@@ -52,7 +52,7 @@ class AnthropicAdapter:
         base = base_url.rstrip("/")
         if kind == "count_tokens":
             return f"{base}/messages/count_tokens"
-        return f"{base}/messages" + ("?stream=true" if False else "")
+        return f"{base}/messages"
 
     def encode_request(self, req: ir.Request, model_id: str,
                        deployment_params: dict[str, Any]) -> dict[str, Any]:
@@ -77,8 +77,12 @@ class AnthropicAdapter:
                     blocks.append({"type": "tool_use", "id": p.id, "name": p.name,
                                    "input": p.args})
                 elif isinstance(p, ir.ToolResultPart):
-                    blocks.append({"type": "tool_result", "tool_use_id": p.tool_use_id,
-                                   "content": p.content})
+                    tr: dict[str, Any] = {"type": "tool_result",
+                                          "tool_use_id": p.tool_use_id,
+                                          "content": p.content}
+                    if p.cache_control:
+                        tr["cache_control"] = p.cache_control
+                    blocks.append(tr)
                 elif isinstance(p, ir.ThinkingPart):
                     tb: dict[str, Any] = {"type": "thinking", "thinking": p.text}
                     if p.signature:
@@ -212,5 +216,3 @@ class AnthropicAdapter:
                                       kind="status"))
         return out
 
-    def is_done(self, event: str, data: str) -> bool:
-        return '"type":"message_stop"' in data.replace(" ", "") or '"type": "message_stop"' in data

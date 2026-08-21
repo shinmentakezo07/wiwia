@@ -15,12 +15,11 @@ def _load_builtin() -> dict[str, dict]:
 
 
 class CostEngine:
-    """Costs are USD per token, 8-decimal rounded. Unknown models cost 0 with one warning."""
+    """Costs are USD per token, 8-decimal rounded. Unpriced models cost 0."""
 
     def __init__(self, overrides: dict[str, dict] | None = None):
         self.prices = _load_builtin()
         self.prices.update(overrides or {})
-        self._warned: set[str] = set()
 
     def register(self, model_id: str, input_per_token: float, output_per_token: float) -> None:
         self.prices[model_id] = {
@@ -32,8 +31,6 @@ class CostEngine:
              cached_tokens: int = 0) -> float:
         p = self.prices.get(model_id) or self.prices.get(model_id.split("/")[-1])
         if not p:
-            if model_id not in self._warned:
-                self._warned.add(model_id)
             return 0.0
         uncached_prompt = max(0, prompt_tokens - cached_tokens)
         cached_rate = p.get("cache_read_input_cost_per_token", p["input_cost_per_token"])

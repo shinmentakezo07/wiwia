@@ -25,16 +25,22 @@ class WiwiError(Exception):
         self.retry_after = retry_after
 
 
-RETRYABLE_STATUS = {408, 429, 500, 502, 503, 529}
+RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504, 529}
 
 
 def error_from_provider_status(status: int, body_text: str, provider: str) -> WiwiError:
     msg = body_text[:500] or f"{provider} returned HTTP {status}"
     if status == 401 or status == 403:
-        return WiwiError(502, "api_connection_error",
-                         f"{provider} rejected credentials ({status}): {msg}", retryable=True)
+        # Preserve the auth-failure status so the router can invalidate the key
+        # (ProviderKey.mark_invalid); retryable stays True so the request fails
+        # over to the next key in the pool instead of hard-failing the client.
+        return WiwiError(status, "authentication_error",
+                         f"{provider} rejected credentials ({status}): {msg}",
+                         retryable=True)
     if status == 429:
         return WiwiError(429, "rate_limit_error", f"{provider} rate limited: {msg}", retryable=True)
+    if status == 504:
+        return WiwiError(504, "timeout", f"{provider} timed out: {msg}", retryable=True)
     if status == 408 or status in (500, 502, 503, 529):
         return WiwiError(502, "api_connection_error",
                          f"{provider} error {status}: {msg}", retryable=True)
@@ -74,4 +80,3 @@ class ProviderAdapter(Protocol):
                        deployment_params: dict[str, Any]) -> dict[str, Any]: ...
     def decode_response(self, status: int, body: bytes) -> AssistantTurn: ...
     def decode_stream_event(self, event: str, data: str) -> list[IRStreamDelta]: ...
-    def is_done(self, event: str, data: str) -> bool: ...

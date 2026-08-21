@@ -107,8 +107,11 @@ class LoggingSubsystem:
         ]
 
     async def stop(self) -> None:
-        await self._request_q.put(None)
-        await self._proxy_q.put(None)
+        for q in (self._request_q, self._proxy_q):
+            try:
+                q.put_nowait(None)  # never block shutdown on a full log queue
+            except asyncio.QueueFull:
+                pass
         for t in self._tasks:
             try:
                 await asyncio.wait_for(t, timeout=5)

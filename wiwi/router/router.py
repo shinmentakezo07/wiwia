@@ -233,6 +233,7 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
             continue
         attempted_groups.add(group_name)
         last_err: WiwiError | None = None
+        group_first_err: WiwiError | None = None
         tried_dep_ids: set[int] = set()
         for attempt in range(router.settings.num_retries + 1):
             dep = router.pick_deployment(deps, ctx, exclude=tried_dep_ids)
@@ -252,26 +253,28 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                 last_err = WiwiError(429, "rate_limit_error",
                                      f"all keys cooling for provider"
                                      f" '{dep.provider.name}'", retry_after=max(1.0, retry_in))
-                break
-            dep.inflight += 1
+                continue  # dep already excluded above; siblings may have live keys
+            # inflight/latency accounting lives in the gateway: for streams the
+            # request stays in flight until the pump finishes, not until
+            # execute_with_retries returns (which happens at connect time).
             try:
-                result = await call_one(dep, ProviderKeyRef(label=key.label, secret=key.secret), ctx)
+                result = await call_one(
+                    dep, ProviderKeyRef(label=key.label, secret=key.secret), ctx)
                 dep.provider.on_result(key, 200, None)
-                dep.latencies.append((time.monotonic() - ctx.started) * 1000)
                 return result
             except WiwiError as e:
+                if group_first_err is None:
+                    group_first_err = e
                 last_err = e
                 status = _status_of(e)
                 dep.provider.on_result(key, status, e.retry_after)
-                if status in (408, 500, 502, 503, 529):
+                if status in (408, 500, 502, 503, 504, 529):
                     dep.record_fail(router.settings.allowed_fails,
                                     router.settings.cooldown_time)
                 if not e.retryable:
                     raise
-            finally:
-                dep.inflight -= 1
-        if first_error is None and last_err is not None:
-            first_error = last_err
+        if first_error is None:
+            first_error = group_first_err or last_err
         # enqueue fallbacks for this group
         for fb in router.fallback_targets(group_name):
             if fb not in seen:

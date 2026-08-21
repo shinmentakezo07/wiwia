@@ -4,8 +4,7 @@ MVP storage is SQLite via SQLAlchemy async; keys are stored hashed, plaintext
 shown once at creation. Cache TTL 60s; admin mutations evict actively.
 """
 
-from __future__ import annotations
-
+import hmac
 import time
 from dataclasses import dataclass, field
 
@@ -64,7 +63,7 @@ class AuthService:
 
     # -- lookup ----------------------------------------------------------------
     async def authenticate(self, plaintext: str) -> AuthInfo | None:
-        if hash_key(plaintext) == self.master_hash:
+        if hmac.compare_digest(hash_key(plaintext), self.master_hash):
             return AuthInfo(key_id="master", key_type="master", alias="master")
         h = hash_key(plaintext)
         now = time.monotonic()
@@ -129,6 +128,45 @@ class AuthService:
         if row is not None:
             self._cache.pop(row[0], None)
         return res.rowcount > 0
+
+    async def get_key(self, key_id: str) -> dict | None:
+        for k in await self.list_keys():
+            if k["id"] == key_id:
+                return k
+        return None
+
+    UPDATABLE_FIELDS = ("max_budget", "rpm", "tpm", "models", "expires_at")
+
+    async def update_key(self, key_id: str, fields: dict) -> dict | None:
+        """Patch editable fields (absent = unchanged; explicit null = clear).
+
+        Returns the updated key dict, or None when the id is unknown. Cache is
+        evicted so the new limits apply immediately.
+        """
+        sets: dict[str, object] = {}
+        for name in self.UPDATABLE_FIELDS:
+            if name not in fields:
+                continue
+            val = fields[name]
+            if name == "models":
+                val = __import__("json").dumps(list(val or []))
+            elif val is not None:
+                val = float(val) if name in ("max_budget", "expires_at") else int(val)
+            sets[name] = val
+        if not sets:
+            return await self.get_key(key_id)
+        async with self.engine.connect() as conn:
+            row = (await conn.execute(sa.text("SELECT key_hash FROM vkeys WHERE id=:id"),
+                                      {"id": key_id})).first()
+        if row is None:
+            return None
+        cols = ", ".join(f"{k}=:{k}" for k in sets)
+        params = {**sets, "now": time.time(), "id": key_id}
+        async with self.engine.begin() as conn:
+            await conn.execute(sa.text(f"UPDATE vkeys SET {cols}, updated_at=:now"
+                                       " WHERE id=:id"), params)
+        self._cache.pop(row[0], None)
+        return await self.get_key(key_id)
 
     async def set_disabled(self, key_id: str, disabled: bool) -> None:
         """Disable/enable a key and evict its cached auth info immediately."""

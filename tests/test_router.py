@@ -137,6 +137,34 @@ def test_single_key_429_cools_and_stops():
     assert len(calls) <= 2  # cooled key prevents hammering
 
 
+def test_exhausted_provider_keys_fall_through_to_sibling_deployment():
+    """Regression: a deployment whose provider has no available keys must not
+    abort the attempt loop — retries should land on sibling deployments backed
+    by other providers in the same group."""
+    from unittest.mock import patch
+
+    r = Router(_config(routing_strategy="least-busy"))  # deterministic: p1 dep first
+
+    async def exhausted_pick():
+        return None, 5.0  # simulates last key cooling between pick and use
+
+    calls = []
+
+    async def call_one(dep, key, ctx):
+        calls.append(dep.provider.name)
+        return "ok"
+
+    class Ctx:
+        group = "gpt-4o"
+        attempts: ClassVar[list] = []
+        started = 0.0
+
+    with patch.object(r.providers["p1"], "pick_key", side_effect=exhausted_pick):
+        result = asyncio.run(_run(r, Ctx(), call_one))
+    assert result == "ok"
+    assert calls and all(name == "p2" for name in calls)
+
+
 async def _run(r, ctx, call_one):
     from wiwi.router.router import execute_with_retries
     return await execute_with_retries(r, ctx, call_one)

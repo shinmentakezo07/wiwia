@@ -31,9 +31,16 @@ def _interpolate(value: Any) -> Any:
 
 class KeyDef(BaseModel):
     label: str = "default"
-    key: str = ""
+    key: str
     weight: int = 1
     enabled: bool = True
+
+    @field_validator("key")
+    @classmethod
+    def _key_required(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("provider key entry needs a non-empty 'key'")
+        return v
 
 
 class ProviderDef(BaseModel):

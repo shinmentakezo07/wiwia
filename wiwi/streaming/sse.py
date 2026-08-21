@@ -31,9 +31,9 @@ class LineSSEParser:
         if line.startswith(":"):
             return None  # comment/heartbeat
         if line.startswith("event:"):
-            self._event = line[6:].strip()
+            self._event = line[6:].removeprefix(" ")
         elif line.startswith("data:"):
-            self._data.append(line[5:].strip())
+            self._data.append(line[5:].removeprefix(" "))
         return None
 
 

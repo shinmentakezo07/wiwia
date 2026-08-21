@@ -12,15 +12,20 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class _Event:
+    ts: float
+    tokens: int          # 1 for rpm events
+    estimated: bool = False  # True until record_tokens() confirms actual usage
+
+
+@dataclass
 class _Window:
-    # rpm windows store timestamps; tpm windows store (timestamp, tokens) pairs.
+    # rpm windows store request events; tpm windows store token events.
     events: deque = field(default_factory=deque)
     is_token: bool = False
 
     def count(self) -> int:
-        if self.is_token:
-            return sum(n for _, n in self.events)
-        return len(self.events)
+        return sum(e.tokens for e in self.events)
 
 
 class RateLimiter:
@@ -39,7 +44,7 @@ class RateLimiter:
     @staticmethod
     def _prune(w: _Window, now: float) -> None:
         cutoff = now - 60.0
-        while w.events and w.events[0][0] < cutoff:
+        while w.events and w.events[0].ts < cutoff:
             w.events.popleft()
 
     def check(self, key_id: str, key_rpm: int | None = None,
@@ -59,24 +64,32 @@ class RateLimiter:
         for w, limit in checks:
             self._prune(w, now)
             # prospective admission: the incoming request's cost must fit
-            # (1 event for rpm scopes, est_tokens for tpm scopes)
-            cost = max(1, est_tokens) if w.is_token else 1
+            cost = est_tokens if w.is_token else 1
             if w.count() + cost > limit:
-                retry_after = int(max(1.0, 60.0 - (now - w.events[0][0]))) + 1
+                retry_after = int(max(1.0, 60.0 - (now - w.events[0].ts))) + 1
                 return False, min(retry_after, 60)
-        # reserve: one timestamp event for rpm scopes; est_tokens for tpm scopes
+        # reserve: one event per rpm scope; an estimated-cost event per tpm scope
         for w, limit in checks:
             if w.is_token:
-                w.events.append((now, max(0, est_tokens)))
+                w.events.append(_Event(ts=now, tokens=max(0, est_tokens),
+                                       estimated=True))
             else:
-                w.events.append((now, 1))
+                w.events.append(_Event(ts=now, tokens=1))
         return True, 0
 
     def record_tokens(self, key_id: str, tokens: int) -> None:
-        """Post-request adjustment: add actual token usage to the tpm windows."""
+        """Post-request confirmation: replace the newest estimated reservation
+        with the actual usage (prevents double-counting estimate + actual)."""
         now = time.monotonic()
         for scope in ("global:tpm", f"{key_id}:tpm"):
             w = self._windows.get(scope)
-            if w is not None and w.is_token:
-                self._prune(w, now)
-                w.events.append((now, max(0, tokens)))
+            if w is None or not w.is_token:
+                continue
+            self._prune(w, now)
+            for e in reversed(w.events):
+                if e.estimated:
+                    e.tokens = max(0, tokens)
+                    e.estimated = False
+                    break
+            else:
+                w.events.append(_Event(ts=now, tokens=max(0, tokens)))

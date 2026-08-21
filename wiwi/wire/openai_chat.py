@@ -58,11 +58,10 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         messages.append(ir.Message(role=role, parts=parts))  # type: ignore[arg-type]
 
     tools = [
-        ir.Tool(name=(t.get("function") or {}).get("name", ""),
-                description=(t.get("function") or {}).get("description", ""),
-                parameters_json_schema=(t.get("function") or {}).get("parameters")
-                or {"type": "object"},
-                strict=t.get("strict"))
+        ir.Tool(name=(fn := t.get("function") or {}).get("name", ""),
+                description=fn.get("description", ""),
+                parameters_json_schema=fn.get("parameters") or {"type": "object"},
+                strict=fn.get("strict"))
         for t in body.get("tools") or [] if t.get("type") == "function"
     ]
     tc_raw = body.get("tool_choice")

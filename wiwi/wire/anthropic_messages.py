@@ -50,10 +50,20 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                                                 args=b.get("input") or {}))
                 elif btype == "tool_result":
                     c = b.get("content")
-                    text = c if isinstance(c, str) else json.dumps(c)
+                    if isinstance(c, str):
+                        text = c
+                    elif isinstance(c, list):
+                        text = " ".join(blk.get("text", "") for blk in c
+                                        if isinstance(blk, dict)
+                                        and blk.get("type") == "text") or json.dumps(c)
+                    elif c is None:
+                        text = ""
+                    else:
+                        text = json.dumps(c)
                     parts.append(ir.ToolResultPart(tool_use_id=b.get("tool_use_id", ""),
                                                    content=text,
-                                                   is_error=bool(b.get("is_error"))))
+                                                   is_error=bool(b.get("is_error")),
+                                                   cache_control=b.get("cache_control")))
                 elif btype == "thinking":
                     parts.append(ir.ThinkingPart(b.get("thinking", ""),
                                                  b.get("signature")))
@@ -126,6 +136,9 @@ class AnthropicStreamEncoder:
         self.req_id = req_id
         self._block_idx = 0
         self._open_block: str | None = None  # "text" | "thinking" | "tool:<idx>"
+        # Signature seen while no thinking block is open (cross-provider quirk);
+        # flushed into the next thinking block right before it closes.
+        self._pending_sig: str | None = None
         self._usage: dl.UsageFinal | None = None
         self._stop = "end_turn"
         self._started = False
@@ -137,10 +150,17 @@ class AnthropicStreamEncoder:
         if self._open_block is None:
             return []
         idx = self._block_idx - 1
-        if self._open_block.startswith("tool:"):
-            idx = int(self._open_block.split(":")[1])
+        kind = self._open_block
         self._open_block = None
-        return [self._evt("content_block_stop", {"type": "content_block_stop", "index": idx})]
+        out: list[bytes] = []
+        if kind == "thinking" and self._pending_sig:
+            out.append(self._evt("content_block_delta", {
+                "type": "content_block_delta", "index": idx,
+                "delta": {"type": "signature_delta", "signature": self._pending_sig}}))
+            self._pending_sig = None
+        out.append(self._evt("content_block_stop",
+                             {"type": "content_block_stop", "index": idx}))
+        return out
 
     def feed(self, d: dl.IRStreamDelta) -> bytes | None:
         if isinstance(d, dl.StreamStart):
@@ -166,9 +186,15 @@ class AnthropicStreamEncoder:
             return b"".join(out)
         if isinstance(d, dl.ThinkingDelta):
             if not d.text and d.signature:
-                return self._evt("content_block_delta", {
-                    "type": "content_block_delta", "index": max(0, self._block_idx - 1),
-                    "delta": {"type": "signature_delta", "signature": d.signature}})
+                if self._open_block == "thinking":
+                    return self._evt("content_block_delta", {
+                        "type": "content_block_delta",
+                        "index": self._block_idx - 1,
+                        "delta": {"type": "signature_delta", "signature": d.signature}})
+                # No thinking block open: buffer instead of stamping a signature
+                # onto a nonexistent (or wrong-type) block.
+                self._pending_sig = d.signature
+                return None
             out = []
             if self._open_block != "thinking":
                 out.extend(self._close_block())

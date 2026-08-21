@@ -41,6 +41,16 @@ class Gateway:
 
     async def _call(self, dep: Deployment, key: ProviderKeyRef,
                     ctx: RequestContext) -> ir.AssistantTurn:
+        # Inflight covers the full upstream round-trip here, and for streams the
+        # pump owns it until the last delta (see _pump wrapper below).
+        dep.inflight += 1
+        try:
+            return await self._call_once(dep, key, ctx)
+        finally:
+            dep.inflight -= 1
+
+    async def _call_once(self, dep: Deployment, key: ProviderKeyRef,
+                         ctx: RequestContext) -> ir.AssistantTurn:
         adapter = get_adapter(dep.provider.provider_type)
         ctx.deployment = dep
         ctx.provider_key = key
@@ -53,8 +63,7 @@ class Gateway:
         try:
             resp = await self._client.post(url, json=body, headers=headers,
                                            timeout=dep.timeout or dep.provider.timeout_s)
-        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout,
-                httpx.PoolTimeout) as e:
+        except httpx.TransportError as e:
             ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
                              type(e).__name__, int((time.monotonic() - t0) * 1000))
             raise WiwiError(504 if "Timeout" in type(e).__name__ else 502,
@@ -80,6 +89,7 @@ class Gateway:
                           resp.text[:300], retryable=True, retry_after=retry_after)
         ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
                          "ok", latency)
+        dep.latencies.append(latency)
         turn = adapter.decode_response(resp.status_code, resp.content)
         self._price(ctx, dep, turn.usage)
         return turn
@@ -104,7 +114,15 @@ class Gateway:
                 raise err_box[0]
             return pump_task
 
-        await execute_with_retries(self.router, ctx, call_one)
+        try:
+            await execute_with_retries(self.router, ctx, call_one)
+        except BaseException:
+            # Cancellation (client gone) or exhaustion while waiting for the
+            # pump to connect: without this the pump task keeps running and
+            # leaks its upstream connection.
+            if pump_task and not pump_task.done():
+                pump_task.cancel()
+            raise
         assert pump_task is not None
         yield dl.StreamStart(model=ctx.ir_req.model, group=ctx.group or "")
         first = True
@@ -130,6 +148,18 @@ class Gateway:
                     ctx: RequestContext, queue: asyncio.Queue,
                     ready: asyncio.Event,
                     err_box: list) -> None:
+        # The stream stays in flight — and counts toward dep.inflight — until
+        # this pump finishes, not merely until the connection opens.
+        dep.inflight += 1
+        try:
+            await self._pump_once(dep, key, ctx, queue, ready, err_box)
+        finally:
+            dep.inflight -= 1
+
+    async def _pump_once(self, dep: Deployment, key: ProviderKeyRef,
+                         ctx: RequestContext, queue: asyncio.Queue,
+                         ready: asyncio.Event,
+                         err_box: list) -> None:
         """Stream pump.  Sets *ready* once the upstream connection is established
         (so the caller can begin consuming the queue) or puts a WiwiError into
         *err_box* and sets *ready* if it fails before any data flows."""
@@ -153,8 +183,7 @@ class Gateway:
                                              timeout=dep.timeout
                                              or dep.provider.timeout_s)
                 resp = await resp_cm.__aenter__()
-            except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout,
-                    httpx.PoolTimeout) as e:
+            except httpx.TransportError as e:
                 ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
                                  key.label, type(e).__name__,
                                  int((time.monotonic() - t0) * 1000))
@@ -182,8 +211,10 @@ class Gateway:
             started = True
             ready.set()
             parser = LineSSEParser()
+            client_gone = False
             async for line in resp.aiter_lines():
                 if ctx.cancel.is_set():
+                    client_gone = True
                     await queue.put(dl.StreamError("client disconnected", "cancelled"))
                     break
                 evt = parser.feed_line(line)
@@ -201,20 +232,32 @@ class Gateway:
                             text_len += len(d.text)
                         await queue.put(d)
             await resp_cm.__aexit__(None, None, None)
-            # upstream closed normally; on_result(200) already fired in
+            # upstream closed; on_result(200) already fired in
             # execute_with_retries when the stream started — don't double count.
-            ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
-                             "ok", int((time.monotonic() - t0) * 1000))
-            u = usage_final or dl.UsageFinal()
-            est_usage = u
-            if est_usage.prompt == 0:
-                est_usage = dl.UsageFinal(
-                    prompt=estimate_tokens(_flatten(ctx)),
-                    output=max(1, text_len // 4), estimated=True)
-            self._price_stream(ctx, dep, est_usage)
-            await queue.put(est_usage)
-            await queue.put(finish or dl.Finish("stop"))
-            await queue.put(dl.StreamEnd())
+            if not client_gone:
+                ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
+                                 key.label, "ok", int((time.monotonic() - t0) * 1000))
+                dep.latencies.append(int((time.monotonic() - t0) * 1000))
+                u = usage_final or dl.UsageFinal()
+                est_usage = u
+                if u.prompt == 0:
+                    # Provider sent no usage: estimate, but keep any real output
+                    # / cache counts it did report.
+                    est_usage = dl.UsageFinal(
+                        prompt=estimate_tokens(_flatten(ctx)),
+                        cached=u.cached, reasoning=u.reasoning,
+                        output=u.output or max(1, text_len // 4),
+                        cache_creation=u.cache_creation, estimated=True)
+                self._price_stream(ctx, dep, est_usage)
+                await queue.put(est_usage)
+                if finish is None and usage_final is None:
+                    if real_key is not None:
+                        real_key.err_count += 1
+                    await queue.put(dl.StreamError(
+                        "upstream stream ended without completion", "connection"))
+                    return
+                await queue.put(finish or dl.Finish("stop"))
+                await queue.put(dl.StreamEnd())
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
@@ -316,6 +359,6 @@ def _build_url(adapter, dep: Deployment, key: ProviderKeyRef,
     """Build the upstream URL, appending the API key for providers that require it
     in the querystring (e.g. Gemini) rather than headers."""
     url = adapter.build_url(dep.provider.base_url, dep.model_id, stream, kind)
-    if dep.provider.provider_type == "gemini" and "?key=" in url:
+    if dep.provider.provider_type == "gemini" and url.endswith(("?key=", "&key=")):
         url += key.secret
     return url

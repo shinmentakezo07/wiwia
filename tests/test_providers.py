@@ -97,3 +97,57 @@ def test_anthropic_encode_request_defaults():
     body = AnthropicAdapter().encode_request(req, "claude-sonnet-4-20250514", {})
     assert body["max_tokens"] == 4096  # mandatory default injection
     assert body["messages"][0]["content"][0]["text"] == "hi"
+
+
+def _vision_req(parts):
+    from wiwi.ir import types as ir
+    return ir.Request(model="x", messages=[ir.Message(role="user", parts=parts)])
+
+
+def test_openai_encode_text_then_image():
+    from wiwi.ir import types as ir
+    body = OpenAIAdapter().encode_request(_vision_req([
+        ir.TextPart("look"), ir.ImagePart(url="https://x/i.png")]), "gpt-4o", {})
+    content = body["messages"][0]["content"]
+    assert isinstance(content, list)
+    assert content[0] == {"type": "text", "text": "look"}
+    assert content[1] == {"type": "image_url", "image_url": {"url": "https://x/i.png"}}
+
+
+def test_openai_encode_image_then_text():
+    """Regression: TextPart after an ImagePart must not raise TypeError (list+str)."""
+    from wiwi.ir import types as ir
+    body = OpenAIAdapter().encode_request(_vision_req([
+        ir.ImagePart(url="https://x/i.png"), ir.TextPart("what is this?")]),
+        "gpt-4o", {})
+    content = body["messages"][0]["content"]
+    assert isinstance(content, list)
+    assert content[0] == {"type": "image_url", "image_url": {"url": "https://x/i.png"}}
+    assert content[1] == {"type": "text", "text": "what is this?"}
+
+
+def test_gemini_function_response_uses_tool_name():
+    """Regression: functionResponse.name must be the function name, resolved from
+    the matching ToolUsePart in history — not the raw tool_use_id."""
+    from wiwi.ir import types as ir
+    req = ir.Request(model="gemini", messages=[
+        ir.Message(role="assistant", parts=[
+            ir.ToolUsePart(id="call_abc123", name="get_weather", args={"city": "SF"})]),
+        ir.Message(role="tool", parts=[
+            ir.ToolResultPart(tool_use_id="call_abc123", content='{"temp": 20}')]),
+    ])
+    body = GeminiAdapter().encode_request(req, "gemini-2.0-flash", {})
+    fr = body["contents"][-1]["parts"][0]["functionResponse"]
+    assert fr["name"] == "get_weather"
+
+
+def test_gemini_function_response_falls_back_to_call_prefix_strip():
+    """No ToolUsePart in history (pruned context): strip the synthetic call_ prefix."""
+    from wiwi.ir import types as ir
+    req = ir.Request(model="gemini", messages=[
+        ir.Message(role="tool", parts=[
+            ir.ToolResultPart(tool_use_id="call_getwx", content="ok")]),
+    ])
+    body = GeminiAdapter().encode_request(req, "gemini-2.0-flash", {})
+    fr = body["contents"][-1]["parts"][0]["functionResponse"]
+    assert fr["name"] == "getwx"

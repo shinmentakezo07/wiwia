@@ -27,7 +27,12 @@ def _role_parts_to_content(messages: list[ir.Message]) -> list[dict[str, Any]]:
         tool_calls = []
         for p in m.parts:
             if isinstance(p, ir.TextPart):
-                content = p.text if content is None else content + p.text
+                if content is None:
+                    content = p.text
+                elif isinstance(content, str):
+                    content = content + p.text
+                else:
+                    content.append({"type": "text", "text": p.text})
             elif isinstance(p, ir.ImagePart):
                 if content is None or isinstance(content, str):
                     content = ([{"type": "text", "text": content}] if content else [])
@@ -67,8 +72,9 @@ class OpenAIAdapter:
             "messages": _role_parts_to_content(req.messages),
             "stream": req.stream,
         }
-        if g.max_tokens:
-            body["max_tokens"] = g.max_tokens
+        mt = g.max_tokens or deployment_params.get("max_tokens")
+        if mt:
+            body["max_tokens"] = mt
         if g.temperature is not None:
             body["temperature"] = g.temperature
         if g.top_p is not None:
@@ -193,5 +199,3 @@ class OpenAIAdapter:
                                   "content_filter": "content_filter"}.get(fr, "stop")))
         return out
 
-    def is_done(self, event: str, data: str) -> bool:
-        return data == "[DONE]"

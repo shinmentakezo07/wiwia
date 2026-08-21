@@ -74,7 +74,17 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                                args=args, raw_args=raw_args)]))
         elif itype == "function_call_output":
             output = item.get("output")
-            text = output if isinstance(output, str) else json.dumps(output)
+            if isinstance(output, str):
+                text = output
+            elif isinstance(output, list):
+                text = " ".join(c.get("text", "") for c in output
+                                if isinstance(c, dict)
+                                and c.get("type") in ("output_text", "text")) \
+                    or json.dumps(output)
+            elif output is None:
+                text = ""
+            else:
+                text = json.dumps(output)
             messages.append(ir.Message(role="tool", parts=[
                 ir.ToolResultPart(tool_use_id=item.get("call_id", ""), content=text)]))
         elif itype == "reasoning":
@@ -163,10 +173,15 @@ class ResponsesStreamEncoder:
         self.model = model
         self.req_id = req_id
         self._seq = 0
-        self._item_open: str | None = None   # "message" | "reasoning" | f"fc:{n}"
+        self._item_open: str | None = None   # "message" | f"fc:<n>"
+        self._open_out = -1                  # output_index of the currently open item
         self._usage: dl.UsageFinal | None = None
         self._stop = "stop"
         self._text_buf = ""
+
+    def _next_output_index(self) -> int:
+        self._open_out += 1
+        return self._open_out
 
     def _evt(self, etype: str, payload: dict[str, Any]) -> bytes:
         payload = {"type": etype, "sequence_number": self._seq, **payload}
@@ -177,25 +192,24 @@ class ResponsesStreamEncoder:
         if self._item_open is None:
             return []
         kind = self._item_open
+        idx = self._open_out
         self._item_open = None
         if kind == "message":
             return [self._evt("response.output_item.done", {
-                "output_index": 0,
+                "output_index": idx,
                 "item": {"type": "message", "id": f"msg_{self.req_id}",
                          "status": "completed", "role": "assistant",
                          "content": [{"type": "output_text", "text": self._text_buf,
                                       "annotations": []}]}})]
-        if kind.startswith("fc:"):
-            _, n, name, call_id = kind.split(":", 3)
-            return [self._evt("response.function_call_arguments.done", {
-                "item_id": f"fc_{self.req_id}_{n}", "output_index": 0,
-                "arguments": self._args_buf}),
-                self._evt("response.output_item.done", {
-                    "output_index": 0,
-                    "item": {"type": "function_call", "id": f"fc_{self.req_id}_{n}",
-                             "call_id": call_id, "name": name,
-                             "arguments": self._args_buf}})]
-        return []
+        _, n, name, call_id = kind.split(":", 3)
+        return [self._evt("response.function_call_arguments.done", {
+            "item_id": f"fc_{self.req_id}_{n}", "output_index": idx,
+            "arguments": self._args_buf}),
+            self._evt("response.output_item.done", {
+                "output_index": idx,
+                "item": {"type": "function_call", "id": f"fc_{self.req_id}_{n}",
+                         "call_id": call_id, "name": name,
+                         "arguments": self._args_buf}})]
 
     _args_buf = ""
 
@@ -209,28 +223,30 @@ class ResponsesStreamEncoder:
             out = []
             if self._item_open != "message":
                 out.extend(self._close_item())
+                oi = self._next_output_index()
                 out.append(self._evt("response.output_item.added", {
-                    "output_index": 0,
+                    "output_index": oi,
                     "item": {"type": "message", "id": f"msg_{self.req_id}",
                              "status": "in_progress", "role": "assistant",
                              "content": []}}))
                 out.append(self._evt("response.content_part.added", {
-                    "item_id": f"msg_{self.req_id}", "output_index": 0,
+                    "item_id": f"msg_{self.req_id}", "output_index": oi,
                     "content_index": 0,
                     "part": {"type": "output_text", "text": "", "annotations": []}}))
                 self._item_open = "message"
                 self._text_buf = ""
             self._text_buf += d.text
             out.append(self._evt("response.output_text.delta", {
-                "item_id": f"msg_{self.req_id}", "output_index": 0,
+                "item_id": f"msg_{self.req_id}", "output_index": self._open_out,
                 "content_index": 0, "delta": d.text}))
             return b"".join(out)
         if isinstance(d, dl.ToolCallOpen):
             out = self._close_item()
             n = d.index
             self._args_buf = ""
+            oi = self._next_output_index()
             out.append(self._evt("response.output_item.added", {
-                "output_index": 0,
+                "output_index": oi,
                 "item": {"type": "function_call", "id": f"fc_{self.req_id}_{n}",
                          "call_id": d.id, "name": d.name, "arguments": ""}}))
             self._item_open = f"fc:{n}:{d.name}:{d.id}"
@@ -239,7 +255,7 @@ class ResponsesStreamEncoder:
             self._args_buf += d.args_fragment
             n = self._item_open.split(":")[1] if self._item_open else "0"
             return self._evt("response.function_call_arguments.delta", {
-                "item_id": f"fc_{self.req_id}_{n}", "output_index": 0,
+                "item_id": f"fc_{self.req_id}_{n}", "output_index": self._open_out,
                 "delta": d.args_fragment})
         if isinstance(d, dl.ToolCallClose):
             return b"".join(self._close_item())

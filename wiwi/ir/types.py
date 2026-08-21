@@ -43,6 +43,7 @@ class ToolResultPart:
     tool_use_id: str
     content: str
     is_error: bool = False
+    cache_control: CacheControl = None
 
 
 @dataclass

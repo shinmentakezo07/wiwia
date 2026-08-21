@@ -13,6 +13,10 @@ from wiwi.streaming import deltas as dl
 class GeminiAdapter:
     provider_type = "gemini"
 
+    def __init__(self) -> None:
+        self._started = False
+        self._saw_function_call = False
+
     def headers(self, key: ProviderKeyRef) -> dict[str, str]:
         return {}  # key goes in querystring
 
@@ -26,6 +30,13 @@ class GeminiAdapter:
         g = req.gen_params
         system_parts: list[str] = []
         contents: list[dict[str, Any]] = []
+        # Gemini requires functionResponse.name to be the *function* name;
+        # resolve it from the matching ToolUsePart in history.
+        tool_names: dict[str, str] = {}
+        for m in req.messages:
+            for p in m.parts:
+                if isinstance(p, ir.ToolUsePart):
+                    tool_names[p.id] = p.name
         for m in req.messages:
             if m.role == "system":
                 system_parts.extend(p.text for p in m.parts if isinstance(p, ir.TextPart))
@@ -48,7 +59,9 @@ class GeminiAdapter:
                         resp = _j.loads(p.content)
                     except (TypeError, ValueError):
                         resp = {"result": p.content}
-                    parts.append({"functionResponse": {"name": p.tool_use_id,
+                    fname = (tool_names.get(p.tool_use_id)
+                             or p.tool_use_id.removeprefix("call_"))
+                    parts.append({"functionResponse": {"name": fname,
                                                        "response": resp}})
             if parts:
                 if contents and contents[-1]["role"] == role:
@@ -59,8 +72,9 @@ class GeminiAdapter:
         if system_parts:
             body["systemInstruction"] = {"parts": [{"text": "\n".join(system_parts)}]}
         gen: dict[str, Any] = {}
-        if g.max_tokens:
-            gen["maxOutputTokens"] = g.max_tokens
+        mt = g.max_tokens or deployment_params.get("max_tokens")
+        if mt:
+            gen["maxOutputTokens"] = mt
         if g.temperature is not None:
             gen["temperature"] = g.temperature
         if g.top_p is not None:
@@ -114,15 +128,17 @@ class GeminiAdapter:
         except json.JSONDecodeError:
             return []
         out: list[dl.IRStreamDelta] = []
-        if not getattr(self, "_started", False):
+        if not self._started:
             out.append(dl.StreamStart(model=""))
             self._started = True
+            self._saw_function_call = False
         cand = (payload.get("candidates") or [{}])[0]
         for part in (cand.get("content") or {}).get("parts") or []:
             if "text" in part:
                 out.append(dl.TextDelta(part["text"]))
             elif "functionCall" in part:
                 fc = part["functionCall"]
+                self._saw_function_call = True
                 out.append(dl.ToolCallOpen(index=0, id=f"call_{fc.get('name', 'x')}",
                                           name=fc.get("name", "")))
                 out.append(dl.ToolCallArgsDelta(index=0,
@@ -138,14 +154,17 @@ class GeminiAdapter:
                     reasoning=u.get("thoughtsTokenCount", 0),
                     output=(u.get("candidatesTokenCount", 0)
                             + u.get("thoughtsTokenCount", 0))))
-            out.append(dl.Finish("tool_call" if "tool" in str(cand).lower() else
-                                 {"STOP": "stop", "MAX_TOKENS": "length",
-                                  "SAFETY": "content_filter"}.get(finish, "stop")))
+            # A real function call in this response wins over the mapped finish
+            # reason — never sniff the serialized candidate text for "tool".
+            if self._saw_function_call:
+                out.append(dl.Finish("tool_call"))
+            else:
+                out.append(dl.Finish({"STOP": "stop", "MAX_TOKENS": "length",
+                                      "SAFETY": "content_filter",
+                                      "RECITATION": "content_filter",
+                                      }.get(finish, "stop")))
             out.append(dl.StreamEnd())
         elif u:
-            # keep latest usage for final frame
-            self._last_usage = u
+            pass  # usage without finishReason: nothing to do; pump estimates later
         return out
 
-    def is_done(self, event: str, data: str) -> bool:
-        return "finishReason" in data
