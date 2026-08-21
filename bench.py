@@ -68,7 +68,7 @@ async def one_request(client: httpx.AsyncClient, base: str, key: str,
                     if chunk.get("usage"):
                         usage = chunk["usage"]
             else:
-                obj = json.loads((await r.aread()))
+                obj = json.loads(await r.aread())
                 msg = (obj.get("choices") or [{}])[0].get("message") or {}
                 text_chars = len(msg.get("content") or "")
                 usage = obj.get("usage")
