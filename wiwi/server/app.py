@@ -195,7 +195,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     yield chunk
             # final frame with usage (style-specific)
             if style == "chat":
-                yield encoder.final_frame(usage_final, stop)
+                yield encoder.final_frame()
                 yield b"data: [DONE]\n\n"
             elif style == "anthropic":
                 yield encoder.final_frame()

@@ -105,7 +105,8 @@ def test_chat_stream_encoder_tool_args():
         chunk = enc.feed(d)
         if chunk:
             frames.append(chunk)
-    frames.append(enc.final_frame(None, "tool_call"))  # usage+finish frame before [DONE]
+    frames.append(enc.final_frame())  # usage+finish frame, then caller sends [DONE]
+    frames.append(b"data: [DONE]\n\n")
     blob = b"".join(frames).decode()
     assert '"tool_calls"' in blob
     assert '"name":"f"' in blob.replace(" ", "") or '"name": "f"' in blob
