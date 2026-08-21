@@ -1,0 +1,27 @@
+services:
+  wiwi:
+    build: .
+    ports: ["4000:4000"]
+    environment:
+      WIWI_MASTER_KEY: ${WIWI_MASTER_KEY:-sk-wiwi-master-change-me}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      - wiwi-data:/app/data
+      - ./wiwi.yaml:/app/wiwi.yaml:ro
+    command: ["--config", "/app/wiwi.yaml", "--host", "0.0.0.0", "--port", "4000"]
+    restart: unless-healthy
+
+  # optional profile: postgres instead of sqlite
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["pg"]
+    environment:
+      POSTGRES_USER: wiwi
+      POSTGRES_PASSWORD: wiwi
+      POSTGRES_DB: wiwi
+    volumes: [pgdata:/var/lib/postgresql/data]
+
+volumes:
+  wiwi-data:
+  pgdata:
