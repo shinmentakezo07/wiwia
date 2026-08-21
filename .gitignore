@@ -13,6 +13,9 @@ wiwi.yaml
 key.md
 wiwi.db
 
+# omp CLI local secrets (provider keys)
+.env
+
 # Local verification scratch (holds live keys/db)
 .verify/
 

@@ -320,7 +320,7 @@ export function TD(props: { children: ReactNode; className?: string; colSpan?: n
 
 export function Dialog(props: {
   open: boolean;
-  title: string;
+  title: ReactNode;
   onClose: () => void;
   children: ReactNode;
   wide?: boolean;
@@ -336,17 +336,28 @@ export function Dialog(props: {
 
   if (!props.open) return null;
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/70 p-4 pt-[10vh] backdrop-blur-sm">
+    <div
+      className="admin-overlay-enter fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/70 p-4 pt-[10vh] backdrop-blur-sm"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) props.onClose();
+      }}
+    >
       <div
-        className={`w-full overflow-hidden rounded-2xl border border-white/[0.06] bg-[var(--admin-surface-elevated)] shadow-2xl shadow-black/60 ${
-          props.wide ? "max-w-2xl" : "max-w-md"
+        role="dialog"
+        aria-modal="true"
+        className={`admin-dialog-enter w-full overflow-hidden rounded-2xl border border-white/[0.06] bg-[var(--admin-surface-elevated)] shadow-2xl shadow-black/60 ${
+          props.wide ? "max-w-3xl" : "max-w-md"
         }`}
       >
-        <div className="flex items-center justify-between border-b border-white/[0.04] px-5 py-3.5">
-          <h3 className="text-[14px] font-semibold text-[var(--admin-text)]">{props.title}</h3>
+        <div className="flex items-center justify-between gap-4 border-b border-white/[0.04] px-5 py-3.5">
+          <h3 className="min-w-0 text-[14px] font-semibold text-[var(--admin-text)]">
+            {props.title}
+          </h3>
           <button
+            type="button"
+            aria-label="Close"
             onClick={props.onClose}
-            className="rounded-lg p-1.5 text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.03] hover:text-[var(--admin-text)]"
+            className="shrink-0 rounded-lg p-2 text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.03] hover:text-[var(--admin-text)]"
           >
             <X size={16} />
           </button>

@@ -4,6 +4,50 @@ Unified LLM gateway proxy — speak **OpenAI Chat Completions**, **OpenAI Respon
 
 Any surface reaches any provider — Claude Code can be backed by GPT, Codex by Gemini, and responses always come back in the caller's dialect.
 
+## How it works
+
+Hub-and-spoke design: every direction goes `dialect → IR → provider`. No pairwise converters — adding an inbound surface is one module in `wiwi/wire/`, adding a provider is one adapter in `wiwi/providers/` plus a line in the registry. Core code never branches on dialect or provider name.
+
+```
+Client (openai SDK / Codex CLI / Claude Code)
+   │  inbound dialect
+   ▼
+wiwi/wire/* ──► Canonical IR (wiwi/ir) ──► router (key pools, WRR, retries, cooldowns)
+                                                │
+                                                ▼
+Client ◄── outbound dialect ◄── wire encoder ◄── providers/* (openai · anthropic · gemini · openai-compatible)
+```
+
+## Project structure
+
+| Path | Role |
+|---|---|
+| `wiwi/main.py` | CLI entrypoint (`wiwi --config …`) |
+| `wiwi/config.py` | YAML → pydantic models; env interpolation; fail-fast validation |
+| `wiwi/ir/types.py` | Canonical IR: tagged parts, messages, tools, params, usage |
+| `wiwi/wire/` | Inbound codecs: `openai_chat.py`, `openai_responses.py`, `anthropic_messages.py` |
+| `wiwi/providers/` | Outbound adapters: `openai`, `anthropic`, `gemini`, `openai-compatible` + `base.py` protocol |
+| `wiwi/router/router.py` | Model groups, key pools (smooth WRR), cooldowns, retries, fallbacks |
+| `wiwi/core/gateway.py` | Surface-agnostic execution engine, pricing, log events |
+| `wiwi/core/context.py` | `RequestContext` — mutable holder threaded through the pipeline |
+| `wiwi/streaming/` | `IRStreamDelta` taxonomy + SSE helpers |
+| `wiwi/auth/` | Key generation/hashing + budget/spend service |
+| `wiwi/cost/pricing.py` | Cost engine + token estimation fallback |
+| `wiwi/ratelimit/` | RPM/TPM sliding-window limits |
+| `wiwi/logging_core/` | Log events + SSE ring buffer for admin tail |
+| `wiwi/server/app.py` | FastAPI factory: proxy routes, middleware, `/admin/*` |
+| `web/` | Admin UI source (React 19 + TypeScript + Vite + Tailwind 4) |
+| `tests/` | Pytest suite with `respx` HTTP mocks and ASGI end-to-end |
+| `bench.py` | Stress / latency / TPS tester for wiwi and any OpenAI-compatible proxy |
+| `docs/` | Architecture and design specs |
+
+## Requirements
+
+- Python ≥ 3.11
+- [uv](https://docs.astral.sh/uv/) (recommended) or pip
+- Docker (optional)
+- Bun or Node (only for rebuilding the admin UI)
+
 ## Quickstart
 
 ```bash
@@ -30,6 +74,37 @@ docker compose up --build
 # optional postgres backend instead of sqlite
 docker compose --profile pg up --build
 ```
+
+Compose mounts `./wiwi.yaml` read-only and passes through `WIWI_MASTER_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`.
+
+## All commands
+
+### Install
+
+```bash
+uv venv && uv pip install -e .            # runtime only
+uv venv && uv pip install -e ".[dev]"     # + pytest, pytest-asyncio, respx, asgi-lifespan, ruff
+uv pip install -e ".[pg]"                 # optional: Postgres backend (asyncpg)
+uv pip install -e ".[redis]"              # optional: Redis backend
+```
+
+### Run the gateway
+
+```bash
+wiwi --config wiwi.yaml                             # host/port from wiwi_settings
+wiwi -c wiwi.yaml --host 0.0.0.0 --port 4000        # explicit overrides (-c = --config)
+```
+
+On startup it prints the listen address plus the number of deployments and providers loaded.
+
+### Benchmark
+
+```bash
+.venv/bin/python bench.py                              # default sweep
+.venv/bin/python bench.py -n 10 -c 1,4,16 --max-tokens 100
+```
+
+Measures TTFT, total latency, tokens, and output TPS per request; aggregates p50/p95, success rate, and throughput per concurrency level. Edit `TARGETS` / `MODEL` at the top of `bench.py` to point at your gateways.
 
 ## Surfaces
 
@@ -163,6 +238,25 @@ curl localhost:4000/health
 curl localhost:4000/v1/models -H "Authorization: Bearer sk-wiwi-..."
 ```
 
+Route map:
+
+| Route | Purpose |
+|---|---|
+| `POST /admin/keys/generate` | mint a virtual key (budget/RPM/TPM limits, model allowlist, TTL) |
+| `GET /admin/keys` | list virtual keys |
+| `PATCH /admin/keys/{id}` | update limits/metadata |
+| `POST /admin/keys/{id}/disable` | disable/enable a key |
+| `DELETE /admin/keys/{id}` | revoke a key |
+| `GET /admin/providers` | provider + key-pool status |
+| `POST /admin/providers` | add a provider at runtime |
+| `POST /admin/providers/{name}/keys` | add a key to a pool |
+| `PATCH /admin/providers/{name}/keys/{label}` | patch weight/disabled per label |
+| `GET /admin/models` · `PATCH /admin/model-groups/{name}` | inspect / edit routing live |
+| `GET /admin/logs/requests` · `GET /admin/logs/proxy` | request + proxy logs |
+| `GET /admin/stream` | SSE live tail of log events |
+| `GET /admin/stats/overview` · `GET /admin/stats/timeseries` | aggregate + time-bucketed stats |
+| `GET / PUT /admin/alert-rules` | spend/error alert rules |
+
 Per-request stats tracked: input / cached / reasoning / output tokens, TPS, TTFT, latency, cost, retry chain, and which provider key served it.
 
 ## Tests & lint
@@ -184,7 +278,10 @@ Per-request stats tracked: input / cached / reasoning / output tokens, TPS, TTFT
 - `docs/PLAN.md` — build phases
 - `docs/TECHSTACK.md` — technology choices
 
+Docs intentionally run ahead of the implementation in places (handler pipeline, DeltaBus, DB schema, Postgres/Redis backends are specified but not yet built). When docs and code disagree, trust the code — or treat the doc section as the spec for work in progress.
+
 ## Guardrails
 
 - **Never commit `wiwi.yaml` or `wiwi.db`** — they hold live provider keys and runtime state (both gitignored). Provider keys come from env via `os.environ/NAME`; master key via `WIWI_MASTER_KEY`.
 - Admin endpoints (`/admin/*`) require the master key; client traffic authenticates with virtual keys (`sk-wiwi-…`).
+- Virtual keys are SHA-256-hashed in storage; plaintext is returned only once at generation time.

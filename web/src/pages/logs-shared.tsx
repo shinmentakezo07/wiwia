@@ -3,8 +3,8 @@
 // and small cell/badge helpers. Kept free of page-specific logic.
 
 import type { ReactNode } from "react";
+import { Search } from "lucide-react";
 import { Badge, Input, Toggle } from "@/components/ui";
-
 // -- toolbar -----------------------------------------------------------------
 
 /** Flex-wrap container for the filter bar above a log table. */
@@ -18,12 +18,19 @@ export function SearchInput(props: {
   placeholder: string;
 }) {
   return (
-    <Input
-      className="h-8 w-64"
-      value={props.value}
-      onChange={(e) => props.onChange(e.target.value)}
-      placeholder={props.placeholder}
-    />
+    <div className="relative">
+      <Search
+        size={13}
+        aria-hidden
+        className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--admin-text-dim)]"
+      />
+      <Input
+        className="h-8 w-72 pl-8 text-[12px]"
+        value={props.value}
+        onChange={(e) => props.onChange(e.target.value)}
+        placeholder={props.placeholder}
+      />
+    </div>
   );
 }
 
@@ -77,8 +84,19 @@ export function LogRow(props: { children: ReactNode; onClick?: () => void; ariaL
     <tr
       aria-label={props.ariaLabel}
       onClick={props.onClick}
+      onKeyDown={
+        props.onClick
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                props.onClick?.();
+              }
+            }
+          : undefined
+      }
+      tabIndex={props.onClick ? 0 : undefined}
       className={`[content-visibility:auto] [contain-intrinsic-size:auto_37px]${
-        props.onClick ? " cursor-pointer hover:bg-white/[0.02]" : ""
+        props.onClick ? " cursor-pointer outline-none focus-visible:bg-white/[0.04]" : ""
       }`}
     >
       {props.children}
@@ -111,9 +129,14 @@ export function NumCell(props: { children: ReactNode }) {
 export function StatusBadge(props: { status: number; errorCode?: string }) {
   const ok = props.status < 400;
   return (
-    <Badge tone={ok ? "green" : "red"} title={props.errorCode || undefined}>
-      {ok ? props.status : `${props.status}${props.errorCode ? ` ${props.errorCode}` : ""}`}
-    </Badge>
+    <span className="inline-flex max-w-[220px] items-center gap-1.5" title={props.errorCode || undefined}>
+      <Badge tone={ok ? "green" : "red"}>{props.status}</Badge>
+      {!ok && props.errorCode && (
+        <span className="truncate font-mono text-[10px] tracking-wide text-[var(--admin-danger)] opacity-70">
+          {props.errorCode}
+        </span>
+      )}
+    </span>
   );
 }
 
@@ -121,8 +144,10 @@ export function StatusBadge(props: { status: number; errorCode?: string }) {
 
 export function LogsFooter(props: { shown: number; total: number }) {
   return (
-    <span>
-      showing {props.shown} of {props.total} events (ring holds ~500)
-    </span>
+      <span className="font-mono text-[11px] text-[var(--admin-text-dim)]">
+        showing <span className="text-zinc-300">{props.shown}</span> of{" "}
+        <span className="text-zinc-300">{props.total}</span> events
+        <span className="mx-1.5 opacity-40">·</span> ring holds ~500
+      </span>
   );
 }

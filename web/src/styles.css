@@ -104,6 +104,8 @@ body {
   }
 }
 
+
+@layer components {
 /* ─── Admin Design System (cloned from the Dra console) ──────────────────────
    Dark-only console: near-black surfaces, hairline white borders, blue accent
    with a violet secondary, tiny uppercase labels, mono tabular values. */
@@ -329,9 +331,13 @@ select.admin-input option {
   border-radius: var(--admin-radius-sm);
   font-size: 13px;
   font-weight: 500;
-  transition: all 0.2s ease;
-  cursor: pointer;
   border: none;
+  cursor: pointer;
+  transition:
+    color 0.2s ease,
+    background-color 0.2s ease,
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
   outline: none;
   white-space: nowrap;
 }
@@ -587,6 +593,37 @@ select.admin-input option {
 .admin-chart-tooltip .tt-series {
   color: #9ca3af;
 }
+
+/* Dialog entrance: quiet fade for the scrim, lift+blur for the panel */
+@keyframes admin-overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes admin-dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+    filter: blur(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+.admin-overlay-enter {
+  animation: admin-overlay-in 0.18s ease-out both;
+}
+.admin-dialog-enter {
+  animation: admin-dialog-in 0.24s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .admin-overlay-enter,
+  .admin-dialog-enter {
+    animation: none;
+  }
+}
 @media (prefers-reduced-motion: reduce) {
   .admin-waiting-pulse { animation: none; }
+}
 }

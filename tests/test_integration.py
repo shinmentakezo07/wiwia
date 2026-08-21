@@ -116,6 +116,25 @@ async def test_streaming_chat(client):
 
 
 @respx.mock
+async def test_streaming_upstream_400_returns_json_error(client):
+    """Upstream rejects at connect time -> real JSON error, not a broken SSE
+    stream / ASGI crash (regression: OpenRouter 400 crashed the ASGI app)."""
+    respx.post("https://api.openai.com/v1/chat/completions").respond(
+        status_code=400,
+        json={"error": {"message": "Provider returned error", "code": 400}})
+    r = await client.post("/v1/messages", json={
+        "model": "gpt-4o", "max_tokens": 100, "stream": True,
+        "messages": [{"role": "user",
+                      "content": [{"type": "text", "text": "hi"}]}]},
+        headers={"x-api-key": "sk-wiwi-master-test",
+                 "anthropic-version": "2023-06-01"})
+    assert r.status_code == 400, r.text
+    data = r.json()
+    assert data["type"] == "error"
+    assert "Provider returned error" in data["error"]["message"]
+
+
+@respx.mock
 async def test_count_tokens(client):
     r = await client.post("/v1/messages/count_tokens", json={
         "model": "gpt-4o", "messages": [{"role": "user", "content": "abcd" * 10}]},

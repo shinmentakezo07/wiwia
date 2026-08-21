@@ -186,9 +186,25 @@ def create_app(config: WiwiConfig) -> FastAPI:
         gateway = state_.gateways["chat"]
         try:
             if ir_req.stream:
-                encoder = _encoder_for(surface, ir_req.model, ctx.request_id)
+                encoder_pair = _encoder_for(surface, ir_req.model, ctx.request_id)
+                # Pull the first delta before committing to a streaming
+                # response: if the upstream fails during connect (bad request,
+                # auth, rate limit...), execute_with_retries raises before any
+                # byte is sent and we can still answer with a real JSON error.
+                stream = gateway.stream(ctx)
+                try:
+                    first = await anext(stream)
+                except StopAsyncIteration:
+                    first = None
+                except WiwiError as e:
+                    ctx.status = e.status
+                    ctx.error = e
+                    state_.logs.log_request(build_log_event(ctx))
+                    return _err(e.status, e.etype, e.message, request, surface)
+                it = _stream_response(state_, ctx, encoder_pair, surface,
+                                      stream, first)
                 return StreamingResponse(
-                    _stream_response(state_, ctx, gateway, encoder, surface),
+                    it,
                     media_type="text/event-stream",
                     headers={"Cache-Control": "no-cache",
                              "x-wiwi-request-id": ctx.request_id})
@@ -218,17 +234,26 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return am.AnthropicStreamEncoder(model, req_id), "anthropic"
         return orp.ResponsesStreamEncoder(model, req_id), "responses"
 
-    async def _stream_response(state_, ctx, gateway, encoder_pair, surface):
+    async def _stream_response(state_, ctx, encoder_pair, surface,
+                               stream, first=None):
         from wiwi.streaming import deltas as dl
         encoder, style = encoder_pair
         errored = False
         try:
-            async for d in gateway.stream(ctx):
-                chunk = encoder.feed(d)
-                if isinstance(d, dl.StreamError):
+            if first is not None:
+                if isinstance(first, dl.StreamError):
+                    errored = True
+                    ctx.status = 502
+                    ctx.error = WiwiError(502, "api_error", first.message)
+                chunk = encoder.feed(first)
+                if chunk:
+                    yield chunk
+            async for d in stream:
+                if isinstance(d, dl.StreamError) and not errored:
                     errored = True
                     ctx.status = 502
                     ctx.error = WiwiError(502, "api_error", d.message)
+                chunk = encoder.feed(d)
                 if chunk:
                     yield chunk
             # terminal frames, correct order per dialect:
