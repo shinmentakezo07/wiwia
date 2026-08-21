@@ -6,6 +6,7 @@ import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from "react
 import { createPortal } from "react-dom";
 import { Check, Copy, X } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import type { Delta } from "@/lib/dashboard-metrics";
 
 // -- layout ------------------------------------------------------------------
 
@@ -153,6 +154,49 @@ const STAT_ACCENT: Record<StatTone, string> = {
   danger: "var(--admin-danger)",
 };
 
+function TileSparkline(props: { points: number[]; accent: string }) {
+  const w = 96;
+  const h = 26;
+  const max = Math.max(1, ...props.points);
+  const pts = props.points.map((v, i) => {
+    const x = props.points.length <= 1 ? 0 : (i / (props.points.length - 1)) * w;
+    const y = h - 2 - (v / max) * (h - 4);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  const lastPair = pts[pts.length - 1] ?? `${w},${h - 2}`;
+  const [lx, ly] = lastPair.split(",").map(Number);
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="h-[26px] w-24 shrink-0" aria-hidden>
+      <polyline
+        points={pts.join(" ")}
+        fill="none"
+        stroke="var(--admin-text-dim)"
+        strokeWidth={1.5}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        opacity={0.55}
+      />
+      <circle cx={lx} cy={ly} r={2.5} fill={props.accent} />
+    </svg>
+  );
+}
+
+function DeltaChip(props: { delta: Delta; goodDir: "up" | "down" }) {
+  if (props.delta.pct === null) {
+    return <span className="admin-delta-chip admin-delta-flat">— vs prev hour</span>;
+  }
+  if (props.delta.dir === "flat") {
+    return <span className="admin-delta-chip admin-delta-flat">±0% vs prev hour</span>;
+  }
+  const cls = props.delta.dir === props.goodDir ? "admin-delta-up" : "admin-delta-down";
+  const arrow = props.delta.dir === "up" ? "↑" : "↓";
+  return (
+    <span className={`admin-delta-chip ${cls}`}>
+      {arrow} {Math.abs(props.delta.pct).toFixed(0)}% vs prev hour
+    </span>
+  );
+}
+
 export function StatCard(props: {
   label: string;
   value: string;
@@ -161,6 +205,14 @@ export function StatCard(props: {
   tone?: StatTone;
   /** Hero metric: larger value + accent-tinted surface. */
   featured?: boolean;
+  /** 12-point sparkline, oldest first. */
+  spark?: number[];
+  /** Change vs the previous hour. */
+  delta?: Delta;
+  /** Which direction of `delta` is good (default: down). */
+  deltaGoodDir?: "up" | "down";
+  /** Zero-traffic state: pulse the value instead of flat zeros. */
+  waiting?: boolean;
 }) {
   const accent = STAT_ACCENT[props.tone ?? "default"];
   const Icon = props.icon;
@@ -173,13 +225,25 @@ export function StatCard(props: {
           )}
           <span className="admin-label">{props.label}</span>
         </div>
-        <p
-          className={`admin-stat-value font-mono ${props.featured ? "text-[28px]" : "text-[22px]"}`}
-        >
-          {props.value}
-        </p>
-        {props.sub && (
-          <p className="mt-2 font-mono text-[11px] text-[var(--admin-text-dim)]">{props.sub}</p>
+        <div className="flex items-end justify-between gap-3">
+          <p
+            className={`admin-stat-value font-mono ${props.featured ? "text-[28px]" : "text-[22px]"} ${
+              props.waiting ? "admin-waiting-pulse" : ""
+            }`}
+          >
+            {props.value}
+          </p>
+          {props.spark && props.spark.some((v) => v > 0) && (
+            <TileSparkline points={props.spark} accent={accent} />
+          )}
+        </div>
+        {(props.sub || props.delta) && (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            {props.sub && (
+              <p className="font-mono text-[11px] text-[var(--admin-text-dim)]">{props.sub}</p>
+            )}
+            {props.delta && <DeltaChip delta={props.delta} goodDir={props.deltaGoodDir ?? "down"} />}
+          </div>
         )}
       </div>
     </Card>
