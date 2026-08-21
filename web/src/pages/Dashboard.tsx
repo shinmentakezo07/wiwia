@@ -40,11 +40,11 @@ const SPARK_H = 56;
 
 const COLORS = {
   tokIn: "#3b82f6",
-  tokCached: "#34d399",
+  tokCached: "#199e70",
   tokReasoning: "#a855f7",
-  tokOut: "#fbbf24",
+  tokOut: "#c98500",
   requests: "#3b82f6",
-  errors: "#f87171",
+  errors: "#e66767",
 };
 
 const TOOLTIP_STYLE: CSSProperties = {
