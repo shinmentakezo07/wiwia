@@ -12,3 +12,10 @@ __pycache__/
 wiwi.yaml
 key.md
 wiwi.db
+
+# Local verification scratch (holds live keys/db)
+.verify/
+
+# Build artifacts
+web/node_modules/
+web/tsconfig.tsbuildinfo
