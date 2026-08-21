@@ -1,0 +1,47 @@
+[project]
+name = "wiwi"
+version = "0.1.0"
+description = "wiwi — unified LLM gateway proxy (OpenAI Chat/Responses + Anthropic Messages in, any provider out)"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.29",
+  "sse-starlette>=2.0",
+  "httpx[http2]>=0.27",
+  "pydantic>=2.7",
+  "pydantic-settings>=2.3",
+  "pyyaml>=6.0",
+  "sqlalchemy[asyncio]>=2.0.30",
+  "aiosqlite>=0.20",
+  "structlog>=24.1",
+  "orjson>=3.10",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "pytest-asyncio>=0.23",
+  "respx>=0.21",
+  "asgi-lifespan>=2.1",
+  "ruff>=0.4",
+]
+pg = ["asyncpg>=0.29"]
+redis = ["redis>=5.0"]
+
+[project.scripts]
+wiwi = "wiwi.main:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["wiwi"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
