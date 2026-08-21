@@ -40,7 +40,7 @@ router_settings:
 
 general_settings:
   master_key: os.environ/WIWI_MASTER_KEY
-  database_url: sqlite:///wiwi.db
+  database_url: sqlite+aiosqlite:///wiwi.db
 
 wiwi_settings:
   drop_params: true

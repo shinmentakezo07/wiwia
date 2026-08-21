@@ -1,13 +1,19 @@
 """End-to-end integration: HTTP requests through the app with mocked upstreams."""
 
-import json
 
 import httpx
 import pytest
 import respx
 from asgi_lifespan import LifespanManager
 
-from wiwi.config import KeyDef, ModelEntry, DeploymentParams, ProviderDef, GeneralSettings, WiwiConfig
+from wiwi.config import (
+    DeploymentParams,
+    GeneralSettings,
+    KeyDef,
+    ModelEntry,
+    ProviderDef,
+    WiwiConfig,
+)
 from wiwi.server.app import create_app
 
 
@@ -119,9 +125,15 @@ async def test_count_tokens(client):
 
 
 async def test_models_list(client):
-    r = await client.get("/v1/models")
+    r = await client.get("/v1/models",
+                         headers={"Authorization": "Bearer sk-wiwi-master-test"})
     ids = [m["id"] for m in r.json()["data"]]
     assert "gpt-4o" in ids
+
+
+async def test_models_list_requires_auth(client):
+    r = await client.get("/v1/models")
+    assert r.status_code == 401
 
 
 @respx.mock
@@ -140,9 +152,8 @@ async def test_admin_key_lifecycle(client):
     assert r2.status_code == 200
     # list + delete
     lst = (await client.get("/admin/keys", headers=h)).json()
-    kid = [k for k in lst["keys"] if k["alias"] == "team-a"][0]["id"]
-    d = await client.delete(f"/admin/admin/keys/{kid}" if False
-                            else f"/admin/keys/{kid}", headers=h)
+    kid = next(k["id"] for k in lst["keys"] if k["alias"] == "team-a")
+    d = await client.delete(f"/admin/keys/{kid}", headers=h)
     assert d.json()["deleted"] is True
 
 

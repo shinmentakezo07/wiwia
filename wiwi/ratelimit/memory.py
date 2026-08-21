@@ -13,7 +13,14 @@ from dataclasses import dataclass, field
 
 @dataclass
 class _Window:
-    events: deque[float] = field(default_factory=deque)
+    # rpm windows store timestamps; tpm windows store (timestamp, tokens) pairs.
+    events: deque = field(default_factory=deque)
+    is_token: bool = False
+
+    def count(self) -> int:
+        if self.is_token:
+            return sum(n for _, n in self.events)
+        return len(self.events)
 
 
 class RateLimiter:
@@ -23,43 +30,53 @@ class RateLimiter:
         self._windows: dict[str, _Window] = {}
         self._inflight = 0
 
-    def _window(self, scope: str) -> _Window:
+    def _window(self, scope: str, is_token: bool = False) -> _Window:
         w = self._windows.get(scope)
         if w is None:
-            w = self._windows[scope] = _Window()
+            w = self._windows[scope] = _Window(is_token=is_token)
         return w
 
     @staticmethod
     def _prune(w: _Window, now: float) -> None:
         cutoff = now - 60.0
-        while w.events and w.events[0] < cutoff:
+        while w.events and w.events[0][0] < cutoff:
             w.events.popleft()
 
     def check(self, key_id: str, key_rpm: int | None = None,
               key_tpm: int | None = None, est_tokens: int = 0) -> tuple[bool, int]:
         """Returns (allowed, retry_after_seconds)."""
         now = time.monotonic()
-        checks: list[tuple[_Window, int | None]] = []
+        checks: list[tuple[_Window, int]] = []
         if self.global_rpm:
             checks.append((self._window("global:rpm"), self.global_rpm))
         if self.global_tpm:
-            checks.append((self._window("global:tpm"), self.global_tpm))
+            checks.append((self._window("global:tpm", is_token=True), self.global_tpm))
         if key_rpm:
             checks.append((self._window(f"{key_id}:rpm"), key_rpm))
         if key_tpm:
-            checks.append((self._window(f"{key_id}:tpm"), key_tpm))
+            checks.append((self._window(f"{key_id}:tpm", is_token=True), key_tpm))
 
         for w, limit in checks:
             self._prune(w, now)
-            if limit and len(w.events) >= limit:
-                retry_after = int(max(1.0, 60.0 - (now - w.events[0]))) + 1
+            # prospective admission: the incoming request's cost must fit
+            # (1 event for rpm scopes, est_tokens for tpm scopes)
+            cost = max(1, est_tokens) if w.is_token else 1
+            if w.count() + cost > limit:
+                retry_after = int(max(1.0, 60.0 - (now - w.events[0][0]))) + 1
                 return False, min(retry_after, 60)
-        for w, _ in checks:
-            w.events.append(now)
+        # reserve: one timestamp event for rpm scopes; est_tokens for tpm scopes
+        for w, limit in checks:
+            if w.is_token:
+                w.events.append((now, max(0, est_tokens)))
+            else:
+                w.events.append((now, 1))
         return True, 0
 
     def record_tokens(self, key_id: str, tokens: int) -> None:
+        """Post-request adjustment: add actual token usage to the tpm windows."""
         now = time.monotonic()
         for scope in ("global:tpm", f"{key_id}:tpm"):
-            if scope in self._windows:
-                self._windows[scope].events.append(now)
+            w = self._windows.get(scope)
+            if w is not None and w.is_token:
+                self._prune(w, now)
+                w.events.append((now, max(0, tokens)))

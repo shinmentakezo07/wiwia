@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
+import hmac
 import time
+from contextlib import asynccontextmanager
 from typing import Any
 
 import sqlalchemy as sa
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from sse_starlette.sse import EventSourceResponse
-
-import orjson
 
 from wiwi.auth.service import AuthService
 from wiwi.config import WiwiConfig
@@ -18,6 +18,7 @@ from wiwi.core.context import RequestContext
 from wiwi.core.gateway import Gateway, build_log_event
 from wiwi.cost.pricing import CostEngine
 from wiwi.logging_core.subsystem import LoggingSubsystem, encode_sse, public_dict
+from wiwi.providers.base import WiwiError
 from wiwi.ratelimit.memory import RateLimiter
 from wiwi.router.router import Router
 from wiwi.wire import anthropic_messages as am
@@ -38,7 +39,9 @@ class AppState:
 
     async def init_db(self) -> None:
         import sqlalchemy.ext.asyncio as saa
-        url = self.config.general_settings.database_url or "sqlite:///wiwi.db"
+        url = self.config.general_settings.database_url or "sqlite+aiosqlite:///wiwi.db"
+        if url.startswith("sqlite:///"):
+            url = url.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
         aengine = saa.create_async_engine(url)
         self.auth = AuthService(aengine, self.config.general_settings.master_key)
         await self.auth.startup()
@@ -53,19 +56,20 @@ class AppState:
         await self.logs.stop()
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup/shutdown: init DB, run logging workers."""
+    state: AppState = app.state.wiwi
+    await state.init_db()
+    await state.logs.start()
+    yield
+    await state.shutdown()
+
 def create_app(config: WiwiConfig) -> FastAPI:
     state = AppState(config)
-    app = FastAPI(title="wiwi", version="0.1.0", docs_url="/docs")
+    app = FastAPI(title="wiwi", version="0.1.0", docs_url="/docs",
+                  lifespan=lifespan)
     app.state.wiwi = state
-
-    @app.on_event("startup")
-    async def _startup() -> None:
-        await state.init_db()
-        await state.logs.start()
-
-    @app.on_event("shutdown")
-    async def _shutdown() -> None:
-        await state.shutdown()
 
     # -- helpers ---------------------------------------------------------------
     def bearer(request: Request) -> str:
@@ -76,36 +80,46 @@ def create_app(config: WiwiConfig) -> FastAPI:
         return xkey.strip() if xkey else ""
 
     def is_admin(request: Request) -> bool:
-        return bearer(request) == config.general_settings.master_key and bool(
-            config.general_settings.master_key)
+        mk = config.general_settings.master_key
+        if not mk:
+            return False
+        return hmac.compare_digest(bearer(request).encode(), mk.encode())
 
-    async def authenticate(request: Request, model: str):
+    async def authenticate(request: Request, model: str, surface: str = "chat"):
         if state.auth is None:
             return None, _err(500, "api_error", "gateway not initialized", request)
         token = bearer(request)
         if not token:
             return None, _err(401, "authentication_error",
-                              "missing API key", request)
+                              "missing API key", request, surface)
         info = await state.auth.authenticate(token)
         if info is None:
-            return None, _err(401, "authentication_error", "invalid API key", request)
+            return None, _err(401, "authentication_error", "invalid API key",
+                              request, surface)
         if info.disabled or (info.expires_at and time.time() > info.expires_at):
             return None, _err(401, "authentication_error", "key disabled or expired",
-                              request)
+                              request, surface)
         if info.over_budget:
             return None, _err(429, "budget_exceeded",
                               f"budget exhausted ({info.spend_to_date:.4f}"
-                              f"/{info.max_budget})", request)
+                              f"/{info.max_budget})", request, surface)
         if info.models and model not in info.models:
             return None, _err(403, "permission_error",
-                              f"key not allowed for model '{model}'", request)
+                              f"key not allowed for model '{model}'", request, surface)
         allowed, retry_after = state.limiter.check(info.key_id, info.rpm, info.tpm)
         if not allowed:
             resp = _err(429, "rate_limit_error",
-                        f"rate limit exceeded, retry in {retry_after}s", request)
+                        f"rate limit exceeded, retry in {retry_after}s", request, surface)
             resp.headers["Retry-After"] = str(retry_after)
             return None, resp
         return info, None
+
+    def _record_tpm_usage(info, ctx) -> None:
+        """Add actual token usage to the tpm sliding windows after a response."""
+        u = ctx.usage
+        if u is not None and info is not None:
+            state.limiter.record_tokens(info.key_id,
+                                        u.prompt_tokens + u.completion_tokens)
 
     def _err(status: int, etype: str, message: str,
              request: Request, surface: str = "chat") -> JSONResponse:
@@ -136,10 +150,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
             ir_req = codec_decode(body)
         except (oc.DialectError, ValueError) as e:
             return _err(400, "invalid_request_error", str(e), request, surface)
-        info, err_resp = await authenticate(request, ir_req.model)
+        info, err_resp = await authenticate(request, ir_req.model, surface)
         if err_resp:
             return err_resp
-        group, deps = state_.router.resolve_group(ir_req.model)
+        group, _ = state_.router.resolve_group(ir_req.model)
         if group is None:
             return _err(404, "not_found_error",
                         f"model '{ir_req.model}' not found", request, surface)
@@ -157,11 +171,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
             ctx.status = 200
             payload = codec_encode_response(ctx, turn, ir_req.model, ctx.request_id)
             state_.logs.log_request(build_log_event(ctx))
+            _record_tpm_usage(info, ctx)
             if info and info.key_type != "master":
                 await state_.auth.update_spend(info.key_id, ctx.cost)
             return JSONResponse(payload, headers={"x-wiwi-request-id": ctx.request_id})
         except Exception as e:  # noqa: BLE001
-            from wiwi.providers.base import WiwiError
             if isinstance(e, WiwiError):
                 ctx.status = e.status
                 ctx.error = e
@@ -182,29 +196,30 @@ def create_app(config: WiwiConfig) -> FastAPI:
     async def _stream_response(state_, ctx, gateway, encoder_pair, surface):
         from wiwi.streaming import deltas as dl
         encoder, style = encoder_pair
-        usage_final = None
-        stop = "stop"
+        errored = False
         try:
             async for d in gateway.stream(ctx):
                 chunk = encoder.feed(d)
-                if isinstance(d, dl.UsageFinal):
-                    usage_final = d
-                if isinstance(d, dl.Finish):
-                    stop = d.stop_reason
+                if isinstance(d, dl.StreamError):
+                    errored = True
+                    ctx.status = 502
+                    ctx.error = WiwiError(502, "api_error", d.message)
                 if chunk:
                     yield chunk
-            # final frame with usage (style-specific)
-            if style == "chat":
-                yield encoder.final_frame()
+            # terminal frames, correct order per dialect:
+            if errored:
+                pass  # error frame already emitted by the encoder's feed()
+            elif style == "chat":
+                yield encoder.final_frame()          # finish_reason + usage
                 yield b"data: [DONE]\n\n"
             elif style == "anthropic":
-                yield encoder.final_frame()
+                yield encoder.final_frame()          # message_delta w/ usage+stop
                 yield b"event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n"
             else:
-                yield encoder._completed()
+                yield encoder._completed()           # response.completed
         finally:
-            ctx.status = 200
             state_.logs.log_request(build_log_event(ctx))
+            _record_tpm_usage(ctx.auth, ctx)
             if ctx.usage and ctx.auth and ctx.auth.key_type != "master":
                 await state_.auth.update_spend(ctx.auth.key_id, ctx.cost)
 
@@ -245,6 +260,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     @app.get("/v1/models")
     async def list_models(request: Request):
+        # authenticated like the rest of the API (OpenAI requires auth here too)
+        _, err_resp = await authenticate(request, model="*")
+        if err_resp:
+            return err_resp
         data = []
         for name in sorted(app.state.wiwi.router.groups.keys()):
             data.append({"id": name, "object": "model", "owned_by": "wiwi"})
@@ -265,6 +284,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             alias=body.get("name") or body.get("alias") or "",
             models=body.get("models"), max_budget=body.get("max_budget"),
             rpm=body.get("rpm"), tpm=body.get("tpm"),
+            ttl_seconds=body.get("ttl_seconds"),
             custom_key=body.get("custom_key"))
         await state.logs.log_audit(actor="master", action="key.generate", target=kid)
         return JSONResponse({"key": plaintext, "id": kid,
@@ -284,6 +304,18 @@ def create_app(config: WiwiConfig) -> FastAPI:
         await state.logs.log_audit(actor="master", action="key.delete", target=key_id)
         return JSONResponse({"deleted": ok})
 
+    @app.post("/admin/keys/{key_id}/disable")
+    async def admin_disable_key(key_id: str, request: Request):
+        if not is_admin(request):
+            return _err(401, "authentication_error", "master key required", request)
+        body = await request.json()
+        disabled = bool(body.get("disabled", True))
+        await state.auth.set_disabled(key_id, disabled)
+        await state.logs.log_audit(actor="master",
+                                   action="key.disable" if disabled else "key.enable",
+                                   target=key_id)
+        return JSONResponse({"key_id": key_id, "disabled": disabled})
+
     @app.get("/admin/logs/requests")
     async def admin_request_logs(request: Request):
         if not is_admin(request):
@@ -297,6 +329,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if not is_admin(request):
             return _err(401, "authentication_error", "master key required", request)
         last_id = int(request.headers.get("last-event-id", "0") or 0)
+        import asyncio as _aio
 
         async def gen():
             q = await state.logs.sse.subscribe("request")
@@ -305,9 +338,6 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 for seq, evt in state.logs.sse.replay("request", last_id):
                     yield encode_sse(seq, evt)
                 while True:
-                    got = await q.get() if False else None
-                    done = {"q": q, "pq": pq}
-                    import asyncio as _aio
                     qq_task = _aio.create_task(q.get())
                     pq_task = _aio.create_task(pq.get())
                     done_t, pending = await _aio.wait(

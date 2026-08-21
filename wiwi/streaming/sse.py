@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import AsyncIterator
 
 
 @dataclass(frozen=True)
@@ -20,8 +20,7 @@ class LineSSEParser:
         self._data: list[str] = []
 
     def feed_line(self, line: str) -> SSEEvent | None:
-        if line.endswith("\r"):
-            line = line[:-1]
+        line = line.removesuffix("\r")
         if line == "":
             if self._data:
                 evt = SSEEvent(self._event, "\n".join(self._data))

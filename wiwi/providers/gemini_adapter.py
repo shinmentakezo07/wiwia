@@ -21,7 +21,7 @@ class GeminiAdapter:
         method = "streamGenerateContent?alt=sse&key=" if stream else "generateContent?key="
         return f"{base}/models/{model_id}:{method}"
 
-    def encode_request(self, req: IRRequest, model_id: str,
+    def encode_request(self, req: ir.Request, model_id: str,
                        deployment_params: dict[str, Any]) -> dict[str, Any]:
         g = req.gen_params
         system_parts: list[str] = []
@@ -46,7 +46,7 @@ class GeminiAdapter:
                     try:
                         import json as _j
                         resp = _j.loads(p.content)
-                    except Exception:
+                    except (TypeError, ValueError):
                         resp = {"result": p.content}
                     parts.append({"functionResponse": {"name": p.tool_use_id,
                                                        "response": resp}})

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import time
 from typing import Any
 
 import orjson
@@ -106,7 +105,7 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
         content = [{"type": "text", "text": ""}]
     u = turn.usage
     sr = {"stop": "end_turn", "length": "max_tokens", "tool_call": "tool_use",
-          "content_filter": "refusal"}[turn.stop_reason]
+          "content_filter": "refusal"}.get(turn.stop_reason, "end_turn")
     return {
         "id": f"msg_{req_id}", "type": "message", "role": "assistant",
         "model": model, "content": content,
@@ -207,7 +206,7 @@ class AnthropicStreamEncoder:
                           "content_filter": "refusal"}.get(d.stop_reason, "end_turn")
             return None
         if isinstance(d, dl.StreamEnd):
-            return b"event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n"
+            return None  # caller emits message_delta (final_frame) then message_stop
         if isinstance(d, dl.StreamError):
             return self._evt("error", {"type": "error",
                                        "error": {"type": "api_error",

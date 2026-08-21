@@ -81,7 +81,7 @@ class RouterSettings(BaseModel):
 
 class GeneralSettings(BaseModel):
     master_key: str = ""
-    database_url: str = "sqlite:///wiwi.db"
+    database_url: str = "sqlite+aiosqlite:///wiwi.db"
     redis_url: str = ""
 
 
@@ -123,7 +123,7 @@ def load_config(path: str | Path) -> WiwiConfig:
     except ConfigError:
         raise
     except Exception as e:  # pydantic.ValidationError and friends
-        loc = getattr(e, "errors", lambda: [])()
+        loc = getattr(e, "errors", list)()
         first = loc[0] if loc else {}
         where = ".".join(str(x) for x in first.get("loc", []))
         raise ConfigError(f"invalid config at '{where or '<root>'}': {first.get('msg', e)}") from e

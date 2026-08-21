@@ -10,12 +10,12 @@ Nothing here ever blocks a response; the DB sink degrades to drop+count when slo
 from __future__ import annotations
 
 import asyncio
-import orjson
-import structlog
 import time
-
 from collections import deque
 from dataclasses import asdict
+
+import orjson
+import structlog
 
 from wiwi.logging_core.events import LogEvent
 
@@ -112,7 +112,7 @@ class LoggingSubsystem:
         for t in self._tasks:
             try:
                 await asyncio.wait_for(t, timeout=5)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except (TimeoutError, asyncio.CancelledError):
                 t.cancel()
 
     async def _pump(self, q: asyncio.Queue, stream: str) -> None:

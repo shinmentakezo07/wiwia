@@ -2,10 +2,10 @@
 
 import json
 
-from wiwi.wire import openai_chat as oc
 from wiwi.providers.anthropic_adapter import AnthropicAdapter
 from wiwi.providers.gemini_adapter import GeminiAdapter
 from wiwi.providers.openai_adapter import OpenAIAdapter
+from wiwi.wire import openai_chat as oc
 
 
 def test_openai_encode_basic():

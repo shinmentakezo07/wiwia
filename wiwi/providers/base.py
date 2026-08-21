@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Protocol
+from typing import Any, Protocol
 
-from wiwi.ir.types import Request as IRRequest
 from wiwi.ir.types import AssistantTurn
+from wiwi.ir.types import Request as IRRequest
 from wiwi.streaming.deltas import IRStreamDelta
 
 

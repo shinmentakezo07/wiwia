@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, AsyncIterator
+from typing import Any
 
 import orjson
 
@@ -128,7 +128,7 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
         "completion_tokens_details": {"reasoning_tokens": u.reasoning_tokens},
     }
     fr = {"stop": "stop", "length": "length", "tool_call": "tool_calls",
-          "content_filter": "content_filter"}[turn.stop_reason]
+          "content_filter": "content_filter"}.get(turn.stop_reason, "stop")
     return {
         "id": f"chatcmpl-{req_id}", "object": "chat.completion",
         "created": int(time.time()), "model": model,

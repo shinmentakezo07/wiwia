@@ -23,6 +23,9 @@ def _system_text(messages: list[ir.Message]) -> str:
 class AnthropicAdapter:
     provider_type = "anthropic"
 
+    def __init__(self) -> None:
+        self._tool_indices: set[int] = set()
+
     def headers(self, key: ProviderKeyRef) -> dict[str, str]:
         return {"x-api-key": key.secret, "anthropic-version": "2023-06-01"}
 
@@ -32,7 +35,7 @@ class AnthropicAdapter:
             return f"{base}/messages/count_tokens"
         return f"{base}/messages" + ("?stream=true" if False else "")
 
-    def encode_request(self, req: IRRequest, model_id: str,
+    def encode_request(self, req: ir.Request, model_id: str,
                        deployment_params: dict[str, Any]) -> dict[str, Any]:
         g = req.gen_params
         system = _system_text(req.messages)
@@ -149,6 +152,7 @@ class AnthropicAdapter:
             cb = payload.get("content_block", {})
             idx = payload.get("index", 0)
             if cb.get("type") == "tool_use":
+                self._tool_indices.add(idx)
                 out.append(dl.ToolCallOpen(index=idx, id=cb.get("id", ""), name=cb.get("name", "")))
         elif etype == "content_block_delta":
             d = payload.get("delta", {})
@@ -163,7 +167,12 @@ class AnthropicAdapter:
                 out.append(dl.ToolCallArgsDelta(index=payload.get("index", 0),
                                                 args_fragment=d.get("partial_json", "")))
         elif etype == "content_block_stop":
-            out.append(dl.ToolCallClose(index=payload.get("index", 0)))
+            # only tool_use blocks close a tool call; text/thinking stops are not
+            # tool-call lifecycle events
+            idx = payload.get("index", 0)
+            if idx in self._tool_indices:
+                self._tool_indices.discard(idx)
+                out.append(dl.ToolCallClose(index=idx))
         elif etype == "message_delta":
             d = payload.get("delta", {})
             u = payload.get("usage") or {}

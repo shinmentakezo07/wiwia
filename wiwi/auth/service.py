@@ -118,6 +118,31 @@ class AuthService:
             )
         return plaintext, kid
 
+    async def delete_key(self, key_id: str) -> bool:
+        # fetch the hash first so the cache entry can be evicted; a deleted key
+        # must stop authenticating immediately, not after the TTL lapses
+        async with self.engine.connect() as conn:
+            row = (await conn.execute(sa.text("SELECT key_hash FROM vkeys WHERE id=:id"),
+                                      {"id": key_id})).first()
+        async with self.engine.begin() as conn:
+            res = await conn.execute(sa.text("DELETE FROM vkeys WHERE id=:id"), {"id": key_id})
+        if row is not None:
+            self._cache.pop(row[0], None)
+        return res.rowcount > 0
+
+    async def set_disabled(self, key_id: str, disabled: bool) -> None:
+        """Disable/enable a key and evict its cached auth info immediately."""
+        async with self.engine.connect() as conn:
+            row = (await conn.execute(sa.text("SELECT key_hash FROM vkeys WHERE id=:id"),
+                                      {"id": key_id})).first()
+        async with self.engine.begin() as conn:
+            await conn.execute(
+                sa.text("UPDATE vkeys SET disabled=:d, updated_at=:now WHERE id=:id"),
+                {"d": int(disabled), "id": key_id, "now": time.time()},
+            )
+        if row is not None:
+            self._cache.pop(row[0], None)
+
     async def update_spend(self, key_id: str, add_cost: float) -> None:
         if key_id == "master":
             return
@@ -127,11 +152,11 @@ class AuthService:
                         " WHERE id=:id"),
                 {"c": add_cost, "id": key_id, "now": time.time()},
             )
-
-    async def delete_key(self, key_id: str) -> bool:
-        async with self.engine.begin() as conn:
-            res = await conn.execute(sa.text("DELETE FROM vkeys WHERE id=:id"), {"id": key_id})
-        return res.rowcount > 0
+        # keep cached budget state fresh so budget limits are enforced promptly;
+        # adjust the cached AuthInfo in place instead of a full re-lookup
+        for info, _ts in self._cache.values():
+            if info is not None and info.key_id == key_id:
+                info.spend_to_date += add_cost
 
     async def list_keys(self) -> list[dict]:
         async with self.engine.connect() as conn:

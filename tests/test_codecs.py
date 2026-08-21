@@ -1,6 +1,5 @@
 """Codec round-trip tests: decode -> encode for all three dialects."""
 
-import json
 
 from wiwi.wire import anthropic_messages as am
 from wiwi.wire import openai_chat as oc
@@ -82,6 +81,7 @@ def test_anthropic_stream_encoder_sequence():
         if chunk:
             frames.append(chunk.decode())
     frames.append(enc.final_frame().decode())  # message_delta w/ stop_reason + usage
+    frames.append(b'event: message_stop\ndata: {"type": "message_stop"}\n\n'.decode())  # caller emits sentinel
     blob = "".join(frames)
     assert "message_start" in blob
     assert "text_delta" in blob and '"Hel"' in blob

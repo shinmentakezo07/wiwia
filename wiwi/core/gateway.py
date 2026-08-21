@@ -19,6 +19,7 @@ from wiwi.providers.base import ProviderKeyRef, WiwiError, error_from_provider_s
 from wiwi.providers.registry import get_adapter
 from wiwi.router.router import Deployment, Router, execute_with_retries
 from wiwi.streaming import deltas as dl
+from wiwi.streaming.sse import LineSSEParser
 
 
 class Gateway:
@@ -41,8 +42,10 @@ class Gateway:
     async def _call(self, dep: Deployment, key: ProviderKeyRef,
                     ctx: RequestContext) -> ir.AssistantTurn:
         adapter = get_adapter(dep.provider.provider_type)
+        ctx.deployment = dep
+        ctx.provider_key = key
         params: dict[str, Any] = {"max_tokens": dep.max_tokens, "extra_body": {}}
-        url = adapter.build_url(dep.provider.base_url, dep.model_id, False, self.kind)
+        url = _build_url(adapter, dep, key, False, self.kind)
         body = adapter.encode_request(ctx.ir_req, dep.model_id, params)
         headers = {**adapter.headers(key), **dep.provider.extra_headers,
                    **dep.extra_headers}
@@ -83,22 +86,33 @@ class Gateway:
 
     # -- streaming ---------------------------------------------------------------
     async def stream(self, ctx: RequestContext) -> AsyncIterator[dl.IRStreamDelta]:
-        queue: asyncio.Queue[dl.IRStreamDelta] = asyncio.Queue(maxsize=4096)
+        queue: asyncio.Queue[dl.IRStreamDelta | dl.StreamError] = asyncio.Queue(maxsize=4096)
+        pump_task: asyncio.Task | None = None
 
         async def call_one(dep: Deployment, key: ProviderKeyRef, c: RequestContext):
-            task = asyncio.create_task(
-                self._pump(dep, key, c, queue))
-            return task
+            nonlocal pump_task
+            ready = asyncio.Event()
+            err_box: list[WiwiError | None] = [None]
+            pump_task = asyncio.create_task(
+                self._pump(dep, key, c, queue, ready, err_box))
+            # Wait until the pump either connects successfully or fails before
+            # sending any data.  If it fails, raise so execute_with_retries can
+            # retry on a different deployment.
+            await ready.wait()
+            if err_box[0] is not None:
+                pump_task.cancel()
+                raise err_box[0]
+            return pump_task
 
-        task = await execute_with_retries(self.router, ctx, call_one)
-        assert isinstance(task, asyncio.Task)
+        await execute_with_retries(self.router, ctx, call_one)
+        assert pump_task is not None
         yield dl.StreamStart(model=ctx.ir_req.model, group=ctx.group or "")
         first = True
         try:
             while True:
                 d = await queue.get()
                 if first and isinstance(d, (dl.TextDelta, dl.ThinkingDelta,
-                                            dl.ToolCallOpen)):
+                                             dl.ToolCallOpen)):
                     ctx.first_token_at = time.monotonic()
                     first = False
                 if isinstance(d, (dl.TextDelta, dl.ThinkingDelta)):
@@ -109,63 +123,89 @@ class Gateway:
                 if isinstance(d, (dl.StreamEnd, dl.StreamError)):
                     break
         finally:
-            task.cancel()
+            if pump_task and not pump_task.done():
+                pump_task.cancel()
 
     async def _pump(self, dep: Deployment, key: ProviderKeyRef,
-                    ctx: RequestContext, queue: asyncio.Queue) -> None:
+                    ctx: RequestContext, queue: asyncio.Queue,
+                    ready: asyncio.Event,
+                    err_box: list) -> None:
+        """Stream pump.  Sets *ready* once the upstream connection is established
+        (so the caller can begin consuming the queue) or puts a WiwiError into
+        *err_box* and sets *ready* if it fails before any data flows."""
         adapter = get_adapter(dep.provider.provider_type)
+        ctx.deployment = dep
+        ctx.provider_key = key
+        real_key = dep.provider.get_key(key.label)  # live pool entry for on_result
         params: dict[str, Any] = {"max_tokens": dep.max_tokens, "extra_body": {}}
-        url = adapter.build_url(dep.provider.base_url, dep.model_id, True, self.kind)
+        url = _build_url(adapter, dep, key, True, self.kind)
         body = adapter.encode_request(ctx.ir_req, dep.model_id, params)
         headers = {**adapter.headers(key), **dep.provider.extra_headers,
                    **dep.extra_headers}
+        t0 = time.monotonic()
         usage_final: dl.UsageFinal | None = None
         finish: dl.Finish | None = None
         text_len = 0
+        started = False
         try:
-            async with self._client.stream("POST", url, json=body, headers=headers,
-                                           timeout=dep.timeout
-                                           or dep.provider.timeout_s) as resp:
-                if resp.status_code != 200:
-                    raw = await resp.aread()
-                    err = error_from_provider_status(resp.status_code,
-                                                     raw.decode(errors="replace"),
-                                                     dep.provider.name)
-                    dep.provider.on_result(key, resp.status_code, err.retry_after)
-                    await queue.put(dl.StreamError(err.message, "status",
-                                                   resp.status_code))
-                    return
-                async for line in resp.aiter_lines():
-                    if ctx.cancel.is_set():
-                        await queue.put(dl.StreamError("client disconnected",
-                                                       "cancelled"))
-                        return
-                    if not line or line.startswith(":"):
+            try:
+                resp_cm = self._client.stream("POST", url, json=body, headers=headers,
+                                             timeout=dep.timeout
+                                             or dep.provider.timeout_s)
+                resp = await resp_cm.__aenter__()
+            except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout,
+                    httpx.PoolTimeout) as e:
+                ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
+                                 key.label, type(e).__name__,
+                                 int((time.monotonic() - t0) * 1000))
+                err_box[0] = WiwiError(
+                    504 if "Timeout" in type(e).__name__ else 502,
+                    "timeout" if "Timeout" in type(e).__name__
+                    else "api_connection_error",
+                    f"upstream {type(e).__name__}", retryable=True)
+                ready.set()
+                return
+            if resp.status_code != 200:
+                raw = await resp.aread()
+                err = error_from_provider_status(resp.status_code,
+                                                 raw.decode(errors="replace"),
+                                                 dep.provider.name)
+                dep.provider.on_result(real_key, resp.status_code, err.retry_after)
+                ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
+                                 key.label, f"http_{resp.status_code}",
+                                 int((time.monotonic() - t0) * 1000))
+                err_box[0] = err
+                ready.set()
+                await resp_cm.__aexit__(None, None, None)
+                return
+            # Connection established — signal the caller to start consuming.
+            started = True
+            ready.set()
+            parser = LineSSEParser()
+            async for line in resp.aiter_lines():
+                if ctx.cancel.is_set():
+                    await queue.put(dl.StreamError("client disconnected", "cancelled"))
+                    break
+                evt = parser.feed_line(line)
+                if evt is None:
+                    continue
+                for d in adapter.decode_stream_event(evt.event, evt.data):
+                    if isinstance(d, dl.UsageFinal):
+                        usage_final = d
+                    elif isinstance(d, dl.Finish):
+                        finish = d
+                    elif isinstance(d, dl.StreamEnd):
                         continue
-                    event = ""
-                    data = ""
-                    if line.startswith("event:"):
-                        event = line[6:].strip()
-                        continue
-                    if line.startswith("data:"):
-                        data = line[5:].strip()
                     else:
-                        continue
-                    for d in adapter.decode_stream_event(event, data):
-                        if isinstance(d, dl.UsageFinal):
-                            usage_final = d
-                        elif isinstance(d, dl.Finish):
-                            finish = d
-                        elif isinstance(d, dl.StreamEnd):
-                            continue
-                        else:
-                            if isinstance(d, dl.TextDelta):
-                                text_len += len(d.text)
-                            await queue.put(d)
-            # upstream closed normally
+                        if isinstance(d, dl.TextDelta):
+                            text_len += len(d.text)
+                        await queue.put(d)
+            await resp_cm.__aexit__(None, None, None)
+            # upstream closed normally; on_result(200) already fired in
+            # execute_with_retries when the stream started — don't double count.
+            ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
+                             "ok", int((time.monotonic() - t0) * 1000))
             u = usage_final or dl.UsageFinal()
-            if u.output == 0 and finish is None:
-                pass
             est_usage = u
             if est_usage.prompt == 0:
                 est_usage = dl.UsageFinal(
@@ -175,12 +215,29 @@ class Gateway:
             await queue.put(est_usage)
             await queue.put(finish or dl.Finish("stop"))
             await queue.put(dl.StreamEnd())
-        except (httpx.ConnectError, httpx.ReadTimeout) as e:
-            await queue.put(dl.StreamError(str(e),
-                                           "timeout" if "Timeout" in type(e).__name__
-                                           else "connection"))
         except asyncio.CancelledError:
             raise
+        except Exception as e:  # noqa: BLE001
+            if not started:
+                ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
+                                 key.label, f"error:{type(e).__name__}",
+                                 int((time.monotonic() - t0) * 1000))
+                err_box[0] = WiwiError(502, "api_connection_error",
+                                       f"stream pump error: {type(e).__name__}: {e}",
+                                       retryable=True)
+                ready.set()
+            else:
+                # Mid-stream error — can't retry; send error to client and
+                # record the failure on the live pool entry.
+                if real_key is not None:
+                    real_key.err_count += 1
+                await queue.put(dl.StreamError(str(e),
+                                               "timeout" if "Timeout" in type(e).__name__
+                                               else "connection"))
+            try:
+                await resp_cm.__aexit__(None, None, None)
+            except Exception:  # noqa: BLE001, S110
+                pass
 
     def _price(self, ctx: RequestContext, dep: Deployment, u: ir.Usage) -> None:
         model_key = f"{dep.provider.provider_type}/{dep.model_id}"
@@ -238,3 +295,13 @@ def build_log_event(ctx: RequestContext) -> LogEvent:
 
 def encode_json(obj: Any) -> bytes:
     return orjson.dumps(obj)
+
+
+def _build_url(adapter, dep: Deployment, key: ProviderKeyRef,
+               stream: bool, kind: str) -> str:
+    """Build the upstream URL, appending the API key for providers that require it
+    in the querystring (e.g. Gemini) rather than headers."""
+    url = adapter.build_url(dep.provider.base_url, dep.model_id, stream, kind)
+    if dep.provider.provider_type == "gemini" and "?key=" in url:
+        url += key.secret
+    return url

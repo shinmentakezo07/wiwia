@@ -59,7 +59,7 @@ class OpenAIAdapter:
             return f"{base}/embeddings"
         return f"{base}/chat/completions"
 
-    def encode_request(self, req: IRRequest, model_id: str,
+    def encode_request(self, req: ir.Request, model_id: str,
                        deployment_params: dict[str, Any]) -> dict[str, Any]:
         g = req.gen_params
         body: dict[str, Any] = {
@@ -166,17 +166,25 @@ class OpenAIAdapter:
             out.append(dl.TextDelta(delta["content"]))
         if delta.get("reasoning_content"):
             out.append(dl.ThinkingDelta(delta["reasoning_content"]))
-        for i, tc in enumerate(delta.get("tool_calls") or []):
+        tool_calls = delta.get("tool_calls") or []
+        for i, tc in enumerate(tool_calls):
             idx = tc.get("index", i)
             fn = tc.get("function") or {}
             if tc.get("id"):
+                # a new tool call opening on the same index closes the previous one
+                if getattr(self, "_open_tool_idx", None) == idx:
+                    out.append(dl.ToolCallClose(index=idx))
+                self._open_tool_idx = idx
                 out.append(dl.ToolCallOpen(index=idx, id=tc["id"], name=fn.get("name", "")))
             if fn.get("arguments"):
                 out.append(dl.ToolCallArgsDelta(index=idx, args_fragment=fn["arguments"]))
-            if tc.get("finish_reason") is None and fn and not fn.get("arguments"):
-                pass
         fr = c.get("finish_reason")
         if fr:
+            # close any still-open tool call before finishing
+            open_idx = getattr(self, "_open_tool_idx", None)
+            if open_idx is not None:
+                out.append(dl.ToolCallClose(index=open_idx))
+                self._open_tool_idx = None
             out.append(dl.Finish({"stop": "stop", "length": "length",
                                   "tool_calls": "tool_call",
                                   "content_filter": "content_filter"}.get(fr, "stop")))

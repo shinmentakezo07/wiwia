@@ -10,10 +10,13 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
-from wiwi.config import KeyDef, ProviderDef, RouterSettings, WiwiConfig
+from wiwi.config import RouterSettings, WiwiConfig
 from wiwi.core.context import RequestContext
-from wiwi.providers.base import (RETRYABLE_STATUS, ProviderKeyRef, WiwiError,
-                                 error_from_provider_status)
+from wiwi.providers.base import (
+    RETRYABLE_STATUS,
+    ProviderKeyRef,
+    WiwiError,
+)
 
 
 @dataclass
@@ -59,6 +62,13 @@ class ProviderAccount:
     @property
     def healthy(self) -> bool:
         return any(k.available for k in self.keys)
+
+    def get_key(self, label: str) -> ProviderKey | None:
+        """Resolve the live pool entry for a key reference (by label)."""
+        for k in self.keys:
+            if k.label == label:
+                return k
+        return None
 
     async def pick_key(self) -> ProviderKey | None:
         """Smooth weighted round-robin over available keys (nginx algorithm)."""
@@ -276,6 +286,6 @@ def _status_of(e: WiwiError) -> int | None:
         return 429
     if e.status in (401, 403):
         return e.status
-    for m in RETRYABLE_STATUS:
-        pass
+    if e.status in RETRYABLE_STATUS:
+        return e.status
     return None

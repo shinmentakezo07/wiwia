@@ -250,7 +250,8 @@ class ResponsesStreamEncoder:
             self._stop = d.stop_reason
             return None
         if isinstance(d, dl.StreamEnd):
-            return b"".join(self._close_item()) + self._completed()
+            # caller emits response.completed via _completed() after the loop
+            return b"".join(self._close_item())
         if isinstance(d, dl.StreamError):
             return self._evt("response.failed", {
                 "response": {"id": f"resp_{self.req_id}", "status": "failed",

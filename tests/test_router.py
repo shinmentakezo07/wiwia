@@ -1,8 +1,16 @@
 """Router tests: WRR key pools, cooldowns, retries, fallbacks."""
 
 import asyncio
+from typing import ClassVar
 
-from wiwi.config import KeyDef, ModelEntry, DeploymentParams, ProviderDef, RouterSettings, WiwiConfig
+from wiwi.config import (
+    DeploymentParams,
+    KeyDef,
+    ModelEntry,
+    ProviderDef,
+    RouterSettings,
+    WiwiConfig,
+)
 from wiwi.providers.base import WiwiError
 from wiwi.router.router import Router
 
@@ -84,7 +92,7 @@ def test_execute_retries_then_fallbacks():
 
     class Ctx:
         group = "gpt-4o"
-        attempts = []
+        attempts: ClassVar[list] = []
         started = 0.0
 
     # force first pick to p1 deterministically: run until p1 is picked first
@@ -117,7 +125,7 @@ def test_single_key_429_cools_and_stops():
 
     class Ctx:
         group = "m"
-        attempts = []
+        attempts: ClassVar[list] = []
         started = 0.0
 
     try:
