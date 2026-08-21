@@ -150,15 +150,18 @@ class OpenAIAdapter:
             return []
         out: list[dl.IRStreamDelta] = []
         choices = chunk.get("choices") or []
+        # usage may ride in ANY chunk — OpenAI/OpenRouter put it in the same
+        # final chunk as choices+finish_reason. Parse it whenever present;
+        # later cumulative values replace earlier ones.
+        u = chunk.get("usage")
+        if u:
+            dp = u.get("prompt_tokens_details") or {}
+            dc = u.get("completion_tokens_details") or {}
+            out.append(dl.UsageFinal(
+                prompt=u.get("prompt_tokens", 0), cached=dp.get("cached_tokens", 0),
+                reasoning=dc.get("reasoning_tokens", 0),
+                output=u.get("completion_tokens", 0)))
         if not choices:
-            u = chunk.get("usage")
-            if u:
-                dp = u.get("prompt_tokens_details") or {}
-                dc = u.get("completion_tokens_details") or {}
-                out.append(dl.UsageFinal(
-                    prompt=u.get("prompt_tokens", 0), cached=dp.get("cached_tokens", 0),
-                    reasoning=dc.get("reasoning_tokens", 0),
-                    output=u.get("completion_tokens", 0)))
             return out
         c = choices[0]
         delta = c.get("delta") or {}

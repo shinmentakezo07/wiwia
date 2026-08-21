@@ -22,8 +22,8 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
     if isinstance(system_text, str) and system_text:
         messages.append(ir.Message(role="system", parts=[ir.TextPart(system_text)]))
     elif isinstance(system_text, list):
-        parts = [ir.TextPart(b.get("text", "")) for b in system_text
-                 if b.get("type") == "text"]
+        parts = [ir.TextPart(b.get("text", ""), cache_control=b.get("cache_control"))
+                 for b in system_text if b.get("type") == "text"]
         if parts:
             messages.append(ir.Message(role="system", parts=parts))
     for m in body.get("messages") or []:

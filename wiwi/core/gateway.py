@@ -244,6 +244,17 @@ class Gateway:
         ctx.usage = u
         ctx.cost = self.cost.cost(model_key, u.prompt_tokens, u.completion_tokens,
                                   u.cached_tokens)
+        ctx.cache_hit = u.cached_tokens > 0
+        ctx.metadata["cache_savings"] = self._cache_savings(model_key, u)
+
+    def _cache_savings(self, model_key: str, u: ir.Usage) -> float:
+        """Dollars saved by provider-side prompt caching at this model's rates."""
+        p = self.cost.prices.get(model_key) or self.cost.prices.get(model_key.split("/")[-1])
+        if not p or u.cached_tokens <= 0:
+            return 0.0
+        input_rate = p["input_cost_per_token"]
+        cache_rate = p.get("cache_read_input_cost_per_token", input_rate)
+        return round(u.cached_tokens * max(0.0, input_rate - cache_rate), 8)
 
     def _price_stream(self, ctx: RequestContext, dep: Deployment,
                       u: dl.UsageFinal) -> None:
@@ -253,6 +264,8 @@ class Gateway:
                              reasoning_estimated=u.estimated,
                              cache_creation_tokens=u.cache_creation)
         ctx.cost = self.cost.cost(model_key, u.prompt, u.output, u.cached)
+        ctx.cache_hit = u.cached > 0
+        ctx.metadata["cache_savings"] = self._cache_savings(model_key, ctx.usage)
 
 
 def _flatten(ctx: RequestContext) -> str:
@@ -286,6 +299,7 @@ def build_log_event(ctx: RequestContext) -> LogEvent:
         tok_out=u.completion_tokens if u else 0,
         tps=round(tps, 2), ttft_ms=round(ttft, 1), latency_ms=round(latency_ms, 1),
         cost=ctx.cost, was_stream=ctx.ir_req.stream, cache_hit=ctx.cache_hit,
+        cache_savings=ctx.metadata.get("cache_savings", 0.0),
         attempts=[{"deployment": a.deployment, "provider": a.provider,
                    "key": a.provider_key_label, "status": a.status,
                    "latency_ms": a.latency_ms} for a in ctx.attempts],

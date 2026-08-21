@@ -20,6 +20,25 @@ def _system_text(messages: list[ir.Message]) -> str:
     return "\n".join(parts)
 
 
+def _system_blocks_or_text(messages: list[ir.Message]) -> str | list[dict[str, Any]] | None:
+    """System prompt for the Messages API. Preserves cache_control by emitting
+    block form when any part carries it (this is what enables Anthropic prompt
+    caching); plain string otherwise."""
+    text_parts = [p for m in messages if m.role == "system"
+                  for p in m.parts if isinstance(p, ir.TextPart)]
+    if not text_parts:
+        return None
+    if any(p.cache_control for p in text_parts):
+        blocks: list[dict[str, Any]] = []
+        for p in text_parts:
+            b: dict[str, Any] = {"type": "text", "text": p.text}
+            if p.cache_control:
+                b["cache_control"] = p.cache_control
+            blocks.append(b)
+        return blocks
+    return "\n".join(p.text for p in text_parts)
+
+
 class AnthropicAdapter:
     provider_type = "anthropic"
 
@@ -38,7 +57,7 @@ class AnthropicAdapter:
     def encode_request(self, req: ir.Request, model_id: str,
                        deployment_params: dict[str, Any]) -> dict[str, Any]:
         g = req.gen_params
-        system = _system_text(req.messages)
+        system = _system_blocks_or_text(req.messages)
         msgs: list[dict[str, Any]] = []
         for m in req.messages:
             if m.role == "system":

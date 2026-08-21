@@ -31,6 +31,7 @@ class LogEvent:
     cost: float = 0.0
     was_stream: bool = False
     cache_hit: bool = False
+    cache_savings: float = 0.0
     attempts: list[dict[str, Any]] = field(default_factory=list)
     # proxy-log fields
     level: ProxyLevel = "info"
