@@ -7,3 +7,8 @@ __pycache__/
 # Project-local tooling
 .omo/
 .codegraph/
+
+# Live config & secrets (tracked template: wiwi.yaml.example)
+wiwi.yaml
+key.md
+wiwi.db
