@@ -175,19 +175,22 @@ class ChatStreamEncoder:
         if isinstance(d, dl.ToolCallClose):
             return None
         if isinstance(d, dl.UsageFinal):
-            return None  # emitted with Finish frame below
+            self._usage = d
+            return None  # emitted with the Finish frame
         if isinstance(d, dl.Finish):
-            self._finished = True
-            return None  # wait for UsageFinal pairing; emit on end()
+            self._stop = d.stop_reason
+            return None  # final_frame() emits finish_reason + usage together
         if isinstance(d, dl.StreamEnd):
-            return b"data: [DONE]\n\n"
+            return None  # [DONE] is emitted by the caller after final_frame()
         if isinstance(d, dl.StreamError):
             err = {"error": {"message": d.message, "type": "api_error"}}
             return sse_frame("", orjson.dumps(err).decode()) + b"data: [DONE]\n\n"
         return None
 
-    def final_frame(self, usage: dl.UsageFinal | None, stop: str) -> bytes:
-        u = usage or dl.UsageFinal()
+    def final_frame(self, usage: dl.UsageFinal | None = None,
+                    stop: str | None = None) -> bytes:
+        u = usage or getattr(self, "_usage", None) or dl.UsageFinal()
+        stop = stop or getattr(self, "_stop", "stop")
         usage_obj = {
             "prompt_tokens": u.prompt, "completion_tokens": u.output,
             "total_tokens": u.prompt + u.output,
