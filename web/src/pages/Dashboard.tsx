@@ -2,7 +2,6 @@
 // sparkline, stacked token throughput, and requests/errors per minute.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -33,6 +32,7 @@ import { useAdminStream } from "@/api/stream";
 import type { RequestLogEntry, TokenBucket } from "@/api/types";
 import { Card, CardHeader, ErrorText, PageHeader, Spinner, StatCard } from "@/components/ui";
 import { fmtInt, fmtPct, fmtTime, fmtTokens, fmtUsd } from "@/lib/format";
+import { deltaVsPrevHour, hourlySeries } from "@/lib/dashboard-metrics";
 
 const LIVE_WINDOW = 30;
 const SPARK_W = 280;
@@ -45,14 +45,6 @@ const COLORS = {
   tokOut: "#c98500",
   requests: "#3b82f6",
   errors: "#e66767",
-};
-
-const TOOLTIP_STYLE: CSSProperties = {
-  backgroundColor: "rgba(10,10,10,0.96)",
-  border: "1px solid rgba(255,255,255,0.08)",
-  borderRadius: "10px",
-  fontSize: "12px",
-  color: "#e5e7eb",
 };
 
 interface LiveBucket {
@@ -145,7 +137,7 @@ function LiveSparkline(props: { series: LiveBucket[]; connected: boolean }) {
         <svg viewBox={`0 0 ${SPARK_W} ${SPARK_H}`} preserveAspectRatio="none" className="block h-16 w-full">
           <defs>
             <linearGradient id="wiwi-spark-req" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor={COLORS.requests} stopOpacity={0.32} />
+              <stop offset="0%" stopColor={COLORS.requests} stopOpacity={0.18} />
               <stop offset="100%" stopColor={COLORS.requests} stopOpacity={0} />
             </linearGradient>
           </defs>
@@ -187,6 +179,34 @@ function LiveSparkline(props: { series: LiveBucket[]; connected: boolean }) {
         </div>
       </div>
     </Card>
+  );
+}
+
+/** Map request logs to {t, v} points for hourlySeries and window sums. */
+function mkPoints(logs: RequestLogEntry[], vOf: (l: RequestLogEntry) => number) {
+  return logs.map((l) => ({ t: l.ts, v: vOf(l) }));
+}
+
+function ChartTooltip(props: {
+  active?: boolean;
+  label?: string | number;
+  payload?: Array<{ name?: string; value?: number | string; color?: string }>;
+  fmt?: (v: number) => string;
+}) {
+  if (!props.active || !props.payload?.length) return null;
+  return (
+    <div className="admin-chart-tooltip">
+      <div className="mb-1 text-[11px] text-[var(--admin-text-muted)]">{props.label}</div>
+      {props.payload.map((p, i) => (
+        <div key={i} className="flex items-center gap-2 leading-5">
+          <span className="h-0.5 w-3 rounded" style={{ backgroundColor: p.color }} />
+          <span className="tt-value">
+            {props.fmt ? props.fmt(Number(p.value)) : String(p.value)}
+          </span>
+          <span className="tt-series">{p.name}</span>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -263,9 +283,45 @@ export function DashboardPage() {
   }, [logsQuery.data]);
 
   const o = overviewQuery.data;
+  const logs = useMemo(() => logsQuery.data?.logs ?? [], [logsQuery.data]);
+  const nowMs = Date.now();
+  const hasTraffic = (o?.requests ?? 0) > 0;
+
+  const reqSpark = useMemo(() => hourlySeries(mkPoints(logs, () => 1), Date.now()), [logs]);
+  const costSpark = useMemo(() => hourlySeries(mkPoints(logs, (l) => l.cost), Date.now()), [logs]);
+  const errSpark = useMemo(
+    () => hourlySeries(mkPoints(logs, (l) => (l.status >= 400 ? 1 : 0)), Date.now()),
+    [logs],
+  );
+  const ttftSpark = useMemo(() => hourlySeries(mkPoints(logs, (l) => l.ttft_ms), Date.now()), [logs]);
+
+  // Current vs previous hour totals for the delta chips. The request-log ring
+  // holds ~500 events, enough to cover both windows at personal-gateway volume.
+  const hourCut = nowMs - 3_600_000;
+  const hourPrevStart = nowMs - 7_200_000;
+  const sumIn = (pts: Array<{ t: number; v: number }>, lo: number, hi: number) =>
+    pts.filter((p) => p.t * 1000 >= lo && p.t * 1000 < hi).reduce((a, p) => a + p.v, 0);
+
+  const reqDelta = deltaVsPrevHour(
+    sumIn(mkPoints(logs, () => 1), hourCut, Number.POSITIVE_INFINITY),
+    sumIn(mkPoints(logs, () => 1), hourPrevStart, hourCut),
+  );
+  const costDelta = deltaVsPrevHour(
+    sumIn(mkPoints(logs, (l) => l.cost), hourCut, Number.POSITIVE_INFINITY),
+    sumIn(mkPoints(logs, (l) => l.cost), hourPrevStart, hourCut),
+  );
+  const errDelta = deltaVsPrevHour(
+    sumIn(mkPoints(logs, (l) => (l.status >= 400 ? 1 : 0)), hourCut, Number.POSITIVE_INFINITY),
+    sumIn(mkPoints(logs, (l) => (l.status >= 400 ? 1 : 0)), hourPrevStart, hourCut),
+  );
 
   return (
-    <div>
+    <div
+      style={{
+        opacity: overviewQuery.isFetching && overviewQuery.data ? 0.7 : 1,
+        transition: "opacity 200ms",
+      }}
+    >
       <PageHeader
         title="Dashboard"
         subtitle={o ? `Gateway activity · last ${o.window_minutes} min` : "Gateway activity"}
@@ -285,6 +341,10 @@ export function DashboardPage() {
           label="req / min"
           value={o ? o.requests_per_minute.toFixed(1) : "—"}
           sub={o ? `${fmtInt(o.requests)} requests` : undefined}
+          spark={reqSpark}
+          delta={reqDelta}
+          deltaGoodDir="up"
+          waiting={!hasTraffic}
         />
         <StatCard
           featured
@@ -292,6 +352,9 @@ export function DashboardPage() {
           label="spend"
           value={o ? fmtUsd(o.cost) : "—"}
           sub={o ? `saved ${fmtUsd(o.cache_savings)}` : undefined}
+          spark={costSpark}
+          delta={costDelta}
+          waiting={!hasTraffic}
         />
         <StatCard
           featured
@@ -300,6 +363,9 @@ export function DashboardPage() {
           label="error rate"
           value={o ? fmtPct(o.error_rate) : "—"}
           sub={o ? `${fmtInt(o.errors)} errors` : undefined}
+          spark={errSpark}
+          delta={errDelta}
+          waiting={!hasTraffic}
         />
         <StatCard
           featured
@@ -307,6 +373,8 @@ export function DashboardPage() {
           label="p95 ttft"
           value={o ? `${Math.round(o.ttft_p95_ms)} ms` : "—"}
           sub={o ? `p95 latency ${fmtInt(o.latency_p95_ms)} ms` : undefined}
+          spark={ttftSpark}
+          waiting={!hasTraffic}
         />
       </div>
 
@@ -349,12 +417,12 @@ export function DashboardPage() {
                     ] as const
                   ).map(([id, color]) => (
                     <linearGradient key={id} id={id} x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor={color} stopOpacity={0.45} />
-                      <stop offset="100%" stopColor={color} stopOpacity={0.03} />
+                      <stop offset="0%" stopColor={color} stopOpacity={0.10} />
+                      <stop offset="100%" stopColor={color} stopOpacity={0.02} />
                     </linearGradient>
                   ))}
                 </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#ffffff" strokeOpacity={0.08} vertical={false} />
+                <CartesianGrid stroke="#ffffff" strokeOpacity={0.06} vertical={false} />
                 <XAxis
                   dataKey="t"
                   tickFormatter={(t: number) => fmtTime(t)}
@@ -369,9 +437,8 @@ export function DashboardPage() {
                   tickLine={false}
                 />
                 <Tooltip
-                  contentStyle={TOOLTIP_STYLE}
-                  formatter={(v) => fmtInt(Number(v))}
-                  cursor={{ stroke: "#3b82f6", strokeOpacity: 0.3, strokeDasharray: "4 4" }}
+                  content={<ChartTooltip fmt={(v) => fmtInt(v)} />}
+                  cursor={{ stroke: "#3b82f6", strokeOpacity: 0.3 }}
                 />
                 <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12, color: "#9ca3af" }} />
                 <Area
@@ -381,6 +448,16 @@ export function DashboardPage() {
                   stackId="1"
                   stroke={COLORS.tokIn}
                   fill="url(#grad-tok-in)"
+                  fillOpacity={1}
+                  strokeWidth={2}
+                />
+                <Area
+                  type="monotone"
+                  dataKey="tok_out"
+                  name="output"
+                  stackId="1"
+                  stroke={COLORS.tokOut}
+                  fill="url(#grad-tok-out)"
                   fillOpacity={1}
                   strokeWidth={2}
                 />
@@ -404,16 +481,6 @@ export function DashboardPage() {
                   fillOpacity={1}
                   strokeWidth={2}
                 />
-                <Area
-                  type="monotone"
-                  dataKey="tok_out"
-                  name="output"
-                  stackId="1"
-                  stroke={COLORS.tokOut}
-                  fill="url(#grad-tok-out)"
-                  fillOpacity={1}
-                  strokeWidth={2}
-                />
               </AreaChart>
             </ResponsiveContainer>
           </div>
@@ -424,7 +491,7 @@ export function DashboardPage() {
           <div className="h-[260px] p-3">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={reqSeries} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#ffffff" strokeOpacity={0.08} vertical={false} />
+                <CartesianGrid stroke="#ffffff" strokeOpacity={0.06} vertical={false} />
                 <XAxis
                   dataKey="t"
                   tickFormatter={(t: number) => fmtTime(t)}
@@ -439,8 +506,8 @@ export function DashboardPage() {
                   tickLine={false}
                 />
                 <Tooltip
-                  contentStyle={TOOLTIP_STYLE}
-                  cursor={{ stroke: "#3b82f6", strokeOpacity: 0.3, strokeDasharray: "4 4" }}
+                  content={<ChartTooltip fmt={(v) => fmtInt(v)} />}
+                  cursor={{ stroke: "#3b82f6", strokeOpacity: 0.3 }}
                 />
                 <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12, color: "#9ca3af" }} />
                 <Line
