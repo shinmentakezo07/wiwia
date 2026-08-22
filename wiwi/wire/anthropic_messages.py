@@ -247,8 +247,11 @@ class AnthropicStreamEncoder:
         return None
 
     def final_frame(self) -> bytes:
+        # A legal stream always closes the currently open content block before
+        # the terminating message_delta, even when the last delta left one open.
+        out = b"".join(self._close_block())
         u = self._usage or dl.UsageFinal()
-        return self._evt("message_delta", {
+        return out + self._evt("message_delta", {
             "type": "message_delta",
             "delta": {"stop_reason": self._stop, "stop_sequence": None},
             "usage": {"output_tokens": u.output,

@@ -303,8 +303,11 @@ class ResponsesStreamEncoder:
         return None
 
     def _completed(self) -> bytes:
+        # A legal stream always closes the currently open output item before
+        # response.completed, even when the last delta left one open.
+        closing = b"".join(self._close_item())
         u = self._usage or dl.UsageFinal()
-        return self._evt("response.completed", {
+        return closing + self._evt("response.completed", {
             "response": {"id": f"resp_{self.req_id}", "object": "response",
                          "status": "completed", "model": self.model,
                          "usage": {

@@ -184,8 +184,10 @@ class ChatStreamEncoder:
         if isinstance(d, dl.StreamEnd):
             return None  # [DONE] is emitted by the caller after final_frame()
         if isinstance(d, dl.StreamError):
+            # error frame only: connection close terminates the stream, same
+            # as the anthropic/responses encoders — [DONE] would imply success
             err = {"error": {"message": d.message, "type": "api_error"}}
-            return sse_frame("", orjson.dumps(err).decode()) + b"data: [DONE]\n\n"
+            return sse_frame("", orjson.dumps(err).decode())
         return None
 
     def final_frame(self, usage: dl.UsageFinal | None = None,
