@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ConfigError(Exception):
@@ -114,6 +114,16 @@ class WiwiConfig(BaseModel):
     router_settings: RouterSettings = Field(default_factory=RouterSettings)
     general_settings: GeneralSettings = Field(default_factory=GeneralSettings)
     wiwi_settings: WiwiSettings = Field(default_factory=WiwiSettings)
+
+    @model_validator(mode="after")
+    def _model_refs_exist(self) -> WiwiConfig:
+        names = {p.name for p in self.providers}
+        for entry in self.model_list:
+            if entry.wiwi_params.provider not in names:
+                raise ValueError(
+                    f"model {entry.model_name!r} references unknown provider"
+                    f" {entry.wiwi_params.provider!r}")
+        return self
 
 
 def load_config(path: str | Path) -> WiwiConfig:

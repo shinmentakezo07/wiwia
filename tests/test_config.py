@@ -36,14 +36,12 @@ def test_missing_env_var_fails(tmp_path, monkeypatch):
 
 
 def test_unknown_provider_reference(tmp_path):
-    from wiwi.router.router import Router
-
     p = tmp_path / "wiwi.yaml"
     p.write_text("model_list:\n  - model_name: gpt-4o\n"
                  "    wiwi_params: {provider: nope, model: gpt-4o}\n")
-    cfg = load_config(p)  # config loads fine; reference validated at router build
-    with pytest.raises(ValueError, match="unknown provider"):
-        Router(cfg)
+    # fail fast at load with a clean CLI error (no traceback from router build)
+    with pytest.raises(ConfigError, match="unknown provider"):
+        load_config(p)
 
 
 def test_provider_requires_keys(tmp_path):
