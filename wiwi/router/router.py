@@ -4,6 +4,7 @@ round-robin, cooldowns, retries, fallbacks (docs/ADMIN.md ยง2, ARCHITECTURE.md ย
 from __future__ import annotations
 
 import asyncio
+import math
 import random
 import time
 from collections import deque
@@ -70,7 +71,7 @@ class ProviderAccount:
                 return k
         return None
 
-    async def pick_key(self) -> ProviderKey | None:
+    async def pick_key(self) -> tuple[ProviderKey | None, float]:
         """Smooth weighted round-robin over available keys (nginx algorithm)."""
         async with self._rr_lock:
             for k in self.keys:
@@ -79,14 +80,14 @@ class ProviderAccount:
             if not avail:
                 soonest = min((k.cooldown_until for k in self.keys
                                if k.status == "cooling"), default=None)
-                return None, (soonest - time.monotonic() if soonest else 5.0)  # type: ignore[return-value]
+                return None, (soonest - time.monotonic() if soonest else 5.0)
             total = sum(k.weight for k in avail)
             for k in avail:
                 k.current_weight += k.weight
             best = max(avail, key=lambda k: k.current_weight)
             best.current_weight -= total
             best.last_used = time.monotonic()
-            return best, 0.0  # type: ignore[return-value]
+            return best, 0.0
 
     def on_result(self, key: ProviderKey | None, status: int | None,
                   retry_after: float | None) -> None:
@@ -136,7 +137,7 @@ class Deployment:
         if not self.latencies:
             return 0.0
         s = sorted(self.latencies)
-        return s[min(len(s) - 1, int(len(s) * 0.95))]
+        return s[max(0, min(len(s) - 1, math.ceil(len(s) * 0.95) - 1))]
 
 
 class Router:
@@ -221,7 +222,6 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
 
     Walks: primary group deployments (retries per settings), then fallback groups.
     """
-    attempted_groups: set[str] = set()
     first_error: WiwiError | None = None
     queue: list[str] = []
     if ctx.group:
@@ -233,7 +233,6 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
         _, deps = router.resolve_group(group_name)
         if not deps:
             continue
-        attempted_groups.add(group_name)
         last_err: WiwiError | None = None
         group_first_err: WiwiError | None = None
         tried_dep_ids: set[int] = set()
@@ -246,15 +245,14 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                                      f"no healthy deployment for '{group_name}'",
                                      retryable=True)
                 break
-            picked = await dep.provider.pick_key()
-            if isinstance(picked, tuple):
-                key, retry_in = picked
-            else:  # defensive
-                key, retry_in = picked, 5.0
+            key, retry_in = await dep.provider.pick_key()
             if key is None:
                 last_err = WiwiError(429, "rate_limit_error",
                                      f"all keys cooling for provider"
                                      f" '{dep.provider.name}'", retry_after=max(1.0, retry_in))
+                fresh = any(d.available and id(d) not in tried_dep_ids for d in deps)
+                if not fresh and attempt < router.settings.num_retries:
+                    await asyncio.sleep(min(5.0, max(1.0, retry_in)))
                 continue  # dep already excluded above; siblings may have live keys
             # inflight/latency accounting lives in the gateway: for streams the
             # request stays in flight until the pump finishes, not until
@@ -275,6 +273,11 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                                     router.settings.cooldown_time)
                 if not e.retryable:
                     raise
+                fresh = any(d.available and id(d) not in tried_dep_ids for d in deps)
+                if not fresh and attempt < router.settings.num_retries:
+                    ra = e.retry_after or 0.0
+                    await asyncio.sleep(min(5.0, max(ra, 0.5 * (2 ** attempt)))
+                                        + random.uniform(0.0, 0.25))
         if first_error is None:
             first_error = group_first_err or last_err
         # enqueue fallbacks for this group

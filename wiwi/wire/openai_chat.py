@@ -21,6 +21,8 @@ class DialectError(ValueError):
 def decode_request(body: dict[str, Any]) -> ir.Request:
     if not isinstance(body.get("model"), str) or not body["model"]:
         raise DialectError("'model' is required")
+    if body.get("n") not in (None, 1):
+        raise DialectError("'n' must be 1 (multiple choices unsupported)")
     messages = []
     for m in body.get("messages") or []:
         role = m.get("role", "user")

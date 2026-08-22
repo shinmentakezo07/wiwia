@@ -33,6 +33,8 @@ router_settings:
   timeout: 120
   allowed_fails: 3
   cooldown_time: 30
+  # global_rpm: 600        # optional gateway-wide RPM/TPM caps (per process)
+  # global_tpm: 200000
   fallbacks:
     claude-sonnet: ["gpt-4o"]
   model_group_alias:

@@ -76,6 +76,10 @@ class LoggingSubsystem:
     def set_db_sink(self, sink) -> None:
         self._db_sink = sink
 
+    @property
+    def db_sink(self):
+        return self._db_sink
+
     # -- producers (called from request path; never block) --------------------
     def log_request(self, event: LogEvent) -> None:
         try:

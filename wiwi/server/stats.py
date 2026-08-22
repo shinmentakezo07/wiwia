@@ -8,6 +8,7 @@ those aggregates only.
 
 from __future__ import annotations
 
+import math
 import time
 
 from wiwi.logging_core.events import LogEvent
@@ -21,7 +22,7 @@ def _p95(values: list[float]) -> float:
     if not values:
         return 0.0
     s = sorted(values)
-    return s[min(len(s) - 1, int(len(s) * 0.95))]
+    return s[max(0, min(len(s) - 1, math.ceil(len(s) * 0.95) - 1))]
 
 
 def window_events(events: list[LogEvent], minutes: int,

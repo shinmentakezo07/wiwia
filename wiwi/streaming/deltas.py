@@ -6,6 +6,8 @@ Ordering contract (adapters guarantee, encoders rely on):
   UsageFinal exactly once, after the last content delta;
   then Finish;
   then exactly one of StreamEnd | StreamError.
+StreamError may terminate at ANY point, replacing everything after the last
+emitted delta — it is the abnormal-path terminal and needs no Finish.
 """
 
 from __future__ import annotations

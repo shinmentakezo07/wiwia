@@ -173,11 +173,12 @@ class ResponsesStreamEncoder:
         self.model = model
         self.req_id = req_id
         self._seq = 0
-        self._item_open: str | None = None   # "message" | f"fc:<n>"
+        self._item_open: str | None = None   # "message" | "thinking" | f"fc:<n>"
         self._open_out = -1                  # output_index of the currently open item
         self._usage: dl.UsageFinal | None = None
         self._stop = "stop"
         self._text_buf = ""
+        self._think_buf = ""
 
     def _next_output_index(self) -> int:
         self._open_out += 1
@@ -201,6 +202,15 @@ class ResponsesStreamEncoder:
                          "status": "completed", "role": "assistant",
                          "content": [{"type": "output_text", "text": self._text_buf,
                                       "annotations": []}]}})]
+        if kind == "thinking":
+            return [self._evt("response.reasoning_text.done", {
+                "item_id": f"rs_{self.req_id}_{idx}", "output_index": idx,
+                "text": self._think_buf}),
+                self._evt("response.output_item.done", {
+                    "output_index": idx,
+                    "item": {"type": "reasoning", "id": f"rs_{self.req_id}_{idx}",
+                             "summary": [{"type": "summary_text",
+                                          "text": self._think_buf}]}})]
         _, n, name, call_id = kind.split(":", 3)
         return [self._evt("response.function_call_arguments.done", {
             "item_id": f"fc_{self.req_id}_{n}", "output_index": idx,
@@ -239,6 +249,24 @@ class ResponsesStreamEncoder:
             out.append(self._evt("response.output_text.delta", {
                 "item_id": f"msg_{self.req_id}", "output_index": self._open_out,
                 "content_index": 0, "delta": d.text}))
+            return b"".join(out)
+        if isinstance(d, dl.ThinkingDelta):
+            if not d.text:
+                return None  # signature-only delta: no Responses representation
+            out = []
+            if self._item_open != "thinking":
+                out.extend(self._close_item())
+                oi = self._next_output_index()
+                out.append(self._evt("response.output_item.added", {
+                    "output_index": oi,
+                    "item": {"type": "reasoning", "id": f"rs_{self.req_id}_{oi}",
+                             "summary": []}}))
+                self._item_open = "thinking"
+                self._think_buf = ""
+            self._think_buf += d.text
+            out.append(self._evt("response.reasoning_text.delta", {
+                "item_id": f"rs_{self.req_id}_{self._open_out}",
+                "output_index": self._open_out, "delta": d.text}))
             return b"".join(out)
         if isinstance(d, dl.ToolCallOpen):
             out = self._close_item()

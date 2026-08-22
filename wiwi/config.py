@@ -84,6 +84,8 @@ class RouterSettings(BaseModel):
     fallbacks: dict[str, list[str]] = Field(default_factory=dict)
     context_window_fallbacks: dict[str, list[str]] = Field(default_factory=dict)
     model_group_alias: dict[str, str] = Field(default_factory=dict)
+    global_rpm: int | None = None
+    global_tpm: int | None = None
 
 
 class GeneralSettings(BaseModel):

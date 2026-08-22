@@ -20,7 +20,7 @@ class LineSSEParser:
         self._data: list[str] = []
 
     def feed_line(self, line: str) -> SSEEvent | None:
-        line = line.removesuffix("\r")
+        line = line.removeprefix("\ufeff").removesuffix("\r")
         if line == "":
             if self._data:
                 evt = SSEEvent(self._event, "\n".join(self._data))

@@ -16,6 +16,7 @@ class GeminiAdapter:
     def __init__(self) -> None:
         self._started = False
         self._saw_function_call = False
+        self._tool_seq = 0
 
     def headers(self, key: ProviderKeyRef) -> dict[str, str]:
         return {}  # key goes in querystring
@@ -98,17 +99,19 @@ class GeminiAdapter:
         cand = (data.get("candidates") or [{}])[0]
         content = cand.get("content") or {}
         turn = ir.AssistantTurn(raw=data)
-        for part in content.get("parts") or []:
+        for ti, part in enumerate(content.get("parts") or []):
             if "text" in part:
                 turn.text += part["text"]
             elif "functionCall" in part:
                 fc = part["functionCall"]
                 turn.tool_calls.append(ir.ToolUsePart(
-                    id=f"call_{fc.get('name', 'x')}", name=fc.get("name", ""),
+                    id=f"call_{fc.get('name', 'x')}_{ti}", name=fc.get("name", ""),
                     args=fc.get("args") or {}))
         finish = cand.get("finishReason", "STOP")
         turn.stop_reason = {"STOP": "stop", "MAX_TOKENS": "length",
                             "SAFETY": "content_filter", "RECITATION": "content_filter",
+                            "BLOCKLIST": "content_filter", "PROHIBITED": "content_filter",
+                            "SPII": "content_filter",
                             }.get(finish, "stop")
         if turn.tool_calls:
             turn.stop_reason = "tool_call"
@@ -132,6 +135,7 @@ class GeminiAdapter:
             out.append(dl.StreamStart(model=""))
             self._started = True
             self._saw_function_call = False
+            self._tool_seq = 0
         cand = (payload.get("candidates") or [{}])[0]
         for part in (cand.get("content") or {}).get("parts") or []:
             if "text" in part:
@@ -139,11 +143,13 @@ class GeminiAdapter:
             elif "functionCall" in part:
                 fc = part["functionCall"]
                 self._saw_function_call = True
-                out.append(dl.ToolCallOpen(index=0, id=f"call_{fc.get('name', 'x')}",
-                                          name=fc.get("name", "")))
-                out.append(dl.ToolCallArgsDelta(index=0,
+                n = self._tool_seq
+                self._tool_seq += 1
+                tid = f"call_{fc.get('name', 'x')}_{n}"
+                out.append(dl.ToolCallOpen(index=n, id=tid, name=fc.get("name", "")))
+                out.append(dl.ToolCallArgsDelta(index=n,
                                                 args_fragment=json.dumps(fc.get("args") or {})))
-                out.append(dl.ToolCallClose(index=0))
+                out.append(dl.ToolCallClose(index=n))
         u = payload.get("usageMetadata")
         finish = cand.get("finishReason")
         if finish:
@@ -162,6 +168,9 @@ class GeminiAdapter:
                 out.append(dl.Finish({"STOP": "stop", "MAX_TOKENS": "length",
                                       "SAFETY": "content_filter",
                                       "RECITATION": "content_filter",
+                                      "BLOCKLIST": "content_filter",
+                                      "PROHIBITED": "content_filter",
+                                      "SPII": "content_filter",
                                       }.get(finish, "stop")))
             out.append(dl.StreamEnd())
         elif u:

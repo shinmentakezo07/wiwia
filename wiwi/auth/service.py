@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass, field
 
 import sqlalchemy as sa
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from wiwi.auth.keys import generate_virtual_key, hash_key
@@ -107,14 +108,17 @@ class AuthService:
         now = time.time()
         expires = now + ttl_seconds if ttl_seconds else None
         async with self.engine.begin() as conn:
-            await conn.execute(
-                sa.text("INSERT INTO vkeys (id, key_hash, key_alias, models, max_budget,"
-                        " spend_to_date, rpm, tpm, expires_at, disabled, created_at, updated_at)"
-                        " VALUES (:id,:h,:a,:m,:b,0,:r,:t,:e,0,:c,:c)"),
-                {"id": kid, "h": hash_key(plaintext), "a": alias,
-                 "m": __import__("json").dumps(models or []), "b": max_budget,
-                 "r": rpm, "t": tpm, "e": expires, "c": now},
-            )
+            try:
+                await conn.execute(
+                    sa.text("INSERT INTO vkeys (id, key_hash, key_alias, models, max_budget,"
+                            " spend_to_date, rpm, tpm, expires_at, disabled, created_at, updated_at)"
+                            " VALUES (:id,:h,:a,:m,:b,0,:r,:t,:e,0,:c,:c)"),
+                    {"id": kid, "h": hash_key(plaintext), "a": alias,
+                     "m": __import__("json").dumps(models or []), "b": max_budget,
+                     "r": rpm, "t": tpm, "e": expires, "c": now},
+                )
+            except IntegrityError as e:
+                raise ValueError("custom key already exists") from e
         # a failed guess of this plaintext may sit in the negative cache for the
         # TTL; evict so the freshly created key authenticates immediately
         self._cache.pop(hash_key(plaintext), None)

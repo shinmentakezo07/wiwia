@@ -2,81 +2,126 @@
 
 ## Project Overview
 
-**wiwi** is a self-hosted unified LLM gateway proxy (LiteLLM-style). It accepts three inbound API dialects — OpenAI Chat Completions, OpenAI Responses (Codex CLI), and Anthropic Messages (Claude Code) — translates them through a canonical internal representation (IR), and routes to any outbound provider (OpenAI, Anthropic, Gemini, OpenAI-compatible). Responses are re-encoded in the caller's dialect, so any client can be backed by any provider. Python ≥3.11, FastAPI, httpx, SQLAlchemy async (SQLite default), managed with `uv`.
+**wiwi** is a self-hosted unified LLM gateway proxy (LiteLLM-style). Three inbound API dialects — OpenAI Chat Completions (`/v1/chat/completions`), OpenAI Responses (`/v1/responses`, Codex CLI), Anthropic Messages (`/v1/messages`, Claude Code) — route through one canonical IR to any outbound provider (OpenAI, Anthropic, Gemini, any OpenAI-compatible URL). Responses are always re-encoded in the caller's dialect, so e.g. Claude Code can be backed by GPT. Adds virtual keys, budgets, RPM/TPM limits, key pools (smooth WRR), retries/cooldowns/fallbacks, cost tracking, request logs, and an admin web UI.
 
-## Project Structure
+Python ≥3.11, FastAPI, httpx, SQLAlchemy async (SQLite default), managed with `uv`. Admin UI: React 19 + TypeScript + Vite + Tailwind 4. **Never commit `wiwi.yaml`, `key.md`, or `wiwi.db`** — live provider keys and runtime state (gitignored, along with `.env` and `.verify/`).
+
+## Architecture & Data Flow
+
+Hub-and-spoke: every direction goes `dialect → IR → provider`. No pairwise converters. Core code (`core/`, `router/`, `auth/`) never branches on dialect or provider name. Adding an inbound surface = one module in `wiwi/wire/`; adding a provider = one adapter implementing the `ProviderAdapter` protocol (`providers/base.py`) plus a line in `providers/registry.py::get_adapter` (`openai-compatible` deliberately shares `OpenAIAdapter`).
+
+Trace the whole flow through **`server/app.py::run_chat_like`** (app.py:194) — the shared inbound path for all three surfaces:
+
+```
+decode (wire codec → ir.Request)
+  → auth (master/virtual key, budget pre-check)
+  → rate limit (global + per-key RPM/TPM windows)
+  → router.execute_with_retries (deployment tier-1, key-pool smooth WRR tier-2,
+                                 cooldowns on failures, fallback groups)
+  → Gateway.complete / Gateway.stream (providers/* adapter over httpx)
+  → price (cost/pricing.py) → build_log_event → logging sinks
+  → encode back out through the caller's wire encoder (SSE when streaming)
+```
+
+Key mechanics:
+
+- **Streaming contract is sacred** (`streaming/deltas.py`, spec in `docs/CORE.md` §7): exactly one `StreamStart` first; `ToolCallOpen → ToolCallArgsDelta* → ToolCallClose` strictly nested per index; `UsageFinal` exactly once after the last content delta; then `Finish`; then exactly one of `StreamEnd | StreamError` — `StreamError` may terminate at any point as the abnormal terminal. Adapters guarantee legal sequences; encoders never defend against malformed ones.
+- **Error model**: everything normalizes to `WiwiError(status, etype, message, retryable, retry_after)` via `error_from_provider_status`. 401/403 keep their status but are `retryable=True` so the pool fails over to the next key (`ProviderKey.mark_invalid`). Each wire codec renders dialect-correct error envelopes via its own `error_body`.
+- Retry/failover lives only in `router.execute_with_retries`; adapters stay single-shot.
+- Logging has three streams that never mix (`logging_core/subsystem.py`): request → batched DB sink + SSE broadcast; proxy → stdout JSON + SSE; audit → synchronous DB write. Nothing blocks a response; slow sinks degrade to drop+count.
+
+## Key Directories
 
 | Path | Role |
 |---|---|
-| `wiwi/main.py` | CLI entrypoint (`wiwi --config …`) |
-| `wiwi/config.py` | YAML → pydantic models; env interpolation; fail-fast validation |
-| `wiwi/ir/types.py` | Canonical IR: tagged parts, messages, tools, params, usage |
-| `wiwi/wire/` | Inbound codecs: `openai_chat.py`, `openai_responses.py`, `anthropic_messages.py` |
-| `wiwi/providers/` | Outbound adapters: `openai`, `anthropic`, `gemini` + `base.py` protocol |
-| `wiwi/router/router.py` | Model groups, key pools (smooth WRR), cooldowns, retries, fallbacks |
-| `wiwi/core/gateway.py` | Surface-agnostic execution engine, pricing, log events |
-| `wiwi/core/context.py` | `RequestContext` — mutable holder threaded through the pipeline |
-| `wiwi/streaming/` | `IRStreamDelta` taxonomy + SSE helpers |
-| `wiwi/auth/` | Key generation/hashing + budget/spend service |
-| `wiwi/cost/pricing.py` | Cost engine + token estimation fallback |
-| `wiwi/ratelimit/` | RPM/TPM sliding-window limits |
-| `wiwi/logging_core/` | Log events + SSE ring buffer for admin tail |
-| `wiwi/server/app.py` | FastAPI factory: routes, middleware, `/admin/*` |
-| `tests/` | Pytest suite with `respx` HTTP mocks and ASGI end-to-end |
-| `docs/` | Architecture and design specs |
+| `wiwi/main.py` | CLI entrypoint (`wiwi --config …` → `load_config` → `create_app` → uvicorn) |
+| `wiwi/config.py` | YAML → pydantic models; recursive `os.environ/NAME` interpolation; fail-fast `ConfigError` with file/line context |
+| `wiwi/ir/types.py` | Canonical IR: dataclass parts (`TextPart`, `ImagePart`, `ToolUsePart`, `ToolResultPart`, `ThinkingPart`, reserved audio/document), `Message`, `ToolChoice*`, `GenParams`, `Request`, `Usage`, `AssistantTurn` |
+| `wiwi/wire/` | Inbound codecs: each module = `decode_request`, `encode_response`, a `*StreamEncoder` FSM, `error_body` |
+| `wiwi/providers/` | Outbound adapters (`openai_adapter.py`, `anthropic_adapter.py`, `gemini_adapter.py`) + `base.py` protocol/errors + `registry.py` |
+| `wiwi/router/router.py` | Model groups (`Deployment`), key pools (`ProviderKey`: weight/cooldown/invalid), `execute_with_retries`, fallbacks, `model_group_alias` |
+| `wiwi/core/gateway.py` | Surface-agnostic engine: `complete`/`stream`, stream pump owns `dep.inflight` until the last delta, pricing hooks, `build_log_event` |
+| `wiwi/core/context.py` | `RequestContext` — single mutable holder threaded through handlers, router, pump (attempts, stream state, usage, cost, outcomes) |
+| `wiwi/streaming/` | `deltas.py` delta taxonomy; `sse.py` incremental upstream SSE parser + framing |
+| `wiwi/auth/` | `keys.py`: generate/SHA-256-hash/constant-time verify (`sk-wiwi-` prefixes); `service.py`: `AuthService`, SQLite `vkeys` table, 60 s cache with active eviction |
+| `wiwi/cost/pricing.py` | `CostEngine` over LiteLLM-shaped `model_prices.json`; USD/token rounded to 8 dp; unpriced models cost 0; `estimate_tokens` chars/4 fallback |
+| `wiwi/ratelimit/memory.py` | Sliding-window RPM/TPM, global + per-key scopes; prospective estimated-token reservation replaced by `record_tokens()` |
+| `wiwi/logging_core/` | Log events, queues/workers/sinks, SSE ring buffers with `Last-Event-ID` replay |
+| `wiwi/server/app.py` | FastAPI factory; `run_chat_like()` shared inbound flow; `/admin/*` API; SPA static mount at `/admin/ui`; `/health` |
+| `wiwi/server/stats.py` | Admin rollups as pure functions over LogEvent lists (unit-testable, no DB) |
+| `web/` | Admin UI source (pages in `web/src/pages/`, API client in `web/src/api/client.ts`) |
+| `tests/` · `docs/` | Pytest suite · design specs |
 
-The hub-and-spoke design means: no pairwise converters. Every direction goes `dialect → IR → provider`. Adding an inbound surface = one module in `wiwi/wire/`; adding a provider = one adapter in `wiwi/providers/` plus a line in the registry. Core code never branches on dialect or provider name.
-
-## Build, Test, and Run
+## Development Commands
 
 ```bash
-# Setup
-uv venv && uv pip install -e ".[dev]"
+# setup
+uv venv && uv pip install -e ".[dev]"        # + pytest, pytest-asyncio, respx, asgi-lifespan, ruff
+uv pip install -e ".[pg]"                    # optional Postgres backend (asyncpg); ".[redis]" also exists
 
-# Run server (needs wiwi.yaml — copy and edit the example)
-cp wiwi.yaml.example wiwi.yaml
-wiwi --config wiwi.yaml [--host H] [--port P]   # default 0.0.0.0:4000
+# run gateway (default 0.0.0.0:4000; needs wiwi.yaml — cp wiwi.yaml.example wiwi.yaml)
+export OPENAI_API_KEY=... WIWI_MASTER_KEY=sk-wiwi-master-...
+wiwi --config wiwi.yaml [--host H] [--port P]
 
-# Tests (all pass; ~1s)
+# tests (~7–8 s full suite, all green expected)
 .venv/bin/python -m pytest tests/ -q
 .venv/bin/python -m pytest tests/test_codecs.py -q            # single file
-.venv/bin/python -m pytest tests/test_router.py -k cooldown    # single test by name
+.venv/bin/python -m pytest tests/test_router.py -k cooldown   # by name substring
 
-# Lint (ruff, line-length 100, target py311)
-.venv/bin/ruff check wiwi/ tests/
+# lint — no CI configured; ruff IS the gate
+.venv/bin/ruff check wiwi/ tests/            # line-length 100, target py311
 
-# Docker
-docker compose up --build
+# admin UI
+cd web && bun install
+bun run dev                                  # Vite dev server; proxies /admin and /v1 → localhost:4000
+bun run build                                # tsc -b && vite build --base=/admin/ui/ → wiwi/server/static/
+
+# docker / bench
+docker compose up --build                    # --profile pg adds postgres 16
+.venv/bin/python bench.py [-n 10 -c 1,4,16]  # TTFT/latency/TPS vs a RUNNING gateway (edit TARGETS/MODEL at top)
 ```
 
-## Coding Style & Conventions
+Run full pytest + ruff before claiming work done or committing.
 
-- Python ≥3.11, ruff for lint (`line-length=100`, `target-version="py311"`).
-- Follow the hub-and-spoke pattern strictly: never add dialect- or provider-specific branches in `core/`, `router/`, or `auth/`. All dialect logic lives in `wiwi/wire/`; all provider logic in `wiwi/providers/`.
-- The streaming contract (`wiwi/streaming/deltas.py`) is sacred: adapters guarantee legal delta sequences; encoders never defend against malformed ones. See `docs/CORE.md` for the taxonomy.
-- Pydantic v2 models for config and wire types. Async throughout (SQLAlchemy async, httpx async).
-- Tests use `asyncio_mode = "auto"` (no `@pytest.mark.asyncio` needed), `respx` to mock upstream HTTP, and `asgi_lifespan.LifespanManager` + `httpx.ASGITransport` for end-to-end (see `tests/test_integration.py`).
+## Code Conventions & Common Patterns
 
-## Testing Guidelines
+- Ruff only (`line-length = 100`, py311). Pydantic v2 for config; plain (frozen where possible) dataclasses for IR/streaming hot paths — don't convert IR types to pydantic.
+- Async throughout: SQLAlchemy async, `httpx.AsyncClient`, `asyncio.Queue` stream pumps; `orjson` in hot paths; `structlog` for logging — never `print` from library code.
+- Env interpolation: any string value in `wiwi.yaml` may be `os.environ/NAME`.
+- Secrets: virtual keys SHA-256-hashed at rest, constant-time compare, plaintext shown once at generation; masked display via `auth.keys.mask_key`.
+- Naming: wire modules named after dialect (`openai_chat.py`); adapters `<provider>_adapter.py`; tests `test_<area>.py` with descriptive names.
+- Commits: imperative present tense, capitalized, no prefix tags (`Add auth keys and service`). One logical change per commit.
+- UI conventions: one routed page per admin concern in `web/src/pages/*.tsx`; shared formatting in `web/src/lib/format.ts`; production bundle must land in `wiwi/server/static/` served at `/admin/ui` with SPA history fallback (`SPAStaticFiles`, app.py:823) — rebuild after UI changes if testing against the Python server instead of the Vite dev server.
+- UI work follows a spec-first flow: dated design docs in `docs/superpowers/specs/` and plans in `docs/superpowers/plans/`.
 
-- Framework: pytest with `pytest-asyncio` (auto mode).
-- Mocks: `respx` for upstream HTTP; `asgi_lifespan` + `httpx.ASGITransport` for app-level tests.
-- Naming: `test_*.py` files, `test_*` functions, descriptive names (e.g. `test_chat_completion_streaming`).
-- Run the full suite before claiming work is done: `.venv/bin/python -m pytest tests/ -q`. All tests currently pass.
+## Important Files
 
-## Commit & Pull Request Guidelines
+- `pyproject.toml` — deps, `[project.scripts] wiwi = "wiwi.main:cli"`, `[tool.pytest.ini_options]` (`asyncio_mode="auto"`, `testpaths=["tests"]`), ruff config.
+- `wiwi.yaml.example` — tracked template: `providers:` (key pools w/ weights), `model_list:` (`wiwi_params`), `router_settings:` (retries/cooldowns/fallbacks/aliases), `general_settings:` (master_key, database_url), `wiwi_settings:` (`drop_params`, port).
+- `Dockerfile` — multi-stage (uv builder → `python:3.12-slim-bookworm`), non-root, `EXPOSE 4000`, `/health` healthcheck, `ENTRYPOINT ["wiwi"]`.
+- `docker-compose.yml` — mounts `./wiwi.yaml:ro`; passes `WIWI_MASTER_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`; optional `pg` profile.
+- `bench.py` — standalone benchmark harness against a running gateway.
+- `web/vite.config.ts` — dev proxy (`/admin`, `/v1` → :4000) and prod `outDir: ../wiwi/server/static`.
+- `tests/test_integration.py` — reference pattern for app-level tests (see Testing & QA).
+- `docs/` — `ARCHITECTURE.md` (system design), `CORE.md` (runtime/streaming spec), `ADMIN.md` (admin/key-pool design), `MVP.md` (scope + gap register, stable "G" ids), `PLAN.md` (phases M1–M6), `TECHSTACK.md` (decisions + upgrade triggers).
 
-- Commit messages use imperative present tense, capitalized, no prefix tags (e.g. `Add auth keys and service`, `Fix chat stream encoder to buffer usage`).
-- Keep commits focused; one logical change per commit.
-- Verify tests pass and ruff is clean before committing.
+## Runtime/Tooling Preferences
 
-## Security & Configuration
+- Package management: **uv**; `.venv` is a symlink into a shared uv env — invoke tools directly as `.venv/bin/python`, `.venv/bin/ruff`.
+- HTTP: `httpx[http2]` only upstream; mock with `respx` in tests. Serve SSE with `sse-starlette`; parse upstream SSE with the custom parser in `streaming/sse.py`.
+- Node tooling: **Bun is authoritative for `web/`** (`bun.lock`; a stale `package-lock.json` also exists — don't switch managers casually).
+- Server: uvicorn; keep the app a pure ASGI callable (no uvicorn-specific APIs).
 
-- **Never commit `wiwi.yaml` or `wiwi.db`** — they hold live provider keys and runtime state. Both are gitignored.
-- Use `wiwi.yaml.example` as the template; copy to `wiwi.yaml` and edit locally.
-- Provider keys come from env vars via `os.environ/NAME` interpolation in the config; master key via `WIWI_MASTER_KEY`.
-- Virtual keys are SHA-256-hashed in storage; the plaintext is returned only once at generation time.
+## Testing & QA
+
+- pytest + pytest-asyncio with `asyncio_mode = "auto"` — bare `async def test_…`, **no** `@pytest.mark.asyncio`.
+- Upstream mocking: `@respx.mock` + `respx.post("https://api.openai.com/v1/chat/completions").respond(json=…)`.
+- End-to-end skeleton (copy from `tests/test_integration.py`): inline `WiwiConfig` (master key `"sk-wiwi-master-test"`, `database_url="sqlite+aiosqlite:///:memory:"`) → `asgi_lifespan.LifespanManager(app)` → `httpx.AsyncClient(transport=httpx.ASGITransport(app=app))`.
+- Codec tests: pure decode→encode round-trips plus scripted `IRStreamDelta` lists fed to stream encoders asserting exact frames (`tests/test_codecs.py`).
+- Regression files are thematic: `test_audit_fixes.py` (bugs 1–20), `test_fix_round2.py` (Gemini key appending, 401/403 key invalidation, timeout cooldowns, TPM reservation replacement), `test_fix_round3.py` (negative auth-cache staleness, allowlist model-listing bypass, admin weight validation), `test_cache_hardening.py` (streaming usage parsing, `ctx.cache_hit`, Anthropic system `cache_control`). Put new bug-fix regressions alongside these.
+- No shared `conftest.py` — fixtures live per-file (e.g. the `client` fixture). Follow suit for small suites.
+- New features need tests covering observable contract (surface behavior, routing semantics, delta legality), not plumbing.
 
 ## Docs vs. Code
 
-`docs/ARCHITECTURE.md` and `docs/CORE.md` are design specs that intentionally run ahead of the implementation (handler pipeline, DeltaBus, DB schema, Postgres/Redis backends are specified but not yet built). When docs and code disagree, trust the code — or treat the doc section as the spec for work in progress. `docs/MVP.md` tracks scope gaps; `docs/PLAN.md` tracks build phases.
+`docs/` specs intentionally run **ahead of the implementation**: handler pipeline (`handlers/` package in CORE.md §1), DeltaBus-style runtime organization, Alembic migrations, AES-GCM key encryption, Redis backends, and ADMIN.md's session-cookie auth + Next.js UI are specified but not built (shipped reality: flat modules, React/Vite SPA, Bearer master-key auth). When docs and code disagree, trust the code — or treat the doc section as the spec for work you're about to do.

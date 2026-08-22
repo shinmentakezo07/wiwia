@@ -53,9 +53,16 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                     if isinstance(c, str):
                         text = c
                     elif isinstance(c, list):
-                        text = " ".join(blk.get("text", "") for blk in c
-                                        if isinstance(blk, dict)
-                                        and blk.get("type") == "text") or json.dumps(c)
+                        texts = [blk.get("text", "") for blk in c
+                                 if isinstance(blk, dict) and blk.get("type") == "text"]
+                        joined = " ".join(t for t in texts if t)
+                        if joined:
+                            text = joined
+                        else:
+                            # keep non-text blocks, never base64 image blobs
+                            others = [b for b in c if isinstance(b, dict)
+                                      and b.get("type") not in ("image", "input_image")]
+                            text = json.dumps(others) if others else ""
                     elif c is None:
                         text = ""
                     else:

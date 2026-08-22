@@ -24,10 +24,12 @@ from wiwi.streaming.sse import LineSSEParser
 
 
 class Gateway:
-    def __init__(self, router: Router, cost_engine: CostEngine, kind: str = "chat"):
+    def __init__(self, router: Router, cost_engine: CostEngine, kind: str = "chat",
+                 drop_params: bool = True):
         self.router = router
         self.cost = cost_engine
-        self.kind = kind  # "chat" | "embeddings"
+        self.kind = kind  # "chat"
+        self.drop_params = drop_params
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0))
 
     async def aclose(self) -> None:
@@ -55,7 +57,8 @@ class Gateway:
         adapter = get_adapter(dep.provider.provider_type)
         ctx.deployment = dep
         ctx.provider_key = key
-        params: dict[str, Any] = {"max_tokens": dep.max_tokens, "extra_body": {}}
+        params: dict[str, Any] = {"max_tokens": dep.max_tokens, "extra_body": {},
+                                  "drop_params": self.drop_params}
         url = _build_url(adapter, dep, key, False, self.kind)
         body = adapter.encode_request(ctx.ir_req, dep.model_id, params)
         headers = {**adapter.headers(key), **dep.provider.extra_headers,
@@ -73,21 +76,14 @@ class Gateway:
                             f"upstream {type(e).__name__}", retryable=True) from e
         latency = int((time.monotonic() - t0) * 1000)
         if resp.status_code != 200:
-            retry_after = None
-            ra = resp.headers.get("retry-after")
-            if ra:
-                try:
-                    retry_after = float(ra)
-                except ValueError:
-                    retry_after = None
             ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
                              f"http_{resp.status_code}", latency)
-            raise error_from_provider_status(resp.status_code, resp.text,
-                                             dep.provider.name) if not retry_after else \
-                WiwiError(429 if resp.status_code == 429 else 502,
-                          "rate_limit_error" if resp.status_code == 429
-                          else "api_connection_error",
-                          resp.text[:300], retryable=True, retry_after=retry_after)
+            err = error_from_provider_status(resp.status_code, resp.text,
+                                             dep.provider.name)
+            ra = _parse_retry_after(resp.headers.get("retry-after"))
+            if ra is not None:
+                err.retry_after = ra
+            raise err
         ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
                          "ok", latency)
         dep.latencies.append(latency)
@@ -171,7 +167,8 @@ class Gateway:
         ctx.deployment = dep
         ctx.provider_key = key
         real_key = dep.provider.get_key(key.label)  # live pool entry for on_result
-        params: dict[str, Any] = {"max_tokens": dep.max_tokens, "extra_body": {}}
+        params: dict[str, Any] = {"max_tokens": dep.max_tokens, "extra_body": {},
+                                  "drop_params": self.drop_params}
         url = _build_url(adapter, dep, key, True, self.kind)
         body = adapter.encode_request(ctx.ir_req, dep.model_id, params)
         headers = {**adapter.headers(key), **dep.provider.extra_headers,
@@ -242,26 +239,25 @@ class Gateway:
                 ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
                                  key.label, "ok", int((time.monotonic() - t0) * 1000))
                 dep.latencies.append(int((time.monotonic() - t0) * 1000))
-                u = usage_final or dl.UsageFinal()
-                est_usage = u
-                if u.prompt == 0:
-                    # Provider sent no usage: estimate, but keep any real output
-                    # / cache counts it did report.
-                    est_usage = dl.UsageFinal(
-                        prompt=estimate_tokens(_flatten(ctx)),
-                        cached=u.cached, reasoning=u.reasoning,
-                        output=u.output or max(1, text_len // 4),
-                        cache_creation=u.cache_creation, estimated=True)
-                self._price_stream(ctx, dep, est_usage)
-                await queue.put(est_usage)
-                if finish is None and usage_final is None:
-                    if real_key is not None:
-                        real_key.err_count += 1
-                    await queue.put(dl.StreamError(
-                        "upstream stream ended without completion", "connection"))
-                    return
-                await queue.put(finish or dl.Finish("stop"))
-                await queue.put(dl.StreamEnd())
+            real_usage = usage_final or dl.UsageFinal()
+            est_usage = real_usage
+            if real_usage.prompt == 0:
+                # Provider sent no usable usage: estimate, keeping any real
+                # output / cache counts it did report.
+                est_usage = dl.UsageFinal(
+                    prompt=estimate_tokens(_flatten(ctx)),
+                    cached=real_usage.cached, reasoning=real_usage.reasoning,
+                    output=real_usage.output or max(1, text_len // 4),
+                    cache_creation=real_usage.cache_creation, estimated=True)
+            self._price_stream(ctx, dep, est_usage)
+            await queue.put(est_usage)
+            if finish is None and usage_final is None and not client_gone:
+                self._note_stream_failure(dep, real_key)
+                await queue.put(dl.StreamError(
+                    "upstream stream ended without completion", "connection"))
+                return
+            await queue.put(finish or dl.Finish("stop"))
+            await queue.put(dl.StreamEnd())
         except asyncio.CancelledError:
             # client went away mid-stream: still release the upstream response,
             # or the pooled socket stays checked out until GC
@@ -279,10 +275,10 @@ class Gateway:
                                        retryable=True)
                 ready.set()
             else:
-                # Mid-stream error — can't retry; send error to client and
-                # record the failure on the live pool entry.
-                if real_key is not None:
-                    real_key.err_count += 1
+                # Mid-stream error — can't retry; bill partial delivery, feed
+                # health stats, send error to client.
+                self._note_stream_failure(dep, real_key)
+                self._price_partial(ctx, dep, usage_final, text_len)
                 await queue.put(dl.StreamError(str(e),
                                                "timeout" if "Timeout" in type(e).__name__
                                                else "connection"))
@@ -290,6 +286,27 @@ class Gateway:
                 await resp_cm.__aexit__(None, None, None)
             except Exception:  # noqa: BLE001, S110
                 pass
+
+    def _note_stream_failure(self, dep: Deployment, real_key) -> None:
+        """Mid-stream failures carry no HTTP status; feed deployment cooldowns
+        and the key pool so a provider that keeps dying mid-stream cools off."""
+        if real_key is not None:
+            real_key.err_count += 1
+        dep.record_fail(self.router.settings.allowed_fails,
+                        self.router.settings.cooldown_time)
+
+    def _price_partial(self, ctx: RequestContext, dep: Deployment,
+                       usage_final: dl.UsageFinal | None, text_len: int) -> None:
+        """Price what was delivered even when the stream failed, so virtual-key
+        spend reflects tokens actually consumed."""
+        u = usage_final or dl.UsageFinal()
+        if u.prompt == 0:
+            u = dl.UsageFinal(
+                prompt=estimate_tokens(_flatten(ctx)),
+                cached=u.cached, reasoning=u.reasoning,
+                output=u.output or max(1, text_len // 4),
+                cache_creation=u.cache_creation, estimated=True)
+        self._price_stream(ctx, dep, u)
 
     def _price(self, ctx: RequestContext, dep: Deployment, u: ir.Usage) -> None:
         model_key = f"{dep.provider.provider_type}/{dep.model_id}"
@@ -371,3 +388,12 @@ def _build_url(adapter, dep: Deployment, key: ProviderKeyRef,
     if dep.provider.provider_type == "gemini" and url.endswith(("?key=", "&key=")):
         url += key.secret
     return url
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None

@@ -20,8 +20,9 @@ def _role_parts_to_content(messages: list[ir.Message]) -> list[dict[str, Any]]:
         if m.role == "tool":
             for p in m.parts:
                 if isinstance(p, ir.ToolResultPart):
+                    content = f"[tool error] {p.content}" if p.is_error else p.content
                     out.append({"role": "tool", "tool_call_id": p.tool_use_id,
-                                "content": p.content})
+                                "content": content})
             continue
         content: Any = None
         tool_calls = []
@@ -85,6 +86,8 @@ class OpenAIAdapter:
             body["seed"] = g.seed
         if g.parallel_tool_calls is not None:
             body["parallel_tool_calls"] = g.parallel_tool_calls
+        if g.reasoning_effort:
+            body["reasoning_effort"] = g.reasoning_effort
         if g.response_format and g.response_format.type != "text":
             rf: dict[str, Any] = {"type": g.response_format.type}
             if g.response_format.json_schema:
@@ -116,6 +119,13 @@ class OpenAIAdapter:
             body["stream_options"] = {"include_usage": True}
         for k, v in deployment_params.get("extra_body", {}).items():
             body.setdefault(k, v)
+        # Standard chat params clients send that the IR doesn't model; forward
+        # to OpenAI-shaped upstreams. drop_params=False forwards the rest raw.
+        _STANDARD = {"frequency_penalty", "presence_penalty", "logprobs",
+                     "top_logprobs", "user"}
+        for k, v in req.extras.items():
+            if k in _STANDARD or not deployment_params.get("drop_params", True):
+                body.setdefault(k, v)
         return body
 
     # -- response decoding -----------------------------------------------------

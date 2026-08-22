@@ -12,14 +12,13 @@ from typing import Any
 
 import httpx
 import orjson
-import sqlalchemy as sa
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
 from wiwi.auth.service import AuthService
-from wiwi.config import WiwiConfig
+from wiwi.config import WiwiConfig, _interpolate
 from wiwi.core.context import RequestContext
 from wiwi.core.gateway import Gateway, build_log_event
 from wiwi.cost.pricing import CostEngine
@@ -67,8 +66,8 @@ class AppState:
         self.router = Router(config)
         self.cost = CostEngine()
         self.logs = LoggingSubsystem()
-        self.limiter = RateLimiter()
-        self.engine = sa.create_engine("sqlite:///:memory:")  # replaced in init_db
+        rs = config.router_settings
+        self.limiter = RateLimiter(global_rpm=rs.global_rpm, global_tpm=rs.global_tpm)
         self.auth: AuthService | None = None
         self.gateways: dict[str, Gateway] = {}
         self.alert_rules: list[dict[str, Any]] = []  # storage only; runtime-scoped
@@ -81,15 +80,21 @@ class AppState:
         aengine = saa.create_async_engine(url)
         self.auth = AuthService(aengine, self.config.general_settings.master_key)
         await self.auth.startup()
+        from wiwi.logging_core.db_sink import DBSink
+        self._db_sink = DBSink(aengine)
+        await self._db_sink.startup()
+        self.logs.set_db_sink(self._db_sink)
         self.gateways = {
-            "chat": Gateway(self.router, self.cost, "chat"),
-            "embeddings": Gateway(self.router, self.cost, "embeddings"),
+            "chat": Gateway(self.router, self.cost, "chat",
+                            drop_params=self.config.wiwi_settings.drop_params),
         }
 
     async def shutdown(self) -> None:
         for g in self.gateways.values():
             await g.aclose()
         await self.logs.stop()
+        if getattr(self, "_db_sink", None) is not None:
+            await self._db_sink.engine.dispose()
 
 
 @asynccontextmanager
@@ -122,7 +127,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         return hmac.compare_digest(bearer(request).encode(), mk.encode())
 
     async def authenticate(request: Request, model: str, surface: str = "chat",
-                           est_tokens: int = 0):
+                           est_tokens: int = 0, reserve: bool = True):
         if state.auth is None:
             return None, _err(500, "api_error", "gateway not initialized", request)
         token = bearer(request)
@@ -145,14 +150,31 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if info.models and model and model != "*" and model not in info.models:
             return None, _err(403, "permission_error",
                               f"key not allowed for model '{model}'", request, surface)
-        allowed, retry_after = state.limiter.check(info.key_id, info.rpm, info.tpm,
+        if reserve:
+            allowed, retry_after = state.limiter.check(info.key_id, info.rpm,
+                                                       info.tpm,
+                                                       est_tokens=est_tokens)
+            if not allowed:
+                resp = _err(429, "rate_limit_error",
+                            f"rate limit exceeded, retry in {retry_after}s",
+                            request, surface)
+                resp.headers["Retry-After"] = str(retry_after)
+                return None, resp
+        return info, None
+
+    def enforce_rate_limit(info, est_tokens: int, request: Request,
+                           surface: str) -> JSONResponse | None:
+        """Reserve RPM/TPM window slots only once the model is known-good."""
+        allowed, retry_after = state.limiter.check(info.key_id, info.rpm,
+                                                   info.tpm,
                                                    est_tokens=est_tokens)
         if not allowed:
             resp = _err(429, "rate_limit_error",
-                        f"rate limit exceeded, retry in {retry_after}s", request, surface)
+                        f"rate limit exceeded, retry in {retry_after}s",
+                        request, surface)
             resp.headers["Retry-After"] = str(retry_after)
-            return None, resp
-        return info, None
+            return resp
+        return None
 
     def _record_tpm_usage(info, ctx) -> None:
         """Add actual token usage to the tpm sliding windows after a response."""
@@ -200,13 +222,16 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return _err(400, "invalid_request_error", str(e), request, surface)
         est = len(orjson.dumps(body)) // 4 if isinstance(body, dict) else 0
         info, err_resp = await authenticate(request, ir_req.model, surface,
-                                            est_tokens=est)
+                                            est_tokens=est, reserve=False)
         if err_resp:
             return err_resp
         group, _ = state_.router.resolve_group(ir_req.model)
         if group is None:
             return _err(404, "not_found_error",
                         f"model '{ir_req.model}' not found", request, surface)
+        rl_err = enforce_rate_limit(info, est, request, surface)
+        if rl_err:
+            return rl_err
         ctx = RequestContext(surface=surface, ir_req=ir_req, auth=info, group=group)
         gateway = state_.gateways["chat"]
         try:
@@ -422,12 +447,15 @@ def create_app(config: WiwiConfig) -> FastAPI:
         return JSONResponse({"key_id": key_id, "disabled": disabled})
 
     @app.get("/admin/logs/requests")
-    async def admin_request_logs(request: Request):
+    async def admin_request_logs(request: Request, limit: int = 200):
         if not is_admin(request):
             return _err(401, "authentication_error", "master key required", request)
-        # MVP: served from SSE ring; DB persistence lands with the batch writer sink
+        limit = max(1, min(limit, 1000))
+        sink = state.logs.db_sink
+        if sink is not None:
+            return JSONResponse({"logs": await sink.read_requests(limit)})
         ring = list(state.logs.sse.replay("request", 0))
-        return JSONResponse({"logs": [public_dict(e) for _, e in ring[-500:]]})
+        return JSONResponse({"logs": [public_dict(e) for _, e in ring[-limit:]]})
 
     @app.get("/admin/stream")
     async def admin_stream(request: Request):
@@ -439,26 +467,31 @@ def create_app(config: WiwiConfig) -> FastAPI:
         async def gen():
             q = await state.logs.sse.subscribe("request")
             pq = await state.logs.sse.subscribe("proxy")
+            combined: _aio.Queue = _aio.Queue()
+            last_sent = last_id
+
+            async def forward(src):
+                # merger tasks are only ever cancelled while awaiting get(),
+                # so no dequeued event can be lost by cancellation
+                while True:
+                    combined.put_nowait(await src.get())
+
+            fwd_tasks = [_aio.create_task(forward(q)),
+                         _aio.create_task(forward(pq))]
             try:
-                last_sent = last_id
                 for seq, evt in state.logs.sse.replay("request", last_id):
                     yield encode_sse(seq, evt)
                     last_sent = max(last_sent, seq)
                 while True:
-                    qq_task = _aio.create_task(q.get())
-                    pq_task = _aio.create_task(pq.get())
-                    done_t, pending = await _aio.wait(
-                        [qq_task, pq_task], return_when=_aio.FIRST_COMPLETED)
-                    for t in pending:
-                        t.cancel()
-                    for t in done_t:
-                        seq, evt = t.result()
-                        if evt.stream == "request" and seq <= last_sent:
-                            continue  # already delivered by the replay above
-                        if evt.stream == "request":
-                            last_sent = seq
-                        yield encode_sse(seq, evt)
+                    seq, evt = await combined.get()
+                    if evt.stream == "request" and seq <= last_sent:
+                        continue  # already replayed above
+                    if evt.stream == "request":
+                        last_sent = seq
+                    yield encode_sse(seq, evt)
             finally:
+                for t in fwd_tasks:
+                    t.cancel()
                 await state.logs.sse.unsubscribe("request", q)
                 await state.logs.sse.unsubscribe("proxy", pq)
 
@@ -531,6 +564,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
                             request)
             key.weight = weight
             diff["weight"] = weight
+        if body.get("reset_status"):
+            key.status = "active"
+            key.cooldown_until = 0.0
+            diff["reset_status"] = True
         await state.logs.log_audit(actor="master", action="provider_key.update",
                                    target=f"{name}/{label}", diff=diff)
         return JSONResponse({"key": _key_view(key, time.monotonic(), time.time())})
@@ -547,7 +584,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if jerr:
             return jerr
         label = str(body.get("label") or "").strip()
-        secret = str(body.get("key") or "")
+        secret = str(_interpolate(body.get("key")) or "")
         if not label or not secret:
             return _err(400, "invalid_request_error", "label and key are required",
                         request)
@@ -576,9 +613,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return jerr
         name = str(body.get("name") or "").strip()
         ptype = str(body.get("provider_type") or "openai-compatible")
-        base_url = str(body.get("base_url") or "") or _default_base_url(ptype)
+        base_url = str(_interpolate(body.get("base_url")) or "") or _default_base_url(ptype)
         label = str(body.get("label") or "default")
-        secret = str(body.get("key") or "")
+        secret = str(_interpolate(body.get("key")) or "")
         if not name or not secret:
             return _err(400, "invalid_request_error", "name and key are required",
                         request)
@@ -624,8 +661,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return _err(502, "api_connection_error",
                         f"could not reach '{name}' ({url})", request)
         if r.status_code != 200:
-            return _err(r.status_code if r.status_code < 500 else 502,
-                        "api_error" if r.status_code >= 500 else "authentication_error",
+            etype = ("rate_limit_error" if r.status_code == 429
+                     else "authentication_error" if r.status_code in (401, 403)
+                     else "not_found_error" if r.status_code == 404
+                     else "api_error")
+            return _err(r.status_code if r.status_code < 500 else 502, etype,
                         f"{name} returned HTTP {r.status_code}: {r.text[:300]}", request)
         models = sorted(m["id"] for m in
                         _parse_models_response(acct.provider_type, r.content))
@@ -655,9 +695,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return _err(400, "invalid_request_error", "weight must be an integer",
                         request)
         dep = Deployment(group=gname, provider=acct, model_id=model_id, weight=weight)
-        if any(d.model_id == model_id for d in state.router.groups.get(gname, [])):
+        if any(d.provider.name == acct.name and d.model_id == model_id
+               for d in state.router.groups.get(gname, [])):
             return _err(409, "invalid_request_error",
-                        f"model '{model_id}' is already attached to group '{gname}'",
+                        f"deployment {acct.name}/{model_id} is already attached"
+                        f" to group '{gname}'",
                         request)
         state.router.groups.setdefault(gname, []).append(dep)
         await state.logs.log_audit(actor="master", action="deployment.create",
