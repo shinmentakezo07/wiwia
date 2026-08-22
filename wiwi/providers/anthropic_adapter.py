@@ -80,6 +80,8 @@ class AnthropicAdapter:
                     tr: dict[str, Any] = {"type": "tool_result",
                                           "tool_use_id": p.tool_use_id,
                                           "content": p.content}
+                    if p.is_error:
+                        tr["is_error"] = True
                     if p.cache_control:
                         tr["cache_control"] = p.cache_control
                     blocks.append(tr)
