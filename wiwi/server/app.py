@@ -15,7 +15,6 @@ import orjson
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sse_starlette.sse import EventSourceResponse
 
 from wiwi.auth.service import AuthService
 from wiwi.config import WiwiConfig, _interpolate
@@ -207,8 +206,17 @@ def create_app(config: WiwiConfig) -> FastAPI:
         rid = uuid.uuid4().hex[:16]
         request.state.request_id = rid
         t0 = time.monotonic()
+        limit_mb = app.state.wiwi.config.wiwi_settings.max_request_body_mb
+        cl = request.headers.get("content-length")
+        if cl and cl.isdigit() and int(cl) > limit_mb * 1024 * 1024:
+            return JSONResponse(
+                {"error": {"message": f"request body exceeds {limit_mb} MiB",
+                           "type": "invalid_request_error", "code": "invalid_request_error"}},
+                status_code=413)
         response = await call_next(request)
-        response.headers["x-wiwi-request-id"] = rid
+        # handlers set the id that appears in log events; never overwrite it
+        if "x-wiwi-request-id" not in response.headers:
+            response.headers["x-wiwi-request-id"] = rid
         response.headers["x-wiwi-latency-ms"] = f"{(time.monotonic()-t0)*1000:.1f}"
         return response
 
@@ -478,12 +486,20 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
             fwd_tasks = [_aio.create_task(forward(q)),
                          _aio.create_task(forward(pq))]
+            # First byte must flow immediately: some ASGI stacks gate header
+            # forwarding on the first body chunk, so an idle-tailed SSE stream
+            # would otherwise hang its own response start.
+            yield b": connected\n\n"
             try:
                 for seq, evt in state.logs.sse.replay("request", last_id):
                     yield encode_sse(seq, evt)
                     last_sent = max(last_sent, seq)
                 while True:
-                    seq, evt = await combined.get()
+                    try:
+                        seq, evt = await _aio.wait_for(combined.get(), timeout=15.0)
+                    except TimeoutError:
+                        yield b": ping\n\n"   # keepalive; EventSource ignores comments
+                        continue
                     if evt.stream == "request" and seq <= last_sent:
                         continue  # already replayed above
                     if evt.stream == "request":
@@ -495,7 +511,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 await state.logs.sse.unsubscribe("request", q)
                 await state.logs.sse.unsubscribe("proxy", pq)
 
-        return EventSourceResponse(gen())
+        # Plain StreamingResponse: sse-starlette's EventSourceResponse stalls
+        # behind BaseHTTPMiddleware on this stack (headers never flush); chat
+        # SSE over plain StreamingResponse is proven end-to-end.
+        return StreamingResponse(gen(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache",
+                                          "x-accel-buffering": "no"})
 
     # -- admin: providers & pools ------------------------------------------------
     def _require_admin(request: Request) -> JSONResponse | None:
@@ -758,20 +779,23 @@ def create_app(config: WiwiConfig) -> FastAPI:
         diff: dict[str, Any] = {}
         weights = body.get("weights")
         if isinstance(weights, dict):
-            applied: dict[str, int] = {}
-            for dep in deps:
-                ident = f"{dep.provider.name}/{dep.model_id}"
-                if ident in weights:
-                    try:
-                        dep.weight = max(1, int(weights[ident]))
-                    except (TypeError, ValueError):
-                        return _err(400, "invalid_request_error",
-                                    f"weight for '{ident}' must be an integer", request)
-                    applied[ident] = dep.weight
-            unknown = set(weights) - {f"{d.provider.name}/{d.model_id}" for d in deps}
+            # atomic: validate every entry BEFORE mutating live routing state
+            idents = {f"{d.provider.name}/{d.model_id}": d for d in deps}
+            unknown = set(weights) - set(idents)
             if unknown:
                 return _err(400, "invalid_request_error",
                             f"unknown deployments: {sorted(unknown)}", request)
+            parsed: dict[str, int] = {}
+            for ident, w in weights.items():
+                try:
+                    parsed[ident] = max(1, int(w))
+                except (TypeError, ValueError):
+                    return _err(400, "invalid_request_error",
+                                f"weight for '{ident}' must be an integer", request)
+            applied: dict[str, int] = {}
+            for ident, w in parsed.items():
+                idents[ident].weight = w
+                applied[ident] = w
             diff["weights"] = applied
         strategy = body.get("strategy")
         if strategy is not None:
