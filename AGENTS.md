@@ -63,7 +63,7 @@ uv pip install -e ".[pg]"                    # optional Postgres backend (asyncp
 export OPENAI_API_KEY=... WIWI_MASTER_KEY=sk-wiwi-master-...
 wiwi --config wiwi.yaml [--host H] [--port P]
 
-# tests (~7–8 s full suite, all green expected)
+# tests (~12 s full suite, all green expected)
 .venv/bin/python -m pytest tests/ -q
 .venv/bin/python -m pytest tests/test_codecs.py -q            # single file
 .venv/bin/python -m pytest tests/test_router.py -k cooldown   # by name substring
