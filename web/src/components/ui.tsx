@@ -16,18 +16,23 @@ export function Card(props: { children: ReactNode; className?: string }) {
   );
 }
 
-export function CardHeader(props: { title: ReactNode; right?: ReactNode }) {
+export function CardHeader(props: { title: ReactNode; subtitle?: ReactNode; right?: ReactNode }) {
   return (
     <div className="flex items-center justify-between border-b border-[var(--admin-border)] px-5 py-3.5">
-      <h3 className="text-[14px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
-        {props.title}
-      </h3>
+      <div className="min-w-0">
+        <h3 className="text-[14px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
+          {props.title}
+        </h3>
+        {props.subtitle && (
+          <p className="mt-0.5 text-[11px] text-[var(--admin-text-muted)]">{props.subtitle}</p>
+        )}
+      </div>
       {props.right}
     </div>
   );
 }
 
-export function PageHeader(props: { title: string; subtitle?: string; right?: ReactNode }) {
+export function PageHeader(props: { title: ReactNode; subtitle?: ReactNode; right?: ReactNode }) {
   return (
     <div className="mb-5 flex flex-wrap items-start justify-between gap-4">
       <div>

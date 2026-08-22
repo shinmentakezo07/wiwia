@@ -189,7 +189,9 @@ class Router:
         if strategy == "least-busy":
             return min(avail, key=lambda d: d.inflight)
         if strategy == "latency-based":
-            return min(avail, key=lambda d: d.p95_latency() or 1e18)
+            # p95 == 0 means "no samples yet": let cold deployments win so they
+            # get explored instead of starving behind warmed-up peers
+            return min(avail, key=lambda d: d.p95_latency())
         # simple-shuffle: weight-weighted random
         total = sum(d.weight for d in avail)
         r = random.uniform(0, total)

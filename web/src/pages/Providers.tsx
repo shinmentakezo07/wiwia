@@ -2,8 +2,9 @@
 // table with enable/disable + weight editing, add-key and add-provider dialogs.
 
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, RefreshCw } from "lucide-react";
+import { Pencil, Plus, RefreshCw } from "lucide-react";
 import {
   addProvider,
   addProviderKey,
@@ -133,9 +134,20 @@ function ProviderCard(props: { p: Provider; onError: (m: string) => void }) {
             {props.p.healthy ? "healthy" : "no healthy keys"}
           </Badge>
         </div>
-        <Button variant="outline" onClick={() => setAddOpen(true)}>
-          <Plus size={14} /> Add key
-        </Button>
+        <div className="flex items-center gap-2">
+          <Link
+            to={`/providers/${encodeURIComponent(props.p.name)}`}
+            className="inline-flex"
+            title="Open provider detail"
+          >
+            <Button variant="outline">
+              <Pencil size={14} /> Edit
+            </Button>
+          </Link>
+          <Button variant="outline" onClick={() => setAddOpen(true)}>
+            <Plus size={14} /> Add key
+          </Button>
+        </div>
       </div>
       <div className="px-4 pb-3 pt-2 font-mono text-[11px] text-[var(--admin-text-dim)]">
         {props.p.base_url || "(default endpoint)"}

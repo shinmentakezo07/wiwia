@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hmac
 import os
 import time
@@ -9,6 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import httpx
 import orjson
 import sqlalchemy as sa
 from fastapi import FastAPI, Request
@@ -23,9 +25,10 @@ from wiwi.core.gateway import Gateway, build_log_event
 from wiwi.cost.pricing import CostEngine
 from wiwi.logging_core.events import LogEvent
 from wiwi.logging_core.subsystem import LoggingSubsystem, encode_sse, public_dict
-from wiwi.providers.base import WiwiError
+from wiwi.providers.base import ProviderKeyRef, WiwiError
+from wiwi.providers.registry import get_adapter
 from wiwi.ratelimit.memory import RateLimiter
-from wiwi.router.router import ProviderAccount, ProviderKey, Router, _default_base_url
+from wiwi.router.router import Deployment, ProviderAccount, ProviderKey, Router, _default_base_url
 from wiwi.server import stats as stats_mod
 from wiwi.wire import anthropic_messages as am
 from wiwi.wire import openai_chat as oc
@@ -36,6 +39,26 @@ def _mask_secret(secret: str) -> str:
     if len(secret) >= 12:
         return secret[:5] + "…" + secret[-4:]
     return "***"
+
+
+def _provider_models_url(provider_type: str, base_url: str) -> str:
+    """Upstream model-list endpoint per provider type."""
+    base = (base_url or _default_base_url(provider_type)).rstrip("/")
+    if provider_type == "gemini":
+        return f"{base}/models"  # key rides the querystring, added by adapter headers
+    return f"{base}/models"  # openai/compatible and anthropic share the path shape
+
+
+def _parse_models_response(provider_type: str, body: bytes) -> list[dict[str, str]]:
+    """Normalize upstream model listings to [{id}] entries."""
+    data = orjson.loads(body)
+    if not isinstance(data, dict):
+        return []
+    if provider_type == "gemini":
+        return [{"id": m["name"].split("/")[-1]}
+                for m in data.get("models", []) if isinstance(m, dict) and "name" in m]
+    return [{"id": str(m["id"])} for m in data.get("data", [])
+            if isinstance(m, dict) and "id" in m]
 
 
 class AppState:
@@ -117,7 +140,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return None, _err(429, "budget_exceeded",
                               f"budget exhausted ({info.spend_to_date:.4f}"
                               f"/{info.max_budget})", request, surface)
-        if info.models and model not in info.models:
+        # "" / "*" = endpoint is not model-scoped (e.g. GET /v1/models):
+        # listing never violates an allowlist, only real completions do
+        if info.models and model and model != "*" and model not in info.models:
             return None, _err(403, "permission_error",
                               f"key not allowed for model '{model}'", request, surface)
         allowed, retry_after = state.limiter.check(info.key_id, info.rpm, info.tpm,
@@ -200,6 +225,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     ctx.status = e.status
                     ctx.error = e
                     state_.logs.log_request(build_log_event(ctx))
+                    await stream.aclose()  # release pump resources, if any
                     return _err(e.status, e.etype, e.message, request, surface)
                 it = _stream_response(state_, ctx, encoder_pair, surface,
                                       stream, first)
@@ -221,7 +247,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 ctx.status = e.status
                 ctx.error = e
                 state_.logs.log_request(build_log_event(ctx))
-                return _err(e.status, e.etype, e.message, request, surface)
+                resp = _err(e.status, e.etype, e.message, request, surface)
+                if e.retry_after:
+                    resp.headers["Retry-After"] = str(int(max(1.0, e.retry_after)))
+                return resp
             ctx.status = 500
             state_.logs.log_proxy("error", f"internal error: {e}", ctx.request_id)
             state_.logs.log_request(build_log_event(ctx))
@@ -271,7 +300,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
             state_.logs.log_request(build_log_event(ctx))
             _record_tpm_usage(ctx.auth, ctx)
             if ctx.usage and ctx.auth and ctx.auth.key_type != "master":
-                await state_.auth.update_spend(ctx.auth.key_id, ctx.cost)
+                # never let accounting failure mask the streamed response
+                with contextlib.suppress(Exception):
+                    await state_.auth.update_spend(ctx.auth.key_id, ctx.cost)
 
     # -- surfaces ---------------------------------------------------------------
     @app.post("/v1/chat/completions")
@@ -342,13 +373,23 @@ def create_app(config: WiwiConfig) -> FastAPI:
         body, jerr = await json_body(request)
         if jerr:
             return jerr
-        plaintext, kid = await state.auth.create_key(
-            alias=body.get("name") or body.get("alias") or "",
-            models=body.get("models"), max_budget=body.get("max_budget"),
-            rpm=body.get("rpm"), tpm=body.get("tpm"),
-            ttl_seconds=body.get("ttl_seconds"),
-            custom_key=body.get("custom_key"))
-        await state.logs.log_audit(actor="master", action="key.generate", target=kid)
+        models = body.get("models")
+        if models is not None and (not isinstance(models, list)
+                                   or not all(isinstance(m, str) for m in models)):
+            return _err(400, "invalid_request_error",
+                        "'models' must be a list of strings", request)
+        try:
+            plaintext, kid = await state.auth.create_key(
+                alias=str(body.get("name") or body.get("alias") or ""),
+                models=body.get("models"), max_budget=body.get("max_budget"),
+                rpm=body.get("rpm"), tpm=body.get("tpm"),
+                ttl_seconds=body.get("ttl_seconds"),
+                custom_key=body.get("custom_key"))
+        except ValueError as e:
+            return _err(400, "invalid_request_error", str(e), request)
+        await state.logs.log_audit(
+            actor="master", action="key.generate", target=kid,
+            diff={"source": "custom"} if body.get("custom_key") else None)
         return JSONResponse({"key": plaintext, "id": kid,
                              "note": "store this key now; it is not shown again"})
 
@@ -399,8 +440,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
             q = await state.logs.sse.subscribe("request")
             pq = await state.logs.sse.subscribe("proxy")
             try:
+                last_sent = last_id
                 for seq, evt in state.logs.sse.replay("request", last_id):
                     yield encode_sse(seq, evt)
+                    last_sent = max(last_sent, seq)
                 while True:
                     qq_task = _aio.create_task(q.get())
                     pq_task = _aio.create_task(pq.get())
@@ -410,6 +453,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         t.cancel()
                     for t in done_t:
                         seq, evt = t.result()
+                        if evt.stream == "request" and seq <= last_sent:
+                            continue  # already delivered by the replay above
+                        if evt.stream == "request":
+                            last_sent = seq
                         yield encode_sse(seq, evt)
             finally:
                 await state.logs.sse.unsubscribe("request", q)
@@ -507,7 +554,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if acct.get_key(label) is not None:
             return _err(409, "invalid_request_error",
                         f"key label '{label}' already exists", request)
-        weight = max(1, int(body.get("weight") or 1))
+        try:
+            weight = max(1, int(body.get("weight") or 1))
+        except (TypeError, ValueError):
+            return _err(400, "invalid_request_error", "weight must be an integer",
+                        request)
         acct.keys.append(ProviderKey(label=label, secret=secret, weight=weight))
         await state.logs.log_audit(actor="master", action="provider_key.create",
                                    target=f"{name}/{label}",
@@ -537,6 +588,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if ptype not in ("openai", "anthropic", "gemini", "openai-compatible"):
             return _err(400, "invalid_request_error",
                         f"unsupported provider type '{ptype}'", request)
+        if not base_url:
+            return _err(400, "invalid_request_error",
+                        f"base_url is required for provider type '{ptype}'",
+                        request)
         state.router.providers[name] = ProviderAccount(
             name=name, provider_type=ptype, base_url=base_url,
             keys=[ProviderKey(label=label, secret=secret)])
@@ -544,6 +599,80 @@ def create_app(config: WiwiConfig) -> FastAPI:
                                    target=name,
                                    diff={"provider_type": ptype, "base_url": base_url})
         return JSONResponse({"name": name, "provider_type": ptype, "base_url": base_url})
+
+    @app.get("/admin/providers/{name}/models")
+    async def admin_provider_models(name: str, request: Request):
+        """Fetch model ids live from the upstream provider (first available key)."""
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        acct = state.router.providers.get(name)
+        if acct is None:
+            return _err(404, "not_found_error", f"unknown provider '{name}'", request)
+        key = next((k for k in acct.keys if k.available), None)
+        if key is None:
+            return _err(409, "invalid_request_error",
+                        f"no available key on provider '{name}' to fetch models",
+                        request)
+        adapter = get_adapter(acct.provider_type)
+        url = _provider_models_url(acct.provider_type, acct.base_url)
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as hc:
+                r = await hc.get(url, headers=adapter.headers(
+                    ProviderKeyRef(label=key.label, secret=key.secret)))
+        except httpx.HTTPError:
+            return _err(502, "api_connection_error",
+                        f"could not reach '{name}' ({url})", request)
+        if r.status_code != 200:
+            return _err(r.status_code if r.status_code < 500 else 502,
+                        "api_error" if r.status_code >= 500 else "authentication_error",
+                        f"{name} returned HTTP {r.status_code}: {r.text[:300]}", request)
+        models = sorted(m["id"] for m in
+                        _parse_models_response(acct.provider_type, r.content))
+        return JSONResponse({"models": [{"id": mid} for mid in models]})
+
+    @app.post("/admin/model-groups/{name}/deployments")
+    async def admin_add_deployment(name: str, request: Request):
+        """Attach a provider deployment to a model group (creating the group)."""
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        gname = str(body.get("group") or name).strip()
+        pname = str(body.get("provider") or "").strip()
+        model_id = str(body.get("model_id") or "").strip()
+        if not gname or not pname or not model_id:
+            return _err(400, "invalid_request_error",
+                        "group, provider and model_id are required", request)
+        acct = state.router.providers.get(pname)
+        if acct is None:
+            return _err(404, "not_found_error", f"unknown provider '{pname}'", request)
+        try:
+            weight = max(1, int(body.get("weight") or 1))
+        except (TypeError, ValueError):
+            return _err(400, "invalid_request_error", "weight must be an integer",
+                        request)
+        dep = Deployment(group=gname, provider=acct, model_id=model_id, weight=weight)
+        if any(d.model_id == model_id for d in state.router.groups.get(gname, [])):
+            return _err(409, "invalid_request_error",
+                        f"model '{model_id}' is already attached to group '{gname}'",
+                        request)
+        state.router.groups.setdefault(gname, []).append(dep)
+        await state.logs.log_audit(actor="master", action="deployment.create",
+                                   target=f"{gname}/{pname}/{model_id}",
+                                   diff={"weight": weight})
+        mono = time.monotonic()
+        return JSONResponse({"deployment": {
+            "provider": dep.provider.name,
+            "model_id": dep.model_id,
+            "weight": dep.weight,
+            "available": dep.available,
+            "inflight": dep.inflight,
+            "p95_latency_ms": round(dep.p95_latency(), 1),
+            "cooldown_remaining_s": round(max(0.0, dep.cooldown_until - mono), 1),
+        }}, status_code=201)
 
     # -- admin: models & routing -------------------------------------------------
     @app.get("/admin/models")

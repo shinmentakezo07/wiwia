@@ -6,7 +6,9 @@ import os
 from pathlib import Path
 
 import httpx
+import orjson
 import pytest
+import respx
 from asgi_lifespan import LifespanManager
 
 import wiwi.server.app as app_mod
@@ -194,6 +196,77 @@ async def test_patch_model_group_weights_and_strategy(client):
         assert rr.status_code == code
     nf = await client.patch("/admin/model-groups/nope", json={}, headers=AUTH)
     assert nf.status_code == 404
+
+
+# -- provider model fetch + deployment create ---------------------------------------
+
+@respx.mock
+async def test_provider_models_fetch_openai(client):
+    respx.get("https://api.openai.com/v1/models").respond(
+        json={"object": "list",
+              "data": [{"id": "gpt-4o-mini"}, {"id": "gpt-4o"}, {"id": "o3"}]})
+    r = await client.get("/admin/providers/p1/models", headers=AUTH)
+    assert r.status_code == 200
+    assert r.json()["models"] == [{"id": "gpt-4o"}, {"id": "gpt-4o-mini"}, {"id": "o3"}]
+
+
+@respx.mock
+async def test_provider_models_upstream_error_passthrough(client):
+    respx.get("https://api.openai.com/v1/models").respond(
+        status_code=401, json={"error": {"message": "bad key"}})
+    r = await client.get("/admin/providers/p1/models", headers=AUTH)
+    assert r.status_code == 401
+    assert "bad key" in r.json()["error"]["message"]
+
+
+async def test_provider_models_unknown_provider(client):
+    r = await client.get("/admin/providers/nope/models", headers=AUTH)
+    assert r.status_code == 404
+
+
+def test_parse_models_response_shapes():
+    openai = app_mod._parse_models_response("openai", orjson.dumps(
+        {"data": [{"id": "b"}, {"id": "a"}, {"nope": 1}]}))
+    assert openai == [{"id": "b"}, {"id": "a"}]
+    gemini = app_mod._parse_models_response("gemini", orjson.dumps(
+        {"models": [{"name": "models/gemini-2.0-flash"},
+                    {"name": "tunedModels/x", "supported": True}]}))
+    assert gemini == [{"id": "gemini-2.0-flash"}, {"id": "x"}]
+    assert app_mod._parse_models_response("openai", b"null") == []
+
+
+async def test_add_deployment_runtime(client):
+    r = await client.post("/admin/model-groups/newgrp/deployments",
+                          json={"provider": "p1", "model_id": "gpt-4o-mini",
+                                "weight": 3}, headers=AUTH)
+    assert r.status_code == 201
+    dep = r.json()["deployment"]
+    assert dep["provider"] == "p1" and dep["model_id"] == "gpt-4o-mini"
+    assert dep["weight"] == 3 and dep["available"] is True
+    # visible in the group listing
+    groups = (await client.get("/admin/models", headers=AUTH)).json()["groups"]
+    g = next(g for g in groups if g["name"] == "newgrp")
+    assert g["deployments"][0]["model_id"] == "gpt-4o-mini"
+    # second model on the same group; then duplicate is rejected
+    ok = await client.post("/admin/model-groups/newgrp/deployments",
+                           json={"provider": "p1", "model_id": "o3"}, headers=AUTH)
+    assert ok.status_code == 201
+    dup = await client.post("/admin/model-groups/newgrp/deployments",
+                            json={"provider": "p1", "model_id": "gpt-4o-mini"},
+                            headers=AUTH)
+    assert dup.status_code == 409
+    # validation
+    missing = await client.post("/admin/model-groups/newgrp/deployments",
+                                json={"provider": "p1"}, headers=AUTH)
+    assert missing.status_code == 400
+    unknown = await client.post("/admin/model-groups/newgrp/deployments",
+                                json={"provider": "ghost", "model_id": "m"},
+                                headers=AUTH)
+    assert unknown.status_code == 404
+    badw = await client.post("/admin/model-groups/newgrp/deployments",
+                             json={"provider": "p1", "model_id": "m2",
+                                   "weight": "lots"}, headers=AUTH)
+    assert badw.status_code == 400
 
 
 # -- virtual keys PATCH ------------------------------------------------------------

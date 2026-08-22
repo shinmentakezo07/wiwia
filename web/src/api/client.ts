@@ -55,6 +55,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
 
 import type {
   AlertRule,
+  DeploymentInfo,
   ModelsResponse,
   OverviewStats,
   PoolKey,
@@ -63,6 +64,7 @@ import type {
   RequestLogEntry,
   TimeseriesMetric,
   TimeseriesResponse,
+  UpstreamModel,
   VirtualKey,
 } from "./types";
 
@@ -106,6 +108,20 @@ export const patchModelGroup = (
     method: "PATCH",
     body: JSON.stringify(patch),
   });
+
+export const fetchProviderModels = (provider: string) =>
+  api<{ models: UpstreamModel[] }>(
+    `/admin/providers/${encodeURIComponent(provider)}/models`,
+  );
+
+export const addDeployment = (
+  group: string,
+  body: { provider: string; model_id: string; weight?: number },
+) =>
+  api<{ deployment: DeploymentInfo }>(
+    `/admin/model-groups/${encodeURIComponent(group)}/deployments`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
 
 export const listKeys = () => api<{ keys: VirtualKey[] }>("/admin/keys");
 

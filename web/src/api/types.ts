@@ -41,6 +41,10 @@ export interface ModelsResponse {
   strategy: string;
 }
 
+export interface UpstreamModel {
+  id: string;
+}
+
 export interface VirtualKey {
   id: string;
   alias: string;

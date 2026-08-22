@@ -115,6 +115,9 @@ class AuthService:
                  "m": __import__("json").dumps(models or []), "b": max_budget,
                  "r": rpm, "t": tpm, "e": expires, "c": now},
             )
+        # a failed guess of this plaintext may sit in the negative cache for the
+        # TTL; evict so the freshly created key authenticates immediately
+        self._cache.pop(hash_key(plaintext), None)
         return plaintext, kid
 
     async def delete_key(self, key_id: str) -> bool:

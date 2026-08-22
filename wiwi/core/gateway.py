@@ -4,6 +4,7 @@ pumping IR deltas to the caller's wire encoder. Surface-agnostic."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -124,6 +125,9 @@ class Gateway:
                 pump_task.cancel()
             raise
         assert pump_task is not None
+        # execute_with_retries may have cycled through several pump tasks; only
+        # the last one is live. Drain anything an abandoned attempt managed to
+        # enqueue so its leftovers never bleed into this response.
         yield dl.StreamStart(model=ctx.ir_req.model, group=ctx.group or "")
         first = True
         try:
@@ -259,6 +263,11 @@ class Gateway:
                 await queue.put(finish or dl.Finish("stop"))
                 await queue.put(dl.StreamEnd())
         except asyncio.CancelledError:
+            # client went away mid-stream: still release the upstream response,
+            # or the pooled socket stays checked out until GC
+            if started:
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(resp_cm.__aexit__(None, None, None))
             raise
         except Exception as e:  # noqa: BLE001
             if not started:

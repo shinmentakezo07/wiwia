@@ -10,6 +10,7 @@ import "@/styles.css";
 import { LoginPage } from "@/pages/Login";
 import { DashboardPage } from "@/pages/Dashboard";
 import { ProvidersPage } from "@/pages/Providers";
+import { ProviderDetailPage } from "@/pages/ProviderDetail";
 import { VirtualKeysPage } from "@/pages/VirtualKeys";
 import { ModelsPage } from "@/pages/Models";
 import { RequestLogsPage } from "@/pages/RequestLogs";
@@ -50,6 +51,7 @@ function AppRoutes() {
       >
         <Route path="/" element={<DashboardPage />} />
         <Route path="/providers" element={<ProvidersPage />} />
+        <Route path="/providers/:name" element={<ProviderDetailPage />} />
         <Route path="/keys" element={<VirtualKeysPage />} />
         <Route path="/models" element={<ModelsPage />} />
         <Route path="/request-logs" element={<RequestLogsPage />} />
