@@ -171,7 +171,12 @@ class Router:
         # alias resolution happens at route(); aliases may point to any group name
 
     def resolve_group(self, requested: str) -> tuple[str | None, list[Deployment]]:
-        name = self.settings.model_group_alias.get(requested, requested)
+        name = requested
+        for _ in range(8):  # bounded walk: aliases may chain, never cycle
+            nxt = self.settings.model_group_alias.get(name)
+            if nxt is None or nxt == name:
+                break
+            name = nxt
         deps = self.groups.get(name, [])
         return (name, deps) if deps else (None, [])
 
