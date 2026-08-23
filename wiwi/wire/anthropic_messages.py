@@ -131,6 +131,9 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
             "input_tokens": u.prompt_tokens, "output_tokens": u.completion_tokens,
             "cache_read_input_tokens": u.cached_tokens,
             "cache_creation_input_tokens": u.cache_creation_tokens,
+            "output_tokens_details": {
+                "thinking_tokens": u.reasoning_tokens,
+            } if u.reasoning_tokens else {},
         },
     }
 

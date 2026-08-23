@@ -10,6 +10,7 @@ from wiwi.providers.base import ProviderKeyRef
 from wiwi.streaming import deltas as dl
 
 DEFAULT_MAX_TOKENS = 4096
+MIN_THINKING_BUDGET = 1024  # Anthropic API minimum for budget_tokens
 
 
 def _system_text(messages: list[ir.Message]) -> str:
@@ -113,13 +114,26 @@ class AnthropicAdapter:
             body["top_p"] = g.top_p
         if g.stop:
             body["stop_sequences"] = g.stop
-        if g.thinking_budget:
-            body["thinking"] = {"type": "enabled", "budget_tokens": g.thinking_budget}
-        elif g.reasoning_effort:
-            # Client sent reasoning_effort (OpenAI dialect) — map to Anthropic thinking budget
+
+        # Thinking configuration.  'none' effort explicitly disables thinking;
+        # a thinking_budget or any other effort level enables it.  The Anthropic
+        # API requires budget_tokens >= 1024 and max_tokens > budget_tokens, so
+        # we clamp the budget and raise max_tokens to satisfy that invariant.
+        thinking_enabled = (g.thinking_budget is not None
+                            or (g.reasoning_effort is not None
+                                and g.reasoning_effort != "none"))
+
+        if thinking_enabled:
             budget = g.effective_thinking_budget()
-            if budget:
-                body["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            if budget is None:
+                budget = ir.effort_to_thinking_budget("medium")
+            # Clamp to the API minimum
+            budget = max(budget, MIN_THINKING_BUDGET)
+            # max_tokens must be strictly greater than budget_tokens
+            if body["max_tokens"] <= budget:
+                body["max_tokens"] = budget + 1024
+            body["thinking"] = {"type": "enabled", "budget_tokens": budget}
+
         if req.tools:
             body["tools"] = [
                 {"name": t.name, "description": t.description,
@@ -128,7 +142,9 @@ class AnthropicAdapter:
             ]
             tc = req.tool_choice
             if isinstance(tc, ir.ToolChoiceNone):
-                body["tool_choice"] = {"type": "auto"}  # closest; none unsupported pre-4.x
+                body["tool_choice"] = {"type": "none"}
+            elif isinstance(tc, ir.ToolChoiceAuto):
+                body["tool_choice"] = {"type": "auto"}
             elif isinstance(tc, ir.ToolChoiceRequired):
                 body["tool_choice"] = {"type": "any"}
             elif isinstance(tc, ir.ToolChoiceNamed):
@@ -151,16 +167,28 @@ class AnthropicAdapter:
                 turn.tool_calls.append(ir.ToolUsePart(
                     id=block.get("id", ""), name=block.get("name", ""),
                     args=block.get("input") or {}))
+            elif btype == "server_tool_use":
+                # Anthropic-built-in tools (web_search, computer, etc.).  These
+                # look like tool_use to the caller, but their results arrive as
+                # web_search_tool_result / similar blocks in the same response.
+                turn.tool_calls.append(ir.ToolUsePart(
+                    id=block.get("id", ""), name=block.get("name", ""),
+                    args=block.get("input") or {}))
         sr = data.get("stop_reason", "end_turn")
         turn.stop_reason = {"end_turn": "stop", "stop_sequence": "stop",
                             "max_tokens": "length", "tool_use": "tool_call",
-                            "refusal": "content_filter"}.get(sr, "stop")
+                            "refusal": "content_filter",
+                            "pause_turn": "stop"}.get(sr, "stop")
         u = data.get("usage") or {}
+        # output_tokens_details.thinking_tokens is where Anthropic reports
+        # reasoning tokens (newer API); fall back to 0 when absent.
+        out_details = u.get("output_tokens_details") or {}
         turn.usage = ir.Usage(
             prompt_tokens=u.get("input_tokens", 0),
             completion_tokens=u.get("output_tokens", 0),
             cached_tokens=u.get("cache_read_input_tokens", 0),
             cache_creation_tokens=u.get("cache_creation_input_tokens", 0),
+            reasoning_tokens=out_details.get("thinking_tokens", 0),
         )
         return turn
 
@@ -181,7 +209,7 @@ class AnthropicAdapter:
         elif etype == "content_block_start":
             cb = payload.get("content_block", {})
             idx = payload.get("index", 0)
-            if cb.get("type") == "tool_use":
+            if cb.get("type") in ("tool_use", "server_tool_use"):
                 self._tool_indices.add(idx)
                 out.append(dl.ToolCallOpen(index=idx, id=cb.get("id", ""), name=cb.get("name", "")))
         elif etype == "content_block_delta":
@@ -207,14 +235,17 @@ class AnthropicAdapter:
             d = payload.get("delta", {})
             u = payload.get("usage") or {}
             sr = d.get("stop_reason", "end_turn")
+            out_details = u.get("output_tokens_details") or {}
             out.append(dl.UsageFinal(
                 prompt=getattr(self, "_pending_prompt", 0),
                 cached=getattr(self, "_pending_cached", 0),
                 cache_creation=getattr(self, "_pending_cache_creation", 0),
+                reasoning=out_details.get("thinking_tokens", 0),
                 output=u.get("output_tokens", 0)))
             out.append(dl.Finish({"end_turn": "stop", "stop_sequence": "stop",
                                   "max_tokens": "length", "tool_use": "tool_call",
-                                  "refusal": "content_filter"}.get(sr, "stop")))
+                                  "refusal": "content_filter",
+                                  "pause_turn": "stop"}.get(sr, "stop")))
         elif etype == "message_stop":
             out.append(dl.StreamEnd())
         elif etype == "error":

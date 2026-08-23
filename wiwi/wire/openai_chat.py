@@ -98,8 +98,7 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
     return ir.Request(
         model=body["model"], messages=messages, tools=tools, tool_choice=tool_choice,
         gen_params=g, stream=bool(body.get("stream")),
-        stream_options_include_usage=bool(stream_opts.get("include_usage",
-                                                          bool(body.get("stream")))),
+        stream_options_include_usage=bool(stream_opts.get("include_usage", False)),
         extras={k: v for k, v in body.items() if k not in _KNOWN_KEYS},
     )
 
@@ -121,6 +120,11 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
                           "arguments": t.raw_args or json.dumps(t.args)}}
             for t in turn.tool_calls
         ]
+    # Reasoning models emit a separate reasoning_content field; include it
+    # when the provider returned thinking blocks so downstream clients that
+    # look for reasoning_content (e.g. OpenAI-shaped clients) receive it.
+    if turn.thinking:
+        message["reasoning_content"] = "".join(t.text for t in turn.thinking)
     u = turn.usage
     usage = {
         "prompt_tokens": u.prompt_tokens, "completion_tokens": u.completion_tokens,
@@ -146,6 +150,8 @@ class ChatStreamEncoder:
         self.req_id = req_id
         self._started = False
         self._finished = False
+        self._usage: dl.UsageFinal | None = None
+        self._stop: str = "stop"
 
     def _shell(self, delta: dict[str, Any], finish: str | None = None,
                usage: dict[str, Any] | None = None) -> bytes:

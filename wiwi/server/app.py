@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import hmac
 import os
+import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -17,7 +18,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from wiwi.auth.service import AuthService
-from wiwi.config import WiwiConfig, _interpolate
+from wiwi.config import ConfigError, WiwiConfig, _interpolate, load_config
 from wiwi.core.context import RequestContext
 from wiwi.core.gateway import Gateway, build_log_event
 from wiwi.cost.pricing import CostEngine
@@ -996,3 +997,18 @@ def create_app(config: WiwiConfig) -> FastAPI:
                   name="admin-ui")
 
     return app
+
+
+def create_app_from_config_path(config_path: str = "wiwi.yaml") -> FastAPI:
+    """Factory used by uvicorn reload mode.
+
+    Uvicorn's reloader re-imports the app in a fresh subprocess on each
+    restart, so the app cannot be passed as an object — it must be built
+    from the config path each time.
+    """
+    try:
+        config = load_config(config_path)
+    except ConfigError as e:
+        print(f"wiwi: config error: {e}", file=sys.stderr)
+        sys.exit(1)
+    return create_app(config)

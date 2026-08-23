@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -28,8 +29,44 @@ class WiwiError(Exception):
 RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504, 529}
 
 
+def _extract_error_message(body_text: str) -> str:
+    """Extract the most useful human-readable message from a provider error body.
+
+    Many OpenAI-compatible providers (OpenRouter, Together, etc.) nest the
+    real error text inside ``error.message`` or ``error.metadata.raw``.
+    The raw body is often hundreds of bytes of JSON scaffolding with no
+    clue about what actually failed, so we drill into known shapes.
+    """
+    try:
+        data = json.loads(body_text)
+    except (json.JSONDecodeError, ValueError):
+        return body_text[:500]
+    # OpenAI shape: {"error": {"message": "..."}}
+    err = data.get("error")
+    if isinstance(err, dict):
+        msg = err.get("message")
+        if isinstance(msg, str) and msg:
+            # OpenRouter sometimes wraps a useless top-level message like
+            # "Provider returned error" around a more specific metadata.raw.
+            meta = err.get("metadata") or {}
+            raw = meta.get("raw")
+            if isinstance(raw, str) and raw and raw != msg:
+                return f"{msg} ({meta.get('provider_name', 'upstream')}: {raw})"
+            return msg
+        # Some providers put the message at error level as a string
+    elif isinstance(err, str) and err:
+        return err
+    # Anthropic shape: {"type": "error", "error": {"message": "..."}}
+    if isinstance(data.get("type"), str) and data["type"] == "error":
+        inner = data.get("error")
+        if isinstance(inner, dict) and isinstance(inner.get("message"), str):
+            return inner["message"]
+    # Generic: fall back to the whole body if it's small enough
+    return body_text[:500]
+
+
 def error_from_provider_status(status: int, body_text: str, provider: str) -> WiwiError:
-    msg = body_text[:500] or f"{provider} returned HTTP {status}"
+    msg = _extract_error_message(body_text) or f"{provider} returned HTTP {status}"
     if status == 401 or status == 403:
         # Preserve the auth-failure status so the router can invalidate the key
         # (ProviderKey.mark_invalid); retryable stays True so the request fails
@@ -44,8 +81,8 @@ def error_from_provider_status(status: int, body_text: str, provider: str) -> Wi
     if status == 408 or status in (500, 502, 503, 529):
         return WiwiError(502, "api_connection_error",
                          f"{provider} error {status}: {msg}", retryable=True)
-    if status == 400 and ("context" in body_text.lower() or "maximum" in body_text.lower()
-                          or "too long" in body_text.lower() or "tokens" in body_text.lower()):
+    if status == 400 and ("context" in msg.lower() or "maximum" in msg.lower()
+                          or "too long" in msg.lower() or "tokens" in msg.lower()):
         return WiwiError(400, "context_window_exceeded", msg)
     if status == 400:
         return WiwiError(400, "invalid_request_error", f"{provider}: {msg}")

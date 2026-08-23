@@ -45,7 +45,7 @@ class KeyDef(BaseModel):
 
 class ProviderDef(BaseModel):
     name: str
-    provider: Literal["openai", "anthropic", "gemini", "openai-compatible"]
+    provider: Literal["openai", "anthropic", "gemini", "openai-compatible", "openrouter"]
     base_url: str | None = None
     timeout_s: float = 120.0
     extra_headers: dict[str, str] = Field(default_factory=dict)

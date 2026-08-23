@@ -141,7 +141,12 @@ class GenParams:
         return None
 
     def effective_thinking_budget(self) -> int | None:
-        """Return thinking_budget, deriving it from reasoning_effort if not set."""
+        """Return thinking_budget, deriving it from reasoning_effort if not set.
+
+        Returns None when reasoning_effort is 'none' (thinking disabled) or
+        when neither field is set, so adapters can distinguish 'no thinking'
+        from 'use a default budget.'
+        """
         if self.thinking_budget is not None:
             return self.thinking_budget
         if self.reasoning_effort:
@@ -153,15 +158,22 @@ class GenParams:
 # Approximate token budgets per effort level. These are conservative defaults;
 # providers that natively support effort levels (OpenAI) use the string directly,
 # while providers that use token budgets (Anthropic) get the mapped value.
-_EFFORT_BUDGETS: dict[str, int] = {
+# "none" means disable thinking entirely (supported by GPT-5.x reasoning models).
+_EFFORT_BUDGETS: dict[str, int | None] = {
+    "none": None,
     "low": 1024,
     "medium": 8000,
     "high": 32000,
+    "xhigh": 64000,
 }
 
 
-def effort_to_thinking_budget(effort: str) -> int:
-    """Map a reasoning_effort level to a thinking token budget."""
+def effort_to_thinking_budget(effort: str) -> int | None:
+    """Map a reasoning_effort level to a thinking token budget.
+
+    Returns None for 'none' (thinking disabled) or unknown values; callers
+    must check the return before setting a thinking config.
+    """
     return _EFFORT_BUDGETS.get(effort, _EFFORT_BUDGETS["medium"])
 
 
@@ -169,9 +181,11 @@ def thinking_budget_to_effort(budget: int) -> str:
     """Map a thinking token budget to the nearest reasoning_effort level."""
     if budget <= 2048:
         return "low"
-    if budget <= 12000:
+    if budget <= 16000:
         return "medium"
-    return "high"
+    if budget <= 48000:
+        return "high"
+    return "xhigh"
 
 
 @dataclass
@@ -182,7 +196,7 @@ class Request:
     tool_choice: ToolChoice | None = None
     gen_params: GenParams = field(default_factory=GenParams)
     stream: bool = False
-    stream_options_include_usage: bool = True  # G4
+    stream_options_include_usage: bool = False  # G4: only when client asks
     # Raw dialect-specific extras that codecs chose not to map but must not lose.
     extras: dict[str, Any] = field(default_factory=dict)
 

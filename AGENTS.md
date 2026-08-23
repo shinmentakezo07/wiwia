@@ -55,3 +55,7 @@ docker compose up --build                   # containerized run
 ## Docs vs. Code
 
 `docs/` specs intentionally run ahead of implementation. When docs and code disagree, trust the code — or treat the doc section as the spec for work you're about to do.
+
+## UPDATE.md — translation changelog
+
+`UPDATE.md` is the changelog for all OpenAI ↔ Anthropic cross-provider translation fixes, the OpenRouter adapter, and multi-turn conversation fixes. **Read it first** when encountering issues with: reasoning/thinking parameter translation, tool_result message handling, `content: null` errors, OpenRouter `reasoning` parameter, `stream_options`, or error message extraction from upstream providers. It documents every fix with before/after code snippets, the files changed, and the tests that cover them.

@@ -24,8 +24,11 @@ def _role_parts_to_content(messages: list[ir.Message]) -> list[dict[str, Any]]:
                     out.append({"role": "tool", "tool_call_id": p.tool_use_id,
                                 "content": content})
             continue
+        # user and assistant roles
         content: Any = None
         tool_calls = []
+        reasoning = ""
+        emitted_tool_results = False
         for p in m.parts:
             if isinstance(p, ir.TextPart):
                 if content is None:
@@ -45,9 +48,35 @@ def _role_parts_to_content(messages: list[ir.Message]) -> list[dict[str, Any]]:
                     "function": {"name": p.name,
                                  "arguments": p.raw_args or json.dumps(p.args)},
                 })
-        msg: dict[str, Any] = {"role": m.role, "content": content}
+            elif isinstance(p, ir.ThinkingPart):
+                reasoning += p.text
+            elif isinstance(p, ir.ToolResultPart) and m.role == "user":
+                # Anthropic convention: tool results arrive as user-role
+                # messages with tool_result content blocks. OpenAI expects
+                # them as role=tool messages, so emit one per result.
+                tool_content = f"[tool error] {p.content}" if p.is_error else p.content
+                out.append({"role": "tool", "tool_call_id": p.tool_use_id,
+                            "content": tool_content})
+                emitted_tool_results = True
+        # If the message was fully consumed as tool_result messages, skip
+        # the empty trailing user message (OpenRouter rejects content: null
+        # and an empty user message is meaningless).
+        if emitted_tool_results and content is None and not tool_calls:
+            continue
+        # Build the assistant/user message; never send content: null.
+        msg: dict[str, Any] = {"role": m.role}
+        if content is not None:
+            msg["content"] = content
+        elif not tool_calls:
+            # No content and no tool calls: emit empty string rather than null
+            # (OpenRouter and other APIs reject content: null).
+            msg["content"] = ""
         if tool_calls:
             msg["tool_calls"] = tool_calls
+            if "content" not in msg:
+                msg["content"] = None  # OpenAI allows null with tool_calls
+        if reasoning and m.role == "assistant":
+            msg["reasoning"] = reasoning
         out.append(msg)
     return out
 
@@ -86,12 +115,20 @@ class OpenAIAdapter:
             body["seed"] = g.seed
         if g.parallel_tool_calls is not None:
             body["parallel_tool_calls"] = g.parallel_tool_calls
+        # reasoning_effort is OpenAI-specific (o-series / GPT-5.x reasoning
+        # models).  openai-compatible backends (OpenRouter, Together, vLLM…)
+        # often reject the field with a 400, so only forward it when talking
+        # to a native OpenAI endpoint (or when the provider type is unknown,
+        # which preserves the default behaviour for direct-OpenAI tests).
+        ptype = deployment_params.get("provider_type")
+        is_native_openai = ptype != "openai-compatible"
         if g.reasoning_effort:
-            body["reasoning_effort"] = g.reasoning_effort
-        elif g.thinking_budget:
+            if is_native_openai:
+                body["reasoning_effort"] = g.reasoning_effort
+        elif g.thinking_budget is not None:
             # Client sent thinking_budget (Anthropic dialect) — map to OpenAI reasoning_effort
             effort = g.effective_reasoning_effort()
-            if effort:
+            if effort and is_native_openai:
                 body["reasoning_effort"] = effort
         if g.response_format and g.response_format.type != "text":
             rf: dict[str, Any] = {"type": g.response_format.type}
@@ -139,6 +176,11 @@ class OpenAIAdapter:
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message", {})
         turn = ir.AssistantTurn(text=message.get("content") or "", raw=data)
+        # Reasoning models may return reasoning_content in the message body
+        # (DeepSeek, OpenRouter, and other OpenAI-compatible providers).
+        reasoning = message.get("reasoning_content") or message.get("reasoning")
+        if reasoning:
+            turn.thinking.append(ir.ThinkingPart(reasoning))
         for tc in message.get("tool_calls") or []:
             raw_args = tc.get("function", {}).get("arguments") or "{}"
             try:
