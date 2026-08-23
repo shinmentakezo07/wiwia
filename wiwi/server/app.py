@@ -42,9 +42,7 @@ def _mask_secret(secret: str) -> str:
 def _provider_models_url(provider_type: str, base_url: str) -> str:
     """Upstream model-list endpoint per provider type."""
     base = (base_url or _default_base_url(provider_type)).rstrip("/")
-    if provider_type == "gemini":
-        return f"{base}/models"  # key rides the querystring, added by adapter headers
-    return f"{base}/models"  # openai/compatible and anthropic share the path shape
+    return f"{base}/models"  # openai/compatible, anthropic, and gemini share the path
 
 
 def _parse_models_response(provider_type: str, body: bytes) -> list[dict[str, str]]:
@@ -624,6 +622,23 @@ def create_app(config: WiwiConfig) -> FastAPI:
         return JSONResponse({"key": _key_view(acct.get_key(label),  # type: ignore[arg-type]
                                               time.monotonic(), time.time())})
 
+    @app.delete("/admin/providers/{name}/keys/{label}")
+    async def admin_delete_provider_key(name: str, label: str, request: Request):
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        acct = state.router.providers.get(name)
+        if acct is None:
+            return _err(404, "not_found_error", f"unknown provider '{name}'", request)
+        key = acct.get_key(label)
+        if key is None:
+            return _err(404, "not_found_error",
+                        f"unknown key '{label}' on provider '{name}'", request)
+        acct.keys = [k for k in acct.keys if k.label != label]
+        await state.logs.log_audit(actor="master", action="provider_key.delete",
+                                   target=f"{name}/{label}")
+        return JSONResponse({"deleted": True, "label": label})
+
     @app.post("/admin/providers")
     async def admin_add_provider(request: Request):
         resp = _require_admin(request)
@@ -674,10 +689,13 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         request)
         adapter = get_adapter(acct.provider_type)
         url = _provider_models_url(acct.provider_type, acct.base_url)
+        headers = adapter.headers(ProviderKeyRef(label=key.label, secret=key.secret))
+        # Gemini puts the API key in the querystring, not headers
+        if acct.provider_type == "gemini":
+            url += f"?key={key.secret}"
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as hc:
-                r = await hc.get(url, headers=adapter.headers(
-                    ProviderKeyRef(label=key.label, secret=key.secret)))
+                r = await hc.get(url, headers=headers)
         except httpx.HTTPError:
             return _err(502, "api_connection_error",
                         f"could not reach '{name}' ({url})", request)
