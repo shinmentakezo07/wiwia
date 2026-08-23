@@ -5,7 +5,7 @@
 > `wiwi/providers/*`, `wiwi/ir/types.py`, plus external research (LiteLLM streaming docs,
 > Vercel AI SDK stream-text/partial-JSON, Anthropic streaming error-recovery guide).
 > **Date:** 2026-08-23
-> **Status:** Proposal — nothing here is implemented yet.
+> **Status:** Implemented — all P0/P1/P2 items shipped. Tests in `tests/test_streaming_improvements.py` (72 tests, all pass).
 
 ---
 
