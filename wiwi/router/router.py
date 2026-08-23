@@ -11,7 +11,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
-from wiwi.config import RouterSettings, WiwiConfig
+from wiwi.config import PROVIDER_TYPES, RouterSettings, WiwiConfig
 from wiwi.core.context import RequestContext
 from wiwi.providers.base import (
     RETRYABLE_STATUS,
@@ -214,50 +214,112 @@ class Router:
 
 
 def _default_base_url(provider_type: str) -> str:
-    return {
-        "openai": "https://api.openai.com/v1",
-        "anthropic": "https://api.anthropic.com/v1",
-        "gemini": "https://generativelanguage.googleapis.com/v1beta",
-        "openrouter": "https://openrouter.ai/api/v1",
-    }.get(provider_type, "")
+    """Look up the default base URL from the built-in provider catalog.
+
+    Derived from BUILTIN_PROVIDER_TYPES so there is a single source of truth —
+    adding a provider type to the catalog automatically makes its default URL
+    available here. Returns "" for types with no fixed default (e.g.
+    openai-compatible) or unknown types.
+    """
+    for p in BUILTIN_PROVIDER_TYPES:
+        if p["provider_type"] == provider_type:
+            return p["default_base_url"]
+    return ""
 
 
 # Built-in provider types that ship with wiwi and can be selected by name
 # in the admin UI. Mirrors registry.get_adapter's recognized types.
-BUILTIN_PROVIDER_TYPES: list[dict[str, str]] = [
+# Metadata sourced from each provider's official API docs as of Aug 2026.
+BUILTIN_PROVIDER_TYPES: list[dict[str, str | list[str]]] = [
     {
         "provider_type": "openai",
         "label": "OpenAI",
         "default_base_url": "https://api.openai.com/v1",
-        "description": "GPT models via the OpenAI Chat Completions API.",
+        "description": (
+            "GPT-5.6 family models via the OpenAI Chat Completions and "
+            "Responses APIs. Supports reasoning effort, tool use, "
+            "structured outputs, and vision."
+        ),
+        "latest_models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+        "context_window": "1.05M tokens",
+        "docs_url": "https://developers.openai.com/api/docs/models",
     },
     {
         "provider_type": "anthropic",
         "label": "Anthropic",
         "default_base_url": "https://api.anthropic.com/v1",
-        "description": "Claude models via the Anthropic Messages API.",
+        "description": (
+            "Claude models via the Anthropic Messages API. Features adaptive "
+            "thinking, tool use, vision, and 1M-token context windows on "
+            "Opus and Sonnet."
+        ),
+        "latest_models": [
+            "claude-fable-5",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-haiku-4-5",
+        ],
+        "context_window": "1M tokens",
+        "docs_url": "https://platform.claude.com/docs/en/about-claude/models/overview",
     },
     {
         "provider_type": "gemini",
         "label": "Google Gemini",
         "default_base_url": "https://generativelanguage.googleapis.com/v1beta",
-        "description": "Gemini models via the Google Generative Language API.",
+        "description": (
+            "Gemini models via the Google Generative Language API. "
+            "Multimodal input (text, images, video, audio), structured "
+            "output, function calling, and the Interactions API."
+        ),
+        "latest_models": [
+            "gemini-3.1-pro-preview",
+            "gemini-3.7-flash",
+            "gemini-3.5-flash-lite",
+        ],
+        "context_window": "1M+ tokens",
+        "docs_url": "https://ai.google.dev/gemini-api/docs",
     },
     {
         "provider_type": "openrouter",
         "label": "OpenRouter",
         "default_base_url": "https://openrouter.ai/api/v1",
-        "description": "Unified gateway to 100+ models via the OpenRouter API.",
+        "description": (
+            "Unified gateway to 400+ models from 60+ providers via a single "
+            "OpenAI-compatible endpoint. Automatic fallbacks, reasoning "
+            "parameter translation, and a latest-alias system."
+        ),
+        "latest_models": [
+            "~openai/gpt-latest",
+            "~anthropic/claude-sonnet-latest",
+            "google/gemini-3.1-pro-preview",
+        ],
+        "context_window": "varies per model",
+        "docs_url": "https://openrouter.ai/docs/quickstart",
     },
     {
         "provider_type": "openai-compatible",
         "label": "OpenAI-compatible",
         "default_base_url": "",
-        "description": "Any endpoint speaking the OpenAI Chat Completions wire format.",
+        "description": (
+            "Any endpoint that speaks the OpenAI Chat Completions wire "
+            "format (e.g. vLLM, Ollama, Together, Groq, DeepSeek). "
+            "Provide a custom base URL."
+        ),
+        "latest_models": [],
+        "context_window": "varies by endpoint",
+        "docs_url": "",
     },
 ]
 
-_RECOGNIZED_PROVIDER_TYPES = {p["provider_type"] for p in BUILTIN_PROVIDER_TYPES}
+# Sanity check: every catalog entry must be a recognized provider type, and
+# every provider type in PROVIDER_TYPES should have a catalog card. This fails
+# at import time so a new provider type added to config.py without a matching
+# catalog entry (or vice-versa) is caught immediately, not silently at runtime.
+_catalog_types = {p["provider_type"] for p in BUILTIN_PROVIDER_TYPES}
+assert _catalog_types == set(PROVIDER_TYPES), (
+    f"BUILTIN_PROVIDER_TYPES catalog ({_catalog_types}) is out of sync with "
+    f"wiwi.config.PROVIDER_TYPES ({set(PROVIDER_TYPES)}) — update both"
+)
 
 
 async def execute_with_retries(router: Router, ctx: RequestContext,

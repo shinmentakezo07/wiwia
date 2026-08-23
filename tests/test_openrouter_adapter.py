@@ -264,12 +264,13 @@ def test_registry_returns_openrouter_adapter():
     assert isinstance(adapter, OpenRouterAdapter)
 
 
-def test_registry_falls_back_to_openai():
-    from wiwi.providers.openai_adapter import OpenAIAdapter
+def test_registry_rejects_unknown_type():
+    """Unknown provider types must raise, not silently fall back to OpenAI."""
+    import pytest
+
     from wiwi.providers.registry import get_adapter
-    adapter = get_adapter("unknown-type")
-    assert isinstance(adapter, OpenAIAdapter)
-    assert not isinstance(adapter, OpenRouterAdapter)
+    with pytest.raises(ValueError, match="unsupported provider type"):
+        get_adapter("unknown-type")
 
 
 # -- multi-turn conversation handling (the 400 bug) -------------------------

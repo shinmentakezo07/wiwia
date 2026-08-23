@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hmac
 import os
@@ -14,11 +15,24 @@ from typing import Any
 import httpx
 import orjson
 from fastapi import FastAPI, Request
-from fastapi.responses import ORJSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+
+class ORJSONResponse(JSONResponse):
+    """orjson-serialized JSON response.
+
+    FastAPI's built-in ``ORJSONResponse`` was deprecated in 0.141 (it now
+    serializes via Pydantic when a response_model is set). We return raw dicts
+    from most admin endpoints, so we keep orjson (faster, handles datetimes)
+    via this trivial subclass instead of the deprecated shim.
+    """
+
+    def render(self, content: Any) -> bytes:
+        return orjson.dumps(content, option=orjson.OPT_NON_STR_KEYS)
+
 from wiwi.auth.service import AuthService
-from wiwi.config import ConfigError, WiwiConfig, _interpolate, load_config
+from wiwi.config import PROVIDER_TYPES, ConfigError, WiwiConfig, _interpolate, load_config
 from wiwi.core.context import RequestContext
 from wiwi.core.gateway import Gateway, build_log_event
 from wiwi.cost.pricing import CostEngine
@@ -76,6 +90,10 @@ class AppState:
         self.auth: AuthService | None = None
         self.gateways: dict[str, Gateway] = {}
         self.alert_rules: list[dict[str, Any]] = []  # storage only; runtime-scoped
+        # Set during shutdown so long-lived SSE generators break out of their
+        # event loop instead of blocking uvicorn's graceful-shutdown drain
+        # (which otherwise hangs at "Waiting for connections to close").
+        self.shutdown_event: asyncio.Event | None = None
 
     async def init_db(self) -> None:
         import sqlalchemy.ext.asyncio as saa
@@ -93,8 +111,11 @@ class AppState:
             "chat": Gateway(self.router, self.cost, "chat",
                             drop_params=self.config.wiwi_settings.drop_params),
         }
+        self.shutdown_event = asyncio.Event()
 
     async def shutdown(self) -> None:
+        if self.shutdown_event is not None:
+            self.shutdown_event.set()
         for g in self.gateways.values():
             await g.aclose()
         await self.logs.stop()
@@ -505,13 +526,17 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if not is_admin(request):
             return _err(401, "authentication_error", "master key required", request)
         last_id = int(request.headers.get("last-event-id", "0") or 0)
-        import asyncio as _aio
 
         async def gen():
             q = await state.logs.sse.subscribe("request")
             pq = await state.logs.sse.subscribe("proxy")
-            combined: _aio.Queue = _aio.Queue()
+            combined: asyncio.Queue = asyncio.Queue()
             last_sent = last_id
+            # Breaks the keepalive loop during app shutdown so this SSE
+            # generator returns instead of blocking uvicorn's graceful
+            # shutdown drain (which otherwise hangs at "Waiting for
+            # connections to close", forcing a manual ^C on every reload).
+            shutdown = state.shutdown_event
 
             async def forward(src):
                 # merger tasks are only ever cancelled while awaiting get(),
@@ -519,8 +544,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 while True:
                     combined.put_nowait(await src.get())
 
-            fwd_tasks = [_aio.create_task(forward(q)),
-                         _aio.create_task(forward(pq))]
+            fwd_tasks = [asyncio.create_task(forward(q)),
+                         asyncio.create_task(forward(pq))]
             # First byte must flow immediately: some ASGI stacks gate header
             # forwarding on the first body chunk, so an idle-tailed SSE stream
             # would otherwise hang its own response start.
@@ -530,11 +555,21 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     yield encode_sse(seq, evt)
                     last_sent = max(last_sent, seq)
                 while True:
-                    try:
-                        seq, evt = await _aio.wait_for(combined.get(), timeout=15.0)
-                    except TimeoutError:
-                        yield b": ping\n\n"   # keepalive; EventSource ignores comments
+                    get_task = asyncio.create_task(combined.get())
+                    wait_set: set[asyncio.Future] = {get_task}
+                    if shutdown is not None:
+                        wait_set.add(asyncio.create_task(shutdown.wait()))
+                    done, _pending = await asyncio.wait(
+                        wait_set, timeout=15.0, return_when=asyncio.FIRST_COMPLETED)
+                    if not done:
+                        # timed out — keepalive; also bail if the client is gone
+                        if await request.is_disconnected():
+                            break
+                        yield b": ping\n\n"  # EventSource ignores comments
                         continue
+                    if shutdown is not None and shutdown.is_set():
+                        break
+                    seq, evt = get_task.result()
                     if evt.stream == "request" and seq <= last_sent:
                         continue  # already replayed above
                     if evt.stream == "request":
@@ -708,8 +743,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if name in state.router.providers:
             return _err(409, "invalid_request_error",
                         f"provider '{name}' already exists", request)
-        if ptype not in ("openai", "anthropic", "gemini", "openrouter",
-                          "openai-compatible"):
+        if ptype not in PROVIDER_TYPES:
             return _err(400, "invalid_request_error",
                         f"unsupported provider type '{ptype}'", request)
         if not base_url:
@@ -770,8 +804,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             diff["name"] = new_name
         if "provider_type" in body:
             ptype = str(body["provider_type"])
-            if ptype not in ("openai", "anthropic", "gemini", "openrouter",
-                             "openai-compatible"):
+            if ptype not in PROVIDER_TYPES:
                 return _err(400, "invalid_request_error",
                             f"unsupported provider type '{ptype}'", request)
             acct.provider_type = ptype

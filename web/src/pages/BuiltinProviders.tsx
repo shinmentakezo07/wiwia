@@ -7,6 +7,7 @@ import { useQuery } from "@tanstack/react-query";
 import {
   ArrowRight,
   Boxes,
+  ExternalLink,
   Globe,
   Plus,
   RefreshCw,
@@ -79,11 +80,34 @@ function ProviderCatalogCard(props: {
           {props.p.description}
         </p>
 
+        {/* latest models */}
+        {props.p.latest_models.length > 0 && (
+          <div className="space-y-1.5">
+            <span className="admin-label">Latest models</span>
+            <div className="flex flex-wrap gap-1">
+              {props.p.latest_models.map((m) => (
+                <code
+                  key={m}
+                  className="rounded border border-white/[0.06] bg-white/[0.02] px-1.5 py-0.5 font-mono text-[10px] text-[var(--admin-text-dim)]"
+                >
+                  {m}
+                </code>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="space-y-1.5">
+          <div className="flex items-center justify-between text-[12px]">
+            <span className="admin-label">Context window</span>
+            <span className="font-mono text-[11px] text-[var(--admin-text-dim)]">
+              {props.p.context_window}
+            </span>
+          </div>
           <div className="flex items-center justify-between text-[12px]">
             <span className="admin-label">Default endpoint</span>
             <code className="truncate pl-2 font-mono text-[11px] text-[var(--admin-text-dim)]">
-              {props.p.default_base_url || "(custom URL required)"}
+              {props.p.default_base_url || "(custom URL)"}
             </code>
           </div>
           <div className="flex items-center justify-between text-[12px]">
@@ -133,16 +157,28 @@ function ProviderCatalogCard(props: {
 
       {/* footer */}
       <div className="flex items-center justify-between gap-2 border-t border-[var(--admin-border)] px-5 py-3">
-        {accountCount > 0 ? (
-          <span className="flex items-center gap-1.5 text-[11px] text-[var(--admin-text-muted)]">
-            <span
-              className={`h-1.5 w-1.5 rounded-full ${anyHealthy ? "bg-emerald-400" : "bg-amber-400"}`}
-            />
-            {anyHealthy ? "healthy keys available" : "all keys unhealthy"}
-          </span>
-        ) : (
-          <span className="text-[11px] text-[var(--admin-text-dim)]">No accounts yet</span>
-        )}
+        <div className="flex items-center gap-2">
+          {accountCount > 0 ? (
+            <span className="flex items-center gap-1.5 text-[11px] text-[var(--admin-text-muted)]">
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${anyHealthy ? "bg-emerald-400" : "bg-amber-400"}`}
+              />
+              {anyHealthy ? "healthy" : "unhealthy"}
+            </span>
+          ) : (
+            <span className="text-[11px] text-[var(--admin-text-dim)]">No accounts</span>
+          )}
+          {props.p.docs_url && (
+            <a
+              href={props.p.docs_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1 text-[11px] text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]"
+            >
+              <ExternalLink size={10} /> Docs
+            </a>
+          )}
+        </div>
         <Link
           to={`/providers?type=${encodeURIComponent(props.p.provider_type)}`}
           className="inline-flex"

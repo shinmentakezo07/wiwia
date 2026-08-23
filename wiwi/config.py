@@ -14,6 +14,19 @@ class ConfigError(Exception):
     """Raised with file/line context when the config is invalid."""
 
 
+# Every provider type that ships with wiwi. This is the single source of truth
+# — the router (catalog), the admin API (add/patch validation), and the Pydantic
+# config schema all reference this list so a new provider type can't be added in
+# one place without the others noticing. Mirrors registry.get_adapter().
+PROVIDER_TYPES: tuple[str, ...] = (
+    "openai",
+    "anthropic",
+    "gemini",
+    "openai-compatible",
+    "openrouter",
+)
+
+
 def _interpolate(value: Any) -> Any:
     """Recursively resolve `os.environ/NAME` strings."""
     if isinstance(value, str) and value.startswith("os.environ/"):
@@ -45,7 +58,7 @@ class KeyDef(BaseModel):
 
 class ProviderDef(BaseModel):
     name: str
-    provider: Literal["openai", "anthropic", "gemini", "openai-compatible", "openrouter"]
+    provider: Literal[PROVIDER_TYPES]  # type: ignore[valid-type]
     base_url: str | None = None
     timeout_s: float = 120.0
     extra_headers: dict[str, str] = Field(default_factory=dict)

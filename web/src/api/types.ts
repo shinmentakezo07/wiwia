@@ -166,6 +166,12 @@ export interface BuiltinProvider {
   label: string;
   default_base_url: string;
   description: string;
+  /** Latest model IDs from the provider's current catalog */
+  latest_models: string[];
+  /** Advertised context window */
+  context_window: string;
+  /** Link to the provider's official API docs */
+  docs_url: string;
   builtin: true;
   /** true if at least one configured account uses this provider type */
   configured: boolean;
