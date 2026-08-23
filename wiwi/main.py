@@ -48,13 +48,15 @@ def cli() -> None:
             reload=True,
             reload_dirs=reload_dirs,
             reload_includes=["*.py"],
+            timeout_graceful_shutdown=5,
         )
     else:
         from wiwi.server.app import create_app
         app = create_app(config)
         print(f"wiwi listening on http://{host}:{port} "
               f"({len(config.model_list)} deployments, {len(config.providers)} providers)")
-        uvicorn.run(app, host=host, port=port, log_level="info")
+        uvicorn.run(app, host=host, port=port, log_level="info",
+                    timeout_graceful_shutdown=5)
 
 
 if __name__ == "__main__":
