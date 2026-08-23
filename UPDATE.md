@@ -570,7 +570,52 @@ if emitted_tool_results and content is None and not tool_calls:
 
 ---
 
-## Files Changed Summary
+## Round 4: Performance & Property-Based Testing
+
+### 4.1 ORJSONResponse for all API/admin routes
+
+**File**: `wiwi/server/app.py`
+
+**Issue**: FastAPI's default `JSONResponse` uses stdlib `json` for serialization. wiwi already depends on `orjson` (used in the streaming hot path), but admin/ API responses were still serialized with the slower stdlib encoder.
+
+**Before**:
+```python
+from fastapi.responses import JSONResponse, StreamingResponse
+# ...
+return JSONResponse(body, status_code=status, ...)
+```
+
+**After**:
+```python
+from fastapi.responses import ORJSONResponse, StreamingResponse
+# ...
+return ORJSONResponse(body, status_code=status, ...)
+```
+
+All ~25 `JSONResponse(...)` calls in `app.py` replaced with `ORJSONResponse(...)`. This covers error responses, admin API endpoints, model lists, provider CRUD, stats, logs, and the chat completions success path.
+
+### 4.2 Hypothesis property-based tests for IR round-trip and delta legality
+
+**File**: `tests/test_property_roundtrip.py` (NEW)
+
+**Issue**: The hand-written tests in `test_translation_enhancements.py` and `test_openrouter_adapter.py` only cover specific cases. Property-based testing with Hypothesis generates hundreds of random inputs to verify invariants across the entire input space — exactly the class of bugs that the manual fixes addressed.
+
+**Properties tested**:
+
+| # | Property | What it catches |
+|---|---|---|
+| 1 | OpenAI encode → decode preserves user/assistant text | Text loss during round-trip |
+| 2 | Anthropic encode → decode preserves user/assistant text | Text loss during round-trip |
+| 3 | No `content: null` without `tool_calls` in OpenAI body | The multi-turn 400 bug |
+| 4 | OpenRouter body never contains `reasoning_effort` | Leaked OpenAI-native param |
+| 5 | OpenRouter uses `max_completion_tokens`, not `max_tokens` | Deprecated field usage |
+| 6 | ChatStreamEncoder produces well-formed SSE for any legal delta sequence | Malformed streaming output |
+
+**Dependency**: `hypothesis>=6.100` added to `dev` extras in `pyproject.toml`.
+
+---
+
+## Files Changed Summary (all rounds)
 
 | File | Changes |
 |---|---|
@@ -584,9 +629,12 @@ if emitted_tool_results and content is None and not tool_calls:
 | `wiwi/wire/anthropic_messages.py` | `output_tokens_details.thinking_tokens` in `encode_response` |
 | `wiwi/core/gateway.py` | Pass `provider_type` through `deployment_params` |
 | `wiwi/config.py` | `"openrouter"` added to provider `Literal` type |
+| `wiwi/server/app.py` | All `JSONResponse` → `ORJSONResponse` (orjson serialization for admin/API routes) |
 | `wiwi.yaml` | Provider type changed to `openrouter` |
 | `wiwi.yaml.example` | OpenRouter example added |
+| `pyproject.toml` | `hypothesis>=6.100` added to dev dependencies |
 | `tests/test_translation_enhancements.py` | **NEW** — 39 tests covering all Round 1 + 3 fixes |
 | `tests/test_openrouter_adapter.py` | **NEW** — 22 tests covering Round 2 + multi-turn |
+| `tests/test_property_roundtrip.py` | **NEW** — 6 Hypothesis property-based tests (Round 4) |
 
-**Total: 213 tests pass, ruff clean.**
+**Total: 219 tests pass, ruff clean.**

@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 import orjson
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import ORJSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from wiwi.auth.service import AuthService
@@ -161,7 +161,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         return info, None
 
     def enforce_rate_limit(info, est_tokens: int, request: Request,
-                           surface: str) -> JSONResponse | None:
+                           surface: str) -> ORJSONResponse | None:
         """Reserve RPM/TPM window slots only once the model is known-good."""
         allowed, retry_after = state.limiter.check(info.key_id, info.rpm,
                                                    info.tpm,
@@ -181,7 +181,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             state.limiter.record_tokens(info.key_id,
                                         u.prompt_tokens + u.completion_tokens)
 
-    async def json_body(request: Request) -> tuple[Any, JSONResponse | None]:
+    async def json_body(request: Request) -> tuple[Any, ORJSONResponse | None]:
         """Parse the request body; malformed JSON is a client error (400)."""
         try:
             return await request.json(), None
@@ -190,14 +190,14 @@ def create_app(config: WiwiConfig) -> FastAPI:
                               "request body is not valid JSON", request)
 
     def _err(status: int, etype: str, message: str,
-             request: Request, surface: str = "chat") -> JSONResponse:
+             request: Request, surface: str = "chat") -> ORJSONResponse:
         rid = getattr(request.state, "request_id", "")
         if surface == "messages":
             body = am.error_body(status, etype, message)
         else:
             body = oc.error_body(status, etype, message)
-        return JSONResponse(body, status_code=status,
-                            headers={"x-wiwi-request-id": rid})
+        return ORJSONResponse(body, status_code=status,
+                              headers={"x-wiwi-request-id": rid})
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
@@ -208,7 +208,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         limit_mb = app.state.wiwi.config.wiwi_settings.max_request_body_mb
         cl = request.headers.get("content-length")
         if cl and cl.isdigit() and int(cl) > limit_mb * 1024 * 1024:
-            return JSONResponse(
+            return ORJSONResponse(
                 {"error": {"message": f"request body exceeds {limit_mb} MiB",
                            "type": "invalid_request_error", "code": "invalid_request_error"}},
                 status_code=413)
@@ -273,7 +273,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             _record_tpm_usage(info, ctx)
             if info and info.key_type != "master":
                 await state_.auth.update_spend(info.key_id, ctx.cost)
-            return JSONResponse(payload, headers={"x-wiwi-request-id": ctx.request_id})
+            return ORJSONResponse(payload, headers={"x-wiwi-request-id": ctx.request_id})
         except Exception as e:  # noqa: BLE001
             if isinstance(e, WiwiError):
                 ctx.status = e.status
@@ -379,7 +379,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             for p in m.parts:
                 if isinstance(p, _ir.TextPart):
                     total += len(p.text) // 4 + 1
-        return JSONResponse({"input_tokens": max(1, total)})
+        return ORJSONResponse({"input_tokens": max(1, total)})
 
     @app.get("/v1/models")
     async def list_models(request: Request):
@@ -390,7 +390,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         data = []
         for name in sorted(app.state.wiwi.router.groups.keys()):
             data.append({"id": name, "object": "model", "owned_by": "wiwi"})
-        return JSONResponse({"object": "list", "data": data})
+        return ORJSONResponse({"object": "list", "data": data})
 
     @app.get("/health")
     async def health():
@@ -422,14 +422,14 @@ def create_app(config: WiwiConfig) -> FastAPI:
         await state.logs.log_audit(
             actor="master", action="key.generate", target=kid,
             diff={"source": "custom"} if body.get("custom_key") else None)
-        return JSONResponse({"key": plaintext, "id": kid,
+        return ORJSONResponse({"key": plaintext, "id": kid,
                              "note": "store this key now; it is not shown again"})
 
     @app.get("/admin/keys")
     async def admin_list_keys(request: Request):
         if not is_admin(request):
             return _err(401, "authentication_error", "master key required", request)
-        return JSONResponse({"keys": await state.auth.list_keys()})
+        return ORJSONResponse({"keys": await state.auth.list_keys()})
 
     @app.delete("/admin/keys/{key_id}")
     async def admin_delete_key(key_id: str, request: Request):
@@ -437,7 +437,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return _err(401, "authentication_error", "master key required", request)
         ok = await state.auth.delete_key(key_id)
         await state.logs.log_audit(actor="master", action="key.delete", target=key_id)
-        return JSONResponse({"deleted": ok})
+        return ORJSONResponse({"deleted": ok})
 
     @app.post("/admin/keys/{key_id}/disable")
     async def admin_disable_key(key_id: str, request: Request):
@@ -451,7 +451,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         await state.logs.log_audit(actor="master",
                                    action="key.disable" if disabled else "key.enable",
                                    target=key_id)
-        return JSONResponse({"key_id": key_id, "disabled": disabled})
+        return ORJSONResponse({"key_id": key_id, "disabled": disabled})
 
     @app.get("/admin/logs/requests")
     async def admin_request_logs(request: Request, limit: int = 200):
@@ -460,9 +460,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
         limit = max(1, min(limit, 1000))
         sink = state.logs.db_sink
         if sink is not None:
-            return JSONResponse({"logs": await sink.read_requests(limit)})
+            return ORJSONResponse({"logs": await sink.read_requests(limit)})
         ring = list(state.logs.sse.replay("request", 0))
-        return JSONResponse({"logs": [public_dict(e) for _, e in ring[-limit:]]})
+        return ORJSONResponse({"logs": [public_dict(e) for _, e in ring[-limit:]]})
 
     @app.get("/admin/stream")
     async def admin_stream(request: Request):
@@ -518,7 +518,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                                           "x-accel-buffering": "no"})
 
     # -- admin: providers & pools ------------------------------------------------
-    def _require_admin(request: Request) -> JSONResponse | None:
+    def _require_admin(request: Request) -> ORJSONResponse | None:
         if not is_admin(request):
             return _err(401, "authentication_error", "master key required", request)
         return None
@@ -555,7 +555,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 "healthy": acct.healthy,
                 "keys": [_key_view(k, mono, wall) for k in acct.keys],
             })
-        return JSONResponse({"providers": out})
+        return ORJSONResponse({"providers": out})
 
     @app.patch("/admin/providers/{name}/keys/{label}")
     async def admin_patch_provider_key(name: str, label: str, request: Request):
@@ -590,7 +590,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             diff["reset_status"] = True
         await state.logs.log_audit(actor="master", action="provider_key.update",
                                    target=f"{name}/{label}", diff=diff)
-        return JSONResponse({"key": _key_view(key, time.monotonic(), time.time())})
+        return ORJSONResponse({"key": _key_view(key, time.monotonic(), time.time())})
 
     @app.post("/admin/providers/{name}/keys")
     async def admin_add_provider_key(name: str, request: Request):
@@ -620,7 +620,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         await state.logs.log_audit(actor="master", action="provider_key.create",
                                    target=f"{name}/{label}",
                                    diff={"weight": weight})
-        return JSONResponse({"key": _key_view(acct.get_key(label),  # type: ignore[arg-type]
+        return ORJSONResponse({"key": _key_view(acct.get_key(label),  # type: ignore[arg-type]
                                               time.monotonic(), time.time())})
 
     @app.delete("/admin/providers/{name}/keys/{label}")
@@ -638,7 +638,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         acct.keys = [k for k in acct.keys if k.label != label]
         await state.logs.log_audit(actor="master", action="provider_key.delete",
                                    target=f"{name}/{label}")
-        return JSONResponse({"deleted": True, "label": label})
+        return ORJSONResponse({"deleted": True, "label": label})
 
     @app.post("/admin/providers")
     async def admin_add_provider(request: Request):
@@ -672,7 +672,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         await state.logs.log_audit(actor="master", action="provider.create",
                                    target=name,
                                    diff={"provider_type": ptype, "base_url": base_url})
-        return JSONResponse({"name": name, "provider_type": ptype, "base_url": base_url})
+        return ORJSONResponse({"name": name, "provider_type": ptype, "base_url": base_url})
 
     @app.delete("/admin/providers/{name}")
     async def admin_delete_provider(name: str, request: Request):
@@ -694,7 +694,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         request)
         del state.router.providers[name]
         await state.logs.log_audit(actor="master", action="provider.delete", target=name)
-        return JSONResponse({"deleted": True, "name": name})
+        return ORJSONResponse({"deleted": True, "name": name})
 
     @app.patch("/admin/providers/{name}")
     async def admin_patch_provider(name: str, request: Request):
@@ -743,7 +743,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         await state.logs.log_audit(actor="master", action="provider.update",
                                    target=target, diff=diff)
         mono, wall = time.monotonic(), time.time()
-        return JSONResponse({
+        return ORJSONResponse({
             "name": acct.name,
             "provider_type": acct.provider_type,
             "base_url": acct.base_url,
@@ -786,7 +786,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         f"{name} returned HTTP {r.status_code}: {r.text[:300]}", request)
         models = sorted(m["id"] for m in
                         _parse_models_response(acct.provider_type, r.content))
-        return JSONResponse({"models": [{"id": mid} for mid in models]})
+        return ORJSONResponse({"models": [{"id": mid} for mid in models]})
 
     @app.post("/admin/model-groups/{name}/deployments")
     async def admin_add_deployment(name: str, request: Request):
@@ -823,7 +823,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                                    target=f"{gname}/{pname}/{model_id}",
                                    diff={"weight": weight})
         mono = time.monotonic()
-        return JSONResponse({"deployment": {
+        return ORJSONResponse({"deployment": {
             "provider": dep.provider.name,
             "model_id": dep.model_id,
             "weight": dep.weight,
@@ -856,7 +856,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 } for d in deps],
             })
         settings = state.router.settings
-        return JSONResponse({"groups": groups,
+        return ORJSONResponse({"groups": groups,
                              "aliases": dict(settings.model_group_alias),
                              "strategy": settings.routing_strategy})
 
@@ -902,7 +902,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             diff["strategy"] = strategy
         await state.logs.log_audit(actor="master", action="model_group.update",
                                    target=gname, diff=diff)
-        return JSONResponse({"group": gname, **diff})
+        return ORJSONResponse({"group": gname, **diff})
 
     # -- admin: virtual keys PATCH -----------------------------------------------
     @app.patch("/admin/keys/{key_id}")
@@ -920,7 +920,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return _err(404, "not_found_error", f"unknown key '{key_id}'", request)
         await state.logs.log_audit(actor="master", action="key.update", target=key_id,
                                    diff=fields)
-        return JSONResponse({"key": updated})
+        return ORJSONResponse({"key": updated})
 
     # -- admin: logs & stats -------------------------------------------------------
     @app.get("/admin/logs/proxy")
@@ -929,7 +929,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if resp:
             return resp
         ring = list(state.logs.sse.replay("proxy", 0))
-        return JSONResponse({"logs": [public_dict(e) for _, e in ring[-500:]]})
+        return ORJSONResponse({"logs": [public_dict(e) for _, e in ring[-500:]]})
 
     def _request_events() -> list[LogEvent]:
         return [e for _, e in state.logs.sse.replay("request", 0)]
@@ -940,7 +940,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if resp:
             return resp
         minutes = max(1, min(minutes, 1440))
-        return JSONResponse(stats_mod.overview(_request_events(), minutes))
+        return ORJSONResponse(stats_mod.overview(_request_events(), minutes))
 
     @app.get("/admin/stats/timeseries")
     async def admin_stats_timeseries(request: Request, bucket: str = "minute",
@@ -949,7 +949,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if resp:
             return resp
         try:
-            return JSONResponse(stats_mod.timeseries(_request_events(), bucket, metric,
+            return ORJSONResponse(stats_mod.timeseries(_request_events(), bucket, metric,
                                                      max(1, min(minutes, 1440))))
         except ValueError as e:
             return _err(400, "invalid_request_error", str(e), request)
@@ -960,7 +960,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         resp = _require_admin(request)
         if resp:
             return resp
-        return JSONResponse({"rules": state.alert_rules})
+        return ORJSONResponse({"rules": state.alert_rules})
 
     @app.put("/admin/alert-rules")
     async def admin_put_alert_rules(request: Request):
@@ -976,7 +976,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         state.alert_rules = rules
         await state.logs.log_audit(actor="master", action="alert_rules.update",
                                    target="*", diff={"count": len(rules)})
-        return JSONResponse({"rules": state.alert_rules})
+        return ORJSONResponse({"rules": state.alert_rules})
 
     # -- admin UI (built SPA; wiwi/server/static produced by `cd web && bun run build`)
     static_dir = Path(os.environ.get("WIWI_STATIC_DIR")
