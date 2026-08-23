@@ -3,14 +3,17 @@
 // model IDs fetched live from the upstream with select-and-attach to a group.
 
 import { useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Plus, RefreshCw, Search, X } from "lucide-react";
+import { ArrowLeft, Plus, RefreshCw, Search, Trash2, X } from "lucide-react";
 import {
   addDeployment,
+  deleteProvider,
+  deleteProviderKey,
   fetchProviderModels,
   getModels,
   getProviders,
+  patchProvider,
   patchProviderKey,
   addProviderKey,
 } from "@/api/client";
@@ -20,11 +23,13 @@ import {
   Button,
   Card,
   CardHeader,
+  Dialog,
   EmptyState,
   ErrorText,
   Field,
   Input,
   PageHeader,
+  Select,
   Spinner,
   Table,
   TD,
@@ -47,6 +52,12 @@ function KeyRow(props: { provider: string; k: PoolKey; onError: (m: string) => v
   const patch = useMutation({
     mutationFn: (p: { enabled?: boolean; weight?: number }) =>
       patchProviderKey(props.provider, props.k.label, p),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["providers"] }),
+    onError: (e) => props.onError(e.message),
+  });
+
+  const del = useMutation({
+    mutationFn: () => deleteProviderKey(props.provider, props.k.label),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["providers"] }),
     onError: (e) => props.onError(e.message),
   });
@@ -95,6 +106,20 @@ function KeyRow(props: { provider: string; k: PoolKey; onError: (m: string) => v
           {props.k.enabled ? "Disable" : "Enable"}
         </Button>
       </TD>
+      <TD>
+        <Button
+          variant="danger"
+          aria-label="Delete key"
+          disabled={del.isPending}
+          onClick={() => {
+            if (window.confirm(`Delete key "${props.k.label}"? This cannot be undone.`)) {
+              del.mutate();
+            }
+          }}
+        >
+          <Trash2 size={14} />
+        </Button>
+      </TD>
     </tr>
   );
 }
@@ -109,7 +134,7 @@ function KeyPoolCard(props: { p: Provider; onError: (m: string) => void }) {
       {props.p.keys.length === 0 ? (
         <EmptyState>No keys yet — add some below.</EmptyState>
       ) : (
-        <Table head={["Label", "Key", "Weight", "Status", ""]}>
+        <Table head={["Label", "Key", "Weight", "Status", "Action"]}>
           {props.p.keys.map((k) => (
             <KeyRow key={k.label} provider={props.p.name} k={k} onError={props.onError} />
           ))}
@@ -406,12 +431,92 @@ function DeploymentsCard(props: { provider: string }) {
   );
 }
 
+// -- account settings (edit metadata) -------------------------------------------
+
+function AccountSettingsCard(props: { p: Provider; onError: (m: string) => void }) {
+  const qc = useQueryClient();
+  const navigate = useNavigate();
+  const [name, setName] = useState(props.p.name);
+  const [type, setType] = useState(props.p.provider_type);
+  const [baseUrl, setBaseUrl] = useState(props.p.base_url);
+  const [error, setError] = useState<string | null>(null);
+
+  const save = useMutation({
+    mutationFn: () => {
+      const patch: { name?: string; base_url?: string; provider_type?: string } = {};
+      if (name.trim() !== props.p.name) patch.name = name.trim();
+      if (type !== props.p.provider_type) patch.provider_type = type;
+      if (baseUrl.trim() !== props.p.base_url) patch.base_url = baseUrl.trim();
+      return patchProvider(props.p.name, patch);
+    },
+    onSuccess: (data) => {
+      setError(null);
+      void qc.invalidateQueries({ queryKey: ["providers"] });
+      void qc.invalidateQueries({ queryKey: ["model-groups"] });
+      if (data.name !== props.p.name) {
+        navigate(`/providers/${encodeURIComponent(data.name)}`, { replace: true });
+      }
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  const dirty =
+    name.trim() !== props.p.name ||
+    type !== props.p.provider_type ||
+    baseUrl.trim() !== props.p.base_url;
+
+  return (
+    <Card className="xl:col-span-3">
+      <CardHeader title="Account settings" subtitle="Rename, change type or base URL." />
+      <div className="space-y-3 px-4 pb-4 pt-2">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <Field label="Name">
+            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="openai-backup" />
+          </Field>
+          <Field label="Type">
+            <Select
+              value={type}
+              onChange={setType}
+              options={[
+                { value: "openai", label: "OpenAI" },
+                { value: "anthropic", label: "Anthropic" },
+                { value: "gemini", label: "Gemini" },
+                { value: "openai-compatible", label: "OpenAI-compatible URL" },
+              ]}
+            />
+          </Field>
+        </div>
+        <Field label="Base URL" hint="Optional for openai/anthropic/gemini. Required for compatible URLs.">
+          <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://…" />
+        </Field>
+        {error && <ErrorText>{error}</ErrorText>}
+        <div className="flex justify-end">
+          <Button disabled={!dirty || save.isPending} onClick={() => save.mutate()}>
+            {save.isPending ? "Saving…" : "Save changes"}
+          </Button>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 // -- page -------------------------------------------------------------------------------
 
 export function ProviderDetailPage() {
   const { name = "" } = useParams();
   const [error, setError] = useState<string | null>(null);
   const q = useQuery({ queryKey: ["providers"], queryFn: getProviders, refetchInterval: 15_000 });
+
+  const navigate = useNavigate();
+  const [delOpen, setDelOpen] = useState(false);
+  const delProvider = useMutation({
+    mutationFn: () => deleteProvider(name),
+    onSuccess: () => {
+      setDelOpen(false);
+      navigate("/providers");
+    },
+    onError: (e) => setError(e.message),
+  });
 
   const p = q.data?.providers.find((x) => x.name === name);
 
@@ -446,11 +551,34 @@ export function ProviderDetailPage() {
             <Button variant="outline" onClick={() => void q.refetch()}>
               <RefreshCw size={14} /> Refresh
             </Button>
+            <Button variant="danger" onClick={() => setDelOpen(true)}>
+              <Trash2 size={14} /> Delete provider
+            </Button>
           </div>
         }
       />
       {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
+      <Dialog open={delOpen} title={`Delete provider ${p.name}?`} onClose={() => setDelOpen(false)}>
+        <p className="text-[13px] text-[var(--admin-text-muted)]">
+          This removes the account and all its keys from the live pool. If any
+          model group still references it, deletion will be blocked.
+        </p>
+        {delProvider.error && (
+          <div className="mt-3">
+            <ErrorText>{delProvider.error.message}</ErrorText>
+          </div>
+        )}
+        <div className="flex justify-end gap-2 pt-4">
+          <Button variant="ghost" type="button" onClick={() => setDelOpen(false)}>
+            Cancel
+          </Button>
+          <Button variant="danger" disabled={delProvider.isPending} onClick={() => delProvider.mutate()}>
+            Delete
+          </Button>
+        </div>
+      </Dialog>
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
+        <AccountSettingsCard p={p} onError={setError} />
         <KeyPoolCard p={p} onError={setError} />
         <AddKeysCard provider={p.name} existing={p.keys.length} onError={setError} />
         <ModelPickerCard p={p} onError={setError} />
