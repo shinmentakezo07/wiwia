@@ -1,6 +1,6 @@
 # wiwi
 
-Unified LLM gateway proxy — speak **OpenAI Chat Completions**, **OpenAI Responses (Codex CLI)**, or **Anthropic Messages (Claude Code)** on the inbound side; route to **OpenAI, Anthropic, Gemini, or any OpenAI-compatible endpoint** on the outbound side. LiteLLM-style `wiwi.yaml` config with provider key pools (multiple API keys per provider, smooth weighted round-robin), retries, cooldowns, fallbacks, virtual keys, budgets, RPM/TPM rate limits, spend tracking, request logs, and a built-in admin web UI.
+Unified LLM gateway proxy — speak **OpenAI Chat Completions**, **OpenAI Responses (Codex CLI)**, or **Anthropic Messages (Claude Code)** on the inbound side; route to **OpenAI, Anthropic, Gemini, OpenRouter, or any OpenAI-compatible endpoint** on the outbound side. LiteLLM-style `wiwi.yaml` config with provider key pools (multiple API keys per provider, smooth weighted round-robin), retries, cooldowns, fallbacks, virtual keys, budgets, RPM/TPM rate limits, spend tracking, request logs, and a built-in admin web UI.
 
 Any surface reaches any provider — Claude Code can be backed by GPT, Codex by Gemini, and responses always come back in the caller's dialect.
 
@@ -39,7 +39,7 @@ Client ◄── outbound dialect ◄── wire encoder ◄── providers/* (
 | `wiwi/logging_core/` | Log events + SSE ring buffer for admin tail |
 | `wiwi/server/app.py` | FastAPI factory: proxy routes, middleware, `/admin/*` |
 | `web/` | Admin UI source (React 19 + TypeScript + Vite + Tailwind 4) |
-| `tests/` | Pytest suite with `respx` HTTP mocks and ASGI end-to-end |
+| `tests/` | Pytest suite: unit (`respx` HTTP mocks), ASGI end-to-end, Hypothesis property round-trips |
 | `bench.py` | Stress / latency / TPS tester for wiwi and any OpenAI-compatible proxy |
 | `docs/` | Architecture and design specs |
 
@@ -120,7 +120,7 @@ Measures TTFT, total latency, tokens, and output TPS per request; aggregates p50
 | POST | `/v1/messages`, `/v1/messages/count_tokens` | Anthropic Messages | Claude Code (`ANTHROPIC_BASE_URL` → wiwi), anthropic SDK |
 | GET | `/v1/models` | model list | all |
 
-Error bodies are dialect-correct per surface (OpenAI `{"error":{…}}` vs Anthropic `{"type":"error",…}`).
+Error bodies are dialect-correct per surface (OpenAI `{"error":{…}}` vs Anthropic `{"type":"error",…}`). Every response carries `x-wiwi-request-id` and `x-wiwi-latency-ms`; request bodies over `max_request_body_mb` (default 50) get a 413. Anthropic `cache_control` blocks pass through untouched, so Claude Code-style prompt caching works end-to-end and savings show up in stats.
 
 ## Connecting clients
 
@@ -276,7 +276,7 @@ All animations disable cleanly under `prefers-reduced-motion: reduce`.
 
 ### Web UI (running)
 
-Built-in SPA at **`http://localhost:4000/admin/ui`** — login with the master key. Pages: Dashboard, Providers (key pools, add/patch/disable keys), Virtual Keys, Models (edit model groups live), Request Logs, Proxy Logs, Usage, Analytics, Budgets & Alerts, Settings. Live updates via SSE.
+Built-in SPA at **`http://localhost:4000/admin/ui`** — login with the master key. Pages: Dashboard, Providers (+ per-provider detail: edit name/type/base_url, manage key pool, browse upstream models live, delete), Virtual Keys, Models (edit model groups and weights live, attach deployments), Request Logs, Proxy Logs, Usage, Analytics, Budgets & Alerts, Settings. Live updates via SSE.
 
 ```bash
 # rebuild the UI from source (React 19 + TypeScript + Vite + Tailwind 4, built with bun)
@@ -294,22 +294,36 @@ curl -X POST localhost:4000/admin/keys/generate -H "$MK" \
   -d '{"name": "team-a", "max_budget": 10, "rpm": 60, "tpm": 100000,
        "models": ["gpt-4o"], "ttl_seconds": 86400}'
 # → {"key":"sk-wiwi-...","id":"k...","note":"store this key now..."}
+# (optional "custom_key": supply your own plaintext, >=16 chars)
 
 curl localhost:4000/admin/keys -H "$MK"
 curl -X PATCH localhost:4000/admin/keys/<id> -H "$MK" -d '{"max_budget": 20}'
 curl -X POST localhost:4000/admin/keys/<id>/disable -H "$MK"
 curl -X DELETE localhost:4000/admin/keys/<id> -H "$MK"
 
-# provider key pools — add / patch per-label keys, add providers
+# providers & key pools — create / edit / delete accounts, manage per-label keys
+curl -X POST localhost:4000/admin/providers -H "$MK" \
+  -d '{"name": "openai-backup", "provider_type": "openai",
+       "base_url": "https://api.openai.com/v1", "key": "os.environ/BACKUP_KEY"}'
+curl -X PATCH localhost:4000/admin/providers/<name> -H "$MK" \
+  -d '{"name": "openai-primary"}'                  # rename / re-type / base_url
+curl -X DELETE localhost:4000/admin/providers/<name> -H "$MK"   # blocked while model groups reference it
+curl localhost:4000/admin/providers -H "$MK"                    # pool status incl. health + cooldowns
+
 curl -X POST localhost:4000/admin/providers/<name>/keys -H "$MK" \
   -d '{"label": "extra", "key": "os.environ/EXTRA_KEY", "weight": 2}'
 curl -X PATCH localhost:4000/admin/providers/<name>/keys/<label> -H "$MK" \
-  -d '{"disabled": true, "weight": 5}'
-curl -X POST localhost:4000/admin/providers -H "$MK" \
-  -d '{"name": "openai-backup", "provider": "openai", "keys": [...]}'
+  -d '{"disabled": true, "weight": 5}'             # also reset_status: true to clear cooldown
+curl -X DELETE localhost:4000/admin/providers/<name>/keys/<label> -H "$MK"
 
-# model groups — edit routing/weights live
-curl -X PATCH localhost:4000/admin/model-groups/<name> -H "$MK" -d '{...}'
+# live upstream model ids for a provider (first available key)
+curl localhost:4000/admin/providers/<name>/models -H "$MK"
+
+# model groups — edit routing/weights live, attach deployments
+curl -X PATCH localhost:4000/admin/model-groups/<name> -H "$MK" \
+  -d '{"weights": {"openai-main/gpt-4o": 3}, "strategy": "least-busy"}'
+curl -X POST localhost:4000/admin/model-groups/<name>/deployments -H "$MK" \
+  -d '{"group": "gpt-4o", "provider": "openrouter", "model_id": "openai/gpt-4o", "weight": 1}'
 
 # logs & stats
 curl localhost:4000/admin/logs/requests -H "$MK"     # per-request logs
@@ -328,41 +342,52 @@ Route map:
 
 | Route | Purpose |
 |---|---|
-| `POST /admin/keys/generate` | mint a virtual key (budget/RPM/TPM limits, model allowlist, TTL) |
+| `POST /admin/keys/generate` | mint a virtual key (budget/RPM/TPM limits, model allowlist, TTL, optional `custom_key`) |
 | `GET /admin/keys` | list virtual keys |
-| `PATCH /admin/keys/{id}` | update limits/metadata |
+| `PATCH /admin/keys/{id}` | update limits/models/expiry live (cache evicted immediately) |
 | `POST /admin/keys/{id}/disable` | disable/enable a key |
 | `DELETE /admin/keys/{id}` | revoke a key |
-| `GET /admin/providers` | provider + key-pool status |
-| `POST /admin/providers` | add a provider at runtime |
+| `GET /admin/providers` | provider + key-pool status (health, cooldowns, req/err counts) |
+| `POST /admin/providers` | add a provider account at runtime |
+| `PATCH /admin/providers/{name}` | rename / re-type / change base_url |
+| `DELETE /admin/providers/{name}` | remove a provider (409 while model groups still reference it) |
 | `POST /admin/providers/{name}/keys` | add a key to a pool |
-| `PATCH /admin/providers/{name}/keys/{label}` | patch weight/disabled per label |
-| `GET /admin/models` · `PATCH /admin/model-groups/{name}` | inspect / edit routing live |
-| `GET /admin/logs/requests` · `GET /admin/logs/proxy` | request + proxy logs |
-| `GET /admin/stream` | SSE live tail of log events |
+| `PATCH /admin/providers/{name}/keys/{label}` | patch weight/enabled, or reset cooldown status |
+| `DELETE /admin/providers/{name}/keys/{label}` | remove a pool key |
+| `GET /admin/providers/{name}/models` | list upstream model ids live (first available key) |
+| `GET /admin/models` · `PATCH /admin/model-groups/{name}` | inspect / edit routing + weights live |
+| `POST /admin/model-groups/{name}/deployments` | attach a deployment to a group (creates the group) |
+| `GET /admin/logs/requests` · `GET /admin/logs/proxy` | request logs (DB-backed) + proxy logs (ring buffer) |
+| `GET /admin/stream` | SSE live tail of log events (`Last-Event-ID` replay, keepalive pings) |
 | `GET /admin/stats/overview` · `GET /admin/stats/timeseries` | aggregate + time-bucketed stats |
-| `GET / PUT /admin/alert-rules` | spend/error alert rules |
+| `GET / PUT /admin/alert-rules` | spend/error alert rules (storage; evaluation engine is post-MVP) |
 
-Per-request stats tracked: input / cached / reasoning / output tokens, TPS, TTFT, latency, cost, retry chain, and which provider key served it.
+Per-request stats tracked: input / cached / reasoning / output tokens, TPS, TTFT, latency, cost, cache hit + cache savings, retry chain (per-attempt deployment/provider/key/status), and which provider key served it.
+
+Every admin mutation writes an audit event (`actor`/`action`/`target`/`diff`) to an `audit_logs` table — key lifecycle, provider/pool edits, routing changes.
 
 ## Tests & lint
 
 ```bash
-.venv/bin/python -m pytest tests/ -q                          # all tests (~8s)
+.venv/bin/python -m pytest tests/ -q                          # all tests (219, ~18s)
 .venv/bin/python -m pytest tests/test_codecs.py -q            # single file
 .venv/bin/python -m pytest tests/test_router.py -k cooldown   # single test by name
 
 .venv/bin/ruff check wiwi/ tests/                             # lint (line-length 100)
 ```
 
+The suite mixes unit tests (`respx` HTTP mocks), ASGI end-to-end tests through the full app, and Hypothesis property-based round-trip tests over the dialect ↔ IR codecs.
+
 ## Docs
 
+- `UPDATE.md` — changelog for cross-provider translation fixes (read first for reasoning/thinking, tool_result, OpenRouter issues)
 - `docs/ARCHITECTURE.md` — system design
 - `docs/CORE.md` — handlers + streaming flow
 - `docs/ADMIN.md` — admin UI/API design
 - `docs/MVP.md` — scope + gap register
 - `docs/PLAN.md` — build phases
 - `docs/TECHSTACK.md` — technology choices
+- `docs/STREAMING_PERFORMANCE_RECOVERY.md` — streaming/tool-call/recovery improvement report (proposal)
 
 Docs intentionally run ahead of the implementation in places (handler pipeline, DeltaBus, DB schema, Postgres/Redis backends are specified but not yet built). When docs and code disagree, trust the code — or treat the doc section as the spec for work in progress.
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import orjson
+
 from wiwi.ir import types as ir
 from wiwi.providers.base import ProviderKeyRef
 from wiwi.streaming import deltas as dl
@@ -154,7 +156,7 @@ class AnthropicAdapter:
         return body
 
     def decode_response(self, status: int, body: bytes) -> ir.AssistantTurn:
-        data = json.loads(body)
+        data = orjson.loads(body)
         turn = ir.AssistantTurn(raw=data)
         for block in data.get("content") or []:
             btype = block.get("type")
@@ -194,7 +196,7 @@ class AnthropicAdapter:
 
     def decode_stream_event(self, event: str, data: str) -> list[dl.IRStreamDelta]:
         try:
-            payload = json.loads(data)
+            payload = orjson.loads(data)
         except json.JSONDecodeError:
             return []
         etype = payload.get("type", event)

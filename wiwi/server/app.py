@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 import orjson
 from fastapi import FastAPI, Request
-from fastapi.responses import ORJSONResponse, StreamingResponse
+from fastapi.responses import ORJSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from wiwi.auth.service import AuthService
@@ -103,6 +103,17 @@ async def lifespan(app: FastAPI):
     await state.logs.start()
     yield
     await state.shutdown()
+
+
+def _inject_id(chunk: bytes, event_id: int) -> bytes:
+    """Prepend an SSE ``id:`` line to a complete SSE frame.
+
+    The id line is placed before the first ``event:`` or ``data:`` line,
+    which is valid SSE (id is part of the event block).
+    """
+    id_line = f"id: {event_id}\n".encode()
+    return id_line + chunk
+
 
 def create_app(config: WiwiConfig) -> FastAPI:
     state = AppState(config)
@@ -260,7 +271,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     await stream.aclose()  # release pump resources, if any
                     return _err(e.status, e.etype, e.message, request, surface)
                 it = _stream_response(state_, ctx, encoder_pair, surface,
-                                      stream, first)
+                                      stream, first,
+                                      event_ids=config.router_settings.stream_event_ids)
                 return StreamingResponse(
                     it,
                     media_type="text/event-stream",
@@ -296,38 +308,44 @@ def create_app(config: WiwiConfig) -> FastAPI:
         return orp.ResponsesStreamEncoder(model, req_id), "responses"
 
     async def _stream_response(state_, ctx, encoder_pair, surface,
-                               stream, first=None):
+                               stream, first=None, event_ids=False):
         from wiwi.streaming import deltas as dl
         encoder, style = encoder_pair
         errored = False
+        _seq = 0
         try:
             if first is not None:
                 if isinstance(first, dl.StreamError):
                     errored = True
                     ctx.status = 502
                     ctx.error = WiwiError(502, "api_error", first.message)
+                _seq += 1
                 chunk = encoder.feed(first)
                 if chunk:
-                    yield chunk
+                    yield _inject_id(chunk, _seq) if event_ids else chunk
             async for d in stream:
                 if isinstance(d, dl.StreamError) and not errored:
                     errored = True
                     ctx.status = 502
                     ctx.error = WiwiError(502, "api_error", d.message)
+                _seq += 1
                 chunk = encoder.feed(d)
                 if chunk:
-                    yield chunk
+                    yield _inject_id(chunk, _seq) if event_ids else chunk
             # terminal frames, correct order per dialect:
             if errored:
                 pass  # error frame already emitted by the encoder's feed()
             elif style == "chat":
-                yield encoder.final_frame()          # finish_reason + usage
+                chunk = encoder.final_frame()
+                yield _inject_id(chunk, _seq) if event_ids else chunk
                 yield b"data: [DONE]\n\n"
             elif style == "anthropic":
-                yield encoder.final_frame()          # message_delta w/ usage+stop
+                chunk = encoder.final_frame()
+                yield _inject_id(chunk, _seq) if event_ids else chunk
                 yield b"event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n"
             else:
-                yield encoder._completed()           # response.completed
+                chunk = encoder._completed()
+                yield _inject_id(chunk, _seq) if event_ids else chunk
         finally:
             state_.logs.log_request(build_log_event(ctx))
             _record_tpm_usage(ctx.auth, ctx)
@@ -396,6 +414,17 @@ def create_app(config: WiwiConfig) -> FastAPI:
     async def health():
         return {"status": "ok", "groups": len(app.state.wiwi.router.groups),
                 "providers": len(app.state.wiwi.router.providers)}
+
+    # -- metrics ---------------------------------------------------------------
+    if config.router_settings.prometheus_enabled:
+        from wiwi.server.metrics import render_metrics
+        metrics_path = config.router_settings.prometheus_path
+
+        @app.get(metrics_path)
+        async def prometheus_metrics():
+            events = [e for _, e in state.logs.sse.replay("request", 0)]
+            text = render_metrics(events)
+            return PlainTextResponse(text, media_type="text/plain; version=0.0.4")
 
     # -- admin -------------------------------------------------------------------
     @app.post("/admin/keys/generate")

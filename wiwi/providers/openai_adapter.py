@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import orjson
+
 from wiwi.ir import types as ir
 from wiwi.providers.base import ProviderKeyRef
 from wiwi.streaming import deltas as dl
@@ -172,7 +174,7 @@ class OpenAIAdapter:
 
     # -- response decoding -----------------------------------------------------
     def decode_response(self, status: int, body: bytes) -> ir.AssistantTurn:
-        data = json.loads(body)
+        data = orjson.loads(body)
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message", {})
         turn = ir.AssistantTurn(text=message.get("content") or "", raw=data)
@@ -186,7 +188,12 @@ class OpenAIAdapter:
             try:
                 args = json.loads(raw_args)
             except json.JSONDecodeError:
-                args = {}
+                # Auto-repair truncated JSON instead of dropping to {}.
+                from wiwi.streaming.partial_json import _repair_truncated_json
+                try:
+                    args = json.loads(_repair_truncated_json(raw_args))
+                except json.JSONDecodeError:
+                    args = {}
             turn.tool_calls.append(ir.ToolUsePart(
                 id=tc.get("id", ""), name=tc.get("function", {}).get("name", ""),
                 args=args, raw_args=raw_args))
@@ -206,12 +213,13 @@ class OpenAIAdapter:
 
     def __init__(self) -> None:
         self._open_tool_indices: set[int] = set()
+        self._tool_names: dict[int, str] = {}  # accumulated name fragments per index
 
     def decode_stream_event(self, event: str, data: str) -> list[dl.IRStreamDelta]:
         if data == "[DONE]":
             return [dl.StreamEnd()]
         try:
-            chunk = json.loads(data)
+            chunk = orjson.loads(data)
         except json.JSONDecodeError:
             return []
         out: list[dl.IRStreamDelta] = []
@@ -239,12 +247,20 @@ class OpenAIAdapter:
         for i, tc in enumerate(tool_calls):
             idx = tc.get("index", i)
             fn = tc.get("function") or {}
+            name_fragment = fn.get("name", "")
             if tc.get("id"):
                 # a new tool call opening on the same index closes the previous one
                 if idx in self._open_tool_indices:
                     out.append(dl.ToolCallClose(index=idx))
                 self._open_tool_indices.add(idx)
-                out.append(dl.ToolCallOpen(index=idx, id=tc["id"], name=fn.get("name", "")))
+                # Accumulate name: some providers send the full name on the
+                # first chunk, others fragment it across subsequent deltas.
+                self._tool_names[idx] = name_fragment or ""
+                out.append(dl.ToolCallOpen(index=idx, id=tc["id"],
+                                           name=self._tool_names[idx]))
+            elif name_fragment and idx in self._open_tool_indices:
+                # Name fragment on a subsequent delta (no id): accumulate.
+                self._tool_names[idx] = self._tool_names.get(idx, "") + name_fragment
             if fn.get("arguments"):
                 out.append(dl.ToolCallArgsDelta(index=idx, args_fragment=fn["arguments"]))
         fr = c.get("finish_reason")
@@ -253,6 +269,7 @@ class OpenAIAdapter:
             for open_idx in sorted(self._open_tool_indices):
                 out.append(dl.ToolCallClose(index=open_idx))
             self._open_tool_indices.clear()
+            self._tool_names.clear()
             out.append(dl.Finish({"stop": "stop", "length": "length",
                                   "tool_calls": "tool_call",
                                   "content_filter": "content_filter"}.get(fr, "stop")))

@@ -86,6 +86,25 @@ class RouterSettings(BaseModel):
     model_group_alias: dict[str, str] = Field(default_factory=dict)
     global_rpm: int | None = None
     global_tpm: int | None = None
+    # Streaming resilience
+    stream_idle_timeout_s: float = 30.0  # max seconds between upstream chunks
+    stream_loop_detection: bool = True
+    stream_loop_limit: int = 100  # identical consecutive chunks before abort
+    stream_coalesce: bool = False  # coalesce TextDeltas under backpressure
+    stream_coalesce_max_bytes: int = 8192
+    stream_coalesce_max_ms: float = 50.0
+    # Mid-stream failover: when an upstream dies after content has flowed,
+    # retry on a fallback deployment with the partial output prepended.
+    stream_resume: Literal["off", "content_only", "enabled"] = "off"
+    stream_resume_max_retries: int = 1  # how many mid-stream resume attempts
+    # SSE Last-Event-ID: assign monotonic event ids for client-side resumption.
+    stream_event_ids: bool = False
+    # Client-gone grace drain: on disconnect, keep pumping upstream for
+    # accurate billing. 0 = cancel immediately (current behavior).
+    stream_grace_drain_s: float = 0.0
+    # Prometheus /metrics endpoint
+    prometheus_enabled: bool = False
+    prometheus_path: str = "/metrics"
 
 
 class GeneralSettings(BaseModel):

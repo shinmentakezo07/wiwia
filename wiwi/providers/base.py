@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+import orjson
+
 from wiwi.ir.types import AssistantTurn
 from wiwi.ir.types import Request as IRRequest
 from wiwi.streaming.deltas import IRStreamDelta
@@ -38,7 +40,7 @@ def _extract_error_message(body_text: str) -> str:
     clue about what actually failed, so we drill into known shapes.
     """
     try:
-        data = json.loads(body_text)
+        data = orjson.loads(body_text)
     except (json.JSONDecodeError, ValueError):
         return body_text[:500]
     # OpenAI shape: {"error": {"message": "..."}}

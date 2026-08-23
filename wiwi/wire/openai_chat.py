@@ -49,7 +49,11 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
             try:
                 args = json.loads(raw_args)
             except json.JSONDecodeError:
-                args = {}
+                from wiwi.streaming.partial_json import _repair_truncated_json
+                try:
+                    args = json.loads(_repair_truncated_json(raw_args))
+                except json.JSONDecodeError:
+                    args = {}
             parts.append(ir.ToolUsePart(id=tc.get("id", ""), name=fn.get("name", ""),
                                         args=args, raw_args=raw_args))
         if role == "tool":

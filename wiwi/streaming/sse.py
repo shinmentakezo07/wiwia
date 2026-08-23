@@ -37,10 +37,21 @@ class LineSSEParser:
         return None
 
 
-def sse_frame(event: str, payload: str | bytes) -> bytes:
-    name = f"event: {event}\n" if event else ""
+def sse_frame(event: str, payload: str | bytes,
+              event_id: int | str | None = None) -> bytes:
+    """Build a single SSE frame.
+
+    When *event_id* is provided, an ``id:`` line is included so clients can
+    reconnect with ``Last-Event-ID`` to resume from where they left off.
+    """
+    parts: list[bytes] = []
+    if event_id is not None:
+        parts.append(f"id: {event_id}\n".encode())
+    if event:
+        parts.append(f"event: {event}\n".encode())
     data = payload.encode() if isinstance(payload, str) else payload
-    return name.encode() + b"data: " + data + b"\n\n"
+    parts.append(b"data: " + data + b"\n\n")
+    return b"".join(parts)
 
 
 async def iter_sse_events(lines: AsyncIterator[str]) -> AsyncIterator[tuple[str, str]]:

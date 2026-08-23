@@ -68,7 +68,11 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
             try:
                 args = json.loads(raw_args)
             except json.JSONDecodeError:
-                args = {}
+                from wiwi.streaming.partial_json import _repair_truncated_json
+                try:
+                    args = json.loads(_repair_truncated_json(raw_args))
+                except json.JSONDecodeError:
+                    args = {}
             messages.append(ir.Message(role="assistant", parts=[
                 ir.ToolUsePart(id=item.get("call_id", ""), name=item.get("name", ""),
                                args=args, raw_args=raw_args)]))
