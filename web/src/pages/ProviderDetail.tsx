@@ -5,7 +5,8 @@
 import { useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Plus, RefreshCw, Search, Trash2, X } from "lucide-react";
+import { ArrowLeft, Boxes, Plus, RefreshCw, Search, Server, Sparkles, Trash2, X, Zap } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import {
   addDeployment,
   deleteProvider,
@@ -42,6 +43,24 @@ const STATUS_TONE: Record<PoolKey["status"], "green" | "amber" | "red" | "gray">
   disabled: "gray",
 };
 
+const PROVIDER_ICON: Record<string, LucideIcon> = {
+  openai: Sparkles,
+  anthropic: Boxes,
+  gemini: Zap,
+  "openai-compatible": Server,
+};
+
+function providerIcon(type: string): LucideIcon {
+  return PROVIDER_ICON[type] ?? Server;
+}
+
+const STATUS_DOT: Record<PoolKey["status"], string> = {
+  active: "bg-emerald-400",
+  cooling: "bg-amber-400",
+  invalid: "bg-red-400",
+  disabled: "bg-zinc-600",
+};
+
 // -- key pool ------------------------------------------------------------------
 
 function KeyRow(props: { provider: string; k: PoolKey; onError: (m: string) => void }) {
@@ -63,8 +82,13 @@ function KeyRow(props: { provider: string; k: PoolKey; onError: (m: string) => v
   });
 
   return (
-    <tr>
-      <TD className="font-medium">{props.k.label}</TD>
+    <tr className="group">
+      <TD className="font-medium">
+        <div className="flex items-center gap-2">
+          <span className={`h-1.5 w-1.5 rounded-full ${STATUS_DOT[props.k.status]}`} />
+          {props.k.label}
+        </div>
+      </TD>
       <TD className="font-mono text-[12px] text-[var(--admin-text-dim)]">{props.k.masked}</TD>
       <TD>
         {editingWeight ? (
@@ -519,6 +543,7 @@ export function ProviderDetailPage() {
   });
 
   const p = q.data?.providers.find((x) => x.name === name);
+  const PIcon = p ? providerIcon(p.provider_type) : Server;
 
   if (q.isLoading) return <Spinner />;
   if (!p) {
@@ -539,15 +564,26 @@ export function ProviderDetailPage() {
                   className="text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]">
               <ArrowLeft size={18} />
             </Link>
+            <span className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--admin-border)] bg-white/[0.02]">
+              <PIcon size={15} className="text-[var(--admin-text-muted)]" />
+            </span>
             {p.name}
           </span>
         }
         subtitle={`${p.provider_type} · ${p.base_url || "(default endpoint)"}`}
         right={
           <div className="flex items-center gap-2">
-            <Badge tone={p.healthy ? "green" : "red"}>
-              {p.healthy ? "healthy" : "no healthy keys"}
-            </Badge>
+            <div className="flex items-center gap-1.5 rounded-lg border border-[var(--admin-border)] px-2.5 py-1.5">
+              <span className="relative flex h-2 w-2">
+                {p.healthy && (
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-40" />
+                )}
+                <span className={`relative inline-flex h-2 w-2 rounded-full ${p.healthy ? "bg-emerald-400" : "bg-red-400"}`} />
+              </span>
+              <span className="text-[11px] text-[var(--admin-text-muted)]">
+                {p.healthy ? "healthy" : "no healthy keys"}
+              </span>
+            </div>
             <Button variant="outline" onClick={() => void q.refetch()}>
               <RefreshCw size={14} /> Refresh
             </Button>
@@ -577,7 +613,7 @@ export function ProviderDetailPage() {
           </Button>
         </div>
       </Dialog>
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
+      <div className="admin-stagger grid grid-cols-1 gap-4 xl:grid-cols-3">
         <AccountSettingsCard p={p} onError={setError} />
         <KeyPoolCard p={p} onError={setError} />
         <AddKeysCard provider={p.name} existing={p.keys.length} onError={setError} />

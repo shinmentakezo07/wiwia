@@ -1,11 +1,24 @@
-// Providers page — bento box layout: one card per provider account with
-// aggregate stats (requests, tokens in/out/cached, errors, cost) computed
-// from the request-log ring, plus edit/delete actions and a compact key pool.
+// Providers page — bento box layout with provider-type icons, health
+// indicators, accent stat cells, error-rate bars, and stagger entrance.
 
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowDownToLine,
+  ArrowUpFromLine,
+  Boxes,
+  DollarSign,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Server,
+  Sparkles,
+  Trash2,
+  Zap,
+} from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import {
   addProvider,
   deleteProvider,
@@ -24,7 +37,7 @@ import {
   Input,
   Select,
 } from "@/components/ui";
-import { fmtInt, fmtTokens, fmtUsd } from "@/lib/format";
+import { fmtInt, fmtPct, fmtTokens, fmtUsd } from "@/lib/format";
 
 const STATUS_TONE: Record<PoolKey["status"], "green" | "amber" | "red" | "gray"> = {
   active: "green",
@@ -32,6 +45,17 @@ const STATUS_TONE: Record<PoolKey["status"], "green" | "amber" | "red" | "gray">
   invalid: "red",
   disabled: "gray",
 };
+
+const PROVIDER_ICON: Record<string, LucideIcon> = {
+  openai: Sparkles,
+  anthropic: Boxes,
+  gemini: Zap,
+  "openai-compatible": Server,
+};
+
+function providerIcon(type: string): LucideIcon {
+  return PROVIDER_ICON[type] ?? Server;
+}
 
 // -- per-provider stats aggregation from the request-log ring -------------------
 
@@ -63,6 +87,49 @@ function computeProviderStats(logs: RequestLogEntry[]): Map<string, ProviderStat
   return m;
 }
 
+function HealthDot({ healthy }: { healthy: boolean }) {
+  return (
+    <span className="relative flex h-2 w-2">
+      {healthy && (
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-40" />
+      )}
+      <span
+        className={`relative inline-flex h-2 w-2 rounded-full ${
+          healthy ? "bg-emerald-400" : "bg-red-400"
+        }`}
+      />
+    </span>
+  );
+}
+
+function StatCell(props: {
+  icon: LucideIcon;
+  label: string;
+  value: string;
+  tone?: "danger" | "accent" | "success";
+}) {
+  const Icon = props.icon;
+  const color =
+    props.tone === "danger"
+      ? "text-red-400"
+      : props.tone === "accent"
+        ? "text-blue-400"
+        : props.tone === "success"
+          ? "text-emerald-400"
+          : "text-[var(--admin-text)]";
+  return (
+    <div className="group/cell relative overflow-hidden px-3 py-2.5 transition-colors hover:bg-white/[0.015]">
+      <div className="mb-1 flex items-center gap-1.5">
+        <Icon size={11} className="text-[var(--admin-text-dim)]" />
+        <span className="admin-label">{props.label}</span>
+      </div>
+      <p className={`font-mono text-[15px] font-semibold tabular-nums ${color}`}>
+        {props.value}
+      </p>
+    </div>
+  );
+}
+
 function ProviderCard(props: {
   p: Provider;
   stats: ProviderStats | undefined;
@@ -83,20 +150,30 @@ function ProviderCard(props: {
   const s = props.stats;
   const totalKeys = props.p.keys.length;
   const activeKeys = props.p.keys.filter((k) => k.enabled && k.status === "active").length;
+  const errorRate = s && s.requests > 0 ? s.errors / s.requests : 0;
+  const cacheRate = s && s.tokIn > 0 ? s.tokCached / s.tokIn : 0;
+  const Icon = providerIcon(props.p.provider_type);
 
   return (
     <Card>
+      {/* header */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--admin-border)] px-4 py-3">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2.5">
+          <div className="flex h-7 w-7 items-center justify-center rounded-lg border border-[var(--admin-border)] bg-white/[0.02]">
+            <Icon size={14} className="text-[var(--admin-text-muted)]" />
+          </div>
           <h3 className="text-[14px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
             {props.p.name}
           </h3>
           <Badge tone="blue">{props.p.provider_type}</Badge>
-          <Badge tone={props.p.healthy ? "green" : "red"}>
-            {props.p.healthy ? "healthy" : "no healthy keys"}
-          </Badge>
+          <div className="flex items-center gap-1.5">
+            <HealthDot healthy={props.p.healthy} />
+            <span className="text-[11px] text-[var(--admin-text-muted)]">
+              {props.p.healthy ? "healthy" : "no healthy keys"}
+            </span>
+          </div>
           <Badge tone="gray">
-            {activeKeys}/{totalKeys} keys active
+            {activeKeys}/{totalKeys} keys
           </Badge>
         </div>
         <div className="flex items-center gap-2">
@@ -114,28 +191,74 @@ function ProviderCard(props: {
           </Button>
         </div>
       </div>
-      <div className="px-4 pb-3 pt-2 font-mono text-[11px] text-[var(--admin-text-dim)]">
+
+      {/* base url */}
+      <div className="flex items-center gap-2 px-4 pb-2 pt-2 font-mono text-[11px] text-[var(--admin-text-dim)]">
+        <span className="h-1 w-1 rounded-full bg-[var(--admin-text-dim)]" />
         {props.p.base_url || "(default endpoint)"}
       </div>
+
       {/* bento stats grid */}
-      <div className="grid grid-cols-2 gap-px border-t border-[var(--admin-border)] bg-[var(--admin-border)] sm:grid-cols-3 lg:grid-cols-6">
-        <StatCell label="Requests" value={s ? fmtInt(s.requests) : "—"} />
+      <div className="grid grid-cols-2 divide-x divide-y divide-[var(--admin-border)] border-t border-[var(--admin-border)] sm:grid-cols-3 lg:grid-cols-6 sm:divide-y-0">
+        <StatCell icon={Server} label="Requests" value={s ? fmtInt(s.requests) : "—"} tone="accent" />
         <StatCell
+          icon={AlertTriangle}
           label="Errors"
           value={s ? fmtInt(s.errors) : "—"}
           tone={s && s.errors > 0 ? "danger" : undefined}
         />
-        <StatCell label="Tokens In" value={s ? fmtTokens(s.tokIn) : "—"} />
-        <StatCell label="Tokens Out" value={s ? fmtTokens(s.tokOut) : "—"} />
-        <StatCell label="Cached" value={s ? fmtTokens(s.tokCached) : "—"} />
-        <StatCell label="Cost" value={s ? fmtUsd(s.cost) : "—"} />
+        <StatCell icon={ArrowDownToLine} label="Tokens In" value={s ? fmtTokens(s.tokIn) : "—"} />
+        <StatCell icon={ArrowUpFromLine} label="Tokens Out" value={s ? fmtTokens(s.tokOut) : "—"} />
+        <StatCell
+          icon={Zap}
+          label="Cached"
+          value={s ? fmtTokens(s.tokCached) : "—"}
+          tone={cacheRate > 0.1 ? "success" : undefined}
+        />
+        <StatCell icon={DollarSign} label="Cost" value={s ? fmtUsd(s.cost) : "—"} />
       </div>
+
+      {/* error-rate bar */}
+      {s && s.requests > 0 && (
+        <div className="flex items-center gap-3 px-4 py-2">
+          <span className="admin-label whitespace-nowrap">Error rate</span>
+          <div className="h-1 flex-1 overflow-hidden rounded-full bg-white/[0.04]">
+            <div
+              className={`h-full rounded-full transition-all duration-500 ${
+                errorRate > 0.1
+                  ? "bg-red-400"
+                  : errorRate > 0.03
+                    ? "bg-amber-400"
+                    : "bg-emerald-400"
+              }`}
+              style={{ width: `${Math.max(2, errorRate * 100)}%` }}
+            />
+          </div>
+          <span className="font-mono text-[11px] tabular-nums text-[var(--admin-text-muted)]">
+            {fmtPct(errorRate)}
+          </span>
+        </div>
+      )}
+
       {/* compact key pool preview */}
       {props.p.keys.length > 0 && (
-        <div className="space-y-0.5 px-4 py-3">
+        <div className="space-y-0.5 border-t border-[var(--admin-border)] px-4 py-3">
           {props.p.keys.slice(0, 3).map((k) => (
             <div key={k.label} className="flex items-center justify-between text-[12px]">
-              <span className="font-medium">{k.label}</span>
+              <div className="flex items-center gap-2">
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${
+                    k.status === "active"
+                      ? "bg-emerald-400"
+                      : k.status === "cooling"
+                        ? "bg-amber-400"
+                        : k.status === "invalid"
+                          ? "bg-red-400"
+                          : "bg-zinc-600"
+                  }`}
+                />
+                <span className="font-medium text-[var(--admin-text)]">{k.label}</span>
+              </div>
               <div className="flex items-center gap-2">
                 <Badge tone={STATUS_TONE[k.status]}>{k.status}</Badge>
                 <span className="font-mono tabular-nums text-[var(--admin-text-dim)]">
@@ -178,21 +301,6 @@ function ProviderCard(props: {
   );
 }
 
-function StatCell(props: { label: string; value: string; tone?: "danger" }) {
-  return (
-    <div className="bg-[var(--admin-surface)] px-3 py-2.5">
-      <p className="admin-label mb-0.5">{props.label}</p>
-      <p
-        className={`font-mono text-[15px] tabular-nums ${
-          props.tone === "danger" ? "text-red-400" : "text-[var(--admin-text)]"
-        }`}
-      >
-        {props.value}
-      </p>
-    </div>
-  );
-}
-
 export function ProvidersPage() {
   const qc = useQueryClient();
   const [error, setError] = useState<string | null>(null);
@@ -232,10 +340,18 @@ export function ProvidersPage() {
 
   return (
     <div>
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-2xl font-semibold tracking-[-0.02em] text-[var(--admin-text)]">
-          Providers
-        </h2>
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-2xl font-semibold tracking-[-0.02em] text-[var(--admin-text)]">
+            Providers
+          </h2>
+          {query.data && (
+            <p className="mt-0.5 font-mono text-[11px] text-[var(--admin-text-dim)]">
+              {query.data.providers.length} account{query.data.providers.length === 1 ? "" : "s"} ·{" "}
+              {query.data.providers.reduce((acc, p) => acc + p.keys.length, 0)} total keys
+            </p>
+          )}
+        </div>
         <div className="flex items-center gap-2">
           <Button variant="outline" onClick={() => void qc.invalidateQueries({ queryKey: ["providers"] })}>
             <RefreshCw size={14} /> Refresh
@@ -250,9 +366,18 @@ export function ProvidersPage() {
           <ErrorText>{error}</ErrorText>
         </div>
       )}
-      {query.isLoading && <p className="text-[13px] text-[var(--admin-text-dim)]">Loading providers…</p>}
+      {query.isLoading && (
+        <div className="space-y-4">
+          {[0, 1].map((i) => (
+            <div
+              key={i}
+              className="admin-skeleton h-[180px] rounded-[14px]"
+            />
+          ))}
+        </div>
+      )}
       {query.error && <ErrorText>{query.error.message}</ErrorText>}
-      <div className="space-y-4">
+      <div className="admin-stagger space-y-4">
         {query.data?.providers.map((p) => (
           <ProviderCard
             key={p.name}
