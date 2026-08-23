@@ -132,6 +132,47 @@ class GenParams:
     thinking_budget: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    def effective_reasoning_effort(self) -> str | None:
+        """Return reasoning_effort, deriving it from thinking_budget if not set."""
+        if self.reasoning_effort:
+            return self.reasoning_effort
+        if self.thinking_budget is not None:
+            return thinking_budget_to_effort(self.thinking_budget)
+        return None
+
+    def effective_thinking_budget(self) -> int | None:
+        """Return thinking_budget, deriving it from reasoning_effort if not set."""
+        if self.thinking_budget is not None:
+            return self.thinking_budget
+        if self.reasoning_effort:
+            return effort_to_thinking_budget(self.reasoning_effort)
+        return None
+
+
+# Reasoning effort ↔ thinking budget mapping.
+# Approximate token budgets per effort level. These are conservative defaults;
+# providers that natively support effort levels (OpenAI) use the string directly,
+# while providers that use token budgets (Anthropic) get the mapped value.
+_EFFORT_BUDGETS: dict[str, int] = {
+    "low": 1024,
+    "medium": 8000,
+    "high": 32000,
+}
+
+
+def effort_to_thinking_budget(effort: str) -> int:
+    """Map a reasoning_effort level to a thinking token budget."""
+    return _EFFORT_BUDGETS.get(effort, _EFFORT_BUDGETS["medium"])
+
+
+def thinking_budget_to_effort(budget: int) -> str:
+    """Map a thinking token budget to the nearest reasoning_effort level."""
+    if budget <= 2048:
+        return "low"
+    if budget <= 12000:
+        return "medium"
+    return "high"
+
 
 @dataclass
 class Request:

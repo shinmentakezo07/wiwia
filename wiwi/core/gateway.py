@@ -200,7 +200,8 @@ class Gateway:
                 err = error_from_provider_status(resp.status_code,
                                                  raw.decode(errors="replace"),
                                                  dep.provider.name)
-                dep.provider.on_result(real_key, resp.status_code, err.retry_after)
+                # on_result is called by execute_with_retries' except handler —
+                # don't double-count key errors here.
                 ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
                                  key.label, f"http_{resp.status_code}",
                                  int((time.monotonic() - t0) * 1000))
@@ -353,7 +354,8 @@ def build_log_event(ctx: RequestContext) -> LogEvent:
     stream_secs = ((ctx.last_token_at - ctx.first_token_at)
                    if ctx.first_token_at and ctx.last_token_at else 0.0)
     u = ctx.usage
-    tps = (u.completion_tokens / stream_secs) if stream_secs > 0.05 else 0.0
+    tps = ((u.completion_tokens / stream_secs)
+           if u and stream_secs > 0.05 else 0.0)
     auth = ctx.auth
     evt = LogEvent(
         stream="request", ts=time.time(), request_id=ctx.request_id,

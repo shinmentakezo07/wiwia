@@ -104,6 +104,95 @@ body {
   }
 }
 
+/* -- login page: aurora orbs ------------------------------------------------ */
+.wiwi-aurora {
+  border-radius: 50%;
+  filter: blur(90px);
+  will-change: transform;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .wiwi-aurora {
+    animation: wiwi-drift 20s ease-in-out infinite;
+  }
+}
+@keyframes wiwi-drift {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  33% {
+    transform: translate(40px, -30px) scale(1.12);
+  }
+  66% {
+    transform: translate(-30px, 40px) scale(0.92);
+  }
+}
+
+/* -- login page: film grain noise ------------------------------------------- */
+.wiwi-noise {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  opacity: 0.02;
+}
+
+/* -- login page: hub glow pulse --------------------------------------------- */
+@media (prefers-reduced-motion: no-preference) {
+  .wiwi-hub-pulse {
+    animation: wiwi-hub-glow 3.2s ease-in-out infinite;
+  }
+}
+@keyframes wiwi-hub-glow {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}
+
+/* -- login page: card glow + gradient edge --------------------------------- */
+.wiwi-card-glow {
+  position: relative;
+  box-shadow:
+    0 0 0 1px rgba(135, 87, 247, 0.06),
+    0 24px 70px -20px rgba(0, 0, 0, 0.6),
+    0 0 100px -30px rgba(135, 87, 247, 0.12);
+}
+.wiwi-card-glow::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 10%;
+  right: 10%;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(135, 87, 247, 0.35), transparent);
+  z-index: 1;
+  pointer-events: none;
+}
+
+/* -- login page: button shimmer sweep --------------------------------------- */
+.wiwi-shimmer {
+  position: relative;
+  overflow: hidden;
+}
+.wiwi-shimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 35%, rgba(255, 255, 255, 0.18) 50%, transparent 65%);
+  transform: translateX(-100%);
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .wiwi-shimmer:not(:disabled):hover::after {
+    animation: wiwi-shimmer-sweep 0.7s ease-out;
+  }
+}
+@keyframes wiwi-shimmer-sweep {
+  to {
+    transform: translateX(100%);
+  }
+}
 
 @layer components {
 /* ─── Admin Design System (cloned from the Dra console) ──────────────────────

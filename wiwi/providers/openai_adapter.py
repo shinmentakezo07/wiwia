@@ -88,6 +88,11 @@ class OpenAIAdapter:
             body["parallel_tool_calls"] = g.parallel_tool_calls
         if g.reasoning_effort:
             body["reasoning_effort"] = g.reasoning_effort
+        elif g.thinking_budget:
+            # Client sent thinking_budget (Anthropic dialect) — map to OpenAI reasoning_effort
+            effort = g.effective_reasoning_effort()
+            if effort:
+                body["reasoning_effort"] = effort
         if g.response_format and g.response_format.type != "text":
             rf: dict[str, Any] = {"type": g.response_format.type}
             if g.response_format.json_schema:
@@ -157,6 +162,9 @@ class OpenAIAdapter:
         )
         return turn
 
+    def __init__(self) -> None:
+        self._open_tool_indices: set[int] = set()
+
     def decode_stream_event(self, event: str, data: str) -> list[dl.IRStreamDelta]:
         if data == "[DONE]":
             return [dl.StreamEnd()]
@@ -191,19 +199,18 @@ class OpenAIAdapter:
             fn = tc.get("function") or {}
             if tc.get("id"):
                 # a new tool call opening on the same index closes the previous one
-                if getattr(self, "_open_tool_idx", None) == idx:
+                if idx in self._open_tool_indices:
                     out.append(dl.ToolCallClose(index=idx))
-                self._open_tool_idx = idx
+                self._open_tool_indices.add(idx)
                 out.append(dl.ToolCallOpen(index=idx, id=tc["id"], name=fn.get("name", "")))
             if fn.get("arguments"):
                 out.append(dl.ToolCallArgsDelta(index=idx, args_fragment=fn["arguments"]))
         fr = c.get("finish_reason")
         if fr:
-            # close any still-open tool call before finishing
-            open_idx = getattr(self, "_open_tool_idx", None)
-            if open_idx is not None:
+            # close ALL still-open tool calls before finishing (parallel tools)
+            for open_idx in sorted(self._open_tool_indices):
                 out.append(dl.ToolCallClose(index=open_idx))
-                self._open_tool_idx = None
+            self._open_tool_indices.clear()
             out.append(dl.Finish({"stop": "stop", "length": "length",
                                   "tool_calls": "tool_call",
                                   "content_filter": "content_filter"}.get(fr, "stop")))

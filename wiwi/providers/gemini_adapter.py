@@ -84,6 +84,10 @@ class GeminiAdapter:
             gen["stopSequences"] = g.stop
         if g.response_format and g.response_format.type == "json_object":
             gen["responseMimeType"] = "application/json"
+        # Map reasoning effort to Gemini's thinkingConfig (reasoning token budget)
+        thinking_budget = g.effective_thinking_budget()
+        if thinking_budget is not None:
+            gen["thinkingConfig"] = {"thinkingBudget": thinking_budget}
         if gen:
             body["generationConfig"] = gen
         if req.tools:
@@ -96,6 +100,9 @@ class GeminiAdapter:
 
     def decode_response(self, status: int, body: bytes) -> ir.AssistantTurn:
         data = json.loads(body)
+        # Check for prompt-level blocking (no candidates returned)
+        pf = data.get("promptFeedback") or {}
+        block_reason = pf.get("blockReason")
         cand = (data.get("candidates") or [{}])[0]
         content = cand.get("content") or {}
         turn = ir.AssistantTurn(raw=data)
@@ -107,14 +114,17 @@ class GeminiAdapter:
                 turn.tool_calls.append(ir.ToolUsePart(
                     id=f"call_{fc.get('name', 'x')}_{ti}", name=fc.get("name", ""),
                     args=fc.get("args") or {}))
-        finish = cand.get("finishReason", "STOP")
-        turn.stop_reason = {"STOP": "stop", "MAX_TOKENS": "length",
-                            "SAFETY": "content_filter", "RECITATION": "content_filter",
-                            "BLOCKLIST": "content_filter", "PROHIBITED": "content_filter",
-                            "SPII": "content_filter",
-                            }.get(finish, "stop")
-        if turn.tool_calls:
-            turn.stop_reason = "tool_call"
+        if block_reason:
+            turn.stop_reason = "content_filter"
+        else:
+            finish = cand.get("finishReason", "STOP")
+            turn.stop_reason = {"STOP": "stop", "MAX_TOKENS": "length",
+                                "SAFETY": "content_filter", "RECITATION": "content_filter",
+                                "BLOCKLIST": "content_filter", "PROHIBITED": "content_filter",
+                                "SPII": "content_filter",
+                                }.get(finish, "stop")
+            if turn.tool_calls:
+                turn.stop_reason = "tool_call"
         u = data.get("usageMetadata") or {}
         turn.usage = ir.Usage(
             prompt_tokens=u.get("promptTokenCount", 0),
@@ -130,6 +140,12 @@ class GeminiAdapter:
             payload = json.loads(data)
         except json.JSONDecodeError:
             return []
+        # Gemini sends errors as {"error": {"code": ..., "message": ..., "status": ...}}
+        err = payload.get("error")
+        if isinstance(err, dict):
+            msg = err.get("message", "unknown gemini error")
+            return [dl.StreamError(message=msg, kind="status",
+                                   status=err.get("code"))]
         out: list[dl.IRStreamDelta] = []
         if not self._started:
             out.append(dl.StreamStart(model=""))

@@ -2,14 +2,25 @@
 // summary, and a sortable per-request table with a totals footer.
 
 import { useMemo, useState } from "react";
-import type { CSSProperties } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
+  Activity,
+  ArrowDownToLine,
+  ArrowUpFromLine,
+  Brain,
+  DollarSign,
+  Gauge,
+  Percent,
+  X,
+  Zap,
+} from "lucide-react";
+import {
+  Area,
+  AreaChart,
+  Bar,
+  BarChart,
   CartesianGrid,
   Cell,
-  Legend,
-  Line,
-  LineChart,
   Pie,
   PieChart,
   ResponsiveContainer,
@@ -31,17 +42,19 @@ import {
   Table,
   TD,
 } from "@/components/ui";
-import { fmtDateTime, fmtInt, fmtPct, fmtTime, fmtTokens, fmtUsd, groupBy, mean } from "@/lib/format";
+import {
+  fmtDateTime,
+  fmtInt,
+  fmtPct,
+  fmtTime,
+  fmtTokens,
+  fmtUsd,
+  groupBy,
+  mean,
+} from "@/lib/format";
+import { deltaVsPrevHour, hourlySeries } from "@/lib/dashboard-metrics";
 
-const PIE_COLORS = ["#3b82f6", "#34d399", "#a855f7", "#fbbf24"];
-
-const TOOLTIP_STYLE: CSSProperties = {
-  backgroundColor: "rgba(10,10,10,0.96)",
-  border: "1px solid rgba(255,255,255,0.08)",
-  borderRadius: "10px",
-  fontSize: "12px",
-  color: "#e5e7eb",
-};
+const PIE_COLORS = ["#3b82f6", "#199e70", "#a855f7", "#c98500"];
 
 const RANGE_OPTIONS = [
   { value: "15", label: "Last 15 min" },
@@ -76,6 +89,8 @@ interface UsageTotals {
   tokOut: number;
   cost: number;
   avgTps: number;
+  cacheHits: number;
+  cacheSavings: number;
 }
 
 interface GroupRow {
@@ -90,6 +105,42 @@ interface GroupRow {
 interface ShareSlice {
   name: string;
   value: number;
+  color: string;
+}
+
+type LatencyMetric = "ttft" | "total";
+
+const LATENCY_BUCKETS = [
+  { label: "<100", lo: 0, hi: 100 },
+  { label: "100–250", lo: 100, hi: 250 },
+  { label: "250–500", lo: 250, hi: 500 },
+  { label: "500–1K", lo: 500, hi: 1000 },
+  { label: "1K–2K", lo: 1000, hi: 2000 },
+  { label: "2K–4K", lo: 2000, hi: 4000 },
+  { label: "4K+", lo: 4000, hi: Number.POSITIVE_INFINITY },
+] as const;
+
+const LATENCY_COLORS: Record<LatencyMetric, string> = {
+  ttft: "#3b82f6",
+  total: "#a855f7",
+};
+
+interface LatencyBucket {
+  label: string;
+  count: number;
+}
+
+function latencyBuckets(
+  logs: RequestLogEntry[],
+  metric: LatencyMetric,
+): LatencyBucket[] {
+  return LATENCY_BUCKETS.map((b) => ({
+    label: b.label,
+    count: logs.filter((l) => {
+      const v = metric === "ttft" ? l.ttft_ms : l.latency_ms;
+      return v > 0 && v >= b.lo && v < b.hi;
+    }).length,
+  }));
 }
 
 function groupKeyOf(l: RequestLogEntry, dim: GroupDim): string {
@@ -157,11 +208,38 @@ function SortHeader(props: {
   );
 }
 
+function ChartTooltip(props: {
+  active?: boolean;
+  label?: string | number;
+  payload?: Array<{ name?: string; value?: number | string; color?: string }>;
+  fmt?: (v: number) => string;
+}) {
+  if (!props.active || !props.payload?.length) return null;
+  return (
+    <div className="admin-chart-tooltip">
+      <div className="mb-1 text-[11px] text-[var(--admin-text-muted)]">{props.label}</div>
+      {props.payload.map((p, i) => (
+        <div key={i} className="flex items-center gap-2 leading-5">
+          <span className="h-0.5 w-3 rounded" style={{ backgroundColor: p.color }} />
+          <span className="tt-value">
+            {props.fmt ? props.fmt(Number(p.value)) : String(p.value)}
+          </span>
+          <span className="tt-series">{p.name}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+const NOW_MS_FN = () => Date.now();
+
 export function UsagePage() {
   const [range, setRange] = useState(60);
   const [groupDim, setGroupDim] = useState<GroupDim>("model");
   const [sortKey, setSortKey] = useState<SortKey>("time");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [latencyMetric, setLatencyMetric] = useState<LatencyMetric>("ttft");
+  const [filterGroup, setFilterGroup] = useState<{ dim: GroupDim; name: string } | null>(null);
 
   const overviewQuery = useQuery({
     queryKey: ["overview", range],
@@ -179,11 +257,24 @@ export function UsagePage() {
     refetchInterval: 15_000,
   });
 
-  const logs = useMemo(() => {
+  const allLogs = useMemo(() => {
     const all = logsQuery.data?.logs ?? [];
     const cutoff = Math.floor(Date.now() / 1000) - range * 60;
     return all.filter((l) => l.ts >= cutoff);
   }, [logsQuery.data, range]);
+
+  // The grouped summary is computed from the unfiltered set (it is the filter
+  // control surface); everything else uses this filtered view.
+  const logs = useMemo(() => {
+    if (!filterGroup) return allLogs;
+    return allLogs.filter((l) => groupKeyOf(l, filterGroup.dim) === filterGroup.name);
+  }, [allLogs, filterGroup]);
+
+  const mkPoints = useMemo(
+    () => (vOf: (l: RequestLogEntry) => number) =>
+      logs.map((l) => ({ t: l.ts, v: vOf(l) })),
+    [logs],
+  );
 
   const totals = useMemo<UsageTotals>(() => {
     const tpsValues: number[] = [];
@@ -196,6 +287,8 @@ export function UsagePage() {
       tokOut: 0,
       cost: 0,
       avgTps: 0,
+      cacheHits: 0,
+      cacheSavings: 0,
     };
     for (const l of logs) {
       t.tokIn += l.tok_in;
@@ -203,6 +296,8 @@ export function UsagePage() {
       t.tokReasoning += l.tok_reasoning;
       t.tokOut += l.tok_out;
       t.cost += l.cost;
+      t.cacheSavings += l.cache_savings;
+      if (l.cache_hit) t.cacheHits += 1;
       if (l.status >= 400) t.errors += 1;
       if (l.tps > 0) tpsValues.push(l.tps);
     }
@@ -226,7 +321,7 @@ export function UsagePage() {
 
   const groupRows = useMemo<GroupRow[]>(() => {
     const rows: GroupRow[] = [];
-    for (const [name, rs] of groupBy(logs, (l) => groupKeyOf(l, groupDim))) {
+    for (const [name, rs] of groupBy(allLogs, (l) => groupKeyOf(l, groupDim))) {
       rows.push({
         name,
         requests: rs.length,
@@ -237,7 +332,7 @@ export function UsagePage() {
       });
     }
     return rows.sort((a, b) => b.requests - a.requests);
-  }, [logs, groupDim]);
+  }, [allLogs, groupDim]);
 
   const tpsBuckets = useMemo<TpsBucket[]>(
     () => (tpsQuery.data?.buckets ?? []) as TpsBucket[],
@@ -247,16 +342,54 @@ export function UsagePage() {
   const share = useMemo<ShareSlice[]>(
     () =>
       [
-        { name: "input", value: totals.tokIn },
-        { name: "cached", value: totals.tokCached },
-        { name: "reasoning", value: totals.tokReasoning },
-        { name: "output", value: totals.tokOut },
+        { name: "input", value: totals.tokIn, color: PIE_COLORS[0] },
+        { name: "cached", value: totals.tokCached, color: PIE_COLORS[1] },
+        { name: "reasoning", value: totals.tokReasoning, color: PIE_COLORS[2] },
+        { name: "output", value: totals.tokOut, color: PIE_COLORS[3] },
       ].filter((s) => s.value > 0),
     [totals],
   );
 
+  const latBuckets = useMemo(
+    () => latencyBuckets(logs, latencyMetric),
+    [logs, latencyMetric],
+  );
+
   const totalTokens = totals.tokIn + totals.tokCached + totals.tokReasoning + totals.tokOut;
   const o = overviewQuery.data;
+
+  // prev-hour deltas + sparklines (same approach as Dashboard)
+  const nowMs = NOW_MS_FN();
+  const hourCut = nowMs - 3_600_000;
+  const hourPrevStart = nowMs - 7_200_000;
+  const sumIn = (pts: Array<{ t: number; v: number }>, lo: number, hi: number) =>
+    pts.filter((p) => p.t * 1000 >= lo && p.t * 1000 < hi).reduce((a, p) => a + p.v, 0);
+
+  const reqPts = mkPoints(() => 1);
+  const costPts = mkPoints((l) => l.cost);
+  const errPts = mkPoints((l) => (l.status >= 400 ? 1 : 0));
+  const outPts = mkPoints((l) => l.tok_out);
+  const cachedPts = mkPoints((l) => l.tok_cached);
+  const reasonPts = mkPoints((l) => l.tok_reasoning);
+  const inPts = mkPoints((l) => l.tok_in);
+  const tpsPts = mkPoints((l) => l.tps);
+
+  const reqDelta = deltaVsPrevHour(
+    sumIn(reqPts, hourCut, Number.POSITIVE_INFINITY),
+    sumIn(reqPts, hourPrevStart, hourCut),
+  );
+  const costDelta = deltaVsPrevHour(
+    sumIn(costPts, hourCut, Number.POSITIVE_INFINITY),
+    sumIn(costPts, hourPrevStart, hourCut),
+  );
+  const errDelta = deltaVsPrevHour(
+    sumIn(errPts, hourCut, Number.POSITIVE_INFINITY),
+    sumIn(errPts, hourPrevStart, hourCut),
+  );
+
+  const hasTraffic = totals.requests > 0;
+  const cacheHitRate = totals.requests > 0 ? totals.cacheHits / totals.requests : 0;
+  const errorRate = totals.requests > 0 ? totals.errors / totals.requests : 0;
 
   const onSort = (k: SortKey) => {
     if (k === sortKey) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -266,44 +399,182 @@ export function UsagePage() {
     }
   };
 
+  const toggleGroupFilter = (name: string) => {
+    setFilterGroup((cur) =>
+      cur && cur.dim === groupDim && cur.name === name ? null : { dim: groupDim, name },
+    );
+  };
+
+  const onGroupDimChange = (v: string) => {
+    setGroupDim(v as GroupDim);
+    setFilterGroup(null);
+  };
+
+  const maxGroupReqs = Math.max(1, ...groupRows.map((r) => r.requests));
+  const latColor = LATENCY_COLORS[latencyMetric];
+  const hasLatency = latBuckets.some((b) => b.count > 0);
+
   return (
-    <div>
+    <div
+      style={{
+        opacity: overviewQuery.isFetching && overviewQuery.data ? 0.7 : 1,
+        transition: "opacity 200ms",
+      }}
+    >
       <PageHeader
         title="Usage"
-        subtitle="Per-request usage detail"
+        subtitle={o ? `Per-request detail · last ${o.window_minutes} min` : "Per-request usage detail"}
         right={
-          <Select
-            value={String(range)}
-            onChange={(v) => setRange(Number(v))}
-            options={RANGE_OPTIONS}
-          />
+          <div className="flex items-center gap-2">
+            {filterGroup && (
+              <span className="admin-badge admin-badge-violet">
+                {filterGroup.dim}: {filterGroup.name}
+                <button
+                  type="button"
+                  onClick={() => setFilterGroup(null)}
+                  className="ml-0.5 -mr-0.5 rounded p-0.5 transition-colors hover:bg-white/10"
+                  aria-label="Clear group filter"
+                >
+                  <X size={11} />
+                </button>
+              </span>
+            )}
+            <Select
+              value={String(range)}
+              onChange={(v) => setRange(Number(v))}
+              options={RANGE_OPTIONS}
+            />
+          </div>
         }
       />
 
       {logsQuery.error && <ErrorText>{logsQuery.error.message}</ErrorText>}
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      {/* Hero row: 4 featured stat cards with icons, sparklines, deltas */}
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <StatCard
+          featured
+          icon={Activity}
+          tone="brand"
           label="requests"
           value={fmtInt(totals.requests)}
           sub={o ? `error rate ${fmtPct(o.error_rate)}` : `${fmtInt(totals.errors)} errors`}
+          spark={hourlySeries(reqPts, nowMs)}
+          delta={reqDelta}
+          deltaGoodDir="up"
+          waiting={!hasTraffic}
         />
-        <StatCard label="total tokens" value={fmtTokens(totalTokens)} />
-        <StatCard label="input" value={fmtTokens(totals.tokIn)} />
-        <StatCard label="cached" value={fmtTokens(totals.tokCached)} />
-        <StatCard label="reasoning" value={fmtTokens(totals.tokReasoning)} />
-        <StatCard label="output" value={fmtTokens(totals.tokOut)} />
-        <StatCard label="cost" value={fmtUsd(totals.cost)} />
-        <StatCard label="avg TPS" value={totals.avgTps.toFixed(1)} />
+        <StatCard
+          featured
+          icon={DollarSign}
+          label="spend"
+          value={fmtUsd(totals.cost)}
+          sub={`saved ${fmtUsd(totals.cacheSavings)}`}
+          spark={hourlySeries(costPts, nowMs)}
+          delta={costDelta}
+          waiting={!hasTraffic}
+        />
+        <StatCard
+          featured
+          icon={Percent}
+          tone={cacheHitRate > 0.1 ? "success" : "default"}
+          label="cache hit rate"
+          value={fmtPct(cacheHitRate)}
+          sub={`${fmtInt(totals.cacheHits)} of ${fmtInt(totals.requests)}`}
+          spark={hourlySeries(cachedPts, nowMs)}
+          waiting={!hasTraffic}
+        />
+        <StatCard
+          featured
+          icon={Gauge}
+          label="avg tps"
+          value={totals.avgTps.toFixed(1)}
+          sub={o ? `p95 ${o.tps_p95.toFixed(1)}` : undefined}
+          spark={hourlySeries(tpsPts, nowMs)}
+          waiting={!hasTraffic}
+        />
       </div>
 
+      {/* Secondary stat row: token breakdown */}
+      <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+        <StatCard
+          icon={ArrowDownToLine}
+          label="tokens in"
+          value={fmtTokens(totals.tokIn)}
+          spark={hourlySeries(inPts, nowMs)}
+          waiting={!hasTraffic}
+        />
+        <StatCard
+          icon={Zap}
+          tone={totals.tokCached > 0 ? "success" : "default"}
+          label="cached"
+          value={fmtTokens(totals.tokCached)}
+          sub={`${fmtInt(totals.cacheHits)} hits`}
+          spark={hourlySeries(cachedPts, nowMs)}
+          waiting={!hasTraffic}
+        />
+        <StatCard
+          icon={Brain}
+          label="reasoning"
+          value={fmtTokens(totals.tokReasoning)}
+          spark={hourlySeries(reasonPts, nowMs)}
+          waiting={!hasTraffic}
+        />
+        <StatCard
+          icon={ArrowUpFromLine}
+          label="output"
+          value={fmtTokens(totals.tokOut)}
+          spark={hourlySeries(outPts, nowMs)}
+          waiting={!hasTraffic}
+        />
+        <StatCard
+          icon={Activity}
+          tone={errorRate > 0.05 ? "danger" : "success"}
+          label="errors"
+          value={fmtInt(totals.errors)}
+          sub={fmtPct(errorRate)}
+          spark={hourlySeries(errPts, nowMs)}
+          delta={errDelta}
+          waiting={!hasTraffic}
+        />
+        <StatCard
+          icon={Gauge}
+          label="total tokens"
+          value={fmtTokens(totalTokens)}
+          waiting={!hasTraffic}
+        />
+      </div>
+
+      {/* Charts: TPS area chart + token share donut */}
       <div className="mt-4 grid gap-4 xl:grid-cols-2">
         <Card>
-          <CardHeader title="TPS over time" />
+          <CardHeader
+            title="TPS over time"
+            right={
+              <span className="flex items-center gap-3 text-[11px] text-[var(--admin-text-dim)]">
+                <span className="flex items-center gap-1.5">
+                  <span className="h-0.5 w-3 rounded bg-[#3b82f6]" /> avg
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="h-0.5 w-3 rounded bg-[#a855f7]" /> p95
+                </span>
+              </span>
+            }
+          />
           <div className="h-[260px] p-3">
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={tpsBuckets} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#ffffff" strokeOpacity={0.08} vertical={false} />
+              <AreaChart data={tpsBuckets} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="grad-tps-avg" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.20} />
+                    <stop offset="100%" stopColor="#3b82f6" stopOpacity={0.01} />
+                  </linearGradient>
+                  <linearGradient id="grad-tps-p95" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#a855f7" stopOpacity={0.10} />
+                    <stop offset="100%" stopColor="#a855f7" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#ffffff" strokeOpacity={0.06} vertical={false} />
                 <XAxis
                   dataKey="t"
                   tickFormatter={(t: number) => fmtTime(t)}
@@ -312,77 +583,173 @@ export function UsagePage() {
                   tickLine={false}
                 />
                 <YAxis width={36} tick={{ fontSize: 11, fill: "#6b7280" }} tickLine={false} />
-                <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v) => Number(v).toFixed(1)} />
-                <Legend wrapperStyle={{ fontSize: 12, color: "#9ca3af" }} />
-                <Line
-                  type="monotone"
-                  dataKey="tps_avg"
-                  name="avg tps"
-                  stroke="#3b82f6"
-                  strokeWidth={2}
-                  dot={false}
+                <Tooltip
+                  content={<ChartTooltip fmt={(v) => `${Number(v).toFixed(1)} tok/s`} />}
+                  cursor={{ stroke: "#3b82f6", strokeOpacity: 0.3 }}
                 />
-                <Line
+                <Area
                   type="monotone"
                   dataKey="tps_p95"
-                  name="p95 tps"
+                  name="p95"
                   stroke="#a855f7"
                   strokeWidth={2}
                   strokeDasharray="4 4"
+                  fill="url(#grad-tps-p95)"
+                  fillOpacity={1}
                   dot={false}
+                  activeDot={{ r: 4, strokeWidth: 0 }}
                 />
-              </LineChart>
+                <Area
+                  type="monotone"
+                  dataKey="tps_avg"
+                  name="avg"
+                  stroke="#3b82f6"
+                  strokeWidth={2.5}
+                  fill="url(#grad-tps-avg)"
+                  fillOpacity={1}
+                  dot={false}
+                  activeDot={{ r: 4, strokeWidth: 0 }}
+                />
+              </AreaChart>
             </ResponsiveContainer>
           </div>
         </Card>
 
         <Card>
           <CardHeader title="Token share" />
-          <div className="h-[260px] p-3">
+          <div className="relative h-[260px] p-3">
             {share.length === 0 ? (
               <EmptyState>No tokens recorded in this window.</EmptyState>
             ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie
-                    data={share}
-                    dataKey="value"
-                    nameKey="name"
-                    innerRadius={55}
-                    outerRadius={85}
-                    paddingAngle={2}
-                    stroke="none"
-                  >
-                    {share.map((s, i) => (
-                      <Cell key={s.name} fill={PIE_COLORS[i % PIE_COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <text
-                    x="50%"
-                    y="50%"
-                    textAnchor="middle"
-                    dominantBaseline="middle"
-                    fill="#e5e7eb"
-                    className="text-sm font-semibold"
-                  >
+              <>
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={share}
+                      dataKey="value"
+                      nameKey="name"
+                      innerRadius={55}
+                      outerRadius={85}
+                      paddingAngle={2}
+                      stroke="none"
+                    >
+                      {share.map((s) => (
+                        <Cell key={s.name} fill={s.color} />
+                      ))}
+                    </Pie>
+                    <Tooltip
+                      content={<ChartTooltip fmt={(v) => fmtInt(Number(v))} />}
+                    />
+                  </PieChart>
+                </ResponsiveContainer>
+                {/* center label overlay */}
+                <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+                  <span className="font-mono text-[18px] font-bold tabular-nums text-[var(--admin-text)]">
                     {fmtTokens(totalTokens)}
-                  </text>
-                  <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v) => fmtInt(Number(v))} />
-                  <Legend wrapperStyle={{ fontSize: 12, color: "#9ca3af" }} />
-                </PieChart>
-              </ResponsiveContainer>
+                  </span>
+                  <span className="admin-label mt-1">total tokens</span>
+                </div>
+                {/* custom legend with percentages */}
+                <div className="absolute bottom-3 left-0 right-0 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 px-4">
+                  {share.map((s) => (
+                    <span key={s.name} className="flex items-center gap-1.5 text-[11px] text-[var(--admin-text-muted)]">
+                      <span className="h-0.5 w-3 rounded" style={{ backgroundColor: s.color }} />
+                      {s.name}
+                      <span className="font-mono tabular-nums text-[var(--admin-text-dim)]">
+                        {fmtPct(s.value / totalTokens)}
+                      </span>
+                    </span>
+                  ))}
+                </div>
+              </>
             )}
           </div>
         </Card>
       </div>
 
+      {/* Latency distribution histogram */}
+      <Card className="mt-4">
+        <CardHeader
+          title="Latency distribution"
+          right={
+            <span className="flex items-center gap-2 text-[11px] text-[var(--admin-text-dim)]">
+              <span className="flex items-center gap-1.5">
+                <span
+                  className="h-0.5 w-3 rounded"
+                  style={{ backgroundColor: LATENCY_COLORS.ttft }}
+                />
+                ttft
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span
+                  className="h-0.5 w-3 rounded"
+                  style={{ backgroundColor: LATENCY_COLORS.total }}
+                />
+                total
+              </span>
+              <Select
+                value={latencyMetric}
+                onChange={(v) => setLatencyMetric(v as LatencyMetric)}
+                options={[
+                  { value: "ttft", label: "ttft" },
+                  { value: "total", label: "total latency" },
+                ]}
+              />
+            </span>
+          }
+        />
+        <div className="h-[260px] p-3">
+          {!hasLatency ? (
+            <EmptyState>No latency data in this window.</EmptyState>
+          ) : (
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={latBuckets} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="grad-latency" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={latColor} stopOpacity={0.5} />
+                    <stop offset="100%" stopColor={latColor} stopOpacity={0.08} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#ffffff" strokeOpacity={0.06} vertical={false} />
+                <XAxis
+                  dataKey="label"
+                  tick={{ fontSize: 11, fill: "#6b7280" }}
+                  tickLine={false}
+                />
+                <YAxis
+                  width={36}
+                  allowDecimals={false}
+                  tick={{ fontSize: 11, fill: "#6b7280" }}
+                  tickLine={false}
+                />
+                <Tooltip
+                  content={<ChartTooltip fmt={(v) => `${fmtInt(Number(v))} requests`} />}
+                  cursor={{ fill: `${latColor}0D` }}
+                />
+                <Bar
+                  dataKey="count"
+                  name={latencyMetric === "ttft" ? "ttft" : "latency"}
+                  fill="url(#grad-latency)"
+                  stroke={latColor}
+                  strokeWidth={1}
+                  radius={[4, 4, 0, 0]}
+                  maxBarSize={80}
+                />
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+      </Card>
+
+      {/* Grouped summary with inline bar indicators */}
       <Card className="mt-4">
         <CardHeader
           title="Grouped summary"
+          subtitle="Click a row to filter the charts above"
           right={
             <Select
               value={groupDim}
-              onChange={(v) => setGroupDim(v as GroupDim)}
+              onChange={onGroupDimChange}
               options={[
                 { value: "model", label: "by model" },
                 { value: "key", label: "by key" },
@@ -394,29 +761,73 @@ export function UsagePage() {
         {groupRows.length === 0 ? (
           <EmptyState>No requests in this window.</EmptyState>
         ) : (
-          <Table head={[groupDim, "requests", "tokens", "cost", "avg tps", "errors"]}>
-            {groupRows.map((r) => (
-              <tr key={r.name}>
-                <TD className="font-medium">{r.name}</TD>
-                <TD className="font-mono tabular-nums">{fmtInt(r.requests)}</TD>
-                <TD className="font-mono tabular-nums">{fmtTokens(r.tokens)}</TD>
-                <TD className="font-mono tabular-nums">{fmtUsd(r.cost)}</TD>
-                <TD className="font-mono tabular-nums">{r.avgTps.toFixed(1)}</TD>
-                <TD className={`font-mono tabular-nums ${r.errs > 0 ? "text-red-400" : ""}`}>
-                  {fmtInt(r.errs)}
-                </TD>
-              </tr>
-            ))}
-          </Table>
+          <div className="admin-table">
+            <div className="admin-scroll overflow-x-auto">
+              <table className="w-full text-left">
+                <thead>
+                  <tr>
+                    <th>{groupDim}</th>
+                    <th>distribution</th>
+                    <th>requests</th>
+                    <th>tokens</th>
+                    <th>cost</th>
+                    <th>avg tps</th>
+                    <th>errors</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {groupRows.map((r) => {
+                    const isActive =
+                      filterGroup?.dim === groupDim && filterGroup.name === r.name;
+                    return (
+                      <tr
+                        key={r.name}
+                        onClick={() => toggleGroupFilter(r.name)}
+                        className={`cursor-pointer ${
+                          isActive ? "ring-1 ring-inset ring-violet-500/30" : ""
+                        }`}
+                      >
+                        <td className="font-medium">{r.name}</td>
+                        <td style={{ width: "30%", minWidth: "120px" }}>
+                          <div className="flex items-center gap-2">
+                            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/[0.05]">
+                              <div
+                                className={`h-full rounded-full ${
+                                  isActive
+                                    ? "bg-gradient-to-r from-violet-500/70 to-fuchsia-500/70"
+                                    : "bg-gradient-to-r from-blue-500/60 to-violet-500/60"
+                                }`}
+                                style={{ width: `${(r.requests / maxGroupReqs) * 100}%` }}
+                              />
+                            </div>
+                          </div>
+                        </td>
+                        <td className="font-mono tabular-nums">{fmtInt(r.requests)}</td>
+                        <td className="font-mono tabular-nums">{fmtTokens(r.tokens)}</td>
+                        <td className="font-mono tabular-nums">{fmtUsd(r.cost)}</td>
+                        <td className="font-mono tabular-nums">{r.avgTps.toFixed(1)}</td>
+                        <td className={`font-mono tabular-nums ${r.errs > 0 ? "text-red-400" : ""}`}>
+                          {fmtInt(r.errs)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
         )}
       </Card>
 
+      {/* Requests table */}
       <Card className="mt-4">
         <CardHeader
           title="Requests"
           right={
             <span className="font-mono text-[11px] text-[var(--admin-text-dim)]">
-              {fmtInt(sorted.length)} rows · click a column to sort
+              {fmtInt(sorted.length)} rows · {filterGroup
+                ? `filtered by ${filterGroup.dim}: ${filterGroup.name}`
+                : "click a column to sort"}
             </span>
           }
         />

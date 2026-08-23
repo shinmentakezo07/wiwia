@@ -151,3 +151,120 @@ def test_gemini_function_response_falls_back_to_call_prefix_strip():
     body = GeminiAdapter().encode_request(req, "gemini-2.0-flash", {})
     fr = body["contents"][-1]["parts"][0]["functionResponse"]
     assert fr["name"] == "getwx"
+
+
+# -- reasoning effort cross-provider mapping -----------------------------------
+
+def test_effort_to_thinking_budget_mapping():
+    from wiwi.ir.types import effort_to_thinking_budget, thinking_budget_to_effort
+    assert effort_to_thinking_budget("low") == 1024
+    assert effort_to_thinking_budget("medium") == 8000
+    assert effort_to_thinking_budget("high") == 32000
+    assert thinking_budget_to_effort(1024) == "low"
+    assert thinking_budget_to_effort(5000) == "medium"
+    assert thinking_budget_to_effort(32000) == "high"
+
+
+def test_gen_params_effective_effort():
+    from wiwi.ir.types import GenParams
+    # reasoning_effort set directly
+    g = GenParams(reasoning_effort="high")
+    assert g.effective_reasoning_effort() == "high"
+    assert g.effective_thinking_budget() == 32000
+    # thinking_budget set directly
+    g = GenParams(thinking_budget=1024)
+    assert g.effective_thinking_budget() == 1024
+    assert g.effective_reasoning_effort() == "low"
+    # neither set
+    g = GenParams()
+    assert g.effective_reasoning_effort() is None
+    assert g.effective_thinking_budget() is None
+    # both set: direct value wins
+    g = GenParams(reasoning_effort="low", thinking_budget=32000)
+    assert g.effective_reasoning_effort() == "low"
+    assert g.effective_thinking_budget() == 32000
+
+
+def test_openai_adapter_maps_thinking_budget_to_effort():
+    """Client sent thinking_budget (Anthropic dialect) routed to OpenAI provider."""
+    from wiwi.ir.types import GenParams, Message, Request, TextPart
+    req = Request(model="gpt-4o", messages=[Message(role="user", parts=[TextPart("hi")])],
+                  gen_params=GenParams(thinking_budget=32000))
+    body = OpenAIAdapter().encode_request(req, "o3", {})
+    assert body["reasoning_effort"] == "high"
+
+
+def test_openai_adapter_passes_effort_directly():
+    """Client sent reasoning_effort (OpenAI dialect) routed to OpenAI provider."""
+    from wiwi.ir.types import GenParams, Message, Request, TextPart
+    req = Request(model="o3", messages=[Message(role="user", parts=[TextPart("hi")])],
+                  gen_params=GenParams(reasoning_effort="low"))
+    body = OpenAIAdapter().encode_request(req, "o3", {})
+    assert body["reasoning_effort"] == "low"
+
+
+def test_anthropic_adapter_maps_effort_to_thinking_budget():
+    """Client sent reasoning_effort (OpenAI dialect) routed to Anthropic provider."""
+    from wiwi.ir.types import GenParams, Message, Request, TextPart
+    req = Request(model="claude", messages=[Message(role="user", parts=[TextPart("hi")])],
+                  gen_params=GenParams(reasoning_effort="medium"))
+    body = AnthropicAdapter().encode_request(req, "claude-sonnet-4-20250514", {})
+    assert body["thinking"]["type"] == "enabled"
+    assert body["thinking"]["budget_tokens"] == 8000
+
+
+def test_anthropic_adapter_passes_thinking_budget_directly():
+    """Client sent thinking_budget (Anthropic dialect) routed to Anthropic provider."""
+    from wiwi.ir.types import GenParams, Message, Request, TextPart
+    req = Request(model="claude", messages=[Message(role="user", parts=[TextPart("hi")])],
+                  gen_params=GenParams(thinking_budget=5000))
+    body = AnthropicAdapter().encode_request(req, "claude-sonnet-4-20250514", {})
+    assert body["thinking"]["budget_tokens"] == 5000
+
+
+def test_gemini_adapter_maps_effort_to_thinking_budget():
+    """Client sent reasoning_effort (OpenAI dialect) routed to Gemini provider."""
+    from wiwi.ir.types import GenParams, Message, Request, TextPart
+    req = Request(model="gemini", messages=[Message(role="user", parts=[TextPart("hi")])],
+                  gen_params=GenParams(reasoning_effort="high"))
+    body = GeminiAdapter().encode_request(req, "gemini-2.0-flash", {})
+    assert body["generationConfig"]["thinkingConfig"]["thinkingBudget"] == 32000
+
+
+def test_gemini_adapter_maps_thinking_budget_directly():
+    """Client sent thinking_budget (Anthropic dialect) routed to Gemini provider."""
+    from wiwi.ir.types import GenParams, Message, Request, TextPart
+    req = Request(model="gemini", messages=[Message(role="user", parts=[TextPart("hi")])],
+                  gen_params=GenParams(thinking_budget=1024))
+    body = GeminiAdapter().encode_request(req, "gemini-2.0-flash", {})
+    assert body["generationConfig"]["thinkingConfig"]["thinkingBudget"] == 1024
+
+
+def test_no_reasoning_config_means_no_thinking_key():
+    """No reasoning_effort or thinking_budget → no thinking/reasoning keys in body."""
+    from wiwi.ir.types import GenParams, Message, Request, TextPart
+    req = Request(model="gpt-4o", messages=[Message(role="user", parts=[TextPart("hi")])],
+                  gen_params=GenParams())
+    oai_body = OpenAIAdapter().encode_request(req, "gpt-4o", {})
+    assert "reasoning_effort" not in oai_body
+    ant_body = AnthropicAdapter().encode_request(req, "claude-sonnet-4-20250514", {})
+    assert "thinking" not in ant_body
+    gem_body = GeminiAdapter().encode_request(req, "gemini-2.0-flash", {})
+    assert "thinkingConfig" not in gem_body.get("generationConfig", {})
+
+
+def test_openai_chat_decode_captures_reasoning_effort():
+    """Wire codec captures reasoning_effort from client request into IR."""
+    req = oc.decode_request({"model": "o3", "messages": [{"role": "user",
+                                                          "content": "think"}],
+                             "reasoning_effort": "high"})
+    assert req.gen_params.reasoning_effort == "high"
+
+
+def test_anthropic_decode_captures_thinking_budget():
+    """Wire codec captures thinking.budget_tokens from client request into IR."""
+    from wiwi.wire import anthropic_messages as am
+    req = am.decode_request({"model": "claude-sonnet-4-20250514",
+                             "messages": [{"role": "user", "content": "hi"}],
+                             "thinking": {"type": "enabled", "budget_tokens": 8000}})
+    assert req.gen_params.thinking_budget == 8000

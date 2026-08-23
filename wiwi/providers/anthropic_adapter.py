@@ -115,6 +115,11 @@ class AnthropicAdapter:
             body["stop_sequences"] = g.stop
         if g.thinking_budget:
             body["thinking"] = {"type": "enabled", "budget_tokens": g.thinking_budget}
+        elif g.reasoning_effort:
+            # Client sent reasoning_effort (OpenAI dialect) — map to Anthropic thinking budget
+            budget = g.effective_thinking_budget()
+            if budget:
+                body["thinking"] = {"type": "enabled", "budget_tokens": budget}
         if req.tools:
             body["tools"] = [
                 {"name": t.name, "description": t.description,

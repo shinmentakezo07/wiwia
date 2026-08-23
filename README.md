@@ -188,7 +188,78 @@ wiwi_settings:
 
 All `/admin/*` endpoints require the master key (`Authorization: Bearer …`).
 
-### Web UI
+### Web UI design system
+
+The admin console is a **dark-only** single-page app (React 19 + TypeScript + Vite + Tailwind 4) built on a custom design system. The visual language deliberately echoes developer tools like the Dra console: near-black surfaces, hairline white borders, a blue primary accent with a violet/fuchsia secondary, tiny uppercase mono labels, and tabular numeric values. Source lives in `web/src/`; production build output lands in `wiwi/server/static/` and is served at `/admin/ui`.
+
+#### Color & surface tokens
+
+Defined as CSS custom properties under the `[data-admin]` scope in `web/src/styles.css`:
+
+| Token | Value | Use |
+|---|---|---|
+| `--admin-bg` | `#050505` | App background (near-black) |
+| `--admin-surface` | `#0a0a0a` | Cards, sidebar, tables |
+| `--admin-surface-elevated` | `#0e0e0e` | Dialogs, dropdowns |
+| `--admin-border` | `rgba(255,255,255,0.04)` | Hairline borders |
+| `--admin-border-hover` | `rgba(255,255,255,0.08)` | Hover border state |
+| `--admin-accent` | `#3b82f6` | Primary blue (links, active nav, focus rings) |
+| `--admin-accent-purple` | `#a855f7` | Purple secondary |
+| `--admin-accent-violet` | `#7c3aed` | Violet tertiary |
+| `--admin-success` / `warning` / `danger` | `#34d399` / `#fbbf24` / `#f87171` | Status semantics |
+
+Brand accent (the login page and logo gradient): the `brand-*` Tailwind ramp in `@theme` — an indigo→violet "iris" ramp from `#f3f1ff` (50) to `#291560` (950), with `#8757f7` (500) as the primary brand.
+
+#### Layout shell (`components/Layout.tsx`)
+
+- **Fixed sidebar** (260px, collapses to 72px) on `#0a0a0a`, grouped into four sections: Overview, Traffic, Configuration, Admin. Active item gets a blue left-edge bar + `blue-500/[0.06]` tint; inactive items are `text-muted` with `hover:bg-white/[0.02]`.
+- **Blurred topbar** (`backdrop-filter: blur(12px)` on `rgba(5,5,5,0.75)`) showing page section + title, a live/offline SSE pulse badge, a mono tabular clock, and a Sign out button.
+- **Ambient backdrop**: a fixed layer with a 64px grid at 2% opacity plus three radial color glows (blue top-left, violet bottom-right, purple center) for depth.
+- Content scrolls inside `main.admin-scroll` (thin gradient scrollbar), capped at `max-w-[1400px]`, with a staggered fade-up entrance.
+
+#### Component kit (`components/ui.tsx`)
+
+Reusable primitives all built on the `admin-*` CSS classes:
+
+- `Card` / `CardHeader` / `PageHeader` — `admin-card` surfaces with hairline borders, a gradient top-line on hover, and `admin-stat-highlight` for featured metrics.
+- `Button` — variants: `primary` (blue-tinted soft fill), `ghost`, `danger`, `outline`.
+- `Input` / `Select` / `Field` — `admin-input` with focus ring (`box-shadow: 0 0 0 3px rgba(99,102,241,0.08)`).
+- `Toggle` — switch with blue glow when on.
+- `Badge` — tones: green / red / amber / gray / blue / violet, all uppercase 10px with soft tinted backgrounds.
+- `StatCard` — hero metric with gradient-text value (`admin-stat-value`), optional 12-point sparkline, delta chip (`↑/↓ N% vs prev hour`), and a `waiting` pulse state for zero-traffic.
+- `Table` / `TD` — sticky-header tables with uppercase 10px headers and row hover.
+- `Dialog` — portal modal with overlay fade + dialog lift+blur entrance, Escape to close, click-outside to dismiss.
+- `CopyButton`, `Spinner`, `EmptyState`, `ErrorText`, `ProgressBar`.
+
+#### Login page (`pages/Login.tsx`)
+
+A standalone light/dark screen (the rest of the app is dark-only) centered on a glass card with:
+
+- **Ambient backdrop**: a blueprint grid (`wiwi-grid`, 44px with a radial mask), two drifting aurora orbs (brand violet + fuchsia, 20s `wiwi-drift` loop), a film-grain noise layer, and a central radial bloom.
+- **Premium glass card** (`wiwi-card-glow`): `backdrop-blur-xl` on `white/80` (light) / `zinc-900/70` (dark), with a layered brand-colored box-shadow and a gradient light-line across the top edge.
+- **Signature diagram** (`GatewayDiagram`): an SVG of wiwi's real hub-and-spoke routes — three inbound dialects (chat, responses, messages) converge into the `w` node and fan out to three providers (openai, anthropic, gemini). Inbound paths use a violet gradient stroke with animated dashes (`wiwi-flow`); outbound paths use a fuchsia gradient. The hub has a radial glow halo that breathes (`wiwi-hub-pulse`, 3.2s). Endpoint dots pulse on staggered delays.
+- **Form**: master-key input with key icon, show/hide toggle, mono font, focus ring. Submit button has a gradient fill and a shimmer sweep on hover (`wiwi-shimmer`). Errors trigger a shake animation (`wiwi-shake`).
+- **Trust footer**: lock icon + "Key stays in this browser — checked once against your gateway."
+- All motion is gated behind `@media (prefers-reduced-motion: no-preference)`.
+
+#### Motion language
+
+| Class | Effect | Duration |
+|---|---|---|
+| `admin-stagger` | Children fade-up with 60ms stagger | 0.5s each |
+| `admin-pulse-dot` | Live badge dot scale+opacity pulse | 2s infinite |
+| `admin-skeleton` | Shimmer placeholder | 1.8s infinite |
+| `admin-waiting-pulse` | Zero-traffic stat value breathing | 2.4s infinite |
+| `wiwi-enter` | Login card entrance (translateY + blur) | 0.55s |
+| `wiwi-flow` | Login diagram dash flow | 1.5s linear infinite |
+| `wiwi-aurora` / `wiwi-drift` | Login background orb drift | 20s infinite |
+| `wiwi-hub-pulse` | Login hub glow breathing | 3.2s infinite |
+| `wiwi-shimmer` | Login button hover sweep | 0.7s on hover |
+| `wiwi-shake` | Login error shake | 0.3s |
+
+All animations disable cleanly under `prefers-reduced-motion: reduce`.
+
+### Web UI (running)
 
 Built-in SPA at **`http://localhost:4000/admin/ui`** — login with the master key. Pages: Dashboard, Providers (key pools, add/patch/disable keys), Virtual Keys, Models (edit model groups live), Request Logs, Proxy Logs, Usage, Analytics, Budgets & Alerts, Settings. Live updates via SSE.
 

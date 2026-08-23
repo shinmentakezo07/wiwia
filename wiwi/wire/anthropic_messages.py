@@ -213,6 +213,9 @@ class AnthropicStreamEncoder:
             out.append(self._evt("content_block_delta", {
                 "type": "content_block_delta", "index": self._block_idx - 1,
                 "delta": {"type": "thinking_delta", "thinking": d.text}}))
+            # Preserve signature if both text and signature arrived together
+            if d.signature:
+                self._pending_sig = d.signature
             return b"".join(out)
         if isinstance(d, dl.ToolCallOpen):
             out = self._close_block()
