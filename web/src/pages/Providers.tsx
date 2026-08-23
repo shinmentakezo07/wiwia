@@ -1,18 +1,18 @@
-// Providers page — full implementation: cards per provider account, live pool
-// table with enable/disable + weight editing, add-key and add-provider dialogs.
+// Providers page — bento box layout: one card per provider account with
+// aggregate stats (requests, tokens in/out/cached, errors, cost) computed
+// from the request-log ring, plus edit/delete actions and a compact key pool.
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 import {
   addProvider,
-  addProviderKey,
   deleteProvider,
   getProviders,
-  patchProviderKey,
+  getRequestLogs,
 } from "@/api/client";
-import type { PoolKey, Provider } from "@/api/types";
+import type { PoolKey, Provider, RequestLogEntry } from "@/api/types";
 import {
   Badge,
   Button,
@@ -23,10 +23,8 @@ import {
   Field,
   Input,
   Select,
-  Table,
-  TD,
 } from "@/components/ui";
-import { fmtAgo } from "@/lib/format";
+import { fmtInt, fmtTokens, fmtUsd } from "@/lib/format";
 
 const STATUS_TONE: Record<PoolKey["status"], "green" | "amber" | "red" | "gray"> = {
   active: "green",
@@ -35,95 +33,44 @@ const STATUS_TONE: Record<PoolKey["status"], "green" | "amber" | "red" | "gray">
   disabled: "gray",
 };
 
-function KeyRow(props: { provider: string; k: PoolKey; onError: (m: string) => void }) {
-  const qc = useQueryClient();
-  const [editingWeight, setEditingWeight] = useState(false);
-  const [weight, setWeight] = useState(String(props.k.weight));
+// -- per-provider stats aggregation from the request-log ring -------------------
 
-  const patch = useMutation({
-    mutationFn: (p: { enabled?: boolean; weight?: number }) =>
-      patchProviderKey(props.provider, props.k.label, p),
-    onSuccess: () => void qc.invalidateQueries({ queryKey: ["providers"] }),
-    onError: (e) => props.onError(e.message),
-  });
-
-  return (
-    <tr>
-      <TD className="font-medium">{props.k.label}</TD>
-      <TD className="font-mono text-[12px] text-[var(--admin-text-dim)]">{props.k.masked}</TD>
-      <TD>
-        {editingWeight ? (
-          <form
-            className="flex items-center gap-1"
-            onSubmit={(e) => {
-              e.preventDefault();
-              const w = parseInt(weight, 10);
-              if (Number.isFinite(w) && w >= 1) patch.mutate({ weight: w });
-              setEditingWeight(false);
-            }}
-          >
-            <Input
-              className="h-auto w-16 text-[12px]"
-              type="number"
-              min={1}
-              value={weight}
-              autoFocus
-              onChange={(e) => setWeight(e.target.value)}
-              onBlur={() => setEditingWeight(false)}
-            />
-          </form>
-        ) : (
-          <button
-            className="rounded px-1.5 py-0.5 font-mono tabular-nums text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]"
-            title="Click to edit weight"
-            onClick={() => setEditingWeight(true)}
-          >
-            {props.k.weight}
-          </button>
-        )}
-      </TD>
-      <TD>
-        <Badge tone={STATUS_TONE[props.k.status]}>{props.k.status}</Badge>
-      </TD>
-      <TD className="tabular-nums">
-        {props.k.req_count}
-        {props.k.err_count > 0 && (
-          <span className="ml-1 text-red-400/80">({props.k.err_count} err)</span>
-        )}
-      </TD>
-      <TD className="font-mono text-[12px] text-[var(--admin-text-dim)]">{fmtAgo(props.k.last_used_ts)}</TD>
-      <TD>
-        <Button
-          variant="outline"
-          disabled={patch.isPending}
-          onClick={() => patch.mutate({ enabled: !props.k.enabled })}
-        >
-          {props.k.enabled ? "Disable" : "Enable"}
-        </Button>
-      </TD>
-    </tr>
-  );
+interface ProviderStats {
+  requests: number;
+  errors: number;
+  tokIn: number;
+  tokOut: number;
+  tokCached: number;
+  cost: number;
 }
 
-function ProviderCard(props: { p: Provider; onError: (m: string) => void }) {
-  const [addOpen, setAddOpen] = useState(false);
-  const [label, setLabel] = useState("");
-  const [secret, setSecret] = useState("");
-  const [weight, setWeight] = useState("1");
+function computeProviderStats(logs: RequestLogEntry[]): Map<string, ProviderStats> {
+  const m = new Map<string, ProviderStats>();
+  for (const log of logs) {
+    const p = log.provider;
+    let s = m.get(p);
+    if (!s) {
+      s = { requests: 0, errors: 0, tokIn: 0, tokOut: 0, tokCached: 0, cost: 0 };
+      m.set(p, s);
+    }
+    s.requests += 1;
+    if (log.status >= 400) s.errors += 1;
+    s.tokIn += log.tok_in;
+    s.tokOut += log.tok_out;
+    s.tokCached += log.tok_cached;
+    s.cost += log.cost;
+  }
+  return m;
+}
+
+function ProviderCard(props: {
+  p: Provider;
+  stats: ProviderStats | undefined;
+  onError: (m: string) => void;
+}) {
+  const [delOpen, setDelOpen] = useState(false);
   const qc = useQueryClient();
 
-  const addKey = useMutation({
-    mutationFn: () => addProviderKey(props.p.name, { label, key: secret, weight: parseInt(weight, 10) || 1 }),
-    onSuccess: () => {
-      setAddOpen(false);
-      setLabel("");
-      setSecret("");
-      void qc.invalidateQueries({ queryKey: ["providers"] });
-    },
-    onError: (e) => props.onError(e.message),
-  });
-
-  const [delOpen, setDelOpen] = useState(false);
   const delProvider = useMutation({
     mutationFn: () => deleteProvider(props.p.name),
     onSuccess: () => {
@@ -132,6 +79,10 @@ function ProviderCard(props: { p: Provider; onError: (m: string) => void }) {
     },
     onError: (e) => props.onError(e.message),
   });
+
+  const s = props.stats;
+  const totalKeys = props.p.keys.length;
+  const activeKeys = props.p.keys.filter((k) => k.enabled && k.status === "active").length;
 
   return (
     <Card>
@@ -144,6 +95,9 @@ function ProviderCard(props: { p: Provider; onError: (m: string) => void }) {
           <Badge tone={props.p.healthy ? "green" : "red"}>
             {props.p.healthy ? "healthy" : "no healthy keys"}
           </Badge>
+          <Badge tone="gray">
+            {activeKeys}/{totalKeys} keys active
+          </Badge>
         </div>
         <div className="flex items-center gap-2">
           <Link
@@ -155,9 +109,6 @@ function ProviderCard(props: { p: Provider; onError: (m: string) => void }) {
               <Pencil size={14} /> Edit
             </Button>
           </Link>
-          <Button variant="outline" onClick={() => setAddOpen(true)}>
-            <Plus size={14} /> Add key
-          </Button>
           <Button variant="danger" onClick={() => setDelOpen(true)}>
             <Trash2 size={14} /> Delete
           </Button>
@@ -166,44 +117,44 @@ function ProviderCard(props: { p: Provider; onError: (m: string) => void }) {
       <div className="px-4 pb-3 pt-2 font-mono text-[11px] text-[var(--admin-text-dim)]">
         {props.p.base_url || "(default endpoint)"}
       </div>
-      {props.p.keys.length === 0 ? (
-        <EmptyState>No keys in this pool.</EmptyState>
-      ) : (
-        <Table head={["Label", "Key", "Weight", "Status", "Requests", "Last used", ""]}>
-          {props.p.keys.map((k) => (
-            <KeyRow key={k.label} provider={props.p.name} k={k} onError={props.onError} />
+      {/* bento stats grid */}
+      <div className="grid grid-cols-2 gap-px border-t border-[var(--admin-border)] bg-[var(--admin-border)] sm:grid-cols-3 lg:grid-cols-6">
+        <StatCell label="Requests" value={s ? fmtInt(s.requests) : "—"} />
+        <StatCell
+          label="Errors"
+          value={s ? fmtInt(s.errors) : "—"}
+          tone={s && s.errors > 0 ? "danger" : undefined}
+        />
+        <StatCell label="Tokens In" value={s ? fmtTokens(s.tokIn) : "—"} />
+        <StatCell label="Tokens Out" value={s ? fmtTokens(s.tokOut) : "—"} />
+        <StatCell label="Cached" value={s ? fmtTokens(s.tokCached) : "—"} />
+        <StatCell label="Cost" value={s ? fmtUsd(s.cost) : "—"} />
+      </div>
+      {/* compact key pool preview */}
+      {props.p.keys.length > 0 && (
+        <div className="space-y-0.5 px-4 py-3">
+          {props.p.keys.slice(0, 3).map((k) => (
+            <div key={k.label} className="flex items-center justify-between text-[12px]">
+              <span className="font-medium">{k.label}</span>
+              <div className="flex items-center gap-2">
+                <Badge tone={STATUS_TONE[k.status]}>{k.status}</Badge>
+                <span className="font-mono tabular-nums text-[var(--admin-text-dim)]">
+                  {fmtInt(k.req_count)} reqs
+                </span>
+              </div>
+            </div>
           ))}
-        </Table>
+          {props.p.keys.length > 3 && (
+            <Link
+              to={`/providers/${encodeURIComponent(props.p.name)}`}
+              className="inline-block pt-1 text-[11px] text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]"
+            >
+              +{props.p.keys.length - 3} more…
+            </Link>
+          )}
+        </div>
       )}
 
-      <Dialog open={addOpen} title={`Add key to ${props.p.name}`} onClose={() => setAddOpen(false)}>
-        <form
-          className="space-y-3"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (label.trim() && secret.trim()) addKey.mutate();
-          }}
-        >
-          <Field label="Label">
-            <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="backup" />
-          </Field>
-          <Field label="API key" hint="Stored server-side only; shown masked afterwards.">
-            <Input value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="sk-…" />
-          </Field>
-          <Field label="Weight">
-            <Input type="number" min={1} value={weight} onChange={(e) => setWeight(e.target.value)} />
-          </Field>
-          {addKey.error && <ErrorText>{addKey.error.message}</ErrorText>}
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="ghost" type="button" onClick={() => setAddOpen(false)}>
-              Cancel
-            </Button>
-            <Button type="submit" disabled={!label.trim() || !secret.trim() || addKey.isPending}>
-              Add
-            </Button>
-          </div>
-        </form>
-      </Dialog>
       <Dialog open={delOpen} title={`Delete provider ${props.p.name}?`} onClose={() => setDelOpen(false)}>
         <p className="text-[13px] text-[var(--admin-text-muted)]">
           This removes the account and all its keys from the live pool. If any
@@ -227,6 +178,21 @@ function ProviderCard(props: { p: Provider; onError: (m: string) => void }) {
   );
 }
 
+function StatCell(props: { label: string; value: string; tone?: "danger" }) {
+  return (
+    <div className="bg-[var(--admin-surface)] px-3 py-2.5">
+      <p className="admin-label mb-0.5">{props.label}</p>
+      <p
+        className={`font-mono text-[15px] tabular-nums ${
+          props.tone === "danger" ? "text-red-400" : "text-[var(--admin-text)]"
+        }`}
+      >
+        {props.value}
+      </p>
+    </div>
+  );
+}
+
 export function ProvidersPage() {
   const qc = useQueryClient();
   const [error, setError] = useState<string | null>(null);
@@ -238,6 +204,12 @@ export function ProvidersPage() {
   const [secret, setSecret] = useState("");
 
   const query = useQuery({ queryKey: ["providers"], queryFn: getProviders, refetchInterval: 15_000 });
+  const logsQuery = useQuery({ queryKey: ["request-logs"], queryFn: getRequestLogs, refetchInterval: 15_000 });
+
+  const statsByProvider = useMemo(
+    () => computeProviderStats(logsQuery.data?.logs ?? []),
+    [logsQuery.data],
+  );
 
   const addProvider_ = useMutation({
     mutationFn: () =>
@@ -282,7 +254,12 @@ export function ProvidersPage() {
       {query.error && <ErrorText>{query.error.message}</ErrorText>}
       <div className="space-y-4">
         {query.data?.providers.map((p) => (
-          <ProviderCard key={p.name} p={p} onError={setError} />
+          <ProviderCard
+            key={p.name}
+            p={p}
+            stats={statsByProvider.get(p.name)}
+            onError={setError}
+          />
         ))}
         {query.data && query.data.providers.length === 0 && (
           <Card>
