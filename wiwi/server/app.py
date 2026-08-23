@@ -695,6 +695,61 @@ def create_app(config: WiwiConfig) -> FastAPI:
         await state.logs.log_audit(actor="master", action="provider.delete", target=name)
         return JSONResponse({"deleted": True, "name": name})
 
+    @app.patch("/admin/providers/{name}")
+    async def admin_patch_provider(name: str, request: Request):
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        acct = state.router.providers.get(name)
+        if acct is None:
+            return _err(404, "not_found_error", f"unknown provider '{name}'", request)
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        diff: dict[str, Any] = {}
+        new_name: str | None = None
+        if "name" in body:
+            new_name = str(body["name"]).strip()
+            if not new_name:
+                return _err(400, "invalid_request_error", "name must be non-empty",
+                            request)
+            if new_name != name and new_name in state.router.providers:
+                return _err(409, "invalid_request_error",
+                            f"provider '{new_name}' already exists", request)
+            diff["name"] = new_name
+        if "provider_type" in body:
+            ptype = str(body["provider_type"])
+            if ptype not in ("openai", "anthropic", "gemini", "openai-compatible"):
+                return _err(400, "invalid_request_error",
+                            f"unsupported provider type '{ptype}'", request)
+            acct.provider_type = ptype
+            diff["provider_type"] = ptype
+        if "base_url" in body:
+            base_url = str(_interpolate(body["base_url"])) or ""
+            if not base_url:
+                return _err(400, "invalid_request_error",
+                            "base_url must be non-empty", request)
+            acct.base_url = base_url
+            diff["base_url"] = base_url
+        # apply rename last so identity-based deployment refs stay valid
+        if new_name is not None and new_name != name:
+            acct.name = new_name
+            state.router.providers[new_name] = acct
+            del state.router.providers[name]
+            target = f"{name}→{new_name}"
+        else:
+            target = name
+        await state.logs.log_audit(actor="master", action="provider.update",
+                                   target=target, diff=diff)
+        mono, wall = time.monotonic(), time.time()
+        return JSONResponse({
+            "name": acct.name,
+            "provider_type": acct.provider_type,
+            "base_url": acct.base_url,
+            "healthy": acct.healthy,
+            "keys": [_key_view(k, mono, wall) for k in acct.keys],
+        })
+
     @app.get("/admin/providers/{name}/models")
     async def admin_provider_models(name: str, request: Request):
         """Fetch model ids live from the upstream provider (first available key)."""

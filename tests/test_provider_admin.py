@@ -108,3 +108,51 @@ async def test_delete_provider_unknown(client):
 async def test_delete_provider_requires_admin(client):
     r = await client.delete("/admin/providers/p1")
     assert r.status_code == 401
+
+
+async def test_patch_provider_rename(client):
+    r = await client.patch("/admin/providers/p1", json={"name": "p1-renamed"}, headers=H)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["name"] == "p1-renamed"
+    listing = (await client.get("/admin/providers", headers=H)).json()
+    names = [p["name"] for p in listing["providers"]]
+    assert "p1-renamed" in names
+    assert "p1" not in names
+
+
+async def test_patch_provider_rename_collision(client):
+    # add a second provider first
+    await client.post("/admin/providers", json={
+        "name": "p2", "provider_type": "openai",
+        "label": "a", "key": "sk-x"}, headers=H)
+    r = await client.patch("/admin/providers/p1", json={"name": "p2"}, headers=H)
+    assert r.status_code == 409
+
+
+async def test_patch_provider_change_base_url(client):
+    r = await client.patch("/admin/providers/p1",
+                           json={"base_url": "https://custom.example.com/v1"}, headers=H)
+    assert r.status_code == 200, r.text
+    assert r.json()["base_url"] == "https://custom.example.com/v1"
+
+
+async def test_patch_provider_change_type(client):
+    r = await client.patch("/admin/providers/p1", json={"provider_type": "anthropic"}, headers=H)
+    assert r.status_code == 200, r.text
+    assert r.json()["provider_type"] == "anthropic"
+
+
+async def test_patch_provider_bad_type(client):
+    r = await client.patch("/admin/providers/p1", json={"provider_type": "bogus"}, headers=H)
+    assert r.status_code == 400
+
+
+async def test_patch_provider_unknown(client):
+    r = await client.patch("/admin/providers/nope", json={"name": "x"}, headers=H)
+    assert r.status_code == 404
+
+
+async def test_patch_provider_requires_admin(client):
+    r = await client.patch("/admin/providers/p1", json={"name": "x"})
+    assert r.status_code == 401
