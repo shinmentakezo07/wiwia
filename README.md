@@ -4,6 +4,8 @@ Unified LLM gateway proxy — speak **OpenAI Chat Completions**, **OpenAI Respon
 
 Any surface reaches any provider — Claude Code can be backed by GPT, Codex by Gemini, and responses always come back in the caller's dialect.
 
+Reasoning translates across dialects too: `reasoning_effort` (OpenAI), `thinking.budget_tokens` (Anthropic), and OpenRouter's unified `reasoning` object are all mapped through one canonical IR form (`low`/`medium`/`high`/… ↔ token budgets), and thinking blocks round-trip across providers so multi-turn conversations survive a mid-conversation model switch.
+
 ## How it works
 
 Hub-and-spoke design: every direction goes `dialect → IR → provider`. No pairwise converters — adding an inbound surface is one module in `wiwi/wire/`, adding a provider is one adapter in `wiwi/providers/` plus a line in the registry. Core code never branches on dialect or provider name.
@@ -15,7 +17,7 @@ Client (openai SDK / Codex CLI / Claude Code)
 wiwi/wire/* ──► Canonical IR (wiwi/ir) ──► router (key pools, WRR, retries, cooldowns)
                                                 │
                                                 ▼
-Client ◄── outbound dialect ◄── wire encoder ◄── providers/* (openai · anthropic · gemini · openai-compatible)
+Client ◄── outbound dialect ◄── wire encoder ◄── providers/* (openai · anthropic · gemini · openrouter · openai-compatible)
 ```
 
 ## Project structure
@@ -26,7 +28,7 @@ Client ◄── outbound dialect ◄── wire encoder ◄── providers/* (
 | `wiwi/config.py` | YAML → pydantic models; env interpolation; fail-fast validation |
 | `wiwi/ir/types.py` | Canonical IR: tagged parts, messages, tools, params, usage |
 | `wiwi/wire/` | Inbound codecs: `openai_chat.py`, `openai_responses.py`, `anthropic_messages.py` |
-| `wiwi/providers/` | Outbound adapters: `openai`, `anthropic`, `gemini`, `openai-compatible` + `base.py` protocol |
+| `wiwi/providers/` | Outbound adapters: `openai`, `anthropic`, `gemini`, `openrouter`, `openai-compatible` + `base.py` protocol |
 | `wiwi/router/router.py` | Model groups, key pools (smooth WRR), cooldowns, retries, fallbacks |
 | `wiwi/core/gateway.py` | Surface-agnostic execution engine, pricing, log events |
 | `wiwi/core/context.py` | `RequestContext` — mutable holder threaded through the pipeline |
@@ -93,9 +95,12 @@ uv pip install -e ".[redis]"              # optional: Redis backend
 ```bash
 wiwi --config wiwi.yaml                             # host/port from wiwi_settings
 wiwi -c wiwi.yaml --host 0.0.0.0 --port 4000        # explicit overrides (-c = --config)
+wiwi --reload --reload-dir wiwi                     # dev mode: restart on .py changes
 ```
 
 On startup it prints the listen address plus the number of deployments and providers loaded.
+
+`./start.sh` is a dev convenience wrapper: kills anything on the port, installs web deps, then runs `wiwi` with auto-reload (env knobs: `WIWI_PORT`, `WIWI_RELOAD`, `WIWI_RELOAD_DIRS`).
 
 ### Benchmark
 
@@ -148,10 +153,15 @@ Single LiteLLM-shaped file. **Any string value may be `os.environ/NAME`.**
 ```yaml
 providers:              # named provider accounts, each with a pool of keyed entries
   - name: openai-main
-    provider: openai    # openai | anthropic | gemini | openai-compatible
+    provider: openai    # openai | anthropic | gemini | openrouter | openai-compatible
     keys:
       - {label: main, key: os.environ/OPENAI_API_KEY, weight: 3}
       - {label: backup, key: os.environ/OPENAI_API_KEY_2, weight: 1}
+
+  - name: openrouter          # OpenRouter gets unified reasoning translation
+    provider: openrouter      #   (reasoning_effort/thinking_budget → reasoning{})
+    base_url: https://openrouter.ai/api/v1
+    keys: [{label: main, key: os.environ/OPENROUTER_API_KEY}]
 
   - name: local-ollama
     provider: openai-compatible
@@ -162,22 +172,27 @@ model_list:             # model_name clients request → provider account + nati
   - model_name: gpt-4o
     wiwi_params: {provider: openai-main, model: gpt-4o, weight: 2}
   - model_name: claude-sonnet
+    # per-deployment overrides: max_tokens, rpm, tpm, timeout, extra_headers
     wiwi_params: {provider: anthropic-main, model: claude-sonnet-4-20250514, max_tokens: 8192}
 
 router_settings:
-  routing_strategy: simple-shuffle
+  routing_strategy: simple-shuffle     # simple-shuffle | least-busy | latency-based
   num_retries: 2
   timeout: 120
   allowed_fails: 3
   cooldown_time: 30     # seconds a provider key cools down after failures
+  # global_rpm: 600      # optional gateway-wide sliding-window caps
+  # global_tpm: 200000
   fallbacks:
     claude-sonnet: ["gpt-4o"]
+  # context_window_fallbacks:            # separate table for context-overflow errors
+  #   long-task: ["claude-sonnet"]
   model_group_alias:
     gpt-4: gpt-4o
 
 general_settings:
   master_key: os.environ/WIWI_MASTER_KEY
-  database_url: sqlite+aiosqlite:///wiwi.db
+  database_url: sqlite+aiosqlite:///wiwi.db   # postgres via [pg] extra also works
 
 wiwi_settings:
   drop_params: true     # silently drop params the target provider doesn't support
