@@ -27,7 +27,14 @@ from wiwi.logging_core.subsystem import LoggingSubsystem, encode_sse, public_dic
 from wiwi.providers.base import ProviderKeyRef, WiwiError
 from wiwi.providers.registry import get_adapter
 from wiwi.ratelimit.memory import RateLimiter
-from wiwi.router.router import Deployment, ProviderAccount, ProviderKey, Router, _default_base_url
+from wiwi.router.router import (
+    BUILTIN_PROVIDER_TYPES,
+    Deployment,
+    ProviderAccount,
+    ProviderKey,
+    Router,
+    _default_base_url,
+)
 from wiwi.server import stats as stats_mod
 from wiwi.wire import anthropic_messages as am
 from wiwi.wire import openai_chat as oc
@@ -568,6 +575,19 @@ def create_app(config: WiwiConfig) -> FastAPI:
                             if k.last_used else None,
         }
 
+    @app.get("/admin/provider-catalog")
+    async def admin_provider_catalog(request: Request):
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        configured = {a.provider_type for a in state.router.providers.values()}
+        out = []
+        for p in BUILTIN_PROVIDER_TYPES:
+            entry = {**p, "builtin": True}
+            entry["configured"] = p["provider_type"] in configured
+            out.append(entry)
+        return ORJSONResponse({"providers": out})
+
     @app.get("/admin/providers")
     async def admin_providers(request: Request):
         resp = _require_admin(request)
@@ -688,7 +708,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if name in state.router.providers:
             return _err(409, "invalid_request_error",
                         f"provider '{name}' already exists", request)
-        if ptype not in ("openai", "anthropic", "gemini", "openai-compatible"):
+        if ptype not in ("openai", "anthropic", "gemini", "openrouter",
+                          "openai-compatible"):
             return _err(400, "invalid_request_error",
                         f"unsupported provider type '{ptype}'", request)
         if not base_url:
@@ -749,7 +770,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
             diff["name"] = new_name
         if "provider_type" in body:
             ptype = str(body["provider_type"])
-            if ptype not in ("openai", "anthropic", "gemini", "openai-compatible"):
+            if ptype not in ("openai", "anthropic", "gemini", "openrouter",
+                             "openai-compatible"):
                 return _err(400, "invalid_request_error",
                             f"unsupported provider type '{ptype}'", request)
             acct.provider_type = ptype
@@ -817,7 +839,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         _parse_models_response(acct.provider_type, r.content))
         return ORJSONResponse({"models": [{"id": mid} for mid in models]})
 
-    @app.post("/admin/model-groups/{name}/deployments")
+    @app.post("/admin/model-groups/{name:path}/deployments")
     async def admin_add_deployment(name: str, request: Request):
         """Attach a provider deployment to a model group (creating the group)."""
         resp = _require_admin(request)
@@ -889,7 +911,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                              "aliases": dict(settings.model_group_alias),
                              "strategy": settings.routing_strategy})
 
-    @app.patch("/admin/model-groups/{name}")
+    @app.patch("/admin/model-groups/{name:path}")
     async def admin_patch_model_group(name: str, request: Request):
         resp = _require_admin(request)
         if resp:
@@ -982,6 +1004,31 @@ def create_app(config: WiwiConfig) -> FastAPI:
                                                      max(1, min(minutes, 1440))))
         except ValueError as e:
             return _err(400, "invalid_request_error", str(e), request)
+
+    # -- admin: model pricing -----------------------------------------------------
+    @app.get("/admin/pricing")
+    async def admin_pricing(request: Request):
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        prices = state.cost.prices
+        out: list[dict[str, Any]] = []
+        for model_id, p in sorted(prices.items()):
+            entry: dict[str, Any] = {
+                "model_id": model_id,
+                "input_per_1m": round(p.get("input_cost_per_token", 0) * 1_000_000, 6),
+                "output_per_1m": round(p.get("output_cost_per_token", 0) * 1_000_000, 6),
+            }
+            if "cache_read_input_cost_per_token" in p:
+                entry["cache_read_per_1m"] = round(p["cache_read_input_cost_per_token"] * 1_000_000, 6)
+            if "max_input_tokens" in p:
+                entry["max_input_tokens"] = p["max_input_tokens"]
+            if "max_output_tokens" in p:
+                entry["max_output_tokens"] = p["max_output_tokens"]
+            if "mode" in p:
+                entry["mode"] = p["mode"]
+            out.append(entry)
+        return ORJSONResponse({"models": out})
 
     # -- admin: alert rules (storage only; evaluation engine is post-MVP) ----------
     @app.get("/admin/alert-rules")

@@ -55,7 +55,9 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
 
 import type {
   AlertRule,
+  BuiltinProvider,
   DeploymentInfo,
+  ModelPrice,
   ModelsResponse,
   OverviewStats,
   PoolKey,
@@ -70,6 +72,9 @@ import type {
 
 export const getProviders = () =>
   api<{ providers: Provider[] }>("/admin/providers");
+
+export const getBuiltinProviders = () =>
+  api<{ providers: BuiltinProvider[] }>("/admin/provider-catalog");
 
 export const patchProviderKey = (
   provider: string,
@@ -194,6 +199,9 @@ export const getTimeseries = (metric: TimeseriesMetric, minutes: number) =>
 
 export const getRequestLogs = () =>
   api<{ logs: RequestLogEntry[] }>("/admin/logs/requests");
+
+export const getPricing = () =>
+  api<{ models: ModelPrice[] }>("/admin/pricing");
 
 export const getProxyLogs = () =>
   api<{ logs: ProxyLogEntry[] }>("/admin/logs/proxy");

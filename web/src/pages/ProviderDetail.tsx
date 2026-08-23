@@ -5,7 +5,7 @@
 import { useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Boxes, Plus, RefreshCw, Search, Server, Sparkles, Trash2, X, Zap } from "lucide-react";
+import { ArrowLeft, Boxes, Globe, Plus, RefreshCw, Search, Server, Sparkles, Trash2, X, Zap } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
   addDeployment,
@@ -47,8 +47,17 @@ const PROVIDER_ICON: Record<string, LucideIcon> = {
   openai: Sparkles,
   anthropic: Boxes,
   gemini: Zap,
+  openrouter: Globe,
   "openai-compatible": Server,
 };
+
+const PROVIDER_TYPE_OPTIONS = [
+  { value: "openai", label: "OpenAI" },
+  { value: "anthropic", label: "Anthropic" },
+  { value: "gemini", label: "Gemini" },
+  { value: "openrouter", label: "OpenRouter" },
+  { value: "openai-compatible", label: "OpenAI-compatible URL" },
+];
 
 function providerIcon(type: string): LucideIcon {
   return PROVIDER_ICON[type] ?? Server;
@@ -272,7 +281,6 @@ function ModelPickerCard(props: { p: Provider; onError: (m: string) => void }) {
   const [models, setModels] = useState<string[] | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
   const [filter, setFilter] = useState("");
-  const [group, setGroup] = useState("");
   const [weight, setWeight] = useState("1");
 
   const groupsQuery = useQuery({ queryKey: ["model-groups"], queryFn: getModels });
@@ -300,7 +308,7 @@ function ModelPickerCard(props: { p: Provider; onError: (m: string) => void }) {
   const attach = useMutation({
     mutationFn: async () => {
       for (const mid of selected) {
-        await addDeployment(group.trim(), {
+        await addDeployment(mid, {
           provider: props.p.name,
           model_id: mid,
           weight: Math.max(1, parseInt(weight, 10) || 1),
@@ -323,7 +331,7 @@ function ModelPickerCard(props: { p: Provider; onError: (m: string) => void }) {
     <Card>
       <CardHeader
         title="Model IDs"
-        subtitle="Fetch what this account can serve, pick, attach to a group."
+        subtitle="Fetch what this account can serve, pick, apply."
         right={
           <Button
             variant="outline"
@@ -375,20 +383,7 @@ function ModelPickerCard(props: { p: Provider; onError: (m: string) => void }) {
                     <p className="px-2 py-3 text-[12px] text-[var(--admin-text-dim)]">No matches.</p>
                   )}
                 </div>
-                <div className="grid grid-cols-[1fr_64px] gap-2">
-                  <Field label="Model group">
-                    <Input
-                      value={group}
-                      list="wiwi-model-groups"
-                      placeholder="gpt-4o-mini"
-                      onChange={(e) => setGroup(e.target.value)}
-                    />
-                    <datalist id="wiwi-model-groups">
-                      {(groupsQuery.data?.groups ?? []).map((g) => (
-                        <option key={g.name} value={g.name} />
-                      ))}
-                    </datalist>
-                  </Field>
+                <div className="w-20">
                   <Field label="Weight">
                     <Input type="number" min={1} value={weight}
                            onChange={(e) => setWeight(e.target.value)} />
@@ -399,10 +394,10 @@ function ModelPickerCard(props: { p: Provider; onError: (m: string) => void }) {
                     {selected.length} selected{selected.length > 1 ? " — added as fallback deployments" : ""}
                   </span>
                   <Button
-                    disabled={selected.length === 0 || !group.trim() || attach.isPending}
+                    disabled={selected.length === 0 || attach.isPending}
                     onClick={() => attach.mutate()}
                   >
-                    {attach.isPending ? "Adding…" : `Add ${selected.length || ""} to ${group.trim() || "group"}`}
+                    {attach.isPending ? "Adding…" : `Apply ${selected.length || ""} model${selected.length > 1 ? "s" : ""}`}
                   </Button>
                 </div>
                 {attach.error && <ErrorText>{attach.error.message}</ErrorText>}
@@ -434,13 +429,13 @@ function DeploymentsCard(props: { provider: string }) {
   );
   return (
     <Card>
-      <CardHeader title="Serving groups" right={<Badge tone="blue">{rows.length}</Badge>} />
+      <CardHeader title="Models" right={<Badge tone="blue">{rows.length}</Badge>} />
       {q.isLoading ? (
         <Spinner />
       ) : rows.length === 0 ? (
         <EmptyState>Not referenced by any model group yet.</EmptyState>
       ) : (
-        <Table head={["Group", "Model ID", "Weight", "Ready"]}>
+        <Table head={["Model", "Model ID", "Weight", "Ready"]}>
           {rows.map((d) => (
             <tr key={`${d.group}/${d.model_id}`}>
               <TD className="font-medium">{d.group}</TD>
@@ -501,16 +496,11 @@ function AccountSettingsCard(props: { p: Provider; onError: (m: string) => void 
             <Select
               value={type}
               onChange={setType}
-              options={[
-                { value: "openai", label: "OpenAI" },
-                { value: "anthropic", label: "Anthropic" },
-                { value: "gemini", label: "Gemini" },
-                { value: "openai-compatible", label: "OpenAI-compatible URL" },
-              ]}
+              options={PROVIDER_TYPE_OPTIONS}
             />
           </Field>
         </div>
-        <Field label="Base URL" hint="Optional for openai/anthropic/gemini. Required for compatible URLs.">
+        <Field label="Base URL" hint="Optional for openai/anthropic/gemini/openrouter. Required for compatible URLs.">
           <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://…" />
         </Field>
         {error && <ErrorText>{error}</ErrorText>}

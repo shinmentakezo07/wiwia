@@ -142,10 +142,31 @@ export interface TimeseriesResponse {
   buckets: TokenBucket[] | TpsBucket[];
 }
 
+export interface ModelPrice {
+  model_id: string;
+  input_per_1m: number;
+  output_per_1m: number;
+  cache_read_per_1m?: number;
+  max_input_tokens?: number;
+  max_output_tokens?: number;
+  mode?: string;
+}
+
 export interface AlertRule {
   id: string;
   name?: string;
   webhook_url: string;
   metric: "spend" | "error_rate" | "requests_per_minute";
   threshold: number;
+}
+
+/** A built-in provider type that ships with wiwi (from /admin/provider-catalog). */
+export interface BuiltinProvider {
+  provider_type: string;
+  label: string;
+  default_base_url: string;
+  description: string;
+  builtin: true;
+  /** true if at least one configured account uses this provider type */
+  configured: boolean;
 }

@@ -1,8 +1,8 @@
 // Providers page — bento box layout with provider-type icons, health
 // indicators, accent stat cells, error-rate bars, and stagger entrance.
 
-import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -10,6 +10,8 @@ import {
   ArrowUpFromLine,
   Boxes,
   DollarSign,
+  Globe,
+  Layers,
   Pencil,
   Plus,
   RefreshCw,
@@ -50,8 +52,17 @@ const PROVIDER_ICON: Record<string, LucideIcon> = {
   openai: Sparkles,
   anthropic: Boxes,
   gemini: Zap,
+  openrouter: Globe,
   "openai-compatible": Server,
 };
+
+const PROVIDER_TYPE_OPTIONS = [
+  { value: "openai", label: "OpenAI" },
+  { value: "anthropic", label: "Anthropic" },
+  { value: "gemini", label: "Gemini" },
+  { value: "openrouter", label: "OpenRouter" },
+  { value: "openai-compatible", label: "OpenAI-compatible URL" },
+];
 
 function providerIcon(type: string): LucideIcon {
   return PROVIDER_ICON[type] ?? Server;
@@ -304,12 +315,23 @@ function ProviderCard(props: {
 export function ProvidersPage() {
   const qc = useQueryClient();
   const [error, setError] = useState<string | null>(null);
+  const [searchParams] = useSearchParams();
   const [addOpen, setAddOpen] = useState(false);
   const [name, setName] = useState("");
   const [type, setType] = useState("openai-compatible");
   const [baseUrl, setBaseUrl] = useState("");
   const [label, setLabel] = useState("default");
   const [secret, setSecret] = useState("");
+
+  // Allow deep-linking from the Built-in Providers catalog: ?type=openrouter
+  // pre-selects the provider type and opens the Add dialog.
+  const presetType = searchParams.get("type");
+  useEffect(() => {
+    if (presetType && PROVIDER_TYPE_OPTIONS.some((o) => o.value === presetType)) {
+      setType(presetType);
+      setAddOpen(true);
+    }
+  }, [presetType]);
 
   const query = useQuery({ queryKey: ["providers"], queryFn: getProviders, refetchInterval: 15_000 });
   const logsQuery = useQuery({ queryKey: ["request-logs"], queryFn: getRequestLogs, refetchInterval: 15_000 });
@@ -353,6 +375,11 @@ export function ProvidersPage() {
           )}
         </div>
         <div className="flex items-center gap-2">
+          <Link to="/builtin-providers" className="inline-flex">
+            <Button variant="ghost">
+              <Layers size={14} /> Catalog
+            </Button>
+          </Link>
           <Button variant="outline" onClick={() => void qc.invalidateQueries({ queryKey: ["providers"] })}>
             <RefreshCw size={14} /> Refresh
           </Button>
@@ -408,15 +435,10 @@ export function ProvidersPage() {
             <Select
               value={type}
               onChange={setType}
-              options={[
-                { value: "openai", label: "OpenAI" },
-                { value: "anthropic", label: "Anthropic" },
-                { value: "gemini", label: "Gemini" },
-                { value: "openai-compatible", label: "OpenAI-compatible URL" },
-              ]}
+              options={PROVIDER_TYPE_OPTIONS}
             />
           </Field>
-          <Field label="Base URL" hint="Optional for openai/anthropic/gemini. Required for compatible URLs.">
+          <Field label="Base URL" hint="Optional for openai/anthropic/gemini/openrouter. Required for compatible URLs.">
             <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://…" />
           </Field>
           <Field label="First key label">

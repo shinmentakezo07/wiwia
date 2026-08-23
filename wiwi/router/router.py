@@ -218,7 +218,46 @@ def _default_base_url(provider_type: str) -> str:
         "openai": "https://api.openai.com/v1",
         "anthropic": "https://api.anthropic.com/v1",
         "gemini": "https://generativelanguage.googleapis.com/v1beta",
+        "openrouter": "https://openrouter.ai/api/v1",
     }.get(provider_type, "")
+
+
+# Built-in provider types that ship with wiwi and can be selected by name
+# in the admin UI. Mirrors registry.get_adapter's recognized types.
+BUILTIN_PROVIDER_TYPES: list[dict[str, str]] = [
+    {
+        "provider_type": "openai",
+        "label": "OpenAI",
+        "default_base_url": "https://api.openai.com/v1",
+        "description": "GPT models via the OpenAI Chat Completions API.",
+    },
+    {
+        "provider_type": "anthropic",
+        "label": "Anthropic",
+        "default_base_url": "https://api.anthropic.com/v1",
+        "description": "Claude models via the Anthropic Messages API.",
+    },
+    {
+        "provider_type": "gemini",
+        "label": "Google Gemini",
+        "default_base_url": "https://generativelanguage.googleapis.com/v1beta",
+        "description": "Gemini models via the Google Generative Language API.",
+    },
+    {
+        "provider_type": "openrouter",
+        "label": "OpenRouter",
+        "default_base_url": "https://openrouter.ai/api/v1",
+        "description": "Unified gateway to 100+ models via the OpenRouter API.",
+    },
+    {
+        "provider_type": "openai-compatible",
+        "label": "OpenAI-compatible",
+        "default_base_url": "",
+        "description": "Any endpoint speaking the OpenAI Chat Completions wire format.",
+    },
+]
+
+_RECOGNIZED_PROVIDER_TYPES = {p["provider_type"] for p in BUILTIN_PROVIDER_TYPES}
 
 
 async def execute_with_retries(router: Router, ctx: RequestContext,

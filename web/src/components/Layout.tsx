@@ -8,6 +8,7 @@ import {
   Activity,
   BarChart3,
   BellRing,
+  Boxes,
   ChevronLeft,
   CreditCard,
   Database,
@@ -56,6 +57,7 @@ const NAV_SECTIONS: NavSection[] = [
     title: "Configuration",
     items: [
       { to: "/providers", label: "Providers", icon: Server },
+      { to: "/builtin-providers", label: "Built-in Providers", icon: Boxes },
       { to: "/models", label: "Models", icon: Database },
       { to: "/keys", label: "Virtual Keys", icon: KeyRound },
     ],
@@ -76,6 +78,7 @@ const PAGE_META: Record<string, { title: string; section: string }> = {
   "/usage": { title: "Usage", section: "Traffic" },
   "/analytics": { title: "Analytics", section: "Traffic" },
   "/providers": { title: "Providers", section: "Configuration" },
+  "/builtin-providers": { title: "Built-in Providers", section: "Configuration" },
   "/models": { title: "Models", section: "Configuration" },
   "/keys": { title: "Virtual Keys", section: "Configuration" },
   "/budgets": { title: "Budgets & Alerts", section: "Admin" },
