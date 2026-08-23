@@ -98,6 +98,27 @@ export const addProvider = (body: {
   key: string;
 }) => api<{ name: string }>("/admin/providers", { method: "POST", body: JSON.stringify(body) });
 
+export const deleteProvider = (name: string) =>
+  api<{ deleted: boolean; name: string }>(
+    `/admin/providers/${encodeURIComponent(name)}`,
+    { method: "DELETE" },
+  );
+
+export const patchProvider = (
+  name: string,
+  patch: { name?: string; base_url?: string; provider_type?: string },
+) =>
+  api<Provider>(`/admin/providers/${encodeURIComponent(name)}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+
+export const deleteProviderKey = (provider: string, label: string) =>
+  api<{ deleted: boolean; label: string }>(
+    `/admin/providers/${encodeURIComponent(provider)}/keys/${encodeURIComponent(label)}`,
+    { method: "DELETE" },
+  );
+
 export const getModels = () => api<ModelsResponse>("/admin/models");
 
 export const patchModelGroup = (
