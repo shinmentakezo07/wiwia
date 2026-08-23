@@ -673,6 +673,28 @@ def create_app(config: WiwiConfig) -> FastAPI:
                                    diff={"provider_type": ptype, "base_url": base_url})
         return JSONResponse({"name": name, "provider_type": ptype, "base_url": base_url})
 
+    @app.delete("/admin/providers/{name}")
+    async def admin_delete_provider(name: str, request: Request):
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        acct = state.router.providers.get(name)
+        if acct is None:
+            return _err(404, "not_found_error", f"unknown provider '{name}'", request)
+        # Block if any model group still references this provider.
+        referencing = sorted(
+            gname for gname, deps in state.router.groups.items()
+            if any(d.provider is acct for d in deps)
+        )
+        if referencing:
+            return _err(409, "invalid_request_error",
+                        f"provider still referenced by groups: "
+                        f"{', '.join(referencing)} — remove those deployments first",
+                        request)
+        del state.router.providers[name]
+        await state.logs.log_audit(actor="master", action="provider.delete", target=name)
+        return JSONResponse({"deleted": True, "name": name})
+
     @app.get("/admin/providers/{name}/models")
     async def admin_provider_models(name: str, request: Request):
         """Fetch model ids live from the upstream provider (first available key)."""
