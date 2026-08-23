@@ -4,10 +4,11 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pencil, Plus, RefreshCw } from "lucide-react";
+import { Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 import {
   addProvider,
   addProviderKey,
+  deleteProvider,
   getProviders,
   patchProviderKey,
 } from "@/api/client";
@@ -122,6 +123,16 @@ function ProviderCard(props: { p: Provider; onError: (m: string) => void }) {
     onError: (e) => props.onError(e.message),
   });
 
+  const [delOpen, setDelOpen] = useState(false);
+  const delProvider = useMutation({
+    mutationFn: () => deleteProvider(props.p.name),
+    onSuccess: () => {
+      setDelOpen(false);
+      void qc.invalidateQueries({ queryKey: ["providers"] });
+    },
+    onError: (e) => props.onError(e.message),
+  });
+
   return (
     <Card>
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--admin-border)] px-4 py-3">
@@ -146,6 +157,9 @@ function ProviderCard(props: { p: Provider; onError: (m: string) => void }) {
           </Link>
           <Button variant="outline" onClick={() => setAddOpen(true)}>
             <Plus size={14} /> Add key
+          </Button>
+          <Button variant="danger" onClick={() => setDelOpen(true)}>
+            <Trash2 size={14} /> Delete
           </Button>
         </div>
       </div>
@@ -189,6 +203,25 @@ function ProviderCard(props: { p: Provider; onError: (m: string) => void }) {
             </Button>
           </div>
         </form>
+      </Dialog>
+      <Dialog open={delOpen} title={`Delete provider ${props.p.name}?`} onClose={() => setDelOpen(false)}>
+        <p className="text-[13px] text-[var(--admin-text-muted)]">
+          This removes the account and all its keys from the live pool. If any
+          model group still references it, deletion will be blocked.
+        </p>
+        {delProvider.error && (
+          <div className="mt-3">
+            <ErrorText>{delProvider.error.message}</ErrorText>
+          </div>
+        )}
+        <div className="flex justify-end gap-2 pt-4">
+          <Button variant="ghost" type="button" onClick={() => setDelOpen(false)}>
+            Cancel
+          </Button>
+          <Button variant="danger" disabled={delProvider.isPending} onClick={() => delProvider.mutate()}>
+            Delete
+          </Button>
+        </div>
       </Dialog>
     </Card>
   );
