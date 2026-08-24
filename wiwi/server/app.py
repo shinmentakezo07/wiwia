@@ -168,15 +168,32 @@ class AppState:
     async def init_db(self) -> None:
         import sqlalchemy.ext.asyncio as saa
         # DATABASE_URL env var overrides config; fall back to SQLite if unset.
-        # Supports both "postgresql://..." and "postgres://..." (SQLAlchemy
-        # normalizes the latter).  For serverless Postgres (Neon, Supabase),
+        # Normalize postgres:// and postgresql:// to postgresql+asyncpg:// so
+        # the async driver (asyncpg) is always used.  Translate psycopg2-style
+        # query params (sslmode) to asyncpg equivalents (ssl) since asyncpg
+        # doesn't understand sslmode.  For serverless Postgres (Neon, Supabase),
         # pool parameters are tuned for short-lived connections.
         url = (os.environ.get("DATABASE_URL")
                or self.config.general_settings.database_url
                or "sqlite+aiosqlite:///wiwi.db")
         if url.startswith("sqlite:///"):
             url = url.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
-        is_pg = url.startswith(("postgresql://", "postgresql+asyncpg://", "postgres://"))
+        if url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql+asyncpg://", 1)
+        elif url.startswith("postgresql://"):
+            url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        if url.startswith("postgresql+asyncpg://"):
+            import urllib.parse as _up
+            parts = _up.urlparse(url)
+            query = dict(_up.parse_qsl(parts.query))
+            # asyncpg uses ssl=require instead of sslmode=require
+            if "sslmode" in query:
+                query["ssl"] = query.pop("sslmode")
+            # channel_binding is not understood by asyncpg; drop it (Neon
+            # enforces it server-side when sslmode=require anyway)
+            query.pop("channel_binding", None)
+            url = _up.urlunparse(parts._replace(query=_up.urlencode(query)))
+        is_pg = url.startswith("postgresql+asyncpg://")
         engine_kwargs: dict[str, Any] = {"url": url}
         if is_pg:
             engine_kwargs.update(

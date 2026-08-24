@@ -16,9 +16,10 @@ services:
   wiwi:
     build: .
     ports: ["4000:4000"]
+    env_file: [.env]
     environment:
       WIWI_MASTER_KEY: ${WIWI_MASTER_KEY:-sk-wiwi-master-change-me}
-      DATABASE_URL: postgresql+asyncpg://wiwi:wiwi@postgres:5432/wiwi
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://wiwi:wiwi@postgres:5432/wiwi}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
