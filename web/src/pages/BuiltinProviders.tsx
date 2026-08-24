@@ -4,18 +4,7 @@
 
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import {
-  ArrowRight,
-  Boxes,
-  ExternalLink,
-  Globe,
-  Plus,
-  RefreshCw,
-  Server,
-  Sparkles,
-  Zap,
-} from "lucide-react";
-import type { LucideIcon } from "lucide-react";
+import { ArrowRight, ExternalLink, Plus, RefreshCw, Server } from "lucide-react";
 import { getBuiltinProviders, getProviders } from "@/api/client";
 import type { BuiltinProvider, Provider } from "@/api/types";
 import {
@@ -28,23 +17,23 @@ import {
   Spinner,
 } from "@/components/ui";
 
-const PROVIDER_ICON: Record<string, LucideIcon> = {
-  openai: Sparkles,
-  anthropic: Boxes,
-  gemini: Zap,
-  openrouter: Globe,
-  "openai-compatible": Server,
+const PROVIDER_LOGO: Record<string, string> = {
+  openai: "/logos/openai.png",
+  anthropic: "/logos/anthropic.png",
+  gemini: "/logos/gemini.png",
+  openrouter: "/logos/openrouter.png",
+  "openai-compatible": "/logos/openai-compatible.png",
 };
 
-function providerIcon(type: string): LucideIcon {
-  return PROVIDER_ICON[type] ?? Server;
+function providerLogo(type: string): string | null {
+  return PROVIDER_LOGO[type] ?? null;
 }
 
 function ProviderCatalogCard(props: {
   p: BuiltinProvider;
   configuredAccounts: Provider[];
 }) {
-  const Icon = providerIcon(props.p.provider_type);
+  const logo = providerLogo(props.p.provider_type);
   const accounts = props.configuredAccounts;
   const accountCount = accounts.length;
   const totalKeys = accounts.reduce((acc, a) => acc + a.keys.length, 0);
@@ -55,7 +44,11 @@ function ProviderCatalogCard(props: {
       {/* header */}
       <div className="flex items-start gap-3 border-b border-[var(--admin-border)] px-5 py-4">
         <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[var(--admin-border)] bg-white/[0.02]">
-          <Icon size={16} className="text-[var(--admin-text-muted)]" />
+          {logo ? (
+            <img src={logo} alt={props.p.label} className="h-5 w-5 object-contain" />
+          ) : (
+            <Server size={16} className="text-[var(--admin-text-muted)]" />
+          )}
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">

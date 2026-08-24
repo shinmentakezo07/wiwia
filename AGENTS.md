@@ -6,7 +6,18 @@
 
 | Path | Role |
 |---|---|
-| `wiwi/` | Backend source: `wire/` (inbound codecs), `providers/` (outbound adapters), `core/` (engine), `router/`, `auth/`, `server/`, `config.py` |
+| `wiwi/` | Backend source (subpackages below) |
+| `wire/` | Inbound codecs (OpenAI Chat, OpenAI Responses/Codex, Anthropic Messages) |
+| `providers/` | Outbound adapters (`<provider>_adapter.py`) |
+| `core/` | Engine: gateway, request context, auth, rate limiting |
+| `ir/` | Internal representation (canonical request/response types) |
+| `streaming/` | `IRStreamDelta` taxonomy — the contract between adapters and encoders |
+| `router/` | Key pools, weighted round-robin, retries, cooldowns, fallbacks |
+| `auth/` | Virtual keys, budgets, rate limits |
+| `cost/` | Token/cost calculation |
+| `ratelimit/` | Rate limit enforcement |
+| `logging_core/` | Structured logging (structlog) |
+| `server/` | FastAPI app, admin API, stats rollups, static SPA serving |
 | `web/` | Admin UI (React 19 + TypeScript + Vite + Tailwind 4) |
 | `tests/` | Pytest suite, thematic regression files |
 | `docs/` | Design specs (intentionally ahead of implementation) |
@@ -23,8 +34,10 @@ wiwi --config wiwi.yaml                    # run gateway (default :4000)
 .venv/bin/ruff check wiwi/ tests/           # lint — ruff is the only gate
 cd web && bun install && bun run dev        # admin UI dev server
 cd web && bun run build                     # build to wiwi/server/static/
-docker compose up --build                   # containerized run
+docker compose up --build                   # containerized run (Postgres default)
 ```
+
+Database: SQLite by default (`wiwi.db`); Postgres in Docker via `DATABASE_URL`. Set `DATABASE_URL=postgresql+asyncpg://...` to switch.
 
 ## Coding Style & Naming Conventions
 
