@@ -99,3 +99,67 @@ async def test_read_overview_empty(db):
     assert ov["tok_in"] == 0
     assert ov["tps_avg"] == 0.0
     assert ov["tps_p95"] == 0.0
+
+
+async def test_read_timeseries_tokens(db):
+    now = time.time()
+    # Two events 1 hour apart, bucket_seconds=3600
+    events = [
+        _evt(now - 3000, tok_in=100, tok_cached=40, tok_reasoning=10, tok_out=50),
+        _evt(now - 600, tok_in=200, tok_cached=8, tok_reasoning=2, tok_out=7),
+    ]
+    await _seed(db, events)
+    ts = await db.read_timeseries(3600, "tokens", 0)  # all-time
+    assert ts["bucket_seconds"] == 3600
+    assert ts["metric"] == "tokens"
+    assert len(ts["buckets"]) >= 1
+    # Both events should fall in the same hourly bucket (within the same hour)
+    total_in = sum(b["tok_in"] for b in ts["buckets"])
+    total_out = sum(b["tok_out"] for b in ts["buckets"])
+    assert total_in == 300
+    assert total_out == 57
+
+
+async def test_read_timeseries_tps(db):
+    # Use explicit timestamps within a single hour bucket so the assertion is
+    # deterministic regardless of the wall-clock position within the hour.
+    base = 3_600_000  # divisible by 3600 -> hour-aligned bucket boundary
+    events = [
+        _evt(base + 100, tps=80.0, tok_out=50),
+        _evt(base + 200, tps=40.0, tok_out=7),
+    ]
+    await _seed(db, events)
+    ts = await db.read_timeseries(3600, "tps", 0)
+    assert ts["bucket_seconds"] == 3600
+    assert ts["metric"] == "tps"
+    # Both in same bucket: avg = (80+40)/2 = 60, p95 (max approximation) = 80
+    non_empty = [b for b in ts["buckets"] if b["tps_avg"] > 0]
+    assert len(non_empty) == 1
+    assert non_empty[0]["tps_avg"] == 60.0
+    assert non_empty[0]["tps_p95"] == 80.0  # approximated as max(tps) in bucket
+
+
+async def test_read_timeseries_unsupported_metric_raises(db):
+    now = time.time()
+    await _seed(db, [_evt(now - 30, tok_in=10, tok_out=5)])
+    with pytest.raises(ValueError):
+        await db.read_timeseries(60, "cost", 0)
+
+
+async def test_read_timeseries_filtered_by_time(db):
+    now = time.time()
+    events = [
+        _evt(now - 600, tok_in=100, tok_out=50),   # within 60 min
+        _evt(now - 9999, tok_in=999, tok_out=999),  # outside 60 min
+    ]
+    await _seed(db, events)
+    ts = await db.read_timeseries(60, "tokens", 60)  # 1-min buckets, last 60 min
+    total_in = sum(b["tok_in"] for b in ts["buckets"])
+    assert total_in == 100
+    assert sum(b["tok_out"] for b in ts["buckets"]) == 50
+
+
+async def test_read_timeseries_empty(db):
+    ts = await db.read_timeseries(3600, "tokens", 0)
+    assert ts["bucket_seconds"] == 3600
+    assert ts["buckets"] == []

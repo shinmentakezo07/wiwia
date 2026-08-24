@@ -12,7 +12,7 @@ import orjson
 import sqlalchemy as sa
 
 from wiwi.logging_core.events import LogEvent
-from wiwi.server.stats import _p95
+from wiwi.server.stats import VALID_METRICS, _p95
 
 REQUEST_DDL = """
 CREATE TABLE IF NOT EXISTS request_logs (
@@ -224,3 +224,62 @@ class DBSink:
             "cost": round(row.cost or 0, 6),
             "cache_savings": round(row.cache_savings or 0, 6),
         }
+
+    async def read_timeseries(self, bucket_seconds: int, metric: str,
+                              minutes: int) -> dict:
+        """DB-backed timeseries with the same dict shape as stats.timeseries().
+
+        minutes == 0 means all-time (no ts cutoff).
+        For metric="tps", tps_p95 is approximated as max(tps) in the bucket.
+        """
+        if metric not in VALID_METRICS:
+            raise ValueError(f"unsupported metric {metric!r}")
+
+        now = time.time()
+        params: dict = {}
+        where_ts = ""
+        if minutes > 0:
+            cutoff = now - minutes * 60
+            params["cutoff"] = cutoff
+            where_ts = "WHERE ts >= :cutoff"
+
+        # bucket_start aligns the in-memory n_buckets grid; the SQL bucket
+        # boundary is computed from each event's own ts (offset-free) so that
+        # FLOOR-style grouping is correct regardless of ts position relative to
+        # bucket_start (CAST(... AS INTEGER) truncates toward zero, which would
+        # mis-bucket events with ts < bucket_start).
+        bucket_start = int(now // bucket_seconds) * bucket_seconds
+        if minutes > 0:
+            n_buckets = max(1, minutes * 60 // bucket_seconds)
+            bucket_start = bucket_start - (n_buckets - 1) * bucket_seconds
+
+        async with self.engine.connect() as conn:
+            rows = (await conn.execute(sa.text(f"""
+                SELECT CAST(ts AS INTEGER) - (CAST(ts AS INTEGER) % :bs) AS bucket_t,
+                       SUM(tok_in) AS tok_in,
+                       SUM(tok_cached) AS tok_cached,
+                       SUM(tok_reasoning) AS tok_reasoning,
+                       SUM(tok_out) AS tok_out,
+                       SUM(CASE WHEN tps > 0 THEN tps ELSE 0 END) AS tps_sum,
+                       COUNT(CASE WHEN tps > 0 THEN 1 END) AS tps_count,
+                       MAX(CASE WHEN tps > 0 THEN tps ELSE 0 END) AS tps_max
+                FROM request_logs
+                {where_ts}
+                GROUP BY bucket_t
+                ORDER BY bucket_t
+            """), {**params, "bs": bucket_seconds})).all()
+
+        if metric == "tokens":
+            buckets = [
+                {"t": r.bucket_t, "tok_in": r.tok_in or 0, "tok_cached": r.tok_cached or 0,
+                 "tok_reasoning": r.tok_reasoning or 0, "tok_out": r.tok_out or 0}
+                for r in rows
+            ]
+        else:
+            buckets = [
+                {"t": r.bucket_t,
+                 "tps_avg": round(r.tps_sum / r.tps_count, 2) if r.tps_count else 0.0,
+                 "tps_p95": round(r.tps_max or 0.0, 2)}
+                for r in rows
+            ]
+        return {"bucket_seconds": bucket_seconds, "metric": metric, "buckets": buckets}
