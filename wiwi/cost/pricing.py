@@ -29,7 +29,7 @@ class CostEngine:
 
     def cost(self, model_id: str, prompt_tokens: int, completion_tokens: int,
              cached_tokens: int = 0) -> float:
-        p = self.prices.get(model_id) or self.prices.get(model_id.split("/")[-1])
+        p = self._lookup(model_id)
         if not p:
             return 0.0
         uncached_prompt = max(0, prompt_tokens - cached_tokens)
@@ -40,6 +40,29 @@ class CostEngine:
             + completion_tokens * p["output_cost_per_token"]
         )
         return round(total, 8)
+
+    def _lookup(self, model_id: str) -> dict | None:
+        """Try multiple lookup strategies for a model's pricing entry.
+
+        The gateway calls cost() with ``f"{provider_type}/{model_id}"`` (e.g.
+        ``"openrouter/anthropic/claude-sonnet-4-20250514"``).  The pricing
+        table keys on the bare model id (e.g. ``"claude-sonnet-4-20250514"``).
+        Try in order: the full key, the key without the provider-type prefix,
+        then each successive slash-trimmed tail.
+        """
+        p = self.prices.get(model_id)
+        if p:
+            return p
+        # Try progressively shorter slash-trimmed tails. For
+        # "openrouter/anthropic/claude-sonnet-4-20250514" this tries:
+        #   "anthropic/claude-sonnet-4-20250514", then "claude-sonnet-4-20250514".
+        parts = model_id.split("/")
+        for i in range(1, len(parts)):
+            tail = "/".join(parts[i:])
+            p = self.prices.get(tail)
+            if p:
+                return p
+        return None
 
 
 def estimate_tokens(text: str, model: str | None = None) -> int:

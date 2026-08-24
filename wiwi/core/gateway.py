@@ -490,7 +490,7 @@ class Gateway:
 
     def _cache_savings(self, model_key: str, u: ir.Usage) -> float:
         """Dollars saved by provider-side prompt caching at this model's rates."""
-        p = self.cost.prices.get(model_key) or self.cost.prices.get(model_key.split("/")[-1])
+        p = self.cost._lookup(model_key)
         if not p or u.cached_tokens <= 0:
             return 0.0
         input_rate = p["input_cost_per_token"]

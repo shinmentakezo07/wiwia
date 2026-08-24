@@ -34,6 +34,36 @@ def test_cost_engine():
     assert ce.cost("unknown-model", 100, 100) == 0.0
 
 
+def test_cost_lookup_strips_provider_prefix():
+    """The gateway calls cost() with f'{provider_type}/{model_id}'.
+    For nested model IDs like 'openrouter/anthropic/claude-sonnet-4-20250514',
+    the lookup must find the pricing entry keyed on 'claude-sonnet-4-20250514'."""
+    ce = CostEngine()
+    # Built-in table has 'claude-sonnet-4-20250514'
+    c = ce.cost("anthropic/claude-sonnet-4-20250514", 1000, 500)
+    assert c > 0
+    # Two-level prefix: openrouter wraps anthropic
+    c2 = ce.cost("openrouter/anthropic/claude-sonnet-4-20250514", 1000, 500)
+    assert abs(c - c2) < 1e-9
+
+
+def test_cost_lookup_glm_nested_id():
+    """Model 'zai/glm-5.2' arriving as 'openai-compatible/zai/glm-5.2'
+    must find the pricing entry keyed on 'glm-5.2'."""
+    ce = CostEngine()
+    c = ce.cost("openai-compatible/zai/glm-5.2", 1000, 500)
+    assert c > 0
+    # Also works with just the model id
+    c2 = ce.cost("zai/glm-5.2", 1000, 500)
+    assert abs(c - c2) < 1e-9
+
+
+def test_cost_lookup_unknown_returns_zero():
+    ce = CostEngine()
+    assert ce.cost("openai-compatible/unknown-model", 100, 100) == 0.0
+    assert ce.cost("openrouter/unknown/org/model", 100, 100) == 0.0
+
+
 def test_cost_cached_discount():
     ce = CostEngine()
     ce.register("m", input_per_token=0.000001, output_per_token=0.000001,
