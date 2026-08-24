@@ -1,9 +1,28 @@
 // Request logs — ring-backed table with client-side filters, optional SSE live
-// tail, and a detail dialog with full metadata + retry-chain breakdown.
+// tail, and a slide-in detail drawer with sectioned metadata + retry-chain.
 
 import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { Inbox } from "lucide-react";
+import {
+  ArrowLeftRight,
+  Brain,
+  Clock,
+  Copy,
+  Check,
+  Cpu,
+  DollarSign,
+  Gauge,
+  Hash,
+  Inbox,
+  Layers,
+  MessageSquare,
+  Repeat,
+  Server,
+  Timer,
+  Wrench,
+  Zap,
+  X,
+} from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getRequestLogs } from "@/api/client";
 import { useAdminStream } from "@/api/stream";
@@ -11,8 +30,7 @@ import type { Attempt, RequestLogEntry } from "@/api/types";
 import {
   Badge,
   Card,
-  CopyButton,
-  Dialog,
+  Drawer,
   EmptyState,
   ErrorText,
   PageHeader,
@@ -87,32 +105,94 @@ function distinctOptions(
   return [{ value: "all", label: allLabel }, ...ordered.map((v) => ({ value: v, label: v }))];
 }
 
-function StatTile(props: { label: string; value: string; accent?: boolean }) {
+// ---------------------------------------------------------------------------
+// Detail drawer sub-components
+// ---------------------------------------------------------------------------
+
+/** A compact metric pill with icon, label, and mono value. */
+function MetricPill(props: {
+  icon: ReactNode;
+  label: string;
+  value: string;
+  dim?: boolean;
+}) {
   return (
-    <div
-      className={`rounded-[10px] border px-3 py-2.5 ${
-        props.accent
-          ? "border-blue-400/[0.14] bg-blue-500/[0.05]"
-          : "border-[var(--admin-border)] bg-white/[0.02]"
-      }`}
-    >
-      <p className="admin-label mb-1.5 text-[9px]">{props.label}</p>
-      <p className="font-mono text-[15px] font-semibold tabular-nums leading-none text-[var(--admin-text)]">
+    <div className={`admin-metric-pill ${props.dim ? "opacity-50" : ""}`}>
+      <span className="admin-metric-pill-label">{props.label}</span>
+      <span className="flex items-center gap-1.5">
+        <span className="text-[var(--admin-text-dim)]" aria-hidden>
+          {props.icon}
+        </span>
         {props.value}
-      </p>
+      </span>
     </div>
+  );
+}
+
+/** A labelled metadata row used in the "Request details" section. */
+function DetailRow(props: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex items-baseline gap-3 py-1.5">
+      <span className="w-[130px] shrink-0 text-[11px] font-medium text-[var(--admin-text-dim)]">
+        {props.label}
+      </span>
+      <span className="min-w-0 flex-1 break-words text-[13px] text-[var(--admin-text)]">
+        {props.children}
+      </span>
+    </div>
+  );
+}
+
+/** A sectioned block with a header and body, used inside the drawer. */
+function DetailSection(props: {
+  title: string;
+  icon: ReactNode;
+  children: ReactNode;
+  right?: ReactNode;
+}) {
+  return (
+    <section className="admin-detail-section">
+      <header className="admin-detail-section-head flex items-center justify-between">
+        <span className="flex items-center gap-2 text-[12px] font-semibold text-[var(--admin-text)]">
+          <span className="text-[var(--admin-text-dim)]" aria-hidden>
+            {props.icon}
+          </span>
+          {props.title}
+        </span>
+        {props.right}
+      </header>
+      <div className="px-3.5 py-2.5">{props.children}</div>
+    </section>
+  );
+}
+
+/** Inline copy button — icon-only, minimal footprint inside the drawer. */
+function InlineCopy(props: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={async () => {
+        await navigator.clipboard.writeText(props.text);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      }}
+      className="shrink-0 rounded-md p-1 text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)]"
+      aria-label="Copy"
+    >
+      {copied ? <Check size={13} /> : <Copy size={13} />}
+    </button>
   );
 }
 
 function RetryChain(props: { attempts: Attempt[] }) {
   const steps = props.attempts;
   return (
-    <div className="border-t border-[var(--admin-border)] pt-3.5">
-      <h4 className="admin-label mb-2.5">Retry chain</h4>
+    <div className="px-3.5 py-3">
       {steps.length <= 1 ? (
-        <p className="text-[12px] text-[var(--admin-text-dim)]">single attempt · no retries</p>
+        <p className="text-[12px] text-[var(--admin-text-dim)]">Single attempt · no retries</p>
       ) : (
-        <ol className="ml-1 space-y-2.5 border-l border-[var(--admin-border)] pl-4">
+        <ol className="ml-1 space-y-3 border-l border-[var(--admin-border)] pl-4">
           {steps.map((a, i) => {
             const ok = a.status === "ok";
             return (
@@ -142,14 +222,236 @@ function RetryChain(props: { attempts: Attempt[] }) {
   );
 }
 
-function Meta(props: { label: string; children: ReactNode }) {
+/** Pretty-printed messages from a request body (OpenAI/Anthropic-shaped). */
+function PrettyMessages(props: { body: RequestLogEntry["request_body"] }) {
+  const body = props.body;
+  if (!body || typeof body !== "object") return null;
+  const messages = (body as Record<string, unknown>).messages;
+  if (!Array.isArray(messages)) return null;
   return (
-    <>
-      <dt className="admin-label pt-1">{props.label}</dt>
-      <dd className="min-w-0 break-words text-[13px] text-[var(--admin-text)]">{props.children}</dd>
-    </>
+    <div className="space-y-2">
+      {messages.map((msg, i) => {
+        if (typeof msg !== "object" || msg === null) return null;
+        const m = msg as Record<string, unknown>;
+        const role = String(m.role ?? "unknown");
+        let content = "";
+        const c = m.content;
+        if (typeof c === "string") {
+          content = c;
+        } else if (Array.isArray(c)) {
+          content = c
+            .map((p) => {
+              if (typeof p === "string") return p;
+              if (typeof p === "object" && p !== null) {
+                const part = p as Record<string, unknown>;
+                if (typeof part.text === "string") return part.text;
+                if (part.type === "image_url") return "[image]";
+                return `[${String(part.type ?? "part")}]`;
+              }
+              return "";
+            })
+            .join("\n");
+        }
+        const roleTone: Record<string, string> = {
+          user: "text-blue-400",
+          assistant: "text-emerald-400",
+          system: "text-amber-400",
+          tool: "text-violet-400",
+        };
+        return (
+          <div
+            key={i}
+            className="rounded-lg border border-[var(--admin-border)] bg-white/[0.02] p-2.5"
+          >
+            <div className="mb-1 flex items-center gap-1.5">
+              <span className={`text-[11px] font-semibold uppercase tracking-wide ${roleTone[role] ?? "text-zinc-400"}`}>
+                {role}
+              </span>
+            </div>
+            <p className="whitespace-pre-wrap break-words font-mono text-[12px] leading-relaxed text-[var(--admin-text-muted)]">
+              {content || "(empty)"}
+            </p>
+          </div>
+        );
+      })}
+    </div>
   );
 }
+
+/** Pretty-printed response content (text, thinking, tool calls). */
+function PrettyResponse(props: { resp: Record<string, unknown> }) {
+  const r = props.resp;
+  const text = typeof r.text === "string" ? r.text : "";
+  const thinking = Array.isArray(r.thinking) ? r.thinking : [];
+  const toolCalls = Array.isArray(r.tool_calls) ? r.tool_calls : [];
+  return (
+    <div className="space-y-2">
+      {thinking.length > 0 && (
+        <div className="rounded-lg border border-violet-500/15 bg-violet-500/[0.04] p-2.5">
+          <div className="mb-1 flex items-center gap-1.5">
+            <Brain size={12} className="text-violet-400" />
+            <span className="text-[11px] font-semibold uppercase tracking-wide text-violet-400">Thinking</span>
+          </div>
+          <p className="whitespace-pre-wrap break-words font-mono text-[12px] leading-relaxed text-violet-300/80">
+            {thinking.map((t) => (typeof t === "object" && t !== null ? String((t as Record<string, unknown>).text ?? "") : "")).join("\n")}
+          </p>
+        </div>
+      )}
+      {text && (
+        <div className="rounded-lg border border-emerald-500/15 bg-emerald-500/[0.04] p-2.5">
+          <div className="mb-1 flex items-center gap-1.5">
+            <MessageSquare size={12} className="text-emerald-400" />
+            <span className="text-[11px] font-semibold uppercase tracking-wide text-emerald-400">Response</span>
+          </div>
+          <p className="whitespace-pre-wrap break-words font-mono text-[12px] leading-relaxed text-[var(--admin-text-muted)]">
+            {text}
+          </p>
+        </div>
+      )}
+      {toolCalls.length > 0 && (
+        <div className="space-y-1.5">
+          {toolCalls.map((tc, i) => {
+            const call = typeof tc === "object" && tc !== null ? tc as Record<string, unknown> : {};
+            const args = call.arguments;
+            const argsStr = typeof args === "string" ? args : JSON.stringify(args, null, 2);
+            return (
+              <div key={i} className="rounded-lg border border-blue-500/15 bg-blue-500/[0.04] p-2.5">
+                <div className="mb-1 flex items-center gap-1.5">
+                  <Wrench size={12} className="text-blue-400" />
+                  <span className="font-mono text-[11px] font-semibold text-blue-400">{String(call.name ?? "tool")}</span>
+                  <span className="font-mono text-[10px] text-[var(--admin-text-dim)]">({String(call.id ?? "")})</span>
+                </div>
+                <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-[var(--admin-text-muted)]">
+                  {argsStr}
+                </pre>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {!text && thinking.length === 0 && toolCalls.length === 0 && (
+        <p className="py-3 text-center text-[12px] italic text-[var(--admin-text-dim)]">
+          No response content captured
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** Tabbed Request/Response viewer with pretty and JSON modes. */
+function PromptResponseSection(props: { log: RequestLogEntry }) {
+  const { log } = props;
+  const [tab, setTab] = useState<"request" | "response">("request");
+  const [mode, setMode] = useState<"pretty" | "json">("pretty");
+
+  const hasRequest = log.request_body != null;
+  const hasResponse = log.response_body != null;
+
+  if (!hasRequest && !hasResponse) {
+    return (
+      <DetailSection title="Request & Response" icon={<ArrowLeftRight size={13} />}>
+        <div className="py-4 text-center">
+          <p className="text-[12px] text-[var(--admin-text-dim)]">
+            Prompt logging is disabled.
+          </p>
+          <p className="mt-1 text-[11px] text-[var(--admin-text-dim)]">
+            Enable <code className="rounded bg-white/[0.04] px-1 py-0.5 font-mono text-[10px]">store_prompts_in_spend_logs</code> in wiwi.yaml to capture request/response content.
+          </p>
+        </div>
+      </DetailSection>
+    );
+  }
+
+  const activeTab = tab === "request" && !hasRequest ? "response" : tab;
+
+  return (
+    <DetailSection
+      title="Request & Response"
+      icon={<ArrowLeftRight size={13} />}
+      right={
+        <div className="flex items-center gap-1">
+          {hasRequest && hasResponse && (
+            <div className="flex rounded-md border border-[var(--admin-border)] p-0.5">
+              <button
+                type="button"
+                onClick={() => setTab("request")}
+                className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                  activeTab === "request"
+                    ? "bg-white/[0.06] text-[var(--admin-text)]"
+                    : "text-[var(--admin-text-dim)] hover:text-[var(--admin-text-muted)]"
+                }`}
+              >
+                Request
+              </button>
+              <button
+                type="button"
+                onClick={() => setTab("response")}
+                className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                  activeTab === "response"
+                    ? "bg-white/[0.06] text-[var(--admin-text)]"
+                    : "text-[var(--admin-text-dim)] hover:text-[var(--admin-text-muted)]"
+                }`}
+              >
+                Response
+              </button>
+            </div>
+          )}
+          <div className="flex rounded-md border border-[var(--admin-border)] p-0.5">
+            <button
+              type="button"
+              onClick={() => setMode("pretty")}
+              className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                mode === "pretty"
+                  ? "bg-white/[0.06] text-[var(--admin-text)]"
+                  : "text-[var(--admin-text-dim)] hover:text-[var(--admin-text-muted)]"
+              }`}
+            >
+              Pretty
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode("json")}
+              className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                mode === "json"
+                  ? "bg-white/[0.06] text-[var(--admin-text)]"
+                  : "text-[var(--admin-text-dim)] hover:text-[var(--admin-text-muted)]"
+              }`}
+            >
+              JSON
+            </button>
+          </div>
+        </div>
+      }
+    >
+      <div className="py-1">
+        {activeTab === "request" && hasRequest && (
+          mode === "pretty" ? (
+            <PrettyMessages body={log.request_body} />
+          ) : (
+            <pre className="max-h-[400px] overflow-auto rounded-lg border border-[var(--admin-border)] bg-black/30 p-3 font-mono text-[11px] leading-relaxed text-[var(--admin-text-muted)]">
+              {JSON.stringify(log.request_body, null, 2)}
+            </pre>
+          )
+        )}
+        {activeTab === "response" && hasResponse && (() => {
+          const rb = log.response_body;
+          if (mode === "pretty" && rb !== null && typeof rb === "object") {
+            return <PrettyResponse resp={rb as Record<string, unknown>} />;
+          }
+          return (
+            <pre className="max-h-[400px] overflow-auto rounded-lg border border-[var(--admin-border)] bg-black/30 p-3 font-mono text-[11px] leading-relaxed text-[var(--admin-text-muted)]">
+              {JSON.stringify(rb, null, 2)}
+            </pre>
+          );
+        })()}
+      </div>
+    </DetailSection>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// The main page
+// ---------------------------------------------------------------------------
 
 export function RequestLogsPage() {
   const qc = useQueryClient();
@@ -363,69 +665,139 @@ export function RequestLogsPage() {
         <LogsFooter shown={filtered.length} total={all.length} />
       </div>
 
-      <Dialog
-        open={selected !== null}
-        onClose={() => setSelected(null)}
-        wide
-        title={
-          selected ? (
-            <span className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-              <StatusBadge status={selected.status} errorCode={selected.error_code} />
-              <span className="truncate">{selected.model_group || "—"}</span>
-              <span className="font-mono text-[11px] font-normal tracking-normal text-[var(--admin-text-dim)]">
-                {fmtDateTime(selected.ts)}
-              </span>
-            </span>
-          ) : (
-            ""
-          )
-        }
-      >
+      {/* ── Slide-in detail drawer ── */}
+      <Drawer open={selected !== null} onClose={() => setSelected(null)} width={620}>
         {selected && (
-          <div className="space-y-4">
-            <div className="flex items-center gap-2 rounded-[10px] border border-[var(--admin-border)] bg-white/[0.02] px-3 py-2">
-              <span className="admin-label shrink-0">Request ID</span>
-              <MonoCell className="min-w-0 flex-1 truncate">{selected.request_id}</MonoCell>
-              <CopyButton text={selected.request_id} />
-            </div>
-
-            <div className="grid grid-cols-3 gap-2">
-              <StatTile
-                label="TTFT"
-                value={selected.ttft_ms > 0 ? fmtLatency(selected.ttft_ms) : "—"}
-              />
-              <StatTile label="Latency" value={fmtLatency(selected.latency_ms)} />
-              <StatTile
-                label="Tokens/sec"
-                value={selected.tps > 0 ? selected.tps.toFixed(1) : "—"}
-              />
-            </div>
-
-            <div className="grid grid-cols-4 gap-2">
-              <StatTile label="Tok in" value={fmtTokens(selected.tok_in)} accent />
-              <StatTile label="Cached" value={fmtTokens(selected.tok_cached)} />
-              <StatTile label="Reasoning" value={fmtTokens(selected.tok_reasoning)} />
-              <StatTile label="Out" value={fmtTokens(selected.tok_out)} />
-            </div>
-
-            <dl className="grid grid-cols-[130px_1fr] items-baseline gap-x-3 gap-y-1.5">
-              <Meta label="Key">{selected.key_alias || "—"}</Meta>
-              <Meta label="Provider">
-                {selected.provider} / {selected.provider_key_label}
-              </Meta>
-              <Meta label="Surface">
-                {selected.surface}
-                {selected.was_stream ? " (stream)" : ""}
-              </Meta>
-              <Meta label="Error code">{selected.error_code || "—"}</Meta>
-              <Meta label="Cost">{fmtUsd(selected.cost)}</Meta>
-              <Meta label="Cache savings">{fmtUsd(selected.cache_savings)}</Meta>
-            </dl>
-
-            <RetryChain attempts={selected.attempts} />
-          </div>
+          <LogDetail log={selected} onClose={() => setSelected(null)} />
         )}
-      </Dialog>
+      </Drawer>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// LogDetail — the full content of the slide-in drawer
+// ---------------------------------------------------------------------------
+
+function LogDetail(props: { log: RequestLogEntry; onClose: () => void }) {
+  const { log: l } = props;
+  const ok = l.status < 400;
+
+  return (
+    <>
+      {/* Drawer header */}
+      <header className="flex items-start justify-between gap-3 border-b border-white/[0.06] px-5 py-4">
+        <div className="min-w-0">
+          <div className="mb-1.5 flex items-center gap-2">
+            <StatusBadge status={l.status} errorCode={l.error_code} />
+            {l.was_stream && <Badge tone="blue">stream</Badge>}
+            {l.cache_hit && <Badge tone="green">cached</Badge>}
+          </div>
+          <h3 className="truncate text-[16px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
+            {l.model_group || "—"}
+          </h3>
+          <p className="mt-0.5 font-mono text-[11px] text-[var(--admin-text-dim)]">
+            {fmtDateTime(l.ts)}
+          </p>
+        </div>
+        <button
+          type="button"
+          aria-label="Close"
+          onClick={props.onClose}
+          className="shrink-0 rounded-lg p-2 text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)]"
+        >
+          <X size={16} />
+        </button>
+      </header>
+
+      {/* Scrollable body */}
+      <div className="flex-1 space-y-3 overflow-y-auto p-4">
+        {/* Request ID row */}
+        <div className="flex items-center gap-2 rounded-lg border border-[var(--admin-border)] bg-white/[0.02] px-3 py-2">
+          <Hash size={13} className="shrink-0 text-[var(--admin-text-dim)]" />
+          <span className="admin-label shrink-0">Request ID</span>
+          <MonoCell className="min-w-0 flex-1 truncate text-[12px] text-[var(--admin-text-muted)]">
+            {l.request_id}
+          </MonoCell>
+          <InlineCopy text={l.request_id} />
+        </div>
+
+        {/* Performance metrics */}
+        <DetailSection title="Performance" icon={<Gauge size={13} />}>
+          <div className="grid grid-cols-3 gap-2">
+            <MetricPill
+              icon={<Zap size={13} />}
+              label="TTFT"
+              value={l.ttft_ms > 0 ? fmtLatency(l.ttft_ms) : "—"}
+              dim={l.ttft_ms === 0}
+            />
+            <MetricPill
+              icon={<Timer size={13} />}
+              label="Latency"
+              value={fmtLatency(l.latency_ms)}
+            />
+            <MetricPill
+              icon={<Cpu size={13} />}
+              label="Tokens/sec"
+              value={l.tps > 0 ? l.tps.toFixed(1) : "—"}
+              dim={l.tps === 0}
+            />
+          </div>
+        </DetailSection>
+
+        {/* Token usage */}
+        <DetailSection title="Token usage" icon={<Layers size={13} />}>
+          <div className="grid grid-cols-4 gap-2">
+            <MetricPill icon={<Layers size={13} />} label="Input" value={fmtTokens(l.tok_in)} />
+            <MetricPill icon={<Clock size={13} />} label="Cached" value={fmtTokens(l.tok_cached)} dim={l.tok_cached === 0} />
+            <MetricPill icon={<Cpu size={13} />} label="Reasoning" value={fmtTokens(l.tok_reasoning)} dim={l.tok_reasoning === 0} />
+            <MetricPill icon={<Layers size={13} />} label="Output" value={fmtTokens(l.tok_out)} />
+          </div>
+        </DetailSection>
+
+        {/* Cost */}
+        <DetailSection title="Cost" icon={<DollarSign size={13} />}>
+          <div className="grid grid-cols-2 gap-2">
+            <MetricPill icon={<DollarSign size={13} />} label="Request cost" value={fmtUsd(l.cost)} dim={l.cost === 0} />
+            <MetricPill icon={<DollarSign size={13} />} label="Cache savings" value={fmtUsd(l.cache_savings)} dim={l.cache_savings === 0} />
+          </div>
+        </DetailSection>
+
+        {/* Request & Response content */}
+        <PromptResponseSection log={l} />
+
+        {/* Request details */}
+        <DetailSection title="Request details" icon={<Server size={13} />}>
+          <DetailRow label="Virtual key">{l.key_alias || "—"}</DetailRow>
+          <DetailRow label="Provider">
+            {l.provider} / {l.provider_key_label}
+          </DetailRow>
+          <DetailRow label="Surface">
+            {l.surface}
+            {l.was_stream ? " (stream)" : ""}
+          </DetailRow>
+          <DetailRow label="Error code">
+            {l.error_code ? (
+              <span className="font-mono text-[12px] text-[var(--admin-danger)]">{l.error_code}</span>
+            ) : (
+              <span className="text-[var(--admin-text-dim)]">—</span>
+            )}
+          </DetailRow>
+        </DetailSection>
+
+        {/* Retry chain */}
+        <DetailSection
+          title="Retry chain"
+          icon={<Repeat size={13} />}
+          right={
+            l.attempts.length > 1 ? (
+              <Badge tone={ok ? "green" : "red"}>{l.attempts.length} attempts</Badge>
+            ) : undefined
+          }
+        >
+          <RetryChain attempts={l.attempts} />
+        </DetailSection>
+      </div>
+    </>
   );
 }

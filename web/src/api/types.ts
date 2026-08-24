@@ -89,6 +89,18 @@ export interface RequestLogEntry {
   cache_hit: boolean;
   cache_savings: number;
   attempts: Attempt[];
+  /** Raw request body (only when store_prompts_in_spend_logs is enabled). */
+  request_body?: Record<string, unknown> | unknown[] | null;
+  /** Model response snapshot (only when store_prompts_in_spend_logs is enabled). */
+  response_body?: {
+    text: string;
+    thinking?: { text: string }[];
+    tool_calls?: { id: string; name: string; arguments: string | Record<string, unknown> }[];
+    stop_reason?: string;
+    usage?: Record<string, number> | null;
+    response?: unknown;
+    streamed?: boolean;
+  } | string | null;
 }
 
 export interface ProxyLogEntry {

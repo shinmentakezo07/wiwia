@@ -706,9 +706,66 @@ select.admin-input option {
 .admin-dialog-enter {
   animation: admin-dialog-in 0.24s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
+/* Drawer (right-side slide-in panel) */
+@keyframes admin-drawer-in {
+  from {
+    opacity: 0;
+    transform: translateX(28px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+.admin-drawer-enter {
+  animation: admin-drawer-in 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Log detail section card — subtle surface for grouped metadata blocks */
+.admin-detail-section {
+  border: 1px solid var(--admin-border);
+  border-radius: var(--admin-radius-sm);
+  background: rgba(255, 255, 255, 0.015);
+  overflow: hidden;
+}
+.admin-detail-section-head {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--admin-border);
+  background: rgba(255, 255, 255, 0.008);
+}
+
+/* Metric pill — compact inline stat used in detail panels */
+.admin-metric-pill {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  border-radius: var(--admin-radius-sm);
+  border: 1px solid var(--admin-border);
+  background: rgba(255, 255, 255, 0.015);
+  min-width: 0;
+}
+.admin-metric-pill-label {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--admin-text-dim);
+  white-space: nowrap;
+}
+.admin-metric-pill-value {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--admin-text);
+  font-variant-numeric: tabular-nums;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .admin-overlay-enter,
-  .admin-dialog-enter {
+  .admin-dialog-enter,
+  .admin-drawer-enter {
     animation: none;
   }
 }

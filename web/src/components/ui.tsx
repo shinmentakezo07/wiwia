@@ -374,6 +374,48 @@ export function Dialog(props: {
   );
 }
 
+// -- drawer (right-side slide-in panel) ----------------------------------------
+
+export function Drawer(props: {
+  open: boolean;
+  onClose: () => void;
+  children: ReactNode;
+  /** Pixel width of the panel (default 560). */
+  width?: number;
+}) {
+  useEffect(() => {
+    if (!props.open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") props.onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [props.open, props.onClose]);
+
+  if (!props.open) return null;
+  const w = props.width ?? 560;
+  return createPortal(
+    <div className="admin-overlay-enter fixed inset-0 z-50 overflow-hidden">
+      {/* scrim */}
+      <div
+        className="absolute inset-0 bg-black/60 backdrop-blur-[2px]"
+        onClick={props.onClose}
+        aria-hidden
+      />
+      {/* panel */}
+      <div
+        role="dialog"
+        aria-modal="true"
+        className="admin-drawer-enter absolute right-0 top-0 flex h-full flex-col border-l border-white/[0.06] bg-[var(--admin-surface-elevated)] shadow-2xl shadow-black/60"
+        style={{ width: `min(${w}px, 100vw)` }}
+      >
+        {props.children}
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 export function CopyButton(props: { text: string }) {
   const [copied, setCopied] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
