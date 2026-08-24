@@ -1023,8 +1023,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
         resp = _require_admin(request)
         if resp:
             return resp
-        minutes = max(1, min(minutes, 1440))
-        return ORJSONResponse(stats_mod.overview(_request_events(), minutes))
+        minutes = max(0, min(minutes, 43200))
+        sink = state.logs.db_sink
+        if sink is not None and (minutes == 0 or minutes > 1440):
+            return ORJSONResponse(await sink.read_overview(minutes))
+        minutes_ring = minutes if minutes > 0 else 1440
+        return ORJSONResponse(stats_mod.overview(_request_events(), minutes_ring))
 
     @app.get("/admin/stats/timeseries")
     async def admin_stats_timeseries(request: Request, bucket: str = "minute",
@@ -1033,8 +1037,15 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if resp:
             return resp
         try:
-            return ORJSONResponse(stats_mod.timeseries(_request_events(), bucket, metric,
-                                                     max(1, min(minutes, 1440))))
+            minutes = max(0, min(minutes, 43200))
+            sink = state.logs.db_sink
+            if sink is not None and (minutes == 0 or minutes > 1440):
+                bs = stats_mod.bucket_size_for(minutes)
+                return ORJSONResponse(
+                    await sink.read_timeseries(bs, metric, minutes))
+            minutes_ring = minutes if minutes > 0 else 1440
+            return ORJSONResponse(
+                stats_mod.timeseries(_request_events(), bucket, metric, minutes_ring))
         except ValueError as e:
             return _err(400, "invalid_request_error", str(e), request)
 

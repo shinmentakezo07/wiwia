@@ -4,10 +4,21 @@ from __future__ import annotations
 
 import time
 
+import httpx
 import pytest
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as saa
+from asgi_lifespan import LifespanManager
 
+import wiwi.server.app as app_mod
+from wiwi.config import (
+    DeploymentParams,
+    GeneralSettings,
+    KeyDef,
+    ModelEntry,
+    ProviderDef,
+    WiwiConfig,
+)
 from wiwi.logging_core.db_sink import DBSink
 from wiwi.logging_core.events import LogEvent
 from wiwi.server.stats import bucket_size_for
@@ -183,3 +194,74 @@ async def test_ts_index_idempotent(db):
             "PRAGMA index_list('request_logs')"))).all()
     index_names = {r[1] for r in indexes}
     assert "idx_request_logs_ts" in index_names
+
+
+# -- endpoint-level tests (Task 5: app.py routing) -----------------------------
+
+MASTER = "sk-wiwi-master-test"
+AUTH = {"Authorization": f"Bearer {MASTER}"}
+
+
+def _config() -> WiwiConfig:
+    return WiwiConfig(
+        providers=[ProviderDef(name="p1", provider="openai",
+                               keys=[KeyDef(label="a", key="***************")])],
+        model_list=[ModelEntry(model_name="gpt-4o",
+                               wiwi_params=DeploymentParams(provider="p1",
+                                                            model="gpt-4o"))],
+        general_settings=GeneralSettings(master_key=MASTER,
+                                         database_url="sqlite+aiosqlite:///:memory:"),
+    )
+
+
+@pytest.fixture
+async def app_client():
+    app = app_mod.create_app(_config())
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as c:
+            yield c
+
+
+async def test_overview_endpoint_all_time(app_client):
+    """minutes=0 should return all-time overview via DB."""
+    r = await app_client.get("/admin/stats/overview?minutes=0", headers=AUTH)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["requests"] == 0
+    assert body["window_minutes"] == 0
+
+
+async def test_overview_endpoint_7d(app_client):
+    """minutes=10080 should work (7 days, via DB)."""
+    r = await app_client.get("/admin/stats/overview?minutes=10080", headers=AUTH)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["window_minutes"] == 10080
+
+
+async def test_timeseries_endpoint_7d(app_client):
+    """minutes=10080 should return hourly buckets via DB."""
+    r = await app_client.get(
+        "/admin/stats/timeseries",
+        params={"bucket": "minute", "metric": "tps", "minutes": 10080},
+        headers=AUTH,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["bucket_seconds"] == 3600  # 1-hour buckets for 7d
+    assert body["metric"] == "tps"
+
+
+async def test_timeseries_endpoint_all_time(app_client):
+    """minutes=0 should return daily buckets via DB."""
+    r = await app_client.get(
+        "/admin/stats/timeseries",
+        params={"bucket": "minute", "metric": "tokens", "minutes": 0},
+        headers=AUTH,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["bucket_seconds"] == 86400  # 1-day buckets for all-time
+    assert body["metric"] == "tokens"
