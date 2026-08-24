@@ -60,6 +60,17 @@ class OpenRouterAdapter(OpenAIAdapter):
         # Remove OpenAI-native reasoning_effort; OpenRouter uses ``reasoning``
         body.pop("reasoning_effort", None)
 
+        # Strip any per-message reasoning / reasoning_content from history
+        # assistant messages. OpenRouter uses ``reasoning_details`` on the
+        # response side and does not accept these on input. The OpenAI base
+        # already omits them for provider_type=="openrouter" (since this
+        # commit), but strip defensively in case a future change re-introduces
+        # them or the deployment_params are missing the type.
+        for m in body.get("messages", []):
+            if isinstance(m, dict) and m.get("role") == "assistant":
+                m.pop("reasoning", None)
+                m.pop("reasoning_content", None)
+
         # Rename deprecated max_tokens to max_completion_tokens (OpenRouter
         # docs mark max_tokens as deprecated; some models enforce a minimum
         # of 16 on max_tokens but not max_completion_tokens).

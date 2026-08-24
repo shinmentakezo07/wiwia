@@ -433,8 +433,11 @@ class Gateway:
             await queue.put(dl.StreamEnd())
         except asyncio.CancelledError:
             # client went away mid-stream: still release the upstream response,
-            # or the pooled socket stays checked out until GC
+            # or the pooled socket stays checked out until GC.  Price the
+            # partial delivery so the log and virtual-key spend reflect
+            # tokens actually consumed before the disconnect.
             if started:
+                self._price_partial(ctx, dep, usage_final, text_len)
                 await asyncio.shield(_close_upstream())
             raise
         except Exception as e:  # noqa: BLE001

@@ -336,3 +336,137 @@ async def test_attempt_resume_returns_new_pump_task():
             new_task.cancel()
             with contextlib.suppress(BaseException):
                 await new_task
+
+
+async def test_stream_consumer_cancels_resume_pump_not_original():
+    """End-to-end: drive Gateway.stream() with a primary pump that errors
+    mid-stream and a fallback pump that records its own cancellation.
+
+    This is the real proof of the H1 fix: a regression that removed the
+    `pump_task = new_pump` assignment in stream()'s consumer loop would let
+    the original (already-done) primary pump be cancelled by the finally,
+    while the active fallback pump leaks. We assert the fallback's pump
+    saw the cancel — which only happens if the outer `pump_task` reference
+    was updated to point at the new task.
+    """
+    from wiwi.config import (
+        DeploymentParams,
+        GeneralSettings,
+        KeyDef,
+        ModelEntry,
+        ProviderDef,
+        RouterSettings,
+        WiwiConfig,
+    )
+    from wiwi.core.gateway import Gateway
+    from wiwi.cost.pricing import CostEngine
+    from wiwi.ir import types as ir
+    from wiwi.router.router import Router
+    from wiwi.streaming import deltas as dl
+
+    cfg = WiwiConfig(
+        providers=[
+            ProviderDef(name="primary", provider="openai",
+                        keys=[KeyDef(label="a", key="k1")]),
+            ProviderDef(name="fallback", provider="openai",
+                        keys=[KeyDef(label="b", key="k2")]),
+        ],
+        model_list=[
+            ModelEntry(model_name="gpt-4o",
+                       wiwi_params=DeploymentParams(provider="primary", model="gpt-4o")),
+            ModelEntry(model_name="gpt-4o",
+                       wiwi_params=DeploymentParams(provider="fallback", model="gpt-4o")),
+        ],
+        general_settings=GeneralSettings(master_key="sk-wiwi-master-test",
+                                         database_url="sqlite+aiosqlite:///:memory:"),
+        router_settings=RouterSettings(
+            fallbacks={"gpt-4o": ["gpt-4o"]},
+            stream_resume="enabled",
+            stream_resume_max_retries=1,
+        ),
+    )
+    router = Router(cfg)
+    gw = Gateway(router, CostEngine())
+
+    # Two distinct fake pumps keyed on the deployment's provider.
+    #   - The primary pushes a text delta then a StreamError on the FIRST
+    #     call. On the SECOND call (the resume picks it first because
+    #     fb_targets resolves the same group), it sets err_box so the
+    #     resume moves on to the fallback.
+    #   - The fallback hangs and records whether it saw a cancel.
+    observed: dict = {
+        "fallback_cancelled": False,
+        "fallback_started": False,
+        "primary_call_count": 0,
+    }
+    original_pump = gw._pump
+
+    async def fake_pump(dep, key, c, q, ready, err_box):
+        if dep.provider.name == "primary":
+            observed["primary_call_count"] += 1
+            if observed["primary_call_count"] == 1:
+                # First call: mid-stream error.
+                ready.set()
+                await q.put(dl.TextDelta("partial "))
+                await q.put(dl.StreamError("upstream died", "connection"))
+                return
+            # Subsequent calls: fail-fast so the resume moves to the fallback.
+            from wiwi.providers.base import WiwiError
+            err_box[0] = WiwiError(503, "service_unavailable", "primary down")
+            ready.set()
+            return
+        # Fallback: hang, record cancellation.
+        observed["fallback_started"] = True
+        ready.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            observed["fallback_cancelled"] = True
+            raise
+
+    gw._pump = fake_pump  # type: ignore[assignment]
+    try:
+        ctx = RequestContext(surface="chat",
+                            ir_req=ir.Request(model="gpt-4o",
+                                              messages=[ir.Message(role="user",
+                                                                  parts=[ir.TextPart("hi")])],
+                                              stream=True))
+        ctx.group = "gpt-4o"
+
+        gen = gw.stream(ctx)
+        deltas_received = []
+        try:
+            for _ in range(2):
+                d = await gen.__anext__()
+                deltas_received.append(d)
+            # The 3rd read may be the StreamError OR a queued-up delta from
+            # the primary's re-pump (in the simpler single-group test the
+            # resume reuses the primary, which queues another TextDelta+Error
+            # before the resume path picks the fallback). Allow several reads.
+            for _ in range(10):
+                try:
+                    d = await asyncio.wait_for(gen.__anext__(), timeout=2.0)
+                    deltas_received.append(d)
+                except TimeoutError:
+                    break
+        finally:
+            await gen.aclose()
+
+        # Give the event loop a moment so the cancel propagates to the
+        # fallback's fake _pump (it records `fallback_cancelled = True`).
+        for _ in range(20):
+            if observed["fallback_cancelled"]:
+                break
+            await asyncio.sleep(0.05)
+
+        assert observed["fallback_started"], (
+            "fallback (resume) pump should have started after the primary error"
+        )
+        assert observed["fallback_cancelled"], (
+            "fallback (resume) pump must be the one cancelled by the consumer "
+            "loop's finally — if the outer `pump_task` reference wasn't "
+            "updated to the new task, the finally would cancel the "
+            "already-done primary and the fallback would leak"
+        )
+    finally:
+        gw._pump = original_pump  # type: ignore[assignment]

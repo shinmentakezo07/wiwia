@@ -276,8 +276,15 @@ def test_registry_rejects_unknown_type():
 # -- multi-turn conversation handling (the 400 bug) -------------------------
 
 def test_multi_turn_thinking_preserved():
-    """Assistant thinking blocks from prior turns must be preserved as
-    ``reasoning`` on the message, not silently dropped."""
+    """Assistant thinking blocks from prior turns must be preserved in the IR
+    but NOT emitted on the per-message wire to OpenRouter.
+
+    OpenRouter documents ``reasoning`` only as a top-level sampling parameter,
+    and strict OpenAI-compatible gateways (per the Nous Research Hermes bug
+    report) reject with ``400 unrecognizedProperty=reasoning_content`` when
+    history assistant messages carry per-message thinking fields. The IR
+    preserves the ThinkingPart; the encoder must not forward it.
+    """
     req = am.decode_request({
         "model": "stealth/ox-alpha",
         "max_tokens": 16384,
@@ -293,11 +300,23 @@ def test_multi_turn_thinking_preserved():
         "stream": True,
         "thinking": {"type": "enabled", "budget_tokens": 10000},
     })
+    # The IR still carries the thinking (it is needed for round-trip fidelity
+    # when routing to providers that DO accept per-message reasoning, like
+    # native OpenAI).
+    from wiwi.ir.types import ThinkingPart
+    assistant_ir = next(m for m in req.messages if m.role == "assistant")
+    assert any(isinstance(p, ThinkingPart) and p.text == "Let me calculate..."
+               for p in assistant_ir.parts)
+
     body = OpenRouterAdapter().encode_request(req, "stealth/ox-alpha", {})
     msgs = body["messages"]
-    # The assistant message should have reasoning field
+    # But the per-message wire to OpenRouter must NOT include reasoning fields.
     assistant_msg = next(m for m in msgs if m["role"] == "assistant")
-    assert assistant_msg["reasoning"] == "Let me calculate..."
+    assert "reasoning" not in assistant_msg, (
+        "per-message `reasoning` on history assistant messages can cause "
+        "400 unrecognizedProperty errors on strict OpenAI-compatible gateways"
+    )
+    assert "reasoning_content" not in assistant_msg
     assert assistant_msg["content"] == "The answer is 4."
 
 

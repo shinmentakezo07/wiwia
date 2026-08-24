@@ -65,6 +65,28 @@ def test_openai_chat_tool_null_content_becomes_empty_string():
     )
 
 
+def test_openai_chat_tool_list_content_is_coerced_to_string():
+    """A tool message with content=[{type:text,...}] (malformed for OpenAI
+    Chat, common in Anthropic-shaped clients) must be coerced to a string.
+    Without coercion, downstream adapters would serialize a list into a
+    provider's tool_result content, which Anthropic (and others) reject.
+    """
+    req = oc.decode_request({
+        "model": "gpt-4o",
+        "messages": [
+            {"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function",
+                                                  "function": {"name": "f", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "call_1",
+             "content": [{"type": "text", "text": "hello world"}]},
+        ],
+    })
+    tool_msg = req.messages[1]
+    assert isinstance(tool_msg.parts[0].content, str), (
+        f"list tool content must coerce to str, got {type(tool_msg.parts[0].content).__name__}"
+    )
+    assert "hello world" in tool_msg.parts[0].content
+
+
 def test_openai_chat_decodes_reasoning_content_into_thinking_part():
     """Reasoning models emit a separate reasoning_content field on assistant
     messages. The decoder must lift it into a ThinkingPart so the IR carries

@@ -12,7 +12,20 @@ from wiwi.providers.base import ProviderKeyRef
 from wiwi.streaming import deltas as dl
 
 
-def _role_parts_to_content(messages: list[ir.Message]) -> list[dict[str, Any]]:
+def _role_parts_to_content(
+    messages: list[ir.Message],
+    *,
+    emit_per_message_reasoning: bool = True,
+) -> list[dict[str, Any]]:
+    """Encode IR messages as a list of OpenAI Chat wire messages.
+
+    ``emit_per_message_reasoning`` controls whether ``reasoning`` /
+    ``reasoning_content`` are written on history assistant messages. Only
+    native OpenAI accepts these as input; strict OpenAI-compatible gateways
+    (Palantir Foundry, etc.) reject with ``400 unrecognizedProperty`` when
+    history carries them. The OpenAI adapter enables this for the OpenAI
+    provider type and disables it for openai-compatible / openrouter / gmicloud.
+    """
     out: list[dict[str, Any]] = []
     for m in messages:
         if m.role == "system":
@@ -77,12 +90,11 @@ def _role_parts_to_content(messages: list[ir.Message]) -> list[dict[str, Any]]:
             msg["tool_calls"] = tool_calls
             if "content" not in msg:
                 msg["content"] = None  # OpenAI allows null with tool_calls
-        if reasoning and m.role == "assistant":
-            msg["reasoning"] = reasoning
-            # Also surface as reasoning_content for OpenAI Chat clients whose
-            # downstream providers expect that field name (OpenAI itself, plus
-            # OpenAI-compatible APIs that follow the OpenAI Chat shape rather
-            # than the older OpenAI-compatible "reasoning" convention).
+        if reasoning and m.role == "assistant" and emit_per_message_reasoning:
+            # Native OpenAI Chat accepts reasoning_content on history assistant
+            # messages. Some strict OpenAI-compatible gateways reject
+            # unrecognized fields on history — caller should pass
+            # emit_per_message_reasoning=False in that case.
             msg["reasoning_content"] = reasoning
         out.append(msg)
     return out
@@ -104,9 +116,23 @@ class OpenAIAdapter:
     def encode_request(self, req: ir.Request, model_id: str,
                        deployment_params: dict[str, Any]) -> dict[str, Any]:
         g = req.gen_params
+        # Per-message reasoning_content is only safe to forward to providers
+        # that accept it as input. Native OpenAI does; strict OpenAI-compatible
+        # gateways (Palantir Foundry and others) reject history assistant
+        # messages with `400 unrecognizedProperty=reasoning_content`. We also
+        # exclude OpenRouter because its per-message handling differs (it uses
+        # `reasoning_details` on the response side and rejects `reasoning` /
+        # `reasoning_content` on input).
+        ptype = deployment_params.get("provider_type")
+        emit_per_message_reasoning = ptype not in {
+            "openai-compatible", "gmicloud", "openrouter",
+        }
         body: dict[str, Any] = {
             "model": model_id,
-            "messages": _role_parts_to_content(req.messages),
+            "messages": _role_parts_to_content(
+                req.messages,
+                emit_per_message_reasoning=emit_per_message_reasoning,
+            ),
             "stream": req.stream,
         }
         mt = g.max_tokens or deployment_params.get("max_tokens")

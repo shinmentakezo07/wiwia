@@ -527,6 +527,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
             entry = tools_map.get(d.index)
             if entry is not None:
                 entry["arguments"] += d.args_fragment
+        elif isinstance(d, dl.UsageFinal):
+            ctx._stream_usage = d  # type: ignore[attr-defined]
         elif isinstance(d, dl.Finish):
             ctx.stop_reason = d.stop_reason
 
@@ -581,11 +583,17 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 yield _inject_id(chunk, _seq) if event_ids else chunk
         finally:
             if store_prompts:
+                stream_usage = getattr(ctx, "_stream_usage", None)
                 ctx.metadata["response_body"] = {
                     "text": "".join(stream_text),
                     "thinking": [{"text": t} for t in stream_thinking],
                     "tool_calls": [stream_tools[i] for i in sorted(stream_tools)],
                     "stop_reason": ctx.stop_reason or "stop",
+                    "usage": ({"prompt_tokens": stream_usage.prompt,
+                               "completion_tokens": stream_usage.output,
+                               "cached_tokens": stream_usage.cached,
+                               "reasoning_tokens": stream_usage.reasoning}
+                              if stream_usage else None),
                     "streamed": True,
                 }
             state_.logs.log_request(build_log_event(ctx))

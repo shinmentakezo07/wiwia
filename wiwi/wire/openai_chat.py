@@ -43,6 +43,22 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                         parts.append(ir.ImagePart(b64=b64, mime=mime))
                     else:
                         parts.append(ir.ImagePart(url=url))
+        # Reasoning models (o1/o3, DeepSeek-R1, etc.) emit a separate
+        # reasoning_content field on assistant messages. Lift it into a
+        # ThinkingPart so the IR carries the thinking context forward —
+        # without this, Anthropic extended-thinking breaks across turns when
+        # a Claude-Code-via-OpenAI-shape client echoes prior assistant
+        # messages with reasoning_content set.
+        #
+        # IMPORTANT: must come BEFORE the tool_calls loop below. The Anthropic
+        # API requires the final assistant turn of a thinking-enabled request
+        # to begin with a thinking block, and the IR's parts order is what
+        # anthropic_adapter.encode_request iterates in. If ThinkingPart is
+        # appended after ToolUsePart, Anthropic rejects the request.
+        if role == "assistant":
+            rc = m.get("reasoning_content")
+            if isinstance(rc, str) and rc:
+                parts.append(ir.ThinkingPart(text=rc))
         for tc in tool_calls:
             fn = tc.get("function") or {}
             raw_args = fn.get("arguments") or "{}"
@@ -56,19 +72,27 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                     args = {}
             parts.append(ir.ToolUsePart(id=tc.get("id", ""), name=fn.get("name", ""),
                                         args=args, raw_args=raw_args))
-        # Reasoning models (o1/o3, DeepSeek-R1, etc.) emit a separate
-        # reasoning_content field on assistant messages. Lift it into a
-        # ThinkingPart so the IR carries the thinking context forward —
-        # without this, Anthropic extended-thinking breaks across turns when
-        # a Claude-Code-via-OpenAI-shape client echoes prior assistant
-        # messages with reasoning_content set.
-        if role == "assistant":
-            rc = m.get("reasoning_content")
-            if isinstance(rc, str) and rc:
-                parts.append(ir.ThinkingPart(text=rc))
         if role == "tool":
+            # OpenAI spec: tool message content is a string. Defensively coerce
+            # non-string payloads (None, lists, dicts) so downstream adapters
+            # — which all type ToolResultPart.content as str — never receive a
+            # list/dict that would be JSON-serialized into the wire body in a
+            # way the upstream provider rejects.
+            if content is None:
+                tool_content: str = ""
+            elif isinstance(content, str):
+                tool_content = content
+            elif isinstance(content, list):
+                # Concatenate text blocks if present; fall back to str() for
+                # any other shape. Common Anthropic-style list payloads are
+                # not valid here, so this is a best-effort recovery.
+                pieces = [b.get("text", "") for b in content
+                          if isinstance(b, dict) and b.get("type") == "text"]
+                tool_content = "\n".join(pieces) if pieces else orjson.dumps(content).decode()
+            else:
+                tool_content = str(content)
             parts = [ir.ToolResultPart(tool_use_id=m.get("tool_call_id", ""),
-                                       content=content if content is not None else "")]
+                                       content=tool_content)]
         if not parts and role != "assistant":
             parts = [ir.TextPart("")]
         messages.append(ir.Message(role=role, parts=parts))  # type: ignore[arg-type]

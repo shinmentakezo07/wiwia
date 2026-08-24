@@ -99,7 +99,12 @@ export interface RequestLogEntry {
     thinking?: { text: string }[];
     tool_calls?: { id: string; name: string; arguments: string | Record<string, unknown> }[];
     stop_reason?: string;
-    usage?: Record<string, number> | null;
+    usage?: {
+      prompt_tokens: number;
+      completion_tokens: number;
+      cached_tokens: number;
+      reasoning_tokens: number;
+    } | null;
     response?: unknown;
     streamed?: boolean;
   } | string | null;
