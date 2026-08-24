@@ -27,7 +27,8 @@ COPY --from=web-builder /wiwi/server/static/ /app/wiwi/server/static/
 COPY wiwi.yaml.example /app/wiwi.yaml
 # Writable data dir for SQLite DB (mounted as a volume in docker-compose)
 RUN mkdir -p /app/data && chown wiwi:wiwi /app/data
-ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
+ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1 \
+    DATABASE_URL=sqlite+aiosqlite:////app/data/wiwi.db
 USER wiwi
 EXPOSE 4000
 HEALTHCHECK --interval=30s --timeout=3s CMD python -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:4000/health')" || exit 1
