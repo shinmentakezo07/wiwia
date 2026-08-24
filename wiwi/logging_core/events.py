@@ -33,6 +33,9 @@ class LogEvent:
     cache_hit: bool = False
     cache_savings: float = 0.0
     attempts: list[dict[str, Any]] = field(default_factory=list)
+    # prompt/response content (only when store_prompts_in_spend_logs is enabled)
+    request_body: dict[str, Any] | list[Any] | None = None
+    response_body: dict[str, Any] | list[Any] | str | None = None
     # proxy-log fields
     level: ProxyLevel = "info"
     message: str = ""
