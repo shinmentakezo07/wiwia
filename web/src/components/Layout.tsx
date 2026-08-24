@@ -23,6 +23,7 @@ import {
 import { useAuth } from "@/api/auth";
 import { useAdminStream } from "@/api/stream";
 import { getToken } from "@/api/client";
+import { useClientPrefs } from "@/lib/settings";
 
 const SIDEBAR_WIDE = 260;
 const SIDEBAR_COLLAPSED = 72;
@@ -86,6 +87,7 @@ const PAGE_META: Record<string, { title: string; section: string }> = {
 };
 
 function LiveClock() {
+  const { prefs } = useClientPrefs();
   const [time, setTime] = useState("");
   useEffect(() => {
     const update = () =>
@@ -94,13 +96,13 @@ function LiveClock() {
           hour: "2-digit",
           minute: "2-digit",
           second: "2-digit",
-          hour12: false,
+          hour12: !prefs.clock24h,
         }),
       );
     update();
     const interval = setInterval(update, 1000);
     return () => clearInterval(interval);
-  }, []);
+  }, [prefs.clock24h]);
   return (
     <span className="font-mono text-[10px] tabular-nums tracking-wider text-[var(--admin-text-dim)]">
       {time}
@@ -115,6 +117,18 @@ export function Layout() {
   const connected = useAdminStream("__noop__", () => undefined);
   const [collapsed, setCollapsed] = useState(false);
   const sidebarWidth = collapsed ? SIDEBAR_COLLAPSED : SIDEBAR_WIDE;
+
+  // Cmd/Ctrl+B toggles the sidebar
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        setCollapsed((c) => !c);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const meta = PAGE_META[location.pathname] ?? { title: "wiwi", section: "Admin" };
   const maskedKey = (() => {
@@ -259,34 +273,85 @@ export function Layout() {
         </nav>
 
         {/* Bottom: identity + collapse */}
-        <div className="space-y-2 p-3">
-          {!collapsed && (
-            <div className="flex items-center gap-3 rounded-[10px] border border-white/[0.04] bg-white/[0.02] px-3 py-2.5">
-              <div
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500/20 to-violet-500/20 ring-1 ring-white/[0.06]"
-                style={{ boxShadow: "0 0 12px rgba(59,130,246,0.06)" }}
-              >
-                <ShieldCheck className="h-4 w-4" style={{ color: "rgba(59,130,246,0.6)" }} />
+        <div className="relative p-3">
+          {/* hairline divider */}
+          <div className="mb-3 h-px bg-gradient-to-r from-transparent via-white/[0.06] to-transparent" />
+
+          {/* ── identity card ── */}
+          {!collapsed ? (
+            <div className="admin-identity group relative overflow-hidden rounded-[12px] border border-white/[0.05] bg-white/[0.02] transition-colors duration-300 hover:border-white/[0.09]">
+              {/* top accent line */}
+              <span className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-blue-500/30 to-transparent" />
+              <div className="relative flex items-center gap-3 px-3 py-2.5">
+                {/* avatar + status */}
+                <div className="relative shrink-0">
+                  <div
+                    className="flex h-9 w-9 items-center justify-center rounded-[10px] bg-gradient-to-br from-blue-500/20 to-violet-500/20 ring-1 ring-white/[0.08]"
+                    style={{ boxShadow: "0 0 14px -3px rgba(59,130,246,0.14)" }}
+                  >
+                    <ShieldCheck className="h-4 w-4" style={{ color: "rgba(59,130,246,0.75)" }} />
+                  </div>
+                  <span
+                    className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full ring-2 ring-[var(--admin-surface)] ${
+                      connected ? "bg-emerald-400" : "bg-zinc-600"
+                    }`}
+                    style={connected ? { boxShadow: "0 0 6px rgba(52,211,153,0.5)" } : undefined}
+                  />
+                </div>
+                {/* name + role + key */}
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5">
+                    <p className="truncate text-[12.5px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
+                      master admin
+                    </p>
+                    <span className="admin-badge admin-badge-blue !px-1.5 !py-0 !text-[8px]">
+                      root
+                    </span>
+                  </div>
+                  <div className="mt-1 flex items-center gap-1.5">
+                    <KeyRound className="h-3 w-3 shrink-0 text-[var(--admin-text-dim)]" />
+                    <p className="truncate font-mono text-[10px] text-[var(--admin-text-dim)]">
+                      {maskedKey}
+                    </p>
+                  </div>
+                </div>
               </div>
-              <div className="min-w-0">
-                <p className="truncate text-[12px] font-medium text-[var(--admin-text)]">
-                  master admin
-                </p>
-                <p className="truncate font-mono text-[10px] text-[var(--admin-text-dim)]">
-                  {maskedKey}
-                </p>
+            </div>
+          ) : (
+            /* collapsed: avatar with status dot only */
+            <div className="mb-2 flex justify-center">
+              <div className="relative" title="master admin">
+                <div
+                  className="flex h-9 w-9 items-center justify-center rounded-[10px] bg-gradient-to-br from-blue-500/20 to-violet-500/20 ring-1 ring-white/[0.08]"
+                  style={{ boxShadow: "0 0 14px -3px rgba(59,130,246,0.14)" }}
+                >
+                  <ShieldCheck className="h-4 w-4" style={{ color: "rgba(59,130,246,0.75)" }} />
+                </div>
+                <span
+                  className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full ring-2 ring-[var(--admin-surface)] ${
+                    connected ? "bg-emerald-400" : "bg-zinc-600"
+                  }`}
+                />
               </div>
             </div>
           )}
+
+          {/* ── collapse button ── */}
           <button
             onClick={() => setCollapsed(!collapsed)}
             aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            className="flex w-full items-center justify-center gap-2 rounded-[10px] py-2.5 font-mono text-[11px] tracking-wider text-[var(--admin-text-dim)] transition-all duration-200 hover:bg-white/[0.02] hover:text-[var(--admin-text-muted)]"
+            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            className="admin-collapse-btn mt-2 flex w-full items-center justify-center gap-2 rounded-[10px] border border-white/[0.04] py-2.5 font-mono text-[11px] tracking-wider text-[var(--admin-text-dim)] transition-all duration-200 hover:border-white/[0.08] hover:bg-white/[0.02] hover:text-[var(--admin-text-muted)]"
           >
             <ChevronLeft
               className={`h-3.5 w-3.5 transition-transform duration-300 ${collapsed ? "rotate-180" : ""}`}
             />
-            {!collapsed && <span>Collapse</span>}
+            {!collapsed && (
+              <>
+                <span>Collapse</span>
+                <kbd className="admin-kbd ml-0.5">⌘B</kbd>
+              </>
+            )}
           </button>
         </div>
       </aside>
