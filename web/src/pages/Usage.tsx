@@ -427,7 +427,7 @@ export function UsagePage() {
     >
       <PageHeader
         title="Usage"
-        subtitle={o ? `Per-request detail · last ${o.window_minutes} min` : "Per-request usage detail"}
+        subtitle={o ? `Per-request detail · ${o.window_minutes === 0 ? 'all time' : `last ${o.window_minutes} min`}` : "Per-request usage detail"}
         right={
           <div className="flex items-center gap-2">
             {filterGroup && (
