@@ -49,6 +49,66 @@ def test_build_log_event_with_none_usage_no_tokens():
     assert evt.tok_out == 0
 
 
+# -- R1b: non-streaming TPS computed from total latency --------------------------
+# OpenRouter reports throughput (output tokens/sec) for all requests, not just
+# streaming ones.  For non-streaming requests where first_token_at is never set,
+# TPS must fall back to completion_tokens / total_latency.
+def test_build_log_event_non_streaming_tps():
+    """Non-streaming request: TPS from total latency (no first/last_token_at)."""
+    ctx = RequestContext(surface="chat", ir_req=ir.Request(model="g", messages=[]))
+    ctx.usage = ir.Usage(prompt_tokens=10, completion_tokens=100)
+    # Simulate 500ms total latency by shifting started back in time.
+    ctx.started = ctx.started - 0.5
+    evt = build_log_event(ctx)
+    assert evt.tok_out == 100
+    # 100 tokens / 0.5s = 200 tps
+    assert abs(evt.tps - 200.0) < 1.0
+
+
+def test_build_log_event_streaming_tps_preferred_over_latency():
+    """Streaming request: stream-phase TPS is used when available."""
+    ctx = RequestContext(surface="chat", ir_req=ir.Request(model="g", messages=[]))
+    ctx.usage = ir.Usage(prompt_tokens=10, completion_tokens=50)
+    ctx.first_token_at = ctx.started + 0.1   # 100ms TTFT
+    ctx.last_token_at = ctx.started + 0.6   # 500ms generation phase
+    # stream_secs = 0.5 -> 50 / 0.5 = 100 tps
+    # total latency = 0.6s -> 50 / 0.6 = 83.3 tps
+    # stream-phase should be preferred (100 > 83.3)
+    evt = build_log_event(ctx)
+    assert abs(evt.tps - 100.0) < 0.1
+
+
+def test_build_log_event_short_stream_falls_back_to_latency():
+    """Stream too short to time (<0.05s): falls back to total latency TPS."""
+    ctx = RequestContext(surface="chat", ir_req=ir.Request(model="g", messages=[]))
+    ctx.usage = ir.Usage(prompt_tokens=10, completion_tokens=30)
+    ctx.first_token_at = ctx.started
+    ctx.last_token_at = ctx.started + 0.01  # 10ms — below 0.05 threshold
+    ctx.started = ctx.started - 0.3  # 300ms total latency
+    # stream_secs = 0.01 (too short) -> fallback: 30 / 0.3 = 100 tps
+    evt = build_log_event(ctx)
+    assert abs(evt.tps - 100.0) < 1.0
+
+
+def test_build_log_event_zero_output_tps_is_zero():
+    """No output tokens -> TPS is 0 regardless of timing."""
+    ctx = RequestContext(surface="chat", ir_req=ir.Request(model="g", messages=[]))
+    ctx.usage = ir.Usage(prompt_tokens=10, completion_tokens=0)
+    ctx.first_token_at = ctx.started
+    ctx.last_token_at = ctx.started + 1.0
+    evt = build_log_event(ctx)
+    assert evt.tps == 0.0
+
+
+def test_build_log_event_very_fast_request_tps_is_zero():
+    """Latency too short (<50ms) to be meaningful -> TPS is 0."""
+    ctx = RequestContext(surface="chat", ir_req=ir.Request(model="g", messages=[]))
+    ctx.usage = ir.Usage(prompt_tokens=10, completion_tokens=5)
+    # No first/last_token_at, and started is basically now -> latency < 50ms
+    evt = build_log_event(ctx)
+    assert evt.tps == 0.0
+
+
 # -- R2: pure ASGI RequestIdMiddleware replaces BaseHTTPMiddleware -----------------
 # The old @app.middleware("http") used Starlette BaseHTTPMiddleware, which wraps
 # every response in a background task pumping chunks through an anyio memory

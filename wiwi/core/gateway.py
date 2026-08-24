@@ -485,8 +485,17 @@ def build_log_event(ctx: RequestContext) -> LogEvent:
     stream_secs = ((ctx.last_token_at - ctx.first_token_at)
                    if ctx.first_token_at and ctx.last_token_at else 0.0)
     u = ctx.usage
-    tps = ((u.completion_tokens / stream_secs)
-           if u and stream_secs > 0.05 else 0.0)
+    # Throughput (output tokens/sec) — like OpenRouter's "throughput" metric:
+    # for streaming, generation-phase speed (completion_tokens / stream_secs);
+    # for non-streaming or streams too short to time meaningfully, fall back
+    # to total round-trip latency so throughput is always reported when we
+    # have output tokens, not just for streaming requests.
+    tps = 0.0
+    if u and u.completion_tokens > 0:
+        if stream_secs > 0.05:
+            tps = u.completion_tokens / stream_secs
+        elif latency_ms > 50:
+            tps = u.completion_tokens / (latency_ms / 1000)
     auth = ctx.auth
     evt = LogEvent(
         stream="request", ts=time.time(), request_id=ctx.request_id,
