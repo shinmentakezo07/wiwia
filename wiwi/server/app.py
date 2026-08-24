@@ -186,6 +186,15 @@ class AppState:
                 pool_recycle=300,
             )
         aengine = saa.create_async_engine(**engine_kwargs)
+        if not is_pg:
+            # SQLite: enable FK enforcement on every connection so that
+            # ON DELETE CASCADE works (aiosqlite disables it by default).
+            import sqlalchemy as _sa
+            @_sa.event.listens_for(aengine.sync_engine, "connect")
+            def _enable_sqlite_fk(dbapi_conn, _record):
+                cursor = dbapi_conn.cursor()
+                cursor.execute("PRAGMA foreign_keys=ON")
+                cursor.close()
         self._db_engine = aengine
         self.auth = AuthService(aengine, self.config.general_settings.master_key)
         await self.auth.startup()

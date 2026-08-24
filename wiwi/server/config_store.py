@@ -39,8 +39,7 @@ CREATE TABLE IF NOT EXISTS provider_keys (
   secret TEXT NOT NULL,
   weight INTEGER NOT NULL DEFAULT 1,
   enabled INTEGER NOT NULL DEFAULT 1,
-  UNIQUE(provider_name, label),
-  FOREIGN KEY(provider_name) REFERENCES providers(name) ON DELETE CASCADE
+  UNIQUE(provider_name, label)
 );
 """
 
@@ -52,8 +51,7 @@ CREATE TABLE IF NOT EXISTS provider_keys (
   secret TEXT NOT NULL,
   weight INTEGER NOT NULL DEFAULT 1,
   enabled INTEGER NOT NULL DEFAULT 1,
-  UNIQUE(provider_name, label),
-  FOREIGN KEY(provider_name) REFERENCES providers(name) ON DELETE CASCADE
+  UNIQUE(provider_name, label)
 );
 """
 
@@ -110,7 +108,7 @@ class ConfigStore:
             await self._migrate(conn)
 
     async def _migrate(self, conn) -> None:
-        """Add extra_headers column if missing (table created before this field)."""
+        """Add extra_headers column and indexes if missing (idempotent)."""
         if self._is_pg:
             cols = {r[0] for r in (await conn.execute(sa.text(
                 "SELECT column_name FROM information_schema.columns"
@@ -121,6 +119,17 @@ class ConfigStore:
         if "extra_headers" not in cols:
             await conn.execute(sa.text(
                 "ALTER TABLE providers ADD COLUMN extra_headers TEXT NOT NULL DEFAULT '{}'"))
+
+        # Indexes on FK columns for cascade-delete performance and lookups:
+        # - provider_keys.provider_name: FK join + cascade delete
+        # - deployments.provider_name: cascade delete when provider is removed
+        # - deployments.group_name: lookup deployments by model group
+        for idx in [
+            "CREATE INDEX IF NOT EXISTS idx_provider_keys_provider ON provider_keys(provider_name)",
+            "CREATE INDEX IF NOT EXISTS idx_deployments_provider ON deployments(provider_name)",
+            "CREATE INDEX IF NOT EXISTS idx_deployments_group ON deployments(group_name)",
+        ]:
+            await conn.execute(sa.text(idx))
 
     # -- providers --------------------------------------------------------------
 
@@ -163,9 +172,9 @@ class ConfigStore:
         if not sets:
             return
         async with self.engine.begin() as conn:
-            await conn.execute(
-                sa.text(f"UPDATE providers SET {', '.join(sets)} WHERE name = :name"),
-                params)
+            # When renaming, update child tables FIRST so the FK constraint
+            # on provider_keys/deployments is not violated when we change
+            # the parent's name.
             if new_name is not None and new_name != name:
                 await conn.execute(
                     sa.text("UPDATE provider_keys SET provider_name = :nn"
@@ -175,6 +184,9 @@ class ConfigStore:
                     sa.text("UPDATE deployments SET provider_name = :nn"
                             " WHERE provider_name = :name"),
                     {"nn": new_name, "name": name})
+            await conn.execute(
+                sa.text(f"UPDATE providers SET {', '.join(sets)} WHERE name = :name"),
+                params)
 
     async def delete_provider(self, name: str) -> None:
         async with self.engine.begin() as conn:

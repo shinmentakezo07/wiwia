@@ -62,6 +62,10 @@ class AuthService:
     async def startup(self) -> None:
         async with self.engine.begin() as conn:
             await conn.execute(sa.text(CREATE_SQL))
+            # Index for ORDER BY created_at DESC in list_keys()
+            await conn.execute(sa.text(
+                "CREATE INDEX IF NOT EXISTS idx_vkeys_created_at"
+                " ON vkeys(created_at DESC)"))
 
     # -- lookup ----------------------------------------------------------------
     async def authenticate(self, plaintext: str) -> AuthInfo | None:

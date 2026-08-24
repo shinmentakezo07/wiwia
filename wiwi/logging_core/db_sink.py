@@ -120,7 +120,7 @@ class DBSink:
             await self._migrate(conn)
 
     async def _migrate(self, conn) -> None:
-        """Add columns introduced after the initial schema (idempotent)."""
+        """Add columns and indexes introduced after the initial schema (idempotent)."""
         if self._is_pg:
             cols = {r[0] for r in (await conn.execute(sa.text(
                 "SELECT column_name FROM information_schema.columns"
@@ -133,8 +133,20 @@ class DBSink:
                 await conn.execute(
                     sa.text(f"ALTER TABLE request_logs ADD COLUMN {col} {decl}"))
 
-        await conn.execute(sa.text(
-            "CREATE INDEX IF NOT EXISTS idx_request_logs_ts ON request_logs(ts)"))
+        # Indexes for query hot paths:
+        # - ts: time-range filters in overview, timeseries, and log reads
+        # - key_alias: per-key filtering in admin API
+        # - model_group: per-model filtering in admin API
+        # - request_id: lookup by request ID
+        # - audit_logs.ts: time-range queries on audit log
+        for idx in [
+            "CREATE INDEX IF NOT EXISTS idx_request_logs_ts ON request_logs(ts)",
+            "CREATE INDEX IF NOT EXISTS idx_request_logs_key_alias ON request_logs(key_alias)",
+            "CREATE INDEX IF NOT EXISTS idx_request_logs_model_group ON request_logs(model_group)",
+            "CREATE INDEX IF NOT EXISTS idx_request_logs_request_id ON request_logs(request_id)",
+            "CREATE INDEX IF NOT EXISTS idx_audit_logs_ts ON audit_logs(ts)",
+        ]:
+            await conn.execute(sa.text(idx))
 
     @staticmethod
     def _row(evt: LogEvent) -> dict:
