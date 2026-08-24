@@ -1,7 +1,8 @@
 """Auth service: master + virtual keys, in-memory cache, budget/rpm/tpm state.
 
-MVP storage is SQLite via SQLAlchemy async; keys are stored hashed, plaintext
-shown once at creation. Cache TTL 60s; admin mutations evict actively.
+Storage is SQLite or PostgreSQL via SQLAlchemy async; keys are stored
+hashed, plaintext shown once at creation. Cache TTL 60s; admin mutations
+evict actively.
 """
 
 import hmac

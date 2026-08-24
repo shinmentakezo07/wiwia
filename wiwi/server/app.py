@@ -118,6 +118,7 @@ from wiwi.router.router import (
     _default_base_url,
 )
 from wiwi.server import stats as stats_mod
+from wiwi.server.config_store import ConfigStore
 from wiwi.wire import anthropic_messages as am
 from wiwi.wire import openai_chat as oc
 from wiwi.wire import openai_responses as orp
@@ -157,7 +158,8 @@ class AppState:
         self.limiter = RateLimiter(global_rpm=rs.global_rpm, global_tpm=rs.global_tpm)
         self.auth: AuthService | None = None
         self.gateways: dict[str, Gateway] = {}
-        self.alert_rules: list[dict[str, Any]] = []  # storage only; runtime-scoped
+        self.alert_rules: list[dict[str, Any]] = []
+        self.config_store: ConfigStore | None = None
         # Set during shutdown so long-lived SSE generators break out of their
         # event loop instead of blocking uvicorn's graceful-shutdown drain
         # (which otherwise hangs at "Waiting for connections to close").
@@ -165,21 +167,89 @@ class AppState:
 
     async def init_db(self) -> None:
         import sqlalchemy.ext.asyncio as saa
-        url = self.config.general_settings.database_url or "sqlite+aiosqlite:///wiwi.db"
+        # DATABASE_URL env var overrides config; fall back to SQLite if unset.
+        # Supports both "postgresql://..." and "postgres://..." (SQLAlchemy
+        # normalizes the latter).  For serverless Postgres (Neon, Supabase),
+        # pool parameters are tuned for short-lived connections.
+        url = (os.environ.get("DATABASE_URL")
+               or self.config.general_settings.database_url
+               or "sqlite+aiosqlite:///wiwi.db")
         if url.startswith("sqlite:///"):
             url = url.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
-        aengine = saa.create_async_engine(url)
+        is_pg = url.startswith(("postgresql://", "postgres://"))
+        engine_kwargs: dict[str, Any] = {"url": url}
+        if is_pg:
+            engine_kwargs.update(
+                pool_size=5,
+                max_overflow=10,
+                pool_pre_ping=True,
+                pool_recycle=300,
+            )
+        aengine = saa.create_async_engine(**engine_kwargs)
+        self._db_engine = aengine
         self.auth = AuthService(aengine, self.config.general_settings.master_key)
         await self.auth.startup()
         from wiwi.logging_core.db_sink import DBSink
         self._db_sink = DBSink(aengine)
         await self._db_sink.startup()
         self.logs.set_db_sink(self._db_sink)
+        # Persist admin-added providers/keys/deployments so they survive restart
+        self.config_store = ConfigStore(aengine)
+        await self.config_store.startup()
+        await self._load_db_config()
         self.gateways = {
             "chat": Gateway(self.router, self.cost, "chat",
                             drop_params=self.config.wiwi_settings.drop_params),
         }
         self.shutdown_event = asyncio.Event()
+
+    async def _load_db_config(self) -> None:
+        """Merge DB-stored providers/keys/deployments into the YAML-built router.
+
+        YAML entries are loaded first by ``Router._build``; DB entries are
+        layered on top, skipping any name/label that already exists from YAML.
+        Alert rules and routing strategy are loaded from the settings table.
+        """
+        if self.config_store is None:
+            return
+        data = await self.config_store.load_all()
+        # providers
+        for p in data["providers"]:
+            if p["name"] in self.router.providers:
+                continue  # YAML-sourced, skip
+            self.router.providers[p["name"]] = ProviderAccount(
+                name=p["name"], provider_type=p["provider_type"],
+                base_url=p["base_url"], timeout_s=p["timeout_s"],
+                extra_headers=p.get("extra_headers", {}))
+        # keys
+        for k in data["keys"]:
+            acct = self.router.providers.get(k["provider_name"])
+            if acct is None or acct.get_key(k["label"]) is not None:
+                continue  # provider missing or label from YAML
+            acct.keys.append(ProviderKey(
+                label=k["label"], secret=k["secret"], weight=k["weight"],
+                enabled=k["enabled"]))
+        # deployments
+        for d in data["deployments"]:
+            acct = self.router.providers.get(d["provider_name"])
+            if acct is None:
+                continue
+            already = any(
+                dep.provider is acct and dep.model_id == d["model_id"]
+                for dep in self.router.groups.get(d["group_name"], []))
+            if already:
+                continue
+            dep = Deployment(group=d["group_name"], provider=acct,
+                             model_id=d["model_id"], weight=d["weight"])
+            self.router.groups.setdefault(d["group_name"], []).append(dep)
+        # alert rules
+        rules = await self.config_store.get_setting("alert_rules")
+        if rules is not None:
+            self.alert_rules = rules
+        # routing strategy
+        strategy = await self.config_store.get_setting("routing_strategy")
+        if strategy is not None:
+            self.router.settings.routing_strategy = strategy
 
     async def shutdown(self) -> None:
         if self.shutdown_event is not None:
@@ -781,6 +851,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
             key.status = "active"
             key.cooldown_until = 0.0
             diff["reset_status"] = True
+        if state.config_store:
+            await state.config_store.update_key(
+                name, label,
+                weight=diff.get("weight"),
+                enabled=diff.get("enabled"))
         await state.logs.log_audit(actor="master", action="provider_key.update",
                                    target=f"{name}/{label}", diff=diff)
         return ORJSONResponse({"key": _key_view(key, time.monotonic(), time.time())})
@@ -810,6 +885,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return _err(400, "invalid_request_error", "weight must be an integer",
                         request)
         acct.keys.append(ProviderKey(label=label, secret=secret, weight=weight))
+        if state.config_store:
+            await state.config_store.add_key(name, label, secret, weight)
         await state.logs.log_audit(actor="master", action="provider_key.create",
                                    target=f"{name}/{label}",
                                    diff={"weight": weight})
@@ -829,6 +906,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return _err(404, "not_found_error",
                         f"unknown key '{label}' on provider '{name}'", request)
         acct.keys = [k for k in acct.keys if k.label != label]
+        if state.config_store:
+            await state.config_store.delete_key(name, label)
         await state.logs.log_audit(actor="master", action="provider_key.delete",
                                    target=f"{name}/{label}")
         return ORJSONResponse({"deleted": True, "label": label})
@@ -862,6 +941,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
         state.router.providers[name] = ProviderAccount(
             name=name, provider_type=ptype, base_url=base_url,
             keys=[ProviderKey(label=label, secret=secret)])
+        if state.config_store:
+            await state.config_store.add_provider(name, ptype, base_url)
+            await state.config_store.add_key(name, label, secret)
         await state.logs.log_audit(actor="master", action="provider.create",
                                    target=name,
                                    diff={"provider_type": ptype, "base_url": base_url})
@@ -886,6 +968,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         f"{', '.join(referencing)} — remove those deployments first",
                         request)
         del state.router.providers[name]
+        if state.config_store:
+            await state.config_store.delete_provider(name)
         await state.logs.log_audit(actor="master", action="provider.delete", target=name)
         return ORJSONResponse({"deleted": True, "name": name})
 
@@ -933,6 +1017,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
             target = f"{name}→{new_name}"
         else:
             target = name
+        if state.config_store:
+            await state.config_store.update_provider(
+                name, provider_type=diff.get("provider_type"),
+                base_url=diff.get("base_url"), new_name=new_name)
         await state.logs.log_audit(actor="master", action="provider.update",
                                    target=target, diff=diff)
         mono, wall = time.monotonic(), time.time()
@@ -1012,6 +1100,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         f" to group '{gname}'",
                         request)
         state.router.groups.setdefault(gname, []).append(dep)
+        if state.config_store:
+            await state.config_store.add_deployment(gname, pname, model_id, weight)
         await state.logs.log_audit(actor="master", action="deployment.create",
                                    target=f"{gname}/{pname}/{model_id}",
                                    diff={"weight": weight})
@@ -1085,6 +1175,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
             for ident, w in parsed.items():
                 idents[ident].weight = w
                 applied[ident] = w
+                if state.config_store:
+                    pname, mid = ident.split("/", 1)
+                    await state.config_store.update_deployment_weight(
+                        gname, pname, mid, w)
             diff["weights"] = applied
         strategy = body.get("strategy")
         if strategy is not None:
@@ -1093,6 +1187,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                             f"invalid strategy '{strategy}'", request)
             state.router.settings.routing_strategy = strategy
             diff["strategy"] = strategy
+            if state.config_store:
+                await state.config_store.set_setting("routing_strategy", strategy)
         await state.logs.log_audit(actor="master", action="model_group.update",
                                    target=gname, diff=diff)
         return ORJSONResponse({"group": gname, **diff})
@@ -1203,6 +1299,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if not isinstance(rules, list):
             return _err(400, "invalid_request_error", "'rules' must be a list", request)
         state.alert_rules = rules
+        if state.config_store:
+            await state.config_store.set_setting("alert_rules", rules)
         await state.logs.log_audit(actor="master", action="alert_rules.update",
                                    target="*", diff={"count": len(rules)})
         return ORJSONResponse({"rules": state.alert_rules})

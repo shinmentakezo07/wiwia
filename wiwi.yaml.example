@@ -50,6 +50,11 @@ router_settings:
 
 general_settings:
   master_key: os.environ/WIWI_MASTER_KEY
+  # Database: SQLite (default) or PostgreSQL.  The DATABASE_URL env var
+  # overrides this setting if set.  For serverless Postgres (Neon, Supabase),
+  # set DATABASE_URL directly instead of using this key.
+  # database_url: sqlite+aiosqlite:///wiwi.db          # SQLite (default)
+  # database_url: postgresql://user:pass@host/db?sslmode=require  # Postgres
   database_url: os.environ/WIWI_DATABASE_URL
 
 wiwi_settings:

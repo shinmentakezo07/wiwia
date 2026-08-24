@@ -1,8 +1,11 @@
-"""SQLite persistence for request + audit log streams (batched writes).
+"""DB persistence for request + audit log streams (batched writes).
 
-The logging subsystem's docstring promises "request -> DBSink(batched)";
-this module is that sink. Audit events are written synchronously from the
-admin mutation paths; request batches arrive from the log pump worker.
+Works with both SQLite (aiosqlite) and PostgreSQL (asyncpg).  DDL and
+queries are written in a dialect-portable way: ``AUTOINCREMENT`` (SQLite)
+vs ``SERIAL`` (Postgres) is resolved via a startup dialect check;
+``PRAGMA`` is replaced with ``information_schema`` for column migration
+detection on Postgres; bucket math uses ``FLOOR()`` instead of
+``CAST(... AS INTEGER)`` for correct truncation on both engines.
 """
 from __future__ import annotations
 
@@ -14,7 +17,9 @@ import sqlalchemy as sa
 from wiwi.logging_core.events import LogEvent
 from wiwi.server.stats import VALID_METRICS, _p95
 
-REQUEST_DDL = """
+# DDL is shared between SQLite and Postgres.  The only difference is the
+# auto-increment syntax, which is resolved at startup time.
+_REQUEST_DDL_SQLITE = """
 CREATE TABLE IF NOT EXISTS request_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts REAL NOT NULL,
@@ -43,10 +48,50 @@ CREATE TABLE IF NOT EXISTS request_logs (
 );
 """
 
-AUDIT_DDL = """
+_REQUEST_DDL_PG = """
+CREATE TABLE IF NOT EXISTS request_logs (
+  id SERIAL PRIMARY KEY,
+  ts DOUBLE PRECISION NOT NULL,
+  request_id TEXT DEFAULT '',
+  surface TEXT DEFAULT '',
+  key_alias TEXT DEFAULT '',
+  model_group TEXT DEFAULT '',
+  provider TEXT DEFAULT '',
+  provider_key_label TEXT DEFAULT '',
+  status INTEGER DEFAULT 200,
+  error_code TEXT DEFAULT '',
+  tok_in INTEGER DEFAULT 0,
+  tok_cached INTEGER DEFAULT 0,
+  tok_reasoning INTEGER DEFAULT 0,
+  tok_out INTEGER DEFAULT 0,
+  tps DOUBLE PRECISION DEFAULT 0,
+  ttft_ms DOUBLE PRECISION DEFAULT 0,
+  latency_ms DOUBLE PRECISION DEFAULT 0,
+  cost DOUBLE PRECISION DEFAULT 0,
+  was_stream INTEGER DEFAULT 0,
+  cache_hit INTEGER DEFAULT 0,
+  cache_savings DOUBLE PRECISION DEFAULT 0,
+  attempts TEXT DEFAULT '[]',
+  request_body TEXT,
+  response_body TEXT
+);
+"""
+
+_AUDIT_DDL_SQLITE = """
 CREATE TABLE IF NOT EXISTS audit_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts REAL NOT NULL,
+  actor TEXT DEFAULT '',
+  action TEXT DEFAULT '',
+  target TEXT DEFAULT '',
+  diff TEXT DEFAULT '{}'
+);
+"""
+
+_AUDIT_DDL_PG = """
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id SERIAL PRIMARY KEY,
+  ts DOUBLE PRECISION NOT NULL,
   actor TEXT DEFAULT '',
   action TEXT DEFAULT '',
   target TEXT DEFAULT '',
@@ -64,24 +109,30 @@ _COLS = ("ts", "request_id", "surface", "key_alias", "model_group", "provider",
 class DBSink:
     def __init__(self, engine) -> None:
         self.engine = engine
+        self._is_pg = engine.dialect.name == "postgresql"
 
     async def startup(self) -> None:
         async with self.engine.begin() as conn:
-            await conn.execute(sa.text(REQUEST_DDL))
-            await conn.execute(sa.text(AUDIT_DDL))
-            # Migrate existing tables: add columns that may not exist yet.
+            request_ddl = _REQUEST_DDL_PG if self._is_pg else _REQUEST_DDL_SQLITE
+            audit_ddl = _AUDIT_DDL_PG if self._is_pg else _AUDIT_DDL_SQLITE
+            await conn.execute(sa.text(request_ddl))
+            await conn.execute(sa.text(audit_ddl))
             await self._migrate(conn)
 
     async def _migrate(self, conn) -> None:
         """Add columns introduced after the initial schema (idempotent)."""
-        existing = {r[1] for r in (await conn.execute(
-            sa.text("PRAGMA table_info(request_logs)"))).all()}
+        if self._is_pg:
+            cols = {r[0] for r in (await conn.execute(sa.text(
+                "SELECT column_name FROM information_schema.columns"
+                " WHERE table_name = 'request_logs'"))).all()}
+        else:
+            cols = {r[1] for r in (await conn.execute(
+                sa.text("PRAGMA table_info(request_logs)"))).all()}
         for col, decl in [("request_body", "TEXT"), ("response_body", "TEXT")]:
-            if col not in existing:
+            if col not in cols:
                 await conn.execute(
                     sa.text(f"ALTER TABLE request_logs ADD COLUMN {col} {decl}"))
 
-        # Index for fast time-range queries on long-range stats
         await conn.execute(sa.text(
             "CREATE INDEX IF NOT EXISTS idx_request_logs_ts ON request_logs(ts)"))
 
@@ -248,10 +299,8 @@ class DBSink:
             where_ts = "WHERE ts >= :cutoff"
 
         # bucket_start aligns the in-memory n_buckets grid; the SQL bucket
-        # boundary is computed from each event's own ts (offset-free) so that
-        # FLOOR-style grouping is correct regardless of ts position relative to
-        # bucket_start (CAST(... AS INTEGER) truncates toward zero, which would
-        # mis-bucket events with ts < bucket_start).
+        # boundary is computed from each event's own ts using FLOOR() which
+        # truncates toward negative infinity (correct for all ts values).
         bucket_start = int(now // bucket_seconds) * bucket_seconds
         if minutes > 0:
             n_buckets = max(1, minutes * 60 // bucket_seconds)
@@ -259,7 +308,7 @@ class DBSink:
 
         async with self.engine.connect() as conn:
             rows = (await conn.execute(sa.text(f"""
-                SELECT CAST(ts AS INTEGER) - (CAST(ts AS INTEGER) % :bs) AS bucket_t,
+                SELECT FLOOR(ts / :bs) * :bs AS bucket_t,
                        SUM(tok_in) AS tok_in,
                        SUM(tok_cached) AS tok_cached,
                        SUM(tok_reasoning) AS tok_reasoning,
@@ -275,7 +324,7 @@ class DBSink:
 
         # GROUP BY skips empty buckets; zero-fill to a dense array so the
         # chart has no gaps (matching the in-memory stats.timeseries() shape).
-        by_t: dict[int, object] = {r.bucket_t: r for r in rows}
+        by_t: dict[int, object] = {int(r.bucket_t): r for r in rows}
         if by_t:
             if minutes > 0:
                 # Fixed grid: bucket_start .. now, n_buckets slots.
