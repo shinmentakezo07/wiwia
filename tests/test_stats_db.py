@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 
 import pytest
+import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as saa
 
 from wiwi.logging_core.db_sink import DBSink
@@ -163,3 +164,22 @@ async def test_read_timeseries_empty(db):
     ts = await db.read_timeseries(3600, "tokens", 0)
     assert ts["bucket_seconds"] == 3600
     assert ts["buckets"] == []
+
+
+async def test_ts_index_created(db):
+    """The ts index should exist after startup."""
+    async with db.engine.connect() as conn:
+        indexes = (await conn.execute(sa.text(
+            "PRAGMA index_list('request_logs')"))).all()
+    index_names = {r[1] for r in indexes}
+    assert "idx_request_logs_ts" in index_names
+
+
+async def test_ts_index_idempotent(db):
+    """Calling startup again should not fail (index already exists)."""
+    await db.startup()  # second call
+    async with db.engine.connect() as conn:
+        indexes = (await conn.execute(sa.text(
+            "PRAGMA index_list('request_logs')"))).all()
+    index_names = {r[1] for r in indexes}
+    assert "idx_request_logs_ts" in index_names

@@ -81,6 +81,10 @@ class DBSink:
                 await conn.execute(
                     sa.text(f"ALTER TABLE request_logs ADD COLUMN {col} {decl}"))
 
+        # Index for fast time-range queries on long-range stats
+        await conn.execute(sa.text(
+            "CREATE INDEX IF NOT EXISTS idx_request_logs_ts ON request_logs(ts)"))
+
     @staticmethod
     def _row(evt: LogEvent) -> dict:
         return {
