@@ -4,6 +4,7 @@ services:
     ports: ["4000:4000"]
     environment:
       WIWI_MASTER_KEY: ${WIWI_MASTER_KEY:-sk-wiwi-master-change-me}
+      WIWI_DATABASE_URL: ${WIWI_DATABASE_URL:-sqlite+aiosqlite:////app/data/wiwi.db}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     volumes:

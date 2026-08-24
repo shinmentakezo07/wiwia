@@ -130,6 +130,7 @@ class WiwiSettings(BaseModel):
     drop_params: bool = True
     max_request_body_mb: int = 50
     log_requests: bool = True
+    store_prompts_in_spend_logs: bool = False
     host: str = "0.0.0.0"
     port: int = 4000
     header_allowlist: list[str] = Field(

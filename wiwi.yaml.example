@@ -50,8 +50,9 @@ router_settings:
 
 general_settings:
   master_key: os.environ/WIWI_MASTER_KEY
-  database_url: sqlite+aiosqlite:///wiwi.db
+  database_url: os.environ/WIWI_DATABASE_URL
 
 wiwi_settings:
   drop_params: true
   port: 4000
+  # store_prompts_in_spend_logs: true   # log full request/response content (off by default)

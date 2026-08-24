@@ -503,6 +503,8 @@ def build_log_event(ctx: RequestContext) -> LogEvent:
         attempts=[{"deployment": a.deployment, "provider": a.provider,
                    "key": a.provider_key_label, "status": a.status,
                    "latency_ms": a.latency_ms} for a in ctx.attempts],
+        request_body=ctx.metadata.get("request_body"),
+        response_body=ctx.metadata.get("response_body"),
     )
     return evt
 
