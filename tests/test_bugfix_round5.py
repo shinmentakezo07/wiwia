@@ -16,6 +16,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from datetime import UTC
 
@@ -382,7 +383,14 @@ def test_attempt_resume_calls_on_result():
 
     result = asyncio.run(gateway._attempt_resume(ctx, tape, queue))
 
-    assert result is True
+    assert result[0] is True
+    assert isinstance(result[1], asyncio.Task)
+    new_task = result[1]
+    new_task.cancel()
+    # Test is sync; let the event loop drain so the task actually cancels.
+    # We expect CancelledError, anything else is a test failure surfaced later.
+    with contextlib.suppress(BaseException):
+        asyncio.get_event_loop().run_until_complete(new_task)
     # The fallback deployment's provider should have on_result called with 200
     # Check the p2 provider keys
     p2 = router.providers["p2"]
@@ -449,7 +457,8 @@ def test_attempt_resume_calls_on_result_on_failure():
 
     result = asyncio.run(gateway._attempt_resume(ctx, tape, queue))
 
-    assert result is False
+    assert result[0] is False
+    assert result[1] is None
     # The fallback deployment's key should have err_count incremented
     p2 = router.providers["p2"]
     assert p2.keys[0].err_count == 1

@@ -161,8 +161,13 @@ class Gateway:
                 # attempt a resume on a fallback deployment.
                 if (isinstance(d, dl.StreamError) and content_flowed
                         and resume_mode != "off" and max_resumes > 0):
-                    resumed = await self._attempt_resume(ctx, tape, queue)
+                    resumed, new_pump = await self._attempt_resume(ctx, tape, queue)
                     if resumed:
+                        # Update the outer pump_task reference so the finally
+                        # below cancels the *active* pump (the resume pump),
+                        # not the original. Without this, the resume pump
+                        # leaks its upstream connection.
+                        pump_task = new_pump
                         max_resumes -= 1
                         continue  # keep consuming the queue from the new pump
                 if coalescer is not None:
@@ -181,16 +186,19 @@ class Gateway:
                 pump_task.cancel()
 
     async def _attempt_resume(self, ctx: RequestContext, tape: StreamTape,
-                              queue: asyncio.Queue) -> bool:
+                              queue: asyncio.Queue) -> tuple[bool, asyncio.Task | None]:
         """Try to resume a failed stream on a fallback deployment.
 
         Appends the partial assistant output as a continuation message and
-        starts a new pump. Returns True if the new pump connected successfully.
+        starts a new pump. Returns ``(success, new_pump_task)``: the caller
+        must update its outer ``pump_task`` reference to the returned task,
+        otherwise the resume pump leaks its upstream connection when the
+        consumer closes (the outer finally only cancels the original task).
         """
         from wiwi.ir import types as ir
         text = tape.replay_text()
         if not text and self.router.settings.stream_resume == "content_only":
-            return False
+            return False, None
         # Build continuation messages with the partial output prepended.
         cont_msgs = build_continuation_messages(tape, ctx.ir_req.messages)
         resume_req = ir.Request(
@@ -202,7 +210,7 @@ class Gateway:
         # Find a fallback deployment.
         _group, deps = self.router.resolve_group(ctx.group or ctx.ir_req.model)
         if not deps:
-            return False
+            return False, None
         # Try each fallback group if configured.
         fb_targets = self.router.fallback_targets(ctx.group or "")
         candidates: list[Deployment] = []
@@ -215,7 +223,7 @@ class Gateway:
         else:
             candidates.extend(deps)
         if not candidates:
-            return False
+            return False, None
         for dep in candidates:
             if not dep.available:
                 continue
@@ -228,7 +236,7 @@ class Gateway:
                 group=ctx.group, cancel=ctx.cancel)
             ready = asyncio.Event()
             err_box: list[WiwiError | None] = [None]
-            pump_task = asyncio.create_task(
+            new_pump_task = asyncio.create_task(
                 self._pump(dep, ProviderKeyRef(label=key.label, secret=key.secret),
                            resume_ctx, queue, ready, err_box))
             await ready.wait()
@@ -236,7 +244,11 @@ class Gateway:
                 # Connection succeeded — report success so the key's
                 # req_count increments and any cooldown is cleared.
                 dep.provider.on_result(key, 200, None)
-                return True
+                # Return the new pump task so the caller updates its outer
+                # reference — otherwise the resume pump leaks its connection
+                # when the consumer closes (the outer finally only cancels
+                # whatever pump_task currently points to).
+                return True, new_pump_task
             # Connection failed — feed the key pool and deployment cooldown
             # so a provider that keeps failing on resume cools off.
             status = _status_of_wiwi_error(err_box[0])
@@ -244,8 +256,8 @@ class Gateway:
             if status in (408, 500, 502, 503, 504, 529):
                 dep.record_fail(self.router.settings.allowed_fails,
                                 self.router.settings.cooldown_time)
-            pump_task.cancel()
-        return False
+            new_pump_task.cancel()
+        return False, None
 
     async def _pump(self, dep: Deployment, key: ProviderKeyRef,
                     ctx: RequestContext, queue: asyncio.Queue,

@@ -79,6 +79,11 @@ def _role_parts_to_content(messages: list[ir.Message]) -> list[dict[str, Any]]:
                 msg["content"] = None  # OpenAI allows null with tool_calls
         if reasoning and m.role == "assistant":
             msg["reasoning"] = reasoning
+            # Also surface as reasoning_content for OpenAI Chat clients whose
+            # downstream providers expect that field name (OpenAI itself, plus
+            # OpenAI-compatible APIs that follow the OpenAI Chat shape rather
+            # than the older OpenAI-compatible "reasoning" convention).
+            msg["reasoning_content"] = reasoning
         out.append(msg)
     return out
 

@@ -65,6 +65,31 @@ def test_openai_chat_tool_null_content_becomes_empty_string():
     )
 
 
+def test_openai_chat_decodes_reasoning_content_into_thinking_part():
+    """Reasoning models emit a separate reasoning_content field on assistant
+    messages. The decoder must lift it into a ThinkingPart so the IR carries
+    the thinking context forward — without this, Anthropic extended-thinking
+    breaks across turns when a Claude-Code-via-OpenAI-shape client echoes
+    prior assistant messages with reasoning_content set.
+    """
+    req = oc.decode_request({
+        "model": "gpt-4o",
+        "messages": [
+            {"role": "user", "content": "what is 2+2?"},
+            {"role": "assistant", "content": "4",
+             "reasoning_content": "The user asks what 2+2 is. The answer is 4."},
+        ],
+    })
+    assistant = req.messages[1]
+    # The thinking text must be in a ThinkingPart on the assistant message.
+    from wiwi.ir.types import ThinkingPart
+    thinking_parts = [p for p in assistant.parts if isinstance(p, ThinkingPart)]
+    assert len(thinking_parts) == 1, (
+        f"expected exactly one ThinkingPart, got {[type(p).__name__ for p in assistant.parts]}"
+    )
+    assert thinking_parts[0].text == "The user asks what 2+2 is. The answer is 4."
+
+
 def test_anthropic_decode_system_and_tools():
     req = am.decode_request({
         "model": "claude-sonnet-4-20250514",

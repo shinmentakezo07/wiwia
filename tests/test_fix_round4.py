@@ -6,6 +6,8 @@ that replaces BaseHTTPMiddleware (which broke streaming responses during
 graceful shutdown).
 """
 
+import contextlib
+
 import httpx
 import pytest
 import respx
@@ -226,3 +228,111 @@ async def test_middleware_does_not_use_base_http_middleware():
         "BaseHTTPMiddleware found in the stack — streaming responses will "
         "break during graceful shutdown"
     )
+
+
+# -- R3: pump_task reference must be updated after _attempt_resume ------------
+# H1: When a mid-stream resume fires, _attempt_resume creates a new pump task
+# locally but the outer stream()'s pump_task reference is never updated. The
+# finally block then cancels the *original* pump, not the resume pump, so the
+# resume pump leaks its upstream connection. The fix is to return the new
+# pump task from _attempt_resume and have stream() update the outer reference.
+import asyncio
+
+from wiwi.streaming.resume import StreamTape
+
+
+async def test_attempt_resume_returns_new_pump_task():
+    """_attempt_resume must return the new pump task so the caller can update
+    its outer reference (otherwise the resume pump leaks on cancel)."""
+    from wiwi.config import (
+        DeploymentParams,
+        GeneralSettings,
+        KeyDef,
+        ModelEntry,
+        ProviderDef,
+        RouterSettings,
+        WiwiConfig,
+    )
+    from wiwi.core.gateway import Gateway
+    from wiwi.cost.pricing import CostEngine
+    from wiwi.ir import types as ir
+    from wiwi.router.router import Router
+
+    # Two providers in the same model group; primary is the one that "failed"
+    # in the outer request, fallback is what _attempt_resume will try.
+    cfg = WiwiConfig(
+        providers=[
+            ProviderDef(name="primary", provider="openai",
+                        keys=[KeyDef(label="a", key="k1")]),
+            ProviderDef(name="fallback", provider="openai",
+                        keys=[KeyDef(label="b", key="k2")]),
+        ],
+        model_list=[
+            ModelEntry(model_name="gpt-4o",
+                       wiwi_params=DeploymentParams(provider="primary", model="gpt-4o")),
+            ModelEntry(model_name="gpt-4o",
+                       wiwi_params=DeploymentParams(provider="fallback", model="gpt-4o")),
+        ],
+        general_settings=GeneralSettings(master_key="sk-wiwi-master-test",
+                                         database_url="sqlite+aiosqlite:///:memory:"),
+        router_settings=RouterSettings(
+            fallbacks={"gpt-4o": ["gpt-4o"]},
+            stream_resume="enabled",
+            stream_resume_max_retries=1,
+        ),
+    )
+    router = Router(cfg)
+    gw = Gateway(router, CostEngine())
+
+    ctx = RequestContext(surface="chat",
+                        ir_req=ir.Request(model="gpt-4o",
+                                          messages=[ir.Message(role="user",
+                                                              parts=[ir.TextPart("hi")])]))
+    ctx.group = "gpt-4o"
+    ctx.deployment = router.groups["gpt-4o"][0]  # primary
+    ctx.provider_key = ctx.deployment.provider.keys[0]
+
+    queue: asyncio.Queue = asyncio.Queue()
+    tape = StreamTape()
+
+    # Stub _pump to simulate a successful fallback connection (sets ready,
+    # then sleeps until cancelled — this lets us observe whether the outer
+    # reference is the one being cancelled, proving the leak is fixed).
+    captured: dict = {}
+
+    async def fake_pump(dep, key, c, q, ready, err_box):
+        captured["new_dep"] = dep
+        captured["new_key"] = key
+        ready.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            captured["cancelled"] = True
+            raise
+
+    gw._pump = fake_pump  # type: ignore[assignment]
+
+    success, new_task = await gw._attempt_resume(ctx, tape, queue)
+    try:
+        assert success is True
+        assert isinstance(new_task, asyncio.Task)
+        assert not new_task.done()
+        # The deployment chosen is a function of the candidate list ordering;
+        # we don't care *which* one, only that a new task was created and
+        # returned (this is the structural fix).
+        assert captured["new_dep"] in router.groups["gpt-4o"]
+        # Simulate the outer stream() finally: cancel the *returned* task.
+        # If the fix is in place, this is the same task _pump is awaiting,
+        # and the fake _pump records that it was cancelled.
+        new_task.cancel()
+        with contextlib.suppress(BaseException):
+            await new_task
+        assert captured.get("cancelled") is True, (
+            "the new pump task must be the one that was cancelled "
+            "(regression: outer pump_task was not updated after resume)"
+        )
+    finally:
+        if not new_task.done():
+            new_task.cancel()
+            with contextlib.suppress(BaseException):
+                await new_task
