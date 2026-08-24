@@ -273,17 +273,36 @@ class DBSink:
                 ORDER BY bucket_t
             """), {**params, "bs": bucket_seconds})).all()
 
+        # GROUP BY skips empty buckets; zero-fill to a dense array so the
+        # chart has no gaps (matching the in-memory stats.timeseries() shape).
+        by_t: dict[int, object] = {r.bucket_t: r for r in rows}
+        if by_t:
+            if minutes > 0:
+                # Fixed grid: bucket_start .. now, n_buckets slots.
+                first_t = bucket_start
+                n_fill = n_buckets
+            else:
+                # All-time: span the oldest..newest populated buckets.
+                first_t = min(by_t)
+                n_fill = (max(by_t) - first_t) // bucket_seconds + 1
+            for i in range(n_fill):
+                t = first_t + i * bucket_seconds
+                if t not in by_t:
+                    by_t[t] = None  # placeholder for a zero-valued bucket
+
         if metric == "tokens":
             buckets = [
-                {"t": r.bucket_t, "tok_in": r.tok_in or 0, "tok_cached": r.tok_cached or 0,
-                 "tok_reasoning": r.tok_reasoning or 0, "tok_out": r.tok_out or 0}
-                for r in rows
+                {"t": t, "tok_in": getattr(r, "tok_in", 0) or 0,
+                 "tok_cached": getattr(r, "tok_cached", 0) or 0,
+                 "tok_reasoning": getattr(r, "tok_reasoning", 0) or 0,
+                 "tok_out": getattr(r, "tok_out", 0) or 0}
+                for t, r in sorted(by_t.items())
             ]
         else:
             buckets = [
-                {"t": r.bucket_t,
-                 "tps_avg": round(r.tps_sum / r.tps_count, 2) if r.tps_count else 0.0,
-                 "tps_p95": round(r.tps_max or 0.0, 2)}
-                for r in rows
+                {"t": t,
+                 "tps_avg": round(r.tps_sum / r.tps_count, 2) if r and r.tps_count else 0.0,
+                 "tps_p95": round(r.tps_max or 0.0, 2) if r else 0.0}
+                for t, r in sorted(by_t.items())
             ]
         return {"bucket_seconds": bucket_seconds, "metric": metric, "buckets": buckets}

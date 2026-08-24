@@ -171,6 +171,34 @@ async def test_read_timeseries_filtered_by_time(db):
     assert sum(b["tok_out"] for b in ts["buckets"]) == 50
 
 
+async def test_read_timeseries_zero_fills_sparse_buckets(db):
+    """Buckets with no traffic should be zero-filled, not skipped (dense array)."""
+    # Use hour-aligned timestamps so bucket boundaries are deterministic:
+    # hours 0, 1, and 3 have events; hour 2 is deliberately empty.
+    base = 3_600_000  # divisible by 3600
+    events = [
+        _evt(base + 100, tok_in=100, tok_out=10),         # hour 0 bucket
+        _evt(base + 3600 + 100, tok_in=200, tok_out=20),   # hour 1 bucket
+        # hour 2 bucket deliberately empty
+        _evt(base + 10800 + 100, tok_in=300, tok_out=30),  # hour 3 bucket
+    ]
+    await _seed(db, events)
+    ts = await db.read_timeseries(3600, "tokens", 0)  # all-time, 1h buckets
+    buckets = ts["buckets"]
+    # The returned series must be dense: no gaps between min and max bucket_t.
+    ts_list = [b["t"] for b in buckets]
+    assert ts_list == sorted(ts_list)
+    assert ts_list == list(range(ts_list[0], ts_list[-1] + 1, 3600))
+    # The empty middle bucket must be present with zero values.
+    empty_bucket = base + 7200  # hour 2 boundary
+    eb = next(b for b in buckets if b["t"] == empty_bucket)
+    assert eb["tok_in"] == 0
+    assert eb["tok_out"] == 0
+    # Non-empty buckets retain their sums.
+    assert sum(b["tok_in"] for b in buckets) == 600
+    assert sum(b["tok_out"] for b in buckets) == 60
+
+
 async def test_read_timeseries_empty(db):
     ts = await db.read_timeseries(3600, "tokens", 0)
     assert ts["bucket_seconds"] == 3600
