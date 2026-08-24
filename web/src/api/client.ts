@@ -111,7 +111,7 @@ export const deleteProvider = (name: string) =>
 
 export const patchProvider = (
   name: string,
-  patch: { name?: string; base_url?: string; provider_type?: string },
+  patch: { name?: string; base_url?: string; provider_type?: string; round_robin?: boolean },
 ) =>
   api<Provider>(`/admin/providers/${encodeURIComponent(name)}`, {
     method: "PATCH",

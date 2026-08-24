@@ -12,7 +12,7 @@ from wiwi.providers.openrouter_adapter import OpenRouterAdapter
 # Provider types that fall through to the OpenAI adapter (they share the
 # Chat Completions wire format). Every other type in PROVIDER_TYPES must have
 # an explicit branch in get_adapter.
-_OPENAI_WIRE_TYPES = frozenset({"openai", "openai-compatible"})
+_OPENAI_WIRE_TYPES = frozenset({"openai", "openai-compatible", "gmicloud"})
 
 
 def get_adapter(provider_type: str) -> ProviderAdapter:

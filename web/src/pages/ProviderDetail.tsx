@@ -5,7 +5,7 @@
 import { useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Boxes, Globe, Plus, RefreshCw, Search, Server, Sparkles, Trash2, X, Zap } from "lucide-react";
+import { ArrowLeft, Boxes, Cloud, Eye, EyeOff, Globe, Plus, RefreshCw, Search, Server, Sparkles, Trash2, X, Zap } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
   addDeployment,
@@ -34,6 +34,7 @@ import {
   Spinner,
   Table,
   TD,
+  Toggle,
 } from "@/components/ui";
 
 const STATUS_TONE: Record<PoolKey["status"], "green" | "amber" | "red" | "gray"> = {
@@ -49,6 +50,7 @@ const PROVIDER_ICON: Record<string, LucideIcon> = {
   gemini: Zap,
   openrouter: Globe,
   "openai-compatible": Server,
+  gmicloud: Cloud,
 };
 
 const PROVIDER_TYPE_OPTIONS = [
@@ -56,6 +58,7 @@ const PROVIDER_TYPE_OPTIONS = [
   { value: "anthropic", label: "Anthropic" },
   { value: "gemini", label: "Gemini" },
   { value: "openrouter", label: "OpenRouter" },
+  { value: "gmicloud", label: "GMI Cloud" },
   { value: "openai-compatible", label: "OpenAI-compatible URL" },
 ];
 
@@ -76,6 +79,7 @@ function KeyRow(props: { provider: string; k: PoolKey; onError: (m: string) => v
   const qc = useQueryClient();
   const [editingWeight, setEditingWeight] = useState(false);
   const [weight, setWeight] = useState(String(props.k.weight));
+  const [revealed, setRevealed] = useState(false);
 
   const patch = useMutation({
     mutationFn: (p: { enabled?: boolean; weight?: number }) =>
@@ -98,7 +102,22 @@ function KeyRow(props: { provider: string; k: PoolKey; onError: (m: string) => v
           {props.k.label}
         </div>
       </TD>
-      <TD className="font-mono text-[12px] text-[var(--admin-text-dim)]">{props.k.masked}</TD>
+      <TD className="font-mono text-[12px] text-[var(--admin-text-dim)]">
+        <div className="flex items-center gap-1.5">
+          <span className={revealed ? "break-all" : ""}>
+            {revealed ? props.k.secret : props.k.masked}
+          </span>
+          <button
+            type="button"
+            onClick={() => setRevealed((v) => !v)}
+            className="shrink-0 rounded p-1 text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.03] hover:text-[var(--admin-text-muted)]"
+            title={revealed ? "Hide key" : "Reveal key"}
+            aria-label={revealed ? "Hide key" : "Reveal key"}
+          >
+            {revealed ? <EyeOff size={12} /> : <Eye size={12} />}
+          </button>
+        </div>
+      </TD>
       <TD>
         {editingWeight ? (
           <form
@@ -158,11 +177,37 @@ function KeyRow(props: { provider: string; k: PoolKey; onError: (m: string) => v
 }
 
 function KeyPoolCard(props: { p: Provider; onError: (m: string) => void }) {
+  const qc = useQueryClient();
+  const [roundRobin, setRoundRobin] = useState(props.p.round_robin);
+
+  const toggleRR = useMutation({
+    mutationFn: () => patchProvider(props.p.name, { round_robin: !roundRobin }),
+    onSuccess: () => {
+      setRoundRobin((v) => !v);
+      void qc.invalidateQueries({ queryKey: ["providers"] });
+    },
+    onError: (e) => props.onError(e.message),
+  });
+
   return (
     <Card className="xl:col-span-3">
       <CardHeader
         title="Key pool"
-        right={<Badge tone="blue">{props.p.keys.length} keys</Badge>}
+        right={
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] text-[var(--admin-text-dim)]">
+                {roundRobin ? "round-robin" : "sequential"}
+              </span>
+              <Toggle
+                checked={roundRobin}
+                onChange={() => toggleRR.mutate()}
+                disabled={toggleRR.isPending}
+              />
+            </div>
+            <Badge tone="blue">{props.p.keys.length} keys</Badge>
+          </div>
+        }
       />
       {props.p.keys.length === 0 ? (
         <EmptyState>No keys yet — add some below.</EmptyState>
@@ -500,7 +545,7 @@ function AccountSettingsCard(props: { p: Provider; onError: (m: string) => void 
             />
           </Field>
         </div>
-        <Field label="Base URL" hint="Optional for openai/anthropic/gemini/openrouter. Required for compatible URLs.">
+        <Field label="Base URL" hint="Optional for openai/anthropic/gemini/openrouter/gmicloud. Required for compatible URLs.">
           <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://…" />
         </Field>
         {error && <ErrorText>{error}</ErrorText>}

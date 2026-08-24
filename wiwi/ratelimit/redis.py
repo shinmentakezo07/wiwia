@@ -37,6 +37,33 @@ class _Window:
         return sum(e.tokens for e in self.events)
 
 
+def compute_retry_after_seconds(
+    oldest_event_ts: float | None, now: float, window_s: float = 60.0
+) -> int:
+    """Compute ``Retry-After`` (seconds) for a sliding-window rate limit.
+
+    ``oldest_event_ts`` is the timestamp of the oldest live event in the
+    60-second window — the moment it will age out is when the caller can
+    retry. If unknown (e.g. the read failed), return the full window length
+    so the client backs off safely.
+
+    Always returns at least 1, and is floored to the window length so the
+    caller never gets a tighter suggestion than the window itself.
+
+    This is extracted as a pure function so the arithmetic is testable
+    without a live Redis. The previous version of the Redis backend
+    hard-coded ``60.0 - (now - (now - 60.0))`` which is a no-op and made
+    every Redis 429 claim a 1-second retry interval.
+    """
+    if oldest_event_ts is None:
+        return int(window_s)
+    seconds_until_free = window_s - (now - oldest_event_ts)
+    # +1 so a freshly-added member never reads as "already free" (sub-second
+    # race); clamp into [1, window_s] so the value is always a sensible
+    # whole-second Retry-After.
+    return max(1, min(int(window_s), int(seconds_until_free) + 1))
+
+
 class RedisRateLimiter:
     """Redis-backed rate limiter using sorted sets for sliding windows.
 
@@ -88,19 +115,46 @@ class RedisRateLimiter:
             # results: [pruned x N, added x N, counts x N]
             n = len(scopes)
             counts = results[2 * n:]
-            for i, (_scope, limit, _is_token) in enumerate(scopes):
+            for i, (scope, limit, _is_token) in enumerate(scopes):
                 count = int(counts[i])
                 # The score includes our just-added member; count is total
                 # including our reservation. Check if over limit.
                 if count > 0 and count > limit:
                     # Undo our reservation
                     await self._undo_reservations(scopes, now, est_tokens)
-                    retry_after = int(max(1.0, 60.0 - (now - (now - 60.0))))
+                    # Compute retry_after from the oldest live member's score
+                    # (the next moment it'll age out of the 60s window).
+                    # Falls back to a safe 60s if the read fails.
+                    retry_after = await self._compute_retry_after(
+                        scope, now, est_tokens
+                    )
                     return False, min(retry_after, 60)
             return True, 0
         except Exception:  # noqa: BLE001
             # Redis error: fall back to memory
             return self._memory.check(key_id, key_rpm, key_tpm, est_tokens)
+
+    async def _compute_retry_after(self, scope: str, now: float,
+                                   est_tokens: int) -> int:
+        """Return Retry-After seconds based on the oldest live member in *scope*.
+
+        The arithmetic itself lives in :func:`compute_retry_after_seconds`;
+        this wrapper just looks up the oldest score from Redis. If the read
+        fails for any reason we conservatively return the full window length
+        (60s) so the client backs off safely.
+        """
+        if self._redis is None:
+            return compute_retry_after_seconds(None, now)
+        try:
+            oldest = await self._redis.zrange(scope, 0, 0, withscores=True)
+        except Exception:  # noqa: BLE001
+            return compute_retry_after_seconds(None, now)
+        if not oldest:
+            return compute_retry_after_seconds(None, now)
+        # `zrange ... withscores=True` returns [(member, score), ...] with
+        # score as float (epoch seconds, since we stored `now` as the score).
+        oldest_ts = float(oldest[0][1])
+        return compute_retry_after_seconds(oldest_ts, now)
 
     async def _undo_reservations(self, scopes: list, now: float, est_tokens: int) -> None:
         if self._redis is None:

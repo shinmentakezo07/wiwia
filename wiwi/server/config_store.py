@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS providers (
   provider_type TEXT NOT NULL,
   base_url TEXT NOT NULL DEFAULT '',
   timeout_s REAL NOT NULL DEFAULT 120.0,
-  extra_headers TEXT NOT NULL DEFAULT '{}'
+  extra_headers TEXT NOT NULL DEFAULT '{}',
+  round_robin INTEGER NOT NULL DEFAULT 1
 );
 """
 
@@ -119,6 +120,9 @@ class ConfigStore:
         if "extra_headers" not in cols:
             await conn.execute(sa.text(
                 "ALTER TABLE providers ADD COLUMN extra_headers TEXT NOT NULL DEFAULT '{}'"))
+        if "round_robin" not in cols:
+            await conn.execute(sa.text(
+                "ALTER TABLE providers ADD COLUMN round_robin INTEGER NOT NULL DEFAULT 1"))
 
         # Indexes on FK columns for cascade-delete performance and lookups:
         # - provider_keys.provider_name: FK join + cascade delete
@@ -135,28 +139,32 @@ class ConfigStore:
 
     async def add_provider(self, name: str, provider_type: str, base_url: str,
                            timeout_s: float = 120.0,
-                           extra_headers: dict | None = None) -> None:
+                           extra_headers: dict | None = None,
+                           round_robin: bool = True) -> None:
         hdrs = orjson.dumps(extra_headers or {}).decode()
+        rr = int(round_robin)
         if self._is_pg:
             sql = ("INSERT INTO providers"
-                   " (name, provider_type, base_url, timeout_s, extra_headers)"
-                   " VALUES (:n,:t,:b,:s,:h)"
+                   " (name, provider_type, base_url, timeout_s, extra_headers, round_robin)"
+                   " VALUES (:n,:t,:b,:s,:h,:r)"
                    " ON CONFLICT (name) DO UPDATE SET"
                    " provider_type=EXCLUDED.provider_type,"
                    " base_url=EXCLUDED.base_url,"
                    " timeout_s=EXCLUDED.timeout_s,"
-                   " extra_headers=EXCLUDED.extra_headers")
+                   " extra_headers=EXCLUDED.extra_headers,"
+                   " round_robin=EXCLUDED.round_robin")
         else:
             sql = ("INSERT OR REPLACE INTO providers"
-                   " (name, provider_type, base_url, timeout_s, extra_headers)"
-                   " VALUES (:n,:t,:b,:s,:h)")
+                   " (name, provider_type, base_url, timeout_s, extra_headers, round_robin)"
+                   " VALUES (:n,:t,:b,:s,:h,:r)")
         async with self.engine.begin() as conn:
             await conn.execute(sa.text(sql),
                                {"n": name, "t": provider_type, "b": base_url,
-                                "s": timeout_s, "h": hdrs})
+                                "s": timeout_s, "h": hdrs, "r": rr})
 
     async def update_provider(self, name: str, *, provider_type: str | None = None,
                               base_url: str | None = None,
+                              round_robin: bool | None = None,
                               new_name: str | None = None) -> None:
         sets: list[str] = []
         params: dict = {"name": name}
@@ -166,6 +174,9 @@ class ConfigStore:
         if base_url is not None:
             sets.append("base_url = :bu")
             params["bu"] = base_url
+        if round_robin is not None:
+            sets.append("round_robin = :rr")
+            params["rr"] = int(round_robin)
         if new_name is not None and new_name != name:
             sets.append("name = :nn")
             params["nn"] = new_name
@@ -305,8 +316,8 @@ class ConfigStore:
         """Return all DB-stored config as a plain dict for merging into the router."""
         async with self.engine.connect() as conn:
             prov_rows = (await conn.execute(sa.text(
-                "SELECT name, provider_type, base_url, timeout_s, extra_headers"
-                " FROM providers ORDER BY name"))).all()
+                "SELECT name, provider_type, base_url, timeout_s, extra_headers,"
+                " round_robin FROM providers ORDER BY name"))).all()
             key_rows = (await conn.execute(sa.text(
                 "SELECT provider_name, label, secret, weight, enabled"
                 " FROM provider_keys ORDER BY id"))).all()
@@ -316,7 +327,8 @@ class ConfigStore:
         return {
             "providers": [
                 {"name": r[0], "provider_type": r[1], "base_url": r[2],
-                 "timeout_s": r[3], "extra_headers": orjson.loads(r[4])}
+                 "timeout_s": r[3], "extra_headers": orjson.loads(r[4]),
+                 "round_robin": bool(r[5])}
                 for r in prov_rows
             ],
             "keys": [

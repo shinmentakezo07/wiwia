@@ -638,3 +638,172 @@ All ~25 `JSONResponse(...)` calls in `app.py` replaced with `ORJSONResponse(...)
 | `tests/test_property_roundtrip.py` | **NEW** — 6 Hypothesis property-based tests (Round 4) |
 
 **Total: 219 tests pass, ruff clean.**
+
+---
+
+## Round 5: Tool-Call Schema Translation (Latest OpenAI + Anthropic Docs)
+
+> **Session date**: 2026-08-24
+> **Status**: All changes verified — 400 tests pass, ruff clean
+> **Scope**: Tool-call schema gaps found by reading the latest official OpenAI and Anthropic docs (tool_choice, disable_parallel_tool_use, strict, input_examples, cache_control)
+
+After reading the latest OpenAI Function Calling guide and Anthropic Tool Use / Define Tools / Parallel Tool Use docs, the following gaps were identified and fixed. These are all cross-provider translation bugs: a client using one dialect would silently lose settings when routed to the other provider.
+
+### 5.1 Anthropic wire codec: `tool_choice` "auto" and "none" silently dropped
+
+**File**: `wiwi/wire/anthropic_messages.py`
+
+**Issue**: The Anthropic wire codec's `decode_request` only handled `tool_choice` types `any` and `tool`. When an Anthropic client sent `{"type": "auto"}` (the default) or `{"type": "none"}`, the `tool_choice` was silently set to `None`, so the IR lost the explicit instruction and the provider adapter would not forward it.
+
+**Before**:
+```python
+tc_raw = body.get("tool_choice") or {}
+tool_choice: ir.ToolChoice | None = None
+if isinstance(tc_raw, dict):
+    if tc_raw.get("type") == "any":
+        tool_choice = ir.ToolChoiceRequired()
+    elif tc_raw.get("type") == "tool":
+        tool_choice = ir.ToolChoiceNamed(tc_raw.get("name", ""))
+    # "auto" and "none" → silently dropped (tool_choice stays None)
+```
+
+**After**:
+```python
+if isinstance(tc_raw, dict):
+    tc_type = tc_raw.get("type")
+    if tc_type == "any":
+        tool_choice = ir.ToolChoiceRequired()
+    elif tc_type == "tool":
+        tool_choice = ir.ToolChoiceNamed(tc_raw.get("name", ""))
+    elif tc_type == "auto":
+        tool_choice = ir.ToolChoiceAuto()
+    elif tc_type == "none":
+        tool_choice = ir.ToolChoiceNone()
+```
+
+**Tests**: `test_anthropic_decode_tool_choice_auto`, `test_anthropic_decode_tool_choice_none`
+
+### 5.2 `disable_parallel_tool_use` translation (OpenAI ↔ Anthropic)
+
+**Files**: `wiwi/ir/types.py`, `wiwi/wire/openai_chat.py`, `wiwi/wire/openai_responses.py`, `wiwi/wire/anthropic_messages.py`, `wiwi/providers/anthropic_adapter.py`, `wiwi/providers/openai_adapter.py`
+
+**Issue**: Anthropic controls parallel tool use via `disable_parallel_tool_use` inside the `tool_choice` object (e.g. `{"type": "auto", "disable_parallel_tool_use": true}`). OpenAI uses `parallel_tool_calls: false`. Neither direction was translated. An OpenAI client sending `parallel_tool_calls: false` routed to Anthropic would lose the setting (and vice versa).
+
+**Changes**:
+
+1. **IR** (`GenParams`): Added `disable_parallel_tool_use: bool | None = None` field.
+
+2. **OpenAI wire codecs** (Chat + Responses): Decode `parallel_tool_calls: false` into `disable_parallel_tool_use=True`:
+```python
+disable_parallel_tool_use=(True if body.get("parallel_tool_calls") is False else None),
+```
+
+3. **Anthropic wire codec**: Decode `disable_parallel_tool_use` from inside `tool_choice`:
+```python
+disable_parallel = tc_raw.get("disable_parallel_tool_use")
+# ... wired into GenParams(disable_parallel_tool_use=disable_parallel)
+```
+
+4. **Anthropic adapter**: Forward `disable_parallel_tool_use` into the `tool_choice` object. When no explicit `tool_choice` was set but `disable_parallel_tool_use` is, use `{"type": "auto"}` as the carrier:
+```python
+if tc_obj is not None:
+    if disable is not None:
+        tc_obj["disable_parallel_tool_use"] = disable
+    body["tool_choice"] = tc_obj
+elif disable is not None:
+    body["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": disable}
+```
+
+5. **OpenAI adapter**: Map `disable_parallel_tool_use=True` → `parallel_tool_calls=false`:
+```python
+if g.disable_parallel_tool_use is not None:
+    body["parallel_tool_calls"] = not g.disable_parallel_tool_use
+```
+
+**Tests**: 12 tests covering decode, encode, and cross-provider round-trip in both directions.
+
+### 5.3 `strict` on tool definitions (cross-provider forwarding)
+
+**Files**: `wiwi/providers/anthropic_adapter.py`, `wiwi/providers/openai_adapter.py`
+
+**Issue**: Both OpenAI (structured outputs) and Anthropic (strict tool use) support `strict: true` on tool definitions, but neither adapter forwarded it when encoding tools for the other provider. An OpenAI client sending `strict: true` routed to Anthropic would lose it.
+
+**Anthropic adapter** (after building tools list):
+```python
+for i, t in enumerate(req.tools):
+    if t.strict is not None:
+        body["tools"][i]["strict"] = t.strict
+```
+
+**OpenAI adapter** (after building tools list):
+```python
+for i, t in enumerate(req.tools):
+    if t.strict is not None:
+        body["tools"][i]["function"]["strict"] = t.strict
+```
+
+Both adapters omit the key entirely when `strict is None` (preserving the provider default).
+
+**Tests**: `test_anthropic_encode_forwards_strict`, `test_openai_encode_forwards_strict`, `test_cross_provider_openai_to_anthropic_strict`, `test_cross_provider_anthropic_to_openai_strict`
+
+### 5.4 Anthropic `input_examples` on tool definitions
+
+**Files**: `wiwi/ir/types.py`, `wiwi/wire/anthropic_messages.py`, `wiwi/providers/anthropic_adapter.py`
+
+**Issue**: Anthropic's `input_examples` field (array of example input objects for a tool) was not decoded from Anthropic requests, not carried in the IR, and not forwarded by the Anthropic adapter.
+
+**IR** (`Tool`): Added `input_examples: list[dict[str, Any]] | None = None`.
+
+**Anthropic wire codec**: Decoded into IR:
+```python
+ir.Tool(..., input_examples=t.get("input_examples"))
+```
+
+**Anthropic adapter**: Forwarded on encode:
+```python
+if t.input_examples is not None:
+    body["tools"][i]["input_examples"] = t.input_examples
+```
+
+**Tests**: `test_anthropic_decode_tool_input_examples`, `test_anthropic_encode_forwards_input_examples`, `test_cross_provider_anthropic_input_examples_round_trip`
+
+### 5.5 Anthropic `cache_control` on tool definitions
+
+**Files**: `wiwi/ir/types.py`, `wiwi/wire/anthropic_messages.py`, `wiwi/providers/anthropic_adapter.py`
+
+**Issue**: Anthropic supports `cache_control: {"type": "ephemeral"}` on tool definitions to set a prompt-cache breakpoint. This was not decoded or forwarded.
+
+**IR** (`Tool`): Added `cache_control: CacheControl = None`.
+
+**Anthropic wire codec**: Decoded into IR:
+```python
+ir.Tool(..., cache_control=t.get("cache_control"))
+```
+
+**Anthropic adapter**: Forwarded on encode:
+```python
+if t.cache_control is not None:
+    body["tools"][i]["cache_control"] = t.cache_control
+```
+
+**Tests**: `test_anthropic_decode_tool_cache_control`, `test_anthropic_encode_forwards_cache_control`, `test_cross_provider_anthropic_cache_control_round_trip`
+
+### 5.6 OpenAI Chat/Responses codecs: decode `strict` from tool definitions
+
+**Issue**: Both codecs already decoded `strict` from function tool definitions, but the test suite didn't explicitly verify it. Added regression tests.
+
+**Tests**: `test_openai_chat_decode_strict`, `test_openai_responses_decode_strict`
+
+### Files Changed (Round 5)
+
+| File | Changes |
+|---|---|
+| `wiwi/ir/types.py` | `Tool`: added `input_examples`, `cache_control` fields. `GenParams`: added `disable_parallel_tool_use` |
+| `wiwi/wire/anthropic_messages.py` | Decode `auto`/`none` tool_choice; decode `disable_parallel_tool_use`; decode `strict`/`input_examples`/`cache_control` from tools |
+| `wiwi/wire/openai_chat.py` | Decode `parallel_tool_calls=false` into `disable_parallel_tool_use=True` |
+| `wiwi/wire/openai_responses.py` | Same `parallel_tool_calls=false` decode |
+| `wiwi/providers/anthropic_adapter.py` | Forward `strict`/`input_examples`/`cache_control` on tools; forward `disable_parallel_tool_use` in `tool_choice` |
+| `wiwi/providers/openai_adapter.py` | Forward `strict` on tool defs; map `disable_parallel_tool_use` to `parallel_tool_calls` |
+| `tests/test_tool_translation_round2.py` | **NEW** — 37 tests covering all Round 5 fixes |
+
+**Total: 400 tests pass, ruff clean.**

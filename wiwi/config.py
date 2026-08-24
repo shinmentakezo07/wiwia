@@ -24,6 +24,7 @@ PROVIDER_TYPES: tuple[str, ...] = (
     "gemini",
     "openai-compatible",
     "openrouter",
+    "gmicloud",
 )
 
 
@@ -62,6 +63,9 @@ class ProviderDef(BaseModel):
     base_url: str | None = None
     timeout_s: float = 120.0
     extra_headers: dict[str, str] = Field(default_factory=dict)
+    # When True (default), keys are selected via smooth weighted round-robin.
+    # When False, keys are used sequentially (first available, in label order).
+    round_robin: bool = True
     keys: list[KeyDef] = Field(default_factory=list)
 
     @field_validator("keys")
@@ -81,6 +85,10 @@ class DeploymentParams(BaseModel):
     tpm: int | None = None
     timeout: float | None = None
     extra_headers: dict[str, str] = Field(default_factory=dict)
+    # Extra JSON fields merged into the upstream request body at encode time.
+    # Used for provider-specific routing knobs, e.g. OpenRouter's ``provider``
+    # object: ``extra_body: {provider: {only: ["gmicloud"]}}``.
+    extra_body: dict[str, Any] = Field(default_factory=dict)
 
 
 class ModelEntry(BaseModel):

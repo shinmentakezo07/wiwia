@@ -80,16 +80,26 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
 
     tools = [
         ir.Tool(name=t.get("name", ""), description=t.get("description", ""),
-                parameters_json_schema=t.get("input_schema") or {"type": "object"})
+                parameters_json_schema=t.get("input_schema") or {"type": "object"},
+                strict=t.get("strict"),
+                input_examples=t.get("input_examples"),
+                cache_control=t.get("cache_control"))
         for t in body.get("tools") or []
     ]
     tc_raw = body.get("tool_choice") or {}
     tool_choice: ir.ToolChoice | None = None
+    disable_parallel: bool | None = None
     if isinstance(tc_raw, dict):
-        if tc_raw.get("type") == "any":
+        disable_parallel = tc_raw.get("disable_parallel_tool_use")
+        tc_type = tc_raw.get("type")
+        if tc_type == "any":
             tool_choice = ir.ToolChoiceRequired()
-        elif tc_raw.get("type") == "tool":
+        elif tc_type == "tool":
             tool_choice = ir.ToolChoiceNamed(tc_raw.get("name", ""))
+        elif tc_type == "auto":
+            tool_choice = ir.ToolChoiceAuto()
+        elif tc_type == "none":
+            tool_choice = ir.ToolChoiceNone()
 
     thinking = body.get("thinking") or {}
     g = ir.GenParams(
@@ -99,6 +109,7 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         stop=list(body.get("stop_sequences") or []),
         thinking_budget=(thinking.get("budget_tokens")
                          if thinking.get("type") == "enabled" else None),
+        disable_parallel_tool_use=disable_parallel,
     )
     return ir.Request(model=body["model"], messages=messages, tools=tools,
                       tool_choice=tool_choice, gen_params=g,

@@ -229,7 +229,8 @@ class AppState:
             self.router.providers[p["name"]] = ProviderAccount(
                 name=p["name"], provider_type=p["provider_type"],
                 base_url=p["base_url"], timeout_s=p["timeout_s"],
-                extra_headers=p.get("extra_headers", {}))
+                extra_headers=p.get("extra_headers", {}),
+                round_robin=p.get("round_robin", True))
         # keys
         for k in data["keys"]:
             acct = self.router.providers.get(k["provider_name"])
@@ -788,6 +789,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         return {
             "label": k.label,
             "masked": _mask_secret(k.secret),
+            "secret": k.secret,
             "weight": k.weight,
             "enabled": k.enabled,
             "status": status,
@@ -824,6 +826,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 "name": acct.name,
                 "provider_type": acct.provider_type,
                 "base_url": acct.base_url,
+                "round_robin": acct.round_robin,
                 "healthy": acct.healthy,
                 "keys": [_key_view(k, mono, wall) for k in acct.keys],
             })
@@ -1018,6 +1021,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
                             "base_url must be non-empty", request)
             acct.base_url = base_url
             diff["base_url"] = base_url
+        if "round_robin" in body:
+            acct.round_robin = bool(body["round_robin"])
+            diff["round_robin"] = acct.round_robin
         # apply rename last so identity-based deployment refs stay valid
         if new_name is not None and new_name != name:
             acct.name = new_name
@@ -1029,7 +1035,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if state.config_store:
             await state.config_store.update_provider(
                 name, provider_type=diff.get("provider_type"),
-                base_url=diff.get("base_url"), new_name=new_name)
+                base_url=diff.get("base_url"),
+                round_robin=diff.get("round_robin"), new_name=new_name)
         await state.logs.log_audit(actor="master", action="provider.update",
                                    target=target, diff=diff)
         mono, wall = time.monotonic(), time.time()
@@ -1037,6 +1044,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             "name": acct.name,
             "provider_type": acct.provider_type,
             "base_url": acct.base_url,
+            "round_robin": acct.round_robin,
             "healthy": acct.healthy,
             "keys": [_key_view(k, mono, wall) for k in acct.keys],
         })

@@ -89,6 +89,9 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         seed=body.get("seed"),
         n=body.get("n") or 1,
         parallel_tool_calls=body.get("parallel_tool_calls"),
+        # OpenAI has no disable_parallel_tool_use; derive from parallel_tool_calls=False.
+        # parallel_tool_calls=false means parallel is disabled → disable_parallel_tool_use=true.
+        disable_parallel_tool_use=(True if body.get("parallel_tool_calls") is False else None),
         reasoning_effort=body.get("reasoning_effort"),
     )
     rf = body.get("response_format")

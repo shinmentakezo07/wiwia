@@ -3,6 +3,7 @@
 export interface PoolKey {
   label: string;
   masked: string;
+  secret: string;
   weight: number;
   enabled: boolean;
   status: "active" | "cooling" | "invalid" | "disabled";
@@ -16,6 +17,7 @@ export interface Provider {
   name: string;
   provider_type: string;
   base_url: string;
+  round_robin: boolean;
   healthy: boolean;
   keys: PoolKey[];
 }

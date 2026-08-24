@@ -75,6 +75,31 @@ class TestRepairTruncatedJSON:
         repaired = _repair_truncated_json('{"key": "val')
         assert json.loads(repaired) == {"key": "val"}
 
+    def test_repair_trailing_single_backslash(self):
+        """Trailing single `\\` is a dangling escape; repair must drop it
+        before appending the closing quote, otherwise the result is invalid
+        JSON and the caller falls back to `{}` (silent tool-args loss)."""
+        repaired = _repair_truncated_json('{"key": "val\\')
+        # Must parse — was the original bug.
+        parsed = json.loads(repaired)
+        assert parsed == {"key": "val"}
+
+    def test_repair_trailing_backslash_then_open_brace(self):
+        """A trailing `\\` followed by an unclosed `{` — the brace is open
+        too, so we need both fixes (drop `\\`, close string, close brace)."""
+        repaired = _repair_truncated_json('{"outer": {"key": "val\\')
+        parsed = json.loads(repaired)
+        assert parsed == {"outer": {"key": "val"}}
+
+    def test_repair_doubled_backslash_preserved(self):
+        """A doubled `\\\\` is an escaped backslash and is already a valid
+        JSON token — the repairer must NOT strip it (the
+        `not text.endswith("\\\\")` guard)."""
+        repaired = _repair_truncated_json('{"key": "val\\\\')
+        parsed = json.loads(repaired)
+        # The string was truncated mid-content; closing it yields "val\\".
+        assert parsed == {"key": "val\\"}
+
     def test_repair_unclosed_object(self):
         repaired = _repair_truncated_json('{"key": "val"')
         assert json.loads(repaired) == {"key": "val"}

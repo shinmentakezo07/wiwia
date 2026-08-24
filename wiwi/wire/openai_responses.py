@@ -122,6 +122,7 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         top_p=body.get("top_p"),
         max_tokens=(body.get("max_output_tokens")),
         parallel_tool_calls=body.get("parallel_tool_calls"),
+        disable_parallel_tool_use=(True if body.get("parallel_tool_calls") is False else None),
         reasoning_effort=((body.get("reasoning") or {}).get("effort")
                           if isinstance(body.get("reasoning"), dict) else None),
     )

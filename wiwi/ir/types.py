@@ -84,7 +84,9 @@ class Tool:
     name: str
     description: str = ""
     parameters_json_schema: dict[str, Any] = field(default_factory=lambda: {"type": "object"})
-    strict: bool | None = None  # G3: OpenAI structured-output strictness
+    strict: bool | None = None  # G3: OpenAI structured-output strictness / Anthropic strict tool use
+    input_examples: list[dict[str, Any]] | None = None  # Anthropic tool-use examples
+    cache_control: CacheControl = None  # Anthropic prompt-cache breakpoint on tool def
 
 
 @dataclass
@@ -128,6 +130,9 @@ class GenParams:
     n: int = 1  # G3: >1 rejected on backends without native support
     response_format: ResponseFormat | None = None
     parallel_tool_calls: bool | None = None
+    # Anthropic: disable_parallel_tool_use rides inside tool_choice, but the IR
+    # keeps it separate so either dialect can set it independently.
+    disable_parallel_tool_use: bool | None = None
     reasoning_effort: str | None = None  # "low" | "medium" | "high"
     thinking_budget: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)

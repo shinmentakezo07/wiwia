@@ -53,7 +53,14 @@ def _repair_truncated_json(text: str) -> str:
             stack.pop()
     suffix = ""
     if in_string:
-        # Unterminated string: close it.
+        # Unterminated string. If the last character was a single backslash
+        # (escape = True) it is a dangling escape sequence and the string
+        # cannot be closed cleanly with just a quote — appending `"` would
+        # produce invalid JSON like {"k": "v\\". Drop the trailing backslash
+        # first. Doubled backslashes (`\\\\`) are escaped backslashes and are
+        # safe to leave alone.
+        if escaped and text.endswith("\\") and not text.endswith("\\\\"):
+            text = text[:-1]
         suffix += _QUOTE
     # Close open containers in reverse order.
     suffix += "".join(reversed(stack))

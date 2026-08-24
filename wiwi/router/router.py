@@ -57,8 +57,10 @@ class ProviderAccount:
     base_url: str
     timeout_s: float = 120.0
     extra_headers: dict[str, str] = field(default_factory=dict)
+    round_robin: bool = True
     keys: list[ProviderKey] = field(default_factory=list)
     _rr_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _seq_idx: int = 0  # sequential key cursor (when round_robin=False)
 
     @property
     def healthy(self) -> bool:
@@ -72,7 +74,14 @@ class ProviderAccount:
         return None
 
     async def pick_key(self) -> tuple[ProviderKey | None, float]:
-        """Smooth weighted round-robin over available keys (nginx algorithm)."""
+        """Pick the next key to use.
+
+        When ``round_robin`` is True (default): smooth weighted round-robin
+        over available keys (nginx algorithm).
+        When ``round_robin`` is False: sequential selection — the first
+        available key in list order, advancing the cursor only when the
+        current key is unavailable (cooldown/disabled).
+        """
         async with self._rr_lock:
             for k in self.keys:
                 k.recover()
@@ -81,6 +90,25 @@ class ProviderAccount:
                 soonest = min((k.cooldown_until for k in self.keys
                                if k.status == "cooling"), default=None)
                 return None, (soonest - time.monotonic() if soonest else 5.0)
+
+            if not self.round_robin:
+                # Sequential: find the first available key at/after the cursor.
+                # This keeps using the same key until it becomes unavailable,
+                # then advances to the next one in list order.
+                n = len(self.keys)
+                for offset in range(n):
+                    idx = (self._seq_idx + offset) % n
+                    k = self.keys[idx]
+                    if k.available:
+                        self._seq_idx = idx
+                        k.last_used = time.monotonic()
+                        return k, 0.0
+                # Fallback (should not reach here since avail is non-empty)
+                k = avail[0]
+                k.last_used = time.monotonic()
+                return k, 0.0
+
+            # Smooth WRR (nginx algorithm)
             total = sum(k.weight for k in avail)
             for k in avail:
                 k.current_weight += k.weight
@@ -114,6 +142,7 @@ class Deployment:
     timeout: float | None = None
     max_tokens: int | None = None
     extra_headers: dict[str, str] = field(default_factory=dict)
+    extra_body: dict[str, Any] = field(default_factory=dict)
     # cooldown / health
     fails: list[float] = field(default_factory=list)
     cooldown_until: float = 0.0
@@ -153,6 +182,7 @@ class Router:
                 name=p.name, provider_type=p.provider,
                 base_url=p.base_url or _default_base_url(p.provider),
                 timeout_s=p.timeout_s, extra_headers=dict(p.extra_headers),
+                round_robin=p.round_robin,
                 keys=[ProviderKey(label=k.label, secret=k.key, weight=k.weight,
                                   enabled=k.enabled) for k in p.keys],
             )
@@ -166,7 +196,8 @@ class Router:
             dep = Deployment(group=entry.model_name, provider=acct, model_id=wp.model,
                              weight=wp.weight, rpm=wp.rpm, tpm=wp.tpm,
                              timeout=wp.timeout, max_tokens=wp.max_tokens,
-                             extra_headers=dict(wp.extra_headers))
+                             extra_headers=dict(wp.extra_headers),
+                             extra_body=dict(wp.extra_body))
             self.groups.setdefault(entry.model_name, []).append(dep)
         # alias resolution happens at route(); aliases may point to any group name
 
@@ -292,6 +323,7 @@ BUILTIN_PROVIDER_TYPES: list[dict[str, str | list[str]]] = [
             "~openai/gpt-latest",
             "~anthropic/claude-sonnet-latest",
             "google/gemini-3.1-pro-preview",
+            "minimax/minimax-m3",
         ],
         "context_window": "varies per model",
         "docs_url": "https://openrouter.ai/docs/quickstart",
@@ -308,6 +340,30 @@ BUILTIN_PROVIDER_TYPES: list[dict[str, str | list[str]]] = [
         "latest_models": [],
         "context_window": "varies by endpoint",
         "docs_url": "",
+    },
+    {
+        "provider_type": "gmicloud",
+        "label": "GMI Cloud",
+        "default_base_url": "https://api.gmi-serving.com/v1",
+        "description": (
+            "Serverless and dedicated GPU inference for 70+ open-source "
+            "and frontier models (DeepSeek, GLM, Llama, Qwen, Claude, "
+            "GPT, Gemini, Kimi) via an OpenAI-compatible Chat Completions "
+            "API. Supports streaming, tool use, vision, and reasoning "
+            "models with reasoning_content."
+        ),
+        "latest_models": [
+            "deepseek-ai/DeepSeek-V3.2",
+            "zai-org/GLM-5-FP8",
+            "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+            "Qwen/Qwen3.6-Plus",
+            "openai/gpt-5.5",
+            "google/gemini-3.1-pro-preview",
+            "anthropic/claude-opus-4.7",
+            "moonshotai/Kimi-K2.6",
+        ],
+        "context_window": "varies per model",
+        "docs_url": "https://docs.gmicloud.ai/quickstart",
     },
 ]
 

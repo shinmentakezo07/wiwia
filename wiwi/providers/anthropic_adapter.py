@@ -142,15 +142,39 @@ class AnthropicAdapter:
                  "input_schema": t.parameters_json_schema}
                 for t in req.tools
             ]
+            # Forward optional tool properties that Anthropic supports.
+            # strict: OpenAI structured-output strictness maps directly.
+            # input_examples: Anthropic-specific, helps Claude call tools.
+            # cache_control: Anthropic prompt-cache breakpoint on the tool def.
+            for i, t in enumerate(req.tools):
+                if t.strict is not None:
+                    body["tools"][i]["strict"] = t.strict
+                if t.input_examples is not None:
+                    body["tools"][i]["input_examples"] = t.input_examples
+                if t.cache_control is not None:
+                    body["tools"][i]["cache_control"] = t.cache_control
             tc = req.tool_choice
+            disable = g.disable_parallel_tool_use
             if isinstance(tc, ir.ToolChoiceNone):
-                body["tool_choice"] = {"type": "none"}
+                tc_obj: dict[str, Any] = {"type": "none"}
             elif isinstance(tc, ir.ToolChoiceAuto):
-                body["tool_choice"] = {"type": "auto"}
+                tc_obj = {"type": "auto"}
             elif isinstance(tc, ir.ToolChoiceRequired):
-                body["tool_choice"] = {"type": "any"}
+                tc_obj = {"type": "any"}
             elif isinstance(tc, ir.ToolChoiceNamed):
-                body["tool_choice"] = {"type": "tool", "name": tc.name}
+                tc_obj = {"type": "tool", "name": tc.name}
+            else:
+                tc_obj = None
+            if tc_obj is not None:
+                if disable is not None:
+                    tc_obj["disable_parallel_tool_use"] = disable
+                body["tool_choice"] = tc_obj
+            elif disable is not None:
+                # No explicit tool_choice, but disable_parallel_tool_use was set.
+                # Anthropic requires it inside a tool_choice object; use the
+                # default "auto" as the carrier.
+                body["tool_choice"] = {"type": "auto",
+                                       "disable_parallel_tool_use": disable}
         if req.stream:
             body["stream"] = True
         return body

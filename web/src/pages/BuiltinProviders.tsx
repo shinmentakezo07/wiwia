@@ -23,6 +23,7 @@ const PROVIDER_LOGO: Record<string, string> = {
   gemini: "/logos/gemini.png",
   openrouter: "/logos/openrouter.png",
   "openai-compatible": "/logos/openai-compatible.png",
+  gmicloud: "/logos/gmicloud.png",
 };
 
 function providerLogo(type: string): string | null {

@@ -31,21 +31,6 @@ body {
   scrollbar-width: thin;
 }
 
-/* -- login page: ambient grid --------------------------------------------- */
-:root {
-  --wiwi-grid-line: rgb(9 9 11 / 0.06);
-}
-.dark {
-  --wiwi-grid-line: rgb(255 255 255 / 0.04);
-}
-.wiwi-grid {
-  background-image:
-    linear-gradient(to right, var(--wiwi-grid-line) 1px, transparent 1px),
-    linear-gradient(to bottom, var(--wiwi-grid-line) 1px, transparent 1px);
-  background-size: 44px 44px;
-  mask-image: radial-gradient(ellipse 75% 65% at 50% 40%, black 25%, transparent 80%);
-}
-
 /* -- login page: motion (gated for reduced motion) ------------------------- */
 @media (prefers-reduced-motion: no-preference) {
   .wiwi-enter {
@@ -104,36 +89,6 @@ body {
   }
 }
 
-/* -- login page: aurora orbs ------------------------------------------------ */
-.wiwi-aurora {
-  border-radius: 50%;
-  filter: blur(90px);
-  will-change: transform;
-}
-@media (prefers-reduced-motion: no-preference) {
-  .wiwi-aurora {
-    animation: wiwi-drift 20s ease-in-out infinite;
-  }
-}
-@keyframes wiwi-drift {
-  0%,
-  100% {
-    transform: translate(0, 0) scale(1);
-  }
-  33% {
-    transform: translate(40px, -30px) scale(1.12);
-  }
-  66% {
-    transform: translate(-30px, 40px) scale(0.92);
-  }
-}
-
-/* -- login page: film grain noise ------------------------------------------- */
-.wiwi-noise {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-  opacity: 0.02;
-}
-
 /* -- login page: hub glow pulse --------------------------------------------- */
 @media (prefers-reduced-motion: no-preference) {
   .wiwi-hub-pulse {
@@ -148,26 +103,6 @@ body {
   50% {
     opacity: 0.9;
   }
-}
-
-/* -- login page: card glow + gradient edge --------------------------------- */
-.wiwi-card-glow {
-  position: relative;
-  box-shadow:
-    0 0 0 1px rgba(135, 87, 247, 0.06),
-    0 24px 70px -20px rgba(0, 0, 0, 0.6),
-    0 0 100px -30px rgba(135, 87, 247, 0.12);
-}
-.wiwi-card-glow::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 10%;
-  right: 10%;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(135, 87, 247, 0.35), transparent);
-  z-index: 1;
-  pointer-events: none;
 }
 
 /* -- login page: button shimmer sweep --------------------------------------- */
@@ -192,6 +127,68 @@ body {
   to {
     transform: translateX(100%);
   }
+}
+
+/* -- login page: aurora color blobs (Linear-look) --------------------------- */
+.wiwi-aurora {
+  filter: blur(70px);
+  will-change: transform;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .wiwi-aurora {
+    animation: wiwi-drift 22s ease-in-out infinite;
+  }
+}
+@keyframes wiwi-drift {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(36px, -24px) scale(1.1); }
+  66% { transform: translate(-28px, 32px) scale(0.92); }
+}
+
+/* -- login page: animated conic-gradient border ----------------------------- */
+@property --conic-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+.wiwi-conic-border {
+  position: relative;
+  padding: 1px;
+  border-radius: 16px;
+  background: conic-gradient(
+    from var(--conic-angle),
+    rgba(59, 130, 246, 0.25),
+    rgba(168, 85, 247, 0.15),
+    rgba(59, 130, 246, 0.03),
+    rgba(168, 85, 247, 0.03),
+    rgba(59, 130, 246, 0.25)
+  );
+}
+@media (prefers-reduced-motion: no-preference) {
+  .wiwi-conic-border {
+    animation: wiwi-conic-spin 6s linear infinite;
+  }
+}
+@keyframes wiwi-conic-spin {
+  to { --conic-angle: 360deg; }
+}
+
+/* -- login page: glassmorphism card ---------------------------------------- */
+.wiwi-glass-card {
+  background: rgba(10, 10, 10, 0.72);
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+}
+
+/* -- login page: top specular highlight line -------------------------------- */
+.wiwi-top-highlight {
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(59, 130, 246, 0.25),
+    rgba(168, 85, 247, 0.15),
+    transparent
+  );
 }
 
 @layer components {

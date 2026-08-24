@@ -60,7 +60,8 @@ class Gateway:
         adapter = get_adapter(dep.provider.provider_type)
         ctx.deployment = dep
         ctx.provider_key = key
-        params: dict[str, Any] = {"max_tokens": dep.max_tokens, "extra_body": {},
+        params: dict[str, Any] = {"max_tokens": dep.max_tokens,
+                                  "extra_body": dict(dep.extra_body),
                                   "drop_params": self.drop_params,
                                   "provider_type": dep.provider.provider_type}
         url = _build_url(adapter, dep, key, False, self.kind)
@@ -254,7 +255,8 @@ class Gateway:
         ctx.deployment = dep
         ctx.provider_key = key
         real_key = dep.provider.get_key(key.label)  # live pool entry for on_result
-        params: dict[str, Any] = {"max_tokens": dep.max_tokens, "extra_body": {},
+        params: dict[str, Any] = {"max_tokens": dep.max_tokens,
+                                  "extra_body": dict(dep.extra_body),
                                   "drop_params": self.drop_params,
                                   "provider_type": dep.provider.provider_type}
         url = _build_url(adapter, dep, key, True, self.kind)

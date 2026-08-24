@@ -9,6 +9,7 @@ import {
   ArrowDownToLine,
   ArrowUpFromLine,
   Boxes,
+  Cloud,
   DollarSign,
   Globe,
   Layers,
@@ -54,6 +55,7 @@ const PROVIDER_ICON: Record<string, LucideIcon> = {
   gemini: Zap,
   openrouter: Globe,
   "openai-compatible": Server,
+  gmicloud: Cloud,
 };
 
 const PROVIDER_TYPE_OPTIONS = [
@@ -61,6 +63,7 @@ const PROVIDER_TYPE_OPTIONS = [
   { value: "anthropic", label: "Anthropic" },
   { value: "gemini", label: "Gemini" },
   { value: "openrouter", label: "OpenRouter" },
+  { value: "gmicloud", label: "GMI Cloud" },
   { value: "openai-compatible", label: "OpenAI-compatible URL" },
 ];
 
@@ -438,7 +441,7 @@ export function ProvidersPage() {
               options={PROVIDER_TYPE_OPTIONS}
             />
           </Field>
-          <Field label="Base URL" hint="Optional for openai/anthropic/gemini/openrouter. Required for compatible URLs.">
+          <Field label="Base URL" hint="Optional for openai/anthropic/gemini/openrouter/gmicloud. Required for compatible URLs.">
             <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://…" />
           </Field>
           <Field label="First key label">

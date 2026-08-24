@@ -119,11 +119,12 @@ class OpenAIAdapter:
             body["parallel_tool_calls"] = g.parallel_tool_calls
         # reasoning_effort is OpenAI-specific (o-series / GPT-5.x reasoning
         # models).  openai-compatible backends (OpenRouter, Together, vLLM…)
-        # often reject the field with a 400, so only forward it when talking
-        # to a native OpenAI endpoint (or when the provider type is unknown,
-        # which preserves the default behaviour for direct-OpenAI tests).
+        # and GMI Cloud often reject the field with a 400, so only forward it
+        # when talking to a native OpenAI endpoint (or when the provider type
+        # is unknown, which preserves the default behaviour for direct-OpenAI
+        # tests).
         ptype = deployment_params.get("provider_type")
-        is_native_openai = ptype != "openai-compatible"
+        is_native_openai = ptype not in {"openai-compatible", "gmicloud"}
         if g.reasoning_effort:
             if is_native_openai:
                 body["reasoning_effort"] = g.reasoning_effort
@@ -149,6 +150,10 @@ class OpenAIAdapter:
                               "parameters": t.parameters_json_schema}}
                 for t in req.tools
             ]
+            # Forward strict mode (OpenAI structured outputs / Anthropic strict tool use).
+            for i, t in enumerate(req.tools):
+                if t.strict is not None:
+                    body["tools"][i]["function"]["strict"] = t.strict
             if req.tool_choice is not None:
                 tc = req.tool_choice
                 if isinstance(tc, ir.ToolChoiceNone):
@@ -159,6 +164,10 @@ class OpenAIAdapter:
                     body["tool_choice"] = "required"
                 elif isinstance(tc, ir.ToolChoiceNamed):
                     body["tool_choice"] = {"type": "function", "function": {"name": tc.name}}
+            # disable_parallel_tool_use (from Anthropic dialect) maps to
+            # parallel_tool_calls=false on the OpenAI side.
+            if g.disable_parallel_tool_use is not None:
+                body["parallel_tool_calls"] = not g.disable_parallel_tool_use
         if req.stream and req.stream_options_include_usage:
             body["stream_options"] = {"include_usage": True}
         for k, v in deployment_params.get("extra_body", {}).items():
