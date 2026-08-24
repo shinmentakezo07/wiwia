@@ -61,6 +61,9 @@ const RANGE_OPTIONS = [
   { value: "60", label: "Last hour" },
   { value: "360", label: "Last 6 hours" },
   { value: "1440", label: "Last 24 hours" },
+  { value: "10080", label: "Last 7 days" },
+  { value: "43200", label: "Last 30 days" },
+  { value: "0", label: "All time" },
 ];
 
 type GroupDim = "model" | "key" | "provider";
@@ -259,6 +262,7 @@ export function UsagePage() {
 
   const allLogs = useMemo(() => {
     const all = logsQuery.data?.logs ?? [];
+    if (range === 0) return all; // all-time: no cutoff
     const cutoff = Math.floor(Date.now() / 1000) - range * 60;
     return all.filter((l) => l.ts >= cutoff);
   }, [logsQuery.data, range]);
@@ -577,7 +581,9 @@ export function UsagePage() {
                 <CartesianGrid strokeDasharray="3 3" stroke="#ffffff" strokeOpacity={0.06} vertical={false} />
                 <XAxis
                   dataKey="t"
-                  tickFormatter={(t: number) => fmtTime(t)}
+                  tickFormatter={(t: number) =>
+                    range === 0 || range > 1440 ? fmtDateTime(t) : fmtTime(t)
+                  }
                   minTickGap={48}
                   tick={{ fontSize: 11, fill: "#6b7280" }}
                   tickLine={false}
