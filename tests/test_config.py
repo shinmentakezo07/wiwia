@@ -26,13 +26,36 @@ def test_load_and_interpolate(tmp_path, monkeypatch):
     assert cfg.general_settings.master_key == "sk-123"
 
 
-def test_missing_env_var_fails(tmp_path, monkeypatch):
+def test_missing_env_var_filters_provider(tmp_path, monkeypatch):
+    """Missing env vars resolve to empty keys; providers with no real keys
+    are filtered out so the example config loads in a fresh container."""
     monkeypatch.delenv("DEFINITELY_NOT_SET_XYZ", raising=False)
     p = tmp_path / "wiwi.yaml"
     p.write_text("providers:\n  - name: x\n    provider: openai\n"
-                 "    keys: [{key: os.environ/DEFINITELY_NOT_SET_XYZ}]\n")
-    with pytest.raises(ConfigError, match="DEFINITELY_NOT_SET_XYZ"):
-        load_config(p)
+                 "    keys: [{key: os.environ/DEFINITELY_NOT_SET_XYZ}]\n"
+                 "model_list:\n  - model_name: gpt-4o\n"
+                 "    wiwi_params: {provider: x, model: gpt-4o}\n")
+    cfg = load_config(p)
+    assert cfg.providers == []
+    assert cfg.model_list == []
+
+
+def test_missing_env_var_partial(tmp_path, monkeypatch):
+    """When only some keys are missing, the provider survives with the
+    remaining real keys."""
+    monkeypatch.delenv("MISSING_KEY", raising=False)
+    monkeypatch.setenv("REAL_KEY", "sk-123")
+    p = tmp_path / "wiwi.yaml"
+    p.write_text("providers:\n  - name: x\n    provider: openai\n"
+                 "    keys:\n"
+                 "      - {label: a, key: os.environ/MISSING_KEY}\n"
+                 "      - {label: b, key: os.environ/REAL_KEY}\n"
+                 "model_list:\n  - model_name: gpt-4o\n"
+                 "    wiwi_params: {provider: x, model: gpt-4o}\n")
+    cfg = load_config(p)
+    assert len(cfg.providers) == 1
+    assert len(cfg.providers[0].keys) == 1
+    assert cfg.providers[0].keys[0].key == "sk-123"
 
 
 def test_unknown_provider_reference(tmp_path):

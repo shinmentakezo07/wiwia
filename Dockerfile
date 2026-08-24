@@ -21,7 +21,10 @@ WORKDIR /app
 COPY --from=py-builder /app/.venv /app/.venv
 # Built web assets land alongside the package so app.py finds them
 COPY --from=web-builder /wiwi/server/static/ /app/wiwi/server/static/
-COPY wiwi.yaml.example /app/wiwi.yaml.example
+# Ship the example config as the default wiwi.yaml so the container boots
+# without a volume mount.  Set env vars (OPENAI_API_KEY, etc.) to activate
+# providers; absent keys are filtered out at load time.
+COPY wiwi.yaml.example /app/wiwi.yaml
 # Writable data dir for SQLite DB (mounted as a volume in docker-compose)
 RUN mkdir -p /app/data && chown wiwi:wiwi /app/data
 ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
@@ -29,4 +32,4 @@ USER wiwi
 EXPOSE 4000
 HEALTHCHECK --interval=30s --timeout=3s CMD python -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:4000/health')" || exit 1
 ENTRYPOINT ["wiwi"]
-CMD []
+CMD ["--config", "/app/wiwi.yaml"]

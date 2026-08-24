@@ -7,11 +7,24 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ConfigError(Exception):
     """Raised with file/line context when the config is invalid."""
+
+
+def load_env(path: str | Path = ".env") -> None:
+    """Load .env file into os.environ if it exists.
+
+    Called early so that DATABASE_URL, WIWI_MASTER_KEY, provider keys, and
+    WIWI_CONFIG are available before config parsing.  Existing environment
+    variables are never overwritten — .env only fills gaps.
+    """
+    p = Path(path)
+    if p.is_file():
+        load_dotenv(p, override=False)
 
 
 # Every provider type that ships with wiwi. This is the single source of truth
@@ -29,13 +42,15 @@ PROVIDER_TYPES: tuple[str, ...] = (
 
 
 def _interpolate(value: Any) -> Any:
-    """Recursively resolve `os.environ/NAME` strings."""
+    """Recursively resolve `os.environ/NAME` strings.
+
+    Missing env vars resolve to an empty string rather than crashing, so the
+    example config (which references many optional provider keys) can load in
+    a fresh container.  Providers with empty keys are filtered out in _validate.
+    """
     if isinstance(value, str) and value.startswith("os.environ/"):
         var = value[len("os.environ/"):]
-        resolved = os.getenv(var)
-        if resolved is None:
-            raise ConfigError(f"environment variable '{var}' is not set (referenced as {value!r})")
-        return resolved
+        return os.getenv(var, "")
     if isinstance(value, dict):
         return {k: _interpolate(v) for k, v in value.items()}
     if isinstance(value, list):
@@ -133,6 +148,12 @@ class GeneralSettings(BaseModel):
     database_url: str = "sqlite+aiosqlite:///wiwi.db"
     redis_url: str = ""
 
+    @field_validator("database_url")
+    @classmethod
+    def _db_url_default(cls, v: str) -> str:
+        """Treat empty string as unset so the SQLite default applies."""
+        return v or "sqlite+aiosqlite:///wiwi.db"
+
 
 class WiwiSettings(BaseModel):
     drop_params: bool = True
@@ -194,6 +215,43 @@ def load_config_from_string(raw_yaml: str) -> WiwiConfig:
 def _validate(raw: dict) -> WiwiConfig:
     try:
         data = _interpolate(raw)
+        # Filter out providers whose keys resolved to empty strings (env vars
+        # not set) and model entries that reference those removed providers.
+        # This lets the example config load in a fresh container where most
+        # provider API keys are absent — only providers with real keys activate.
+        # Providers explicitly declared with keys: [] still raise a validation
+        # error — only keys that were present but resolved to "" are filtered.
+        providers = data.get("providers", [])
+        if isinstance(providers, list):
+            survivors: list[dict] = []
+            removed_names: set[str] = set()
+            for p in providers:
+                if not isinstance(p, dict):
+                    continue
+                keys = p.get("keys", [])
+                pname = str(p.get("name", ""))
+                if not isinstance(keys, list) or len(keys) == 0:
+                    # keys: [] or missing — let Pydantic raise the validation error
+                    survivors.append(p)
+                    continue
+                real_keys = [
+                    k for k in keys
+                    if isinstance(k, dict) and str(k.get("key", "")).strip()
+                ]
+                if real_keys:
+                    p["keys"] = real_keys
+                    survivors.append(p)
+                else:
+                    removed_names.add(pname)
+            data["providers"] = survivors
+            model_list = data.get("model_list", [])
+            if isinstance(model_list, list):
+                data["model_list"] = [
+                    m for m in model_list
+                    if isinstance(m, dict)
+                    and isinstance(m.get("wiwi_params"), dict)
+                    and m["wiwi_params"].get("provider", "") not in removed_names
+                ]
         return WiwiConfig.model_validate(data)
     except ConfigError:
         raise

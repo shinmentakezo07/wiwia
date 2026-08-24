@@ -8,7 +8,7 @@ import sys
 
 import uvicorn
 
-from wiwi.config import ConfigError, load_config, load_config_from_string
+from wiwi.config import ConfigError, load_config, load_config_from_string, load_env
 
 
 def cli() -> None:
@@ -24,6 +24,10 @@ def cli() -> None:
                         help="directory to watch for reload (default: wiwi/); "
                              "may be repeated for multiple dirs")
     args = parser.parse_args()
+
+    # Load .env before anything else so DATABASE_URL, WIWI_MASTER_KEY, provider
+    # keys, and WIWI_CONFIG are all available during config parsing.
+    load_env()
 
     try:
         # Precedence: --config flag > WIWI_CONFIG env var > default wiwi.yaml

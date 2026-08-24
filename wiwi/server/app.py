@@ -99,7 +99,7 @@ class RequestIdMiddleware:
 
 
 from wiwi.auth.service import AuthService
-from wiwi.config import PROVIDER_TYPES, ConfigError, WiwiConfig, _interpolate, load_config
+from wiwi.config import PROVIDER_TYPES, ConfigError, WiwiConfig, _interpolate, load_config, load_env
 from wiwi.core.context import RequestContext
 from wiwi.core.gateway import Gateway, build_log_event
 from wiwi.cost.pricing import CostEngine
@@ -1355,6 +1355,9 @@ def create_app_from_config_path(config_path: str = "wiwi.yaml") -> FastAPI:
     restart, so the app cannot be passed as an object — it must be built
     from the config path each time.
     """
+    # Reload re-imports in a fresh subprocess that bypasses main.py, so load
+    # .env here too — otherwise DATABASE_URL and provider keys would be missing.
+    load_env()
     try:
         config = load_config(config_path)
     except ConfigError as e:
