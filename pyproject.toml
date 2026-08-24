@@ -13,6 +13,7 @@ dependencies = [
   "pyyaml>=6.0",
   "sqlalchemy[asyncio]>=2.0.30",
   "aiosqlite>=0.20",
+  "asyncpg>=0.29",
   "structlog>=24.1",
   "orjson>=3.10",
 ]
@@ -26,7 +27,6 @@ dev = [
   "ruff>=0.4",
   "hypothesis>=6.100",
 ]
-pg = ["asyncpg>=0.29"]
 redis = ["redis>=5.0"]
 
 [project.scripts]

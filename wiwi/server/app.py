@@ -176,7 +176,7 @@ class AppState:
                or "sqlite+aiosqlite:///wiwi.db")
         if url.startswith("sqlite:///"):
             url = url.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
-        is_pg = url.startswith(("postgresql://", "postgres://"))
+        is_pg = url.startswith(("postgresql://", "postgresql+asyncpg://", "postgres://"))
         engine_kwargs: dict[str, Any] = {"url": url}
         if is_pg:
             engine_kwargs.update(

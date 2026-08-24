@@ -1,28 +1,34 @@
 services:
-  wiwi:
-    build: .
-    ports: ["4000:4000"]
-    environment:
-      WIWI_MASTER_KEY: ${WIWI_MASTER_KEY:-sk-wiwi-master-change-me}
-      WIWI_DATABASE_URL: ${WIWI_DATABASE_URL:-sqlite+aiosqlite:////app/data/wiwi.db}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-    volumes:
-      - wiwi-data:/app/data
-      - ./wiwi.yaml:/app/wiwi.yaml:ro
-    command: ["--config", "/app/wiwi.yaml", "--host", "0.0.0.0", "--port", "4000"]
-    restart: unless-healthy
-
-  # optional profile: postgres instead of sqlite
   postgres:
     image: postgres:16-alpine
-    profiles: ["pg"]
     environment:
       POSTGRES_USER: wiwi
       POSTGRES_PASSWORD: wiwi
       POSTGRES_DB: wiwi
     volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wiwi -d wiwi"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  wiwi:
+    build: .
+    ports: ["4000:4000"]
+    environment:
+      WIWI_MASTER_KEY: ${WIWI_MASTER_KEY:-sk-wiwi-master-change-me}
+      DATABASE_URL: postgresql+asyncpg://wiwi:wiwi@postgres:5432/wiwi
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+    volumes:
+      - ./wiwi.yaml:/app/wiwi.yaml:ro
+    command: ["--config", "/app/wiwi.yaml", "--host", "0.0.0.0", "--port", "4000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
-  wiwi-data:
   pgdata:
