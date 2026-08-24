@@ -17,6 +17,9 @@ import orjson
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException
+from starlette.middleware import Middleware
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 
 class ORJSONResponse(JSONResponse):
@@ -31,11 +34,76 @@ class ORJSONResponse(JSONResponse):
     def render(self, content: Any) -> bytes:
         return orjson.dumps(content, option=orjson.OPT_NON_STR_KEYS)
 
+
+class RequestIdMiddleware:
+    """Pure ASGI middleware: request ID, body-size guard, latency header.
+
+    Replaces the previous ``@app.middleware("http")`` (BaseHTTPMiddleware)
+    which wraps every response — including StreamingResponse — in a
+    background task pumping chunks through an internal anyio memory stream.
+    When uvicorn cancels in-flight tasks during graceful shutdown, that pump
+    is cancelled mid-flight and raises WouldBlock/CancelledError.  A pure
+    ASGI middleware passes streaming responses through untouched, so shutdown
+    cancellation simply ends the response with no error traceback.
+    """
+
+    def __init__(self, app: ASGIApp, *, max_body_mb: float) -> None:
+        self.app = app
+        self.max_body_bytes = int(max_body_mb * 1024 * 1024)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        import uuid
+
+        rid = uuid.uuid4().hex[:16]
+        scope.setdefault("state", {})["request_id"] = rid
+        t0 = time.monotonic()
+
+        # --- body-size guard (early 413) -------------------------------------
+        cl = None
+        for k, v in scope.get("headers", []):
+            if k == b"content-length":
+                cl = v
+                break
+        if cl is not None and cl.isdigit() and int(cl) > self.max_body_bytes:
+            body = orjson.dumps(
+                {"error": {"message": f"request body exceeds {self.max_body_bytes // (1024 * 1024)} MiB",
+                           "type": "invalid_request_error",
+                           "code": "invalid_request_error"}}
+            )
+            await send({"type": "http.response.start", "status": 413,
+                        "headers": [(b"content-type", b"application/json"),
+                                    (b"content-length", str(len(body)).encode()),
+                                    (b"x-wiwi-request-id", rid.encode())]})
+            await send({"type": "http.response.body", "body": body})
+            return
+
+        # --- inject headers into the response.start message ------------------
+        async def send_wrapper(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                # Avoid duplicate x-wiwi-request-id (handlers set it on
+                # StreamingResponse/ORJSONResponse directly).
+                has_rid = any(k == b"x-wiwi-request-id" for k, _ in headers)
+                if not has_rid:
+                    headers.append((b"x-wiwi-request-id", rid.encode()))
+                headers.append((b"x-wiwi-latency-ms",
+                                f"{(time.monotonic() - t0) * 1000:.1f}".encode()))
+                message["headers"] = headers
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+
+
 from wiwi.auth.service import AuthService
 from wiwi.config import PROVIDER_TYPES, ConfigError, WiwiConfig, _interpolate, load_config
 from wiwi.core.context import RequestContext
 from wiwi.core.gateway import Gateway, build_log_event
 from wiwi.cost.pricing import CostEngine
+from wiwi.ir import types as ir
 from wiwi.logging_core.events import LogEvent
 from wiwi.logging_core.subsystem import LoggingSubsystem, encode_sse, public_dict
 from wiwi.providers.base import ProviderKeyRef, WiwiError
@@ -238,27 +306,31 @@ def create_app(config: WiwiConfig) -> FastAPI:
         return ORJSONResponse(body, status_code=status,
                               headers={"x-wiwi-request-id": rid})
 
-    @app.middleware("http")
-    async def request_id_middleware(request: Request, call_next):
-        import uuid
-        rid = uuid.uuid4().hex[:16]
-        request.state.request_id = rid
-        t0 = time.monotonic()
-        limit_mb = app.state.wiwi.config.wiwi_settings.max_request_body_mb
-        cl = request.headers.get("content-length")
-        if cl and cl.isdigit() and int(cl) > limit_mb * 1024 * 1024:
-            return ORJSONResponse(
-                {"error": {"message": f"request body exceeds {limit_mb} MiB",
-                           "type": "invalid_request_error", "code": "invalid_request_error"}},
-                status_code=413)
-        response = await call_next(request)
-        # handlers set the id that appears in log events; never overwrite it
-        if "x-wiwi-request-id" not in response.headers:
-            response.headers["x-wiwi-request-id"] = rid
-        response.headers["x-wiwi-latency-ms"] = f"{(time.monotonic()-t0)*1000:.1f}"
-        return response
+    # Pure ASGI middleware (replaces @app.middleware("http") / BaseHTTPMiddleware,
+    # which breaks streaming responses during graceful shutdown — see RequestIdMiddleware).
+    app.user_middleware.insert(0, Middleware(RequestIdMiddleware,
+                                            max_body_mb=config.wiwi_settings.max_request_body_mb))
 
     # -- shared execution ------------------------------------------------------
+
+    def _serialize_turn(turn: ir.AssistantTurn, payload: Any) -> dict[str, Any]:
+        """Build a JSON-serializable snapshot of the model's response."""
+        return {
+            "text": turn.text,
+            "thinking": [{"text": t.text} for t in turn.thinking],
+            "tool_calls": [
+                {"id": tc.id, "name": tc.name, "arguments": tc.raw_args or tc.args}
+                for tc in turn.tool_calls
+            ],
+            "stop_reason": turn.stop_reason,
+            "usage": ({"prompt_tokens": turn.usage.prompt_tokens,
+                       "completion_tokens": turn.usage.completion_tokens,
+                       "cached_tokens": turn.usage.cached_tokens,
+                       "reasoning_tokens": turn.usage.reasoning_tokens}
+                      if turn.usage else None),
+            "response": payload,
+        }
+
     async def run_chat_like(request: Request, surface: str, body: dict[str, Any],
                             codec_decode, codec_encode_response, error_body_fn):
         state_ = app.state.wiwi
@@ -280,6 +352,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return rl_err
         ctx = RequestContext(surface=surface, ir_req=ir_req, auth=info, group=group)
         gateway = state_.gateways["chat"]
+        if config.wiwi_settings.store_prompts_in_spend_logs:
+            ctx.metadata["request_body"] = body
         try:
             if ir_req.stream:
                 encoder_pair = _encoder_for(surface, ir_req.model, ctx.request_id)
@@ -309,6 +383,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
             turn = await gateway.complete(ctx)
             ctx.status = 200
             payload = codec_encode_response(ctx, turn, ir_req.model, ctx.request_id)
+            if config.wiwi_settings.store_prompts_in_spend_logs:
+                ctx.metadata["response_body"] = _serialize_turn(turn, payload)
             state_.logs.log_request(build_log_event(ctx))
             _record_tpm_usage(info, ctx)
             if info and info.key_type != "master":
@@ -335,18 +411,41 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return am.AnthropicStreamEncoder(model, req_id), "anthropic"
         return orp.ResponsesStreamEncoder(model, req_id), "responses"
 
+    def _capture_delta(
+        d: Any,
+        text_buf: list[str],
+        thinking_buf: list[str],
+        tools_buf: list[dict[str, Any]],
+    ) -> None:
+        """Accumulate streaming deltas into serializable buffers for log capture."""
+        from wiwi.streaming import deltas as dl
+        if isinstance(d, dl.TextDelta):
+            text_buf.append(d.text)
+        elif isinstance(d, dl.ThinkingDelta):
+            thinking_buf.append(d.text)
+        elif isinstance(d, dl.ToolCallOpen):
+            tools_buf.append({"id": d.id, "name": d.name, "arguments": ""})
+        elif isinstance(d, dl.ToolCallArgsDelta) and 0 <= d.index < len(tools_buf):
+            tools_buf[d.index]["arguments"] += d.args_fragment
+
     async def _stream_response(state_, ctx, encoder_pair, surface,
                                stream, first=None, event_ids=False):
         from wiwi.streaming import deltas as dl
         encoder, style = encoder_pair
         errored = False
         _seq = 0
+        store_prompts = config.wiwi_settings.store_prompts_in_spend_logs
+        stream_text: list[str] = []
+        stream_thinking: list[str] = []
+        stream_tools: list[dict[str, Any]] = []
         try:
             if first is not None:
                 if isinstance(first, dl.StreamError):
                     errored = True
                     ctx.status = 502
                     ctx.error = WiwiError(502, "api_error", first.message)
+                if store_prompts:
+                    _capture_delta(first, stream_text, stream_thinking, stream_tools)
                 _seq += 1
                 chunk = encoder.feed(first)
                 if chunk:
@@ -356,6 +455,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     errored = True
                     ctx.status = 502
                     ctx.error = WiwiError(502, "api_error", d.message)
+                if store_prompts:
+                    _capture_delta(d, stream_text, stream_thinking, stream_tools)
                 _seq += 1
                 chunk = encoder.feed(d)
                 if chunk:
@@ -375,6 +476,14 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 chunk = encoder._completed()
                 yield _inject_id(chunk, _seq) if event_ids else chunk
         finally:
+            if store_prompts:
+                ctx.metadata["response_body"] = {
+                    "text": "".join(stream_text),
+                    "thinking": [{"text": t} for t in stream_thinking],
+                    "tool_calls": stream_tools,
+                    "stop_reason": ctx.stop_reason or "stop",
+                    "streamed": True,
+                }
             state_.logs.log_request(build_log_event(ctx))
             _record_tpm_usage(ctx.auth, ctx)
             if ctx.usage and ctx.auth and ctx.auth.key_type != "master":
@@ -1107,7 +1216,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
         so client-side routes like /admin/ui/login survive hard refresh."""
 
         async def get_response(self, path: str, scope):
-            resp = await super().get_response(path, scope)
+            try:
+                resp = await super().get_response(path, scope)
+            except HTTPException as exc:
+                if exc.status_code == 404:
+                    return await super().get_response("index.html", scope)
+                raise
             if resp.status_code == 404:
                 return await super().get_response("index.html", scope)
             return resp
