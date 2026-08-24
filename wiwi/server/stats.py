@@ -18,6 +18,22 @@ BUCKET_SECONDS = {"minute": 60}
 VALID_METRICS = ("tokens", "tps")
 
 
+def bucket_size_for(minutes: int) -> int:
+    """Return bucket size in seconds appropriate for the time range.
+
+    minutes == 0 means all-time (uses 1-day buckets).
+    """
+    if minutes == 0:
+        return 86400
+    if minutes <= 1440:
+        return 60
+    if minutes <= 10080:
+        return 3600
+    if minutes <= 43200:
+        return 21600
+    return 86400
+
+
 def _p95(values: list[float]) -> float:
     if not values:
         return 0.0
