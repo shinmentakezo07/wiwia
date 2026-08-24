@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 import uvicorn
 
-from wiwi.config import ConfigError, load_config
+from wiwi.config import ConfigError, load_config, load_config_from_string
 
 
 def cli() -> None:
     parser = argparse.ArgumentParser(prog="wiwi",
                                      description="wiwi — unified LLM gateway proxy")
-    parser.add_argument("--config", "-c", default="wiwi.yaml", help="path to wiwi.yaml")
+    parser.add_argument("--config", "-c", default=None, help="path to wiwi.yaml")
     parser.add_argument("--host", default=None)
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--reload", action="store_true",
@@ -25,7 +26,14 @@ def cli() -> None:
     args = parser.parse_args()
 
     try:
-        config = load_config(args.config)
+        # Precedence: --config flag > WIWI_CONFIG env var > default wiwi.yaml
+        config_yaml = os.environ.get("WIWI_CONFIG")
+        if args.config:
+            config = load_config(args.config)
+        elif config_yaml:
+            config = load_config_from_string(config_yaml)
+        else:
+            config = load_config("wiwi.yaml")
     except ConfigError as e:
         print(f"wiwi: config error: {e}", file=sys.stderr)
         sys.exit(1)

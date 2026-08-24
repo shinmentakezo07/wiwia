@@ -177,6 +177,21 @@ def load_config(path: str | Path) -> WiwiConfig:
         raise ConfigError(f"invalid YAML in {p}: {e}") from e
     if not isinstance(raw, dict):
         raise ConfigError(f"{p} must contain a YAML mapping at top level")
+    return _validate(raw)
+
+
+def load_config_from_string(raw_yaml: str) -> WiwiConfig:
+    """Load config from inline YAML (for WIWI_CONFIG env var in containers)."""
+    try:
+        raw = yaml.safe_load(raw_yaml) or {}
+    except yaml.YAMLError as e:
+        raise ConfigError(f"invalid YAML in WIWI_CONFIG: {e}") from e
+    if not isinstance(raw, dict):
+        raise ConfigError("WIWI_CONFIG must contain a YAML mapping at top level")
+    return _validate(raw)
+
+
+def _validate(raw: dict) -> WiwiConfig:
     try:
         data = _interpolate(raw)
         return WiwiConfig.model_validate(data)

@@ -22,6 +22,8 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+    # If wiwi.yaml exists on the host, mount it; otherwise set WIWI_CONFIG
+    # env var with inline YAML (cloud deployments without a host filesystem).
     volumes:
       - ./wiwi.yaml:/app/wiwi.yaml:ro
     command: ["--config", "/app/wiwi.yaml", "--host", "0.0.0.0", "--port", "4000"]
