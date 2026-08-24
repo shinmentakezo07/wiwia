@@ -276,6 +276,16 @@ export function Spinner(_props: { className?: string }) {
   );
 }
 
+/** Live-updating indicator pill: pulsing dot + "live" label when connected. */
+export function LiveBadge(props: { connected: boolean }) {
+  return (
+    <span className="admin-live-badge">
+      <span className={props.connected ? "admin-pulse-dot" : "h-1.5 w-1.5 rounded-full bg-zinc-600"} />
+      {props.connected ? "live" : "offline"}
+    </span>
+  );
+}
+
 export function EmptyState(props: { children: ReactNode }) {
   return (
     <div className="px-4 py-12 text-center text-[13px] text-[var(--admin-text-dim)]">

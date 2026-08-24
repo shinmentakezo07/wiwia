@@ -28,9 +28,9 @@ import {
   YAxis,
 } from "recharts";
 import { getOverview, getRequestLogs, getTimeseries } from "@/api/client";
-import { useAdminStream } from "@/api/stream";
+import { useAdminStream, useLiveInvalidation } from "@/api/stream";
 import type { RequestLogEntry, TokenBucket } from "@/api/types";
-import { Card, CardHeader, ErrorText, PageHeader, Spinner, StatCard } from "@/components/ui";
+import { Card, CardHeader, ErrorText, LiveBadge, PageHeader, Spinner, StatCard } from "@/components/ui";
 import { fmtInt, fmtPct, fmtTime, fmtTokens, fmtUsd } from "@/lib/format";
 import { deltaVsPrevHour, hourlySeries } from "@/lib/dashboard-metrics";
 
@@ -227,6 +227,10 @@ export function DashboardPage() {
     refetchInterval: 10_000,
   });
 
+  // Live SSE invalidation: refresh overview/timeseries/logs the moment a
+  // request lands, instead of waiting up to 10s for the next poll.
+  useLiveInvalidation(["overview", "tokens-ts", "request-logs"]);
+
   // Rolling per-minute counts, seeded once from the request-log poll and then
   // kept live by SSE "log.created" events. A counter state forces re-renders.
   const liveRef = useRef<LiveBucket[]>([]);
@@ -325,6 +329,7 @@ export function DashboardPage() {
       <PageHeader
         title="Dashboard"
         subtitle={o ? `Gateway activity · last ${o.window_minutes} min` : "Gateway activity"}
+        right={<LiveBadge connected={connected} />}
       />
       {overviewQuery.isLoading && (
         <div className="flex justify-center py-10">

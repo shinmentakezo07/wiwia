@@ -3,6 +3,7 @@
 
 import { createContext, useContext, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { WiwiStream } from "./sse";
 import { getToken } from "./client";
 
@@ -59,5 +60,30 @@ export function useAdminStream(event: string, handler: Handler): boolean {
   useEffect(() => {
     return subscribe(event, (data, id) => ref.current(data, id));
   }, [event, subscribe]);
+  return connected;
+}
+
+/**
+ * Live-invalidate React Query caches whenever a `log.created` SSE event arrives,
+ * so overview/timeseries/logs data refreshes immediately instead of waiting for
+ * the next polling interval. Invalidation is throttled to at most once per
+ * `minGapMs` to avoid stampeding the server with a burst of refetches when many
+ * requests finish in quick succession. Returns the SSE connection state so the
+ * caller can render a live badge.
+ */
+export function useLiveInvalidation(
+  queryKeys: string[],
+  minGapMs = 1500,
+): boolean {
+  const qc = useQueryClient();
+  const lastRef = useRef(0);
+  const connected = useAdminStream("log.created", () => {
+    const now = Date.now();
+    if (now - lastRef.current < minGapMs) return;
+    lastRef.current = now;
+    for (const key of queryKeys) {
+      qc.invalidateQueries({ queryKey: [key] });
+    }
+  });
   return connected;
 }

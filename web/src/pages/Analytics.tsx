@@ -30,6 +30,7 @@ import {
   Zap,
 } from "lucide-react";
 import { getRequestLogs, getPricing } from "@/api/client";
+import { useLiveInvalidation } from "@/api/stream";
 import type { ModelPrice, RequestLogEntry } from "@/api/types";
 import {
   Button,
@@ -37,6 +38,7 @@ import {
   CardHeader,
   EmptyState,
   ErrorText,
+  LiveBadge,
   PageHeader,
   Select,
   StatCard,
@@ -382,6 +384,10 @@ export function AnalyticsPage() {
     staleTime: 5 * 60 * 1000,
   });
 
+  // Live SSE invalidation: refresh request logs immediately when a new request
+  // lands, instead of waiting up to 15s for the next poll.
+  const connected = useLiveInvalidation(["request-logs"]);
+
   const allLogs = useMemo(() => logsQuery.data?.logs ?? [], [logsQuery.data]);
   const pricingMap = useMemo(() => {
     const m = new Map<string, ModelPrice>();
@@ -610,6 +616,7 @@ export function AnalyticsPage() {
         subtitle="Historical patterns across the request log"
         right={
           <div className="flex items-center gap-2">
+            <LiveBadge connected={connected} />
             <Select
               value={selectedModel}
               onChange={setSelectedModel}

@@ -29,6 +29,7 @@ import {
   YAxis,
 } from "recharts";
 import { getOverview, getRequestLogs, getTimeseries } from "@/api/client";
+import { useLiveInvalidation } from "@/api/stream";
 import type { RequestLogEntry, TpsBucket } from "@/api/types";
 import {
   Badge,
@@ -36,6 +37,7 @@ import {
   CardHeader,
   EmptyState,
   ErrorText,
+  LiveBadge,
   PageHeader,
   Select,
   StatCard,
@@ -260,6 +262,10 @@ export function UsagePage() {
     refetchInterval: 15_000,
   });
 
+  // Live SSE invalidation: refresh all three queries immediately when a new
+  // request lands, instead of waiting up to 15s for the next poll.
+  const connected = useLiveInvalidation(["overview", "tps-ts", "usage-logs"]);
+
   const allLogs = useMemo(() => {
     const all = logsQuery.data?.logs ?? [];
     if (range === 0) return all; // all-time: no cutoff
@@ -430,6 +436,7 @@ export function UsagePage() {
         subtitle={o ? `Per-request detail · ${o.window_minutes === 0 ? 'all time' : `last ${o.window_minutes} min`}` : "Per-request usage detail"}
         right={
           <div className="flex items-center gap-2">
+            <LiveBadge connected={connected} />
             {filterGroup && (
               <span className="admin-badge admin-badge-violet">
                 {filterGroup.dim}: {filterGroup.name}
