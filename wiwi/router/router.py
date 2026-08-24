@@ -434,6 +434,16 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                     dep.record_fail(router.settings.allowed_fails,
                                     router.settings.cooldown_time)
                 if not e.retryable:
+                    # Non-retryable, but context-window errors should still
+                    # try context_window_fallbacks (e.g. a model with a larger
+                    # context window) before giving up.
+                    if e.etype == "context_window_exceeded":
+                        for fb in router.fallback_targets(group_name,
+                                                          "context_window_fallbacks"):
+                            if fb not in seen:
+                                seen.add(fb)
+                                queue.append(fb)
+                        break  # let the while-loop process the fallback queue
                     raise
                 fresh = any(d.available and id(d) not in tried_dep_ids for d in deps)
                 if not fresh and attempt < router.settings.num_retries:
@@ -447,6 +457,14 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
             if fb not in seen:
                 seen.add(fb)
                 queue.append(fb)
+        # Context-window fallbacks: when the failure was a context-window
+        # exceeded error, also enqueue groups from context_window_fallbacks
+        # (e.g. a model with a larger context window).
+        if last_err is not None and last_err.etype == "context_window_exceeded":
+            for fb in router.fallback_targets(group_name, "context_window_fallbacks"):
+                if fb not in seen:
+                    seen.add(fb)
+                    queue.append(fb)
 
     raise first_error or WiwiError(503, "service_unavailable", "no deployment could serve request")
 

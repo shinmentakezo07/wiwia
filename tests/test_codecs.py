@@ -45,6 +45,26 @@ def test_openai_chat_tool_roundtrip():
     assert req.tools[0].name == "get_weather"
 
 
+def test_openai_chat_tool_null_content_becomes_empty_string():
+    """A tool message with content=null must not be encoded as the literal 'None'.
+
+    Regression: str(None) used to produce the four-character string 'None',
+    silently corrupting the tool result sent to the upstream provider.
+    """
+    req = oc.decode_request({
+        "model": "gpt-4o",
+        "messages": [
+            {"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function",
+                                                  "function": {"name": "f", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "call_1", "content": None},
+        ],
+    })
+    tool_msg = req.messages[1]
+    assert tool_msg.parts[0].content == "", (
+        f"null tool content must decode to empty string, got {tool_msg.parts[0].content!r}"
+    )
+
+
 def test_anthropic_decode_system_and_tools():
     req = am.decode_request({
         "model": "claude-sonnet-4-20250514",

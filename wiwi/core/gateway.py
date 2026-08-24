@@ -16,7 +16,12 @@ from wiwi.core.context import RequestContext
 from wiwi.cost.pricing import CostEngine, estimate_tokens
 from wiwi.ir import types as ir
 from wiwi.logging_core.events import LogEvent
-from wiwi.providers.base import ProviderKeyRef, WiwiError, error_from_provider_status
+from wiwi.providers.base import (
+    RETRYABLE_STATUS,
+    ProviderKeyRef,
+    WiwiError,
+    error_from_provider_status,
+)
 from wiwi.providers.registry import get_adapter
 from wiwi.router.router import Deployment, Router, execute_with_retries
 from wiwi.streaming import deltas as dl
@@ -228,7 +233,17 @@ class Gateway:
                            resume_ctx, queue, ready, err_box))
             await ready.wait()
             if err_box[0] is None:
+                # Connection succeeded — report success so the key's
+                # req_count increments and any cooldown is cleared.
+                dep.provider.on_result(key, 200, None)
                 return True
+            # Connection failed — feed the key pool and deployment cooldown
+            # so a provider that keeps failing on resume cools off.
+            status = _status_of_wiwi_error(err_box[0])
+            dep.provider.on_result(key, status, err_box[0].retry_after)
+            if status in (408, 500, 502, 503, 504, 529):
+                dep.record_fail(self.router.settings.allowed_fails,
+                                self.router.settings.cooldown_time)
             pump_task.cancel()
         return False
 
@@ -305,12 +320,22 @@ class Gateway:
             parser = LineSSEParser()
             client_gone = False
             grace_drain_s = self.router.settings.stream_grace_drain_s
+            grace_deadline: float | None = None  # monotonic deadline for grace drain
             idle_s = self.router.settings.stream_idle_timeout_s
             loop_limit = (self.router.settings.stream_loop_limit
                           if self.router.settings.stream_loop_detection else 0)
             loop_last: str | None = None
             loop_count = 0
             line_iter = resp.aiter_lines().__aiter__()
+            closed = False  # True once resp_cm.__aexit__ has been called
+
+            async def _close_upstream() -> None:
+                nonlocal closed
+                if not closed:
+                    closed = True
+                    with contextlib.suppress(Exception):
+                        await resp_cm.__aexit__(None, None, None)
+
             while True:
                 try:
                     line = await asyncio.wait_for(line_iter.__anext__(), timeout=idle_s)
@@ -319,22 +344,26 @@ class Gateway:
                     self._price_partial(ctx, dep, usage_final, text_len)
                     await queue.put(dl.StreamError(
                         f"upstream idle >{idle_s:.0f}s between chunks", "timeout"))
-                    await resp_cm.__aexit__(None, None, None)
+                    await _close_upstream()
                     return
                 except StopAsyncIteration:
                     break
                 if ctx.cancel.is_set():
-                    if grace_drain_s > 0 and not client_gone:
-                        # Grace drain: keep pumping upstream for billing accuracy.
+                    if not client_gone:
                         client_gone = True
-                        # Continue draining for up to grace_drain_s.
-                        continue
-                    elif not client_gone:
-                        client_gone = True
+                        if grace_drain_s > 0:
+                            # Grace drain: keep pumping upstream for billing
+                            # accuracy. Set a deadline so we stop after
+                            # grace_drain_s seconds, not after one line.
+                            grace_deadline = time.monotonic() + grace_drain_s
+                            continue
                         await queue.put(dl.StreamError("client disconnected", "cancelled"))
                         break
                     else:
-                        break
+                        # Already in grace drain: stop if the deadline passed.
+                        if grace_deadline is not None and time.monotonic() >= grace_deadline:
+                            break
+                        continue
                 evt = parser.feed_line(line)
                 if evt is None:
                     continue
@@ -358,13 +387,13 @@ class Gateway:
                                         await queue.put(dl.StreamError(
                                             f"model loop detected ({loop_limit} "
                                             f"identical chunks)", "unknown"))
-                                        await resp_cm.__aexit__(None, None, None)
+                                        await _close_upstream()
                                         return
                                 else:
                                     loop_last = d.text
                                     loop_count = 1
                         await queue.put(d)
-            await resp_cm.__aexit__(None, None, None)
+            await _close_upstream()
             # upstream closed; on_result(200) already fired in
             # execute_with_retries when the stream started — don't double count.
             if not client_gone:
@@ -394,8 +423,7 @@ class Gateway:
             # client went away mid-stream: still release the upstream response,
             # or the pooled socket stays checked out until GC
             if started:
-                with contextlib.suppress(Exception):
-                    await asyncio.shield(resp_cm.__aexit__(None, None, None))
+                await asyncio.shield(_close_upstream())
             raise
         except Exception as e:  # noqa: BLE001
             if not started:
@@ -414,10 +442,7 @@ class Gateway:
                 await queue.put(dl.StreamError(str(e),
                                                "timeout" if "Timeout" in type(e).__name__
                                                else "connection"))
-            try:
-                await resp_cm.__aexit__(None, None, None)
-            except Exception:  # noqa: BLE001, S110
-                pass
+            await _close_upstream()
 
     def _note_stream_failure(self, dep: Deployment, real_key) -> None:
         """Mid-stream failures carry no HTTP status; feed deployment cooldowns
@@ -475,6 +500,15 @@ def _flatten(ctx: RequestContext) -> str:
         for p in m.parts:
             if isinstance(p, ir.TextPart):
                 out.append(p.text)
+            elif isinstance(p, ir.ToolResultPart):
+                out.append(p.content)
+            elif isinstance(p, ir.ThinkingPart):
+                out.append(p.text)
+            elif isinstance(p, ir.ToolUsePart):
+                # Include the tool name and JSON-serialized args so tool-use
+                # turns contribute to the prompt-token estimate.
+                out.append(p.name)
+                out.append(p.raw_args or orjson.dumps(p.args).decode())
     return " ".join(out)
 
 
@@ -540,4 +574,26 @@ def _parse_retry_after(value: str | None) -> float | None:
     try:
         return float(value)
     except ValueError:
-        return None
+        pass
+    # RFC 7231 also allows an HTTP-date (e.g. "Wed, 21 Oct 2026 07:28:00 GMT").
+    # Parse it and compute seconds from now; clamp to >= 0.
+    from email.utils import parsedate_to_datetime
+    try:
+        dt = parsedate_to_datetime(value)
+        if dt is not None:
+            delta = dt.timestamp() - time.time()
+            return max(0.0, delta)
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def _status_of_wiwi_error(e: WiwiError) -> int | None:
+    """Extract the HTTP status from a WiwiError for key-pool accounting."""
+    if e.status == 429:
+        return 429
+    if e.status in (401, 403):
+        return e.status
+    if e.status in RETRYABLE_STATUS:
+        return e.status
+    return None

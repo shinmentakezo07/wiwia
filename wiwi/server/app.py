@@ -510,9 +510,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     def _capture_delta(
         d: Any,
+        ctx: RequestContext,
         text_buf: list[str],
         thinking_buf: list[str],
-        tools_buf: list[dict[str, Any]],
+        tools_map: dict[int, dict[str, Any]],
     ) -> None:
         """Accumulate streaming deltas into serializable buffers for log capture."""
         from wiwi.streaming import deltas as dl
@@ -521,9 +522,13 @@ def create_app(config: WiwiConfig) -> FastAPI:
         elif isinstance(d, dl.ThinkingDelta):
             thinking_buf.append(d.text)
         elif isinstance(d, dl.ToolCallOpen):
-            tools_buf.append({"id": d.id, "name": d.name, "arguments": ""})
-        elif isinstance(d, dl.ToolCallArgsDelta) and 0 <= d.index < len(tools_buf):
-            tools_buf[d.index]["arguments"] += d.args_fragment
+            tools_map[d.index] = {"id": d.id, "name": d.name, "arguments": ""}
+        elif isinstance(d, dl.ToolCallArgsDelta):
+            entry = tools_map.get(d.index)
+            if entry is not None:
+                entry["arguments"] += d.args_fragment
+        elif isinstance(d, dl.Finish):
+            ctx.stop_reason = d.stop_reason
 
     async def _stream_response(state_, ctx, encoder_pair, surface,
                                stream, first=None, event_ids=False):
@@ -534,7 +539,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         store_prompts = config.wiwi_settings.store_prompts_in_spend_logs
         stream_text: list[str] = []
         stream_thinking: list[str] = []
-        stream_tools: list[dict[str, Any]] = []
+        stream_tools: dict[int, dict[str, Any]] = {}
         try:
             if first is not None:
                 if isinstance(first, dl.StreamError):
@@ -542,7 +547,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     ctx.status = 502
                     ctx.error = WiwiError(502, "api_error", first.message)
                 if store_prompts:
-                    _capture_delta(first, stream_text, stream_thinking, stream_tools)
+                    _capture_delta(first, ctx, stream_text, stream_thinking,
+                                   stream_tools)
                 _seq += 1
                 chunk = encoder.feed(first)
                 if chunk:
@@ -553,7 +559,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     ctx.status = 502
                     ctx.error = WiwiError(502, "api_error", d.message)
                 if store_prompts:
-                    _capture_delta(d, stream_text, stream_thinking, stream_tools)
+                    _capture_delta(d, ctx, stream_text, stream_thinking,
+                                   stream_tools)
                 _seq += 1
                 chunk = encoder.feed(d)
                 if chunk:
@@ -577,7 +584,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 ctx.metadata["response_body"] = {
                     "text": "".join(stream_text),
                     "thinking": [{"text": t} for t in stream_thinking],
-                    "tool_calls": stream_tools,
+                    "tool_calls": [stream_tools[i] for i in sorted(stream_tools)],
                     "stop_reason": ctx.stop_reason or "stop",
                     "streamed": True,
                 }

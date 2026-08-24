@@ -178,12 +178,19 @@ class ResponsesStreamEncoder:
         self.model = model
         self.req_id = req_id
         self._seq = 0
-        self._item_open: str | None = None   # "message" | "thinking" | f"fc:<n>"
+        self._item_open: str | None = None   # "message" | "thinking" | "tool"
         self._open_out = -1                  # output_index of the currently open item
         self._usage: dl.UsageFinal | None = None
         self._stop = "stop"
         self._text_buf = ""
         self._think_buf = ""
+        # Tool-call metadata stored as separate fields so tool names or call
+        # IDs containing colons don't break the close-time unpacking that
+        # previously used a colon-delimited string.
+        self._tool_n: int = 0
+        self._tool_name: str = ""
+        self._tool_call_id: str = ""
+        self._args_buf: str = ""
 
     def _next_output_index(self) -> int:
         self._open_out += 1
@@ -216,17 +223,16 @@ class ResponsesStreamEncoder:
                     "item": {"type": "reasoning", "id": f"rs_{self.req_id}_{idx}",
                              "summary": [{"type": "summary_text",
                                           "text": self._think_buf}]}})]
-        _, n, name, call_id = kind.split(":", 3)
+        # kind == "tool"
+        n = self._tool_n
         return [self._evt("response.function_call_arguments.done", {
             "item_id": f"fc_{self.req_id}_{n}", "output_index": idx,
             "arguments": self._args_buf}),
             self._evt("response.output_item.done", {
                 "output_index": idx,
                 "item": {"type": "function_call", "id": f"fc_{self.req_id}_{n}",
-                         "call_id": call_id, "name": name,
+                         "call_id": self._tool_call_id, "name": self._tool_name,
                          "arguments": self._args_buf}})]
-
-    _args_buf = ""
 
     def feed(self, d: dl.IRStreamDelta) -> bytes | None:
         if isinstance(d, dl.StreamStart):
@@ -276,19 +282,22 @@ class ResponsesStreamEncoder:
         if isinstance(d, dl.ToolCallOpen):
             out = self._close_item()
             n = d.index
+            self._tool_n = n
+            self._tool_name = d.name
+            self._tool_call_id = d.id
             self._args_buf = ""
             oi = self._next_output_index()
             out.append(self._evt("response.output_item.added", {
                 "output_index": oi,
                 "item": {"type": "function_call", "id": f"fc_{self.req_id}_{n}",
                          "call_id": d.id, "name": d.name, "arguments": ""}}))
-            self._item_open = f"fc:{n}:{d.name}:{d.id}"
+            self._item_open = "tool"
             return b"".join(out)
         if isinstance(d, dl.ToolCallArgsDelta):
             self._args_buf += d.args_fragment
-            n = self._item_open.split(":")[1] if self._item_open else "0"
             return self._evt("response.function_call_arguments.delta", {
-                "item_id": f"fc_{self.req_id}_{n}", "output_index": self._open_out,
+                "item_id": f"fc_{self.req_id}_{self._tool_n}",
+                "output_index": self._open_out,
                 "delta": d.args_fragment})
         if isinstance(d, dl.ToolCallClose):
             return b"".join(self._close_item())
