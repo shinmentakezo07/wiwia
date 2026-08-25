@@ -360,7 +360,20 @@ def _schema_type(schema: dict[str, Any]) -> str | None:
 
 
 def _coerce_text(value: str, schema: dict[str, Any]) -> Any:
-    """Decode a textual tool argument per its declared JSON type."""
+    """Decode a textual tool argument per its declared JSON type.
+
+    Conversion failures are signalled as ``NimToolProtocolError`` so callers
+    that catch protocol errors (``parse_tool_block`` callers) also cover
+    malformed argument values.
+    """
+    try:
+        return _coerce_text_inner(value, schema)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise NimToolProtocolError(
+            f"invalid tool argument value: {value!r}") from exc
+
+
+def _coerce_text_inner(value: str, schema: dict[str, Any]) -> Any:
     enum_vals = schema.get("enum")
     if isinstance(enum_vals, list):
         for ev in enum_vals:

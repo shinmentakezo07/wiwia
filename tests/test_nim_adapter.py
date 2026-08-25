@@ -436,6 +436,122 @@ def test_stream_structured_tool_calls_pass_through():
     assert json.loads(args_deltas[0].args_fragment) == {"q": "test"}
 
 
+def test_stream_structured_tool_call_args_unaliased():
+    """Aliased params (a param named 'type') are un-aliased on the structured path."""
+    ad = NimAdapter()
+    tools = [{"type": "function", "function": {
+        "name": "create",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "enum": ["a", "b"]},
+                "name": {"type": "string"},
+            },
+            "required": ["type"],
+        },
+    }}]
+    ad.set_tool_context({"tools": sanitize_nim_tool_schemas(tools)})
+
+    deltas_out = []
+    events = [
+        json.dumps({"choices": [{"delta": {"tool_calls": [{
+            "index": 0, "id": "call_1",
+            "function": {"name": "create", "arguments": '{"_nim_arg_t'},
+        }]}}]}),
+        json.dumps({"choices": [{"delta": {"tool_calls": [{
+            "index": 0,
+            "function": {"arguments": 'ype": "a", "name": "x"}'},
+        }]}}]}),
+        json.dumps({"choices": [{"delta": {}, "finish_reason": "tool_calls"}],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 3}}),
+    ]
+    for ev in events:
+        deltas_out.extend(ad.decode_stream_event("", ev))
+    args_deltas = [d for d in deltas_out if isinstance(d, dl.ToolCallArgsDelta)]
+    args_json = "".join(d.args_fragment for d in args_deltas)
+    assert json.loads(args_json) == {"type": "a", "name": "x"}
+
+
+def test_stream_namespace_in_plain_text_degrades_to_text():
+    """A namespace-like string in plain text must not abort the stream."""
+    ad = NimAdapter()
+    # _NAMESPACE not followed by a tool-block start raises in the framer;
+    # the adapter must degrade and emit the chunk as visible text.
+    chunk = "echoing: " + _NAMESPACE + "oops not a tool"
+    deltas_out = ad.decode_stream_event(
+        "", json.dumps({"choices": [{"delta": {"content": chunk}}]}))
+    text_deltas = [d for d in deltas_out if isinstance(d, dl.TextDelta)]
+    assert "".join(d.text for d in text_deltas) == chunk
+
+
+def test_stream_trailing_text_after_tool_block_degrades():
+    """Text after a completed tool block degrades to text instead of StreamError."""
+    ad = NimAdapter()
+    invoke = f'{_NAMESPACE}<invoke name="fn">{_NAMESPACE}</invoke>'
+    chunk = _TOOL_BLOCK_START + invoke + _TOOL_BLOCK_END + "Done!"
+    deltas_out = ad.decode_stream_event(
+        "", json.dumps({"choices": [{"delta": {"content": chunk}}]}))
+    text_deltas = [d for d in deltas_out if isinstance(d, dl.TextDelta)]
+    assert "Done!" in "".join(d.text for d in text_deltas)
+
+
+def test_sanitize_if_then_else_boolean_subschemas():
+    """Boolean subschemas under if/then/else must be stripped too."""
+    tools = [{"type": "function", "function": {
+        "name": "cond",
+        "parameters": {
+            "type": "object",
+            "properties": {"mode": {"type": "string"}},
+            "if": {"properties": {"mode": {"const": "x"}}},
+            "then": True,
+        },
+    }}]
+    sanitized = sanitize_nim_tool_schemas(tools)
+    params = sanitized[0]["function"]["parameters"]
+    assert "then" not in params
+    assert params["if"] == {"properties": {"mode": {"const": "x"}}}
+
+
+def test_decode_response_preserves_text_around_markup():
+    """Non-streaming: visible text around a native block is kept, not wiped."""
+    invoke = f'{_NAMESPACE}<invoke name="fn">{_NAMESPACE}</invoke>'
+    block = _TOOL_BLOCK_START + invoke + _TOOL_BLOCK_END
+    payload = {
+        "choices": [{"message": {"role": "assistant",
+                                "content": "See below: " + block},
+                     "finish_reason": "tool_calls"}],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 3},
+    }
+    turn = NimAdapter().decode_response(200, json.dumps(payload).encode())
+    assert turn.text == "See below:"
+    assert len(turn.tool_calls) == 1
+    assert turn.tool_calls[0].name == "fn"
+
+
+def test_decode_response_unaliases_structured_args():
+    """Non-streaming: structured tool_calls args are un-aliased."""
+    ad = NimAdapter()
+    tools = [{"type": "function", "function": {
+        "name": "create",
+        "parameters": {
+            "type": "object",
+            "properties": {"type": {"type": "string"}},
+        },
+    }}]
+    ad.set_tool_context({"tools": sanitize_nim_tool_schemas(tools)})
+    payload = {
+        "choices": [{"message": {
+            "role": "assistant", "content": None,
+            "tool_calls": [{"id": "call_1", "function": {
+                "name": "create", "arguments": '{"_nim_arg_type": "foo"}'}}],
+        }, "finish_reason": "tool_calls"}],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 10},
+    }
+    turn = ad.decode_response(200, json.dumps(payload).encode())
+    assert turn.tool_calls[0].args == {"type": "foo"}
+    assert json.loads(turn.tool_calls[0].raw_args) == {"type": "foo"}
+
+
 # -- framer unit tests ---------------------------------------------------------
 
 def test_framer_plain_text():
@@ -606,6 +722,45 @@ def test_parse_tool_block_malformed_raises():
     import pytest
     with pytest.raises(NimToolProtocolError):
         parse_tool_block("not a tool block", {}, {})
+
+
+def test_parse_tool_block_bad_typed_value_raises_protocol_error():
+    """An argument value that fails type coercion raises NimToolProtocolError,
+    not a bare ValueError/JSONDecodeError that would escape callers."""
+    import pytest
+    block = (
+        f'{_NAMESPACE}<invoke name="calc">'
+        f'{_NAMESPACE}<x>not-a-number{_NAMESPACE}</x>'
+        f'{_NAMESPACE}</invoke>'
+    )
+    schemas = {"calc": {"type": "object",
+                        "properties": {"x": {"type": "integer"}}}}
+    with pytest.raises(NimToolProtocolError):
+        parse_tool_block(block, schemas, {})
+
+
+def test_emit_native_calls_bad_value_degrades_to_text():
+    """Malformed typed arguments degrade to a TextDelta, not a stream abort."""
+    ad = NimAdapter()
+    body = {
+        "tools": [{"type": "function", "function": {
+            "name": "calc",
+            "parameters": {"type": "object",
+                           "properties": {"x": {"type": "integer"}}},
+        }}],
+    }
+    ad.set_tool_context(body)
+    block = (
+        f'{_NAMESPACE}<invoke name="calc">'
+        f'{_NAMESPACE}<x>oops{_NAMESPACE}</x>'
+        f'{_NAMESPACE}</invoke>'
+    )
+    deltas_out = ad.decode_stream_event(
+        "",
+        json.dumps({"choices": [{"delta": {
+            "content": _TOOL_BLOCK_START + block + _TOOL_BLOCK_END}}]}))
+    assert any(isinstance(d, dl.TextDelta) for d in deltas_out)
+    assert not any(isinstance(d, dl.ToolCallOpen) for d in deltas_out)
 
 
 # -- cross-dialect: Anthropic client -> NIM provider ---------------------------

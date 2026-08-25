@@ -22,7 +22,7 @@ from typing import Any
 
 # JSON Schema keys whose *values* are schemas ( recurse into them ).
 _SCHEMA_VALUE_KEYS = frozenset(
-    {"additionalProperties", "not", "contains", "propertyNames", "_if", "_then", "_else"}
+    {"additionalProperties", "not", "contains", "propertyNames", "if", "then", "else"}
 )
 # JSON Schema keys whose *values* are lists of schemas.
 _SCHEMA_LIST_KEYS = frozenset({"allOf", "anyOf", "oneOf", "prefixItems"})

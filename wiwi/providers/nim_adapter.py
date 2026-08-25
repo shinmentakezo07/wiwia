@@ -49,6 +49,7 @@ from wiwi.providers.nim_native_tools import (
 from wiwi.providers.nim_tool_schema import (
     collect_nim_tool_aliases,
     sanitize_nim_tool_schemas,
+    unalias_nim_tool_args,
 )
 from wiwi.providers.openai_adapter import OpenAIAdapter
 from wiwi.streaming import deltas as dl
@@ -126,26 +127,28 @@ class NimAdapter(OpenAIAdapter):
         # This is rare for non-streaming (NIM usually returns proper
         # tool_calls), but handle it for robustness.
         if not turn.tool_calls and turn.text:
-            markup = _detect_native_markup(turn.text)
-            if markup is not None:
+            hit = _detect_native_markup(turn.text)
+            if hit is not None:
+                block_start, block_end, markup = hit
                 # We don't have the original request's tool schemas here,
                 # so parse without schema validation (best-effort).
                 try:
-                    calls = parse_tool_block(markup, {}, {})
+                    calls = parse_tool_block(markup, {}, self._tool_aliases)
                 except NimToolProtocolError:
                     calls = ()
                 if calls:
-                    turn.text = ""
+                    # Remove only the markup block; keep surrounding text.
+                    turn.text = (turn.text[:block_start]
+                                 + turn.text[block_end:]).strip()
                     for c in calls:
                         turn.tool_calls.append(ir.ToolUsePart(
                             id=f"call_nim_resp_{c.index}",
                             name=c.name, args=c.arguments,
                             raw_args=json.dumps(c.arguments)))
 
-        # Un-alias tool call arguments if the request used aliased params.
-        # We can't know the aliases from the response alone, so this is
-        # handled in decode_stream_event where the adapter retains the
-        # aliases from encode_request.
+        # Un-alias structured tool_calls args (e.g. a param named "type"
+        # sent upstream as "_nim_arg_type") when the request used aliases.
+        self._unalias_turn_tool_calls(turn)
 
         return turn
 
@@ -158,6 +161,9 @@ class NimAdapter(OpenAIAdapter):
         self._reasoning_framer = MiniMaxFramer()
         self._tool_schemas: dict[str, dict[str, Any]] = {}
         self._tool_aliases: dict[str, dict[str, str]] = {}
+        # Args fragments for tools with aliased params are buffered per
+        # index and emitted once (un-aliased) when the call closes.
+        self._buffered_args: dict[int, str] = {}
 
     def set_tool_context(self, body: dict[str, Any]) -> None:
         """Capture tool schemas and aliases from the encoded request body.
@@ -203,7 +209,7 @@ class NimAdapter(OpenAIAdapter):
         # is detected, emit tool-call deltas instead of text.
         content = delta.get("content")
         if content:
-            visible = self._content_framer.feed(content)
+            visible = self._feed_safely(self._content_framer, content, "content")
             if visible:
                 out.append(dl.TextDelta(visible))
             if self._content_framer.tool_block is not None:
@@ -214,7 +220,8 @@ class NimAdapter(OpenAIAdapter):
         # tool markup in reasoning too).
         reasoning = delta.get("reasoning_content") or delta.get("reasoning")
         if reasoning:
-            visible_r = self._reasoning_framer.feed(reasoning)
+            visible_r = self._feed_safely(self._reasoning_framer, reasoning,
+                                          "reasoning")
             if visible_r:
                 out.append(dl.ThinkingDelta(visible_r))
             if self._reasoning_framer.tool_block is not None:
@@ -229,6 +236,7 @@ class NimAdapter(OpenAIAdapter):
             name_fragment = fn.get("name", "")
             if tc.get("id"):
                 if idx in self._open_tool_indices:
+                    self._flush_buffered_args(idx, out)
                     out.append(dl.ToolCallClose(index=idx))
                 self._open_tool_indices.add(idx)
                 self._tool_names[idx] = name_fragment or ""
@@ -237,7 +245,14 @@ class NimAdapter(OpenAIAdapter):
             elif name_fragment and idx in self._open_tool_indices:
                 self._tool_names[idx] = self._tool_names.get(idx, "") + name_fragment
             if fn.get("arguments"):
-                out.append(dl.ToolCallArgsDelta(index=idx, args_fragment=fn["arguments"]))
+                if self._tool_aliases.get(self._tool_names.get(idx, "")):
+                    # Aliased tool: buffer fragments so the completed JSON
+                    # can be un-aliased before the client sees it.
+                    self._buffered_args[idx] = (
+                        self._buffered_args.get(idx, "") + fn["arguments"])
+                else:
+                    out.append(dl.ToolCallArgsDelta(index=idx,
+                                                    args_fragment=fn["arguments"]))
 
         fr = c.get("finish_reason")
         if fr:
@@ -246,25 +261,82 @@ class NimAdapter(OpenAIAdapter):
             out.extend(flushed)
             # Close ALL still-open tool calls (parallel tools).
             for open_idx in sorted(self._open_tool_indices):
+                self._flush_buffered_args(open_idx, out)
                 out.append(dl.ToolCallClose(index=open_idx))
             self._open_tool_indices.clear()
             self._tool_names.clear()
+            self._buffered_args.clear()
             out.append(dl.Finish({"stop": "stop", "length": "length",
                                  "tool_calls": "tool_call",
                                  "content_filter": "content_filter"}.get(fr, "stop")))
         return out
 
+    def _feed_safely(self, framer: MiniMaxFramer, chunk: str,
+                     which: str) -> str:
+        """Feed a framer chunk; on a protocol error degrade to plain text.
+
+        The framer raises ``NimToolProtocolError`` for content that is
+        benign model output (a namespace-like string in plain text, text
+        after a completed tool block, an oversized block).  Rather than
+        aborting the whole stream, reset the framer and pass the chunk
+        through as visible text.
+        """
+        try:
+            return framer.feed(chunk)
+        except NimToolProtocolError:
+            fresh = MiniMaxFramer()
+            if which == "content":
+                self._content_framer = fresh
+            else:
+                self._reasoning_framer = fresh
+            return chunk
+
+    def _flush_buffered_args(self, idx: int, out: list[dl.IRStreamDelta]) -> None:
+        """Emit buffered args for an aliased tool call, un-aliased."""
+        buf = self._buffered_args.pop(idx, None)
+        if buf is None:
+            return
+        aliases = self._tool_aliases.get(self._tool_names.get(idx, ""), {})
+        fragment = buf
+        try:
+            args = orjson.loads(buf)
+            if isinstance(args, dict):
+                fragment = json.dumps(unalias_nim_tool_args(args, aliases),
+                                      ensure_ascii=False, separators=(",", ":"))
+        except (ValueError, json.JSONDecodeError):
+            pass  # leave the raw fragment as-is
+        out.append(dl.ToolCallArgsDelta(index=idx, args_fragment=fragment))
+
+    def _unalias_turn_tool_calls(self, turn: ir.AssistantTurn) -> None:
+        """Un-alias structured tool_calls args on a non-streaming turn."""
+        if not self._tool_aliases:
+            return
+        for tc in turn.tool_calls:
+            aliases = self._tool_aliases.get(tc.name)
+            if aliases and isinstance(tc.args, dict):
+                tc.args = unalias_nim_tool_args(tc.args, aliases)
+                tc.raw_args = json.dumps(tc.args, ensure_ascii=False,
+                                         separators=(",", ":"))
+
     def _flush_framers(self) -> list[dl.IRStreamDelta]:
         """Flush pending text from both framers and emit any complete tool block."""
         out: list[dl.IRStreamDelta] = []
-        tail = self._content_framer.finish()
+        try:
+            tail = self._content_framer.finish()
+        except NimToolProtocolError:
+            tail = ""
+            self._content_framer = MiniMaxFramer()
         if tail:
             out.append(dl.TextDelta(tail))
         if self._content_framer.tool_block is not None:
             out.extend(self._emit_native_calls(self._content_framer.tool_block))
             self._content_framer.tool_block = None
 
-        tail_r = self._reasoning_framer.finish()
+        try:
+            tail_r = self._reasoning_framer.finish()
+        except NimToolProtocolError:
+            tail_r = ""
+            self._reasoning_framer = MiniMaxFramer()
         if tail_r:
             out.append(dl.ThinkingDelta(tail_r))
         if self._reasoning_framer.tool_block is not None:
@@ -285,10 +357,12 @@ class NimAdapter(OpenAIAdapter):
 
 # -- helpers -------------------------------------------------------------------
 
-def _detect_native_markup(text: str) -> str | None:
-    """If ``text`` contains a complete native tool block, return the block.
+def _detect_native_markup(text: str) -> tuple[int, int, str] | None:
+    """Locate a complete native tool block in ``text``.
 
-    Returns ``None`` if no tool block is found.
+    Returns ``(block_start, block_end, inner)`` — the span of the whole
+    block (markers included) and its inner markup — or ``None`` when no
+    complete block is found.
     """
     from wiwi.providers.nim_native_tools import _TOOL_BLOCK_END, _TOOL_BLOCK_START
     start = text.find(_TOOL_BLOCK_START)
@@ -297,5 +371,5 @@ def _detect_native_markup(text: str) -> str | None:
     end = text.find(_TOOL_BLOCK_END, start + len(_TOOL_BLOCK_START))
     if end < 0:
         return None
-    # Return the inner content ( between start and end markers ).
-    return text[start + len(_TOOL_BLOCK_START):end]
+    inner = text[start + len(_TOOL_BLOCK_START):end]
+    return start, end + len(_TOOL_BLOCK_END), inner
