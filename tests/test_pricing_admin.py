@@ -97,6 +97,23 @@ async def test_pricing_put_creates_new_model(client):
     assert models["my-custom-model"]["input_per_1m"] == 2.5
 
 
+async def test_pricing_put_slash_model_id(client):
+    """Model ids that contain a slash (e.g. MiniMaxAI/MiniMax-M3) must be
+    routable. The path converter must accept the slash, not 404."""
+    r = await client.put("/admin/pricing/MiniMaxAI/MiniMax-M3", headers=AUTH, json={
+        "input_per_1m": 0.23,
+        "output_per_1m": 0.96,
+        "mode": "chat",
+    })
+    assert r.status_code == 200, r.text
+    assert r.json()["model_id"] == "MiniMaxAI/MiniMax-M3"
+    # Confirm it lands in the listing under the exact slash-bearing id.
+    models = {m["model_id"]: m for m in
+              (await client.get("/admin/pricing", headers=AUTH)).json()["models"]}
+    assert "MiniMaxAI/MiniMax-M3" in models
+    assert models["MiniMaxAI/MiniMax-M3"]["input_per_1m"] == 0.23
+
+
 async def test_pricing_put_updates_existing(client):
     # Create.
     await client.put("/admin/pricing/edit-me", headers=AUTH, json={
@@ -149,6 +166,19 @@ async def test_pricing_delete_unknown_returns_deleted_false(client):
     r = await client.delete("/admin/pricing/never-existed", headers=AUTH)
     assert r.status_code == 200
     assert r.json()["deleted"] is False
+
+
+async def test_pricing_delete_slash_model_id(client):
+    """DELETE must also accept a slash-bearing model id."""
+    await client.put("/admin/pricing/zai/glm-5.2", headers=AUTH, json={
+        "input_per_1m": 1.4, "output_per_1m": 4.4,
+    })
+    r = await client.delete("/admin/pricing/zai/glm-5.2", headers=AUTH)
+    assert r.status_code == 200, r.text
+    assert r.json()["deleted"] is True
+    models = {m["model_id"]: m for m in
+              (await client.get("/admin/pricing", headers=AUTH)).json()["models"]}
+    assert "zai/glm-5.2" not in models
 
 
 # -- cost engine integration ---------------------------------------------------
