@@ -26,12 +26,20 @@ _CLOSE_CHARS = set(_OPEN_CLOSE.values())
 # When we see these characters we *might* be in the middle of a string token.
 _QUOTE = '"'
 
+# Buffer cap (1 MiB) and repair-stack cap (4k) to bound memory and CPU on
+# pathological inputs. A misbehaving model can otherwise send an unbounded
+# stream that grows the buffer until the gateway OOMs.
+MAX_BUFFER_BYTES = 1024 * 1024
+MAX_REPAIR_DEPTH = 4096
+
 
 def _repair_truncated_json(text: str) -> str:
     """Append missing closing characters for truncated JSON.
 
     Tracks nesting depth and string state, then appends whatever closers
-    are needed to produce valid JSON.
+    are needed to produce valid JSON.  The container stack is bounded by
+    :data:`MAX_REPAIR_DEPTH` so deeply-nested pathological input does not
+    blow memory or spend unbounded time producing an arbitrarily long suffix.
     """
     stack: list[str] = []
     in_string = False
@@ -48,7 +56,10 @@ def _repair_truncated_json(text: str) -> str:
         if ch == _QUOTE:
             in_string = True
         elif ch in _OPEN_CLOSE:
-            stack.append(_OPEN_CLOSE[ch])
+            if len(stack) < MAX_REPAIR_DEPTH:
+                stack.append(_OPEN_CLOSE[ch])
+            # else: drop the opener on the floor; the repair will close
+            # what we have but not balloon the suffix.
         elif ch in _CLOSE_CHARS and stack and stack[-1] == ch:
             stack.pop()
     suffix = ""
@@ -98,16 +109,36 @@ class PartialJSONParser:
 
     Call :meth:`feed` with each fragment as it arrives; call :meth:`finalize`
     when the tool call closes to get the repaired final value.
+
+    The internal buffer is bounded by :data:`MAX_BUFFER_BYTES` so a
+    misbehaving model cannot grow it without limit.
     """
 
     def __init__(self) -> None:
         self._buf = ""
 
     def feed(self, fragment: str) -> Any:
-        """Accumulate *fragment* and return the best-effort parsed value."""
-        self._buf += fragment
-        value, _complete = parse_partial(self._buf)
-        return value
+        """Accumulate *fragment* and return the best-effort parsed value.
+
+        Once the buffer reaches the cap, further fragments replace the
+        tail of the buffer rather than appending — this preserves the
+        most recent arg text (which is what a partial-JSON parser can
+        still make sense of) while bounding memory.
+        """
+        if not fragment:
+            return parse_partial(self._buf)[0]
+        # Cheap byte check: if the fragment alone exceeds the cap, only
+        # keep its tail. Otherwise append and trim the head if needed.
+        if len(fragment.encode("utf-8", "replace")) >= MAX_BUFFER_BYTES:
+            self._buf = fragment[-MAX_BUFFER_BYTES:]
+        else:
+            self._buf += fragment
+            overflow = len(self._buf.encode("utf-8", "replace")) - MAX_BUFFER_BYTES
+            if overflow > 0:
+                # Drop the overflow from the head, keeping the most recent
+                # MAX_BUFFER_BYTES characters intact.
+                self._buf = self._buf[overflow:]
+        return parse_partial(self._buf)[0]
 
     def finalize(self) -> Any:
         """Repair and parse the accumulated buffer. Always returns a dict."""
