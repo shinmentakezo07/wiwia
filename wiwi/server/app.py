@@ -850,7 +850,6 @@ def create_app(config: WiwiConfig) -> FastAPI:
         return {
             "label": k.label,
             "masked": _mask_secret(k.secret),
-            "secret": k.secret,
             "weight": k.weight,
             "enabled": k.enabled,
             "status": status,
