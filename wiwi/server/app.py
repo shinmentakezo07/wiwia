@@ -1349,7 +1349,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             out.append(entry)
         return ORJSONResponse({"models": out})
 
-    @app.put("/admin/pricing/{model_id}")
+    @app.put("/admin/pricing/{model_id:path}")
     async def admin_put_pricing(model_id: str, request: Request):
         """Create or update a model's pricing (USD per 1M tokens in the body)."""
         resp = _require_admin(request)
@@ -1400,7 +1400,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             result["mode"] = entry["mode"]
         return ORJSONResponse(result)
 
-    @app.delete("/admin/pricing/{model_id}")
+    @app.delete("/admin/pricing/{model_id:path}")
     async def admin_delete_pricing(model_id: str, request: Request):
         """Remove a model's custom pricing entry."""
         resp = _require_admin(request)
