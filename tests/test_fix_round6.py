@@ -221,18 +221,26 @@ def test_validate_tool_args_under_cap_works():
 
 # -- H6: stop logging raw tool args --
 
-def test_validate_tool_args_does_not_log_raw(caplog):
-    """validate_tool_args must log length + fingerprint, never raw args."""
-    caplog.set_level("WARNING", logger="wiwi.streaming.validation")
+def test_validate_tool_args_does_not_log_raw(capsys):
+    """validate_tool_args must log length + fingerprint, never raw args.
+
+    The gateway's structlog chain renders to stdout, so we capture
+    stdout to inspect the actual rendered log line.
+    """
     from wiwi.streaming.validation import validate_tool_args
 
-    secret = '"super-secret-password-from-tool-args-1234"'
-    valid, _msg = validate_tool_args("t", secret, {"type": "integer"})
+    # Path: invalid JSON so the JSONDecodeError branch fires (the one that
+    # used to log the raw args). The new code must not echo the payload.
+    secret = "not-valid-json-super-secret-pw-1234"
+    valid, _msg = validate_tool_args("t", secret, {"type": "string"})
     assert valid is False
-    rendered = " ".join(r.getMessage() for r in caplog.records)
-    assert "super-secret-password" not in rendered
-    # Length and fingerprint are expected to be present.
-    assert "len=" in rendered or "length=" in rendered or "fingerprint" in rendered
+    captured = capsys.readouterr()
+    rendered = (captured.out + captured.err)
+    assert "super-secret-pw-1234" not in rendered, \
+        f"raw secret leaked into log: {rendered!r}"
+    # Length and fingerprint are expected to be present in the formatted text.
+    assert "fingerprint" in rendered
+    assert "bytes" in rendered
 
 
 # -- H7: partial_json buffer cap --

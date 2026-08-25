@@ -8,12 +8,23 @@ still receives the tool call, but with a warning flag.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
 import structlog
 
 log = structlog.get_logger(__name__)
+
+# Cap raw tool-arg payloads at 1 MiB to bound memory and JSON-parse time.
+# A model can otherwise emit an unbounded stream that grows the buffer
+# without limit, eventually OOM-ing the gateway process.
+MAX_TOOL_ARGS_BYTES = 1024 * 1024
+
+
+def _fingerprint(raw_args: str) -> str:
+    """Stable short hash of *raw_args* for log correlation without leaking PII."""
+    return hashlib.sha256(raw_args.encode("utf-8", "replace")).hexdigest()[:16]
 
 
 def validate_tool_args(
@@ -29,11 +40,22 @@ def validate_tool_args(
     """
     if not schema:
         return True, ""
+    # Reject oversize payloads up front so a hostile/malformed model cannot
+    # push megabytes of args into a JSON parse. We never log the payload
+    # itself — just length and a short fingerprint.
+    raw_bytes = len(raw_args.encode("utf-8", "replace"))
+    if raw_bytes > MAX_TOOL_ARGS_BYTES:
+        msg = f"tool '{tool_name}': arguments exceed {MAX_TOOL_ARGS_BYTES} byte cap"
+        log.warning("tool_args_oversize", tool=tool_name,
+                    bytes=raw_bytes, fingerprint=_fingerprint(raw_args))
+        return False, msg
     try:
         args = json.loads(raw_args)
     except json.JSONDecodeError:
         msg = f"tool '{tool_name}': arguments are not valid JSON"
-        log.warning("tool_args_invalid_json", tool=tool_name, raw_args=raw_args[:200])
+        # Never log raw_args: tool arguments often contain user secrets.
+        log.warning("tool_args_invalid_json", tool=tool_name,
+                    bytes=raw_bytes, fingerprint=_fingerprint(raw_args))
         return False, msg
 
     # Basic type checking against the schema.
