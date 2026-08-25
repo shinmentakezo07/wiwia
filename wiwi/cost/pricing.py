@@ -2,6 +2,18 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+
+@dataclass
+class CostState:
+    """Result of a pricing lookup. ``unpriced`` is True when the model is
+    missing from the pricing table, so callers can log/flag it instead of
+    silently treating usage as $0."""
+
+    cost: float
+    unpriced: bool
+
 
 class CostEngine:
     """Costs are USD per token, 8-decimal rounded. Unpriced models cost 0.
@@ -21,9 +33,19 @@ class CostEngine:
 
     def cost(self, model_id: str, prompt_tokens: int, completion_tokens: int,
              cached_tokens: int = 0) -> float:
+        return self.cost_with_status(model_id, prompt_tokens, completion_tokens,
+                                     cached_tokens).cost
+
+    def cost_with_status(self, model_id: str, prompt_tokens: int, completion_tokens: int,
+                         cached_tokens: int = 0) -> CostState:
+        """Like :meth:`cost` but also returns whether the model is priced.
+
+        Unpriced models report cost=0.0 (back-compat) and unpriced=True so
+        callers can log/flag the missing entry rather than silently treating
+        usage as free."""
         p = self._lookup(model_id)
         if not p:
-            return 0.0
+            return CostState(cost=0.0, unpriced=True)
         uncached_prompt = max(0, prompt_tokens - cached_tokens)
         cached_rate = p.get("cache_read_input_cost_per_token", p["input_cost_per_token"])
         total = (
@@ -31,7 +53,7 @@ class CostEngine:
             + cached_tokens * cached_rate
             + completion_tokens * p["output_cost_per_token"]
         )
-        return round(total, 8)
+        return CostState(cost=round(total, 8), unpriced=False)
 
     def _lookup(self, model_id: str) -> dict | None:
         """Try multiple lookup strategies for a model's pricing entry.
