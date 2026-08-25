@@ -59,14 +59,13 @@ async def test_pricing_endpoints_require_master(client, method, path):
 
 # -- GET -----------------------------------------------------------------------
 
-async def test_pricing_list_includes_builtin(client):
+async def test_pricing_list_starts_empty(client):
     r = await client.get("/admin/pricing", headers=AUTH)
     assert r.status_code == 200
     models = {m["model_id"]: m for m in r.json()["models"]}
-    # Built-in table has gpt-4o.
-    assert "gpt-4o" in models
-    assert models["gpt-4o"]["input_per_1m"] > 0
-    assert models["gpt-4o"]["output_per_1m"] > 0
+    # No built-in prices ship — the table only lists user-added entries.
+    assert "gpt-4o" not in models
+    assert models == {}
 
 
 # -- PUT (create + update) -----------------------------------------------------

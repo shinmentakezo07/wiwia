@@ -39,7 +39,8 @@ def test_cost_lookup_strips_provider_prefix():
     For nested model IDs like 'openrouter/anthropic/claude-sonnet-4-20250514',
     the lookup must find the pricing entry keyed on 'claude-sonnet-4-20250514'."""
     ce = CostEngine()
-    # Built-in table has 'claude-sonnet-4-20250514'
+    ce.register("claude-sonnet-4-20250514",
+                input_per_token=0.000003, output_per_token=0.000015)
     c = ce.cost("anthropic/claude-sonnet-4-20250514", 1000, 500)
     assert c > 0
     # Two-level prefix: openrouter wraps anthropic
@@ -51,6 +52,7 @@ def test_cost_lookup_glm_nested_id():
     """Model 'zai/glm-5.2' arriving as 'openai-compatible/zai/glm-5.2'
     must find the pricing entry keyed on 'glm-5.2'."""
     ce = CostEngine()
+    ce.register("glm-5.2", input_per_token=0.0000014, output_per_token=0.0000044)
     c = ce.cost("openai-compatible/zai/glm-5.2", 1000, 500)
     assert c > 0
     # Also works with just the model id
