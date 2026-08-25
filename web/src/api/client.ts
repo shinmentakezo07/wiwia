@@ -206,6 +206,28 @@ export const getRequestLogsWithLimit = (limit: number) =>
 export const getPricing = () =>
   api<{ models: ModelPrice[] }>("/admin/pricing");
 
+export const upsertPricing = (
+  modelId: string,
+  body: {
+    input_per_1m: number;
+    output_per_1m: number;
+    cache_read_per_1m?: number;
+    max_input_tokens?: number;
+    max_output_tokens?: number;
+    mode?: string;
+  },
+) =>
+  api<ModelPrice>(`/admin/pricing/${encodeURIComponent(modelId)}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+
+export const deletePricing = (modelId: string) =>
+  api<{ deleted: boolean; model_id: string }>(
+    `/admin/pricing/${encodeURIComponent(modelId)}`,
+    { method: "DELETE" },
+  );
+
 export const getProxyLogs = () =>
   api<{ logs: ProxyLogEntry[] }>("/admin/logs/proxy");
 

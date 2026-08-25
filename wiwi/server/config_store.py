@@ -85,6 +85,18 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 """
 
+MODEL_PRICES_DDL = """
+CREATE TABLE IF NOT EXISTS model_prices (
+  model_id TEXT PRIMARY KEY,
+  input_cost_per_token REAL NOT NULL DEFAULT 0,
+  output_cost_per_token REAL NOT NULL DEFAULT 0,
+  cache_read_input_cost_per_token REAL,
+  max_input_tokens INTEGER,
+  max_output_tokens INTEGER,
+  mode TEXT
+);
+"""
+
 
 class ConfigStore:
     """Persists admin-added routing state to the database.
@@ -106,6 +118,7 @@ class ConfigStore:
             await conn.execute(sa.text(key_ddl))
             await conn.execute(sa.text(dep_ddl))
             await conn.execute(sa.text(SETTINGS_DDL))
+            await conn.execute(sa.text(MODEL_PRICES_DDL))
             await self._migrate(conn)
 
     async def _migrate(self, conn) -> None:
@@ -288,6 +301,67 @@ class ConfigStore:
                 sa.text("DELETE FROM deployments"
                         " WHERE group_name = :g AND provider_name = :p AND model_id = :m"),
                 {"g": group_name, "p": provider_name, "m": model_id})
+
+    # -- model pricing ---------------------------------------------------------
+
+    async def upsert_price(self, model_id: str, entry: dict) -> None:
+        """Insert or update a custom model pricing entry."""
+        params = {
+            "m": model_id,
+            "ipt": entry.get("input_cost_per_token", 0),
+            "opt": entry.get("output_cost_per_token", 0),
+            "cr": entry.get("cache_read_input_cost_per_token"),
+            "mi": entry.get("max_input_tokens"),
+            "mo": entry.get("max_output_tokens"),
+            "mode": entry.get("mode"),
+        }
+        cols = ("model_id, input_cost_per_token, output_cost_per_token,"
+                " cache_read_input_cost_per_token, max_input_tokens,"
+                " max_output_tokens, mode")
+        ph = ":m,:ipt,:opt,:cr,:mi,:mo,:mode"
+        if self._is_pg:
+            updates = ("input_cost_per_token=EXCLUDED.input_cost_per_token,"
+                       "output_cost_per_token=EXCLUDED.output_cost_per_token,"
+                       "cache_read_input_cost_per_token=EXCLUDED.cache_read_input_cost_per_token,"
+                       "max_input_tokens=EXCLUDED.max_input_tokens,"
+                       "max_output_tokens=EXCLUDED.max_output_tokens,"
+                       "mode=EXCLUDED.mode")
+            sql = (f"INSERT INTO model_prices ({cols}) VALUES ({ph})"
+                   f" ON CONFLICT (model_id) DO UPDATE SET {updates}")
+        else:
+            sql = f"INSERT OR REPLACE INTO model_prices ({cols}) VALUES ({ph})"
+        async with self.engine.begin() as conn:
+            await conn.execute(sa.text(sql), params)
+
+    async def delete_price(self, model_id: str) -> None:
+        async with self.engine.begin() as conn:
+            await conn.execute(
+                sa.text("DELETE FROM model_prices WHERE model_id = :m"),
+                {"m": model_id})
+
+    async def load_prices(self) -> list[dict]:
+        """Return all DB-stored custom pricing entries."""
+        async with self.engine.connect() as conn:
+            rows = (await conn.execute(sa.text(
+                "SELECT model_id, input_cost_per_token, output_cost_per_token,"
+                " cache_read_input_cost_per_token, max_input_tokens,"
+                " max_output_tokens, mode FROM model_prices ORDER BY model_id"))).all()
+        out: list[dict] = []
+        for r in rows:
+            e: dict = {
+                "input_cost_per_token": r[1],
+                "output_cost_per_token": r[2],
+            }
+            if r[3] is not None:
+                e["cache_read_input_cost_per_token"] = r[3]
+            if r[4] is not None:
+                e["max_input_tokens"] = r[4]
+            if r[5] is not None:
+                e["max_output_tokens"] = r[5]
+            if r[6] is not None:
+                e["mode"] = r[6]
+            out.append({"model_id": r[0], **e})
+        return out
 
     # -- settings (alert rules, routing strategy) -------------------------------
 

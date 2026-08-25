@@ -277,6 +277,11 @@ class AppState:
         strategy = await self.config_store.get_setting("routing_strategy")
         if strategy is not None:
             self.router.settings.routing_strategy = strategy
+        # custom model pricing overrides (admin-added; survive restarts)
+        for p in await self.config_store.load_prices():
+            mid = p["model_id"]
+            entry = {k: v for k, v in p.items() if k != "model_id"}
+            self.cost.prices[mid] = entry
 
     async def shutdown(self) -> None:
         if self.shutdown_event is not None:
@@ -1330,6 +1335,72 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 entry["mode"] = p["mode"]
             out.append(entry)
         return ORJSONResponse({"models": out})
+
+    @app.put("/admin/pricing/{model_id}")
+    async def admin_put_pricing(model_id: str, request: Request):
+        """Create or update a model's pricing (USD per 1M tokens in the body)."""
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        if not isinstance(body, dict):
+            return _err(400, "invalid_request_error", "body must be a JSON object", request)
+        ipt = body.get("input_per_1m")
+        opt = body.get("output_per_1m")
+        if not isinstance(ipt, (int, float)) or not isinstance(opt, (int, float)):
+            return _err(400, "invalid_request_error",
+                        "'input_per_1m' and 'output_per_1m' are required numbers", request)
+        # Convert per-1M-token rates to per-token for the cost engine.
+        entry: dict[str, Any] = {
+            "input_cost_per_token": round(ipt / 1_000_000, 12),
+            "output_cost_per_token": round(opt / 1_000_000, 12),
+        }
+        if isinstance(body.get("cache_read_per_1m"), (int, float)):
+            entry["cache_read_input_cost_per_token"] = round(body["cache_read_per_1m"] / 1_000_000, 12)
+        if isinstance(body.get("max_input_tokens"), int):
+            entry["max_input_tokens"] = body["max_input_tokens"]
+        if isinstance(body.get("max_output_tokens"), int):
+            entry["max_output_tokens"] = body["max_output_tokens"]
+        if isinstance(body.get("mode"), str):
+            entry["mode"] = body["mode"]
+        state.cost.prices[model_id] = entry
+        if state.config_store:
+            await state.config_store.upsert_price(model_id, entry)
+        await state.logs.log_audit(actor="master", action="pricing.update",
+                                   target=model_id,
+                                   diff={"input_per_1m": ipt, "output_per_1m": opt})
+        # Echo back the normalized per-1M entry the GET endpoint returns.
+        result: dict[str, Any] = {
+            "model_id": model_id,
+            "input_per_1m": round(entry["input_cost_per_token"] * 1_000_000, 6),
+            "output_per_1m": round(entry["output_cost_per_token"] * 1_000_000, 6),
+        }
+        if "cache_read_input_cost_per_token" in entry:
+            result["cache_read_per_1m"] = round(entry["cache_read_input_cost_per_token"] * 1_000_000, 6)
+        if "max_input_tokens" in entry:
+            result["max_input_tokens"] = entry["max_input_tokens"]
+        if "max_output_tokens" in entry:
+            result["max_output_tokens"] = entry["max_output_tokens"]
+        if "mode" in entry:
+            result["mode"] = entry["mode"]
+        return ORJSONResponse(result)
+
+    @app.delete("/admin/pricing/{model_id}")
+    async def admin_delete_pricing(model_id: str, request: Request):
+        """Remove a model's custom pricing entry."""
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        existed = model_id in state.cost.prices
+        if existed:
+            del state.cost.prices[model_id]
+        if state.config_store:
+            await state.config_store.delete_price(model_id)
+        await state.logs.log_audit(actor="master", action="pricing.delete",
+                                   target=model_id)
+        return ORJSONResponse({"deleted": existed, "model_id": model_id})
 
     # -- admin: alert rules (storage only; evaluation engine is post-MVP) ----------
     @app.get("/admin/alert-rules")

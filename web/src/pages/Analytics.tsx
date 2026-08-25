@@ -2,9 +2,9 @@
 // daily trend, distribution donut, group-by breakdown with inline share
 // bars, spend per key, token efficiency, and CSV export.
 
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import type { CSSProperties } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Area,
   AreaChart,
@@ -27,17 +27,28 @@ import {
   DollarSign,
   Download,
   TrendingUp,
+  Pencil,
+  Plus,
+  Trash2,
   Zap,
 } from "lucide-react";
-import { getRequestLogs, getPricing } from "@/api/client";
+import {
+  deletePricing,
+  getRequestLogs,
+  getPricing,
+  upsertPricing,
+} from "@/api/client";
 import { useLiveInvalidation } from "@/api/stream";
 import type { ModelPrice, RequestLogEntry } from "@/api/types";
 import {
   Button,
   Card,
   CardHeader,
+  Dialog,
   EmptyState,
   ErrorText,
+  Field,
+  Input,
   LiveBadge,
   PageHeader,
   Select,
@@ -202,12 +213,19 @@ function fmtPerMm(v: number): string {
 
 // -- pricing card ------------------------------------------------------------
 
-function PricingCard({ price }: { price: ModelPrice }) {
+function PricingCard({ price, onEdit }: { price: ModelPrice; onEdit?: () => void }) {
   return (
     <Card className="admin-stat-highlight">
       <CardHeader
         title="Model pricing"
         subtitle={price.model_id}
+        right={
+          onEdit && (
+            <Button variant="outline" onClick={onEdit} className="!px-2.5 !py-1.5 text-[12px]">
+              <Pencil size={12} /> Edit
+            </Button>
+          )
+        }
       />
       <div className="grid grid-cols-3 gap-px bg-[var(--admin-border)]">
         <div className="bg-[var(--admin-surface)] p-4">
@@ -366,6 +384,283 @@ function Brain(props: { size?: number; className?: string; style?: CSSProperties
   );
 }
 
+// -- pricing editor dialog ---------------------------------------------------
+
+interface PriceForm {
+  model_id: string;
+  input_per_1m: string;
+  output_per_1m: string;
+  cache_read_per_1m: string;
+  max_input_tokens: string;
+  max_output_tokens: string;
+  mode: string;
+}
+
+function emptyForm(): PriceForm {
+  return {
+    model_id: "",
+    input_per_1m: "",
+    output_per_1m: "",
+    cache_read_per_1m: "",
+    max_input_tokens: "",
+    max_output_tokens: "",
+    mode: "",
+  };
+}
+
+function formFromPrice(p: ModelPrice): PriceForm {
+  return {
+    model_id: p.model_id,
+    input_per_1m: String(p.input_per_1m),
+    output_per_1m: String(p.output_per_1m),
+    cache_read_per_1m: p.cache_read_per_1m != null ? String(p.cache_read_per_1m) : "",
+    max_input_tokens: p.max_input_tokens != null ? String(p.max_input_tokens) : "",
+    max_output_tokens: p.max_output_tokens != null ? String(p.max_output_tokens) : "",
+    mode: p.mode ?? "",
+  };
+}
+
+function tryNum(s: string): number | undefined {
+  const t = s.trim();
+  if (!t) return undefined;
+  const n = Number(t);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function PricingDialog(props: {
+  open: boolean;
+  initial: PriceForm | null;
+  isNew: boolean;
+  existingIds: string[];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const qc = useQueryClient();
+  const [form, setForm] = useState<PriceForm>(emptyForm());
+  const [error, setError] = useState<string | null>(null);
+
+  // Sync form whenever the dialog opens with new initial data.
+  useEffect(() => {
+    if (props.open) setForm(props.initial ?? emptyForm());
+    setError(null);
+  }, [props.open, props.initial]);
+
+  const save = useMutation({
+    mutationFn: (f: PriceForm) =>
+      upsertPricing(f.model_id.trim(), {
+        input_per_1m: Number(f.input_per_1m) || 0,
+        output_per_1m: Number(f.output_per_1m) || 0,
+        cache_read_per_1m: tryNum(f.cache_read_per_1m),
+        max_input_tokens: tryNum(f.max_input_tokens),
+        max_output_tokens: tryNum(f.max_output_tokens),
+        mode: f.mode.trim() || undefined,
+      }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["pricing"] });
+      props.onSaved();
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  const modelId = form.model_id.trim();
+  const idValid = props.isNew
+    ? modelId.length > 0 && !props.existingIds.includes(modelId)
+    : modelId.length > 0;
+  const inputValid = tryNum(form.input_per_1m) != null;
+  const outputValid = tryNum(form.output_per_1m) != null;
+  const canSave = idValid && inputValid && outputValid && !save.isPending;
+
+  const set = (k: keyof PriceForm, v: string) => setForm((f) => ({ ...f, [k]: v }));
+
+  return (
+    <Dialog
+      open={props.open}
+      title={props.isNew ? "Add model pricing" : `Edit · ${props.initial?.model_id ?? ""}`}
+      onClose={props.onClose}
+      wide
+    >
+      <div className="space-y-4">
+        {props.isNew && (
+          <Field label="Model ID" hint="The bare model id, e.g. claude-sonnet-4-20250514">
+            <Input
+              value={form.model_id}
+              onChange={(e) => set("model_id", e.target.value)}
+              placeholder="model-name"
+            />
+          </Field>
+        )}
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Input $ / 1M tokens">
+            <Input
+              value={form.input_per_1m}
+              onChange={(e) => set("input_per_1m", e.target.value)}
+              placeholder="3.00"
+              type="number"
+              step="any"
+            />
+          </Field>
+          <Field label="Output $ / 1M tokens">
+            <Input
+              value={form.output_per_1m}
+              onChange={(e) => set("output_per_1m", e.target.value)}
+              placeholder="15.00"
+              type="number"
+              step="any"
+            />
+          </Field>
+        </div>
+        <div className="grid grid-cols-3 gap-3">
+          <Field label="Cache read $ / 1M" hint="Optional">
+            <Input
+              value={form.cache_read_per_1m}
+              onChange={(e) => set("cache_read_per_1m", e.target.value)}
+              placeholder="0.30"
+              type="number"
+              step="any"
+            />
+          </Field>
+          <Field label="Max input tokens" hint="Optional">
+            <Input
+              value={form.max_input_tokens}
+              onChange={(e) => set("max_input_tokens", e.target.value)}
+              placeholder="200000"
+              type="number"
+            />
+          </Field>
+          <Field label="Max output tokens" hint="Optional">
+            <Input
+              value={form.max_output_tokens}
+              onChange={(e) => set("max_output_tokens", e.target.value)}
+              placeholder="8192"
+              type="number"
+            />
+          </Field>
+        </div>
+        <Field label="Mode" hint="Optional, e.g. chat or embedding">
+          <Input
+            value={form.mode}
+            onChange={(e) => set("mode", e.target.value)}
+            placeholder="chat"
+          />
+        </Field>
+
+        {error && <ErrorText>{error}</ErrorText>}
+
+        <div className="flex justify-end gap-2 pt-1">
+          <Button variant="ghost" onClick={props.onClose}>Cancel</Button>
+          <Button
+            disabled={!canSave}
+            onClick={() => save.mutate(form)}
+          >
+            {save.isPending ? "Saving…" : props.isNew ? "Add pricing" : "Save changes"}
+          </Button>
+        </div>
+      </div>
+    </Dialog>
+  );
+}
+
+// -- pricing management table ------------------------------------------------
+
+function PricingManager(props: {
+  models: ModelPrice[];
+  onEdit: (p: ModelPrice) => void;
+  onAdd: () => void;
+}) {
+  const qc = useQueryClient();
+  const [confirmId, setConfirmId] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const del = useMutation({
+    mutationFn: (modelId: string) => deletePricing(modelId),
+    onSuccess: () => {
+      setConfirmId(null);
+      void qc.invalidateQueries({ queryKey: ["pricing"] });
+    },
+    onError: (e) => {
+      setErr(e.message);
+      setConfirmId(null);
+    },
+  });
+
+  return (
+    <Card className="mt-4">
+      <CardHeader
+        title="Model pricing"
+        subtitle="Input, output, and cache-read costs per 1M tokens — editable, persisted in the database"
+        right={
+          <Button onClick={props.onAdd} className="!py-1.5 text-[12px]">
+            <Plus size={14} /> Add model
+          </Button>
+        }
+      />
+      {err && (
+        <div className="px-4 pt-3">
+          <ErrorText>{err}</ErrorText>
+        </div>
+      )}
+      {props.models.length === 0 ? (
+        <EmptyState>No pricing entries yet. Click “Add model” to define one.</EmptyState>
+      ) : (
+        <Table head={["Model", "Input $/1M", "Output $/1M", "Cache read $/1M", "Context", "Mode", ""]}>
+          {props.models.map((p) => (
+            <tr key={p.model_id}>
+              <TD className="font-medium text-[var(--admin-text)]">{p.model_id}</TD>
+              <TD className="font-mono tabular-nums">{fmtPerMm(p.input_per_1m)}</TD>
+              <TD className="font-mono tabular-nums">{fmtPerMm(p.output_per_1m)}</TD>
+              <TD className="font-mono tabular-nums">
+                {p.cache_read_per_1m != null ? fmtPerMm(p.cache_read_per_1m) : "—"}
+              </TD>
+              <TD className="font-mono tabular-nums text-[var(--admin-text-dim)]">
+                {p.max_input_tokens ? fmtInt(p.max_input_tokens) : "—"}
+              </TD>
+              <TD className="text-[var(--admin-text-dim)]">{p.mode ?? "—"}</TD>
+              <TD>
+                {confirmId === p.model_id ? (
+                  <div className="flex items-center justify-end gap-2">
+                    <span className="text-[11px] text-red-400">Delete?</span>
+                    <Button
+                      variant="danger"
+                      className="!px-2 !py-1 text-[11px]"
+                      onClick={() => del.mutate(p.model_id)}
+                    >
+                      Confirm
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      className="!px-2 !py-1 text-[11px]"
+                      onClick={() => setConfirmId(null)}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-end gap-1.5">
+                    <button
+                      title="Edit"
+                      onClick={() => props.onEdit(p)}
+                      className="rounded p-1.5 text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)]"
+                    >
+                      <Pencil size={13} />
+                    </button>
+                    <button
+                      title="Delete"
+                      onClick={() => setConfirmId(p.model_id)}
+                      className="rounded p-1.5 text-[var(--admin-text-dim)] transition-colors hover:bg-red-500/10 hover:text-red-400"
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                )}
+              </TD>
+            </tr>
+          ))}
+        </Table>
+      )}
+    </Card>
+  );
+}
+
 // -- main component ---------------------------------------------------------
 
 export function AnalyticsPage() {
@@ -394,6 +689,29 @@ export function AnalyticsPage() {
     for (const p of pricingQuery.data?.models ?? []) m.set(p.model_id, p);
     return m;
   }, [pricingQuery.data]);
+
+  // Pricing editor dialog state
+  const [pricingOpen, setPricingOpen] = useState(false);
+  const [pricingInitial, setPricingInitial] = useState<PriceForm | null>(null);
+  const [pricingIsNew, setPricingIsNew] = useState(false);
+  const allPricing = useMemo(
+    () => pricingQuery.data?.models ?? [],
+    [pricingQuery.data],
+  );
+  function openAddPricing() {
+    setPricingInitial(emptyForm());
+    setPricingIsNew(true);
+    setPricingOpen(true);
+  }
+  function openEditPricing(p: ModelPrice) {
+    setPricingInitial(formFromPrice(p));
+    setPricingIsNew(false);
+    setPricingOpen(true);
+  }
+  function closePricing() {
+    setPricingOpen(false);
+    setPricingInitial(null);
+  }
 
   // All model IDs seen in logs + pricing table, for the selector.
   const modelOptions = useMemo(() => {
@@ -676,7 +994,7 @@ export function AnalyticsPage() {
       {/* ── Pricing + Token efficiency (only when a specific model is selected) ── */}
       {selectedPrice && (
         <div className="mt-4 grid gap-4 xl:grid-cols-2">
-          <PricingCard price={selectedPrice} />
+          <PricingCard price={selectedPrice} onEdit={() => openEditPricing(selectedPrice)} />
           <TokenEfficiencyCard eff={efficiency} />
         </div>
       )}
@@ -687,6 +1005,21 @@ export function AnalyticsPage() {
           <TokenEfficiencyCard eff={efficiency} />
         </div>
       )}
+
+      {/* ── Pricing management (add / edit / delete, persisted in DB) ──── */}
+      <PricingManager
+        models={allPricing}
+        onEdit={openEditPricing}
+        onAdd={openAddPricing}
+      />
+      <PricingDialog
+        open={pricingOpen}
+        initial={pricingInitial}
+        isNew={pricingIsNew}
+        existingIds={allPricing.map((p) => p.model_id)}
+        onClose={closePricing}
+        onSaved={closePricing}
+      />
 
       {/* ── Daily trend ─────────────────────────────────────────────────── */}
       <Card className="mt-4">
