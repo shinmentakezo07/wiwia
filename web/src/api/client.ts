@@ -198,7 +198,7 @@ export const getTimeseries = (metric: TimeseriesMetric, minutes: number) =>
   );
 
 export const getRequestLogs = () =>
-  api<{ logs: RequestLogEntry[] }>("/admin/logs/requests?limit=1000");
+  api<{ logs: RequestLogEntry[] }>("/admin/logs/requests?limit=10000");
 
 export const getRequestLogsWithLimit = (limit: number) =>
   api<{ logs: RequestLogEntry[] }>(`/admin/logs/requests?limit=${limit}`);

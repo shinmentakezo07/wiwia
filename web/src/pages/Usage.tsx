@@ -1,7 +1,7 @@
 // Usage — range-filtered totals, TPS trend, token-share donut, group-by
 // summary, and a sortable per-request table with a totals footer.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
@@ -67,6 +67,21 @@ const RANGE_OPTIONS = [
   { value: "43200", label: "Last 30 days" },
   { value: "0", label: "All time" },
 ];
+
+const RANGE_STORAGE_KEY = "wiwi.usage.range";
+
+function loadStoredRange(): number {
+  try {
+    const raw = localStorage.getItem(RANGE_STORAGE_KEY);
+    if (raw == null) return 60;
+    const v = Number(raw);
+    return Number.isFinite(v) && RANGE_OPTIONS.some((o) => Number(o.value) === v)
+      ? v
+      : 60;
+  } catch {
+    return 60;
+  }
+}
 
 type GroupDim = "model" | "key" | "provider";
 type SortDir = "asc" | "desc";
@@ -239,12 +254,20 @@ function ChartTooltip(props: {
 const NOW_MS_FN = () => Date.now();
 
 export function UsagePage() {
-  const [range, setRange] = useState(60);
+  const [range, setRange] = useState<number>(loadStoredRange);
   const [groupDim, setGroupDim] = useState<GroupDim>("model");
   const [sortKey, setSortKey] = useState<SortKey>("time");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [latencyMetric, setLatencyMetric] = useState<LatencyMetric>("ttft");
   const [filterGroup, setFilterGroup] = useState<{ dim: GroupDim; name: string } | null>(null);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(RANGE_STORAGE_KEY, String(range));
+    } catch {
+      // localStorage may be unavailable (private mode); in-memory state still works
+    }
+  }, [range]);
 
   const overviewQuery = useQuery({
     queryKey: ["overview", range],
@@ -352,10 +375,10 @@ export function UsagePage() {
   const share = useMemo<ShareSlice[]>(
     () =>
       [
-        { name: "input", value: totals.tokIn, color: PIE_COLORS[0] },
-        { name: "cached", value: totals.tokCached, color: PIE_COLORS[1] },
-        { name: "reasoning", value: totals.tokReasoning, color: PIE_COLORS[2] },
-        { name: "output", value: totals.tokOut, color: PIE_COLORS[3] },
+        { name: "input", value: tokIn, color: PIE_COLORS[0] },
+        { name: "cached", value: tokCached, color: PIE_COLORS[1] },
+        { name: "reasoning", value: tokReasoning, color: PIE_COLORS[2] },
+        { name: "output", value: tokOut, color: PIE_COLORS[3] },
       ].filter((s) => s.value > 0),
     [totals],
   );
@@ -365,8 +388,22 @@ export function UsagePage() {
     [logs, latencyMetric],
   );
 
-  const totalTokens = totals.tokIn + totals.tokCached + totals.tokReasoning + totals.tokOut;
   const o = overviewQuery.data;
+
+  // Display totals prefer the DB-backed overview (real COUNT(*)/SUM) so the
+  // page never lies when more than `limit` rows were requested. The per-row
+  // totals are a fallback while the overview is still loading.
+  const requests = o?.requests ?? totals.requests;
+  const errors = o?.errors ?? totals.errors;
+  const cacheHits = o?.cache_hits ?? totals.cacheHits;
+  const cost = o?.cost ?? totals.cost;
+  const cacheSavings = o?.cache_savings ?? totals.cacheSavings;
+  const tokIn = o?.tok_in ?? totals.tokIn;
+  const tokCached = o?.tok_cached ?? totals.tokCached;
+  const tokReasoning = o?.tok_reasoning ?? totals.tokReasoning;
+  const tokOut = o?.tok_out ?? totals.tokOut;
+  const avgTps = o?.tps_avg ?? totals.avgTps;
+  const totalTokens = tokIn + tokCached + tokReasoning + tokOut;
 
   // prev-hour deltas + sparklines (same approach as Dashboard)
   const nowMs = NOW_MS_FN();
@@ -397,9 +434,9 @@ export function UsagePage() {
     sumIn(errPts, hourPrevStart, hourCut),
   );
 
-  const hasTraffic = totals.requests > 0;
-  const cacheHitRate = totals.requests > 0 ? totals.cacheHits / totals.requests : 0;
-  const errorRate = totals.requests > 0 ? totals.errors / totals.requests : 0;
+  const hasTraffic = requests > 0;
+  const cacheHitRate = hasTraffic ? cacheHits / requests : 0;
+  const errorRate = hasTraffic ? errors / requests : 0;
 
   const onSort = (k: SortKey) => {
     if (k === sortKey) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -468,8 +505,8 @@ export function UsagePage() {
           icon={Activity}
           tone="brand"
           label="requests"
-          value={fmtInt(totals.requests)}
-          sub={o ? `error rate ${fmtPct(o.error_rate)}` : `${fmtInt(totals.errors)} errors`}
+          value={fmtInt(requests)}
+          sub={o ? `error rate ${fmtPct(o.error_rate)}` : `${fmtInt(errors)} errors`}
           spark={hourlySeries(reqPts, nowMs)}
           delta={reqDelta}
           deltaGoodDir="up"
@@ -479,8 +516,8 @@ export function UsagePage() {
           featured
           icon={DollarSign}
           label="spend"
-          value={fmtUsd(totals.cost)}
-          sub={`saved ${fmtUsd(totals.cacheSavings)}`}
+          value={fmtUsd(cost)}
+          sub={`saved ${fmtUsd(cacheSavings)}`}
           spark={hourlySeries(costPts, nowMs)}
           delta={costDelta}
           waiting={!hasTraffic}
@@ -491,7 +528,7 @@ export function UsagePage() {
           tone={cacheHitRate > 0.1 ? "success" : "default"}
           label="cache hit rate"
           value={fmtPct(cacheHitRate)}
-          sub={`${fmtInt(totals.cacheHits)} of ${fmtInt(totals.requests)}`}
+          sub={`${fmtInt(cacheHits)} of ${fmtInt(requests)}`}
           spark={hourlySeries(cachedPts, nowMs)}
           waiting={!hasTraffic}
         />
@@ -499,7 +536,7 @@ export function UsagePage() {
           featured
           icon={Gauge}
           label="avg tps"
-          value={totals.avgTps.toFixed(1)}
+          value={avgTps.toFixed(1)}
           sub={o ? `p95 ${o.tps_p95.toFixed(1)}` : undefined}
           spark={hourlySeries(tpsPts, nowMs)}
           waiting={!hasTraffic}
@@ -511,30 +548,30 @@ export function UsagePage() {
         <StatCard
           icon={ArrowDownToLine}
           label="tokens in"
-          value={fmtTokens(totals.tokIn)}
+          value={fmtTokens(tokIn)}
           spark={hourlySeries(inPts, nowMs)}
           waiting={!hasTraffic}
         />
         <StatCard
           icon={Zap}
-          tone={totals.tokCached > 0 ? "success" : "default"}
+          tone={tokCached > 0 ? "success" : "default"}
           label="cached"
-          value={fmtTokens(totals.tokCached)}
-          sub={`${fmtInt(totals.cacheHits)} hits`}
+          value={fmtTokens(tokCached)}
+          sub={`${fmtInt(cacheHits)} hits`}
           spark={hourlySeries(cachedPts, nowMs)}
           waiting={!hasTraffic}
         />
         <StatCard
           icon={Brain}
           label="reasoning"
-          value={fmtTokens(totals.tokReasoning)}
+          value={fmtTokens(tokReasoning)}
           spark={hourlySeries(reasonPts, nowMs)}
           waiting={!hasTraffic}
         />
         <StatCard
           icon={ArrowUpFromLine}
           label="output"
-          value={fmtTokens(totals.tokOut)}
+          value={fmtTokens(tokOut)}
           spark={hourlySeries(outPts, nowMs)}
           waiting={!hasTraffic}
         />
@@ -542,7 +579,7 @@ export function UsagePage() {
           icon={Activity}
           tone={errorRate > 0.05 ? "danger" : "success"}
           label="errors"
-          value={fmtInt(totals.errors)}
+          value={fmtInt(errors)}
           sub={fmtPct(errorRate)}
           spark={hourlySeries(errPts, nowMs)}
           delta={errDelta}
@@ -884,15 +921,15 @@ export function UsagePage() {
               </tr>
             ))}
             <tr className="border-t border-[var(--admin-border)] bg-white/[0.02] font-medium">
-              <TD colSpan={5}>Totals · {fmtInt(totals.requests)} requests</TD>
-              <TD className="font-mono tabular-nums">{fmtInt(totals.tokIn)}</TD>
-              <TD className="font-mono tabular-nums">{fmtInt(totals.tokCached)}</TD>
-              <TD className="font-mono tabular-nums">{fmtInt(totals.tokReasoning)}</TD>
-              <TD className="font-mono tabular-nums">{fmtInt(totals.tokOut)}</TD>
-              <TD className="font-mono tabular-nums">{totals.avgTps.toFixed(1)}</TD>
+              <TD colSpan={5}>Totals · {fmtInt(requests)} requests</TD>
+              <TD className="font-mono tabular-nums">{fmtInt(tokIn)}</TD>
+              <TD className="font-mono tabular-nums">{fmtInt(tokCached)}</TD>
+              <TD className="font-mono tabular-nums">{fmtInt(tokReasoning)}</TD>
+              <TD className="font-mono tabular-nums">{fmtInt(tokOut)}</TD>
+              <TD className="font-mono tabular-nums">{avgTps.toFixed(1)}</TD>
               <TD className="font-mono tabular-nums text-[var(--admin-text-dim)]">—</TD>
               <TD className="font-mono tabular-nums text-[var(--admin-text-dim)]">—</TD>
-              <TD className="font-mono tabular-nums">{fmtUsd(totals.cost)}</TD>
+              <TD className="font-mono tabular-nums">{fmtUsd(cost)}</TD>
             </tr>
           </Table>
         )}
