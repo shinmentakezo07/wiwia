@@ -372,22 +372,6 @@ export function UsagePage() {
     [tpsQuery.data],
   );
 
-  const share = useMemo<ShareSlice[]>(
-    () =>
-      [
-        { name: "input", value: tokIn, color: PIE_COLORS[0] },
-        { name: "cached", value: tokCached, color: PIE_COLORS[1] },
-        { name: "reasoning", value: tokReasoning, color: PIE_COLORS[2] },
-        { name: "output", value: tokOut, color: PIE_COLORS[3] },
-      ].filter((s) => s.value > 0),
-    [totals],
-  );
-
-  const latBuckets = useMemo(
-    () => latencyBuckets(logs, latencyMetric),
-    [logs, latencyMetric],
-  );
-
   const o = overviewQuery.data;
 
   // Display totals prefer the DB-backed overview (real COUNT(*)/SUM) so the
@@ -404,6 +388,22 @@ export function UsagePage() {
   const tokOut = o?.tok_out ?? totals.tokOut;
   const avgTps = o?.tps_avg ?? totals.avgTps;
   const totalTokens = tokIn + tokCached + tokReasoning + tokOut;
+
+  const share = useMemo<ShareSlice[]>(
+    () =>
+      [
+        { name: "input", value: tokIn, color: PIE_COLORS[0] },
+        { name: "cached", value: tokCached, color: PIE_COLORS[1] },
+        { name: "reasoning", value: tokReasoning, color: PIE_COLORS[2] },
+        { name: "output", value: tokOut, color: PIE_COLORS[3] },
+      ].filter((s) => s.value > 0),
+    [tokIn, tokCached, tokReasoning, tokOut],
+  );
+
+  const latBuckets = useMemo(
+    () => latencyBuckets(logs, latencyMetric),
+    [logs, latencyMetric],
+  );
 
   // prev-hour deltas + sparklines (same approach as Dashboard)
   const nowMs = NOW_MS_FN();
