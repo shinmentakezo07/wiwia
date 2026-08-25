@@ -75,7 +75,12 @@ class AuthService:
         now = time.monotonic()
         hit = self._cache.get(h)
         if hit and now - hit[1] < self._ttl:
-            return hit[0]
+            # Budget-bound keys must always reflect the latest spend so a
+            # concurrent update_spend can immediately reject further use;
+            # other keys (no max_budget) keep the TTL cache for speed.
+            info, _ts = hit
+            if info is None or info.max_budget is None:
+                return info
         info = await self._lookup_db(h)
         self._cache[h] = (info, now)
         return info
@@ -193,20 +198,35 @@ class AuthService:
         if row is not None:
             self._cache.pop(row[0], None)
 
-    async def update_spend(self, key_id: str, add_cost: float) -> None:
+    async def update_spend(self, key_id: str, add_cost: float) -> bool:
+        """Add *add_cost* to the key's spend_to_date.
+
+        Uses a conditional UPDATE: the row is only incremented when the
+        resulting total would not exceed max_budget.  Returns True on a
+        successful spend, False when the update was rejected (over-budget
+        or unknown key).  Master is a no-op (always True) so callers don't
+        branch on key type.
+        """
         if key_id == "master":
-            return
+            return True
+        if add_cost <= 0:
+            return True
         async with self.engine.begin() as conn:
-            await conn.execute(
-                sa.text("UPDATE vkeys SET spend_to_date = spend_to_date + :c, updated_at=:now"
-                        " WHERE id=:id"),
+            res = await conn.execute(
+                sa.text("UPDATE vkeys SET spend_to_date = spend_to_date + :c,"
+                        " updated_at = :now"
+                        " WHERE id = :id"
+                        " AND (max_budget IS NULL OR spend_to_date + :c <= max_budget)"),
                 {"c": add_cost, "id": key_id, "now": time.time()},
             )
+        if res.rowcount == 0:
+            return False
         # keep cached budget state fresh so budget limits are enforced promptly;
         # adjust the cached AuthInfo in place instead of a full re-lookup
         for info, _ts in self._cache.values():
             if info is not None and info.key_id == key_id:
                 info.spend_to_date += add_cost
+        return True
 
     async def list_keys(self) -> list[dict]:
         async with self.engine.connect() as conn:

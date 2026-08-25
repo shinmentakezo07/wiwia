@@ -157,3 +157,36 @@ async def test_row_endpoint_default_returns_10k_rows_when_db_has_more(big_app_cl
     c, _ = big_app_client
     body = (await c.get("/admin/logs/requests", headers=AUTH)).json()
     assert len(body["logs"]) == 5_000
+
+
+# -- ordering contract ---------------------------------------------------------
+# The DB-backed and ring-backed paths must both return newest-first so the
+# frontend can stop reversing (the old reverse() flipped the DB path to
+# oldest-first, showing stale logs). This pins that contract for both paths.
+
+
+async def test_request_logs_db_path_returns_newest_first(seeded_app_client):
+    """DB path: entries must be sorted by insertion id DESC (newest first).
+    Events were seeded with ts decreasing as i increases, so the newest row
+    (i=0, ts=now) must be first in the response."""
+    c, sink = seeded_app_client
+    r = await c.get("/admin/logs/requests", headers=AUTH)
+    assert r.status_code == 200
+    logs = r.json()["logs"]
+    assert len(logs) == 350
+    # Newest first: logs[0] is r-0 (seeded with ts=now, the highest ts)
+    assert logs[0]["request_id"] == "r-0"
+    assert logs[1]["request_id"] == "r-1"
+    # Strictly descending ts across the whole response
+    tss = [row["ts"] for row in logs]
+    assert all(tss[i] >= tss[i + 1] for i in range(len(tss) - 1)), "logs not newest-first"
+
+
+async def test_request_logs_no_store_cache_header(seeded_app_client):
+    """Log endpoints must opt out of HTTP caching so polling never shows a
+    stale browser-cached response (the cause of the 'no logs' symptom)."""
+    c, _ = seeded_app_client
+    r = await c.get("/admin/logs/requests", headers=AUTH)
+    assert r.headers.get("cache-control") == "no-store"
+    r2 = await c.get("/admin/logs/proxy", headers=AUTH)
+    assert r2.headers.get("cache-control") == "no-store"

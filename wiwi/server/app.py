@@ -759,9 +759,17 @@ def create_app(config: WiwiConfig) -> FastAPI:
         limit = max(1, min(limit, 50000))
         sink = state.logs.db_sink
         if sink is not None:
-            return ORJSONResponse({"logs": await sink.read_requests(limit)})
+            return ORJSONResponse(
+                {"logs": await sink.read_requests(limit)},
+                headers={"Cache-Control": "no-store"},
+            )
+        # Ring fallback: deque is oldest→newest, so slice the newest N then
+        # reverse to newest-first — matching the DB path contract.
         ring = list(state.logs.sse.replay("request", 0))
-        return ORJSONResponse({"logs": [public_dict(e) for _, e in ring[-limit:]]})
+        return ORJSONResponse(
+            {"logs": [public_dict(e) for _, e in reversed(ring[-limit:])]},
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/admin/stream")
     async def admin_stream(request: Request):
@@ -1287,8 +1295,13 @@ def create_app(config: WiwiConfig) -> FastAPI:
         resp = _require_admin(request)
         if resp:
             return resp
+        # Ring is oldest→newest; slice newest 500 then reverse to newest-first
+        # so the contract matches /admin/logs/requests.
         ring = list(state.logs.sse.replay("proxy", 0))
-        return ORJSONResponse({"logs": [public_dict(e) for _, e in ring[-500:]]})
+        return ORJSONResponse(
+            {"logs": [public_dict(e) for _, e in reversed(ring[-500:])]},
+            headers={"Cache-Control": "no-store"},
+        )
 
     def _request_events() -> list[LogEvent]:
         return [e for _, e in state.logs.sse.replay("request", 0)]

@@ -483,10 +483,14 @@ class Gateway:
     def _price(self, ctx: RequestContext, dep: Deployment, u: ir.Usage) -> None:
         model_key = f"{dep.provider.provider_type}/{dep.model_id}"
         ctx.usage = u
-        ctx.cost = self.cost.cost(model_key, u.prompt_tokens, u.completion_tokens,
-                                  u.cached_tokens)
+        state = self.cost.cost_with_status(model_key, u.prompt_tokens,
+                                           u.completion_tokens, u.cached_tokens)
+        ctx.cost = state.cost
         ctx.cache_hit = u.cached_tokens > 0
         ctx.metadata["cache_savings"] = self._cache_savings(model_key, u)
+        if state.unpriced:
+            ctx.metadata["unpriced_model"] = True
+            ctx.metadata["unpriced_model_id"] = model_key
 
     def _cache_savings(self, model_key: str, u: ir.Usage) -> float:
         """Dollars saved by provider-side prompt caching at this model's rates."""
@@ -504,9 +508,13 @@ class Gateway:
                              cached_tokens=u.cached, reasoning_tokens=u.reasoning,
                              reasoning_estimated=u.estimated,
                              cache_creation_tokens=u.cache_creation)
-        ctx.cost = self.cost.cost(model_key, u.prompt, u.output, u.cached)
+        state = self.cost.cost_with_status(model_key, u.prompt, u.output, u.cached)
+        ctx.cost = state.cost
         ctx.cache_hit = u.cached > 0
         ctx.metadata["cache_savings"] = self._cache_savings(model_key, ctx.usage)
+        if state.unpriced:
+            ctx.metadata["unpriced_model"] = True
+            ctx.metadata["unpriced_model_id"] = model_key
 
 
 def _flatten(ctx: RequestContext) -> str:

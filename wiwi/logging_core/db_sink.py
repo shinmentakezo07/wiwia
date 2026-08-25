@@ -200,11 +200,17 @@ class DBSink:
 
     async def read_requests(self, limit: int = 200) -> list[dict]:
         """Newest-first rows shaped like public_dict(LogEvent) so the admin UI
-        can treat ring-backed and DB-backed entries identically."""
+        can treat ring-backed and DB-backed entries identically.
+
+        Ordered by ts DESC (id DESC tiebreak) so the result is deterministic by
+        event time regardless of insertion order — the frontend renders this
+        array directly without re-sorting.
+        """
         cols = ", ".join(_COLS)
         async with self.engine.connect() as conn:
             rows = (await conn.execute(
-                sa.text(f"SELECT {cols} FROM request_logs ORDER BY id DESC LIMIT :l"),
+                sa.text(f"SELECT {cols} FROM request_logs"
+                        " ORDER BY ts DESC, id DESC LIMIT :l"),
                 {"l": int(limit)})).all()
         out: list[dict] = []
         for r in rows:

@@ -388,6 +388,31 @@ async def test_proxy_logs_endpoint_empty(client):
     assert r.json() == {"logs": []}
 
 
+async def test_proxy_logs_ring_returns_newest_first(client):
+    """Ring-backed path: proxy logs must be newest-first and include the
+    Cache-Control: no-store header. Pins the contract that the frontend
+    relies on (it no longer reverses the array)."""
+    app = app_mod.create_app(_config())
+    async with LifespanManager(app):
+        # Publish three proxy events in order a, b, c (c is newest).
+        app.state.wiwi.logs.log_proxy("info", "alpha", request_id="ra")
+        app.state.wiwi.logs.log_proxy("info", "beta", request_id="rb")
+        app.state.wiwi.logs.log_proxy("error", "gamma", request_id="rc")
+        # The ring is pumped asynchronously; give the worker a beat.
+        import asyncio
+        await asyncio.sleep(0.05)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as c:
+            r = await c.get("/admin/logs/proxy", headers=AUTH)
+            assert r.status_code == 200
+            assert r.headers.get("cache-control") == "no-store"
+            logs = r.json()["logs"]
+            # newest-first: gamma (last published) comes first
+            assert [row["message"] for row in logs] == ["gamma", "beta", "alpha"]
+            assert [row["level"] for row in logs] == ["error", "info", "info"]
+
+
 async def test_alert_rules_roundtrip(client):
     rules = [{"id": "r1", "webhook_url": "https://hooks.example/x",
               "metric": "spend", "threshold": 10.0}]
