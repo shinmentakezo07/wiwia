@@ -31,34 +31,15 @@ providers:
     keys:
       - {label: main, key: os.environ/GMI_API_KEY}
 
-model_list:
-  - model_name: gpt-4o
-    wiwi_params: {provider: openai-main, model: gpt-4o, weight: 2}
-  - model_name: gpt-4o-mini
-    wiwi_params: {provider: openai-main, model: gpt-4o-mini}
-  - model_name: claude-sonnet
-    wiwi_params: {provider: anthropic-main, model: claude-sonnet-4-20250514, max_tokens: 8192}
-  - model_name: llama-local
-    wiwi_params: {provider: local-ollama, model: llama3.1}
-  # OpenRouter model pinned to a specific underlying provider (GMICloud).
-  # The extra_body.provider.only field is sent as-is to OpenRouter, which
-  # routes the request only to the named provider slug.
-  - model_name: minimax/minimax-m3
-    wiwi_params:
-      provider: openrouter
-      model: minimax/minimax-m3
-      extra_body:
-        provider:
-          only: ["gmicloud"]
-  # GMI Cloud direct provider — OpenAI-compatible inference API.
-  - model_name: deepseek-v3.2
-    wiwi_params:
-      provider: gmicloud
-      model: deepseek-ai/DeepSeek-V3.2
-  - model_name: glm-5
-    wiwi_params:
-      provider: gmicloud
-      model: zai-org/GLM-5-FP8
+# Model groups: map a model_name clients request to one or more provider
+# deployments. Empty by default — add your own via the admin UI (/models) or
+# here. Each entry needs a model_name and wiwi_params with a provider (one of
+# the names under `providers:` above) and the native model id.
+#
+# Example shape:
+#   - model_name: my-gpt
+#     wiwi_params: {provider: openai-main, model: gpt-4o, weight: 2}
+model_list: []
 
 router_settings:
   routing_strategy: simple-shuffle

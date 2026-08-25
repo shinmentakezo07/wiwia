@@ -481,7 +481,7 @@ function PricingDialog(props: {
     >
       <div className="space-y-4">
         {props.isNew && (
-          <Field label="Model ID" hint="The bare model id, e.g. claude-sonnet-4-20250514">
+          <Field label="Model ID" hint="The bare model id, no provider prefix.">
             <Input
               value={form.model_id}
               onChange={(e) => set("model_id", e.target.value)}

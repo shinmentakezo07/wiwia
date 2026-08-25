@@ -354,7 +354,7 @@ export function VirtualKeysPage() {
               <Input
                 value={modelsCsv}
                 onChange={(e) => setModelsCsv(e.target.value)}
-                placeholder="gpt-4o, claude-sonnet-4"
+                placeholder="model-a, model-b"
               />
             </Field>
             <Field label="Budget (USD)" hint="Total lifetime spend cap; empty = unlimited.">
@@ -479,7 +479,7 @@ export function VirtualKeysPage() {
               <Input
                 value={editModels}
                 onChange={(e) => setEditModels(e.target.value)}
-                placeholder="gpt-4o, claude-sonnet-4"
+                placeholder="model-a, model-b"
               />
             </Field>
             <label className="flex items-center gap-2 text-[13px] text-[var(--admin-text-muted)]">
