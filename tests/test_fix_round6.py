@@ -14,8 +14,6 @@ from __future__ import annotations
 import asyncio
 import json
 
-import pytest
-
 # ============================================================================
 # Fix #1: H1+M4+M7 — budget race + stale cache + unpriced-model flagging
 # ============================================================================
@@ -162,8 +160,13 @@ async def test_admin_providers_does_not_leak_plaintext_secrets():
     from asgi_lifespan import LifespanManager
 
     from wiwi.config import (
-        DeploymentParams, GeneralSettings, KeyDef, ModelEntry, ProviderDef,
-        RouterSettings, WiwiConfig,
+        DeploymentParams,
+        GeneralSettings,
+        KeyDef,
+        ModelEntry,
+        ProviderDef,
+        RouterSettings,
+        WiwiConfig,
     )
     from wiwi.server.app import create_app
 
@@ -298,9 +301,9 @@ async def test_on_result_serialized_with_pick_key():
     async def result_loop() -> None:
         for _ in range(200):
             for k in acct.keys:
-                acct.on_result(k, 429, 1.0)
+                await acct.on_result_locked(k, 429, 1.0)
             for k in acct.keys:
-                acct.on_result(k, 200, None)
+                await acct.on_result_locked(k, 200, None)
 
     await asyncio.gather(pick_loop(), result_loop())
     # After the storm, no key should be left in a state where current_weight
@@ -334,14 +337,14 @@ async def test_rate_limiter_record_tokens_atomic():
     # 5 concurrent checks each reserving 200 estimated, then recording
     # actual 100. Total confirmed usage must be 5*100=500, not 5*300=1500.
     async def flow() -> None:
-        ok, _ = rl.check("k", est_tokens=200)
+        ok, _ = await rl.check("k", est_tokens=200)
         assert ok
-        rl.record_tokens("k", 100)
+        await rl.record_tokens("k", 100)
 
     await asyncio.gather(*(flow() for _ in range(5)))
     # One more check should still be allowed (1000 - 500 = 500 left),
     # not denied (1000 - 1500 = negative).
-    ok, _ = rl.check("k", est_tokens=100)
+    ok, _ = await rl.check("k", est_tokens=100)
     assert ok is True
 
 

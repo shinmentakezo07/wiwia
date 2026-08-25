@@ -86,7 +86,7 @@ class RedisRateLimiter:
                     key_tpm: int | None = None, est_tokens: int = 0) -> tuple[bool, int]:
         """Returns (allowed, retry_after_seconds)."""
         if self._redis is None:
-            return self._memory.check(key_id, key_rpm, key_tpm, est_tokens)
+            return await self._memory.check(key_id, key_rpm, key_tpm, est_tokens)
 
         now = time.time()
 
@@ -132,7 +132,7 @@ class RedisRateLimiter:
             return True, 0
         except Exception:  # noqa: BLE001
             # Redis error: fall back to memory
-            return self._memory.check(key_id, key_rpm, key_tpm, est_tokens)
+            return await self._memory.check(key_id, key_rpm, key_tpm, est_tokens)
 
     async def _compute_retry_after(self, scope: str, now: float,
                                    est_tokens: int) -> int:
@@ -171,13 +171,13 @@ class RedisRateLimiter:
     async def record_tokens(self, key_id: str, tokens: int) -> None:
         """Post-request confirmation of actual token usage."""
         if self._redis is None:
-            self._memory.record_tokens(key_id, tokens)
+            await self._memory.record_tokens(key_id, tokens)
             return
         # In Redis mode, we rely on the check-time reservation being accurate
         # enough. True reconciliation would require finding and replacing the
         # estimated member. For simplicity, we update the memory fallback too
         # so cost accounting stays consistent.
-        self._memory.record_tokens(key_id, tokens)
+        await self._memory.record_tokens(key_id, tokens)
 
     async def close(self) -> None:
         if self._redis is not None:

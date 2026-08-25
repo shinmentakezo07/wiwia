@@ -169,7 +169,7 @@ async def test_request_logs_db_path_returns_newest_first(seeded_app_client):
     """DB path: entries must be sorted by insertion id DESC (newest first).
     Events were seeded with ts decreasing as i increases, so the newest row
     (i=0, ts=now) must be first in the response."""
-    c, sink = seeded_app_client
+    c, _ = seeded_app_client
     r = await c.get("/admin/logs/requests", headers=AUTH)
     assert r.status_code == 200
     logs = r.json()["logs"]

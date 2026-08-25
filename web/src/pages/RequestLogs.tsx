@@ -19,6 +19,7 @@ import {
   Repeat,
   Server,
   Timer,
+  TrendingDown,
   Wrench,
   Zap,
   X,
@@ -37,7 +38,7 @@ import {
   Select,
   Spinner,
 } from "@/components/ui";
-import { fmtDateTime, fmtTime, fmtTokens, fmtUsd } from "@/lib/format";
+import { fmtDateTime, fmtTokens, fmtUsd } from "@/lib/format";
 import {
   LiveTail,
   LogRow,
@@ -49,6 +50,10 @@ import {
   NumCell,
   SearchInput,
   StatusBadge,
+  SummaryBar,
+  SummaryChip,
+  TimeAgo,
+  useNow,
 } from "./logs-shared";
 
 type StatusFilter = "all" | "2xx" | "4xx" | "5xx";
@@ -463,12 +468,15 @@ export function RequestLogsPage() {
   const [surface, setSurface] = useState("all");
   const [range, setRange] = useState<RangeFilter>("all");
   const [selected, setSelected] = useState<RequestLogEntry | null>(null);
+  const now = useNow(15_000);
 
   const query = useQuery({
     queryKey: ["request-logs"],
     queryFn: async () => {
       const { logs } = await getRequestLogs();
-      return [...logs].reverse(); // API returns oldest→newest; keep newest-first for display
+      // Server already returns newest-first (ORDER BY id DESC / reversed ring);
+      // do NOT re-reverse — that was the root cause of stale/old logs display.
+      return logs;
     },
     refetchInterval: 15_000,
   });
@@ -478,9 +486,10 @@ export function RequestLogsPage() {
     const evt = asRequestEntry(data);
     if (!evt) return;
     qc.setQueryData<RequestLogEntry[]>(["request-logs"], (old) => {
-      if (!old) return old;
-      const first = old[0];
-      if (first && first.request_id === evt.request_id && first.ts === evt.ts) return old; // poll will bring it
+      if (!old) return [evt];
+      // Dedupe by request_id — the poll will replace this eventually, but
+      // avoid showing the same event twice in the meantime.
+      if (old.some((l) => l.request_id === evt.request_id)) return old;
       return [evt, ...old].slice(0, 500);
     });
   });
@@ -511,6 +520,17 @@ export function RequestLogsPage() {
     () => distinctOptions(all, (l) => l.surface, "All surfaces", CANONICAL_SURFACES),
     [all],
   );
+
+  // Summary stats for the chips above the table (over the filtered set).
+  const summary = useMemo(() => {
+    const total = filtered.length;
+    const errors = filtered.filter((l) => l.status >= 400).length;
+    const latencies = filtered.map((l) => l.latency_ms).filter((v) => v > 0);
+    const avgLatency = latencies.length
+      ? latencies.reduce((a, b) => a + b, 0) / latencies.length
+      : 0;
+    return { total, errors, avgLatency };
+  }, [filtered]);
 
   return (
     <div>
@@ -563,8 +583,41 @@ export function RequestLogsPage() {
         />
       </LogsToolbar>
 
+      {/* Summary chips + distribution bar */}
+      {filtered.length > 0 && (
+        <div className="mb-3 space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <SummaryChip label="shown" value={String(summary.total)} />
+            <SummaryChip
+              label="errors"
+              value={String(summary.errors)}
+              tone={summary.errors > 0 ? "danger" : "default"}
+            />
+            <SummaryChip
+              label="avg latency"
+              value={fmtLatency(summary.avgLatency)}
+              icon={<TrendingDown size={12} />}
+            />
+          </div>
+          <SummaryBar
+            segments={[
+              {
+                value: summary.total - summary.errors,
+                tone: "bg-emerald-400/60",
+                title: `${summary.total - summary.errors} successful`,
+              },
+              {
+                value: summary.errors,
+                tone: "bg-red-400/70",
+                title: `${summary.errors} errors`,
+              },
+            ]}
+          />
+        </div>
+      )}
+
       {query.isLoading && (
-        <div className="py-8">
+        <div className="py-12">
           <Spinner />
         </div>
       )}
@@ -584,6 +637,7 @@ export function RequestLogsPage() {
       {filtered.length > 0 && (
         <Card>
           <LogsTable
+            maxHeight={640}
             head={[
               "Time",
               "Key",
@@ -601,13 +655,14 @@ export function RequestLogsPage() {
               "Cache",
             ]}
           >
-            {filtered.map((l) => (
+            {filtered.map((l, i) => (
               <LogRow
                 key={`${l.request_id}:${l.ts}`}
+                zebra={i}
                 ariaLabel={`request ${l.request_id}`}
                 onClick={() => setSelected(l)}
               >
-                <LogTD className="font-mono text-[12px] text-[var(--admin-text-dim)]" title={fmtDateTime(l.ts)}>{fmtTime(l.ts)}</LogTD>
+                <TimeAgo ts={l.ts} nowMs={now} />
                 <LogTD className="font-medium">{l.key_alias || "—"}</LogTD>
                 <LogTD>{l.model_group || "—"}</LogTD>
                 <LogTD className="text-[var(--admin-text-muted)]">

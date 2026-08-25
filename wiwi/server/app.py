@@ -371,9 +371,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return None, _err(403, "permission_error",
                               f"key not allowed for model '{model}'", request, surface)
         if reserve:
-            allowed, retry_after = state.limiter.check(info.key_id, info.rpm,
-                                                       info.tpm,
-                                                       est_tokens=est_tokens)
+            allowed, retry_after = await state.limiter.check(info.key_id, info.rpm,
+                                                             info.tpm,
+                                                             est_tokens=est_tokens)
             if not allowed:
                 resp = _err(429, "rate_limit_error",
                             f"rate limit exceeded, retry in {retry_after}s",
@@ -382,12 +382,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 return None, resp
         return info, None
 
-    def enforce_rate_limit(info, est_tokens: int, request: Request,
-                           surface: str) -> ORJSONResponse | None:
+    async def enforce_rate_limit(info, est_tokens: int, request: Request,
+                                 surface: str) -> ORJSONResponse | None:
         """Reserve RPM/TPM window slots only once the model is known-good."""
-        allowed, retry_after = state.limiter.check(info.key_id, info.rpm,
-                                                   info.tpm,
-                                                   est_tokens=est_tokens)
+        allowed, retry_after = await state.limiter.check(info.key_id, info.rpm,
+                                                         info.tpm,
+                                                         est_tokens=est_tokens)
         if not allowed:
             resp = _err(429, "rate_limit_error",
                         f"rate limit exceeded, retry in {retry_after}s",
@@ -396,12 +396,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return resp
         return None
 
-    def _record_tpm_usage(info, ctx) -> None:
+    async def _record_tpm_usage(info, ctx) -> None:
         """Add actual token usage to the tpm sliding windows after a response."""
         u = ctx.usage
         if u is not None and info is not None:
-            state.limiter.record_tokens(info.key_id,
-                                        u.prompt_tokens + u.completion_tokens)
+            await state.limiter.record_tokens(
+                info.key_id, u.prompt_tokens + u.completion_tokens)
 
     async def json_body(request: Request) -> tuple[Any, ORJSONResponse | None]:
         """Parse the request body; malformed JSON is a client error (400)."""
@@ -462,7 +462,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if group is None:
             return _err(404, "not_found_error",
                         f"model '{ir_req.model}' not found", request, surface)
-        rl_err = enforce_rate_limit(info, est, request, surface)
+        rl_err = await enforce_rate_limit(info, est, request, surface)
         if rl_err:
             return rl_err
         ctx = RequestContext(surface=surface, ir_req=ir_req, auth=info, group=group)
@@ -501,7 +501,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             if config.wiwi_settings.store_prompts_in_spend_logs:
                 ctx.metadata["response_body"] = _serialize_turn(turn, payload)
             state_.logs.log_request(build_log_event(ctx))
-            _record_tpm_usage(info, ctx)
+            await _record_tpm_usage(info, ctx)
             if info and info.key_type != "master":
                 await state_.auth.update_spend(info.key_id, ctx.cost)
             return ORJSONResponse(payload, headers={"x-wiwi-request-id": ctx.request_id})
@@ -615,7 +615,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     "streamed": True,
                 }
             state_.logs.log_request(build_log_event(ctx))
-            _record_tpm_usage(ctx.auth, ctx)
+            await _record_tpm_usage(ctx.auth, ctx)
             if ctx.usage and ctx.auth and ctx.auth.key_type != "master":
                 # never let accounting failure mask the streamed response
                 with contextlib.suppress(Exception):

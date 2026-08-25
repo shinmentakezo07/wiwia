@@ -191,24 +191,24 @@ def test_responses_completed_emitted_once():
 
 
 # -- bug 8: TPM windows count tokens -------------------------------------------
-def test_tpm_counts_tokens_not_requests():
+async def test_tpm_counts_tokens_not_requests():
     rl = RateLimiter()
     # 100-token budget: two 40-token requests fit, third is blocked
-    allowed, _ = rl.check("k1", key_rpm=None, key_tpm=100, est_tokens=40)
+    allowed, _ = await rl.check("k1", key_rpm=None, key_tpm=100, est_tokens=40)
     assert allowed
-    allowed, _ = rl.check("k1", key_rpm=None, key_tpm=100, est_tokens=40)
+    allowed, _ = await rl.check("k1", key_rpm=None, key_tpm=100, est_tokens=40)
     assert allowed
-    allowed, _ = rl.check("k1", key_rpm=None, key_tpm=100, est_tokens=40)
+    allowed, _ = await rl.check("k1", key_rpm=None, key_tpm=100, est_tokens=40)
     assert not allowed, "tpm should block once token budget is exhausted"
     assert rl._windows["k1:tpm"].count() == 80, "requests (not tokens) were counted"
 
 
-def test_record_tokens_adds_usage():
+async def test_record_tokens_adds_usage():
     rl = RateLimiter()
-    allowed, _ = rl.check("k1", key_tpm=100, est_tokens=10)
+    allowed, _ = await rl.check("k1", key_tpm=100, est_tokens=10)
     assert allowed
-    rl.record_tokens("k1", 95)
-    allowed, _ = rl.check("k1", key_tpm=100, est_tokens=10)
+    await rl.record_tokens("k1", 95)
+    allowed, _ = await rl.check("k1", key_tpm=100, est_tokens=10)
     assert not allowed, "recorded tokens should count toward tpm"
 
 

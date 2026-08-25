@@ -88,9 +88,10 @@ async def test_providers_lists_pool_without_secrets(client):
     assert key["status"] == "active"
     assert key["req_count"] == 0 and key["err_count"] == 0
     assert key["last_used_ts"] is None
-    # admin API (master-key-authenticated) returns the full secret so the
-    # console can display/reveal it; masked is also present for compact views.
-    assert key["secret"] == "sk-test-key-abcdef123456"
+    # H4: plaintext secrets must NOT be exposed in list responses — the
+    # masked form is sufficient for the admin UI; reveal happens via the
+    # dedicated POST /admin/providers/{name}/keys/{label}/reveal endpoint.
+    assert "secret" not in key
     assert key["masked"].startswith("sk-te")
 
 
@@ -130,10 +131,12 @@ async def test_add_provider_key_runtime(client):
     provs = (await client.get("/admin/providers", headers=AUTH)).json()
     labels = [k["label"] for k in provs["providers"][0]["keys"]]
     assert labels == ["a", "backup"]
-    # admin API returns the full secret for the console reveal feature.
+    # H4: list responses must never include plaintext secrets.
     provs2 = (await client.get("/admin/providers", headers=AUTH)).json()
-    secrets = [k["secret"] for k in provs2["providers"][0]["keys"]]
-    assert "sk-second-key-xyz" in secrets
+    for k in provs2["providers"][0]["keys"]:
+        assert "secret" not in k
+    assert "sk-second-key-xyz" not in (await client.get(
+        "/admin/providers", headers=AUTH)).text
 
 
 async def test_add_provider_account_runtime(client):

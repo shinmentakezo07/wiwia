@@ -6,6 +6,7 @@ Memory backend is exact for a single instance. Redis parity interface exists
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -34,6 +35,10 @@ class RateLimiter:
         self.global_tpm = global_tpm
         self._windows: dict[str, _Window] = {}
         self._inflight = 0
+        # Serializes check() and record_tokens() so concurrent callers cannot
+        # both pass the limit at the same instant, and so a reservation can
+        # be replaced (not appended alongside) when the actual usage arrives.
+        self._lock = asyncio.Lock()
 
     def _window(self, scope: str, is_token: bool = False) -> _Window:
         w = self._windows.get(scope)
@@ -47,49 +52,59 @@ class RateLimiter:
         while w.events and w.events[0].ts < cutoff:
             w.events.popleft()
 
-    def check(self, key_id: str, key_rpm: int | None = None,
-              key_tpm: int | None = None, est_tokens: int = 0) -> tuple[bool, int]:
-        """Returns (allowed, retry_after_seconds)."""
-        now = time.monotonic()
-        checks: list[tuple[_Window, int]] = []
-        if self.global_rpm:
-            checks.append((self._window("global:rpm"), self.global_rpm))
-        if self.global_tpm:
-            checks.append((self._window("global:tpm", is_token=True), self.global_tpm))
-        if key_rpm:
-            checks.append((self._window(f"{key_id}:rpm"), key_rpm))
-        if key_tpm:
-            checks.append((self._window(f"{key_id}:tpm", is_token=True), key_tpm))
+    async def check(self, key_id: str, key_rpm: int | None = None,
+                    key_tpm: int | None = None, est_tokens: int = 0) -> tuple[bool, int]:
+        """Returns (allowed, retry_after_seconds).
 
-        for w, limit in checks:
-            self._prune(w, now)
-            # prospective admission: the incoming request's cost must fit
-            cost = est_tokens if w.is_token else 1
-            if w.count() + cost > limit:
-                retry_after = int(max(1.0, 60.0 - (now - w.events[0].ts))) + 1
-                return False, min(retry_after, 60)
-        # reserve: one event per rpm scope; an estimated-cost event per tpm scope
-        for w, limit in checks:
-            if w.is_token:
-                w.events.append(_Event(ts=now, tokens=max(0, est_tokens),
-                                       estimated=True))
-            else:
-                w.events.append(_Event(ts=now, tokens=1))
-        return True, 0
+        Atomic against itself and against :meth:`record_tokens` so two
+        concurrent callers cannot both pass when only one slot is free.
+        """
+        async with self._lock:
+            now = time.monotonic()
+            checks: list[tuple[_Window, int]] = []
+            if self.global_rpm:
+                checks.append((self._window("global:rpm"), self.global_rpm))
+            if self.global_tpm:
+                checks.append((self._window("global:tpm", is_token=True), self.global_tpm))
+            if key_rpm:
+                checks.append((self._window(f"{key_id}:rpm"), key_rpm))
+            if key_tpm:
+                checks.append((self._window(f"{key_id}:tpm", is_token=True), key_tpm))
 
-    def record_tokens(self, key_id: str, tokens: int) -> None:
+            for w, limit in checks:
+                self._prune(w, now)
+                # prospective admission: the incoming request's cost must fit
+                cost = est_tokens if w.is_token else 1
+                if w.count() + cost > limit:
+                    retry_after = int(max(1.0, 60.0 - (now - w.events[0].ts))) + 1
+                    return False, min(retry_after, 60)
+            # reserve: one event per rpm scope; an estimated-cost event per tpm scope
+            for w, limit in checks:
+                if w.is_token:
+                    w.events.append(_Event(ts=now, tokens=max(0, est_tokens),
+                                           estimated=True))
+                else:
+                    w.events.append(_Event(ts=now, tokens=1))
+            return True, 0
+
+    async def record_tokens(self, key_id: str, tokens: int) -> None:
         """Post-request confirmation: replace the newest estimated reservation
-        with the actual usage (prevents double-counting estimate + actual)."""
-        now = time.monotonic()
-        for scope in ("global:tpm", f"{key_id}:tpm"):
-            w = self._windows.get(scope)
-            if w is None or not w.is_token:
-                continue
-            self._prune(w, now)
-            for e in reversed(w.events):
-                if e.estimated:
-                    e.tokens = max(0, tokens)
-                    e.estimated = False
-                    break
-            else:
-                w.events.append(_Event(ts=now, tokens=max(0, tokens)))
+        with the actual usage (prevents double-counting estimate + actual).
+
+        Atomic against :meth:`check` so the replacement is exclusive with
+        the next admission decision.
+        """
+        async with self._lock:
+            now = time.monotonic()
+            for scope in ("global:tpm", f"{key_id}:tpm"):
+                w = self._windows.get(scope)
+                if w is None or not w.is_token:
+                    continue
+                self._prune(w, now)
+                for e in reversed(w.events):
+                    if e.estimated:
+                        e.tokens = max(0, tokens)
+                        e.estimated = False
+                        break
+                else:
+                    w.events.append(_Event(ts=now, tokens=max(0, tokens)))

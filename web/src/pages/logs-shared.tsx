@@ -2,9 +2,92 @@
 // toolbar shell, custom table markup with per-row content-visibility,
 // and small cell/badge helpers. Kept free of page-specific logic.
 
+import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { Search } from "lucide-react";
 import { Badge, Input, Toggle } from "@/components/ui";
+import { fmtAgo, fmtDateTime } from "@/lib/format";
+
+// -- live clock hook ---------------------------------------------------------
+// Re-renders every `interval` ms so relative "x ago" labels stay fresh.
+
+export function useNow(interval = 15_000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), interval);
+    return () => clearInterval(id);
+  }, [interval]);
+  return now;
+}
+
+// -- relative time cell -------------------------------------------------------
+
+/** Mono-typed time cell: shows "x ago" relative, with absolute ts on hover. */
+export function TimeAgo(props: { ts: number; nowMs: number; className?: string }) {
+  return (
+    <td
+      title={fmtDateTime(props.ts)}
+      className={`font-mono text-[12px] text-[var(--admin-text-dim)] whitespace-nowrap ${props.className ?? ""}`}
+    >
+      {fmtAgo(props.ts, props.nowMs)}
+    </td>
+  );
+}
+
+// -- summary chips -----------------------------------------------------------
+
+/** Small inline summary chip for the area above a log table. */
+export function SummaryChip(props: {
+  label: string;
+  value: string;
+  tone?: "default" | "success" | "warning" | "danger";
+  icon?: ReactNode;
+}) {
+  const toneCls = {
+    default: "border-[var(--admin-border)] text-[var(--admin-text-muted)]",
+    success: "border-emerald-500/15 bg-emerald-500/[0.03] text-emerald-400",
+    warning: "border-amber-500/15 bg-amber-500/[0.03] text-amber-400",
+    danger: "border-red-500/15 bg-red-500/[0.03] text-red-400",
+  };
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[12px] ${toneCls[props.tone ?? "default"]}`}
+    >
+      {props.icon && (
+        <span className="text-[var(--admin-text-dim)]" aria-hidden>
+          {props.icon}
+        </span>
+      )}
+      <span className="font-mono tabular-nums font-semibold">{props.value}</span>
+      <span className="text-[10px] font-medium uppercase tracking-wide text-[var(--admin-text-dim)]">
+        {props.label}
+      </span>
+    </span>
+  );
+}
+
+/** Thin horizontal distribution bar showing relative proportions (e.g. ok vs
+ * errors). Renders nothing when the total is zero. */
+export function SummaryBar(props: {
+  segments: { value: number; tone: string; title?: string }[];
+}) {
+  const total = props.segments.reduce((s, seg) => s + seg.value, 0);
+  if (total <= 0) return null;
+  return (
+    <div className="flex h-1.5 w-full overflow-hidden rounded-full bg-white/[0.03]">
+      {props.segments.map((seg, i) =>
+        seg.value > 0 ? (
+          <div
+            key={i}
+            className={seg.tone}
+            style={{ width: `${(seg.value / total) * 100}%` }}
+            title={seg.title}
+          />
+        ) : null,
+      )}
+    </div>
+  );
+}
 // -- toolbar -----------------------------------------------------------------
 
 /** Flex-wrap container for the filter bar above a log table. */
@@ -60,10 +143,18 @@ export function LiveTail(props: { live: boolean; onToggle: (v: boolean) => void;
 // Cell chrome (padding, borders, uppercase headers) comes from the global
 // .admin-table styles; only semantic classes live on individual cells.
 
-export function LogsTable(props: { head: ReactNode[]; children: ReactNode }) {
+export function LogsTable(props: {
+  head: ReactNode[];
+  children: ReactNode;
+  /** Optional max-height (px) enabling a sticky header inside a scrollable body. */
+  maxHeight?: number;
+}) {
   return (
     <div className="admin-table">
-      <div className="admin-scroll overflow-x-auto">
+      <div
+        className="admin-scroll overflow-auto"
+        style={props.maxHeight ? { maxHeight: `${props.maxHeight}px` } : undefined}
+      >
         <table className="w-full text-left">
           <thead>
             <tr>
@@ -79,7 +170,16 @@ export function LogsTable(props: { head: ReactNode[]; children: ReactNode }) {
   );
 }
 
-export function LogRow(props: { children: ReactNode; onClick?: () => void; ariaLabel?: string }) {
+export function LogRow(props: {
+  children: ReactNode;
+  onClick?: () => void;
+  ariaLabel?: string;
+  /** Index used for subtle zebra striping. */
+  zebra?: number;
+  /** Disable the hover highlight (e.g. an expanded detail row). */
+  flat?: boolean;
+}) {
+  const zebraCls = props.zebra != null && props.zebra % 2 === 1 ? "bg-white/[0.012]" : "";
   return (
     <tr
       aria-label={props.ariaLabel}
@@ -95,8 +195,10 @@ export function LogRow(props: { children: ReactNode; onClick?: () => void; ariaL
           : undefined
       }
       tabIndex={props.onClick ? 0 : undefined}
-      className={`[content-visibility:auto] [contain-intrinsic-size:auto_37px]${
-        props.onClick ? " cursor-pointer outline-none focus-visible:bg-white/[0.04]" : ""
+      className={`[content-visibility:auto] [contain-intrinsic-size:auto_37px] ${zebraCls}${
+        props.onClick && !props.flat
+          ? " cursor-pointer outline-none hover:bg-white/[0.04] focus-visible:bg-white/[0.04]"
+          : ""
       }`}
     >
       {props.children}
