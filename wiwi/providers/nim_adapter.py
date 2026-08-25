@@ -54,6 +54,22 @@ from wiwi.providers.nim_tool_schema import (
 from wiwi.providers.openai_adapter import OpenAIAdapter
 from wiwi.streaming import deltas as dl
 
+# NIM-specific reasoning effort → token budget mapping.
+#
+# NIM-hosted models typically have smaller context windows than OpenAI
+# or Anthropic reasoning models, so we use conservative budgets matching
+# the NVIDIA NIM reference implementation rather than wiwi's global
+# effort→budget map (which targets 32K–64K tokens for Anthropic).
+_NIM_EFFORT_BUDGETS: dict[str, int] = {
+    "minimal": 512,
+    "low": 512,
+    "medium": 1024,
+    "high": 2048,
+    "xhigh": 4096,
+    "max": 8192,
+}
+_NIM_DEFAULT_BUDGET = 1024  # fallback for unknown effort levels
+
 
 class NimAdapter(OpenAIAdapter):
     """NVIDIA NIM: extends OpenAI adapter with NIM-specific translations."""
@@ -73,43 +89,60 @@ class NimAdapter(OpenAIAdapter):
 
     def encode_request(self, req: ir.Request, model_id: str,
                        deployment_params: dict[str, Any]) -> dict[str, Any]:
-        # Delegate the bulk of encoding to the OpenAI adapter.  The base
-        # adapter will forward reasoning_effort (NIM is not in the
-        # is_native_openai exclusion set... actually it IS now), so we strip
-        # it below and translate to chat_template_kwargs instead.
+        # Delegate the bulk of encoding to the OpenAI adapter, then strip
+        # every reasoning-related field NIM does not understand and replace
+        # it with chat_template_kwargs (the vLLM-native control surface).
         body = super().encode_request(req, model_id, deployment_params)
 
-        # NIM does not accept the OpenAI-native reasoning_effort field.
-        body.pop("reasoning_effort", None)
+        # NIM rejects the OpenAI-native reasoning_effort field and every
+        # reasoning-shaped key that might arrive via client extras or
+        # deployment extra_body.  The OpenAI adapter merges deployment
+        # extra_body into the body top-level (body.setdefault), so reasoning
+        # keys from there land at the top level.  Strip them all.
+        for key in ("reasoning_effort", "reasoning", "reasoning_budget",
+                    "reasoning_tokens", "thinking", "thinking_budget_tokens"):
+            body.pop(key, None)
 
-        # Translate reasoning config to NIM's chat_template_kwargs format.
+        # If the client or deployment supplied chat_template_kwargs, strip
+        # the reasoning sub-keys so we have full control over them below.
+        # Non-reasoning sub-keys are preserved.
+        ctk = body.get("chat_template_kwargs")
+        if isinstance(ctk, dict):
+            for key in ("thinking", "enable_thinking", "reasoning_budget"):
+                ctk.pop(key, None)
+            if not ctk:
+                body.pop("chat_template_kwargs", None)
+
+        # Resolve the reasoning intent from the IR.  The IR exposes two
+        # shapes: reasoning_effort (named levels) and thinking_budget (direct
+        # token count, from the Anthropic dialect).  Either or both may be
+        # absent; the adapter must produce the correct chat_template_kwargs
+        # for every combination.
+        #
+        # NIM models typically have smaller context windows than Anthropic
+        # or OpenAI reasoning models, so we use conservative budgets matching
+        # the NVIDIA NIM reference implementation rather than wiwi's global
+        # effort→budget map (which targets 32K–64K tokens for Anthropic).
         g = req.gen_params
-        extra_body: dict[str, Any] = body.get("extra_body", {})
-        if not isinstance(extra_body, dict):
-            extra_body = {}
+        effort = g.reasoning_effort
+        budget = g.thinking_budget
 
-        if g.reasoning_effort == "none":
+        if effort == "none":
             # Explicitly disable thinking.
-            ctk = extra_body.setdefault("chat_template_kwargs", {})
-            ctk["thinking"] = False
-            ctk["enable_thinking"] = False
-        elif g.reasoning_effort:
-            # Named effort level -> enable thinking with mapped budget.
-            ctk = extra_body.setdefault("chat_template_kwargs", {})
-            ctk["thinking"] = True
-            ctk["enable_thinking"] = True
-            budget = ir.effort_to_thinking_budget(g.reasoning_effort)
+            chat = body.setdefault("chat_template_kwargs", {})
+            chat["thinking"] = False
+            chat["enable_thinking"] = False
+        elif effort or budget is not None:
+            # Reasoning requested via named effort or direct budget.
+            chat = body.setdefault("chat_template_kwargs", {})
+            chat["thinking"] = True
+            chat["enable_thinking"] = True
             if budget is not None:
-                ctk["reasoning_budget"] = budget
-        elif g.thinking_budget is not None:
-            # Direct token budget -> enable thinking with that budget.
-            ctk = extra_body.setdefault("chat_template_kwargs", {})
-            ctk["thinking"] = True
-            ctk["enable_thinking"] = True
-            ctk["reasoning_budget"] = g.thinking_budget
-
-        if extra_body:
-            body["extra_body"] = extra_body
+                # Direct token budget takes precedence over effort mapping.
+                chat["reasoning_budget"] = budget
+            elif effort:
+                mapped = _NIM_EFFORT_BUDGETS.get(effort, _NIM_DEFAULT_BUDGET)
+                chat["reasoning_budget"] = mapped
 
         # Sanitize tool schemas: strip boolean subschemas, alias unsafe params.
         if body.get("tools"):

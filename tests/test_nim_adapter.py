@@ -67,11 +67,11 @@ def test_reasoning_effort_high_maps_to_chat_template_kwargs():
     })
     body = NimAdapter().encode_request(req, "nvidia/nemotron-3-super-120b-a12b",
                                        {"provider_type": "nvidia-nim"})
-    ctk = body["extra_body"]["chat_template_kwargs"]
+    ctk = body["chat_template_kwargs"]
     assert ctk["thinking"] is True
     assert ctk["enable_thinking"] is True
-    # high -> 32000 per the IR effort->budget map
-    assert ctk["reasoning_budget"] == 32000
+    # high -> 2048 per the NIM-specific effort->budget map
+    assert ctk["reasoning_budget"] == 2048
     assert "reasoning_effort" not in body
 
 
@@ -84,7 +84,7 @@ def test_reasoning_effort_none_disables_thinking():
     })
     body = NimAdapter().encode_request(req, "nvidia/nemotron-3-super-120b-a12b",
                                        {"provider_type": "nvidia-nim"})
-    ctk = body["extra_body"]["chat_template_kwargs"]
+    ctk = body["chat_template_kwargs"]
     assert ctk["thinking"] is False
     assert ctk["enable_thinking"] is False
 
@@ -99,7 +99,7 @@ def test_thinking_budget_maps_to_reasoning_budget():
     })
     body = NimAdapter().encode_request(req, "nvidia/nemotron-3-super-120b-a12b",
                                        {"provider_type": "nvidia-nim"})
-    ctk = body["extra_body"]["chat_template_kwargs"]
+    ctk = body["chat_template_kwargs"]
     assert ctk["thinking"] is True
     assert ctk["enable_thinking"] is True
     assert ctk["reasoning_budget"] == 10000
@@ -115,8 +115,103 @@ def test_no_reasoning_config_omits_chat_template_kwargs():
     )
     body = NimAdapter().encode_request(req, "nvidia/nemotron",
                                        {"provider_type": "nvidia-nim"})
-    eb = body.get("extra_body", {})
-    assert "chat_template_kwargs" not in eb
+    assert "chat_template_kwargs" not in body
+
+
+def test_reasoning_effort_max_maps_to_highest_budget():
+    """reasoning_effort='max' -> thinking enabled with highest NIM budget."""
+    req = oc.decode_request({
+        "model": "nvidia/nemotron",
+        "messages": [{"role": "user", "content": "think"}],
+        "reasoning_effort": "max",
+    })
+    body = NimAdapter().encode_request(req, "nvidia/nemotron",
+                                       {"provider_type": "nvidia-nim"})
+    ctk = body["chat_template_kwargs"]
+    assert ctk["thinking"] is True
+    assert ctk["enable_thinking"] is True
+    assert ctk["reasoning_budget"] == 8192
+    assert "reasoning_effort" not in body
+
+
+def test_reasoning_effort_minimal_maps_to_lowest_budget():
+    """reasoning_effort='minimal' -> thinking enabled with lowest NIM budget."""
+    req = oc.decode_request({
+        "model": "nvidia/nemotron",
+        "messages": [{"role": "user", "content": "think"}],
+        "reasoning_effort": "minimal",
+    })
+    body = NimAdapter().encode_request(req, "nvidia/nemotron",
+                                       {"provider_type": "nvidia-nim"})
+    ctk = body["chat_template_kwargs"]
+    assert ctk["thinking"] is True
+    assert ctk["enable_thinking"] is True
+    assert ctk["reasoning_budget"] == 512
+    assert "reasoning_effort" not in body
+
+
+def test_reasoning_effort_unknown_uses_default_budget():
+    """Unknown reasoning_effort -> thinking enabled with default NIM budget."""
+    req = oc.decode_request({
+        "model": "nvidia/nemotron",
+        "messages": [{"role": "user", "content": "think"}],
+        "reasoning_effort": "turbo",
+    })
+    body = NimAdapter().encode_request(req, "nvidia/nemotron",
+                                       {"provider_type": "nvidia-nim"})
+    ctk = body["chat_template_kwargs"]
+    assert ctk["thinking"] is True
+    assert ctk["enable_thinking"] is True
+    assert ctk["reasoning_budget"] == 1024
+    assert "reasoning_effort" not in body
+
+
+def test_reasoning_effort_xhigh_maps_to_budget():
+    """reasoning_effort='xhigh' -> thinking enabled with xhigh NIM budget."""
+    req = oc.decode_request({
+        "model": "nvidia/nemotron",
+        "messages": [{"role": "user", "content": "think"}],
+        "reasoning_effort": "xhigh",
+    })
+    body = NimAdapter().encode_request(req, "nvidia/nemotron",
+                                       {"provider_type": "nvidia-nim"})
+    ctk = body["chat_template_kwargs"]
+    assert ctk["thinking"] is True
+    assert ctk["enable_thinking"] is True
+    assert ctk["reasoning_budget"] == 4096
+    assert "reasoning_effort" not in body
+
+
+def test_deployment_extra_body_reasoning_keys_stripped():
+    """Reasoning keys in deployment extra_body are stripped, not forwarded."""
+    req = oc.decode_request({
+        "model": "nvidia/nemotron",
+        "messages": [{"role": "user", "content": "think"}],
+        "reasoning_effort": "high",
+    })
+    body = NimAdapter().encode_request(req, "nvidia/nemotron", {
+        "provider_type": "nvidia-nim",
+        "extra_body": {
+            "reasoning_effort": "should_be_stripped",
+            "reasoning_budget": 999,
+            "chat_template_kwargs": {
+                "thinking": False,
+                "enable_thinking": False,
+                "reasoning_budget": 100,
+                "custom_key": "keep_me",
+            },
+        },
+    })
+    ctk = body["chat_template_kwargs"]
+    # Client values overwritten by IR-derived values
+    assert ctk["thinking"] is True
+    assert ctk["enable_thinking"] is True
+    assert ctk["reasoning_budget"] == 2048  # high -> 2048 per NIM map
+    # Custom key preserved
+    assert ctk["custom_key"] == "keep_me"
+    # Stripped from top-level body
+    assert "reasoning_effort" not in body
+    assert "reasoning_budget" not in body
 
 
 # -- encode: tool schema sanitization ------------------------------------------
@@ -776,7 +871,7 @@ def test_cross_dialect_anthropic_to_nim():
     })
     body = NimAdapter().encode_request(req, "nvidia/nemotron-3-super-120b-a12b",
                                        {"provider_type": "nvidia-nim"})
-    ctk = body["extra_body"]["chat_template_kwargs"]
+    ctk = body["chat_template_kwargs"]
     assert ctk["reasoning_budget"] == 10000
     assert ctk["thinking"] is True
     assert "reasoning_effort" not in body
@@ -792,10 +887,10 @@ def test_cross_dialect_openai_to_nim():
     })
     body = NimAdapter().encode_request(req, "nvidia/nemotron-3-super-120b-a12b",
                                        {"provider_type": "nvidia-nim"})
-    ctk = body["extra_body"]["chat_template_kwargs"]
+    ctk = body["chat_template_kwargs"]
     assert ctk["thinking"] is True
-    # medium -> 8000 per the IR effort->budget map
-    assert ctk["reasoning_budget"] == 8000
+    # medium -> 1024 per the NIM-specific effort->budget map
+    assert ctk["reasoning_budget"] == 1024
     assert "reasoning_effort" not in body
 
 
@@ -813,3 +908,99 @@ def test_catalog_has_nim_entry():
 def test_config_provider_types_includes_nim():
     from wiwi.config import PROVIDER_TYPES
     assert "nvidia-nim" in PROVIDER_TYPES
+
+
+# -- reasoning key stripping ( robustness ) ------------------------------------
+
+def test_reasoning_effort_stripped_from_extras():
+    """reasoning_effort in client extras must not leak to NIM body."""
+    req = ir.Request(
+        model="nvidia/nemotron",
+        messages=[ir.Message(role="user", parts=[ir.TextPart("hi")])],
+        gen_params=ir.GenParams(),
+        extras={"reasoning_effort": "high"},
+    )
+    body = NimAdapter().encode_request(req, "nvidia/nemotron",
+                                       {"provider_type": "nvidia-nim",
+                                        "drop_params": False})
+    assert "reasoning_effort" not in body
+    # Should not have been translated since it came via extras, not gen_params
+    eb = body.get("extra_body", {})
+    assert "reasoning_effort" not in eb
+
+
+def test_reasoning_keys_stripped_from_deployment_extra_body():
+    """Reasoning keys in deployment extra_body must be stripped for NIM.
+
+    The OpenAI adapter merges deployment extra_body into the top-level body
+    via body.setdefault(), so reasoning keys land at the top level.  The NIM
+    adapter must strip them all.
+    """
+    req = ir.Request(
+        model="nvidia/nemotron",
+        messages=[ir.Message(role="user", parts=[ir.TextPart("hi")])],
+        gen_params=ir.GenParams(),
+    )
+    body = NimAdapter().encode_request(req, "nvidia/nemotron",
+                                       {"provider_type": "nvidia-nim",
+                                        "extra_body": {
+                                            "reasoning_effort": "high",
+                                            "thinking": {"type": "enabled"},
+                                            "thinking_budget_tokens": 4096,
+                                        }})
+    assert "reasoning_effort" not in body
+    assert "thinking" not in body
+    assert "thinking_budget_tokens" not in body
+
+
+def test_client_chat_template_kwargs_reasoning_keys_stripped():
+    """Client-supplied chat_template_kwargs reasoning sub-keys are stripped."""
+    req = ir.Request(
+        model="nvidia/nemotron",
+        messages=[ir.Message(role="user", parts=[ir.TextPart("hi")])],
+        gen_params=ir.GenParams(reasoning_effort="high"),
+    )
+    body = NimAdapter().encode_request(req, "nvidia/nemotron",
+                                       {"provider_type": "nvidia-nim",
+                                        "extra_body": {
+                                            "chat_template_kwargs": {
+                                                "thinking": False,
+                                                "enable_thinking": False,
+                                                "reasoning_budget": 100,
+                                                "custom_key": "keep_me",
+                                            },
+                                        }})
+    ctk = body["chat_template_kwargs"]
+    # Client values overwritten by IR-derived values
+    assert ctk["thinking"] is True
+    assert ctk["enable_thinking"] is True
+    assert ctk["reasoning_budget"] == 2048  # high -> 2048 (NIM-specific)
+    # Non-reasoning keys preserved
+    assert ctk["custom_key"] == "keep_me"
+
+
+def test_no_reasoning_config_leaves_no_chat_template_kwargs():
+    """No reasoning config in IR or extras -> no chat_template_kwargs."""
+    req = ir.Request(
+        model="nvidia/nemotron",
+        messages=[ir.Message(role="user", parts=[ir.TextPart("hi")])],
+        gen_params=ir.GenParams(),
+    )
+    body = NimAdapter().encode_request(req, "nvidia/nemotron",
+                                       {"provider_type": "nvidia-nim"})
+    assert "chat_template_kwargs" not in body
+
+
+def test_thinking_budget_precedence_over_effort():
+    """Direct thinking_budget takes precedence over effort-mapped budget."""
+    req = ir.Request(
+        model="nvidia/nemotron",
+        messages=[ir.Message(role="user", parts=[ir.TextPart("hi")])],
+        gen_params=ir.GenParams(reasoning_effort="high",
+                                thinking_budget=5000),
+    )
+    body = NimAdapter().encode_request(req, "nvidia/nemotron",
+                                       {"provider_type": "nvidia-nim"})
+    ctk = body["chat_template_kwargs"]
+    assert ctk["reasoning_budget"] == 5000  # direct budget, not 32000
+    assert ctk["thinking"] is True
