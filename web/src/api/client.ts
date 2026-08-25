@@ -198,7 +198,10 @@ export const getTimeseries = (metric: TimeseriesMetric, minutes: number) =>
   );
 
 export const getRequestLogs = () =>
-  api<{ logs: RequestLogEntry[] }>("/admin/logs/requests");
+  api<{ logs: RequestLogEntry[] }>("/admin/logs/requests?limit=1000");
+
+export const getRequestLogsWithLimit = (limit: number) =>
+  api<{ logs: RequestLogEntry[] }>(`/admin/logs/requests?limit=${limit}`);
 
 export const getPricing = () =>
   api<{ models: ModelPrice[] }>("/admin/pricing");

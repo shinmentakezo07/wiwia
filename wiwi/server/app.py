@@ -732,9 +732,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
         return ORJSONResponse({"key_id": key_id, "disabled": disabled})
 
     @app.get("/admin/logs/requests")
-    async def admin_request_logs(request: Request, limit: int = 200):
+    async def admin_request_logs(request: Request, limit: int = 1000):
         if not is_admin(request):
             return _err(401, "authentication_error", "master key required", request)
+        # Hard ceiling protects the DB query from a runaway caller; the default
+        # matches the admin UI's largest expected table so a freshly-loaded
+        # Usage page reflects real traffic, not a 200-row cap.
         limit = max(1, min(limit, 1000))
         sink = state.logs.db_sink
         if sink is not None:
