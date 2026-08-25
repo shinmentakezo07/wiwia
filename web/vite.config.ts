@@ -19,6 +19,7 @@ export default defineConfig({
     proxy: {
       "/admin": "http://localhost:4000",
       "/v1": "http://localhost:4000",
+      "/health": "http://localhost:4000",
     },
   },
 });
