@@ -57,6 +57,7 @@ const PROVIDER_ICON: Record<string, LucideIcon> = {
 const PROVIDER_TYPE_OPTIONS = [
   { value: "openai", label: "OpenAI" },
   { value: "anthropic", label: "Anthropic" },
+  { value: "gemini", label: "Gemini" },
   { value: "nvidia-nim", label: "NVIDIA NIM" },
   { value: "openrouter", label: "OpenRouter" },
   { value: "gmicloud", label: "GMI Cloud" },

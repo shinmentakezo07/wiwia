@@ -56,12 +56,14 @@ const PROVIDER_ICON: Record<string, LucideIcon> = {
   gemini: Zap,
   openrouter: Globe,
   "nvidia-nim": Cpu,
+  "openai-compatible": Server,
   gmicloud: Cloud,
 };
 
 const PROVIDER_TYPE_OPTIONS = [
   { value: "openai", label: "OpenAI" },
   { value: "anthropic", label: "Anthropic" },
+  { value: "gemini", label: "Gemini" },
   { value: "nvidia-nim", label: "NVIDIA NIM" },
   { value: "openrouter", label: "OpenRouter" },
   { value: "gmicloud", label: "GMI Cloud" },
