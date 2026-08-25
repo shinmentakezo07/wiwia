@@ -71,6 +71,8 @@ class Gateway:
                                   "provider_type": dep.provider.provider_type}
         url = _build_url(adapter, dep, key, False, self.kind)
         body = adapter.encode_request(ctx.ir_req, dep.model_id, params)
+        if hasattr(adapter, "set_tool_context"):
+            adapter.set_tool_context(body)
         headers = {**adapter.headers(key), **dep.provider.extra_headers,
                    **dep.extra_headers}
         t0 = time.monotonic()
@@ -288,6 +290,8 @@ class Gateway:
                                   "provider_type": dep.provider.provider_type}
         url = _build_url(adapter, dep, key, True, self.kind)
         body = adapter.encode_request(ctx.ir_req, dep.model_id, params)
+        if hasattr(adapter, "set_tool_context"):
+            adapter.set_tool_context(body)
         headers = {**adapter.headers(key), **dep.provider.extra_headers,
                    **dep.extra_headers}
         t0 = time.monotonic()
