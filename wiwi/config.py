@@ -38,6 +38,7 @@ PROVIDER_TYPES: tuple[str, ...] = (
     "openai-compatible",
     "openrouter",
     "gmicloud",
+    "nvidia-nim",
 )
 
 

@@ -9,6 +9,7 @@ import {
   ArrowDownToLine,
   ArrowUpFromLine,
   Boxes,
+  Cpu,
   Cloud,
   DollarSign,
   Globe,
@@ -54,14 +55,14 @@ const PROVIDER_ICON: Record<string, LucideIcon> = {
   anthropic: Boxes,
   gemini: Zap,
   openrouter: Globe,
-  "openai-compatible": Server,
+  "nvidia-nim": Cpu,
   gmicloud: Cloud,
 };
 
 const PROVIDER_TYPE_OPTIONS = [
   { value: "openai", label: "OpenAI" },
   { value: "anthropic", label: "Anthropic" },
-  { value: "gemini", label: "Gemini" },
+  { value: "nvidia-nim", label: "NVIDIA NIM" },
   { value: "openrouter", label: "OpenRouter" },
   { value: "gmicloud", label: "GMI Cloud" },
   { value: "openai-compatible", label: "OpenAI-compatible URL" },
@@ -441,7 +442,7 @@ export function ProvidersPage() {
               options={PROVIDER_TYPE_OPTIONS}
             />
           </Field>
-          <Field label="Base URL" hint="Optional for openai/anthropic/gemini/openrouter/gmicloud. Required for compatible URLs.">
+          <Field label="Base URL" hint="Optional for openai/anthropic/gemini/openrouter/gmicloud/nvidia-nim. Required for compatible URLs.">
             <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://…" />
           </Field>
           <Field label="First key label">

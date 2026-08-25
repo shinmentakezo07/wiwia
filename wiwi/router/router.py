@@ -381,6 +381,29 @@ BUILTIN_PROVIDER_TYPES: list[dict[str, str | list[str]]] = [
         "context_window": "varies per model",
         "docs_url": "https://docs.gmicloud.ai/quickstart",
     },
+    {
+        "provider_type": "nvidia-nim",
+        "label": "NVIDIA NIM",
+        "default_base_url": "https://integrate.api.nvidia.com/v1",
+        "description": (
+            "NVIDIA NIM hosts 50+ open and frontier models (Nemotron, "
+            "DeepSeek, GLM, Llama, Qwen, Kimi, MiniMax, StepFun) on "
+            "optimized GPU infrastructure via an OpenAI-compatible Chat "
+            "Completions API. Supports streaming, tool use, reasoning "
+            "via chat_template_kwargs, and reasoning_content."
+        ),
+        "latest_models": [
+            "nvidia/nemotron-3-super-120b-a12b",
+            "nvidia/nemotron-3.5-lightning-30b-a3b",
+            "deepseek-ai/deepseek-v4-pro",
+            "zai-org/glm-5.2",
+            "moonshotai/kimi-k2.6",
+            "minimaxai/minimax-m3",
+            "stepfun-ai/step-3.7-flash",
+        ],
+        "context_window": "varies per model",
+        "docs_url": "https://docs.nvidia.com/nim/large-language-models/latest/",
+    },
 ]
 
 # Sanity check: every catalog entry must be a recognized provider type, and

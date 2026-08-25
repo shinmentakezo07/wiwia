@@ -5,7 +5,7 @@
 import { useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Boxes, Cloud, Eye, EyeOff, Globe, Plus, RefreshCw, Search, Server, Sparkles, Trash2, X, Zap } from "lucide-react";
+import { ArrowLeft, Boxes, Cloud, Cpu, Eye, EyeOff, Globe, Plus, RefreshCw, Search, Server, Sparkles, Trash2, X, Zap } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
   addDeployment,
@@ -49,6 +49,7 @@ const PROVIDER_ICON: Record<string, LucideIcon> = {
   anthropic: Boxes,
   gemini: Zap,
   openrouter: Globe,
+  "nvidia-nim": Cpu,
   "openai-compatible": Server,
   gmicloud: Cloud,
 };
@@ -56,7 +57,7 @@ const PROVIDER_ICON: Record<string, LucideIcon> = {
 const PROVIDER_TYPE_OPTIONS = [
   { value: "openai", label: "OpenAI" },
   { value: "anthropic", label: "Anthropic" },
-  { value: "gemini", label: "Gemini" },
+  { value: "nvidia-nim", label: "NVIDIA NIM" },
   { value: "openrouter", label: "OpenRouter" },
   { value: "gmicloud", label: "GMI Cloud" },
   { value: "openai-compatible", label: "OpenAI-compatible URL" },
@@ -545,7 +546,7 @@ function AccountSettingsCard(props: { p: Provider; onError: (m: string) => void 
             />
           </Field>
         </div>
-        <Field label="Base URL" hint="Optional for openai/anthropic/gemini/openrouter/gmicloud. Required for compatible URLs.">
+        <Field label="Base URL" hint="Optional for openai/anthropic/gemini/openrouter/gmicloud/nvidia-nim. Required for compatible URLs.">
           <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://…" />
         </Field>
         {error && <ErrorText>{error}</ErrorText>}
