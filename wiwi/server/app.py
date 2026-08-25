@@ -56,6 +56,18 @@ class RequestIdMiddleware:
             await self.app(scope, receive, send)
             return
 
+        # Normalize /V1/ → /v1/ for API routes — many clients and proxies send
+        # uppercase path prefixes; FastAPI route matching is case-sensitive.
+        path = scope.get("path", "")
+        if path[:4] == "/V1/" or path == "/V1":
+            scope["path"] = path[:1] + "v1" + path[3:]
+            # raw_path follows the same pattern
+            rp = scope.get("raw_path")
+            if isinstance(rp, bytes) and rp[:4] == b"/V1/":
+                scope["raw_path"] = b"/v1/" + rp[4:]
+            elif isinstance(rp, bytes) and rp == b"/V1":
+                scope["raw_path"] = b"/v1"
+
         import uuid
 
         rid = uuid.uuid4().hex[:16]
