@@ -292,14 +292,14 @@ def test_responses_function_call_output_structured_content():
 
 
 # -- m6: recorded usage replaces the estimate instead of stacking on it ----------
-def test_record_tokens_replaces_reservation():
+async def test_record_tokens_replaces_reservation():
     from wiwi.ratelimit.memory import RateLimiter
     rl = RateLimiter()
-    assert rl.check("k1", key_tpm=100, est_tokens=80)[0]
-    rl.record_tokens("k1", 20)  # actual was far below estimate
+    assert (await rl.check("k1", key_tpm=100, est_tokens=80))[0]
+    await rl.record_tokens("k1", 20)  # actual was far below estimate
     w = rl._windows["k1:tpm"]
     assert w.count() == 20, "actual must replace the estimated reservation"
-    assert rl.check("k1", key_tpm=100, est_tokens=60)[0], \
+    assert (await rl.check("k1", key_tpm=100, est_tokens=60))[0], \
         "no double counting of estimate + actual"
 
 

@@ -119,6 +119,13 @@ class ProviderAccount:
 
     def on_result(self, key: ProviderKey | None, status: int | None,
                   retry_after: float | None) -> None:
+        """Update a key's health counters after a request completes.
+
+        Synchronous callers (e.g. retry paths inside the same task) use this
+        directly.  Async paths that can race with :meth:`pick_key` should
+        call :meth:`on_result_locked` so the mutation serializes under the
+        same lock.
+        """
         if key is None or status is None:
             return
         if status == 200:
@@ -129,6 +136,15 @@ class ProviderAccount:
         elif status in (401, 403):
             key.err_count += 1
             key.mark_invalid()
+
+    async def on_result_locked(self, key: ProviderKey | None, status: int | None,
+                               retry_after: float | None) -> None:
+        """Async variant that takes ``_rr_lock`` so it cannot interleave with
+        :meth:`pick_key`'s read of the same state.  Use this from any path
+        that may run concurrently with a fresh pick_key for the same account.
+        """
+        async with self._rr_lock:
+            self.on_result(key, status, retry_after)
 
 
 @dataclass
@@ -422,14 +438,14 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
             try:
                 result = await call_one(
                     dep, ProviderKeyRef(label=key.label, secret=key.secret), ctx)
-                dep.provider.on_result(key, 200, None)
+                await dep.provider.on_result_locked(key, 200, None)
                 return result
             except WiwiError as e:
                 if group_first_err is None:
                     group_first_err = e
                 last_err = e
                 status = _status_of(e)
-                dep.provider.on_result(key, status, e.retry_after)
+                await dep.provider.on_result_locked(key, status, e.retry_after)
                 if status in (408, 500, 502, 503, 504, 529):
                     dep.record_fail(router.settings.allowed_fails,
                                     router.settings.cooldown_time)

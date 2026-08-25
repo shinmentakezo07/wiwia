@@ -75,16 +75,17 @@ def test_responses_encoder_tool_close_uses_stored_fields():
 
 
 def test_responses_encoder_args_buf_is_instance_attr():
-    """_args_buf must be an instance attribute, not a class-level shared variable."""
+    """Per-encoder tool-arg state must be isolated: encoder-level buffers are
+    now per-index dicts (_tools), but two encoders must still not share state."""
     enc1 = ResponsesStreamEncoder("m", "r1")
     enc2 = ResponsesStreamEncoder("m", "r2")
     enc1.feed(dl.StreamStart(model="m", group=""))
     enc2.feed(dl.StreamStart(model="m", group=""))
     enc1.feed(dl.ToolCallOpen(index=0, id="a", name="f"))
     enc1.feed(dl.ToolCallArgsDelta(index=0, args_fragment='{"k":"v1"}'))
-    # enc2 should have its own empty _args_buf
-    assert enc2._args_buf == ""
-    assert enc1._args_buf == '{"k":"v1"}'
+    # enc2 should have its own empty per-index args
+    assert enc2._tools == {}
+    assert enc1._tools[0]["args"] == '{"k":"v1"}'
 
 
 # -- Fix #2: ctx.stop_reason set from Finish delta ------------------------------

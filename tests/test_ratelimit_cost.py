@@ -4,25 +4,25 @@ from wiwi.cost.pricing import CostEngine, estimate_tokens
 from wiwi.ratelimit.memory import RateLimiter
 
 
-def test_rate_limit_rpm():
+async def test_rate_limit_rpm():
     rl = RateLimiter(global_rpm=3)
     ok = True
     for _ in range(3):
-        allowed, _ = rl.check("k1", None, None)
+        allowed, _ = await rl.check("k1", None, None)
         ok = ok and allowed
     assert ok
-    allowed, retry_after = rl.check("k1", None, None)
+    allowed, retry_after = await rl.check("k1", None, None)
     assert not allowed and retry_after >= 1
 
 
-def test_rate_limit_per_key():
+async def test_rate_limit_per_key():
     rl = RateLimiter()
     for _ in range(5):
-        allowed, _ = rl.check("kA", key_rpm=5, key_tpm=None)
+        allowed, _ = await rl.check("kA", key_rpm=5, key_tpm=None)
         assert allowed
-    allowed, _ = rl.check("kA", key_rpm=5, key_tpm=None)
+    allowed, _ = await rl.check("kA", key_rpm=5, key_tpm=None)
     assert not allowed
-    allowed, _ = rl.check("kB", key_rpm=5, key_tpm=None)  # other key unaffected
+    allowed, _ = await rl.check("kB", key_rpm=5, key_tpm=None)  # other key unaffected
     assert allowed
 
 
