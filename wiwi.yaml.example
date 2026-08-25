@@ -86,3 +86,4 @@ wiwi_settings:
   drop_params: true
   port: 4000
   # store_prompts_in_spend_logs: true   # log full request/response content (off by default)
+  log_retention_days: 30                 # prune request_logs older than this (0 = keep forever)

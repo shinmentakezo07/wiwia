@@ -28,6 +28,7 @@ import {
 import { clearToken, getToken } from "@/api/client";
 import { api } from "@/api/client";
 import { useAuth } from "@/api/auth";
+import { useQueryClient } from "@tanstack/react-query";
 import { useClientPrefs } from "@/lib/settings";
 import {
   Badge,
@@ -248,16 +249,17 @@ function SecurityTab() {
   const [copied, setCopied] = useState(false);
   const navigate = useNavigate();
   const { logout } = useAuth();
+  const qc = useQueryClient();
   const token = getToken();
 
   function clearCache() {
-    try {
-      localStorage.removeItem("wiwi.cache");
-      sessionStorage.clear();
-    } catch {
-      // best-effort; ignore storage errors
-    }
-    setCopied(false);
+    // Drop all cached server data (logs, overview, timeseries, pricing,
+    // providers, keys) from the in-memory React Query cache so every page
+    // refetches fresh data on next visit. This is where the stats/log data
+    // actually lives — localStorage only holds the master key and UI prefs.
+    qc.clear();
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
   }
 
   return (
@@ -346,8 +348,8 @@ function SecurityTab() {
             <div>
               <p className="admin-setting-row-title">Clear local cache</p>
               <p className="admin-setting-row-desc">
-                Removes cached console data (session storage). Your master key and preferences are
-                kept.
+                Drops all cached server data (logs, usage stats, pricing) so every page
+                refetches fresh data on next visit. Your master key and preferences are kept.
               </p>
             </div>
             <Button variant="ghost" onClick={clearCache}>

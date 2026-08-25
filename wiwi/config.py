@@ -160,6 +160,8 @@ class WiwiSettings(BaseModel):
     max_request_body_mb: int = 50
     log_requests: bool = True
     store_prompts_in_spend_logs: bool = False
+    """Prune request_logs older than this many days at startup. 0 = keep forever."""
+    log_retention_days: int = 30
     host: str = "0.0.0.0"
     port: int = 4000
     header_allowlist: list[str] = Field(

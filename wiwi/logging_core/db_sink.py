@@ -119,6 +119,18 @@ class DBSink:
             await conn.execute(sa.text(audit_ddl))
             await self._migrate(conn)
 
+    async def prune_old_requests(self, retention_days: int) -> int:
+        """Delete request_logs rows older than *retention_days*. Returns count deleted."""
+        if retention_days <= 0:
+            return 0
+        cutoff = time.time() - retention_days * 86400
+        async with self.engine.begin() as conn:
+            result = await conn.execute(
+                sa.text("DELETE FROM request_logs WHERE ts < :cutoff"),
+                {"cutoff": cutoff},
+            )
+            return result.rowcount or 0
+
     async def _migrate(self, conn) -> None:
         """Add columns and indexes introduced after the initial schema (idempotent)."""
         if self._is_pg:

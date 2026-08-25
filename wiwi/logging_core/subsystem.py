@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import orjson
 import structlog
@@ -23,6 +23,26 @@ log = structlog.get_logger(__name__)
 
 REQUEST_QUEUE_SIZE = 50_000
 PROXY_QUEUE_SIZE = 10_000
+
+# Fields that hold full prompt/response text when store_prompts_in_spend_logs
+# is enabled. They are stripped from the in-memory ring buffer + SSE broadcast
+# copy to prevent RAM bloat (up to 500 full LLM responses held in the ring),
+# while still being persisted to the DB by the DBSink which receives the
+# original unstripped event from the batch.
+_HEAVY_FIELDS: tuple[str, ...] = ("request_body", "response_body")
+
+
+def _lightweight_copy(evt: LogEvent) -> LogEvent:
+    """Return a shallow copy of *evt* with heavy prompt/response bodies set to None.
+
+    The DB write path (DBSink.write_requests) receives the *original* event from
+    the batch, so prompt logging still works when enabled. This copy is only used
+    for the in-memory ring buffer and live SSE fan-out, where holding hundreds of
+    full LLM responses would balloon memory.
+    """
+    if evt.request_body is None and evt.response_body is None:
+        return evt  # already lightweight; avoid an unnecessary copy
+    return replace(evt, request_body=None, response_body=None)
 
 
 class SSEBroadcastSink:
@@ -52,14 +72,19 @@ class SSEBroadcastSink:
         return [(i, e) for i, e in self._rings[stream] if i > last_event_id]
 
     async def publish(self, stream: str, event: LogEvent) -> None:
+        # Store a lightweight copy (prompt/response bodies stripped) in the
+        # ring buffer and broadcast it to SSE subscribers. The original event
+        # remains in the batch list for DBSink.write_requests to persist the
+        # full bodies when store_prompts_in_spend_logs is enabled.
+        ring_evt = _lightweight_copy(event) if stream == "request" else event
         async with self._lock:
             self._seq += 1
             seq = self._seq
-            self._rings[stream].append((seq, event))
+            self._rings[stream].append((seq, ring_evt))
             subs = list(self._subs[stream])
         for q in subs:
             try:
-                q.put_nowait((seq, event))
+                q.put_nowait((seq, ring_evt))
             except asyncio.QueueFull:
                 pass  # slow admin client: drop rather than backpressure the gateway
 
