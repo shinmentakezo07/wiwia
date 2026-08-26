@@ -179,6 +179,19 @@ export interface AlertRule {
   threshold: number;
 }
 
+/** Authenticated console user (from /auth/me, /auth/signup, /auth/login). */
+export interface User {
+  id: string;
+  username: string;
+  role: "user" | "admin";
+}
+
+/** Public, secret-free model catalog entry (from /public/models). */
+export interface PublicModelGroup {
+  name: string;
+  deployments: { provider: string; model_id: string }[];
+}
+
 /** A built-in provider type that ships with wiwi (from /admin/provider-catalog). */
 export interface BuiltinProvider {
   provider_type: string;

@@ -1,9 +1,11 @@
 // VirtualKeys page — issue and manage client credentials: budgets, rate limits,
 // model allowlists, expiry. Generated plaintext keys are revealed exactly once.
 
+import type { ReactNode } from "react";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus } from "lucide-react";
+import { Check, Clock, KeyRound, Plus, ShieldCheck, Sparkles, Upload } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { deleteKey, disableKey, generateKey, listKeys, patchKey } from "@/api/client";
 import type { VirtualKey } from "@/api/types";
 import {
@@ -16,9 +18,9 @@ import {
   ErrorText,
   Field,
   Input,
+  NumberInput,
   PageHeader,
   ProgressBar,
-  Select,
   Spinner,
   Table,
   TD,
@@ -70,6 +72,63 @@ function BudgetCell(props: { k: VirtualKey }) {
     </div>
   );
 }
+
+/** Grouped form section: icon-led header + hairline divider between sections. */
+function FormSection(props: { icon: LucideIcon; title: string; desc?: string; children: ReactNode; last?: boolean }) {
+  const Icon = props.icon;
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center gap-2.5">
+        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-gradient-to-br from-blue-500/15 to-violet-500/15 ring-1 ring-white/[0.06]">
+          <Icon className="h-3.5 w-3.5" style={{ color: "rgba(59,130,246,0.75)" }} />
+        </span>
+        <div className="leading-tight">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--admin-text-muted)]">
+            {props.title}
+          </p>
+          {props.desc && <p className="text-[11px] text-[var(--admin-text-dim)]">{props.desc}</p>}
+        </div>
+      </div>
+      <div className="space-y-3">{props.children}</div>
+      {!props.last && <div className="h-px bg-[var(--admin-border)]" />}
+    </section>
+  );
+}
+
+/** Two-up selectable card — used for the key-source choice. */
+function KeySourceCard(props: {
+  active: boolean;
+  icon: LucideIcon;
+  title: string;
+  desc: string;
+  onClick: () => void;
+}) {
+  const Icon = props.icon;
+  return (
+    <button
+      type="button"
+      onClick={props.onClick}
+      className={`flex flex-1 items-start gap-2.5 rounded-lg border p-3 text-left transition-colors ${
+        props.active
+          ? "border-[var(--admin-accent-glow)] bg-[var(--admin-accent-soft)] ring-1 ring-[var(--admin-accent-glow)]"
+          : "border-[var(--admin-border)] bg-white/[0.015] hover:border-[var(--admin-border-hover)] hover:bg-white/[0.025]"
+      }`}
+    >
+      <span
+        className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${
+          props.active ? "bg-blue-500/15" : "bg-white/[0.04]"
+        }`}
+      >
+        <Icon className={`h-3.5 w-3.5 ${props.active ? "text-blue-400" : "text-[var(--admin-text-dim)]"}`} />
+      </span>
+      <div className="min-w-0">
+        <p className="text-[13px] font-medium text-[var(--admin-text)]">{props.title}</p>
+        <p className="text-[11px] leading-tight text-[var(--admin-text-dim)]">{props.desc}</p>
+      </div>
+    </button>
+  );
+}
+
 
 function KeyRow(props: { k: VirtualKey; onEdit: (k: VirtualKey) => void; onError: (m: string) => void }) {
   const qc = useQueryClient();
@@ -278,23 +337,30 @@ export function VirtualKeysPage() {
       {/* -- create / reveal-once ------------------------------------------- */}
       <Dialog
         open={createOpen}
+        wide
         title={created ? "Key created" : "New virtual key"}
         onClose={closeCreate}
       >
         {created ? (
-          <div className="space-y-3">
-            <p className="text-[13px] text-[var(--admin-text-muted)]">
-              Copy your new key now — <strong>you won&apos;t see this again</strong>.
-            </p>
+          <div className="space-y-4">
+            <div className="flex items-center gap-3">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-emerald-500/10 ring-1 ring-emerald-500/20">
+                <Check className="h-5 w-5 text-emerald-400" />
+              </span>
+              <div className="min-w-0">
+                <p className="text-[14px] font-semibold text-[var(--admin-text)]">Key created</p>
+                <p className="text-[12px] text-[var(--admin-text-muted)]">
+                  Copy your new key now — <strong>you won&apos;t see this again</strong>.
+                </p>
+              </div>
+            </div>
             <div className="rounded-[12px] border border-blue-500/15 bg-blue-500/[0.04] p-4">
-              <p className="break-all font-mono text-[15px] tracking-wide text-blue-300">
-                {created.key}
-              </p>
+              <p className="break-all font-mono text-[15px] tracking-wide text-blue-300">{created.key}</p>
             </div>
             <p className="text-[12px] text-amber-400/70">
               This is the only time the plaintext is shown. Store it somewhere safe.
             </p>
-            <div className="flex items-center justify-between pt-2">
+            <div className="flex items-center justify-between pt-1">
               <CopyButton text={created.key} />
               <Button
                 onClick={() => {
@@ -308,7 +374,7 @@ export function VirtualKeysPage() {
           </div>
         ) : (
           <form
-            className="space-y-3"
+            className="space-y-5"
             onSubmit={(e) => {
               e.preventDefault();
               if (!name.trim() || !numsOk || customTooShort) return;
@@ -325,83 +391,103 @@ export function VirtualKeysPage() {
               });
             }}
           >
-            <Field label="Name">
-              <Input
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="ci-pipeline"
-                autoFocus
-              />
-            </Field>
-            <Field label="Key source">
-              <Select
-                value={authMode}
-                onChange={(v) => setAuthMode(v === "custom" ? "custom" : "random")}
-                options={[
-                  { value: "random", label: "Generate random key" },
-                  { value: "custom", label: "Bring your own key" },
-                ]}
-              />
-            </Field>
-            {authMode === "custom" && (
-              <Field label="Custom key" hint="At least 16 characters.">
+            <FormSection icon={KeyRound} title="Identity" desc="Name this key and choose how it's generated.">
+              <Field label="Name">
                 <Input
-                  value={customKey}
-                  onChange={(e) => setCustomKey(e.target.value)}
-                  placeholder="sk-my-own-value…"
-                  className="font-mono"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="ci-pipeline"
+                  autoFocus
                 />
               </Field>
-            )}
-            <Field label="Model allowlist" hint="Comma-separated model names; empty = all models.">
-              <Input
-                value={modelsCsv}
-                onChange={(e) => setModelsCsv(e.target.value)}
-                placeholder="model-a, model-b"
-              />
-            </Field>
-            <Field label="Budget (USD)" hint="Total lifetime spend cap; empty = unlimited.">
-              <Input
-                type="number"
-                min={0}
-                step="any"
-                value={budget}
-                onChange={(e) => setBudget(e.target.value)}
-                placeholder="25"
-              />
-            </Field>
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="RPM" hint="Requests/min; empty = unlimited.">
+              <div>
+                <span className="admin-label mb-1.5 block">Key source</span>
+                <div className="flex gap-3">
+                  <KeySourceCard
+                    active={authMode === "random"}
+                    icon={Sparkles}
+                    title="Generate random"
+                    desc="Wiwi creates a strong key."
+                    onClick={() => setAuthMode("random")}
+                  />
+                  <KeySourceCard
+                    active={authMode === "custom"}
+                    icon={Upload}
+                    title="Bring your own"
+                    desc="Use an existing secret."
+                    onClick={() => setAuthMode("custom")}
+                  />
+                </div>
+              </div>
+              {authMode === "custom" && (
+                <Field label="Custom key" hint="At least 16 characters.">
+                  <Input
+                    value={customKey}
+                    onChange={(e) => setCustomKey(e.target.value)}
+                    placeholder="sk-my-own-value…"
+                    className="font-mono"
+                  />
+                </Field>
+              )}
+            </FormSection>
+
+            <FormSection
+              icon={ShieldCheck}
+              title="Access & limits"
+              desc="Constrain which models this key can reach and how much it can spend."
+            >
+              <Field label="Model allowlist" hint="Comma-separated model names; empty = all models.">
                 <Input
-                  type="number"
+                  value={modelsCsv}
+                  onChange={(e) => setModelsCsv(e.target.value)}
+                  placeholder="model-a, model-b"
+                />
+              </Field>
+              <div className="grid grid-cols-3 gap-3">
+                <Field label="Budget" hint="Lifetime spend cap; empty = unlimited.">
+                  <NumberInput
+                    min={0}
+                    step="any"
+                    value={budget}
+                    onChange={setBudget}
+                    placeholder="25"
+                    suffix="USD"
+                  />
+                </Field>
+                <Field label="RPM" hint="Requests/min; empty = unlimited.">
+                  <NumberInput
+                    min={0}
+                    value={rpm}
+                    onChange={setRpm}
+                    placeholder="60"
+                  />
+                </Field>
+                <Field label="TPM" hint="Tokens/min; empty = unlimited.">
+                  <NumberInput
+                    min={0}
+                    value={tpm}
+                    onChange={setTpm}
+                    placeholder="100000"
+                  />
+                </Field>
+              </div>
+            </FormSection>
+
+            <FormSection icon={Clock} title="Lifetime" last>
+              <Field label="Expires in" hint="Empty = never expires.">
+                <NumberInput
                   min={0}
-                  value={rpm}
-                  onChange={(e) => setRpm(e.target.value)}
-                  placeholder="60"
+                  step="any"
+                  value={ttlHours}
+                  onChange={setTtlHours}
+                  placeholder="720"
+                  suffix="hrs"
                 />
               </Field>
-              <Field label="TPM" hint="Tokens/min; empty = unlimited.">
-                <Input
-                  type="number"
-                  min={0}
-                  value={tpm}
-                  onChange={(e) => setTpm(e.target.value)}
-                  placeholder="100000"
-                />
-              </Field>
-            </div>
-            <Field label="Expires in (hours)" hint="Empty = never expires.">
-              <Input
-                type="number"
-                min={0}
-                step="any"
-                value={ttlHours}
-                onChange={(e) => setTtlHours(e.target.value)}
-                placeholder="720"
-              />
-            </Field>
+            </FormSection>
+
             {createError && <ErrorText>{createError}</ErrorText>}
-            <div className="flex justify-end gap-2 pt-2">
+            <div className="flex justify-end gap-2 pt-1">
               <Button variant="ghost" type="button" onClick={closeCreate}>
                 Cancel
               </Button>
@@ -409,7 +495,7 @@ export function VirtualKeysPage() {
                 type="submit"
                 disabled={!name.trim() || !numsOk || customTooShort || create.isPending}
               >
-                Create key
+                <Sparkles size={14} /> Create key
               </Button>
             </div>
           </form>
@@ -449,31 +535,28 @@ export function VirtualKeysPage() {
                 editTarget.max_budget != null ? fmtUsd(editTarget.max_budget) : "unlimited"
               }. Empty = leave unchanged.`}
             >
-              <Input
-                type="number"
+              <NumberInput
                 min={0}
                 step="any"
                 value={editBudget}
-                onChange={(e) => setEditBudget(e.target.value)}
+                onChange={setEditBudget}
                 placeholder="unchanged"
               />
             </Field>
             <div className="grid grid-cols-2 gap-3">
               <Field label="RPM" hint="Empty = leave unchanged.">
-                <Input
-                  type="number"
+                <NumberInput
                   min={0}
                   value={editRpm}
-                  onChange={(e) => setEditRpm(e.target.value)}
+                  onChange={setEditRpm}
                   placeholder="unchanged"
                 />
               </Field>
               <Field label="TPM" hint="Empty = leave unchanged.">
-                <Input
-                  type="number"
+                <NumberInput
                   min={0}
                   value={editTpm}
-                  onChange={(e) => setEditTpm(e.target.value)}
+                  onChange={setEditTpm}
                   placeholder="unchanged"
                 />
               </Field>

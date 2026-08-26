@@ -403,6 +403,68 @@ body {
   border-color: var(--admin-accent-glow);
   box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.08);
 }
+
+/* Number-input steppers: hide the glaring browser-default white spinners.
+   The form uses a custom themed stepper (admin-number-stepper) instead, so
+   the native buttons are removed for a consistent dark look. */
+input[type="number"].admin-input {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+input[type="number"].admin-input::-webkit-outer-spin-button,
+input[type="number"].admin-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* Custom themed stepper: − / + buttons on the right of a number field.
+   Uses admin surface/border tokens so it reads as part of the input, not a
+   bright foreign control. */
+.admin-number-field {
+  position: relative;
+}
+.admin-number-field .admin-input {
+  padding-right: 30px;
+}
+.admin-number-stepper {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  bottom: 1px;
+  width: 26px;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--admin-border);
+  border-radius: 0 calc(var(--admin-radius-sm) - 1px) calc(var(--admin-radius-sm) - 1px) 0;
+  overflow: hidden;
+}
+.admin-number-stepper button {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: rgba(255, 255, 255, 0.015);
+  color: var(--admin-text-dim);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+  line-height: 0;
+}
+.admin-number-stepper button + button {
+  border-top: 1px solid var(--admin-border);
+}
+.admin-number-stepper button:hover {
+  background: rgba(59, 130, 246, 0.1);
+  color: var(--admin-accent);
+}
+.admin-number-stepper button:active {
+  background: rgba(59, 130, 246, 0.16);
+}
+.admin-number-stepper button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
 select.admin-input option {
   background: var(--admin-surface-elevated);
   color: var(--admin-text);
@@ -904,4 +966,439 @@ select.admin-input option {
   border-color: var(--admin-accent-glow);
   box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
 }
+}
+
+/* -- docs page: layout + hero + code blocks --------------------------------- */
+
+/* Two-column layout: sticky sidebar + scrollable content */
+.docs-grid {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 2.5rem;
+}
+
+@media (max-width: 768px) {
+  .docs-grid {
+    grid-template-columns: 1fr;
+  }
+  .docs-sidebar {
+    display: none;
+  }
+}
+
+.docs-sidebar {
+  position: sticky;
+  top: 80px;
+  align-self: start;
+  max-height: calc(100vh - 100px);
+  overflow-y: auto;
+}
+
+/* Section anchor offset for sticky-nav scroll */
+.docs-section {
+  scroll-margin-top: 80px;
+}
+
+/* Hero banner */
+.docs-hero {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.015) 0%, transparent 100%);
+}
+
+.docs-hero-glow {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 400px 200px at 15% 0%, rgba(59, 130, 246, 0.06) 0%, transparent 60%),
+    radial-gradient(ellipse 350px 200px at 85% 100%, rgba(168, 85, 247, 0.04) 0%, transparent 60%);
+  pointer-events: none;
+}
+
+/* Code block with subtle top glow */
+.docs-codeblock-glow {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse 200px 60px at 50% 0%, rgba(59, 130, 246, 0.03) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+/* CTA card */
+.docs-cta {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02) 0%, transparent 100%);
+}
+
+/* ─── Landing page: AnimatedGroup + MarqueeContainer keyframes ──────────── */
+
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes wiwi-ag-fade {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes wiwi-ag-slide {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes wiwi-ag-scale {
+    from { opacity: 0; transform: scale(0.8); }
+    to { opacity: 1; transform: scale(1); }
+  }
+  @keyframes wiwi-ag-blur {
+    from { opacity: 0; filter: blur(4px); }
+    to { opacity: 1; filter: blur(0); }
+  }
+  @keyframes wiwi-ag-blur-slide {
+    from { opacity: 0; filter: blur(4px); transform: translateY(20px); }
+    to { opacity: 1; filter: blur(0); transform: translateY(0); }
+  }
+  @keyframes wiwi-marquee {
+    from { transform: translateX(0); }
+    to { transform: translateX(calc(-100% - var(--gap, 24px))); }
+  }
+}
+.animate-marquee {
+  animation: wiwi-marquee var(--duration, 40s) linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .animate-marquee { animation: none; }
+}
+
+/* ─── Hero entrance + scroll-reveal (from llmgateway-ref globals.css) ───── */
+
+@keyframes hero-enter {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+    filter: blur(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .animate-hero-enter {
+    animation: hero-enter 0.9s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .hero-enter-delay-1 { animation-delay: 0.15s; }
+  .hero-enter-delay-2 { animation-delay: 0.3s; }
+  .hero-enter-delay-3 { animation-delay: 0.45s; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-hero-enter { animation: none; }
+}
+
+/* ─── Hero visual enhancements ───────────────────────────────────────────── */
+
+/* Slow-drifting aurora orbs behind the hero */
+@keyframes hero-orb-1 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(40px, -30px) scale(1.08); }
+  66% { transform: translate(-25px, 25px) scale(0.95); }
+}
+@keyframes hero-orb-2 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(-50px, 40px) scale(1.12); }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .hero-orb-1 { animation: hero-orb-1 18s ease-in-out infinite; }
+  .hero-orb-2 { animation: hero-orb-2 22s ease-in-out infinite; }
+}
+
+/* Gradient text shimmer on the headline accent */
+@keyframes hero-gradient-pan {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+.hero-gradient-text {
+  background: linear-gradient(90deg, #60a5fa, #a78bfa, #f472b6, #a78bfa, #60a5fa);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .hero-gradient-text {
+    animation: hero-gradient-pan 6s linear infinite;
+  }
+}
+
+/* Pulsing "live" dot for the hero badge */
+@keyframes hero-live-pulse {
+  0% { transform: scale(1); opacity: 1; }
+  100% { transform: scale(2.6); opacity: 0; }
+}
+.hero-live-dot {
+  position: relative;
+  display: inline-flex;
+  height: 7px;
+  width: 7px;
+}
+.hero-live-dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: currentColor;
+}
+.hero-live-dot::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: currentColor;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .hero-live-dot::before {
+    animation: hero-live-pulse 1.8s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+  }
+}
+
+/* Subtle conic glow ring around the primary CTA */
+@keyframes cta-ring-spin {
+  to { transform: rotate(360deg); }
+}
+.hero-cta-ring {
+  position: absolute;
+  inset: -2px;
+  border-radius: 9999px;
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg,
+    rgba(59, 130, 246, 0.5) 60deg,
+    rgba(168, 85, 247, 0.5) 120deg,
+    transparent 180deg,
+    transparent 360deg
+  );
+  opacity: 0.6;
+  filter: blur(6px);
+  z-index: -1;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .hero-cta-ring { animation: cta-ring-spin 4s linear infinite; }
+}
+
+/* Animated grid pan for the hero backdrop */
+@keyframes hero-grid-pan {
+  0% { background-position: 0 0; }
+  100% { background-position: 64px 64px; }
+}
+.hero-grid {
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
+  background-size: 64px 64px;
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 35%, #000 0%, transparent 75%);
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 35%, #000 0%, transparent 75%);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .hero-grid { animation: hero-grid-pan 24s linear infinite; }
+}
+
+@keyframes scroll-reveal-in {
+  from {
+    opacity: 0;
+    transform: translateY(24px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .scroll-reveal {
+    @supports (animation-timeline: view()) {
+      animation: scroll-reveal-in linear both;
+      animation-timeline: view();
+      animation-range: entry 5% cover 28%;
+    }
+  }
+}
+
+/* ─── Shimmer button (from llmgateway-ref ShimmerButton) ────────────────── */
+
+@keyframes shimmer-slide {
+  to { transform: translate(calc(100cqw - 100%), 0); }
+}
+
+@keyframes spin-around {
+  0% { transform: translateZ(0) rotate(0); }
+  15%, 35% { transform: translateZ(0) rotate(90deg); }
+  65%, 85% { transform: translateZ(0) rotate(270deg); }
+  100% { transform: translateZ(0) rotate(360deg); }
+}
+
+.lg-shimmer-button {
+  position: relative;
+  overflow: hidden;
+  border: none;
+  cursor: pointer;
+  border-radius: 9999px;
+}
+.lg-shimmer-button .shimmer-wrapper {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: inherit;
+}
+.lg-shimmer-button .shimmer {
+  position: absolute;
+  inset: -100%;
+  background: conic-gradient(
+    from 0deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.4) 15%,
+    transparent 30%,
+    transparent 50%,
+    rgba(255, 255, 255, 0.4) 65%,
+    transparent 80%
+  );
+  animation: spin-around 4s linear infinite;
+}
+.lg-shimmer-button .shimmer::before,
+.lg-shimmer-button .shimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: conic-gradient(
+    from 0deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.4) 15%,
+    transparent 30%,
+    transparent 50%,
+    rgba(255, 255, 255, 0.4) 65%,
+    transparent 80%
+  );
+  animation: shimmer-slide 3s ease-in-out infinite alternate;
+}
+.lg-shimmer-button .shimmer::after {
+  animation-direction: alternate-reverse;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lg-shimmer-button .shimmer,
+  .lg-shimmer-button .shimmer::before,
+  .lg-shimmer-button .shimmer::after {
+    animation: none;
+  }
+}
+
+/* ─── Accordion (from llmgateway-ref) ────────────────────────────────────── */
+
+@keyframes accordion-down {
+  from { height: 0; }
+  to { height: var(--radix-accordion-content-height); }
+}
+
+@keyframes accordion-up {
+  from { height: var(--radix-accordion-content-height); }
+  to { height: 0; }
+}
+
+.animate-accordion-down {
+  animation: accordion-down 0.2s ease-out;
+}
+
+.animate-accordion-up {
+  animation: accordion-up 0.2s ease-out;
+}
+
+/* ─── Noise texture utility (from llmgateway-ref bg-noise) ───────────────── */
+
+.bg-noise::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: 0.03;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 256px 256px;
+  pointer-events: none;
+}
+
+/* ─── Marquee reverse direction ─────────────────────────────────────────── */
+
+@keyframes wiwi-marquee-reverse {
+  from { transform: translateX(calc(-100% - var(--gap, 24px))); }
+  to { transform: translateX(0); }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .animate-marquee-reverse {
+    animation: wiwi-marquee-reverse var(--duration, 40s) linear infinite;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-marquee-reverse { animation: none; }
+}
+
+/* ─── Playground chat ───────────────────────────────────────────────────── */
+
+/* Message enter animation */
+@keyframes pg-msg-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .pg-msg-enter { animation: pg-msg-in 0.28s cubic-bezier(0.16, 1, 0.3, 1) both; }
+}
+
+/* Suggestion card enter stagger */
+@keyframes pg-sugg-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .pg-sugg-enter { animation: pg-sugg-in 0.22s cubic-bezier(0.16, 1, 0.3, 1) both; }
+}
+
+/* Streaming caret blink */
+@keyframes pg-caret {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+.pg-caret::after {
+  content: "▍";
+  margin-left: 1px;
+  animation: pg-caret 1s step-end infinite;
+  color: var(--admin-accent, #3b82f6);
+}
+@media (prefers-reduced-motion: reduce) {
+  .pg-caret::after { content: none; }
+}
+
+/* Typing loader — three bouncing dots */
+.pg-typing-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: var(--admin-text-muted, #9ca3af);
+}
+@keyframes pg-typing-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-6px); opacity: 1; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .pg-typing-dot { animation: pg-typing-bounce 1.2s ease-in-out infinite; }
+  .pg-typing-dot:nth-child(2) { animation-delay: 0.15s; }
+  .pg-typing-dot:nth-child(3) { animation-delay: 0.3s; }
+}
+
+/* Composer auto-grow textarea — hide native resize, match surface */
+.pg-textarea {
+  resize: none;
+  field-sizing: content;
+  min-height: 24px;
+  max-height: 200px;
+}
+
+/* Scroll-to-bottom fade */
+.pg-scroll-fade {
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 48px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 48px), transparent 100%);
 }

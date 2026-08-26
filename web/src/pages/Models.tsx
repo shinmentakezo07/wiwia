@@ -5,6 +5,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { getModels, patchModelGroup } from "@/api/client";
 import type { ModelGroup } from "@/api/types";
+import { useAuth } from "@/api/auth";
 import {
   Badge,
   Card,
@@ -38,6 +39,7 @@ function WeightChip(props: {
   weight: number;
   ok: boolean;
   title: string;
+  editable: boolean;
   onError: (m: string) => void;
 }) {
   const qc = useQueryClient();
@@ -50,6 +52,26 @@ function WeightChip(props: {
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["models"] }),
     onError: (e) => props.onError(e.message),
   });
+
+  if (!props.editable) {
+    // Read-only for non-admins: same chip, no click-to-edit.
+    return (
+      <div
+        title={props.editable ? "Click to edit weight" : "Weight (admin-only)"}
+        className="flex items-center gap-2 rounded-[10px] border border-[var(--admin-border)] bg-white/[0.015] px-3 py-2 text-left text-[13px]"
+      >
+        <HealthDot ok={props.ok} title={props.title} />
+        <span>
+          <span className="font-medium text-[var(--admin-text)]">{props.provider}</span>
+          <span className="text-[var(--admin-text-dim)]"> · </span>
+          <span className="font-mono text-[12px] text-[var(--admin-text-muted)]">{props.modelId}</span>
+        </span>
+        <Badge tone="gray" title="Deployment weight">
+          w {props.weight}
+        </Badge>
+      </div>
+    );
+  }
 
   if (!editing) {
     return (
@@ -94,7 +116,7 @@ function WeightChip(props: {
   );
 }
 
-function GroupCard(props: { g: ModelGroup; strategy: string; aliases: Record<string, string>; onError: (m: string) => void }) {
+function GroupCard(props: { g: ModelGroup; strategy: string; aliases: Record<string, string>; editable: boolean; onError: (m: string) => void }) {
   return (
     <Card className="p-4">
       <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -121,6 +143,7 @@ function GroupCard(props: { g: ModelGroup; strategy: string; aliases: Record<str
             modelId={d.model_id}
             weight={d.weight}
             ok={d.available}
+            editable={props.editable}
             title={
               d.available
                 ? `healthy · inflight ${d.inflight} · p95 ${Math.round(d.p95_latency_ms)}ms`
@@ -136,6 +159,8 @@ function GroupCard(props: { g: ModelGroup; strategy: string; aliases: Record<str
 
 export function ModelsPage() {
   const qc = useQueryClient();
+  const { user } = useAuth();
+  const editable = user?.role === "admin";
   const [error, setError] = useState<string | null>(null);
   const query = useQuery({ queryKey: ["models"], queryFn: getModels, refetchInterval: 10_000 });
 
@@ -154,21 +179,34 @@ export function ModelsPage() {
     onError: (e) => setError(e.message),
   });
 
+  // Strategy label for the read-only (non-admin) view.
+  const strategyLabel = STRATEGIES.find((s) => s.value === data.strategy)?.label ?? data.strategy;
+
   return (
     <div>
       <PageHeader
         title="Models"
-        subtitle="Model groups and their deployments. Click a chip's weight to rebalance traffic."
+        subtitle={
+          editable
+            ? "Model groups and their deployments. Click a chip's weight to rebalance traffic."
+            : "Model groups and their deployments. (Read-only — ask an admin to change weights.)"
+        }
         right={
-          <Select
-            value={data.strategy}
-            onChange={(s) => {
-              if (!data.groups.length) return;
-              // PATCH applies globally on the router settings; any group path works.
-              setStrategy.mutate(s);
-            }}
-            options={STRATEGIES}
-          />
+          editable ? (
+            <Select
+              value={data.strategy}
+              onChange={(s) => {
+                if (!data.groups.length) return;
+                // PATCH applies globally on the router settings; any group path works.
+                setStrategy.mutate(s);
+              }}
+              options={STRATEGIES}
+            />
+          ) : (
+            <Badge tone="gray" title="Routing strategy">
+              {strategyLabel}
+            </Badge>
+          )
         }
       />
       {error && (
@@ -176,10 +214,17 @@ export function ModelsPage() {
           <ErrorText>{error}</ErrorText>
         </div>
       )}
-      {setStrategy.isPending && <Spinner />}
+      {editable && setStrategy.isPending && <Spinner />}
       <div className="space-y-4">
         {data.groups.map((g) => (
-          <GroupCard key={g.name} g={g} strategy={data.strategy} aliases={data.aliases} onError={setError} />
+          <GroupCard
+            key={g.name}
+            g={g}
+            strategy={data.strategy}
+            aliases={data.aliases}
+            editable={editable}
+            onError={setError}
+          />
         ))}
         {data.groups.length === 0 && (
           <Card className="px-4 py-12 text-center text-[13px] text-[var(--admin-text-dim)]">

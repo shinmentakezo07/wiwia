@@ -28,6 +28,7 @@ import {
   YAxis,
 } from "recharts";
 import { getOverview, getRequestLogs, getTimeseries } from "@/api/client";
+import { useAuth } from "@/api/auth";
 import { useAdminStream, useLiveInvalidation } from "@/api/stream";
 import type { RequestLogEntry, TokenBucket } from "@/api/types";
 import { Card, CardHeader, ErrorText, LiveBadge, PageHeader, Spinner, StatCard } from "@/components/ui";
@@ -211,6 +212,8 @@ function ChartTooltip(props: {
 }
 
 export function DashboardPage() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
   const overviewQuery = useQuery({
     queryKey: ["overview", 60],
     queryFn: () => getOverview(60),
@@ -340,8 +343,14 @@ export function DashboardPage() {
       }}
     >
       <PageHeader
-        title="Dashboard"
-        subtitle={o ? `Gateway activity · last ${o.window_minutes} min` : "Gateway activity"}
+        title={isAdmin ? "Dashboard" : "Your dashboard"}
+        subtitle={
+          isAdmin
+            ? o
+              ? `Gateway activity · last ${o.window_minutes} min`
+              : "Gateway activity"
+            : "Usage across your virtual keys"
+        }
         right={<LiveBadge connected={connected} />}
       />
       {overviewQuery.isLoading && (

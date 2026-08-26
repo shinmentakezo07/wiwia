@@ -311,7 +311,7 @@ function SecurityTab() {
             <Button
               variant="danger"
               onClick={() => {
-                logout();
+                void logout();
                 navigate("/login");
               }}
             >
