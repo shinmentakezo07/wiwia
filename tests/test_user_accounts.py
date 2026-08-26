@@ -81,3 +81,37 @@ async def test_list_and_patch_user():
     assert patched["role"] == "admin"
     info = await svc.get(u.id)
     assert info.role == "admin"
+
+
+from wiwi.auth.service import AuthService
+
+
+async def _auth_svc():
+    eng = await _engine()
+    svc = AuthService(eng, "master-key-plaintext")
+    await svc.startup()
+    return svc
+
+
+async def test_create_key_stamps_owner():
+    svc = await _auth_svc()
+    plaintext, kid = await svc.create_key("alice-key", owner_id="u1")
+    assert plaintext.startswith("sk-wiwi-")
+    assert await svc.key_owner(kid) == "u1"
+
+
+async def test_create_key_no_owner_is_admin():
+    svc = await _auth_svc()
+    _, kid = await svc.create_key("system-key")
+    assert await svc.key_owner(kid) is None
+
+
+async def test_list_keys_for_owner_filters():
+    svc = await _auth_svc()
+    _, k1 = await svc.create_key("a1", owner_id="u1")
+    _, k2 = await svc.create_key("b1", owner_id="u2")
+    _, k3 = await svc.create_key("sys")
+    own1 = [k["id"] for k in await svc.list_keys_for_owner("u1")]
+    assert own1 == [k1]
+    all_ids = [k["id"] for k in await svc.list_keys()]
+    assert {k1, k2, k3} <= set(all_ids)
