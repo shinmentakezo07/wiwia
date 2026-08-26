@@ -178,12 +178,12 @@ function KeyRow(props: { provider: string; k: PoolKey; onError: (m: string) => v
   );
 }
 
-function KeyPoolCard(props: { p: Provider; onError: (m: string) => void }) {
+function KeyPoolCard(props: { p: Provider; providerName: string; onError: (m: string) => void }) {
   const qc = useQueryClient();
   const [roundRobin, setRoundRobin] = useState(props.p.round_robin);
 
   const toggleRR = useMutation({
-    mutationFn: () => patchProvider(props.p.name, { round_robin: !roundRobin }),
+    mutationFn: () => patchProvider(props.providerName, { round_robin: !roundRobin }),
     onSuccess: () => {
       setRoundRobin((v) => !v);
       void qc.invalidateQueries({ queryKey: ["providers"] });
@@ -216,7 +216,7 @@ function KeyPoolCard(props: { p: Provider; onError: (m: string) => void }) {
       ) : (
         <Table head={["Label", "Key", "Weight", "Status", "Action"]}>
           {props.p.keys.map((k) => (
-            <KeyRow key={k.label} provider={props.p.name} k={k} onError={props.onError} />
+            <KeyRow key={k.label} provider={props.providerName} k={k} onError={props.onError} />
           ))}
         </Table>
       )}
@@ -652,7 +652,7 @@ export function ProviderDetailPage() {
       </Dialog>
       <div className="admin-stagger grid grid-cols-1 gap-4 xl:grid-cols-3">
         <AccountSettingsCard p={p} onError={setError} />
-        <KeyPoolCard p={p} onError={setError} />
+        <KeyPoolCard p={p} providerName={name} onError={setError} />
         <AddKeysCard provider={p.name} existing={p.keys.length} onError={setError} />
         <ModelPickerCard p={p} onError={setError} />
         <DeploymentsCard provider={p.name} />

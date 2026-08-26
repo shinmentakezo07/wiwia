@@ -235,12 +235,25 @@ export function DashboardPage() {
   // kept live by SSE "log.created" events. A counter state forces re-renders.
   const liveRef = useRef<LiveBucket[]>([]);
   const liveSeededRef = useRef(false);
+  const lastDataRef = useRef<typeof logsQuery.data>(undefined);
   const [, bumpLive] = useState(0);
 
   useEffect(() => {
-    if (liveSeededRef.current || !logsQuery.data) return;
-    liveSeededRef.current = true;
-    liveRef.current = bucketLiveMinutes(logsQuery.data.logs);
+    if (!logsQuery.data) return;
+    // Seed from the request-log poll. Re-seed whenever a fresh poll arrives
+    // and the live buckets are entirely stale (no SSE activity since the last
+    // seed), so an SSE disconnect doesn't freeze the sparkline at old data.
+    const dataChanged = lastDataRef.current !== logsQuery.data;
+    lastDataRef.current = logsQuery.data;
+    if (!dataChanged && liveSeededRef.current) return;
+    const nowMin = Math.floor(Date.now() / 60_000);
+    const arr = liveRef.current;
+    const last = arr[arr.length - 1];
+    const stale = !last || last.minute < nowMin;
+    if (stale) {
+      liveSeededRef.current = true;
+      liveRef.current = bucketLiveMinutes(logsQuery.data.logs);
+    }
   }, [logsQuery.data]);
 
   const connected = useAdminStream("log.created", (data) => {

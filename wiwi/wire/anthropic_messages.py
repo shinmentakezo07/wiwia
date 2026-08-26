@@ -156,7 +156,11 @@ class AnthropicStreamEncoder:
         self.model = model
         self.req_id = req_id
         self._block_idx = 0
-        self._open_block: str | None = None  # "text" | "thinking" | "tool:<idx>"
+        self._open_block: str | None = None  # "text" | "thinking" | "tool"
+        # Map from IR tool index to Anthropic content block index, so
+        # interleaved parallel tool calls route args to the right block.
+        self._tool_blocks: dict[int, int] = {}
+        self._open_tool: int | None = None
         # Signature seen while no thinking block is open (cross-provider quirk);
         # flushed into the next thinking block right before it closes.
         self._pending_sig: str | None = None
@@ -167,11 +171,26 @@ class AnthropicStreamEncoder:
     def _evt(self, event: str, payload: dict[str, Any]) -> bytes:
         return sse_frame(event, orjson.dumps(payload).decode())
 
-    def _close_block(self) -> list[bytes]:
+    def _close_block(self, tool_index: int | None = None) -> list[bytes]:
+        """Close the currently open block, or a specific tool by IR index."""
+        if tool_index is not None:
+            # Close a specific tool's content block (parallel-safe).
+            idx = self._tool_blocks.pop(tool_index, None)
+            if idx is None:
+                return []
+            if self._open_tool == tool_index:
+                self._open_block = None
+                self._open_tool = None
+            return [self._evt("content_block_stop",
+                              {"type": "content_block_stop", "index": idx})]
         if self._open_block is None:
             return []
         idx = self._block_idx - 1
         kind = self._open_block
+        if kind == "tool" and self._open_tool is not None:
+            idx = self._tool_blocks.get(self._open_tool, self._block_idx - 1)
+            self._tool_blocks.pop(self._open_tool, None)
+            self._open_tool = None
         self._open_block = None
         out: list[bytes] = []
         if kind == "thinking" and self._pending_sig:
@@ -232,21 +251,27 @@ class AnthropicStreamEncoder:
                 self._pending_sig = d.signature
             return b"".join(out)
         if isinstance(d, dl.ToolCallOpen):
-            out = self._close_block()
+            out: list[bytes] = []
+            # Only close the open block if it's text/thinking — parallel
+            # tool calls are siblings, not sequential.
+            if self._open_block is not None and self._open_block != "tool":
+                out.extend(self._close_block())
             out.append(self._evt("content_block_start", {
                 "type": "content_block_start", "index": self._block_idx,
                 "content_block": {"type": "tool_use", "id": d.id, "name": d.name,
                                   "input": {}}}))
-            self._open_block = f"tool:{self._block_idx}"
+            self._tool_blocks[d.index] = self._block_idx
+            self._open_tool = d.index
+            self._open_block = "tool"
             self._block_idx += 1
             return b"".join(out)
         if isinstance(d, dl.ToolCallArgsDelta):
-            idx = int(self._open_block.split(":")[1]) if self._open_block else 0
+            idx = self._tool_blocks.get(d.index, self._block_idx - 1)
             return self._evt("content_block_delta", {
                 "type": "content_block_delta", "index": idx,
                 "delta": {"type": "input_json_delta", "partial_json": d.args_fragment}})
         if isinstance(d, dl.ToolCallClose):
-            return b"".join(self._close_block())
+            return b"".join(self._close_block(tool_index=d.index))
         if isinstance(d, dl.UsageFinal):
             self._usage = d
             return None

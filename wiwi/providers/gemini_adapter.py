@@ -90,6 +90,11 @@ class GeminiAdapter:
         thinking_budget = g.effective_thinking_budget()
         if thinking_budget is not None:
             gen["thinkingConfig"] = {"thinkingBudget": thinking_budget}
+        elif g.reasoning_effort == "none":
+            # explicit disable — effective_thinking_budget returns None for 'none',
+            # so without this branch thinkingConfig would never be set and
+            # thinking would stay at the model default.
+            gen["thinkingConfig"] = {"thinkingBudget": 0}
         if gen:
             body["generationConfig"] = gen
         if req.tools:

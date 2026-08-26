@@ -198,6 +198,9 @@ export function VirtualKeysPage() {
   const [editTpm, setEditTpm] = useState("");
   const [editModels, setEditModels] = useState("");
   const [clearExpiry, setClearExpiry] = useState(false);
+  const [clearBudget, setClearBudget] = useState(false);
+  const [clearRpm, setClearRpm] = useState(false);
+  const [clearTpm, setClearTpm] = useState(false);
 
   const editBudgetN = tryParse(editBudget);
   const editRpmN = tryParse(editRpm);
@@ -207,10 +210,10 @@ export function VirtualKeysPage() {
   function openEdit(k: VirtualKey) {
     setEditTarget(k);
     setEditBudget(k.max_budget != null ? String(k.max_budget) : "");
-    setEditRpm(k.rpm != null ? String(k.rpm) : "");
-    setEditTpm(k.tpm != null ? String(k.tpm) : "");
-    setEditModels(k.models.join(", "));
     setClearExpiry(false);
+    setClearBudget(false);
+    setClearRpm(false);
+    setClearTpm(false);
     setEditError(null);
   }
 
@@ -429,9 +432,12 @@ export function VirtualKeysPage() {
               const patch: Parameters<typeof patchKey>[1] = {};
               // Empty input = leave unchanged (field omitted); a value overwrites;
               // clearing happens only via the explicit checkboxes/nulls below.
-              if (editBudgetN != null) patch.max_budget = editBudgetN;
-              if (editRpmN != null) patch.rpm = editRpmN;
-              if (editTpmN != null) patch.tpm = editTpmN;
+              if (clearBudget) patch.max_budget = null;
+              else if (editBudgetN != null) patch.max_budget = editBudgetN;
+              if (clearRpm) patch.rpm = null;
+              else if (editRpmN != null) patch.rpm = editRpmN;
+              if (clearTpm) patch.tpm = null;
+              else if (editTpmN != null) patch.tpm = editTpmN;
               patch.models = parseCsv(editModels);
               if (clearExpiry) patch.expires_at = null;
               editSave.mutate({ id: editTarget.id, patch });
@@ -471,6 +477,35 @@ export function VirtualKeysPage() {
                   placeholder="unchanged"
                 />
               </Field>
+            </div>
+            <div className="flex flex-wrap gap-x-4 gap-y-2 text-[13px] text-[var(--admin-text-muted)]">
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={clearBudget}
+                  onChange={(e) => setClearBudget(e.target.checked)}
+                  className="h-4 w-4 rounded border-[var(--admin-border)] accent-blue-500"
+                />
+                Clear budget → unlimited
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={clearRpm}
+                  onChange={(e) => setClearRpm(e.target.checked)}
+                  className="h-4 w-4 rounded border-[var(--admin-border)] accent-blue-500"
+                />
+                Clear RPM → unlimited
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={clearTpm}
+                  onChange={(e) => setClearTpm(e.target.checked)}
+                  className="h-4 w-4 rounded border-[var(--admin-border)] accent-blue-500"
+                />
+                Clear TPM → unlimited
+              </label>
             </div>
             <Field
               label="Model allowlist"

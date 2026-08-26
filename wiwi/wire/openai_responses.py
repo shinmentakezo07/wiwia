@@ -61,8 +61,9 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                             parts.append(ir.ImagePart(b64=b64, mime=mime))
                         else:
                             parts.append(ir.ImagePart(url=url))
-            messages.append(ir.Message(role="assistant" if role == "assistant" else "user",
-                                       parts=parts))
+            ir_role = ("system" if role in ("system", "developer")
+                       else "assistant" if role == "assistant" else "user")
+            messages.append(ir.Message(role=ir_role, parts=parts))
         elif itype == "function_call":
             raw_args = item.get("arguments") or "{}"
             try:
@@ -127,12 +128,15 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                           if isinstance(body.get("reasoning"), dict) else None),
     )
     rf = body.get("text") or {}
-    if isinstance(rf, dict) and rf.get("format", {}).get("type") == "json_schema":
-        fmt = rf["format"]
-        g.response_format = ir.ResponseFormat(type="json_schema",
-                                              json_schema=fmt.get("schema"),
-                                              name=fmt.get("name"),
-                                              strict=fmt.get("strict"))
+    if isinstance(rf, dict):
+        fmt = rf.get("format") or {}
+        if fmt.get("type") == "json_schema":
+            g.response_format = ir.ResponseFormat(type="json_schema",
+                                                  json_schema=fmt.get("schema"),
+                                                  name=fmt.get("name"),
+                                                  strict=fmt.get("strict"))
+        elif fmt.get("type") == "json_object":
+            g.response_format = ir.ResponseFormat(type="json_object")
     return ir.Request(model=model, messages=messages, tools=tools,
                       tool_choice=tool_choice, gen_params=g,
                       stream=bool(body.get("stream")))
@@ -203,10 +207,11 @@ class ResponsesStreamEncoder:
         """Close a specific tool item by IR index (parallel-safe)."""
         if self._item_open == "tool" and self._open_tool == index:
             self._item_open = None
+            self._open_tool = None
         t = self._tools.pop(index, None)
         if t is None:
             return []
-        idx = self._open_out
+        idx = t["output_index"]
         n = t["index"]
         item_id = f"fc_{self.req_id}_{n}"
         return [self._evt("response.function_call_arguments.done", {
@@ -217,7 +222,6 @@ class ResponsesStreamEncoder:
                 "item": {"type": "function_call", "id": item_id,
                          "call_id": t["call_id"], "name": t["name"],
                          "arguments": t["args"]}})]
-
     def _close_item(self) -> list[bytes]:
         if self._item_open is None:
             return []
@@ -245,6 +249,7 @@ class ResponsesStreamEncoder:
         if t is None:
             self._item_open = None
             return []
+        idx = t["output_index"]
         n = t["index"]
         item_id = f"fc_{self.req_id}_{n}"
         return [self._evt("response.function_call_arguments.done", {
@@ -302,12 +307,17 @@ class ResponsesStreamEncoder:
                 "output_index": self._open_out, "delta": d.text}))
             return b"".join(out)
         if isinstance(d, dl.ToolCallOpen):
-            out = self._close_item()
+            out: list[bytes] = []
+            # Only close the open item if it's a message/thinking — parallel
+            # tool calls are siblings, not sequential; don't prematurely close
+            # an already-open tool.
+            if self._item_open is not None and self._item_open != "tool":
+                out.extend(self._close_item())
             n = d.index
-            self._tools[n] = {"index": n, "name": d.name,
-                              "call_id": d.id, "args": ""}
-            self._open_tool = n
             oi = self._next_output_index()
+            self._tools[n] = {"index": n, "name": d.name,
+                              "call_id": d.id, "args": "", "output_index": oi}
+            self._open_tool = n
             out.append(self._evt("response.output_item.added", {
                 "output_index": oi,
                 "item": {"type": "function_call", "id": f"fc_{self.req_id}_{n}",
@@ -316,12 +326,13 @@ class ResponsesStreamEncoder:
             return b"".join(out)
         if isinstance(d, dl.ToolCallArgsDelta):
             t = self._tools.setdefault(d.index, {"index": d.index, "name": "",
-                                                 "call_id": "", "args": ""})
+                                                 "call_id": "", "args": "",
+                                                 "output_index": self._open_out})
             t["args"] += d.args_fragment
             self._open_tool = d.index
             return self._evt("response.function_call_arguments.delta", {
                 "item_id": f"fc_{self.req_id}_{d.index}",
-                "output_index": self._open_out,
+                "output_index": t["output_index"],
                 "delta": d.args_fragment})
         if isinstance(d, dl.ToolCallClose):
             return b"".join(self._close_tool(d.index))

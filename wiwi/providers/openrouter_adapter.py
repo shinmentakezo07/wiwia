@@ -227,6 +227,12 @@ class OpenRouterAdapter(OpenAIAdapter):
                 summary = rd.get("summary", "")
                 if summary:
                     out.append(dl.ThinkingDelta(summary))
+            elif rtype == "reasoning.encrypted":
+                # Encrypted reasoning — preserve as-is so it round-trips if
+                # echoed back to OpenRouter (mirrors non-streaming decode).
+                enc = rd.get("data", "")
+                if enc:
+                    out.append(dl.ThinkingDelta(enc, signature=rd.get("id")))
 
         tool_calls = delta.get("tool_calls") or []
         for i, tc in enumerate(tool_calls):

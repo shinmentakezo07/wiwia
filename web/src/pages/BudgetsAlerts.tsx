@@ -65,7 +65,12 @@ function computeProjections(logs: RequestLogEntry[], now: Date): Projections {
   }
   if (oldest == null) return { byKey: new Map(), total: 0, hasData: false };
 
-  const windowDays = Math.max(Math.min(nowS - oldest, SEVEN_DAYS_S) / 86400, 1 / 24);
+  // Require at least 1 day of history before projecting. With less data the
+  // per-day rate is wildly unstable (a partially-filled ring can inflate the
+  // month-end estimate by up to ~720×), so report "insufficient data" instead.
+  const windowDays = Math.min(nowS - oldest, SEVEN_DAYS_S) / 86400;
+  if (windowDays < 1) return { byKey: new Map(), total: 0, hasData: false };
+
   const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
   const scale = daysInMonth / windowDays;
 

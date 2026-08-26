@@ -329,13 +329,18 @@ async def lifespan(app: FastAPI):
 
 
 def _inject_id(chunk: bytes, event_id: int) -> bytes:
-    """Prepend an SSE ``id:`` line to a complete SSE frame.
+    """Prepend an SSE ``id:`` line to each SSE frame in the chunk.
 
-    The id line is placed before the first ``event:`` or ``data:`` line,
-    which is valid SSE (id is part of the event block).
+    A chunk may contain multiple frames (joined by blank-line boundaries).
+    Per the SSE spec, an ``id`` line sets the last-event-id for the NEXT
+    event dispatched.  If we only tag the first frame, the client's
+    Last-Event-ID points at the first sub-event, not the last — causing
+    replay-from-wrong-offset on reconnect.  Tag every frame instead.
     """
     id_line = f"id: {event_id}\n".encode()
-    return id_line + chunk
+    frames = chunk.split(b"\n\n")
+    tagged = [id_line + f for f in frames if f]
+    return b"\n\n".join(tagged)
 
 
 def create_app(config: WiwiConfig) -> FastAPI:
@@ -395,11 +400,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
         return info, None
 
     async def enforce_rate_limit(info, est_tokens: int, request: Request,
-                                 surface: str) -> ORJSONResponse | None:
+                                 surface: str, request_id: str = "") -> ORJSONResponse | None:
         """Reserve RPM/TPM window slots only once the model is known-good."""
         allowed, retry_after = await state.limiter.check(info.key_id, info.rpm,
                                                          info.tpm,
-                                                         est_tokens=est_tokens)
+                                                         est_tokens=est_tokens,
+                                                         request_id=request_id)
         if not allowed:
             resp = _err(429, "rate_limit_error",
                         f"rate limit exceeded, retry in {retry_after}s",
@@ -413,7 +419,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
         u = ctx.usage
         if u is not None and info is not None:
             await state.limiter.record_tokens(
-                info.key_id, u.prompt_tokens + u.completion_tokens)
+                info.key_id, u.prompt_tokens + u.completion_tokens,
+                request_id=ctx.request_id)
 
     async def json_body(request: Request) -> tuple[Any, ORJSONResponse | None]:
         """Parse the request body; malformed JSON is a client error (400)."""
@@ -474,10 +481,13 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if group is None:
             return _err(404, "not_found_error",
                         f"model '{ir_req.model}' not found", request, surface)
-        rl_err = await enforce_rate_limit(info, est, request, surface)
+        import uuid as _uuid
+        request_id = _uuid.uuid4().hex[:16]
+        rl_err = await enforce_rate_limit(info, est, request, surface, request_id)
         if rl_err:
             return rl_err
-        ctx = RequestContext(surface=surface, ir_req=ir_req, auth=info, group=group)
+        ctx = RequestContext(surface=surface, ir_req=ir_req, auth=info, group=group,
+                             request_id=request_id)
         gateway = state_.gateways["chat"]
         if config.wiwi_settings.store_prompts_in_spend_logs:
             ctx.metadata["request_body"] = body
@@ -499,6 +509,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     state_.logs.log_request(build_log_event(ctx))
                     await stream.aclose()  # release pump resources, if any
                     return _err(e.status, e.etype, e.message, request, surface)
+                except BaseException:
+                    # Non-WiwiError failure: release the pump's upstream
+                    # connection before letting the outer handler deal with it.
+                    await stream.aclose()
+                    raise
                 it = _stream_response(state_, ctx, encoder_pair, surface,
                                       stream, first,
                                       event_ids=config.router_settings.stream_event_ids)
@@ -515,7 +530,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
             state_.logs.log_request(build_log_event(ctx))
             await _record_tpm_usage(info, ctx)
             if info and info.key_type != "master":
-                await state_.auth.update_spend(info.key_id, ctx.cost)
+                # never let accounting failure mask the successful response
+                with contextlib.suppress(Exception):
+                    await state_.auth.update_spend(info.key_id, ctx.cost)
             return ORJSONResponse(payload, headers={"x-wiwi-request-id": ctx.request_id})
         except Exception as e:  # noqa: BLE001
             if isinstance(e, WiwiError):
@@ -667,7 +684,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
             ir_req = am.decode_request(body)
         except (oc.DialectError, ValueError) as e:
             return _err(400, "invalid_request_error", str(e), request, "messages")
-        _, err_resp = await authenticate(request, ir_req.model, "messages")
+        _, err_resp = await authenticate(request, ir_req.model, "messages",
+                                          reserve=False)
         if err_resp:
             return err_resp
         from wiwi.ir import types as _ir
@@ -680,8 +698,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     @app.get("/v1/models")
     async def list_models(request: Request):
-        # authenticated like the rest of the API (OpenAI requires auth here too)
-        _, err_resp = await authenticate(request, model="*")
+        _, err_resp = await authenticate(request, model="*", reserve=False)
         if err_resp:
             return err_resp
         data = []
@@ -700,8 +717,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
         metrics_path = config.router_settings.prometheus_path
 
         @app.get(metrics_path)
-        async def prometheus_metrics():
-            events = [e for _, e in state.logs.sse.replay("request", 0)]
+        async def prometheus_metrics(request: Request):
+            if not is_admin(request):
+                return _err(401, "authentication_error", "master key required",
+                            request, "chat")
+            events = [e for _, e in await state.logs.sse.replay("request", 0)]
             text = render_metrics(events)
             return PlainTextResponse(text, media_type="text/plain; version=0.0.4")
 
@@ -777,7 +797,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             )
         # Ring fallback: deque is oldest→newest, so slice the newest N then
         # reverse to newest-first — matching the DB path contract.
-        ring = list(state.logs.sse.replay("request", 0))
+        ring = list(await state.logs.sse.replay("request", 0))
         return ORJSONResponse(
             {"logs": [public_dict(e) for _, e in reversed(ring[-limit:])]},
             headers={"Cache-Control": "no-store"},
@@ -813,7 +833,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             # would otherwise hang its own response start.
             yield b": connected\n\n"
             try:
-                for seq, evt in state.logs.sse.replay("request", last_id):
+                for seq, evt in await state.logs.sse.replay("request", last_id):
                     yield encode_sse(seq, evt)
                     last_sent = max(last_sent, seq)
                 while True:
@@ -823,6 +843,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         wait_set.add(asyncio.create_task(shutdown.wait()))
                     done, _pending = await asyncio.wait(
                         wait_set, timeout=15.0, return_when=asyncio.FIRST_COMPLETED)
+                    for t in _pending:
+                        t.cancel()
                     if not done:
                         # timed out — keepalive; also bail if the client is gone
                         if await request.is_disconnected():
@@ -1087,7 +1109,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
             acct.provider_type = ptype
             diff["provider_type"] = ptype
         if "base_url" in body:
-            base_url = str(_interpolate(body["base_url"])) or ""
+            raw_url = _interpolate(body["base_url"])
+            if not isinstance(raw_url, str):
+                return _err(400, "invalid_request_error",
+                            "base_url must be a string", request)
+            base_url = raw_url.strip()
             if not base_url:
                 return _err(400, "invalid_request_error",
                             "base_url must be non-empty", request)
@@ -1308,14 +1334,14 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return resp
         # Ring is oldest→newest; slice newest 500 then reverse to newest-first
         # so the contract matches /admin/logs/requests.
-        ring = list(state.logs.sse.replay("proxy", 0))
+        ring = list(await state.logs.sse.replay("proxy", 0))
         return ORJSONResponse(
             {"logs": [public_dict(e) for _, e in reversed(ring[-500:])]},
             headers={"Cache-Control": "no-store"},
         )
 
-    def _request_events() -> list[LogEvent]:
-        return [e for _, e in state.logs.sse.replay("request", 0)]
+    async def _request_events() -> list[LogEvent]:
+        return [e for _, e in await state.logs.sse.replay("request", 0)]
 
     @app.get("/admin/stats/overview")
     async def admin_stats_overview(request: Request, minutes: int = 60):
@@ -1327,7 +1353,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if sink is not None and (minutes == 0 or minutes > 1440):
             return ORJSONResponse(await sink.read_overview(minutes))
         minutes_ring = minutes if minutes > 0 else 1440
-        return ORJSONResponse(stats_mod.overview(_request_events(), minutes_ring))
+        return ORJSONResponse(stats_mod.overview(await _request_events(), minutes_ring))
 
     @app.get("/admin/stats/timeseries")
     async def admin_stats_timeseries(request: Request, bucket: str = "minute",
@@ -1344,7 +1370,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     await sink.read_timeseries(bs, metric, minutes))
             minutes_ring = minutes if minutes > 0 else 1440
             return ORJSONResponse(
-                stats_mod.timeseries(_request_events(), bucket, metric, minutes_ring))
+                stats_mod.timeseries(await _request_events(), bucket, metric, minutes_ring))
         except ValueError as e:
             return _err(400, "invalid_request_error", str(e), request)
 

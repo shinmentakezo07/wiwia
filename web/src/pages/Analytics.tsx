@@ -734,10 +734,7 @@ export function AnalyticsPage() {
     return (
       pricingMap.get(selectedModel) ??
       pricingQuery.data?.models?.find(
-        (p) =>
-          p.model_id === selectedModel ||
-          p.model_id.endsWith(selectedModel) ||
-          selectedModel.endsWith(p.model_id),
+        (p) => p.model_id === selectedModel || p.model_id.endsWith(selectedModel),
       )
     );
   }, [selectedModel, pricingMap, pricingQuery.data]);

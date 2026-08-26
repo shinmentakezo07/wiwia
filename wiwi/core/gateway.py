@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+from collections import deque
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -13,7 +14,7 @@ import httpx
 import orjson
 
 from wiwi.core.context import RequestContext
-from wiwi.cost.pricing import CostEngine, estimate_tokens
+from wiwi.cost.pricing import CostEngine, estimate_tokens, estimate_tokens_async
 from wiwi.ir import types as ir
 from wiwi.logging_core.events import LogEvent
 from wiwi.providers.base import (
@@ -245,7 +246,7 @@ class Gateway:
             if err_box[0] is None:
                 # Connection succeeded — report success so the key's
                 # req_count increments and any cooldown is cleared.
-                dep.provider.on_result(key, 200, None)
+                await dep.provider.on_result_locked(key, 200, None)
                 # Return the new pump task so the caller updates its outer
                 # reference — otherwise the resume pump leaks its connection
                 # when the consumer closes (the outer finally only cancels
@@ -254,7 +255,7 @@ class Gateway:
             # Connection failed — feed the key pool and deployment cooldown
             # so a provider that keeps failing on resume cools off.
             status = _status_of_wiwi_error(err_box[0])
-            dep.provider.on_result(key, status, err_box[0].retry_after)
+            await dep.provider.on_result_locked(key, status, err_box[0].retry_after)
             if status in (408, 500, 502, 503, 504, 529):
                 dep.record_fail(self.router.settings.allowed_fails,
                                 self.router.settings.cooldown_time)
@@ -289,11 +290,19 @@ class Gateway:
                                   "drop_params": self.drop_params,
                                   "provider_type": dep.provider.provider_type}
         url = _build_url(adapter, dep, key, True, self.kind)
-        body = adapter.encode_request(ctx.ir_req, dep.model_id, params)
-        if hasattr(adapter, "set_tool_context"):
-            adapter.set_tool_context(body)
-        headers = {**adapter.headers(key), **dep.provider.extra_headers,
-                   **dep.extra_headers}
+        try:
+            body = adapter.encode_request(ctx.ir_req, dep.model_id, params)
+            if hasattr(adapter, "set_tool_context"):
+                adapter.set_tool_context(body)
+            headers = {**adapter.headers(key), **dep.provider.extra_headers,
+                       **dep.extra_headers}
+        except Exception as e:  # noqa: BLE001
+            ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
+                             key.label, "encode_error", 0)
+            err_box[0] = WiwiError(400, "invalid_request_error",
+                                   f"failed to encode request: {e}")
+            ready.set()
+            return
         t0 = time.monotonic()
         usage_final: dl.UsageFinal | None = None
         finish: dl.Finish | None = None
@@ -321,6 +330,9 @@ class Gateway:
                 err = error_from_provider_status(resp.status_code,
                                                  raw.decode(errors="replace"),
                                                  dep.provider.name)
+                ra = _parse_retry_after(resp.headers.get("retry-after"))
+                if ra is not None:
+                    err.retry_after = ra
                 # on_result is called by execute_with_retries' except handler —
                 # don't double-count key errors here.
                 ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
@@ -340,8 +352,7 @@ class Gateway:
             idle_s = self.router.settings.stream_idle_timeout_s
             loop_limit = (self.router.settings.stream_loop_limit
                           if self.router.settings.stream_loop_detection else 0)
-            loop_last: str | None = None
-            loop_count = 0
+            loop_window: deque[str] = deque(maxlen=16)
             line_iter = resp.aiter_lines().__aiter__()
             closed = False  # True once resp_cm.__aexit__ has been called
 
@@ -394,21 +405,27 @@ class Gateway:
                         if isinstance(d, dl.TextDelta):
                             text_len += len(d.text)
                             if loop_limit > 0:
-                                if d.text == loop_last:
-                                    loop_count += 1
-                                    if loop_count >= loop_limit:
+                                loop_window.append(d.text)
+                                if len(loop_window) >= loop_limit:
+                                    chunks = list(loop_window)
+                                    n = len(chunks)
+                                    is_loop = False
+                                    for period in range(1, n // 2 + 1):
+                                        if all(chunks[i] == chunks[i - period]
+                                               for i in range(period, n)):
+                                            is_loop = True
+                                            break
+                                    if is_loop:
                                         self._note_stream_failure(dep, real_key)
                                         self._price_partial(ctx, dep, usage_final,
                                                             text_len)
                                         await queue.put(dl.StreamError(
                                             f"model loop detected ({loop_limit} "
-                                            f"identical chunks)", "unknown"))
+                                            f"repeating chunks)", "unknown"))
                                         await _close_upstream()
                                         return
-                                else:
-                                    loop_last = d.text
-                                    loop_count = 1
-                        await queue.put(d)
+                        if not client_gone:
+                            await queue.put(d)
             await _close_upstream()
             # upstream closed; on_result(200) already fired in
             # execute_with_retries when the stream started — don't double count.
@@ -421,20 +438,22 @@ class Gateway:
             if real_usage.prompt == 0:
                 # Provider sent no usable usage: estimate, keeping any real
                 # output / cache counts it did report.
+                est_prompt = await estimate_tokens_async(_flatten(ctx), dep.model_id)
                 est_usage = dl.UsageFinal(
-                    prompt=estimate_tokens(_flatten(ctx), dep.model_id),
+                    prompt=est_prompt,
                     cached=real_usage.cached, reasoning=real_usage.reasoning,
                     output=real_usage.output or max(1, text_len // 4),
                     cache_creation=real_usage.cache_creation, estimated=True)
             self._price_stream(ctx, dep, est_usage)
-            await queue.put(est_usage)
-            if finish is None and usage_final is None and not client_gone:
-                self._note_stream_failure(dep, real_key)
-                await queue.put(dl.StreamError(
-                    "upstream stream ended without completion", "connection"))
-                return
-            await queue.put(finish or dl.Finish("stop"))
-            await queue.put(dl.StreamEnd())
+            if not client_gone:
+                await queue.put(est_usage)
+                if finish is None and usage_final is None:
+                    self._note_stream_failure(dep, real_key)
+                    await queue.put(dl.StreamError(
+                        "upstream stream ended without completion", "connection"))
+                    return
+                await queue.put(finish or dl.Finish("stop"))
+                await queue.put(dl.StreamEnd())
         except asyncio.CancelledError:
             # client went away mid-stream: still release the upstream response,
             # or the pooled socket stays checked out until GC.  Price the
@@ -442,7 +461,7 @@ class Gateway:
             # tokens actually consumed before the disconnect.
             if started:
                 self._price_partial(ctx, dep, usage_final, text_len)
-                await asyncio.shield(_close_upstream())
+                await asyncio.shield(asyncio.wait_for(_close_upstream(), timeout=5.0))
             raise
         except Exception as e:  # noqa: BLE001
             if not started:
@@ -487,8 +506,10 @@ class Gateway:
     def _price(self, ctx: RequestContext, dep: Deployment, u: ir.Usage) -> None:
         model_key = f"{dep.provider.provider_type}/{dep.model_id}"
         ctx.usage = u
-        state = self.cost.cost_with_status(model_key, u.prompt_tokens,
-                                           u.completion_tokens, u.cached_tokens)
+        includes_cached = dep.provider.provider_type != "anthropic"
+        state = self.cost.cost_with_status(
+            model_key, u.prompt_tokens, u.completion_tokens, u.cached_tokens,
+            u.cache_creation_tokens, includes_cached)
         ctx.cost = state.cost
         ctx.cache_hit = u.cached_tokens > 0
         ctx.metadata["cache_savings"] = self._cache_savings(model_key, u)
@@ -512,7 +533,10 @@ class Gateway:
                              cached_tokens=u.cached, reasoning_tokens=u.reasoning,
                              reasoning_estimated=u.estimated,
                              cache_creation_tokens=u.cache_creation)
-        state = self.cost.cost_with_status(model_key, u.prompt, u.output, u.cached)
+        includes_cached = dep.provider.provider_type != "anthropic"
+        state = self.cost.cost_with_status(
+            model_key, u.prompt, u.output, u.cached, u.cache_creation,
+            includes_cached)
         ctx.cost = state.cost
         ctx.cache_hit = u.cached > 0
         ctx.metadata["cache_savings"] = self._cache_savings(model_key, ctx.usage)

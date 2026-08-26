@@ -67,14 +67,24 @@ def unalias_nim_tool_args(
 ) -> dict[str, Any]:
     """Reverse parameter aliasing: map ``_nim_arg_type`` back to ``type``.
 
-    ``aliases`` maps alias → original name.
+    ``aliases`` maps alias → original name.  Recurses into nested dicts and
+    lists so aliased keys at any depth are restored.
     """
     if not aliases:
         return args
     out: dict[str, Any] = {}
     for k, v in args.items():
-        out[aliases.get(k, k)] = v
+        out[aliases.get(k, k)] = _unalias_value(v, aliases)
     return out
+
+
+def _unalias_value(value: Any, aliases: dict[str, str]) -> Any:
+    """Recursively un-alias nested dict/list values."""
+    if isinstance(value, dict):
+        return unalias_nim_tool_args(value, aliases)
+    if isinstance(value, list):
+        return [_unalias_value(v, aliases) for v in value]
+    return value
 
 
 # -- boolean subschema removal -------------------------------------------------
@@ -189,7 +199,7 @@ def collect_nim_tool_aliases(tools: list[dict[str, Any]]) -> dict[str, dict[str,
     """Build a ``{tool_name: {alias: original}}`` map from sanitized tool defs.
 
     Scans the sanitized parameter schemas for aliased property names
-    ( prefixed with ``_nim_arg_`` ) and reverses them.
+    ( prefixed with ``_nim_arg_`` ) at all nesting levels and reverses them.
     """
     result: dict[str, dict[str, str]] = {}
     for tool in tools:
@@ -204,13 +214,28 @@ def collect_nim_tool_aliases(tools: list[dict[str, Any]]) -> dict[str, dict[str,
         params = fn.get("parameters")
         if not isinstance(params, dict):
             continue
-        props = params.get("properties")
-        if not isinstance(props, dict):
-            continue
         aliases: dict[str, str] = {}
-        for pname in props:
-            if isinstance(pname, str) and pname.startswith(_ALIAS_PREFIX):
-                aliases[pname] = pname[len(_ALIAS_PREFIX):]
+        _collect_aliases_in_node(params, aliases)
         if aliases:
             result[name] = aliases
     return result
+
+
+def _collect_aliases_in_node(value: Any, aliases: dict[str, str]) -> None:
+    """Recursively collect ``_nim_arg_``-prefixed property names → originals."""
+    if isinstance(value, list):
+        for v in value:
+            _collect_aliases_in_node(v, aliases)
+        return
+    if not isinstance(value, dict):
+        return
+    props = value.get("properties")
+    if isinstance(props, dict):
+        for pname in props:
+            if isinstance(pname, str) and pname.startswith(_ALIAS_PREFIX):
+                aliases[pname] = pname[len(_ALIAS_PREFIX):]
+        for schema in props.values():
+            _collect_aliases_in_node(schema, aliases)
+    for key in _SCHEMA_VALUE_KEYS | _SCHEMA_LIST_KEYS | _SCHEMA_MAP_KEYS:
+        if key in value:
+            _collect_aliases_in_node(value[key], aliases)

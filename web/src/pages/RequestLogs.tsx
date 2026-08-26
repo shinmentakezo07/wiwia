@@ -472,12 +472,7 @@ export function RequestLogsPage() {
 
   const query = useQuery({
     queryKey: ["request-logs"],
-    queryFn: async () => {
-      const { logs } = await getRequestLogs();
-      // Server already returns newest-first (ORDER BY id DESC / reversed ring);
-      // do NOT re-reverse — that was the root cause of stale/old logs display.
-      return logs;
-    },
+    queryFn: getRequestLogs,
     refetchInterval: 15_000,
   });
 
@@ -485,16 +480,16 @@ export function RequestLogsPage() {
     if (!live) return;
     const evt = asRequestEntry(data);
     if (!evt) return;
-    qc.setQueryData<RequestLogEntry[]>(["request-logs"], (old) => {
-      if (!old) return [evt];
+    qc.setQueryData<{ logs: RequestLogEntry[] }>(["request-logs"], (old) => {
+      if (!old) return { logs: [evt] };
       // Dedupe by request_id — the poll will replace this eventually, but
       // avoid showing the same event twice in the meantime.
-      if (old.some((l) => l.request_id === evt.request_id)) return old;
-      return [evt, ...old].slice(0, 500);
+      if (old.logs.some((l) => l.request_id === evt.request_id)) return old;
+      return { logs: [evt, ...old.logs].slice(0, 500) };
     });
   });
 
-  const all = query.data ?? EMPTY;
+  const all = query.data?.logs ?? EMPTY;
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();

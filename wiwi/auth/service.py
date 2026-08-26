@@ -152,10 +152,16 @@ class AuthService:
                 return k
         return None
 
-    UPDATABLE_FIELDS = ("max_budget", "rpm", "tpm", "models", "expires_at")
+    UPDATABLE_FIELDS = ("max_budget", "rpm", "tpm", "models", "expires_at",
+                        "ttl_seconds")
 
     async def update_key(self, key_id: str, fields: dict) -> dict | None:
         """Patch editable fields (absent = unchanged; explicit null = clear).
+
+        ``ttl_seconds`` is a relative duration (seconds from now); it is
+        converted to an absolute ``expires_at`` epoch. ``expires_at`` (absolute
+        epoch) is still accepted for backward compatibility. When both are
+        present, ``ttl_seconds`` wins.
 
         Returns the updated key dict, or None when the id is unknown. Cache is
         evicted so the new limits apply immediately.
@@ -167,9 +173,19 @@ class AuthService:
             val = fields[name]
             if name == "models":
                 val = __import__("json").dumps(list(val or []))
+            elif name == "ttl_seconds":
+                # Relative duration -> absolute epoch; ttl_seconds is not a
+                # DB column, it maps to expires_at.
+                if val is not None:
+                    sets["expires_at"] = time.time() + float(val)
+                else:
+                    sets["expires_at"] = None
+                continue
             elif val is not None:
                 val = float(val) if name in ("max_budget", "expires_at") else int(val)
             sets[name] = val
+        # ttl_seconds maps to expires_at; don't emit it as a column.
+        sets.pop("ttl_seconds", None)
         if not sets:
             return await self.get_key(key_id)
         async with self.engine.connect() as conn:

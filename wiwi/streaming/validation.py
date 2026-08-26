@@ -95,4 +95,8 @@ def _check_type(value: Any, expected: str) -> bool:
     # bool is a subclass of int, so check it separately.
     if expected == "integer" and isinstance(value, bool):
         return False
+    # bool is a subclass of int (and thus int|float), so reject it for
+    # "number" too — a JSON boolean is not a JSON number.
+    if expected == "number" and isinstance(value, bool):
+        return False
     return isinstance(value, python_type)

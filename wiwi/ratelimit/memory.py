@@ -17,7 +17,7 @@ class _Event:
     ts: float
     tokens: int          # 1 for rpm events
     estimated: bool = False  # True until record_tokens() confirms actual usage
-
+    request_id: str = ""  # tags the reservation so record_tokens can match it
 
 @dataclass
 class _Window:
@@ -53,7 +53,8 @@ class RateLimiter:
             w.events.popleft()
 
     async def check(self, key_id: str, key_rpm: int | None = None,
-                    key_tpm: int | None = None, est_tokens: int = 0) -> tuple[bool, int]:
+                    key_tpm: int | None = None, est_tokens: int = 0,
+                    request_id: str = "") -> tuple[bool, int]:
         """Returns (allowed, retry_after_seconds).
 
         Atomic against itself and against :meth:`record_tokens` so two
@@ -82,14 +83,21 @@ class RateLimiter:
             for w, limit in checks:
                 if w.is_token:
                     w.events.append(_Event(ts=now, tokens=max(0, est_tokens),
-                                           estimated=True))
+                                           estimated=True, request_id=request_id))
                 else:
                     w.events.append(_Event(ts=now, tokens=1))
             return True, 0
 
-    async def record_tokens(self, key_id: str, tokens: int) -> None:
+    async def record_tokens(self, key_id: str, tokens: int,
+                            request_id: str = "") -> None:
         """Post-request confirmation: replace the newest estimated reservation
         with the actual usage (prevents double-counting estimate + actual).
+
+        When *request_id* is provided, the reservation tagged with that id at
+        check time is replaced — so concurrent same-key requests do not
+        misattribute actual usage to the wrong reservation. When no id is
+        given or the tagged reservation is not found, fall back to replacing
+        the newest estimated reservation (backward-compatible behaviour).
 
         Atomic against :meth:`check` so the replacement is exclusive with
         the next admission decision.
@@ -101,10 +109,22 @@ class RateLimiter:
                 if w is None or not w.is_token:
                     continue
                 self._prune(w, now)
-                for e in reversed(w.events):
-                    if e.estimated:
-                        e.tokens = max(0, tokens)
-                        e.estimated = False
-                        break
+                # Match by request_id first so concurrent same-key requests
+                # each reconcile their own reservation. Fall back to the
+                # newest estimated reservation for backward compatibility.
+                target = None
+                if request_id:
+                    for e in reversed(w.events):
+                        if e.estimated and e.request_id == request_id:
+                            target = e
+                            break
+                if target is None:
+                    for e in reversed(w.events):
+                        if e.estimated:
+                            target = e
+                            break
+                if target is not None:
+                    target.tokens = max(0, tokens)
+                    target.estimated = False
                 else:
                     w.events.append(_Event(ts=now, tokens=max(0, tokens)))

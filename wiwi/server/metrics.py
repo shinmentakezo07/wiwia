@@ -16,16 +16,21 @@ work without any external dependency.
 
 from __future__ import annotations
 
+import math
 import time
 from collections import Counter
 
 from wiwi.logging_core.events import LogEvent
 
 
+def _escape_label(value: str) -> str:
+    """Escape a label value for Prometheus text exposition format."""
+    return value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
+
 def _percentile(sorted_vals: list[float], p: float) -> float:
     if not sorted_vals:
         return 0.0
-    idx = max(0, min(len(sorted_vals) - 1, int(len(sorted_vals) * p / 100)))
+    idx = max(0, min(len(sorted_vals) - 1, math.ceil(len(sorted_vals) * p / 100) - 1))
     return sorted_vals[idx]
 
 
@@ -64,11 +69,13 @@ def render_metrics(events: list[LogEvent]) -> str:
 
     # Status breakdown.
     for status, count in sorted(status_counts.items()):
-        lines.append(f"wiwi_requests_by_status{{status=\"{status}\"}} {count}")
+        lines.append(
+            f"wiwi_requests_by_status{{status=\"{_escape_label(str(status))}\"}} {count}")
 
     # Provider breakdown.
     for provider, count in sorted(provider_counts.items()):
-        lines.append(f"wiwi_requests_by_provider{{provider=\"{provider}\"}} {count}")
+        lines.append(
+            f"wiwi_requests_by_provider{{provider=\"{_escape_label(provider)}\"}} {count}")
 
     # Histograms (simplified: just p50, p95, p99).
     if durations:

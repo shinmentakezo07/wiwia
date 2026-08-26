@@ -18,6 +18,7 @@ best-effort value (``{}`` as ultimate fallback).
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 # Pairs that need closing when truncated.
@@ -72,6 +73,12 @@ def _repair_truncated_json(text: str) -> str:
         # safe to leave alone.
         if escaped and text.endswith("\\") and not text.endswith("\\\\"):
             text = text[:-1]
+        # An incomplete ``\uXXXX`` unicode escape (a backslash followed by
+        # 0-3 hex digits) likewise cannot be closed cleanly: appending `"`
+        # turns the partial escape into invalid JSON. Strip the trailing
+        # incomplete escape (backslash + up to 3 hex digits) before closing.
+        if re.search(r'\\u[0-9a-fA-F]{0,3}$', text):
+            text = re.sub(r'\\u[0-9a-fA-F]{0,3}$', '', text)
         suffix += _QUOTE
     # Close open containers in reverse order.
     suffix += "".join(reversed(stack))

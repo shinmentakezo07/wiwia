@@ -68,8 +68,11 @@ class SSEBroadcastSink:
             if q in self._subs[stream]:
                 self._subs[stream].remove(q)
 
-    def replay(self, stream: str, last_event_id: int) -> list[tuple[int, LogEvent]]:
-        return [(i, e) for i, e in self._rings[stream] if i > last_event_id]
+    async def replay(self, stream: str, last_event_id: int) -> list[tuple[int, LogEvent]]:
+        # Snapshot the ring under the lock so a concurrent publish() cannot
+        # mutate the deque while we iterate it.
+        async with self._lock:
+            return [(i, e) for i, e in self._rings[stream] if i > last_event_id]
 
     async def publish(self, stream: str, event: LogEvent) -> None:
         # Store a lightweight copy (prompt/response bodies stripped) in the
@@ -127,6 +130,9 @@ class LoggingSubsystem:
                        action=action, target=target, diff=diff or {})
         if self._db_sink is not None:
             await self._db_sink.write_audit(evt)
+        else:
+            log.warning("audit_event_dropped", actor=actor, action=action,
+                        target=target)
 
     # -- lifecycle ------------------------------------------------------------
     async def start(self) -> None:

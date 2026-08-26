@@ -75,7 +75,7 @@ def overview(events: list[LogEvent], minutes: int,
         "tps_avg": round(sum(tps_values) / len(tps_values), 2) if tps_values else 0.0,
         "tps_p95": round(_p95(tps_values), 2),
         "ttft_p95_ms": round(_p95(ttft_values), 1),
-        "latency_p95_ms": round(_p95([e.latency_ms for e in win]), 1),
+        "latency_p95_ms": round(_p95([e.latency_ms for e in win if e.latency_ms > 0]), 1),
         "cost": round(sum(e.cost for e in win), 6),
         "cache_savings": round(sum(e.cache_savings for e in win), 6),
     }

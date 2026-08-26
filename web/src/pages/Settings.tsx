@@ -11,7 +11,7 @@
 // Dra-style dark design system.
 
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import {
   Activity,
   Boxes,
@@ -247,6 +247,7 @@ function AppearanceTab() {
 function SecurityTab() {
   const [revealed, setRevealed] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [cacheCleared, setCacheCleared] = useState(false);
   const navigate = useNavigate();
   const { logout } = useAuth();
   const qc = useQueryClient();
@@ -256,10 +257,9 @@ function SecurityTab() {
     // Drop all cached server data (logs, overview, timeseries, pricing,
     // providers, keys) from the in-memory React Query cache so every page
     // refetches fresh data on next visit. This is where the stats/log data
-    // actually lives — localStorage only holds the master key and UI prefs.
     qc.clear();
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+    setCacheCleared(true);
+    setTimeout(() => setCacheCleared(false), 1500);
   }
 
   return (
@@ -354,7 +354,7 @@ function SecurityTab() {
             </div>
             <Button variant="ghost" onClick={clearCache}>
               <Trash2 size={14} />
-              Clear cache
+              {cacheCleared ? "Cleared" : "Clear cache"}
             </Button>
           </div>
         </div>
@@ -428,8 +428,8 @@ function AboutTab() {
 function InfoTile(props: { icon: LucideIcon; title: string; desc: string; to: string }) {
   const Icon = props.icon;
   return (
-    <a
-      href={props.to}
+    <Link
+      to={props.to}
       className="group flex items-center gap-3 rounded-[12px] border border-[var(--admin-border)] bg-white/[0.015] px-4 py-3 transition-colors hover:border-[var(--admin-border-hover)] hover:bg-white/[0.025]"
     >
       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-gradient-to-br from-blue-500/15 to-violet-500/15 ring-1 ring-white/[0.06]">
@@ -439,7 +439,7 @@ function InfoTile(props: { icon: LucideIcon; title: string; desc: string; to: st
         <p className="text-[13px] font-medium text-[var(--admin-text)]">{props.title}</p>
         <p className="truncate text-[11px] text-[var(--admin-text-dim)]">{props.desc}</p>
       </div>
-    </a>
+    </Link>
   );
 }
 

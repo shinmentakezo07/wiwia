@@ -58,7 +58,9 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         if role == "assistant":
             rc = m.get("reasoning_content")
             if isinstance(rc, str) and rc:
-                parts.append(ir.ThinkingPart(text=rc))
+                # Must be the FIRST part: Anthropic extended-thinking requires
+                # the final assistant turn to begin with a thinking block.
+                parts.insert(0, ir.ThinkingPart(text=rc))
         for tc in tool_calls:
             fn = tc.get("function") or {}
             raw_args = fn.get("arguments") or "{}"
@@ -212,6 +214,8 @@ class ChatStreamEncoder:
         if isinstance(d, dl.TextDelta):
             return self._shell({"content": d.text})
         if isinstance(d, dl.ThinkingDelta):
+            if not d.text:
+                return None  # signature-only delta: no content to emit
             return self._shell({"reasoning_content": d.text})
         if isinstance(d, dl.ToolCallOpen):
             return self._shell({"tool_calls": [{

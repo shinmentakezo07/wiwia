@@ -48,7 +48,9 @@ class ProviderKey:
     def recover(self) -> None:
         if self.status == "cooling" and time.monotonic() >= self.cooldown_until:
             self.status = "active"
-
+            # Reset WRR weight so the recovered key isn't starved by the
+            # deficit it accumulated while cooling.
+            self.current_weight = 0.0
 
 @dataclass
 class ProviderAccount:
@@ -172,7 +174,11 @@ class Deployment:
     def record_fail(self, allowed_fails: int, cooldown_time: float) -> None:
         now = time.monotonic()
         self.fails.append(now)
-        recent = [t for t in self.fails if now - t < 60]
+        # Use a window at least 2x the cooldown time so chronic slow-fail
+        # deployments (failing once every >60s) still accumulate enough
+        # failures to trigger a cooldown.
+        window = max(60.0, 2 * cooldown_time)
+        recent = [t for t in self.fails if now - t < window]
         self.fails = recent
         if len(recent) >= allowed_fails:
             self.cooldown_until = now + cooldown_time
@@ -242,8 +248,12 @@ class Router:
         if strategy == "least-busy":
             return min(avail, key=lambda d: d.inflight)
         if strategy == "latency-based":
-            # p95 == 0 means "no samples yet": let cold deployments win so they
-            # get explored instead of starving behind warmed-up peers
+            # p95 == 0 means "no samples yet": among cold deployments,
+            # break ties randomly so they get explored instead of all
+            # traffic pinning to the first one in list order.
+            cold = [d for d in avail if d.p95_latency() == 0.0]
+            if cold and len(cold) == len(avail):
+                return random.choice(cold)
             return min(avail, key=lambda d: d.p95_latency())
         # simple-shuffle: weight-weighted random
         total = sum(d.weight for d in avail)
@@ -439,8 +449,6 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
         tried_dep_ids: set[int] = set()
         for attempt in range(router.settings.num_retries + 1):
             dep = router.pick_deployment(deps, ctx, exclude=tried_dep_ids)
-            if dep is not None:
-                tried_dep_ids.add(id(dep))
             if dep is None:
                 last_err = WiwiError(503, "service_unavailable",
                                      f"no healthy deployment for '{group_name}'",
@@ -448,22 +456,32 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                 break
             key, retry_in = await dep.provider.pick_key()
             if key is None:
+                tried_dep_ids.add(id(dep))
                 last_err = WiwiError(429, "rate_limit_error",
                                      f"all keys cooling for provider"
                                      f" '{dep.provider.name}'", retry_after=max(1.0, retry_in))
                 fresh = any(d.available and id(d) not in tried_dep_ids for d in deps)
-                if not fresh and attempt < router.settings.num_retries:
-                    await asyncio.sleep(min(5.0, max(1.0, retry_in)))
-                continue  # dep already excluded above; siblings may have live keys
+                if not fresh:
+                    # All keys cooling and no fresh deployments: wait for a
+                    # key to recover, then clear exclusions so the deployment
+                    # can be retried instead of breaking with a 503.
+                    if attempt < router.settings.num_retries:
+                        await asyncio.sleep(min(5.0, max(1.0, retry_in)))
+                        tried_dep_ids.clear()
+                    continue
+                continue  # siblings may have live keys
             # inflight/latency accounting lives in the gateway: for streams the
             # request stays in flight until the pump finishes, not until
             # execute_with_retries returns (which happens at connect time).
             try:
                 result = await call_one(
                     dep, ProviderKeyRef(label=key.label, secret=key.secret), ctx)
+                # Success: account the key. For streaming the pump also
+                # increments req_count on clean completion.
                 await dep.provider.on_result_locked(key, 200, None)
                 return result
             except WiwiError as e:
+                tried_dep_ids.add(id(dep))
                 if group_first_err is None:
                     group_first_err = e
                 last_err = e

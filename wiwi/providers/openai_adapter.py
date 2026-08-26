@@ -283,6 +283,8 @@ class OpenAIAdapter:
             out.append(dl.TextDelta(delta["content"]))
         if delta.get("reasoning_content"):
             out.append(dl.ThinkingDelta(delta["reasoning_content"]))
+        elif delta.get("reasoning"):
+            out.append(dl.ThinkingDelta(delta["reasoning"]))
         tool_calls = delta.get("tool_calls") or []
         for i, tc in enumerate(tool_calls):
             idx = tc.get("index", i)

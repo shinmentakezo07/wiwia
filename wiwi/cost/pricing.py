@@ -32,25 +32,40 @@ class CostEngine:
         }
 
     def cost(self, model_id: str, prompt_tokens: int, completion_tokens: int,
-             cached_tokens: int = 0) -> float:
-        return self.cost_with_status(model_id, prompt_tokens, completion_tokens,
-                                     cached_tokens).cost
+             cached_tokens: int = 0, cache_creation_tokens: int = 0,
+             prompt_includes_cached: bool = True) -> float:
+        return self.cost_with_status(
+            model_id, prompt_tokens, completion_tokens, cached_tokens,
+            cache_creation_tokens, prompt_includes_cached).cost
 
-    def cost_with_status(self, model_id: str, prompt_tokens: int, completion_tokens: int,
-                         cached_tokens: int = 0) -> CostState:
+    def cost_with_status(self, model_id: str, prompt_tokens: int,
+                         completion_tokens: int, cached_tokens: int = 0,
+                         cache_creation_tokens: int = 0,
+                         prompt_includes_cached: bool = True) -> CostState:
         """Like :meth:`cost` but also returns whether the model is priced.
 
         Unpriced models report cost=0.0 (back-compat) and unpriced=True so
         callers can log/flag the missing entry rather than silently treating
-        usage as free."""
+        usage as free.
+
+        ``prompt_includes_cached``: True for providers whose ``prompt_tokens``
+        is the TOTAL prompt (OpenAI, Gemini, NIM, OpenRouter); False for
+        Anthropic, whose ``input_tokens`` already excludes cached tokens.
+        """
         p = self._lookup(model_id)
         if not p:
             return CostState(cost=0.0, unpriced=True)
-        uncached_prompt = max(0, prompt_tokens - cached_tokens)
+        if prompt_includes_cached:
+            uncached_prompt = max(0, prompt_tokens - cached_tokens)
+        else:
+            uncached_prompt = prompt_tokens
         cached_rate = p.get("cache_read_input_cost_per_token", p["input_cost_per_token"])
+        cache_creation_rate = p.get("cache_creation_input_cost_per_token",
+                                    p["input_cost_per_token"])
         total = (
             uncached_prompt * p["input_cost_per_token"]
             + cached_tokens * cached_rate
+            + cache_creation_tokens * cache_creation_rate
             + completion_tokens * p["output_cost_per_token"]
         )
         return CostState(cost=round(total, 8), unpriced=False)
@@ -90,15 +105,21 @@ def estimate_tokens(text: str, model: str | None = None) -> int:
         return 0
     # Try tiktoken for OpenAI-family models.
     if model:
-        enc_name = _model_to_encoding(model)
-        if enc_name:
-            try:
-                import tiktoken
-                enc = tiktoken.get_encoding(enc_name)
-                return len(enc.encode(text))
-            except Exception:  # noqa: BLE001, S110
-                pass  # tiktoken not installed or encoding not found
+        enc = _get_tiktoken_encoding(model)
+        if enc is not None:
+            return len(enc.encode(text))
     return max(1, len(text) // 4)
+
+
+async def estimate_tokens_async(text: str, model: str | None = None) -> int:
+    """Async wrapper around :func:`estimate_tokens`.
+
+    Offloads the (potentially blocking) tiktoken import + encoding to a
+    worker thread via :func:`asyncio.to_thread` so the event loop is not
+    blocked in async stream-pump coroutines.
+    """
+    import asyncio
+    return await asyncio.to_thread(estimate_tokens, text, model)
 
 
 # Map common model prefixes to tiktoken encoding names.
@@ -118,3 +139,40 @@ def _model_to_encoding(model: str) -> str | None:
         if lower.startswith(prefix):
             return enc
     return None
+
+
+# Cache of tiktoken encoding instances, keyed by encoding name. The tiktoken
+# import and get_encoding call are expensive (file I/O + BPE merge-table load);
+# caching avoids repeating them on every estimate_tokens call.
+_tiktoken_encodings: dict[str, object] = {}
+_tiktoken_available: bool | None = None
+
+
+def _get_tiktoken_encoding(model: str) -> object | None:
+    """Return a cached tiktoken encoding for *model*, or None if unavailable.
+
+    Caches the tiktoken import check and each encoding instance so the
+    expensive import + ``get_encoding`` work happens at most once per encoding.
+    """
+    global _tiktoken_available
+    enc_name = _model_to_encoding(model)
+    if not enc_name:
+        return None
+    cached = _tiktoken_encodings.get(enc_name)
+    if cached is not None:
+        return cached
+    if _tiktoken_available is None:
+        try:
+            import tiktoken
+            _tiktoken_available = True
+        except Exception:  # noqa: BLE001
+            _tiktoken_available = False
+    if not _tiktoken_available:
+        return None
+    try:
+        import tiktoken
+        enc = tiktoken.get_encoding(enc_name)
+        _tiktoken_encodings[enc_name] = enc
+        return enc
+    except Exception:  # noqa: BLE001
+        return None

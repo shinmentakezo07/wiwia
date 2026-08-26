@@ -84,7 +84,7 @@ def error_from_provider_status(status: int, body_text: str, provider: str) -> Wi
         return WiwiError(502, "api_connection_error",
                          f"{provider} error {status}: {msg}", retryable=True)
     if status == 400 and ("context" in msg.lower() or "maximum" in msg.lower()
-                          or "too long" in msg.lower() or "tokens" in msg.lower()):
+                          or "too long" in msg.lower()):
         return WiwiError(400, "context_window_exceeded", msg)
     if status == 400:
         return WiwiError(400, "invalid_request_error", f"{provider}: {msg}")

@@ -139,6 +139,11 @@ export function ModelsPage() {
   const [error, setError] = useState<string | null>(null);
   const query = useQuery({ queryKey: ["models"], queryFn: getModels, refetchInterval: 10_000 });
 
+  if (query.isLoading) return <Spinner />;
+  if (query.error) return <ErrorText>{query.error.message}</ErrorText>;
+
+  const data = query.data!;
+
   const setStrategy = useMutation({
     mutationFn: (strategy: string) => {
       if (!data.groups.length) return Promise.reject(new Error("no groups to patch"));
@@ -148,11 +153,6 @@ export function ModelsPage() {
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["models"] }),
     onError: (e) => setError(e.message),
   });
-
-  if (query.isLoading) return <Spinner />;
-  if (query.error) return <ErrorText>{query.error.message}</ErrorText>;
-
-  const data = query.data!;
 
   return (
     <div>
