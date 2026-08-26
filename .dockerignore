@@ -1,0 +1,46 @@
+# Build artifacts
+web/node_modules/
+web/dist/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Live config & secrets (tracked template: wiwi.yaml.example)
+wiwi.yaml
+key.md
+wiwi.db
+.env
+
+# Local verification scratch
+.verify/
+
+# Git
+.git/
+.gitignore
+
+# IDE / tooling
+.omp/
+.omo/
+.codegraph/
+
+# Reference sources (not needed in production image)
+web/src/llmgateway-ref/
+
+# Docs (not needed in runtime image)
+docs/
+
+# Test artifacts
+bench.py
+detailed.md
+AUDIT.md
+RESEARCH.md
+UPDATE.md
+
+# Misc
+*.md
+!wiwi/server/static/**/*.md
+README.md

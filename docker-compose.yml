@@ -23,10 +23,16 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-    # If wiwi.yaml exists on the host, mount it; otherwise set WIWI_CONFIG
-    # env var with inline YAML (cloud deployments without a host filesystem).
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+    # If wiwi.yaml exists on the host, mount it; otherwise the container
+    # ships with wiwi.yaml.example as /app/wiwi.yaml. Set env vars to
+    # activate providers; absent keys are filtered at load time.
     volumes:
-      - ./wiwi.yaml:/app/wiwi.yaml:ro
+      - wiwi_data:/app/data
+      # Uncomment to mount a custom config:
+      # - ./wiwi.yaml:/app/wiwi.yaml:ro
     command: ["--config", "/app/wiwi.yaml", "--host", "0.0.0.0", "--port", "4000"]
     depends_on:
       postgres:
@@ -35,3 +41,4 @@ services:
 
 volumes:
   pgdata:
+  wiwi_data:
