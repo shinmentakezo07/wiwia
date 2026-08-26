@@ -4,8 +4,8 @@ import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
 
 // Dev runs standalone at / (SPA routes live at the root); production builds
-// with --base=/admin/ui/ (see package.json) so the FastAPI process can serve
-// the bundle from wiwi/server/static at /admin/ui.
+// with default base=/ so assets resolve at /assets/... and the FastAPI process
+// serves the bundle from wiwi/server/static at the root.
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {

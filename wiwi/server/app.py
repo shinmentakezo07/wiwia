@@ -1754,7 +1754,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     class SPAStaticFiles(StaticFiles):
         """StaticFiles with SPA history fallback: unknown paths get index.html
-        so client-side routes like /admin/ui/login survive hard refresh."""
+        so client-side routes like /login or /app survive hard refresh."""
 
         async def get_response(self, path: str, scope):
             try:
@@ -1768,7 +1768,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return resp
 
     if static_dir.is_dir():
-        app.mount("/admin/ui", SPAStaticFiles(directory=str(static_dir), html=True),
+        # Mount the SPA at the root.  API routes (/admin/*, /v1/*, /auth/*,
+        # /public/*, /health) are registered above and matched first, so they
+        # still return JSON.  Any path that doesn't match an API route falls
+        # through to the SPA and serves index.html (client-side routing).
+        app.mount("/", SPAStaticFiles(directory=str(static_dir), html=True),
                   name="admin-ui")
 
     return app
