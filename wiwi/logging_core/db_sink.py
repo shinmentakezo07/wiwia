@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
   request_id TEXT DEFAULT '',
   surface TEXT DEFAULT '',
   key_alias TEXT DEFAULT '',
+  key_id TEXT DEFAULT '',
   model_group TEXT DEFAULT '',
   provider TEXT DEFAULT '',
   provider_key_label TEXT DEFAULT '',
@@ -55,6 +56,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
   request_id TEXT DEFAULT '',
   surface TEXT DEFAULT '',
   key_alias TEXT DEFAULT '',
+  key_id TEXT DEFAULT '',
   model_group TEXT DEFAULT '',
   provider TEXT DEFAULT '',
   provider_key_label TEXT DEFAULT '',
@@ -99,10 +101,10 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 """
 
-_COLS = ("ts", "request_id", "surface", "key_alias", "model_group", "provider",
-         "provider_key_label", "status", "error_code", "tok_in", "tok_cached",
-         "tok_reasoning", "tok_out", "tps", "ttft_ms", "latency_ms", "cost",
-         "was_stream", "cache_hit", "cache_savings", "attempts",
+_COLS = ("ts", "request_id", "surface", "key_alias", "key_id", "model_group",
+         "provider", "provider_key_label", "status", "error_code", "tok_in",
+         "tok_cached", "tok_reasoning", "tok_out", "tps", "ttft_ms", "latency_ms",
+         "cost", "was_stream", "cache_hit", "cache_savings", "attempts",
          "request_body", "response_body")
 
 
@@ -140,7 +142,8 @@ class DBSink:
         else:
             cols = {r[1] for r in (await conn.execute(
                 sa.text("PRAGMA table_info(request_logs)"))).all()}
-        for col, decl in [("request_body", "TEXT"), ("response_body", "TEXT")]:
+        for col, decl in [("request_body", "TEXT"), ("response_body", "TEXT"),
+                          ("key_id", "TEXT DEFAULT ''")]:
             if col not in cols:
                 await conn.execute(
                     sa.text(f"ALTER TABLE request_logs ADD COLUMN {col} {decl}"))
@@ -148,12 +151,15 @@ class DBSink:
         # Indexes for query hot paths:
         # - ts: time-range filters in overview, timeseries, and log reads
         # - key_alias: per-key filtering in admin API
+        # - key_id: per-user filtering (scoping request logs by the key ids a
+        #   user owns — key_alias is not unique in vkeys, so scope by key_id)
         # - model_group: per-model filtering in admin API
         # - request_id: lookup by request ID
         # - audit_logs.ts: time-range queries on audit log
         for idx in [
             "CREATE INDEX IF NOT EXISTS idx_request_logs_ts ON request_logs(ts)",
             "CREATE INDEX IF NOT EXISTS idx_request_logs_key_alias ON request_logs(key_alias)",
+            "CREATE INDEX IF NOT EXISTS idx_request_logs_key_id ON request_logs(key_id)",
             "CREATE INDEX IF NOT EXISTS idx_request_logs_model_group ON request_logs(model_group)",
             "CREATE INDEX IF NOT EXISTS idx_request_logs_request_id ON request_logs(request_id)",
             "CREATE INDEX IF NOT EXISTS idx_audit_logs_ts ON audit_logs(ts)",
@@ -164,7 +170,8 @@ class DBSink:
     def _row(evt: LogEvent) -> dict:
         return {
             "ts": evt.ts, "request_id": evt.request_id, "surface": evt.surface,
-            "key_alias": evt.key_alias, "model_group": evt.model_group,
+            "key_alias": evt.key_alias, "key_id": evt.key_id,
+            "model_group": evt.model_group,
             "provider": evt.provider, "provider_key_label": evt.provider_key_label,
             "status": evt.status, "error_code": evt.error_code,
             "tok_in": evt.tok_in, "tok_cached": evt.tok_cached,
@@ -198,20 +205,37 @@ class DBSink:
                  "target": evt.target, "diff": orjson.dumps(evt.diff).decode()},
             )
 
-    async def read_requests(self, limit: int = 200) -> list[dict]:
+    async def read_requests(self, limit: int = 200,
+                            key_ids: list[str] | None = None) -> list[dict]:
         """Newest-first rows shaped like public_dict(LogEvent) so the admin UI
         can treat ring-backed and DB-backed entries identically.
 
         Ordered by ts DESC (id DESC tiebreak) so the result is deterministic by
         event time regardless of insertion order — the frontend renders this
         array directly without re-sorting.
+
+        *key_ids* scoping semantics:
+        - ``None`` → admin / unfiltered (all rows).
+        - non-empty list → rows whose ``key_id`` is in the list (per-user).
+        - empty list ``[]`` → this caller owns no keys → return [] with no
+          DB query. (An empty list is NOT "no filter": it is the normal
+          first-visit state for a user who signed up but generated no key,
+          and treating it as unfiltered leaks every other user's rows.)
         """
+        if key_ids is not None and not key_ids:
+            return []
         cols = ", ".join(_COLS)
+        params: dict = {"l": int(limit)}
+        where = ""
+        if key_ids:
+            where = "WHERE key_id IN :kids"
+            params["kids"] = key_ids
+        stmt = sa.text(f"SELECT {cols} FROM request_logs {where}"
+                       " ORDER BY ts DESC, id DESC LIMIT :l")
+        if key_ids:
+            stmt = stmt.bindparams(sa.bindparam("kids", expanding=True))
         async with self.engine.connect() as conn:
-            rows = (await conn.execute(
-                sa.text(f"SELECT {cols} FROM request_logs"
-                        " ORDER BY ts DESC, id DESC LIMIT :l"),
-                {"l": int(limit)})).all()
+            rows = (await conn.execute(stmt, params)).all()
         out: list[dict] = []
         for r in rows:
             d = dict(zip(_COLS, r))
@@ -232,20 +256,65 @@ class DBSink:
             out.append(d)
         return out
 
-    async def read_overview(self, minutes: int) -> dict:
+    async def read_overview(self, minutes: int,
+                            key_ids: list[str] | None = None) -> dict:
         """DB-backed overview with the same dict shape as stats.overview().
 
         minutes == 0 means all-time (no ts cutoff).
+
+        *key_ids* scoping semantics (see ``read_requests``):
+        - ``None`` → admin / unfiltered.
+        - non-empty list → aggregates restricted to those ``key_id``s.
+        - empty list ``[]`` → caller owns no keys → return the zero-aggregate
+          overview shape (the same dict this method returns when the matching
+          row set is empty) with no DB query. Not "no filter": an empty list
+          is the normal first-visit state for a user without a key, and
+          treating it as unfiltered leaks every other user's aggregates.
         """
         now = time.time()
+        if key_ids is not None and not key_ids:
+            # Zero-row overview: same shape the aggregate below returns when
+            # no rows match, so the frontend's empty state works unchanged.
+            return {
+                "window_minutes": minutes,
+                "generated_at": now,
+                "requests": 0,
+                "errors": 0,
+                "error_rate": 0.0,
+                "requests_per_minute": 0.0,
+                "tok_in": 0,
+                "tok_cached": 0,
+                "tok_reasoning": 0,
+                "tok_out": 0,
+                "cache_hits": 0,
+                "cache_hit_rate": 0.0,
+                "tps_avg": 0.0,
+                "tps_p95": 0.0,
+                "ttft_p95_ms": 0.0,
+                "latency_p95_ms": 0.0,
+                "cost": 0.0,
+                "cache_savings": 0.0,
+            }
         cutoff = now - minutes * 60 if minutes > 0 else 0.0
-        where_clause = "WHERE ts >= :cutoff" if minutes > 0 else ""
         params: dict = {}
         if minutes > 0:
             params["cutoff"] = cutoff
 
+        # key_id IN :kids clause — applied to the aggregate WHERE and to every
+        # p95 sample subquery.  When key_ids is None/empty, no filtering.
+        key_filter = bool(key_ids)
+        if key_filter:
+            params["kids"] = key_ids
+        # For the aggregate, which may have no ts WHERE at all (all-time):
+        if minutes > 0:
+            where_clause = "WHERE ts >= :cutoff" + (" AND key_id IN :kids" if key_filter else "")
+        else:
+            where_clause = "WHERE key_id IN :kids" if key_filter else ""
+        # For sample subqueries, which always begin "WHERE <col> > 0":
+        key_and = " AND key_id IN :kids" if key_filter else ""
+
         async with self.engine.connect() as conn:
-            row = (await conn.execute(sa.text(f"""
+            agg_stmt = (sa.text(f"""
                 SELECT COUNT(*) AS requests,
                        SUM(CASE WHEN status >= 400 OR error_code != '' THEN 1 ELSE 0 END) AS errors,
                        COALESCE(SUM(tok_in), 0) AS tok_in,
@@ -257,35 +326,37 @@ class DBSink:
                        COALESCE(SUM(cache_savings), 0) AS cache_savings
                 FROM request_logs
                 {where_clause}
-            """), params)).one()
+            """))
+            if key_filter:
+                agg_stmt = agg_stmt.bindparams(sa.bindparam("kids", expanding=True))
+            row = (await conn.execute(agg_stmt, params)).one()
 
             requests = row.requests or 0
             errors = row.errors or 0
             cache_hits = row.cache_hits or 0
 
-            # p95 from bounded sample (max 5000 rows) to avoid full-table scan
-            sample_query = "SELECT tps FROM request_logs"
-            sample_where = "WHERE tps > 0"
-            if minutes > 0:
-                sample_where += " AND ts >= :cutoff"
-            sample_query = f"{sample_query} {sample_where} ORDER BY id DESC LIMIT 5000"
-            tps_rows = (await conn.execute(sa.text(sample_query), params)).all()
+            # p95 from bounded sample (max 5000 rows) to avoid full-table scan.
+            # Each sample subquery always has a WHERE (<col> > 0), so the
+            # key_id filter is appended as another AND term.
+            def _sample_stmt(col: str) -> str:
+                where = f"WHERE {col} > 0"
+                if minutes > 0:
+                    where += " AND ts >= :cutoff"
+                where += key_and
+                return f"SELECT {col} FROM request_logs {where} ORDER BY id DESC LIMIT 5000"
+
+            tps_stmt = sa.text(_sample_stmt("tps"))
+            ttft_stmt = sa.text(_sample_stmt("ttft_ms"))
+            lat_stmt = sa.text(_sample_stmt("latency_ms"))
+            if key_filter:
+                tps_stmt = tps_stmt.bindparams(sa.bindparam("kids", expanding=True))
+                ttft_stmt = ttft_stmt.bindparams(sa.bindparam("kids", expanding=True))
+                lat_stmt = lat_stmt.bindparams(sa.bindparam("kids", expanding=True))
+            tps_rows = (await conn.execute(tps_stmt, params)).all()
             tps_values = [r[0] for r in tps_rows]
-
-            ttft_query = "SELECT ttft_ms FROM request_logs"
-            ttft_where = "WHERE ttft_ms > 0"
-            if minutes > 0:
-                ttft_where += " AND ts >= :cutoff"
-            ttft_query = f"{ttft_query} {ttft_where} ORDER BY id DESC LIMIT 5000"
-            ttft_rows = (await conn.execute(sa.text(ttft_query), params)).all()
+            ttft_rows = (await conn.execute(ttft_stmt, params)).all()
             ttft_values = [r[0] for r in ttft_rows]
-
-            lat_query = "SELECT latency_ms FROM request_logs"
-            lat_where = "WHERE latency_ms > 0"
-            if minutes > 0:
-                lat_where += " AND ts >= :cutoff"
-            lat_query = f"{lat_query} {lat_where} ORDER BY id DESC LIMIT 5000"
-            lat_rows = (await conn.execute(sa.text(lat_query), params)).all()
+            lat_rows = (await conn.execute(lat_stmt, params)).all()
             lat_values = [r[0] for r in lat_rows]
 
         minutes_norm = max(minutes, 1e-9)
@@ -311,14 +382,27 @@ class DBSink:
         }
 
     async def read_timeseries(self, bucket_seconds: int, metric: str,
-                              minutes: int) -> dict:
+                              minutes: int, key_ids: list[str] | None = None) -> dict:
         """DB-backed timeseries with the same dict shape as stats.timeseries().
 
         minutes == 0 means all-time (no ts cutoff).
         For metric="tps", tps_p95 is approximated as max(tps) in the bucket.
+
+        *key_ids* scoping semantics (see ``read_requests``):
+        - ``None`` → admin / unfiltered.
+        - non-empty list → buckets restricted to those ``key_id``s.
+        - empty list ``[]`` → caller owns no keys → return the empty-buckets
+          shape (the same dict this method returns when no rows match) with
+          no DB query. Not "no filter": an empty list is the normal first-visit
+          state for a user without a key, and treating it as unfiltered leaks
+          every other user's timeseries buckets.
         """
         if metric not in VALID_METRICS:
             raise ValueError(f"unsupported metric {metric!r}")
+        if key_ids is not None and not key_ids:
+            # Zero-row timeseries: same shape the bucket loop below returns
+            # when no rows match (by_t empty → no zero-fill → [] buckets).
+            return {"bucket_seconds": bucket_seconds, "metric": metric, "buckets": []}
 
         now = time.time()
         params: dict = {}
@@ -327,6 +411,16 @@ class DBSink:
             cutoff = now - minutes * 60
             params["cutoff"] = cutoff
             where_ts = "WHERE ts >= :cutoff"
+
+        # key_id IN :kids clause appended to the bucket aggregate.  When
+        # key_ids is None/empty, no filtering.
+        key_filter = bool(key_ids)
+        if key_filter:
+            params["kids"] = key_ids
+            if where_ts:
+                where_ts += " AND key_id IN :kids"
+            else:
+                where_ts = "WHERE key_id IN :kids"
 
         # bucket_start aligns the in-memory n_buckets grid; the SQL bucket
         # boundary is computed from each event's own ts using FLOOR() which
@@ -337,7 +431,7 @@ class DBSink:
             bucket_start = bucket_start - (n_buckets - 1) * bucket_seconds
 
         async with self.engine.connect() as conn:
-            rows = (await conn.execute(sa.text(f"""
+            ts_stmt = (sa.text(f"""
                 SELECT FLOOR(ts / :bs) * :bs AS bucket_t,
                        SUM(tok_in) AS tok_in,
                        SUM(tok_cached) AS tok_cached,
@@ -350,7 +444,10 @@ class DBSink:
                 {where_ts}
                 GROUP BY bucket_t
                 ORDER BY bucket_t
-            """), {**params, "bs": bucket_seconds})).all()
+            """))
+            if key_filter:
+                ts_stmt = ts_stmt.bindparams(sa.bindparam("kids", expanding=True))
+            rows = (await conn.execute(ts_stmt, {**params, "bs": bucket_seconds})).all()
 
         # GROUP BY skips empty buckets; zero-fill to a dense array so the
         # chart has no gaps (matching the in-memory stats.timeseries() shape).

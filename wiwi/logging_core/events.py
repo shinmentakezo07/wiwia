@@ -16,6 +16,7 @@ class LogEvent:
     request_id: str = ""
     surface: str = ""
     key_alias: str = ""
+    key_id: str = ""
     model_group: str = ""
     provider: str = ""
     provider_key_label: str = ""

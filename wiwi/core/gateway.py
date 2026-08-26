@@ -585,6 +585,7 @@ def build_log_event(ctx: RequestContext) -> LogEvent:
     evt = LogEvent(
         stream="request", ts=time.time(), request_id=ctx.request_id,
         surface=ctx.surface, key_alias=getattr(auth, "alias", ""),
+        key_id=getattr(auth, "key_id", ""),
         model_group=ctx.group or "", provider=(ctx.deployment.provider.name
                                                if ctx.deployment else ""),
         provider_key_label=(getattr(ctx.provider_key, "label", "") if ctx.provider_key else ""),

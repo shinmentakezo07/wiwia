@@ -28,6 +28,7 @@ class AuthInfo:
     tpm: int | None = None
     expires_at: float | None = None
     disabled: bool = False
+    owner_id: str | None = None
 
     @property
     def over_budget(self) -> bool:
@@ -46,6 +47,7 @@ CREATE TABLE IF NOT EXISTS vkeys (
   tpm INTEGER,
   expires_at REAL,
   disabled INTEGER NOT NULL DEFAULT 0,
+  owner_id TEXT,
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL
 );
@@ -58,6 +60,7 @@ class AuthService:
         self.master_hash = hash_key(master_key_plaintext)
         self._cache: dict[str, tuple[AuthInfo | None, float]] = {}
         self._ttl = 60.0
+        self._is_pg = engine.dialect.name == "postgresql"
 
     async def startup(self) -> None:
         async with self.engine.begin() as conn:
@@ -66,6 +69,19 @@ class AuthService:
             await conn.execute(sa.text(
                 "CREATE INDEX IF NOT EXISTS idx_vkeys_created_at"
                 " ON vkeys(created_at DESC)"))
+            # Additive migration: owner_id column + index (idempotent).
+            if self._is_pg:
+                cols = {r[0] for r in (await conn.execute(sa.text(
+                    "SELECT column_name FROM information_schema.columns"
+                    " WHERE table_name = 'vkeys'"))).all()}
+            else:
+                cols = {r[1] for r in (await conn.execute(
+                    sa.text("PRAGMA table_info(vkeys)"))).all()}
+            if "owner_id" not in cols:
+                await conn.execute(sa.text(
+                    "ALTER TABLE vkeys ADD COLUMN owner_id TEXT"))
+            await conn.execute(sa.text(
+                "CREATE INDEX IF NOT EXISTS idx_vkeys_owner ON vkeys(owner_id)"))
 
     # -- lookup ----------------------------------------------------------------
     async def authenticate(self, plaintext: str) -> AuthInfo | None:
@@ -89,7 +105,8 @@ class AuthService:
         async with self.engine.connect() as conn:
             row = (await conn.execute(
                 sa.text("SELECT id, key_alias, models, max_budget, spend_to_date,"
-                        " rpm, tpm, expires_at, disabled FROM vkeys WHERE key_hash=:h"),
+                        " rpm, tpm, expires_at, disabled, owner_id FROM vkeys"
+                        " WHERE key_hash=:h"),
                 {"h": h},
             )).first()
         if row is None:
@@ -100,6 +117,7 @@ class AuthService:
             key_id=row[0], key_type="virtual", alias=row[1],
             models=_json.loads(row[2]), max_budget=row[3], spend_to_date=float(row[4]),
             rpm=row[5], tpm=row[6], expires_at=expires, disabled=bool(row[8]),
+            owner_id=row[9],
         )
 
     def evict(self, plaintext: str) -> None:
@@ -109,7 +127,8 @@ class AuthService:
     async def create_key(self, alias: str, models: list[str] | None = None,
                          max_budget: float | None = None, rpm: int | None = None,
                          tpm: int | None = None, ttl_seconds: float | None = None,
-                         custom_key: str | None = None) -> tuple[str, str]:
+                         custom_key: str | None = None,
+                         owner_id: str | None = None) -> tuple[str, str]:
         """Returns (plaintext, key_id). Custom keys allowed (>=16 chars)."""
         plaintext = custom_key or generate_virtual_key()
         if custom_key and len(custom_key) < 16:
@@ -121,11 +140,12 @@ class AuthService:
             try:
                 await conn.execute(
                     sa.text("INSERT INTO vkeys (id, key_hash, key_alias, models, max_budget,"
-                            " spend_to_date, rpm, tpm, expires_at, disabled, created_at, updated_at)"
-                            " VALUES (:id,:h,:a,:m,:b,0,:r,:t,:e,0,:c,:c)"),
+                            " spend_to_date, rpm, tpm, expires_at, disabled, owner_id,"
+                            " created_at, updated_at)"
+                            " VALUES (:id,:h,:a,:m,:b,0,:r,:t,:e,0,:owner,:c,:c)"),
                     {"id": kid, "h": hash_key(plaintext), "a": alias,
                      "m": __import__("json").dumps(models or []), "b": max_budget,
-                     "r": rpm, "t": tpm, "e": expires, "c": now},
+                     "r": rpm, "t": tpm, "e": expires, "owner": owner_id, "c": now},
                 )
             except IntegrityError as e:
                 raise ValueError("custom key already exists") from e
@@ -248,14 +268,34 @@ class AuthService:
         async with self.engine.connect() as conn:
             rows = (await conn.execute(
                 sa.text("SELECT id, key_alias, models, max_budget, spend_to_date, rpm, tpm,"
-                        " expires_at, disabled FROM vkeys ORDER BY created_at DESC"))).all()
+                        " expires_at, disabled, owner_id FROM vkeys ORDER BY created_at DESC"))).all()
         import json as _json
         return [
             {"id": r[0], "alias": r[1], "models": _json.loads(r[2]), "max_budget": r[3],
              "spend_to_date": r[4], "rpm": r[5], "tpm": r[6],
-             "expires_at": r[7], "disabled": bool(r[8])}
+             "expires_at": r[7], "disabled": bool(r[8]), "owner_id": r[9]}
             for r in rows
         ]
+
+    async def list_keys_for_owner(self, owner_id: str) -> list[dict]:
+        async with self.engine.connect() as conn:
+            rows = (await conn.execute(
+                sa.text("SELECT id, key_alias, models, max_budget, spend_to_date,"
+                        " rpm, tpm, expires_at, disabled FROM vkeys"
+                        " WHERE owner_id = :o ORDER BY created_at DESC"),
+                {"o": owner_id})).all()
+        import json as _json
+        return [{"id": r[0], "alias": r[1], "models": _json.loads(r[2]),
+                 "max_budget": r[3], "spend_to_date": r[4], "rpm": r[5],
+                 "tpm": r[6], "expires_at": r[7], "disabled": bool(r[8])}
+                for r in rows]
+
+    async def key_owner(self, key_id: str) -> str | None:
+        async with self.engine.connect() as conn:
+            row = (await conn.execute(
+                sa.text("SELECT owner_id FROM vkeys WHERE id = :id"),
+                {"id": key_id})).first()
+        return row[0] if row else None
 
 
 def secrets_hex() -> str:

@@ -111,6 +111,7 @@ class RequestIdMiddleware:
 
 
 from wiwi.auth.service import AuthService
+from wiwi.auth.users import SESSION_TTL, UserInfo, UserService, sign_session, verify_session
 from wiwi.config import PROVIDER_TYPES, ConfigError, WiwiConfig, _interpolate, load_config, load_env
 from wiwi.core.context import RequestContext
 from wiwi.core.gateway import Gateway, build_log_event
@@ -172,6 +173,7 @@ class AppState:
         self.gateways: dict[str, Gateway] = {}
         self.alert_rules: list[dict[str, Any]] = []
         self.config_store: ConfigStore | None = None
+        self.users: UserService | None = None
         # Set during shutdown so long-lived SSE generators break out of their
         # event loop instead of blocking uvicorn's graceful-shutdown drain
         # (which otherwise hangs at "Waiting for connections to close").
@@ -227,6 +229,20 @@ class AppState:
         self._db_engine = aengine
         self.auth = AuthService(aengine, self.config.general_settings.master_key)
         await self.auth.startup()
+        # User accounts + signed session cookies. The session signing secret
+        # is WIWI_SESSION_SECRET when provided; otherwise it is derived from
+        # the master key (or a fixed default if even that is absent).
+        mk = self.config.general_settings.master_key or ""
+        session_secret = (
+            os.environ.get("WIWI_SESSION_SECRET") or mk
+            or "wiwi-default-session-secret"
+        )
+        if not os.environ.get("WIWI_SESSION_SECRET") and mk:
+            import structlog as _sl
+            _sl.get_logger("wiwi.startup").info(
+                "session_secret_derived_from_master_key")
+        self.users = UserService(aengine, session_secret)
+        await self.users.startup()
         from wiwi.logging_core.db_sink import DBSink
         self._db_sink = DBSink(aengine)
         await self._db_sink.startup()
@@ -728,8 +744,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
     # -- admin -------------------------------------------------------------------
     @app.post("/admin/keys/generate")
     async def admin_generate_key(request: Request):
-        if not is_admin(request):
-            return _err(401, "authentication_error", "master key required", request)
+        actor = await current_user(request)
+        if actor is None:
+            return _err(401, "authentication_error", "authentication required", request)
         body, jerr = await json_body(request)
         if jerr:
             return jerr
@@ -738,68 +755,92 @@ def create_app(config: WiwiConfig) -> FastAPI:
                                    or not all(isinstance(m, str) for m in models)):
             return _err(400, "invalid_request_error",
                         "'models' must be a list of strings", request)
+        owner_id = None if actor.role == "admin" else actor.id
         try:
             plaintext, kid = await state.auth.create_key(
                 alias=str(body.get("name") or body.get("alias") or ""),
                 models=body.get("models"), max_budget=body.get("max_budget"),
                 rpm=body.get("rpm"), tpm=body.get("tpm"),
                 ttl_seconds=body.get("ttl_seconds"),
-                custom_key=body.get("custom_key"))
+                custom_key=body.get("custom_key"), owner_id=owner_id)
         except ValueError as e:
             return _err(400, "invalid_request_error", str(e), request)
         await state.logs.log_audit(
-            actor="master", action="key.generate", target=kid,
+            actor=actor.username, action="key.generate", target=kid,
             diff={"source": "custom"} if body.get("custom_key") else None)
         return ORJSONResponse({"key": plaintext, "id": kid,
                              "note": "store this key now; it is not shown again"})
 
     @app.get("/admin/keys")
     async def admin_list_keys(request: Request):
-        if not is_admin(request):
-            return _err(401, "authentication_error", "master key required", request)
-        return ORJSONResponse({"keys": await state.auth.list_keys()})
+        actor = await current_user(request)
+        if actor is None:
+            return _err(401, "authentication_error", "authentication required", request)
+        if actor.role == "admin":
+            keys = await state.auth.list_keys()
+        else:
+            keys = await state.auth.list_keys_for_owner(actor.id)
+        return ORJSONResponse({"keys": keys})
 
     @app.delete("/admin/keys/{key_id}")
     async def admin_delete_key(key_id: str, request: Request):
-        if not is_admin(request):
-            return _err(401, "authentication_error", "master key required", request)
+        actor = await current_user(request)
+        if actor is None:
+            return _err(401, "authentication_error", "authentication required", request)
+        if actor.role != "admin":
+            owner = await state.auth.key_owner(key_id)
+            if owner != actor.id:
+                return _err(403, "permission_error", "not your key", request)
         ok = await state.auth.delete_key(key_id)
-        await state.logs.log_audit(actor="master", action="key.delete", target=key_id)
+        await state.logs.log_audit(actor=actor.username, action="key.delete",
+                                   target=key_id)
         return ORJSONResponse({"deleted": ok})
 
     @app.post("/admin/keys/{key_id}/disable")
     async def admin_disable_key(key_id: str, request: Request):
-        if not is_admin(request):
-            return _err(401, "authentication_error", "master key required", request)
+        actor = await current_user(request)
+        if actor is None:
+            return _err(401, "authentication_error", "authentication required", request)
+        if actor.role != "admin":
+            owner = await state.auth.key_owner(key_id)
+            if owner != actor.id:
+                return _err(403, "permission_error", "not your key", request)
         body, jerr = await json_body(request)
         if jerr:
             return jerr
         disabled = bool(body.get("disabled", True))
         await state.auth.set_disabled(key_id, disabled)
-        await state.logs.log_audit(actor="master",
+        await state.logs.log_audit(actor=actor.username,
                                    action="key.disable" if disabled else "key.enable",
                                    target=key_id)
         return ORJSONResponse({"key_id": key_id, "disabled": disabled})
 
     @app.get("/admin/logs/requests")
     async def admin_request_logs(request: Request, limit: int = 10000):
-        if not is_admin(request):
-            return _err(401, "authentication_error", "master key required", request)
+        actor = await current_user(request)
+        if actor is None:
+            return _err(401, "authentication_error", "authentication required", request)
         # Hard ceiling (50k) is a safety net against runaway callers, not a
         # product limit — the Usage page trusts the DB-backed overview for
         # the headline number and only uses this endpoint for the row table.
         limit = max(1, min(limit, 50000))
+        kids: list[str] | None = None
+        if actor.role != "admin":
+            kids = [k["id"] for k in await state.auth.list_keys_for_owner(actor.id)]
         sink = state.logs.db_sink
         if sink is not None:
             return ORJSONResponse(
-                {"logs": await sink.read_requests(limit)},
+                {"logs": await sink.read_requests(limit, key_ids=kids)},
                 headers={"Cache-Control": "no-store"},
             )
         # Ring fallback: deque is oldest→newest, so slice the newest N then
         # reverse to newest-first — matching the DB path contract.
         ring = list(await state.logs.sse.replay("request", 0))
+        evs = [e for _, e in ring]
+        if kids is not None:
+            evs = [e for e in evs if e.key_id in kids]
         return ORJSONResponse(
-            {"logs": [public_dict(e) for _, e in reversed(ring[-limit:])]},
+            {"logs": [public_dict(e) for e in reversed(evs[-limit:])]},
             headers={"Cache-Control": "no-store"},
         )
 
@@ -876,6 +917,50 @@ def create_app(config: WiwiConfig) -> FastAPI:
     def _require_admin(request: Request) -> ORJSONResponse | None:
         if not is_admin(request):
             return _err(401, "authentication_error", "master key required", request)
+        return None
+
+    # -- session / user resolution ----------------------------------------------
+    async def current_user(request: Request) -> UserInfo | None:
+        """Resolve the caller from a signed session cookie OR a bearer master
+        key (back-compat). Returns ``None`` when anonymous or when the session
+        user has been disabled/deleted."""
+        # master key via bearer → synthetic admin (back-compat for /auth/me)
+        mk = config.general_settings.master_key
+        tok = bearer(request)
+        if mk and tok and hmac.compare_digest(tok.encode(), mk.encode()):
+            return UserInfo(id="master", username="master", role="admin")
+        # signed session cookie
+        cookie = request.cookies.get("wiwi_session")
+        if not cookie:
+            return None
+        parsed = verify_session(state.users._secret, cookie)  # type: ignore[union-attr]
+        if parsed is None:
+            return None
+        uid, _role, _exp = parsed
+        if uid == "master":
+            return UserInfo(id="master", username="master", role="admin")
+        if state.users is None:
+            return None
+        info = await state.users.get(uid)
+        if info is None or info.disabled:
+            return None
+        return info
+
+    async def require_user_dep(request: Request) -> ORJSONResponse | None:
+        """401 when the caller is not an authenticated user (nor master)."""
+        if await current_user(request) is None:
+            return _err(401, "authentication_error",
+                        "authentication required", request)
+        return None
+
+    async def require_admin_dep(request: Request) -> ORJSONResponse | None:
+        """401 when anonymous, 403 when authenticated but not an admin."""
+        u = await current_user(request)
+        if u is None:
+            return _err(401, "authentication_error",
+                        "authentication required", request)
+        if u.role != "admin":
+            return _err(403, "permission_error", "admin role required", request)
         return None
 
     def _key_view(k, now_mono: float, now_wall: float) -> dict:
@@ -1234,9 +1319,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
     # -- admin: models & routing -------------------------------------------------
     @app.get("/admin/models")
     async def admin_models(request: Request):
-        resp = _require_admin(request)
-        if resp:
-            return resp
+        # Read for any authenticated actor (admin or user); guard via the
+        # actor-based resolver so logged-in users can see the model list
+        # without holding the master key.
+        actor = await current_user(request)
+        if actor is None:
+            return _err(401, "authentication_error", "authentication required", request)
         mono = time.monotonic()
         groups = []
         for gname in sorted(state.router.groups):
@@ -1260,9 +1348,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     @app.patch("/admin/model-groups/{name:path}")
     async def admin_patch_model_group(name: str, request: Request):
-        resp = _require_admin(request)
-        if resp:
-            return resp
+        actor = await current_user(request)
+        if actor is None:
+            return _err(401, "authentication_error", "authentication required", request)
+        if actor.role != "admin":
+            return _err(403, "permission_error", "admin only", request)
         gname, deps = state.router.resolve_group(name)
         if gname is None or not deps:
             return _err(404, "not_found_error", f"unknown model group '{name}'",
@@ -1311,9 +1401,13 @@ def create_app(config: WiwiConfig) -> FastAPI:
     # -- admin: virtual keys PATCH -----------------------------------------------
     @app.patch("/admin/keys/{key_id}")
     async def admin_patch_key(key_id: str, request: Request):
-        resp = _require_admin(request)
-        if resp:
-            return resp
+        actor = await current_user(request)
+        if actor is None:
+            return _err(401, "authentication_error", "authentication required", request)
+        if actor.role != "admin":
+            owner = await state.auth.key_owner(key_id)
+            if owner != actor.id:
+                return _err(403, "permission_error", "not your key", request)
         body, jerr = await json_body(request)
         if jerr:
             return jerr
@@ -1322,8 +1416,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
         updated = await state.auth.update_key(key_id, fields)  # type: ignore[union-attr]
         if updated is None:
             return _err(404, "not_found_error", f"unknown key '{key_id}'", request)
-        await state.logs.log_audit(actor="master", action="key.update", target=key_id,
-                                   diff=fields)
+        await state.logs.log_audit(actor=actor.username, action="key.update",
+                                   target=key_id, diff=fields)
         return ORJSONResponse({"key": updated})
 
     # -- admin: logs & stats -------------------------------------------------------
@@ -1345,32 +1439,44 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     @app.get("/admin/stats/overview")
     async def admin_stats_overview(request: Request, minutes: int = 60):
-        resp = _require_admin(request)
-        if resp:
-            return resp
+        actor = await current_user(request)
+        if actor is None:
+            return _err(401, "authentication_error", "authentication required", request)
         minutes = max(0, min(minutes, 43200))
+        kids: list[str] | None = None
+        if actor.role != "admin":
+            kids = [k["id"] for k in await state.auth.list_keys_for_owner(actor.id)]
         sink = state.logs.db_sink
         if sink is not None and (minutes == 0 or minutes > 1440):
-            return ORJSONResponse(await sink.read_overview(minutes))
+            return ORJSONResponse(await sink.read_overview(minutes, key_ids=kids))
         minutes_ring = minutes if minutes > 0 else 1440
-        return ORJSONResponse(stats_mod.overview(await _request_events(), minutes_ring))
+        evs = await _request_events()
+        if kids is not None:
+            evs = [e for e in evs if e.key_id in kids]
+        return ORJSONResponse(stats_mod.overview(evs, minutes_ring))
 
     @app.get("/admin/stats/timeseries")
     async def admin_stats_timeseries(request: Request, bucket: str = "minute",
                                      metric: str = "tokens", minutes: int = 60):
-        resp = _require_admin(request)
-        if resp:
-            return resp
+        actor = await current_user(request)
+        if actor is None:
+            return _err(401, "authentication_error", "authentication required", request)
         try:
             minutes = max(0, min(minutes, 43200))
+            kids: list[str] | None = None
+            if actor.role != "admin":
+                kids = [k["id"] for k in await state.auth.list_keys_for_owner(actor.id)]
             sink = state.logs.db_sink
             if sink is not None and (minutes == 0 or minutes > 1440):
                 bs = stats_mod.bucket_size_for(minutes)
                 return ORJSONResponse(
-                    await sink.read_timeseries(bs, metric, minutes))
+                    await sink.read_timeseries(bs, metric, minutes, key_ids=kids))
             minutes_ring = minutes if minutes > 0 else 1440
+            evs = await _request_events()
+            if kids is not None:
+                evs = [e for e in evs if e.key_id in kids]
             return ORJSONResponse(
-                stats_mod.timeseries(await _request_events(), bucket, metric, minutes_ring))
+                stats_mod.timeseries(evs, bucket, metric, minutes_ring))
         except ValueError as e:
             return _err(400, "invalid_request_error", str(e), request)
 
@@ -1490,6 +1596,157 @@ def create_app(config: WiwiConfig) -> FastAPI:
         await state.logs.log_audit(actor="master", action="alert_rules.update",
                                    target="*", diff={"count": len(rules)})
         return ORJSONResponse({"rules": state.alert_rules})
+
+    # -- admin: users ----------------------------------------------------------
+    @app.get("/admin/users")
+    async def admin_list_users(request: Request):
+        # Accept the master bearer key (existing admin auth) OR a master/admin
+        # session cookie, so an admin who logged in via /auth/login can manage
+        # users from the UI.
+        resp = await require_admin_dep(request)
+        if resp:
+            return resp
+        if state.users is None:
+            return _err(500, "api_error", "user service not initialized", request)
+        return ORJSONResponse({"users": await state.users.list_users()})
+
+    @app.patch("/admin/users/{uid}")
+    async def admin_patch_user(uid: str, request: Request):
+        # Accept the master bearer key (existing admin auth) OR a master/admin
+        # session cookie, so an admin who logged in via /auth/login can manage
+        # users from the UI.
+        resp = await require_admin_dep(request)
+        if resp:
+            return resp
+        if state.users is None:
+            return _err(500, "api_error", "user service not initialized", request)
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        role = body.get("role")
+        disabled = body.get("disabled")
+        # Last-admin guard: if demoting or disabling an admin would leave zero
+        # active admins, reject. The master-key admin (id="master") is synthetic
+        # and not in the users table, so count_admins() only counts DB admins.
+        if role == "user" or disabled is True:
+            cur = await state.users.get(uid)
+            if (cur is not None and cur.role == "admin" and not cur.disabled
+                    and await state.users.count_admins() <= 1):
+                return _err(400, "invalid_request_error",
+                            "cannot demote or disable the last admin", request)
+        try:
+            updated = await state.users.patch(uid, role=role, disabled=disabled)
+        except ValueError as e:
+            return _err(400, "invalid_request_error", str(e), request)
+        if updated is None:
+            return _err(404, "not_found_error", "user not found", request)
+        await state.logs.log_audit(actor="master", action="user.update", target=uid,
+                                   diff={"role": role, "disabled": disabled})
+        return ORJSONResponse(updated)
+
+    # -- public auth surface (signup / login / logout / me) --------------------
+    def _set_session_cookie(resp: ORJSONResponse, uid: str, role: str,
+                            *, secure: bool) -> None:
+        tok = sign_session(state.users._secret, uid, role,  # type: ignore[union-attr]
+                           expires=time.time() + SESSION_TTL)
+        resp.set_cookie("wiwi_session", tok, max_age=SESSION_TTL,
+                        httponly=True, samesite="lax", secure=secure,
+                        path="/")
+
+    def _clear_session_cookie(resp: ORJSONResponse) -> None:
+        resp.delete_cookie("wiwi_session", path="/")
+
+    @app.post("/auth/signup")
+    async def auth_signup(request: Request):
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        if state.users is None:
+            return _err(500, "api_error", "user service not initialized", request)
+        try:
+            u = await state.users.create_user(
+                body.get("username", ""), body.get("password", ""))
+        except ValueError as e:
+            # distinguish duplicate (409) from validation (400)
+            if "already taken" in str(e):
+                return _err(409, "conflict", str(e), request)
+            return _err(400, "invalid_request_error", str(e), request)
+        resp = ORJSONResponse(
+            {"user": {"id": u.id, "username": u.username, "role": u.role}},
+            status_code=201)
+        # Only log in the new user when the caller is anonymous: an admin
+        # creating a user via signup should keep their own session.
+        if await current_user(request) is None:
+            _set_session_cookie(resp, u.id, u.role,
+                                secure=request.url.scheme == "https")
+        return resp
+
+    @app.post("/auth/login")
+    async def auth_login(request: Request):
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        if state.users is None:
+            return _err(500, "api_error", "user service not initialized", request)
+        # master-key login → synthetic master admin
+        mk = body.get("master_key")
+        if mk:
+            if hmac.compare_digest(str(mk).encode(),
+                                   (config.general_settings.master_key or "").encode()):
+                resp = ORJSONResponse(
+                    {"user": {"id": "master", "username": "master", "role": "admin"}})
+                _set_session_cookie(resp, "master", "admin",
+                                    secure=request.url.scheme == "https")
+                return resp
+            return _err(401, "authentication_error", "invalid master key", request)
+        # username/password login
+        try:
+            u = await state.users.verify(body.get("username", ""), body.get("password", ""))
+        except ValueError:
+            # malformed username charset/length — treat as invalid credentials
+            return _err(401, "authentication_error", "invalid credentials", request)
+        if u is None or u.disabled:
+            return _err(401, "authentication_error", "invalid credentials", request)
+        resp = ORJSONResponse(
+            {"user": {"id": u.id, "username": u.username, "role": u.role}})
+        _set_session_cookie(resp, u.id, u.role,
+                            secure=request.url.scheme == "https")
+        return resp
+
+    @app.post("/auth/logout")
+    async def auth_logout(request: Request):
+        resp = ORJSONResponse({"ok": True})
+        _clear_session_cookie(resp)
+        return resp
+
+    @app.get("/auth/me")
+    async def auth_me(request: Request):
+        u = await current_user(request)
+        if u is None:
+            return ORJSONResponse({"user": None})
+        return ORJSONResponse(
+            {"user": {"id": u.id, "username": u.username, "role": u.role}})
+
+    # -- public: secret-free model catalog (no auth) --------------------------
+    # Powers the public Models catalog page. Strips all health/inflight/
+    # cooldown/weight fields — only the model group's name and each
+    # deployment's provider + model_id are exposed. Never errors on auth.
+    @app.get("/public/models")
+    async def public_models() -> ORJSONResponse:
+        groups = []
+        for gname in sorted(state.router.groups):
+            deps = state.router.groups[gname]
+            groups.append({
+                "name": gname,
+                "deployments": [{
+                    "provider": d.provider.name,
+                    "model_id": d.model_id,
+                } for d in deps],
+            })
+        return ORJSONResponse({
+            "groups": groups,
+            "aliases": dict(state.router.settings.model_group_alias),
+        })
 
     # -- admin UI (built SPA; wiwi/server/static produced by `cd web && bun run build`)
     static_dir = Path(os.environ.get("WIWI_STATIC_DIR")
