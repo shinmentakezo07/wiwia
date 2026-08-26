@@ -1,11 +1,13 @@
 // Playground — authenticated chat playground with chat history sidebar.
-// Auto-creates a virtual key via the session cookie (no manual key/bearer
-// entry). Enhanced model selector with provider info, availability, and
+// Uses the playground key minted at login (stored in sessionStorage by the
+// auth context) as the bearer for /v1/chat/completions. If no key is cached
+// (new tab with a valid session), it mints a fresh one via /auth/playground-key.
+// Enhanced model selector with provider info, availability, and
 // deployment details. Full-page chat arena with SSE streaming, hero empty
 // state, message actions, and localStorage-backed conversation history.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowDown,
   Check,
@@ -23,7 +25,8 @@ import {
   Trash2,
   Zap,
 } from "lucide-react";
-import { generateKey, getModels } from "@/api/client";
+import { getModels } from "@/api/client";
+import { useAuth } from "@/api/auth";
 import type { ModelGroup } from "@/api/types";
 import { Link } from "react-router-dom";
 import {
@@ -404,6 +407,7 @@ function ChatSidebar(props: {
 
 export function PlaygroundPage() {
   const qc = useQueryClient();
+  const { ensurePlaygroundKey } = useAuth();
   const modelsQ = useQuery({ queryKey: ["models"], queryFn: getModels });
 
   const [bearer, setBearer] = useState<string>("");
@@ -457,23 +461,22 @@ export function PlaygroundPage() {
   const groups: ModelGroup[] = modelsQ.data?.groups ?? [];
   const effectiveModel = model || groups[0]?.name || "";
 
-  // ── Auto-create a playground key via session cookie ───────────────────────
-  const createKey = useMutation({
-    mutationFn: () => generateKey({ name: "playground" }),
-    onSuccess: (data) => {
-      setBearer(data.key);
-      setKeyReady(true);
-      void qc.invalidateQueries({ queryKey: ["keys"] });
-    },
-    onError: (e) => setErr(e.message),
-  });
-
-  // Auto-mint a key on mount if we don't already have a bearer
+  // ── Obtain the playground key (cached in sessionStorage by auth context) ──
+  // On mount: use the cached key from login, or mint a fresh one via the
+  // session cookie when sessionStorage is empty (new tab / first visit).
   useEffect(() => {
-    if (!bearer && !keyReady && !createKey.isPending) {
-      void createKey.mutate();
-    }
-  }, [bearer, keyReady, createKey]);
+    let cancelled = false;
+    if (bearer || keyReady) return;
+    void (async () => {
+      const key = await ensurePlaygroundKey();
+      if (cancelled) return;
+      setBearer(key);
+      setKeyReady(!!key);
+      if (key) void qc.invalidateQueries({ queryKey: ["keys"] });
+      else setErr("Could not create a playground key. Please log in again.");
+    })();
+    return () => { cancelled = true; };
+  }, [bearer, keyReady, ensurePlaygroundKey, qc]);
 
   // ── Chat management ───────────────────────────────────────────────────────
 
@@ -673,7 +676,7 @@ export function PlaygroundPage() {
   };
 
   const isEmpty = messages.length === 0;
-  const keyLoading = createKey.isPending && !bearer;
+  const keyLoading = !keyReady && !bearer;
 
   return (
     <div data-admin className="relative z-0 flex h-dvh flex-col overflow-hidden bg-[var(--admin-bg)] text-[var(--admin-text)]">

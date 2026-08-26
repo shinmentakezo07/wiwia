@@ -5,6 +5,7 @@
 
 import { Link, NavLink, Outlet } from "react-router-dom";
 import { BookOpen, Boxes, DollarSign, Terminal, TrendingUp } from "lucide-react";
+import { useAuth } from "@/api/auth";
 
 const NAV_LINKS = [
   { to: "/playground", label: "Playground", icon: Terminal },
@@ -45,8 +46,8 @@ const FOOTER_COLS: { heading: string; links: { label: string; to: string }[] }[]
     ],
   },
 ];
-
 export function PublicLayout() {
+  const { user } = useAuth();
   return (
     <div data-admin className="relative z-0 min-h-screen bg-[var(--admin-bg)]">
       {/* Ambient background: faint grid + radial glows */}
@@ -105,10 +106,10 @@ export function PublicLayout() {
               );
             })}
             <Link
-              to="/login"
+              to={user ? "/app" : "/login"}
               className="ml-2 flex items-center gap-2 rounded-[10px] border border-white/[0.06] bg-white/[0.02] px-3.5 py-2 text-[13px] font-medium text-[var(--admin-text)] transition-all hover:border-white/[0.1] hover:bg-white/[0.04]"
             >
-              Sign in
+              {user ? "Console" : "Sign in"}
             </Link>
           </nav>
         </div>

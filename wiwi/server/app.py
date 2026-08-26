@@ -1671,15 +1671,35 @@ def create_app(config: WiwiConfig) -> FastAPI:
             if "already taken" in str(e):
                 return _err(409, "conflict", str(e), request)
             return _err(400, "invalid_request_error", str(e), request)
+        # Mint a fresh playground key when the new user is being logged in so
+        # the Playground can use it immediately without a separate call.
+        pg_key = ""
+        anon = await current_user(request) is None
+        if anon and state.auth is not None:
+            with contextlib.suppress(Exception):
+                pg_key = await _mint_playground_key(u)
         resp = ORJSONResponse(
-            {"user": {"id": u.id, "username": u.username, "role": u.role}},
+            {"user": {"id": u.id, "username": u.username, "role": u.role},
+             "playground_key": pg_key},
             status_code=201)
         # Only log in the new user when the caller is anonymous: an admin
         # creating a user via signup should keep their own session.
-        if await current_user(request) is None:
+        if anon:
             _set_session_cookie(resp, u.id, u.role,
                                 secure=request.url.scheme == "https")
         return resp
+
+    async def _mint_playground_key(actor: UserInfo) -> str:
+        """Mint a fresh virtual key for the playground, scoped to the actor.
+
+        Admins get an un-owned key (owner_id=None) for back-compat; regular
+        users get an owner-scoped key so it shows up in their key list and
+        respects role-based filtering.
+        """
+        owner_id = None if actor.role == "admin" else actor.id
+        plaintext, _kid = await state.auth.create_key(  # type: ignore[union-attr]
+            alias="playground", owner_id=owner_id)
+        return plaintext
 
     @app.post("/auth/login")
     async def auth_login(request: Request):
@@ -1693,8 +1713,16 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if mk:
             if hmac.compare_digest(str(mk).encode(),
                                    (config.general_settings.master_key or "").encode()):
+                # Mint a fresh playground key alongside the session cookie so
+                # the Playground can use it immediately without a second call.
+                pg_key = ""
+                if state.auth is not None:
+                    with contextlib.suppress(Exception):
+                        pg_key = await _mint_playground_key(
+                            UserInfo(id="master", username="master", role="admin"))
                 resp = ORJSONResponse(
-                    {"user": {"id": "master", "username": "master", "role": "admin"}})
+                    {"user": {"id": "master", "username": "master", "role": "admin"},
+                     "playground_key": pg_key})
                 _set_session_cookie(resp, "master", "admin",
                                     secure=request.url.scheme == "https")
                 return resp
@@ -1707,8 +1735,15 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return _err(401, "authentication_error", "invalid credentials", request)
         if u is None or u.disabled:
             return _err(401, "authentication_error", "invalid credentials", request)
+        # Mint a fresh playground key alongside the session cookie so the
+        # Playground can use it immediately without a second call.
+        pg_key = ""
+        if state.auth is not None:
+            with contextlib.suppress(Exception):
+                pg_key = await _mint_playground_key(u)
         resp = ORJSONResponse(
-            {"user": {"id": u.id, "username": u.username, "role": u.role}})
+            {"user": {"id": u.id, "username": u.username, "role": u.role},
+             "playground_key": pg_key})
         _set_session_cookie(resp, u.id, u.role,
                             secure=request.url.scheme == "https")
         return resp
@@ -1726,6 +1761,22 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return ORJSONResponse({"user": None})
         return ORJSONResponse(
             {"user": {"id": u.id, "username": u.username, "role": u.role}})
+
+    @app.post("/auth/playground-key")
+    async def auth_playground_key(request: Request):
+        """Mint a fresh playground key for the current session.
+
+        Used by the Playground when no key is cached in sessionStorage (new
+        tab, first visit, or the cached key was evicted). Requires an
+        authenticated session — anonymous callers get 401.
+        """
+        actor = await current_user(request)
+        if actor is None:
+            return _err(401, "authentication_error", "authentication required", request)
+        if state.auth is None:
+            return _err(500, "api_error", "gateway not initialized", request)
+        plaintext = await _mint_playground_key(actor)
+        return ORJSONResponse({"key": plaintext})
 
     # -- public: secret-free model catalog (no auth) --------------------------
     # Powers the public Models catalog page. Strips all health/inflight/
