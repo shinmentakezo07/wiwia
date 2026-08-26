@@ -587,3 +587,19 @@ async def test_stats_scoped_by_key_id(tmp_path):
         await asyncio.sleep(0.05)
     assert ov.get("requests") == 1, "user stats must be scoped to their own keys"
     await client.aclose()
+
+
+# -- Task 9: /public/models secret-free catalog --------------------------------
+
+
+async def test_public_models_no_secrets_and_no_auth(tmp_path):
+    client = await _client_for_config(tmp_path, _CONFIG)
+    r = await client.get("/public/models")
+    assert r.status_code == 200
+    body = r.json()
+    g = body["groups"][0]
+    assert "name" in g
+    assert "deployments" not in g or all("inflight" not in d for d in g.get("deployments", []))
+    # no auth required
+    assert r.status_code == 200
+    await client.aclose()

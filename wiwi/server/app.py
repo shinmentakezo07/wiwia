@@ -1727,6 +1727,27 @@ def create_app(config: WiwiConfig) -> FastAPI:
         return ORJSONResponse(
             {"user": {"id": u.id, "username": u.username, "role": u.role}})
 
+    # -- public: secret-free model catalog (no auth) --------------------------
+    # Powers the public Models catalog page. Strips all health/inflight/
+    # cooldown/weight fields — only the model group's name and each
+    # deployment's provider + model_id are exposed. Never errors on auth.
+    @app.get("/public/models")
+    async def public_models() -> ORJSONResponse:
+        groups = []
+        for gname in sorted(state.router.groups):
+            deps = state.router.groups[gname]
+            groups.append({
+                "name": gname,
+                "deployments": [{
+                    "provider": d.provider.name,
+                    "model_id": d.model_id,
+                } for d in deps],
+            })
+        return ORJSONResponse({
+            "groups": groups,
+            "aliases": dict(state.router.settings.model_group_alias),
+        })
+
     # -- admin UI (built SPA; wiwi/server/static produced by `cd web && bun run build`)
     static_dir = Path(os.environ.get("WIWI_STATIC_DIR")
                       or Path(__file__).parent / "static")
