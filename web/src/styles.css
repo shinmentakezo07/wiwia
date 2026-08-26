@@ -1434,3 +1434,79 @@ select.admin-input option {
 @media (prefers-reduced-motion: no-preference) {
   .pg-sidebar-enter { animation: pg-sidebar-enter 0.2s ease both; }
 }
+
+/* ── Reliability page: failover diagram + uptime timeline ────────────────── */
+
+/* Flowing packets along the request path: a dot travels the connector line. */
+@keyframes rel-packet {
+  0% { offset-distance: 0%; opacity: 0; }
+  10% { opacity: 1; }
+  85% { opacity: 1; }
+  100% { offset-distance: 100%; opacity: 0; }
+}
+/* Failed attempt: travels partway toward the down provider, then peters out. */
+@keyframes rel-packet-fail {
+  0% { offset-distance: 0%; opacity: 0; }
+  10% { opacity: 1; }
+  55% { offset-distance: 60%; opacity: 1; }
+  100% { offset-distance: 78%; opacity: 0; }
+}
+
+/* Down-provider connector: a dashed line steadily "flaring" red. */
+@keyframes rel-down-flare {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 0.9; }
+}
+
+/* Healthy-provider success ping: ring expands outward from the node. */
+@keyframes rel-success-ring {
+  0% { transform: scale(1); opacity: 0.7; }
+  100% { transform: scale(2.4); opacity: 0; }
+}
+
+/* Gateway hub breathing glow. */
+@keyframes rel-hub-glow {
+  0%, 100% { opacity: 0.4; transform: scale(1); }
+  50% { opacity: 0.85; transform: scale(1.06); }
+}
+
+/* Hub shield sweep — a faint highlight rotating around the hub. */
+@keyframes rel-shield-sweep {
+  to { transform: rotate(360deg); }
+}
+
+/* Uptime timeline left-to-right reveal wipe. */
+@keyframes rel-uptime-reveal {
+  from { clip-path: inset(0 100% 0 0); }
+  to { clip-path: inset(0 0 0 0); }
+}
+
+/* Status bar segment blink for the "incident" ticks. */
+@keyframes rel-incident-blink {
+  0%, 100% { opacity: 0.85; }
+  50% { opacity: 0.4; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .rel-down-flare { animation: rel-down-flare 1.4s ease-in-out infinite; }
+  .rel-success-ring { animation: rel-success-ring 2.2s ease-out infinite; }
+  .rel-hub-glow { animation: rel-hub-glow 3.4s ease-in-out infinite; }
+  .rel-shield-sweep { animation: rel-shield-sweep 8s linear infinite; }
+  .rel-uptime-reveal { animation: rel-uptime-reveal 1.4s cubic-bezier(0.16, 1, 0.3, 1) both; }
+  .rel-incident-blink { animation: rel-incident-blink 1.6s ease-in-out infinite; }
+  .rel-packet-ok { animation: rel-packet 2.4s linear infinite; }
+  .rel-packet-fail { animation: rel-packet-fail 2.4s linear infinite; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rel-down-flare,
+  .rel-success-ring,
+  .rel-hub-glow,
+  .rel-shield-sweep,
+  .rel-uptime-reveal,
+  .rel-incident-blink,
+  .rel-packet-ok,
+  .rel-packet-fail {
+    animation: none;
+  }
+}
