@@ -424,12 +424,12 @@ async def test_user_cannot_access_admin_users_403(tmp_path):
 async def test_user_keys_scoped(tmp_path):
     client = await _client_for_config(tmp_path, _CONFIG)
     # user A signup
-    await client.post("/auth/signup", json={"username": "a1", "password": "password1"})
+    await client.post("/auth/signup", json={"username": "al1", "password": "password1"})
     r_a = await client.post("/admin/keys/generate", json={"name": "ka"})
     kid_a = r_a.json()["id"]
     # logout, signup B
     await client.post("/auth/logout")
-    await client.post("/auth/signup", json={"username": "b1", "password": "password1"})
+    await client.post("/auth/signup", json={"username": "bo1", "password": "password1"})
     r_b = await client.post("/admin/keys/generate", json={"name": "kb"})
     kid_b = r_b.json()["id"]
     # B lists keys → only kb
@@ -441,11 +441,11 @@ async def test_user_keys_scoped(tmp_path):
 
 async def test_user_cannot_patch_others_key_403(tmp_path):
     client = await _client_for_config(tmp_path, _CONFIG)
-    await client.post("/auth/signup", json={"username": "a2", "password": "password1"})
+    await client.post("/auth/signup", json={"username": "al2", "password": "password1"})
     r_a = await client.post("/admin/keys/generate", json={"name": "ka"})
     kid_a = r_a.json()["id"]
     await client.post("/auth/logout")
-    await client.post("/auth/signup", json={"username": "b2", "password": "password1"})
+    await client.post("/auth/signup", json={"username": "bo2", "password": "password1"})
     r = await client.patch(f"/admin/keys/{kid_a}", json={"max_budget": 5})
     assert r.status_code == 403
     await client.aclose()
@@ -461,14 +461,14 @@ async def test_request_logs_scoped_by_key_id(tmp_path):
               "content": "hi"}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 5, "completion_tokens": 3}}))
     # user A
-    await client.post("/auth/signup", json={"username": "la", "password": "password1"})
+    await client.post("/auth/signup", json={"username": "lan", "password": "password1"})
     ka = (await client.post("/admin/keys/generate", json={"name": "ka"})).json()["key"]
     await client.post("/v1/chat/completions", json={"model": "gpt-4o",
         "messages": [{"role": "user", "content": "hi"}]},
         headers={"Authorization": f"Bearer {ka}"})
     await client.post("/auth/logout")
     # user B
-    await client.post("/auth/signup", json={"username": "lb", "password": "password1"})
+    await client.post("/auth/signup", json={"username": "lbo", "password": "password1"})
     r_b = await client.post("/admin/keys/generate", json={"name": "kb"})
     kb = r_b.json()["key"]
     kb_id = r_b.json()["id"]
@@ -493,7 +493,7 @@ async def test_request_logs_scoped_by_key_id(tmp_path):
 
 async def test_models_patch_admin_only_403_for_user(tmp_path):
     client = await _client_for_config(tmp_path, _CONFIG)
-    await client.post("/auth/signup", json={"username": "ua", "password": "password1"})
+    await client.post("/auth/signup", json={"username": "usa", "password": "password1"})
     models = (await client.get("/admin/models")).json()
     group = models["groups"][0]["name"]
     r = await client.patch(f"/admin/model-groups/{group}",
@@ -504,7 +504,7 @@ async def test_models_patch_admin_only_403_for_user(tmp_path):
 
 async def test_admin_sees_all_keys(tmp_path):
     client = await _client_for_config(tmp_path, _CONFIG)
-    await client.post("/auth/signup", json={"username": "z1", "password": "password1"})
+    await client.post("/auth/signup", json={"username": "zed1", "password": "password1"})
     r_z = await client.post("/admin/keys/generate", json={"name": "kz"})
     kid_z = r_z.json()["id"]
     await client.post("/auth/login", json={"master_key": "sk-master-test-123"})
@@ -566,13 +566,13 @@ async def test_stats_scoped_by_key_id(tmp_path):
             "choices": [{"index": 0, "message": {"role": "assistant",
               "content": "hi"}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 5, "completion_tokens": 3}}))
-    await client.post("/auth/signup", json={"username": "sa", "password": "password1"})
+    await client.post("/auth/signup", json={"username": "san", "password": "password1"})
     ka = (await client.post("/admin/keys/generate", json={"name": "ka"})).json()["key"]
     await client.post("/v1/chat/completions", json={"model": "gpt-4o",
         "messages": [{"role": "user", "content": "hi"}]},
         headers={"Authorization": f"Bearer {ka}"})
     await client.post("/auth/logout")
-    await client.post("/auth/signup", json={"username": "sb", "password": "password1"})
+    await client.post("/auth/signup", json={"username": "sbo", "password": "password1"})
     kb = (await client.post("/admin/keys/generate", json={"name": "kb"})).json()["key"]
     await client.post("/v1/chat/completions", json={"model": "gpt-4o",
         "messages": [{"role": "user", "content": "hi"}]},
