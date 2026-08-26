@@ -1,7 +1,8 @@
-// Playground — authenticated chat playground. Auto-creates a virtual key via
-// the session cookie (no manual key/bearer entry). Enhanced model selector
-// with provider info, availability, and deployment details. Full-page chat
-// arena with SSE streaming, hero empty state, and message actions.
+// Playground — authenticated chat playground with chat history sidebar.
+// Auto-creates a virtual key via the session cookie (no manual key/bearer
+// entry). Enhanced model selector with provider info, availability, and
+// deployment details. Full-page chat arena with SSE streaming, hero empty
+// state, message actions, and localStorage-backed conversation history.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -10,6 +11,9 @@ import {
   Check,
   ChevronDown,
   Copy,
+  MessageSquarePlus,
+  PanelLeftClose,
+  PanelLeftOpen,
   RefreshCcw,
   Search,
   Send,
@@ -33,6 +37,15 @@ import {
   sampleSuggestions,
   type HeroSuggestionGroup,
 } from "@/lib/hero-suggestions";
+import {
+  type ChatMsg,
+  type Conversation,
+  createChat,
+  deleteChat,
+  loadChats,
+  relativeTime,
+  updateChat,
+} from "@/lib/chat-store";
 
 type Role = "user" | "assistant";
 type Msg = { id: string; role: Role; content: string };
@@ -99,6 +112,11 @@ function buildHeroSuggestions(): Record<HeroSuggestionGroup, readonly string[]> 
     Explore: sampleSuggestions(heroSuggestionGroups.Explore, 5),
     Code: sampleSuggestions(heroSuggestionGroups.Code, 5),
   };
+}
+
+/** Convert Msg[] to ChatMsg[] for persistence. */
+function toChatMsgs(msgs: Msg[]): ChatMsg[] {
+  return msgs.map((m) => ({ id: m.id, role: m.role, content: m.content }));
 }
 
 // ── provider icon (simple text badge) ──────────────────────────────────────
@@ -257,6 +275,131 @@ function ModelSelector(props: {
   );
 }
 
+// ── Sidebar ─────────────────────────────────────────────────────────────────
+
+function ChatSidebar(props: {
+  chats: Conversation[];
+  activeId: string | null;
+  onSelect: (id: string) => void;
+  onNew: () => void;
+  onDelete: (id: string) => void;
+  collapsed: boolean;
+  onToggle: () => void;
+}) {
+  const { chats, activeId, onSelect, onNew, onDelete, collapsed, onToggle } = props;
+
+  if (collapsed) {
+    return (
+      <div className="flex shrink-0 flex-col items-center gap-2 border-r border-[var(--admin-border)] bg-[var(--admin-surface)] py-3 px-2">
+        <button
+          type="button"
+          onClick={onToggle}
+          className="flex h-9 w-9 items-center justify-center rounded-lg text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)]"
+          aria-label="Expand sidebar"
+          title="Expand sidebar"
+        >
+          <PanelLeftOpen size={18} />
+        </button>
+        <button
+          type="button"
+          onClick={onNew}
+          className="flex h-9 w-9 items-center justify-center rounded-lg text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)]"
+          aria-label="New chat"
+          title="New chat"
+        >
+          <MessageSquarePlus size={18} />
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="pg-sidebar flex shrink-0 flex-col border-r border-[var(--admin-border)] bg-[var(--admin-surface)]">
+      {/* Header */}
+      <div className="flex items-center justify-between px-3 py-3">
+        <span className="text-[12px] font-semibold uppercase tracking-wider text-[var(--admin-text-dim)]">
+          Chats
+        </span>
+        <button
+          type="button"
+          onClick={onToggle}
+          className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)]"
+          aria-label="Collapse sidebar"
+          title="Collapse sidebar"
+        >
+          <PanelLeftClose size={16} />
+        </button>
+      </div>
+
+      {/* New chat button */}
+      <div className="px-3 pb-2">
+        <button
+          type="button"
+          onClick={onNew}
+          className="flex w-full items-center gap-2 rounded-lg border border-[var(--admin-border)] bg-white/[0.02] px-3 py-2 text-[13px] font-medium text-[var(--admin-text)] transition-colors hover:border-[var(--admin-border-hover)] hover:bg-white/[0.04]"
+        >
+          <MessageSquarePlus size={15} className="text-blue-400" />
+          New chat
+        </button>
+      </div>
+
+      {/* Chat list */}
+      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+        {chats.length === 0 ? (
+          <div className="px-3 py-8 text-center text-[12px] text-[var(--admin-text-dim)]">
+            No conversations yet.
+          </div>
+        ) : (
+          <div className="space-y-0.5">
+            {chats.map((c) => (
+              <div
+                key={c.id}
+                data-active={c.id === activeId}
+                onClick={() => onSelect(c.id)}
+                className="pg-chat-item group flex cursor-pointer items-start gap-2 rounded-lg border border-transparent px-2.5 py-2"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className={`truncate text-[13px] ${c.id === activeId ? "text-blue-300 font-medium" : "text-[var(--admin-text-muted)]"}`}>
+                      {c.title || "New chat"}
+                    </span>
+                  </div>
+                  <span className="text-[10px] text-[var(--admin-text-dim)]">
+                    {relativeTime(c.updated)} · {c.messages.length} msgs
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDelete(c.id);
+                  }}
+                  className="mt-0.5 shrink-0 rounded p-1 text-[var(--admin-text-dim)] opacity-0 transition-opacity hover:text-red-400 group-hover:opacity-100"
+                  aria-label="Delete chat"
+                  title="Delete chat"
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Footer */}
+      <div className="shrink-0 border-t border-[var(--admin-border)] px-3 py-2">
+        <Link
+          to="/app"
+          className="flex items-center gap-2 text-[12px] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]"
+        >
+          <Terminal size={12} />
+          Dashboard
+        </Link>
+      </div>
+    </div>
+  );
+}
+
 // ── Main component ─────────────────────────────────────────────────────────
 
 export function PlaygroundPage() {
@@ -272,6 +415,35 @@ export function PlaygroundPage() {
   const [err, setErr] = useState<string | null>(null);
   const [usage, setUsage] = useState<{ prompt_tokens: number; completion_tokens: number; total_tokens: number } | null>(null);
   const [keyReady, setKeyReady] = useState(false);
+
+  // ── Chat history state ───────────────────────────────────────────────────
+  const [chats, setChats] = useState<Conversation[]>([]);
+  const [activeChatId, setActiveChatId] = useState<string | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+  // Load chat history from localStorage on mount
+  useEffect(() => {
+    const loaded = loadChats();
+    setChats(loaded);
+    if (loaded.length > 0) {
+      setActiveChatId(loaded[0]!.id);
+      setMessages(loaded[0]!.messages.map((m) => ({ id: m.id, role: m.role, content: m.content })));
+      setModel(loaded[0]!.model);
+    } else {
+      // Create initial empty chat
+      const chat = createChat("");
+      setChats([chat]);
+      setActiveChatId(chat.id);
+    }
+  }, []);
+
+  // Persist messages to localStorage whenever they change
+  useEffect(() => {
+    if (!activeChatId) return;
+    updateChat(activeChatId, toChatMsgs(messages), model || undefined);
+    // Refresh chat list ordering (most recent first)
+    setChats(loadChats());
+  }, [messages, activeChatId, model]);
 
   // hero suggestion state
   const [activeGroup, setActiveGroup] = useState<HeroSuggestionGroup>("Create");
@@ -303,11 +475,47 @@ export function PlaygroundPage() {
     }
   }, [bearer, keyReady, createKey]);
 
-  function clearChat() {
+  // ── Chat management ───────────────────────────────────────────────────────
+
+  function handleNewChat() {
+    const chat = createChat(effectiveModel);
+    setChats((prev) => [chat, ...prev]);
+    setActiveChatId(chat.id);
     setMessages([]);
     setErr(null);
     setUsage(null);
     setDraft("");
+  }
+
+  function handleSelectChat(id: string) {
+    const chat = chats.find((c) => c.id === id);
+    if (!chat) return;
+    setActiveChatId(id);
+    setMessages(chat.messages.map((m) => ({ id: m.id, role: m.role, content: m.content })));
+    setModel(chat.model);
+    setErr(null);
+    setUsage(null);
+    setDraft("");
+  }
+
+  function handleDeleteChat(id: string) {
+    const remaining = deleteChat(id);
+    setChats(remaining);
+    if (activeChatId === id) {
+      if (remaining.length > 0) {
+        const next = remaining[0]!;
+        setActiveChatId(next.id);
+        setMessages(next.messages.map((m) => ({ id: m.id, role: m.role, content: m.content })));
+        setModel(next.model);
+      } else {
+        // Create a fresh empty chat
+        const chat = createChat(effectiveModel);
+        setChats([chat]);
+        setActiveChatId(chat.id);
+        setMessages([]);
+        setModel(effectiveModel);
+      }
+    }
   }
 
   // ── streaming send ────────────────────────────────────────────────────────
@@ -483,7 +691,7 @@ export function PlaygroundPage() {
 
       {/* ══ Top bar ══ */}
       <header className="admin-topbar relative z-30 shrink-0">
-        <div className="flex h-[52px] items-center gap-4 px-6">
+        <div className="flex h-[52px] items-center gap-4 px-4">
           <Link to="/" className="flex items-center gap-2.5">
             <img src="/wiwi-logo.png" alt="wiwi" className="h-7 w-7 shrink-0 rounded-[8px] object-cover ring-1 ring-white/[0.06] ring-inset" />
             <span className="text-[14px] font-semibold text-[var(--admin-text)]">wiwi</span>
@@ -512,15 +720,6 @@ export function PlaygroundPage() {
                 <Spinner className="h-3.5 w-3.5" /> creating key…
               </span>
             )}
-            {!isEmpty && (
-              <button
-                type="button"
-                onClick={clearChat}
-                className="flex items-center gap-1 rounded-[10px] border border-[var(--admin-border)] px-2.5 py-1.5 text-[12px] text-[var(--admin-text-muted)] transition-colors hover:border-[var(--admin-border-hover)] hover:text-[var(--admin-text)]"
-              >
-                <Trash2 size={12} /> Clear
-              </button>
-            )}
             <Link
               to="/app"
               className="flex items-center rounded-[10px] px-3 py-1.5 text-[13px] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]"
@@ -532,101 +731,115 @@ export function PlaygroundPage() {
         <div className="admin-topbar-border h-px" />
       </header>
 
-      {/* ══ Chat arena ══ */}
-      <main className="relative z-10 flex min-h-0 flex-1 flex-col">
-        {err && (
-          <div className="shrink-0 px-6 py-2">
-            <div className="mx-auto max-w-[760px]">
-              <ErrorText>{err}</ErrorText>
-            </div>
-          </div>
-        )}
+      {/* ══ Body: sidebar + chat arena ══ */}
+      <div className="relative z-10 flex min-h-0 flex-1">
+        {/* Sidebar */}
+        <ChatSidebar
+          chats={chats}
+          activeId={activeChatId}
+          onSelect={handleSelectChat}
+          onNew={handleNewChat}
+          onDelete={handleDeleteChat}
+          collapsed={sidebarCollapsed}
+          onToggle={() => setSidebarCollapsed((v) => !v)}
+        />
 
-        {/* Messages */}
-        <div
-          ref={scrollRef}
-          onScroll={handleScroll}
-          className="min-h-0 flex-1 overflow-y-auto"
-          role="log"
-          aria-live="polite"
-        >
-          {isEmpty ? (
-            <HeroEmptyState
-              activeGroup={activeGroup}
-              onGroupChange={setActiveGroup}
-              suggestions={heroSuggestions}
-              onPick={(s) => void send(s)}
-              keyReady={!!bearer}
-            />
-          ) : (
-            <div className="mx-auto max-w-[760px] px-6 py-6">
-              {messages.map((m, i) => (
-                <MessageBubble
-                  key={m.id}
-                  msg={m}
-                  isLast={i === messages.length - 1}
-                  streaming={streaming}
-                  model={effectiveModel}
-                  onCopy={() => void navigator.clipboard.writeText(m.content)}
-                  onRetry={regenerate}
-                  busy={busy}
-                />
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Scroll-to-bottom */}
-        {!isEmpty && !atBottom && (
-          <button
-            type="button"
-            onClick={scrollToBottom}
-            className="absolute bottom-24 left-1/2 z-10 flex h-9 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-[var(--admin-border)] bg-[var(--admin-surface-elevated)] text-[var(--admin-text-muted)] shadow-lg transition-colors hover:text-[var(--admin-text)]"
-            aria-label="Scroll to bottom"
-          >
-            <ArrowDown size={16} />
-          </button>
-        )}
-
-        {/* Usage badges */}
-        {usage && (
-          <div className="shrink-0 px-6 pb-1">
-            <div className="mx-auto flex max-w-[760px] flex-wrap gap-2">
-              <Badge tone="blue">in {fmtTokens(usage.prompt_tokens)}</Badge>
-              <Badge tone="violet">out {fmtTokens(usage.completion_tokens)}</Badge>
-              <Badge tone="gray">total {fmtTokens(usage.total_tokens)}</Badge>
-            </div>
-          </div>
-        )}
-
-        {/* Composer */}
-        <div className="shrink-0 bg-gradient-to-t from-[var(--admin-bg)] via-[var(--admin-bg)] to-transparent pt-2">
-          <form onSubmit={onSubmit} className="mx-auto max-w-[760px] px-6 pb-4">
-            <div className="relative">
-              <div className="pointer-events-none absolute -inset-0.5 rounded-2xl bg-gradient-to-r from-blue-500/8 via-transparent to-fuchsia-500/8 opacity-0 transition-opacity focus-within:opacity-100" aria-hidden />
-              <div className="relative flex items-end gap-2 rounded-2xl border border-[var(--admin-border)] bg-[var(--admin-surface)] p-2 shadow-lg shadow-black/30 transition-colors focus-within:border-[var(--admin-border-hover)]">
-                <textarea
-                  value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
-                  onKeyDown={onKeyDown}
-                  placeholder={keyLoading ? "Preparing your playground key…" : "Message the model…"}
-                  disabled={busy || keyLoading}
-                  rows={1}
-                  className="pg-textarea flex-1 resize-none bg-transparent px-3 py-2 text-[14px] leading-relaxed text-[var(--admin-text)] outline-none placeholder:text-[var(--admin-text-dim)] disabled:opacity-50"
-                />
-                <button
-                  type="submit"
-                  disabled={busy || keyLoading || !draft.trim()}
-                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-b from-brand-400 to-brand-700 text-white shadow-lg shadow-brand-600/20 transition-[filter,transform] duration-150 hover:brightness-110 active:scale-95 disabled:opacity-40 disabled:grayscale"
-                  aria-label={streaming ? "Stop" : "Send"}
-                >
-                  {streaming ? <Square size={16} /> : busy ? <Spinner className="h-4 w-4" /> : <Send size={16} />}
-                </button>
+        {/* Chat arena */}
+        <main className="relative flex min-h-0 flex-1 flex-col">
+          {err && (
+            <div className="shrink-0 px-6 py-2">
+              <div className="mx-auto max-w-[760px]">
+                <ErrorText>{err}</ErrorText>
               </div>
             </div>
-          </form>
-        </div>
-      </main>
+          )}
+
+          {/* Messages */}
+          <div
+            ref={scrollRef}
+            onScroll={handleScroll}
+            className="min-h-0 flex-1 overflow-y-auto"
+            role="log"
+            aria-live="polite"
+          >
+            {isEmpty ? (
+              <HeroEmptyState
+                activeGroup={activeGroup}
+                onGroupChange={setActiveGroup}
+                suggestions={heroSuggestions}
+                onPick={(s) => void send(s)}
+                keyReady={!!bearer}
+              />
+            ) : (
+              <div className="mx-auto max-w-[760px] px-6 py-6">
+                {messages.map((m, i) => (
+                  <MessageBubble
+                    key={m.id}
+                    msg={m}
+                    isLast={i === messages.length - 1}
+                    streaming={streaming}
+                    model={effectiveModel}
+                    onCopy={() => void navigator.clipboard.writeText(m.content)}
+                    onRetry={regenerate}
+                    busy={busy}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Scroll-to-bottom */}
+          {!isEmpty && !atBottom && (
+            <button
+              type="button"
+              onClick={scrollToBottom}
+              className="absolute bottom-24 left-1/2 z-10 flex h-9 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-[var(--admin-border)] bg-[var(--admin-surface-elevated)] text-[var(--admin-text-muted)] shadow-lg transition-colors hover:text-[var(--admin-text)]"
+              aria-label="Scroll to bottom"
+            >
+              <ArrowDown size={16} />
+            </button>
+          )}
+
+          {/* Usage badges */}
+          {usage && (
+            <div className="shrink-0 px-6 pb-1">
+              <div className="mx-auto flex max-w-[760px] flex-wrap gap-2">
+                <Badge tone="blue">in {fmtTokens(usage.prompt_tokens)}</Badge>
+                <Badge tone="violet">out {fmtTokens(usage.completion_tokens)}</Badge>
+                <Badge tone="gray">total {fmtTokens(usage.total_tokens)}</Badge>
+              </div>
+            </div>
+          )}
+
+          {/* Composer */}
+          <div className="shrink-0 bg-gradient-to-t from-[var(--admin-bg)] via-[var(--admin-bg)] to-transparent pt-2">
+            <form onSubmit={onSubmit} className="mx-auto max-w-[760px] px-6 pb-4">
+              <div className="relative">
+                <div className="pointer-events-none absolute -inset-0.5 rounded-2xl bg-gradient-to-r from-blue-500/8 via-transparent to-fuchsia-500/8 opacity-0 transition-opacity focus-within:opacity-100" aria-hidden />
+                <div className="relative flex items-end gap-2 rounded-2xl border border-[var(--admin-border)] bg-[var(--admin-surface)] p-2 shadow-lg shadow-black/30 transition-colors focus-within:border-[var(--admin-border-hover)]">
+                  <textarea
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    onKeyDown={onKeyDown}
+                    placeholder={keyLoading ? "Preparing your playground key…" : "Message the model…"}
+                    disabled={busy || keyLoading}
+                    rows={1}
+                    className="pg-textarea flex-1 resize-none bg-transparent px-3 py-2 text-[14px] leading-relaxed text-[var(--admin-text)] outline-none placeholder:text-[var(--admin-text-dim)] disabled:opacity-50"
+                  />
+                  <button
+                    type="submit"
+                    disabled={busy || keyLoading || !draft.trim()}
+                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-b from-brand-400 to-brand-700 text-white shadow-lg shadow-brand-600/20 transition-[filter,transform] duration-150 hover:brightness-110 active:scale-95 disabled:opacity-40 disabled:grayscale"
+                    aria-label={streaming ? "Stop" : "Send"}
+                  >
+                    {streaming ? <Square size={16} /> : busy ? <Spinner className="h-4 w-4" /> : <Send size={16} />}
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </main>
+      </div>
     </div>
   );
 }

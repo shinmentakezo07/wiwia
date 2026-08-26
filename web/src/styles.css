@@ -1402,3 +1402,35 @@ select.admin-input option {
   mask-image: linear-gradient(to bottom, #000 calc(100% - 48px), transparent 100%);
   -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 48px), transparent 100%);
 }
+
+/* ── Playground sidebar ───────────────────────────────────────────────────── */
+
+.pg-sidebar {
+  width: 260px;
+  flex-shrink: 0;
+  transition: width 0.2s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.15s ease;
+  overflow: hidden;
+}
+.pg-sidebar[data-collapsed="true"] {
+  width: 0;
+  opacity: 0;
+}
+
+.pg-chat-item {
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+.pg-chat-item:hover {
+  background: rgba(255, 255, 255, 0.025);
+}
+.pg-chat-item[data-active="true"] {
+  background: rgba(59, 130, 246, 0.08);
+  border-color: rgba(59, 130, 246, 0.15);
+}
+
+@keyframes pg-sidebar-enter {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .pg-sidebar-enter { animation: pg-sidebar-enter 0.2s ease both; }
+}
