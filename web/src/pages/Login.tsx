@@ -127,7 +127,7 @@ export function LoginPage() {
     setError(null);
     try {
       await loginWithMaster(key.trim());
-      navigate("/");
+      navigate("/app");
     } catch (err) {
       setError(err instanceof Error ? err.message : "login failed");
     } finally {
