@@ -51,8 +51,11 @@ export function PlaygroundPage() {
   const keys: VirtualKey[] = keysQ.data?.keys ?? [];
   const groups = modelsQ.data?.groups ?? [];
 
-  // default model once groups arrive
-  if (!model && groups.length) setModel(groups[0].name);
+  // Derive the effective model rather than storing a defaulted one in state.
+  // This avoids a state-update-during-render (setModel in the render body)
+  // when the groups query resolves. `model` is "" until the user picks one,
+  // so we fall back to the first group's name for display + the request body.
+  const effectiveModel = model || groups[0]?.name || "";
 
   // create-key mutation
   const createKey = useMutation({
@@ -81,7 +84,7 @@ export function PlaygroundPage() {
       setErr("Pick a key (and paste its plaintext bearer) — the list endpoint only returns masked secrets.");
       return;
     }
-    if (!model) {
+    if (!effectiveModel) {
       setErr("Pick a model group.");
       return;
     }
@@ -98,7 +101,7 @@ export function PlaygroundPage() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${bearer.trim()}`,
         },
-        body: JSON.stringify({ model, messages: next, stream: false }),
+        body: JSON.stringify({ model: effectiveModel, messages: next, stream: false }),
       });
       const body = await resp.json().catch(() => null);
       if (!resp.ok) {
@@ -156,7 +159,7 @@ export function PlaygroundPage() {
           </Field>
           <Field label="Model group">
             <Select
-              value={model}
+              value={effectiveModel}
               onChange={setModel}
               options={[
                 { value: "", label: groups.length ? "select a model…" : "loading…" },
