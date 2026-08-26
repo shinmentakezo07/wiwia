@@ -18,6 +18,8 @@ export default defineConfig({
   server: {
     proxy: {
       "/admin": "http://localhost:4000",
+      "/auth": "http://localhost:4000",
+      "/public": "http://localhost:4000",
       "/v1": "http://localhost:4000",
       "/health": "http://localhost:4000",
     },

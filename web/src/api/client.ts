@@ -30,7 +30,11 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   }
   let resp: Response;
   try {
-    resp = await fetch(path, { ...init, headers });
+    // credentials:"include" carries the HttpOnly session cookie alongside the
+    // bearer header (kept for master-key admin back-compat). For username/
+    // password users the token is empty → "Bearer " header is harmless and the
+    // server falls back to the cookie.
+    resp = await fetch(path, { ...init, headers, credentials: "include" });
   } catch (e) {
     throw new ApiError(0, `network error: ${String(e)}`);
   }
@@ -63,10 +67,12 @@ import type {
   PoolKey,
   Provider,
   ProxyLogEntry,
+  PublicModelGroup,
   RequestLogEntry,
   TimeseriesMetric,
   TimeseriesResponse,
   UpstreamModel,
+  User,
   VirtualKey,
 } from "./types";
 
@@ -238,3 +244,51 @@ export const putAlertRules = (rules: AlertRule[]) =>
     method: "PUT",
     body: JSON.stringify({ rules }),
   });
+
+// -- session auth + user + public catalog helpers ----------------------------
+
+export const getMe = () => api<{ user: User | null }>("/auth/me");
+
+export const signupUser = (body: { username: string; password: string }) =>
+  api<{ user: User }>("/auth/signup", {
+    method: "POST",
+    body: JSON.stringify(body),
+    credentials: "include",
+  });
+
+export const loginUser = (body: { username: string; password: string }) =>
+  api<{ user: User }>("/auth/login", {
+    method: "POST",
+    body: JSON.stringify(body),
+    credentials: "include",
+  });
+
+export const loginMaster = (body: { master_key: string }) =>
+  api<{ user: User }>("/auth/login", {
+    method: "POST",
+    body: JSON.stringify(body),
+    credentials: "include",
+  });
+
+export const logoutSession = () =>
+  api<{ ok: true }>("/auth/logout", { method: "POST", credentials: "include" });
+
+export const getUsers = () =>
+  api<{ users: (User & { disabled: boolean; created_at: number })[] }>(
+    "/admin/users",
+  );
+
+export const patchUser = (
+  id: string,
+  body: { role?: string; disabled?: boolean },
+) =>
+  api<User>(`/admin/users/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+    credentials: "include",
+  });
+
+export const getPublicModels = () =>
+  api<{ groups: PublicModelGroup[]; aliases: Record<string, string> }>(
+    "/public/models",
+  );

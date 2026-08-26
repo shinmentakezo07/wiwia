@@ -4,10 +4,19 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AuthProvider, useAuth } from "@/api/auth";
 import { AdminStreamProvider } from "@/api/stream";
-import { Layout } from "@/components/Layout";
+import { AdminLayout } from "@/components/Layout";
+import { PublicLayout } from "@/components/PublicLayout";
+import { RequireAdmin, RequireUser } from "@/components/guards";
 import "@/styles.css";
 
 import { LoginPage } from "@/pages/Login";
+import { SignupPage } from "@/pages/Signup";
+import { LandingPage } from "@/pages/Landing";
+import { PlaygroundPage } from "@/pages/Playground";
+import { ModelsCatalogPage } from "@/pages/ModelsCatalog";
+import { DocsPage } from "@/pages/Docs";
+import { UsersPage } from "@/pages/Users";
+
 import { DashboardPage } from "@/pages/Dashboard";
 import { ProvidersPage } from "@/pages/Providers";
 import { ProviderDetailPage } from "@/pages/ProviderDetail";
@@ -21,7 +30,7 @@ import { AnalyticsPage } from "@/pages/Analytics";
 import { BudgetsAlertsPage } from "@/pages/BudgetsAlerts";
 import { SettingsPage } from "@/pages/Settings";
 
-// The admin console is dark-only (Dra-style design system).
+// The console is dark-only (Dra-style design system).
 document.documentElement.classList.add("dark");
 localStorage.setItem("wiwi.theme", "dark");
 
@@ -31,38 +40,111 @@ const queryClient = new QueryClient({
   },
 });
 
-function RequireAuth({ children }: { children: React.ReactNode }) {
-  const { authed } = useAuth();
-  return authed ? children : <Navigate to="/login" replace />;
-}
-
 function AppRoutes() {
-  const { authed } = useAuth();
+  const { user, loading } = useAuth();
+  if (loading) return null;
   return (
     <Routes>
-      <Route path="/login" element={authed ? <Navigate to="/" replace /> : <LoginPage />} />
+      {/* Public front */}
+      <Route element={<PublicLayout />}>
+        <Route path="/" element={<LandingPage />} />
+        <Route path="/models" element={<ModelsCatalogPage />} />
+        <Route path="/docs" element={<DocsPage />} />
+      </Route>
+
+      {/* Playground is gated but lives outside the admin shell */}
+      <Route
+        path="/playground"
+        element={
+          <RequireUser>
+            <PlaygroundPage />
+          </RequireUser>
+        }
+      />
+
+      {/* Auth */}
+      <Route path="/login" element={user ? <Navigate to="/app" replace /> : <LoginPage />} />
+      <Route path="/signup" element={user ? <Navigate to="/app" replace /> : <SignupPage />} />
+
+      {/* Guarded admin shell */}
       <Route
         element={
-          <RequireAuth>
+          <RequireUser>
             <AdminStreamProvider>
-              <Layout />
+              <AdminLayout />
             </AdminStreamProvider>
-          </RequireAuth>
+          </RequireUser>
         }
       >
-        <Route path="/" element={<DashboardPage />} />
-        <Route path="/providers" element={<ProvidersPage />} />
-        <Route path="/providers/:name" element={<ProviderDetailPage />} />
-        <Route path="/builtin-providers" element={<BuiltinProvidersPage />} />
-        <Route path="/keys" element={<VirtualKeysPage />} />
-        <Route path="/models" element={<ModelsPage />} />
-        <Route path="/request-logs" element={<RequestLogsPage />} />
-        <Route path="/proxy-logs" element={<ProxyLogsPage />} />
-        <Route path="/usage" element={<UsagePage />} />
-        <Route path="/analytics" element={<AnalyticsPage />} />
-        <Route path="/budgets" element={<BudgetsAlertsPage />} />
-        <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/app" element={<DashboardPage />} />
+        <Route path="/app/keys" element={<VirtualKeysPage />} />
+        <Route path="/app/models" element={<ModelsPage />} />
+        <Route path="/app/request-logs" element={<RequestLogsPage />} />
+        <Route path="/app/usage" element={<UsagePage />} />
+        <Route path="/app/analytics" element={<AnalyticsPage />} />
+        <Route path="/app/budgets" element={<BudgetsAlertsPage />} />
+        <Route
+          path="/app/providers"
+          element={
+            <RequireAdmin>
+              <ProvidersPage />
+            </RequireAdmin>
+          }
+        />
+        <Route
+          path="/app/providers/:name"
+          element={
+            <RequireAdmin>
+              <ProviderDetailPage />
+            </RequireAdmin>
+          }
+        />
+        <Route
+          path="/app/builtin-providers"
+          element={
+            <RequireAdmin>
+              <BuiltinProvidersPage />
+            </RequireAdmin>
+          }
+        />
+        <Route
+          path="/app/proxy-logs"
+          element={
+            <RequireAdmin>
+              <ProxyLogsPage />
+            </RequireAdmin>
+          }
+        />
+        <Route
+          path="/app/settings"
+          element={
+            <RequireAdmin>
+              <SettingsPage />
+            </RequireAdmin>
+          }
+        />
+        <Route
+          path="/app/users"
+          element={
+            <RequireAdmin>
+              <UsersPage />
+            </RequireAdmin>
+          }
+        />
       </Route>
+
+      {/* legacy flat-path redirects */}
+      <Route path="/keys" element={<Navigate to="/app/keys" replace />} />
+      <Route path="/providers" element={<Navigate to="/app/providers" replace />} />
+      <Route path="/models-config" element={<Navigate to="/app/models" replace />} />
+      <Route path="/request-logs" element={<Navigate to="/app/request-logs" replace />} />
+      <Route path="/usage" element={<Navigate to="/app/usage" replace />} />
+      <Route path="/analytics" element={<Navigate to="/app/analytics" replace />} />
+      <Route path="/budgets" element={<Navigate to="/app/budgets" replace />} />
+      <Route path="/settings" element={<Navigate to="/app/settings" replace />} />
+      <Route path="/proxy-logs" element={<Navigate to="/app/proxy-logs" replace />} />
+      <Route path="/builtin-providers" element={<Navigate to="/app/builtin-providers" replace />} />
+      <Route path="/dashboard" element={<Navigate to="/app" replace />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

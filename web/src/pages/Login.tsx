@@ -113,7 +113,7 @@ function GatewayDiagram() {
 }
 
 export function LoginPage() {
-  const { login } = useAuth();
+  const { loginWithMaster } = useAuth();
   const navigate = useNavigate();
   const [key, setKey] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -125,10 +125,14 @@ export function LoginPage() {
     if (!key.trim() || busy) return;
     setBusy(true);
     setError(null);
-    const err = await login(key.trim());
-    setBusy(false);
-    if (err) setError(err);
-    else navigate("/");
+    try {
+      await loginWithMaster(key.trim());
+      navigate("/");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "login failed");
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (

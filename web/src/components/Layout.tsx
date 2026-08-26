@@ -1,8 +1,13 @@
 // App shell — cloned from the Dra admin console: fixed sidebar with sections
 // and collapse, blurred topbar with page identity + live badge + clock, and an
 // ambient near-black backdrop with faint grid + radial glows.
+//
+// Role-aware: the sidebar nav and identity card reflect the logged-in user's
+// role (admin sees everything; user sees Overview/Traffic/Configuration/Budgets
+// but not Providers/Settings/Users). Master-key admins keep the bearer token so
+// /admin/stream SSE stays live.
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   Activity,
@@ -19,6 +24,7 @@ import {
   Server,
   ShieldCheck,
   Terminal,
+  Users,
 } from "lucide-react";
 import { useAuth } from "@/api/auth";
 import { useAdminStream } from "@/api/stream";
@@ -40,50 +46,66 @@ interface NavSection {
   items: NavItem[];
 }
 
-const NAV_SECTIONS: NavSection[] = [
+// Sections visible to every authenticated user. Admin-only routes
+// (Providers, Built-in Providers, Proxy Logs, Settings, Users) are appended
+// only when the current user is an admin.
+const USER_NAV_SECTIONS: NavSection[] = [
   {
     title: "Overview",
-    items: [{ to: "/", label: "Dashboard", icon: LayoutDashboard, end: true }],
+    items: [{ to: "/app", label: "Dashboard", icon: LayoutDashboard, end: true }],
   },
   {
     title: "Traffic",
     items: [
-      { to: "/request-logs", label: "Request Logs", icon: ScrollText },
-      { to: "/proxy-logs", label: "Proxy Logs", icon: Terminal },
-      { to: "/usage", label: "Usage", icon: Activity },
-      { to: "/analytics", label: "Analytics", icon: BarChart3 },
+      { to: "/app/request-logs", label: "Request Logs", icon: ScrollText },
+      { to: "/app/usage", label: "Usage", icon: Activity },
+      { to: "/app/analytics", label: "Analytics", icon: BarChart3 },
     ],
   },
   {
     title: "Configuration",
     items: [
-      { to: "/providers", label: "Providers", icon: Server },
-      { to: "/builtin-providers", label: "Built-in Providers", icon: Boxes },
-      { to: "/models", label: "Models", icon: Database },
-      { to: "/keys", label: "Virtual Keys", icon: KeyRound },
+      { to: "/app/models", label: "Models", icon: Database },
+      { to: "/app/keys", label: "Virtual Keys", icon: KeyRound },
+    ],
+  },
+  {
+    title: "Admin",
+    items: [{ to: "/app/budgets", label: "Budgets & Alerts", icon: BellRing }],
+  },
+];
+
+const ADMIN_ONLY_SECTIONS: NavSection[] = [
+  {
+    title: "Configuration",
+    items: [
+      { to: "/app/providers", label: "Providers", icon: Server },
+      { to: "/app/builtin-providers", label: "Built-in Providers", icon: Boxes },
     ],
   },
   {
     title: "Admin",
     items: [
-      { to: "/budgets", label: "Budgets & Alerts", icon: BellRing },
-      { to: "/settings", label: "Settings", icon: CreditCard },
+      { to: "/app/proxy-logs", label: "Proxy Logs", icon: Terminal },
+      { to: "/app/users", label: "Users", icon: Users },
+      { to: "/app/settings", label: "Settings", icon: CreditCard },
     ],
   },
 ];
 
 const PAGE_META: Record<string, { title: string; section: string }> = {
-  "/": { title: "Dashboard", section: "Overview" },
-  "/request-logs": { title: "Request Logs", section: "Traffic" },
-  "/proxy-logs": { title: "Proxy Logs", section: "Traffic" },
-  "/usage": { title: "Usage", section: "Traffic" },
-  "/analytics": { title: "Analytics", section: "Traffic" },
-  "/providers": { title: "Providers", section: "Configuration" },
-  "/builtin-providers": { title: "Built-in Providers", section: "Configuration" },
-  "/models": { title: "Models", section: "Configuration" },
-  "/keys": { title: "Virtual Keys", section: "Configuration" },
-  "/budgets": { title: "Budgets & Alerts", section: "Admin" },
-  "/settings": { title: "Settings", section: "Admin" },
+  "/app": { title: "Dashboard", section: "Overview" },
+  "/app/request-logs": { title: "Request Logs", section: "Traffic" },
+  "/app/proxy-logs": { title: "Proxy Logs", section: "Traffic" },
+  "/app/usage": { title: "Usage", section: "Traffic" },
+  "/app/analytics": { title: "Analytics", section: "Traffic" },
+  "/app/providers": { title: "Providers", section: "Configuration" },
+  "/app/builtin-providers": { title: "Built-in Providers", section: "Configuration" },
+  "/app/models": { title: "Models", section: "Configuration" },
+  "/app/keys": { title: "Virtual Keys", section: "Configuration" },
+  "/app/budgets": { title: "Budgets & Alerts", section: "Admin" },
+  "/app/settings": { title: "Settings", section: "Admin" },
+  "/app/users": { title: "Users", section: "Admin" },
 };
 
 function LiveClock() {
@@ -110,13 +132,19 @@ function LiveClock() {
   );
 }
 
-export function Layout() {
-  const { logout } = useAuth();
+export function AdminLayout() {
+  const { user, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const connected = useAdminStream("__noop__", () => undefined);
   const [collapsed, setCollapsed] = useState(false);
   const sidebarWidth = collapsed ? SIDEBAR_COLLAPSED : SIDEBAR_WIDE;
+
+  const isAdmin = user?.role === "admin";
+  const navSections = useMemo<NavSection[]>(
+    () => (isAdmin ? [...USER_NAV_SECTIONS, ...ADMIN_ONLY_SECTIONS] : USER_NAV_SECTIONS),
+    [isAdmin],
+  );
 
   // Cmd/Ctrl+B toggles the sidebar
   useEffect(() => {
@@ -135,6 +163,10 @@ export function Layout() {
     const k = getToken();
     return k.length > 17 ? `${k.slice(0, 13)}…${k.slice(-4)}` : "master key";
   })();
+
+  const identityName = user ? user.username : "user";
+  const identityRole = isAdmin ? "admin" : "user";
+  const identityBadge = isAdmin ? (user?.id === "master" ? "root" : "admin") : "user";
 
   return (
     <div data-admin className="relative z-0 h-screen overflow-hidden bg-[var(--admin-bg)]">
@@ -223,7 +255,7 @@ export function Layout() {
 
         {/* Navigation */}
         <nav className="admin-scroll flex-1 space-y-6 overflow-y-auto px-3 py-5">
-          {NAV_SECTIONS.map((section) => (
+          {navSections.map((section) => (
             <div key={section.title}>
               {!collapsed && <p className="admin-label mb-2.5 px-2.5">{section.title}</p>}
               <div className="space-y-0.5">
@@ -302,16 +334,16 @@ export function Layout() {
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1.5">
                     <p className="truncate text-[12.5px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
-                      master admin
+                      {identityName}
                     </p>
                     <span className="admin-badge admin-badge-blue !px-1.5 !py-0 !text-[8px]">
-                      root
+                      {identityBadge}
                     </span>
                   </div>
                   <div className="mt-1 flex items-center gap-1.5">
                     <KeyRound className="h-3 w-3 shrink-0 text-[var(--admin-text-dim)]" />
                     <p className="truncate font-mono text-[10px] text-[var(--admin-text-dim)]">
-                      {maskedKey}
+                      {isAdmin ? maskedKey : identityRole}
                     </p>
                   </div>
                 </div>
@@ -320,7 +352,7 @@ export function Layout() {
           ) : (
             /* collapsed: avatar with status dot only */
             <div className="mb-2 flex justify-center">
-              <div className="relative" title="master admin">
+              <div className="relative" title={identityName}>
                 <div
                   className="flex h-9 w-9 items-center justify-center rounded-[10px] bg-gradient-to-br from-blue-500/20 to-violet-500/20 ring-1 ring-white/[0.08]"
                   style={{ boxShadow: "0 0 14px -3px rgba(59,130,246,0.14)" }}
@@ -388,7 +420,7 @@ export function Layout() {
               <div className="mx-1 h-5 w-px bg-white/[0.04]" />
               <button
                 onClick={() => {
-                  logout();
+                  void logout();
                   navigate("/login");
                 }}
                 className="flex items-center gap-2 rounded-xl border border-white/[0.04] bg-white/[0.02] px-3 py-2 text-[12px] text-[var(--admin-text-dim)] transition-all duration-200 hover:border-white/[0.08] hover:bg-white/[0.03] hover:text-red-400"
