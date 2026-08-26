@@ -115,3 +115,36 @@ async def test_list_keys_for_owner_filters():
     assert own1 == [k1]
     all_ids = [k["id"] for k in await svc.list_keys()]
     assert {k1, k2, k3} <= set(all_ids)
+
+
+import time
+
+from wiwi.logging_core.db_sink import DBSink
+from wiwi.logging_core.events import LogEvent
+
+
+async def _sink():
+    eng = await _engine()
+    sink = DBSink(eng)
+    await sink.startup()
+    return eng, sink
+
+
+def _req_event(key_id: str, cost: float = 0.01, ts: float | None = None) -> LogEvent:
+    return LogEvent(stream="request", ts=ts if ts else time.time(),
+                    key_id=key_id, cost=cost, tok_in=10, tok_out=5,
+                    status=200, model_group="gpt-4o")
+
+
+async def test_request_log_carries_key_id_and_filters():
+    _eng, sink = await _sink()
+    await sink.write_requests([_req_event("k1", 0.10), _req_event("k2", 0.20)])
+    all_logs = await sink.read_requests(100)
+    assert {l["key_id"] for l in all_logs} == {"k1", "k2"}
+    only_k1 = await sink.read_requests(100, key_ids=["k1"])
+    assert {l["key_id"] for l in only_k1} == {"k1"}
+    ov_all = await sink.read_overview(0)
+    assert ov_all["requests"] == 2
+    ov_k2 = await sink.read_overview(0, key_ids=["k2"])
+    assert ov_k2["requests"] == 1
+    assert round(ov_k2["cost"], 2) == 0.20
