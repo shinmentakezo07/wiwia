@@ -243,7 +243,7 @@ function Circle({
   return (
     <div
       ref={ref}
-      className={`group relative z-10 flex h-14 w-14 items-center justify-center rounded-full border-2 border-[var(--admin-border)] bg-[var(--admin-surface)] p-3 shadow-lg shadow-black/20 backdrop-blur-sm transition-all duration-200 hover:scale-110 hover:border-white/[0.15] ${className}`}
+      className={`group relative z-10 flex h-16 w-16 items-center justify-center rounded-full border-2 border-[var(--admin-border)] bg-[var(--admin-surface)] p-3 shadow-lg shadow-black/30 backdrop-blur-sm transition-all duration-200 hover:scale-110 hover:border-white/[0.18] hover:shadow-brand-500/30 ${className}`}
     >
       {children}
     </div>
@@ -264,20 +264,20 @@ export function GraphSection() {
   ];
 
   return (
-    <section className="relative w-full overflow-hidden py-20 md:py-28">
-      {/* Faint radial glow behind center */}
-      <div className="absolute left-1/2 top-1/2 h-96 w-96 -translate-x-1/2 -translate-y-1/2 rounded-full bg-blue-500/5 blur-3xl" aria-hidden />
+    <section className="relative w-full overflow-hidden py-28 md:py-40">
+      {/* Rich multi-color radial glow behind center */}
+      <div className="absolute left-1/2 top-1/2 h-[32rem] w-[32rem] -translate-x-1/2 -translate-y-1/2 rounded-full bg-[radial-gradient(circle,rgba(139,92,246,0.12)_0%,rgba(59,130,246,0.08)_40%,transparent_70%)] blur-2xl" aria-hidden />
+      <div className="absolute left-1/2 top-1/2 h-80 w-80 -translate-x-1/2 -translate-y-1/2 rounded-full bg-pink-500/5 blur-3xl" aria-hidden />
 
       <div className="relative">
         {/* Header */}
         <div className="mx-auto max-w-4xl px-4">
           <div className="mb-8 flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
             <div>
-              <span className="admin-label mb-3 block">How It Works</span>
-              <h2 className="text-3xl font-semibold tracking-[-0.01em] text-[var(--admin-text)] sm:text-4xl">
+              <h2 className="text-4xl font-semibold tracking-[-0.01em] text-[var(--admin-text)] sm:text-5xl">
                 One request. Any model.
               </h2>
-              <p className="mt-3 max-w-xl text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
+              <p className="mt-4 max-w-xl text-[15px] leading-relaxed text-[var(--admin-text-muted)] sm:text-base">
                 Your app sends one request. wiwi routes it to OpenAI, Anthropic, Gemini,
                 or any OpenAI-compatible URL — automatically decoding and re-encoding across dialects.
               </p>
@@ -285,7 +285,7 @@ export function GraphSection() {
             <div className="flex gap-6 lg:gap-10">
               {STATS.map((s) => (
                 <div key={s.label}>
-                  <div className="bg-gradient-to-b from-[var(--admin-text)] to-[var(--admin-text-muted)] bg-clip-text text-2xl font-bold tabular-nums text-transparent sm:text-3xl">
+                  <div className="bg-gradient-to-b from-[var(--admin-text)] to-[var(--admin-text-muted)] bg-clip-text text-3xl font-bold tabular-nums text-transparent sm:text-4xl">
                     {s.value}
                   </div>
                   <div className="text-[12px] text-[var(--admin-text-dim)]">{s.label}</div>
@@ -298,7 +298,7 @@ export function GraphSection() {
         {/* Diagram */}
         <div className="relative mx-auto max-w-4xl">
           <div
-            className="relative flex h-[500px] items-center justify-center p-10"
+            className="relative flex h-[560px] items-center justify-center p-10"
             ref={containerRef}
           >
             {/* Left: client node */}
@@ -310,18 +310,18 @@ export function GraphSection() {
                   <line x1="12" x2="12" y1="17" y2="21" />
                 </svg>
               </Circle>
-              <div className="mt-2 text-center">
-                <span className="text-[10px] font-medium uppercase tracking-wide text-[var(--admin-text-dim)]">Your app</span>
+              <div className="mt-3 text-center">
+                <span className="text-[11px] font-medium uppercase tracking-wide text-[var(--admin-text-dim)]">Your app</span>
               </div>
             </div>
 
             {/* Center: wiwi gateway */}
             <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-10">
-              <Circle ref={centerRef}>
-                <img src="/wiwi-logo.png" alt="wiwi" className="h-8 w-8 rounded-full object-cover" />
+              <Circle ref={centerRef} className="!h-20 !w-20 wiwi-gateway-node">
+                <img src="/wiwi-logo.png" alt="wiwi" className="h-10 w-10 rounded-full object-cover" />
               </Circle>
-              <div className="mt-2 text-center">
-                <span className="text-[10px] font-medium uppercase tracking-wide text-[var(--admin-text-dim)]">wiwi gateway</span>
+              <div className="mt-3 text-center">
+                <span className="text-[11px] font-medium uppercase tracking-wide text-[var(--admin-text-dim)]">wiwi gateway</span>
               </div>
             </div>
 
@@ -330,8 +330,9 @@ export function GraphSection() {
               {PROVIDER_NODES.map((node, i) => (
                 <div key={node.label} className="flex flex-col items-center">
                   <Circle ref={rightRefs[i]} className="hover:!border-[var(--admin-border-hover)]">
-                    <node.Icon className="h-6 w-6 object-contain" />
+                    <node.Icon className="h-7 w-7 object-contain" />
                   </Circle>
+                  <span className="mt-2 text-[10px] font-medium text-[var(--admin-text-dim)]">{node.label}</span>
                 </div>
               ))}
             </div>
@@ -341,23 +342,36 @@ export function GraphSection() {
               containerRef={containerRef}
               fromRef={leftRef}
               toRef={centerRef}
+              pathWidth={3}
               gradientStart="#3b82f6"
               gradientStop="#8b5cf6"
-              duration={4}
+              duration={3.5}
             />
-            {rightRefs.map((ref, i) => (
-              <AnimatedBeam
-                key={i}
-                containerRef={containerRef}
-                fromRef={centerRef}
-                toRef={ref}
-                curvature={(i - 2) * 20}
-                delay={i * 0.5}
-                gradientStart="#8b5cf6"
-                gradientStop="#ec4899"
-                duration={4 + i * 0.5}
-              />
-            ))}
+            {rightRefs.map((ref, i) => {
+              const hues = [
+                ["#8b5cf6", "#ec4899"], // OpenAI  → violet→pink
+                ["#f59e0b", "#ef4444"], // Anthropic → amber→red
+                ["#22c55e", "#3b82f6"], // Gemini  → green→blue
+                ["#06b6d4", "#8b5cf6"], // xAI     → cyan→violet
+                ["#4d6bfe", "#22c55e"], // DeepSeek → blue→green
+                ["#ec4899", "#f59e0b"], // Moonshot → pink→amber
+              ];
+              const [g0, g1] = hues[i] ?? ["#8b5cf6", "#ec4899"];
+              return (
+                <AnimatedBeam
+                  key={i}
+                  containerRef={containerRef}
+                  fromRef={centerRef}
+                  toRef={ref}
+                  curvature={(i - 2) * 24}
+                  delay={i * 0.4}
+                  pathWidth={3}
+                  gradientStart={g0}
+                  gradientStop={g1}
+                  duration={3.5 + i * 0.4}
+                />
+              );
+            })}
           </div>
         </div>
 
@@ -367,9 +381,9 @@ export function GraphSection() {
             {DIALECTS.map((d) => (
               <div
                 key={d.name}
-                className="flex items-center gap-2 rounded-lg border border-[var(--admin-border)] bg-[var(--admin-surface)] px-3 py-2"
+                className="flex items-center gap-2 rounded-full border border-[var(--admin-border)] bg-[var(--admin-surface)] px-4 py-2.5 transition-all duration-200 hover:border-brand-400/40 hover:bg-brand-500/[0.06]"
               >
-                <span className="font-mono text-[12px] text-blue-300">{d.name}</span>
+                <span className="font-mono text-[13px] text-blue-300">{d.name}</span>
                 <span className="text-[11px] text-[var(--admin-text-dim)]">{d.note}</span>
               </div>
             ))}
