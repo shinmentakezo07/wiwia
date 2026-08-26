@@ -5,8 +5,8 @@
 // glassmorphism card, subtle gradient heading.
 
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { ArrowRight, Eye, EyeOff, KeyRound, Loader2, ShieldCheck, TriangleAlert } from "lucide-react";
+import { Link, useNavigate } from "react-router-dom";
+import { ArrowRight, Eye, EyeOff, KeyRound, Loader2, ShieldCheck, TriangleAlert, UserRound } from "lucide-react";
 import { useAuth } from "@/api/auth";
 
 const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
@@ -113,20 +113,31 @@ function GatewayDiagram() {
 }
 
 export function LoginPage() {
-  const { loginWithMaster } = useAuth();
+  const { login, loginWithMaster } = useAuth();
   const navigate = useNavigate();
+  const [mode, setMode] = useState<"master" | "username">("master");
   const [key, setKey] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showKey, setShowKey] = useState(false);
 
+  const masterReady = !!key.trim();
+  const usernameReady = username.trim().length >= 3 && password.length >= 8;
+  const canSubmit = (mode === "master" ? masterReady : usernameReady) && !busy;
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!key.trim() || busy) return;
+    if (!canSubmit || busy) return;
     setBusy(true);
     setError(null);
     try {
-      await loginWithMaster(key.trim());
+      if (mode === "master") {
+        await loginWithMaster(key.trim());
+      } else {
+        await login(username.trim(), password);
+      }
       navigate("/app");
     } catch (err) {
       setError(err instanceof Error ? err.message : "login failed");
@@ -199,41 +210,109 @@ export function LoginPage() {
               <GatewayDiagram />
             </div>
 
+            {/* ── mode toggle ── */}
+            <div className="flex gap-1 border-b border-[var(--admin-border)] px-4 pt-3">
+              <button
+                type="button"
+                onClick={() => { setMode("master"); setError(null); }}
+                className={`flex-1 rounded-[8px] px-3 py-2 text-[13px] font-medium transition-colors ${
+                  mode === "master"
+                    ? "bg-blue-500/[0.06] text-blue-200"
+                    : "text-[var(--admin-text-muted)] hover:bg-white/[0.02] hover:text-[var(--admin-text)]"
+                }`}
+              >
+                <KeyRound size={13} className="mr-1.5 inline" />
+                Master key
+              </button>
+              <button
+                type="button"
+                onClick={() => { setMode("username"); setError(null); }}
+                className={`flex-1 rounded-[8px] px-3 py-2 text-[13px] font-medium transition-colors ${
+                  mode === "username"
+                    ? "bg-blue-500/[0.06] text-blue-200"
+                    : "text-[var(--admin-text-muted)] hover:bg-white/[0.02] hover:text-[var(--admin-text)]"
+                }`}
+              >
+                <UserRound size={13} className="mr-1.5 inline" />
+                Username
+              </button>
+            </div>
+
             {/* ── form ── */}
             <form onSubmit={submit} className="space-y-4 px-7 pb-6 pt-6">
-              <label htmlFor="master-key" className="block">
-                <span className="admin-label mb-2 block">Master Key</span>
-                <span className="relative block">
-                  <KeyRound
-                    size={14}
-                    className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--admin-text-dim)]"
-                    aria-hidden="true"
-                  />
-                  <input
-                    id="master-key"
-                    type={showKey ? "text" : "password"}
-                    value={key}
-                    autoFocus
-                    autoComplete="off"
-                    spellCheck={false}
-                    disabled={busy}
-                    placeholder="sk-wiwi-master-…"
-                    onChange={(e) => setKey(e.target.value)}
-                    className="admin-input h-11 pl-9 pr-10 font-mono text-sm disabled:opacity-60"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowKey((v) => !v)}
-                    aria-label={showKey ? "Hide key" : "Show key"}
-                    className="absolute right-1.5 top-1/2 grid h-7 w-7 -translate-y-1/2 place-items-center rounded-md text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.03] hover:text-[var(--admin-text-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
-                  >
-                    {showKey ? <EyeOff size={13} /> : <Eye size={13} />}
-                  </button>
-                </span>
-                <span className="mt-1.5 block text-[11px] text-[var(--admin-text-dim)]">
-                  The <code className="font-mono">master_key</code> from your wiwi.yaml.
-                </span>
-              </label>
+              {mode === "master" ? (
+                <label htmlFor="master-key" className="block">
+                  <span className="admin-label mb-2 block">Master Key</span>
+                  <span className="relative block">
+                    <KeyRound
+                      size={14}
+                      className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--admin-text-dim)]"
+                      aria-hidden="true"
+                    />
+                    <input
+                      id="master-key"
+                      type={showKey ? "text" : "password"}
+                      value={key}
+                      autoFocus
+                      autoComplete="off"
+                      spellCheck={false}
+                      disabled={busy}
+                      placeholder="sk-wiwi-master-…"
+                      onChange={(e) => setKey(e.target.value)}
+                      className="admin-input h-11 pl-9 pr-10 font-mono text-sm disabled:opacity-60"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowKey((v) => !v)}
+                      aria-label={showKey ? "Hide key" : "Show key"}
+                      className="absolute right-1.5 top-1/2 grid h-7 w-7 -translate-y-1/2 place-items-center rounded-md text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.03] hover:text-[var(--admin-text-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
+                    >
+                      {showKey ? <EyeOff size={13} /> : <Eye size={13} />}
+                    </button>
+                  </span>
+                  <span className="mt-1.5 block text-[11px] text-[var(--admin-text-dim)]">
+                    The <code className="font-mono">master_key</code> from your wiwi.yaml.
+                  </span>
+                </label>
+              ) : (
+                <>
+                  <label htmlFor="li-username" className="block">
+                    <span className="admin-label mb-2 block">Username</span>
+                    <span className="relative block">
+                      <UserRound
+                        size={14}
+                        className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--admin-text-dim)]"
+                        aria-hidden="true"
+                      />
+                      <input
+                        id="li-username"
+                        type="text"
+                        value={username}
+                        autoFocus
+                        autoComplete="username"
+                        spellCheck={false}
+                        disabled={busy}
+                        placeholder="your username"
+                        onChange={(e) => setUsername(e.target.value)}
+                        className="admin-input h-11 pl-9 pr-3 text-sm disabled:opacity-60"
+                      />
+                    </span>
+                  </label>
+                  <label htmlFor="li-password" className="block">
+                    <span className="admin-label mb-2 block">Password</span>
+                    <input
+                      id="li-password"
+                      type="password"
+                      value={password}
+                      autoComplete="current-password"
+                      disabled={busy}
+                      placeholder="••••••••"
+                      onChange={(e) => setPassword(e.target.value)}
+                      className="admin-input h-11 px-3 text-sm disabled:opacity-60"
+                    />
+                  </label>
+                </>
+              )}
 
               {error && (
                 <p
@@ -248,7 +327,7 @@ export function LoginPage() {
 
               <button
                 type="submit"
-                disabled={!key.trim() || busy}
+                disabled={!canSubmit}
                 className="wiwi-shimmer group inline-flex h-11 w-full items-center justify-center gap-2 rounded-[8px] bg-gradient-to-b from-brand-500 to-brand-700 text-sm font-medium text-white shadow-lg shadow-brand-600/20 transition-[transform,filter,box-shadow] duration-150 hover:brightness-110 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/70 disabled:pointer-events-none disabled:opacity-50 disabled:saturate-50"
               >
                 {busy ? (
@@ -267,12 +346,21 @@ export function LoginPage() {
                   </>
                 )}
               </button>
+
+              <p className="pt-1 text-center text-[12px] text-[var(--admin-text-dim)]">
+                No account?{" "}
+                <Link to="/signup" className="text-blue-300 hover:text-blue-200">
+                  Sign up
+                </Link>
+              </p>
             </form>
 
             {/* ── trust footer ── */}
             <div className="flex items-center gap-2 border-t border-[var(--admin-border)] px-7 py-3.5 text-[11px] text-[var(--admin-text-dim)]">
               <ShieldCheck size={12} className="shrink-0" aria-hidden="true" />
-              Key stays in this browser — checked once against your gateway.
+              {mode === "master"
+                ? "Key stays in this browser — checked once against your gateway."
+                : "Session held in a server-side cookie. We never see your password."}
             </div>
           </div>
         </div>
