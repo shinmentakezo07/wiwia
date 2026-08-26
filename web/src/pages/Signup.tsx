@@ -32,7 +32,7 @@ export function SignupPage() {
     setError(null);
     try {
       await signup(u, p);
-      navigate("/app");
+      navigate("/console");
     } catch (err) {
       setError(err instanceof Error ? err.message : "signup failed");
     } finally {

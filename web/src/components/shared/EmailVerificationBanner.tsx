@@ -34,7 +34,7 @@ export function EmailVerificationBanner() {
         credentials: "include",
         body: JSON.stringify({
           email: user.username,
-          callbackURL: `${window.location.origin}/app?emailVerified=true`,
+          callbackURL: `${window.location.origin}/console?emailVerified=true`,
         }),
       });
       if (!res.ok) {

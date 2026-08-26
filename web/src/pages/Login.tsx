@@ -138,7 +138,7 @@ export function LoginPage() {
       } else {
         await login(username.trim(), password);
       }
-      navigate("/app");
+      navigate("/console");
     } catch (err) {
       setError(err instanceof Error ? err.message : "login failed");
     } finally {

@@ -52,26 +52,26 @@ interface NavSection {
 const USER_NAV_SECTIONS: NavSection[] = [
   {
     title: "Overview",
-    items: [{ to: "/app", label: "Dashboard", icon: LayoutDashboard, end: true }],
+    items: [{ to: "/console", label: "Dashboard", icon: LayoutDashboard, end: true }],
   },
   {
     title: "Traffic",
     items: [
-      { to: "/app/request-logs", label: "Request Logs", icon: ScrollText },
-      { to: "/app/usage", label: "Usage", icon: Activity },
-      { to: "/app/analytics", label: "Analytics", icon: BarChart3 },
+      { to: "/console/request-logs", label: "Request Logs", icon: ScrollText },
+      { to: "/console/usage", label: "Usage", icon: Activity },
+      { to: "/console/analytics", label: "Analytics", icon: BarChart3 },
     ],
   },
   {
     title: "Configuration",
     items: [
-      { to: "/app/models", label: "Models", icon: Database },
-      { to: "/app/keys", label: "Virtual Keys", icon: KeyRound },
+      { to: "/console/models", label: "Models", icon: Database },
+      { to: "/console/keys", label: "Virtual Keys", icon: KeyRound },
     ],
   },
   {
     title: "Admin",
-    items: [{ to: "/app/budgets", label: "Budgets & Alerts", icon: BellRing }],
+    items: [{ to: "/console/budgets", label: "Budgets & Alerts", icon: BellRing }],
   },
 ];
 
@@ -79,33 +79,33 @@ const ADMIN_ONLY_SECTIONS: NavSection[] = [
   {
     title: "Configuration",
     items: [
-      { to: "/app/providers", label: "Providers", icon: Server },
-      { to: "/app/builtin-providers", label: "Built-in Providers", icon: Boxes },
+      { to: "/console/providers", label: "Providers", icon: Server },
+      { to: "/console/builtin-providers", label: "Built-in Providers", icon: Boxes },
     ],
   },
   {
     title: "Admin",
     items: [
-      { to: "/app/proxy-logs", label: "Proxy Logs", icon: Terminal },
-      { to: "/app/users", label: "Users", icon: Users },
-      { to: "/app/settings", label: "Settings", icon: CreditCard },
+      { to: "/console/proxy-logs", label: "Proxy Logs", icon: Terminal },
+      { to: "/console/users", label: "Users", icon: Users },
+      { to: "/console/settings", label: "Settings", icon: CreditCard },
     ],
   },
 ];
 
 const PAGE_META: Record<string, { title: string; section: string }> = {
-  "/app": { title: "Dashboard", section: "Overview" },
-  "/app/request-logs": { title: "Request Logs", section: "Traffic" },
-  "/app/proxy-logs": { title: "Proxy Logs", section: "Traffic" },
-  "/app/usage": { title: "Usage", section: "Traffic" },
-  "/app/analytics": { title: "Analytics", section: "Traffic" },
-  "/app/providers": { title: "Providers", section: "Configuration" },
-  "/app/builtin-providers": { title: "Built-in Providers", section: "Configuration" },
-  "/app/models": { title: "Models", section: "Configuration" },
-  "/app/keys": { title: "Virtual Keys", section: "Configuration" },
-  "/app/budgets": { title: "Budgets & Alerts", section: "Admin" },
-  "/app/settings": { title: "Settings", section: "Admin" },
-  "/app/users": { title: "Users", section: "Admin" },
+  "/console": { title: "Dashboard", section: "Overview" },
+  "/console/request-logs": { title: "Request Logs", section: "Traffic" },
+  "/console/proxy-logs": { title: "Proxy Logs", section: "Traffic" },
+  "/console/usage": { title: "Usage", section: "Traffic" },
+  "/console/analytics": { title: "Analytics", section: "Traffic" },
+  "/console/providers": { title: "Providers", section: "Configuration" },
+  "/console/builtin-providers": { title: "Built-in Providers", section: "Configuration" },
+  "/console/models": { title: "Models", section: "Configuration" },
+  "/console/keys": { title: "Virtual Keys", section: "Configuration" },
+  "/console/budgets": { title: "Budgets & Alerts", section: "Admin" },
+  "/console/settings": { title: "Settings", section: "Admin" },
+  "/console/users": { title: "Users", section: "Admin" },
 };
 
 function LiveClock() {

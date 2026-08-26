@@ -22,3 +22,8 @@ wiwi.db
 # Build artifacts
 web/node_modules/
 web/tsconfig.tsbuildinfo
+# Agent harness scratch
+.omp/
+
+# HAR captures
+*.har

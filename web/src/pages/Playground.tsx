@@ -392,7 +392,7 @@ function ChatSidebar(props: {
       {/* Footer */}
       <div className="shrink-0 border-t border-[var(--admin-border)] px-3 py-2">
         <Link
-          to="/app"
+          to="/console"
           className="flex items-center gap-2 text-[12px] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]"
         >
           <Terminal size={12} />
@@ -724,7 +724,7 @@ export function PlaygroundPage() {
               </span>
             )}
             <Link
-              to="/app"
+              to="/console"
               className="flex items-center rounded-[10px] px-3 py-1.5 text-[13px] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]"
             >
               Dashboard

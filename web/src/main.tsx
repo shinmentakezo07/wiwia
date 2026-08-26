@@ -1,6 +1,6 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useParams } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AuthProvider, useAuth } from "@/api/auth";
 import { AdminStreamProvider } from "@/api/stream";
@@ -68,6 +68,12 @@ const queryClient = new QueryClient({
   },
 });
 
+// Legacy redirect: /app/* → /console/* (and bare /app → /console).
+function LegacyAppRedirect() {
+  const { "*": rest } = useParams();
+  return <Navigate to={rest ? `/console/${rest}` : "/console"} replace />;
+}
+
 function AppRoutes() {
   const { user, loading } = useAuth();
   if (loading) return null;
@@ -119,8 +125,8 @@ function AppRoutes() {
       />
 
       {/* Auth */}
-      <Route path="/login" element={user ? <Navigate to="/app" replace /> : <LoginPage />} />
-      <Route path="/signup" element={user ? <Navigate to="/app" replace /> : <SignupPage />} />
+      <Route path="/login" element={user ? <Navigate to="/console" replace /> : <LoginPage />} />
+      <Route path="/signup" element={user ? <Navigate to="/console" replace /> : <SignupPage />} />
 
       {/* Guarded admin shell */}
       <Route
@@ -132,15 +138,15 @@ function AppRoutes() {
           </RequireUser>
         }
       >
-        <Route path="/app" element={<DashboardPage />} />
-        <Route path="/app/keys" element={<VirtualKeysPage />} />
-        <Route path="/app/models" element={<ModelsPage />} />
-        <Route path="/app/request-logs" element={<RequestLogsPage />} />
-        <Route path="/app/usage" element={<UsagePage />} />
-        <Route path="/app/analytics" element={<AnalyticsPage />} />
-        <Route path="/app/budgets" element={<BudgetsAlertsPage />} />
+        <Route path="/console" element={<DashboardPage />} />
+        <Route path="/console/keys" element={<VirtualKeysPage />} />
+        <Route path="/console/models" element={<ModelsPage />} />
+        <Route path="/console/request-logs" element={<RequestLogsPage />} />
+        <Route path="/console/usage" element={<UsagePage />} />
+        <Route path="/console/analytics" element={<AnalyticsPage />} />
+        <Route path="/console/budgets" element={<BudgetsAlertsPage />} />
         <Route
-          path="/app/providers"
+          path="/console/providers"
           element={
             <RequireAdmin>
               <ProvidersPage />
@@ -148,7 +154,7 @@ function AppRoutes() {
           }
         />
         <Route
-          path="/app/providers/:name"
+          path="/console/providers/:name"
           element={
             <RequireAdmin>
               <ProviderDetailPage />
@@ -156,7 +162,7 @@ function AppRoutes() {
           }
         />
         <Route
-          path="/app/builtin-providers"
+          path="/console/builtin-providers"
           element={
             <RequireAdmin>
               <BuiltinProvidersPage />
@@ -164,7 +170,7 @@ function AppRoutes() {
           }
         />
         <Route
-          path="/app/proxy-logs"
+          path="/console/proxy-logs"
           element={
             <RequireAdmin>
               <ProxyLogsPage />
@@ -172,7 +178,7 @@ function AppRoutes() {
           }
         />
         <Route
-          path="/app/settings"
+          path="/console/settings"
           element={
             <RequireAdmin>
               <SettingsPage />
@@ -180,7 +186,7 @@ function AppRoutes() {
           }
         />
         <Route
-          path="/app/users"
+          path="/console/users"
           element={
             <RequireAdmin>
               <UsersPage />
@@ -189,18 +195,21 @@ function AppRoutes() {
         />
       </Route>
 
+      {/* legacy /app/* → /console/* redirect (old admin base path) */}
+      <Route path="/app/*" element={<LegacyAppRedirect />} />
+
       {/* legacy flat-path redirects */}
-      <Route path="/keys" element={<Navigate to="/app/keys" replace />} />
-      <Route path="/providers" element={<Navigate to="/app/providers" replace />} />
-      <Route path="/models-config" element={<Navigate to="/app/models" replace />} />
-      <Route path="/request-logs" element={<Navigate to="/app/request-logs" replace />} />
-      <Route path="/usage" element={<Navigate to="/app/usage" replace />} />
-      <Route path="/analytics" element={<Navigate to="/app/analytics" replace />} />
-      <Route path="/budgets" element={<Navigate to="/app/budgets" replace />} />
-      <Route path="/settings" element={<Navigate to="/app/settings" replace />} />
-      <Route path="/proxy-logs" element={<Navigate to="/app/proxy-logs" replace />} />
-      <Route path="/builtin-providers" element={<Navigate to="/app/builtin-providers" replace />} />
-      <Route path="/dashboard" element={<Navigate to="/app" replace />} />
+      <Route path="/keys" element={<Navigate to="/console/keys" replace />} />
+      <Route path="/providers" element={<Navigate to="/console/providers" replace />} />
+      <Route path="/models-config" element={<Navigate to="/console/models" replace />} />
+      <Route path="/request-logs" element={<Navigate to="/console/request-logs" replace />} />
+      <Route path="/usage" element={<Navigate to="/console/usage" replace />} />
+      <Route path="/analytics" element={<Navigate to="/console/analytics" replace />} />
+      <Route path="/budgets" element={<Navigate to="/console/budgets" replace />} />
+      <Route path="/settings" element={<Navigate to="/console/settings" replace />} />
+      <Route path="/proxy-logs" element={<Navigate to="/console/proxy-logs" replace />} />
+      <Route path="/builtin-providers" element={<Navigate to="/console/builtin-providers" replace />} />
+      <Route path="/dashboard" element={<Navigate to="/console" replace />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

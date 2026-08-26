@@ -76,7 +76,7 @@ export function PricingPlans() {
     if (!hasSession) {
       navigate("/signup");
     } else {
-      navigate("/app");
+      navigate("/console");
     }
   };
 

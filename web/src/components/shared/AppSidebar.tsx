@@ -11,8 +11,8 @@ import { useAuth } from "@/api/auth";
 import { Badge, Button } from "@/components/ui";
 
 const items = [
-  { title: "Dashboard", url: "/app", icon: User2 },
-  { title: "Settings", url: "/app/settings", icon: Settings },
+  { title: "Dashboard", url: "/console", icon: User2 },
+  { title: "Settings", url: "/console/settings", icon: Settings },
 ];
 
 export function AppSidebar() {

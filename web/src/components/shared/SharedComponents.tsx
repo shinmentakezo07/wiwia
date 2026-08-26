@@ -13,7 +13,7 @@ import { useAuth } from "@/api/auth";
 
 export function AuthLink(props: { href: string; children: React.ReactNode; className?: string }) {
   const { user, loading } = useAuth();
-  const to = user && !loading ? "/app" : "/signup";
+  const to = user && !loading ? "/console" : "/signup";
   return (
     <Link to={to} className={props.className}>
       {props.children}
