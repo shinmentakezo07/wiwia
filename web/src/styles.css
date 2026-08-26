@@ -1101,9 +1101,14 @@ select.admin-input option {
   0%, 100% { transform: translate(0, 0) scale(1); }
   50% { transform: translate(-50px, 40px) scale(1.12); }
 }
+@keyframes hero-orb-3 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(35px, 35px) scale(1.1); }
+}
 @media (prefers-reduced-motion: no-preference) {
   .hero-orb-1 { animation: hero-orb-1 18s ease-in-out infinite; }
   .hero-orb-2 { animation: hero-orb-2 22s ease-in-out infinite; }
+  .hero-orb-3 { animation: hero-orb-3 26s ease-in-out infinite; }
 }
 
 /* Gradient text shimmer on the headline accent */
@@ -1112,7 +1117,7 @@ select.admin-input option {
   100% { background-position: 200% 50%; }
 }
 .hero-gradient-text {
-  background: linear-gradient(90deg, #60a5fa, #a78bfa, #f472b6, #a78bfa, #60a5fa);
+  background: linear-gradient(90deg, #22d3ee, #60a5fa, #a78bfa, #f472b6, #a78bfa, #60a5fa, #22d3ee);
   background-size: 200% 100%;
   -webkit-background-clip: text;
   background-clip: text;
@@ -1196,6 +1201,7 @@ select.admin-input option {
 @media (prefers-reduced-motion: no-preference) {
   .hero-grid { animation: hero-grid-pan 24s linear infinite; }
 }
+
 
 @keyframes scroll-reveal-in {
   from {
@@ -1521,4 +1527,14 @@ select.admin-input option {
 }
 @media (prefers-reduced-motion: no-preference) {
   .wiwi-gateway-node { animation: wiwi-gateway-pulse 3.5s ease-in-out infinite; }
+}
+
+/* ── Full-bleed breakout ────────────────────────────────────────────────────
+   Breaks a child out of a centered max-width + padding wrapper so it spans
+   the full viewport width. Used by the Landing hero to go edge-to-edge. */
+.full-bleed {
+  width: 100vw;
+  max-width: 100vw;
+  margin-left: calc(50% - 50vw);
+  margin-right: calc(50% - 50vw);
 }

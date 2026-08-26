@@ -3,7 +3,7 @@
 // hub-and-spoke graph, tabbed code examples, pricing strip, FAQ accordion,
 // enterprise CTA, and final CTA. All in wiwi's dark design system.
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   ArrowRight,
@@ -25,6 +25,56 @@ import { Badge, Card } from "@/components/ui";
 import { GraphSection } from "@/components/AnimatedBeam";
 
 const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
+
+// ── Hero beam backdrop ────────────────────────────────────────────────────
+// Subtle animated gradient beams drifting across the hero background. Same
+// gradient-sweep language as the How It Works graph, but lighter and slower
+// so it reads as ambient motion behind the hero content.
+const HERO_BEAMS = [
+  { d: "M 0,120 Q 300,60 600,140 T 1200,120", dur: 10, delay: 0, w: 1.5, c0: "#3b82f6", c1: "#8b5cf6" },
+  { d: "M 0,220 Q 250,160 500,240 T 1200,200", dur: 12, delay: 1.5, w: 1, c0: "#8b5cf6", c1: "#ec4899" },
+  { d: "M 0,320 Q 350,260 700,340 T 1200,300", dur: 14, delay: 0.8, w: 1.5, c0: "#22d3ee", c1: "#3b82f6" },
+  { d: "M 0,80 Q 400,20 800,100 T 1200,60", dur: 11, delay: 2, w: 1, c0: "#a78bfa", c1: "#22d3ee" },
+  { d: "M 0,160 Q 200,100 500,180 T 1200,140", dur: 15, delay: 1.2, w: 1, c0: "#f472b6", c1: "#a78bfa" },
+  { d: "M 0,280 Q 450,220 800,300 T 1200,260", dur: 13, delay: 0.5, w: 1, c0: "#60a5fa", c1: "#22c55e" },
+] as const;
+
+function HeroBeamBackdrop() {
+  const id = useId().replace(/[:]/g, "");
+  return (
+    <svg
+      className="pointer-events-none absolute inset-0 h-full w-full opacity-70"
+      viewBox="0 0 1200 400"
+      preserveAspectRatio="xMidYMid slice"
+      aria-hidden
+    >
+      <defs>
+        {HERO_BEAMS.map((b, i) => (
+          <linearGradient key={i} id={`hb-${id}-${i}`} gradientUnits="userSpaceOnUse">
+            <stop stopColor={b.c0} stopOpacity="0">
+              <animate attributeName="offset" values="-0.3;1" dur={`${b.dur}s`} begin={`${b.delay}s`} repeatCount="indefinite" />
+            </stop>
+            <stop stopColor={b.c0}>
+              <animate attributeName="offset" values="-0.1;1.1" dur={`${b.dur}s`} begin={`${b.delay}s`} repeatCount="indefinite" />
+            </stop>
+            <stop offset="0.3" stopColor={b.c1}>
+              <animate attributeName="offset" values="0;1.3" dur={`${b.dur}s`} begin={`${b.delay}s`} repeatCount="indefinite" />
+            </stop>
+            <stop offset="1" stopColor={b.c1} stopOpacity="0">
+              <animate attributeName="offset" values="0.3;1.6" dur={`${b.dur}s`} begin={`${b.delay}s`} repeatCount="indefinite" />
+            </stop>
+          </linearGradient>
+        ))}
+      </defs>
+      {HERO_BEAMS.map((b, i) => (
+        <g key={i}>
+          <path d={b.d} fill="none" stroke="rgba(255,255,255,0.03)" strokeWidth={b.w} />
+          <path d={b.d} fill="none" stroke={`url(#hb-${id}-${i})`} strokeWidth={b.w} strokeLinecap="round" />
+        </g>
+      ))}
+    </svg>
+  );
+}
 
 // ── data ───────────────────────────────────────────────────────────────────
 
@@ -537,23 +587,14 @@ function CheckIcon({ yes }: { yes: boolean }) {
 
 export function LandingPage() {
   return (
-    <div className="space-y-24 pb-24">
+    <div className="space-y-16 pb-24">
       {/* ══ hero ══ */}
-      <section className="relative overflow-hidden rounded-3xl border border-[var(--admin-border)] bg-gradient-to-b from-white/[0.02] to-transparent px-6 py-20 sm:px-12 sm:py-28">
-        {/* Animated grid backdrop with radial fade */}
-        <div className="hero-grid pointer-events-none absolute inset-0 opacity-60" aria-hidden />
-        {/* Drifting aurora orbs */}
-        <div className="hero-orb-1 pointer-events-none absolute -left-24 -top-24 h-[480px] w-[480px] rounded-full" style={{ background: "radial-gradient(circle, rgba(59,130,246,0.12) 0%, transparent 60%)" }} aria-hidden />
-        <div className="hero-orb-2 pointer-events-none absolute -bottom-32 -right-24 h-[440px] w-[440px] rounded-full" style={{ background: "radial-gradient(circle, rgba(168,85,247,0.10) 0%, transparent 60%)" }} aria-hidden />
-        {/* Top spotlight glow */}
-        <div className="pointer-events-none absolute inset-x-0 top-0 h-64" style={{ background: "radial-gradient(ellipse 60% 100% at 50% 0%, rgba(59,130,246,0.06) 0%, transparent 70%)" }} aria-hidden />
+      <section className="full-bleed relative flex min-h-[calc(100vh-64px)] items-center justify-center overflow-hidden bg-[var(--admin-bg)] px-6 sm:px-12">
+        {/* Animated beam backdrop — the sole ambient effect on pure black */}
+        <HeroBeamBackdrop />
 
-        <div className="animate-hero-enter relative mx-auto max-w-4xl text-center">
-          <span className="admin-badge admin-badge-blue mb-7 inline-flex items-center gap-2 border-white/[0.08] bg-white/[0.03] px-3.5 py-1.5">
-            <span className="hero-live-dot text-blue-400" />
-            <Zap size={11} /> self-hosted · unified LLM gateway
-          </span>
-          <h1 className="text-4xl font-semibold tracking-[-0.02em] text-[var(--admin-text)] sm:text-5xl lg:text-6xl">
+        <div className="animate-hero-enter relative mx-auto -mt-8 max-w-4xl text-center">
+          <h1 className="text-5xl font-semibold tracking-[-0.02em] text-[var(--admin-text)] sm:text-6xl lg:text-7xl">
             One gateway,
             <br />
             <span className="hero-gradient-text">every model</span>
@@ -604,11 +645,15 @@ export function LandingPage() {
       {/* ══ stats bar ══ */}
       <section className="scroll-reveal grid grid-cols-2 gap-4 sm:grid-cols-4">
         {STATS.map((s) => (
-          <div key={s.label} className="text-center">
-            <div className="bg-gradient-to-b from-[var(--admin-text)] to-[var(--admin-text-muted)] bg-clip-text text-3xl font-bold tabular-nums text-transparent sm:text-4xl">
+          <div
+            key={s.label}
+            className="group relative overflow-hidden rounded-2xl border border-[var(--admin-border)] bg-[var(--admin-surface)] px-4 py-6 text-center transition-all duration-200 hover:border-white/[0.12] hover:bg-white/[0.03]"
+          >
+            <div className="pointer-events-none absolute -top-12 left-1/2 h-24 w-24 -translate-x-1/2 rounded-full bg-brand-500/10 blur-2xl transition-opacity duration-200 group-hover:opacity-150 opacity-0 group-hover:opacity-100" aria-hidden />
+            <div className="relative bg-gradient-to-b from-[var(--admin-text)] to-[var(--admin-text-muted)] bg-clip-text text-3xl font-bold tabular-nums text-transparent sm:text-4xl">
               {s.value}
             </div>
-            <div className="mt-1 text-[13px] text-[var(--admin-text-dim)]">{s.label}</div>
+            <div className="relative mt-1 text-[13px] text-[var(--admin-text-dim)]">{s.label}</div>
           </div>
         ))}
       </section>
