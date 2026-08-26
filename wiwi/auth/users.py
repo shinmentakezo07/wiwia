@@ -111,8 +111,8 @@ def verify_session(secret: str, token: str) -> tuple[str, str, float] | None:
 
 def _validate_username(username: str) -> str:
     u = (username or "").strip().lower()
-    if not (3 <= len(u) <= 32) or not USERNAME_RE.match(u):
-        raise ValueError("username must be 3-32 chars [a-zA-Z0-9_-]")
+    if not (2 <= len(u) <= 32) or not USERNAME_RE.match(u):
+        raise ValueError("username must be 2-32 chars [a-zA-Z0-9_-]")
     return u
 
 
