@@ -4,6 +4,7 @@
 
 import { useEffect, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
+import { useAuth } from "@/api/auth";
 import {
   Activity,
   Blocks,
@@ -14,7 +15,6 @@ import {
   Calculator,
   ChevronDown,
   Clock,
-  Code,
   GitCompare,
   Gift,
   Handshake,
@@ -59,14 +59,7 @@ const productsLinks: NavLink[] = [
     gradient: "hover:from-violet-500/20 hover:to-purple-600/30 group-hover/product:text-violet-400",
   },
   {
-    title: "DevPass",
-    href: "/pricing",
-    description: "Fixed-price monthly plans for Claude Code, Cursor, and every coding tool.",
-    icon: Code,
-    gradient: "hover:from-indigo-500/20 hover:to-blue-600/30 group-hover/product:text-indigo-400",
-  },
-  {
-    title: "Lounge",
+    title: "Playground",
     href: "/playground",
     description: "Every frontier model in one chat — plus image, video and audio studios.",
     icon: MessagesSquare,
@@ -223,8 +216,8 @@ export function Navbar({ sticky = true }: { sticky?: boolean }) {
   const [menuState, setMenuState] = useState(false);
   const [isScrolled, setIsScrolled] = useState(false);
   const [openMobileSection, setOpenMobileSection] = useState<string | null>(null);
-
-  const isAuthenticated = !!localStorage.getItem("wiwi.user");
+  const { user } = useAuth();
+  const isAuthenticated = !!user;
 
   // highlight the section the user is currently on
   const isActivePath = (href: string) =>
@@ -285,14 +278,11 @@ export function Navbar({ sticky = true }: { sticky?: boolean }) {
             {/* Desktop center nav */}
             <div className="hidden min-w-0 items-center gap-1 lg:flex">
               <div className="flex gap-0.5 text-sm">
-                <Link to="/pricing" className={DESKTOP_LINK_BASE}>
-                  DevPass
-                </Link>
                 <Link
                   to="/playground"
                   className={`${directLinkClass(isActivePath("/playground"))} hidden min-[1360px]:block`}
                 >
-                  Lounge
+                  Playground
                 </Link>
                 <Link to="/models" className={directLinkClass(isActivePath("/models"))}>
                   Models
@@ -347,8 +337,7 @@ export function Navbar({ sticky = true }: { sticky?: boolean }) {
           {menuState && (
             <div id="mobile-nav" className="wiwi-enter border-t border-white/[0.06] px-4 pb-5 pt-3 lg:hidden">
               <ul className="space-y-0.5 text-[15px]">
-                <li><Link to="/pricing" className={DESKTOP_LINK_BASE}>DevPass</Link></li>
-                <li><Link to="/playground" className={directLinkClass(isActivePath("/playground"))}>Lounge</Link></li>
+                <li><Link to="/playground" className={directLinkClass(isActivePath("/playground"))}>Playground</Link></li>
                 <li><Link to="/models" className={directLinkClass(isActivePath("/models"))}>Models</Link></li>
                 <li>
                   <a href={DOCS_URL} target="_blank" rel="noopener noreferrer" className={DESKTOP_LINK_BASE}>
