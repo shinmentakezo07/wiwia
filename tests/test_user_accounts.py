@@ -148,3 +148,59 @@ async def test_request_log_carries_key_id_and_filters():
     ov_k2 = await sink.read_overview(0, key_ids=["k2"])
     assert ov_k2["requests"] == 1
     assert round(ov_k2["cost"], 2) == 0.20
+
+
+import httpx
+import respx
+from asgi_lifespan import LifespanManager
+from httpx import ASGITransport, AsyncClient
+
+from wiwi.server.app import create_app_from_config_path
+
+
+async def _app_for_config(tmp_path, config_yaml: str):
+    cfg_path = tmp_path / "wiwi.yaml"
+    cfg_path.write_text(config_yaml)
+    return create_app_from_config_path(str(cfg_path))
+
+
+_CONFIG = """
+general_settings:
+  master_key: sk-master-test-123
+providers:
+  - name: openai
+    provider: openai
+    keys: [{label: main, key: sk-upstream-fake}]
+model_list:
+  - model_name: gpt-4o
+    wiwi_params:
+      provider: openai
+      model: gpt-4o
+"""
+
+
+@respx.mock
+async def test_request_logs_key_id_for_virtual_key(tmp_path):
+    # Create a virtual key via master, then make a chat call with it.
+    app = await _app_for_config(tmp_path, _CONFIG)
+    async with LifespanManager(app):  # noqa: SIM117
+        async with AsyncClient(transport=ASGITransport(app=app),
+                               base_url="http://t") as client:
+            respx.post("https://api.openai.com/v1/chat/completions").mock(
+                return_value=httpx.Response(200, json={
+                    "id": "chatcmpl-1", "object": "chat.completion",
+                    "choices": [{"index": 0, "message": {"role": "assistant",
+                      "content": "hi"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 3},
+                }))
+            r = await client.post("/admin/keys/generate", json={"name": "test"},
+                                  headers={"Authorization": "Bearer sk-master-test-123"})
+            vkey = r.json()["key"]
+            r2 = await client.post("/v1/chat/completions",
+                                   json={"model": "gpt-4o",
+                                         "messages": [{"role": "user", "content": "hi"}]},
+                                   headers={"Authorization": f"Bearer {vkey}"})
+            assert r2.status_code == 200
+            logs = (await client.get("/admin/logs/requests",
+                     headers={"Authorization": "Bearer sk-master-test-123"})).json()["logs"]
+            assert any(l["key_id"] and l["key_id"].startswith("k") for l in logs)
