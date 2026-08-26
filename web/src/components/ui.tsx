@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Check, Copy, X } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, Copy, X } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { Delta } from "@/lib/dashboard-metrics";
 
@@ -71,6 +71,62 @@ export function Button(props: ButtonHTMLAttributes<HTMLButtonElement> & { varian
 export function Input(props: InputHTMLAttributes<HTMLInputElement>) {
   const { className = "", ...rest } = props;
   return <input className={`admin-input ${className}`} {...rest} />;
+}
+
+/** Number input with custom dark-themed −/+ stepper buttons (native browser
+ *  spinners are hidden via CSS). Optional right-aligned unit suffix. */
+export function NumberInput(props: {
+  value: string;
+  onChange: (v: string) => void;
+  min?: number;
+  step?: number | "any";
+  suffix?: string;
+  disabled?: boolean;
+  placeholder?: string;
+  autoFocus?: boolean;
+  className?: string;
+}) {
+  const { value, onChange, min, step, suffix, disabled, ...rest } = props;
+  const stepN = step === "any" || step == null ? 1 : step;
+  const num = value === "" ? null : Number(value);
+  const atMin = min != null && num != null && !Number.isNaN(num) && num <= min;
+
+  function clamp(n: number) {
+    if (min != null && n < min) n = min;
+    return n;
+  }
+  function bump(dir: 1 | -1) {
+    const base = num == null || Number.isNaN(num) ? (min != null ? min : 0) : num;
+    onChange(String(clamp(base + dir * stepN)));
+  }
+
+  return (
+    <div className="admin-number-field">
+      <Input
+        type="number"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        min={min}
+        step={step}
+        disabled={disabled}
+        className={suffix ? "pr-16" : undefined}
+        {...rest}
+      />
+      {suffix && (
+        <span className="pointer-events-none absolute right-8 top-1/2 -translate-y-1/2 font-mono text-[10px] uppercase tracking-wider text-[var(--admin-text-dim)]">
+          {suffix}
+        </span>
+      )}
+      <span className="admin-number-stepper">
+        <button type="button" tabIndex={-1} disabled={disabled} onClick={() => bump(1)} aria-label="Increment">
+          <ChevronUp size={11} />
+        </button>
+        <button type="button" tabIndex={-1} disabled={disabled || atMin} onClick={() => bump(-1)} aria-label="Decrement">
+          <ChevronDown size={11} />
+        </button>
+      </span>
+    </div>
+  );
 }
 
 export function Select(props: {

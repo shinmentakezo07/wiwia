@@ -183,9 +183,7 @@ export function LoginPage() {
 
             {/* ── brand header ── */}
             <div className="flex items-center gap-3.5 border-b border-[var(--admin-border)] px-7 py-5">
-              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[12px] bg-gradient-to-br from-brand-500 to-fuchsia-600 font-mono text-lg font-bold text-white shadow-lg shadow-brand-600/20 ring-1 ring-white/[0.06] ring-inset">
-                w
-              </span>
+              <img src="/wiwi-logo.png" alt="wiwi" className="h-10 w-10 shrink-0 rounded-[12px] object-cover shadow-lg shadow-brand-600/20 ring-1 ring-white/[0.06] ring-inset" />
               <div>
                 <div className="flex items-baseline gap-2">
                   <h1 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">

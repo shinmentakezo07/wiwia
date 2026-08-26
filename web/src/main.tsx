@@ -15,6 +15,34 @@ import { LandingPage } from "@/pages/Landing";
 import { PlaygroundPage } from "@/pages/Playground";
 import { ModelsCatalogPage } from "@/pages/ModelsCatalog";
 import { DocsPage } from "@/pages/Docs";
+import { PricingPage } from "@/pages/Pricing";
+import { AboutPage } from "@/pages/About";
+import { ContactPage } from "@/pages/Contact";
+import { EnterprisePage } from "@/pages/Enterprise";
+import { ComparePage } from "@/pages/Compare";
+import { LegalPage } from "@/pages/Legal";
+import { ChangelogPage } from "@/pages/Changelog";
+import { BlogPage } from "@/pages/Blog";
+import { BrandPage } from "@/pages/Brand";
+import { PartnersPage } from "@/pages/Partners";
+import { ReliabilityPage } from "@/pages/Reliability";
+import { RankingsPage } from "@/pages/Rankings";
+import { IntegrationsPage } from "@/pages/Integrations";
+import { GuidesPage } from "@/pages/Guides";
+import { MigrationPage } from "@/pages/Migration";
+import { OpenSourcePage } from "@/pages/OpenSource";
+import { CopilotCostCalculatorPage } from "@/pages/CopilotCostCalculator";
+import { TokenCostCalculatorPage } from "@/pages/TokenCostCalculator";
+import { TimelinePage } from "@/pages/Timeline";
+import { TemplatesPage } from "@/pages/Templates";
+import { AgentsPage } from "@/pages/Agents";
+import { AppsPage } from "@/pages/Apps";
+import { SSOPage } from "@/pages/SSO";
+import { ReferralsPage } from "@/pages/Referrals";
+import { ShipPage } from "@/pages/Ship";
+import { ConnectPage } from "@/pages/Connect";
+import { OnboardingPage } from "@/pages/Onboarding";
+import { ProductsPage } from "@/pages/Products";
 import { UsersPage } from "@/pages/Users";
 
 import { DashboardPage } from "@/pages/Dashboard";
@@ -50,6 +78,34 @@ function AppRoutes() {
         <Route path="/" element={<LandingPage />} />
         <Route path="/models" element={<ModelsCatalogPage />} />
         <Route path="/docs" element={<DocsPage />} />
+        <Route path="/pricing" element={<PricingPage />} />
+        <Route path="/about" element={<AboutPage />} />
+        <Route path="/contact" element={<ContactPage />} />
+        <Route path="/enterprise" element={<EnterprisePage />} />
+        <Route path="/compare" element={<ComparePage />} />
+        <Route path="/legal" element={<LegalPage />} />
+        <Route path="/changelog" element={<ChangelogPage />} />
+        <Route path="/blog" element={<BlogPage />} />
+        <Route path="/brand" element={<BrandPage />} />
+        <Route path="/partners" element={<PartnersPage />} />
+        <Route path="/reliability" element={<ReliabilityPage />} />
+        <Route path="/rankings" element={<RankingsPage />} />
+        <Route path="/integrations" element={<IntegrationsPage />} />
+        <Route path="/guides" element={<GuidesPage />} />
+        <Route path="/migration" element={<MigrationPage />} />
+        <Route path="/open-source" element={<OpenSourcePage />} />
+        <Route path="/copilot-cost-calculator" element={<CopilotCostCalculatorPage />} />
+        <Route path="/token-cost-calculator" element={<TokenCostCalculatorPage />} />
+        <Route path="/timeline" element={<TimelinePage />} />
+        <Route path="/templates" element={<TemplatesPage />} />
+        <Route path="/agents" element={<AgentsPage />} />
+        <Route path="/apps" element={<AppsPage />} />
+        <Route path="/sso" element={<SSOPage />} />
+        <Route path="/referrals" element={<ReferralsPage />} />
+        <Route path="/ship" element={<ShipPage />} />
+        <Route path="/connect" element={<ConnectPage />} />
+        <Route path="/onboarding" element={<OnboardingPage />} />
+        <Route path="/products" element={<ProductsPage />} />
       </Route>
 
       {/* Playground is gated but lives outside the admin shell */}

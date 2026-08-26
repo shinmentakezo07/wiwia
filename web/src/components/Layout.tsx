@@ -230,14 +230,10 @@ export function AdminLayout() {
         {/* Logo */}
         <div className="relative flex h-[72px] items-center px-5">
           {collapsed ? (
-            <span className="mx-auto flex h-9 w-9 items-center justify-center rounded-[10px] bg-gradient-to-br from-brand-500 to-fuchsia-600 font-mono text-sm font-bold text-white ring-1 ring-white/[0.06] ring-inset">
-              w
-            </span>
+            <img src="/wiwi-logo.png" alt="wiwi" className="mx-auto h-9 w-9 rounded-[10px] object-cover ring-1 ring-white/[0.06] ring-inset" />
           ) : (
             <div className="flex items-center gap-3.5">
-              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[12px] bg-gradient-to-br from-brand-500 to-fuchsia-600 font-mono text-lg font-bold text-white ring-1 ring-white/[0.06] ring-inset">
-                w
-              </span>
+              <img src="/wiwi-logo.png" alt="wiwi" className="h-10 w-10 shrink-0 rounded-[12px] object-cover ring-1 ring-white/[0.06] ring-inset" />
               <div>
                 <h1 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
                   wiwi
