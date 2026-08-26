@@ -214,10 +214,16 @@ class DBSink:
         event time regardless of insertion order — the frontend renders this
         array directly without re-sorting.
 
-        When *key_ids* is a non-empty list, rows are restricted to those whose
-        ``key_id`` is in the list (per-user scoping). ``None``/empty = admin /
-        unfiltered.
+        *key_ids* scoping semantics:
+        - ``None`` → admin / unfiltered (all rows).
+        - non-empty list → rows whose ``key_id`` is in the list (per-user).
+        - empty list ``[]`` → this caller owns no keys → return [] with no
+          DB query. (An empty list is NOT "no filter": it is the normal
+          first-visit state for a user who signed up but generated no key,
+          and treating it as unfiltered leaks every other user's rows.)
         """
+        if key_ids is not None and not key_ids:
+            return []
         cols = ", ".join(_COLS)
         params: dict = {"l": int(limit)}
         where = ""
@@ -256,11 +262,39 @@ class DBSink:
 
         minutes == 0 means all-time (no ts cutoff).
 
-        When *key_ids* is a non-empty list, aggregates and samples are
-        restricted to rows whose ``key_id`` is in the list (per-user scoping).
-        ``None``/empty = admin / unfiltered.
+        *key_ids* scoping semantics (see ``read_requests``):
+        - ``None`` → admin / unfiltered.
+        - non-empty list → aggregates restricted to those ``key_id``s.
+        - empty list ``[]`` → caller owns no keys → return the zero-aggregate
+          overview shape (the same dict this method returns when the matching
+          row set is empty) with no DB query. Not "no filter": an empty list
+          is the normal first-visit state for a user without a key, and
+          treating it as unfiltered leaks every other user's aggregates.
         """
         now = time.time()
+        if key_ids is not None and not key_ids:
+            # Zero-row overview: same shape the aggregate below returns when
+            # no rows match, so the frontend's empty state works unchanged.
+            return {
+                "window_minutes": minutes,
+                "generated_at": now,
+                "requests": 0,
+                "errors": 0,
+                "error_rate": 0.0,
+                "requests_per_minute": 0.0,
+                "tok_in": 0,
+                "tok_cached": 0,
+                "tok_reasoning": 0,
+                "tok_out": 0,
+                "cache_hits": 0,
+                "cache_hit_rate": 0.0,
+                "tps_avg": 0.0,
+                "tps_p95": 0.0,
+                "ttft_p95_ms": 0.0,
+                "latency_p95_ms": 0.0,
+                "cost": 0.0,
+                "cache_savings": 0.0,
+            }
         cutoff = now - minutes * 60 if minutes > 0 else 0.0
         params: dict = {}
         if minutes > 0:
@@ -354,12 +388,21 @@ class DBSink:
         minutes == 0 means all-time (no ts cutoff).
         For metric="tps", tps_p95 is approximated as max(tps) in the bucket.
 
-        When *key_ids* is a non-empty list, buckets are restricted to rows
-        whose ``key_id`` is in the list (per-user scoping).  ``None``/empty =
-        admin / unfiltered.
+        *key_ids* scoping semantics (see ``read_requests``):
+        - ``None`` → admin / unfiltered.
+        - non-empty list → buckets restricted to those ``key_id``s.
+        - empty list ``[]`` → caller owns no keys → return the empty-buckets
+          shape (the same dict this method returns when no rows match) with
+          no DB query. Not "no filter": an empty list is the normal first-visit
+          state for a user without a key, and treating it as unfiltered leaks
+          every other user's timeseries buckets.
         """
         if metric not in VALID_METRICS:
             raise ValueError(f"unsupported metric {metric!r}")
+        if key_ids is not None and not key_ids:
+            # Zero-row timeseries: same shape the bucket loop below returns
+            # when no rows match (by_t empty → no zero-fill → [] buckets).
+            return {"bucket_seconds": bucket_seconds, "metric": metric, "buckets": []}
 
         now = time.time()
         params: dict = {}

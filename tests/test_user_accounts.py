@@ -469,7 +469,9 @@ async def test_request_logs_scoped_by_key_id(tmp_path):
     await client.post("/auth/logout")
     # user B
     await client.post("/auth/signup", json={"username": "lb", "password": "password1"})
-    kb = (await client.post("/admin/keys/generate", json={"name": "kb"})).json()["key"]
+    r_b = await client.post("/admin/keys/generate", json={"name": "kb"})
+    kb = r_b.json()["key"]
+    kb_id = r_b.json()["id"]
     await client.post("/v1/chat/completions", json={"model": "gpt-4o",
         "messages": [{"role": "user", "content": "hi"}]},
         headers={"Authorization": f"Bearer {kb}"})
@@ -483,6 +485,9 @@ async def test_request_logs_scoped_by_key_id(tmp_path):
             break
         await asyncio.sleep(0.05)
     assert len(logs) == 1  # only B's
+    # Reviewer I3: the log row's key_id must be B's key id (not A's), proving
+    # the scoping filter matched on the right id rather than returning any row.
+    assert logs[0]["key_id"] == kb_id
     await client.aclose()
 
 
@@ -500,8 +505,85 @@ async def test_models_patch_admin_only_403_for_user(tmp_path):
 async def test_admin_sees_all_keys(tmp_path):
     client = await _client_for_config(tmp_path, _CONFIG)
     await client.post("/auth/signup", json={"username": "z1", "password": "password1"})
-    await client.post("/admin/keys/generate", json={"name": "kz"})
+    r_z = await client.post("/admin/keys/generate", json={"name": "kz"})
+    kid_z = r_z.json()["id"]
     await client.post("/auth/login", json={"master_key": "sk-master-test-123"})
     ids = [k["id"] for k in (await client.get("/admin/keys")).json()["keys"]]
-    assert len(ids) >= 1
+    # Reviewer I2: admin sees every key, including the user's — capture the
+    # user's key id and assert it is present (not just len >= 1).
+    assert kid_z in ids
+    await client.aclose()
+
+
+# -- Task 8 fix: zero-key user cross-user leak regression -----------------------
+#
+# DBSink treated an empty key_ids list as "no filter" (``if key_ids:`` /
+# ``bool(key_ids)`` are both falsy for []), so a user who signed up but never
+# generated a key saw every other user's logs/stats. These tests pin the fix:
+# key_ids == [] must mean "this user owns no keys → see nothing".
+
+
+@respx.mock
+async def test_user_with_no_keys_sees_no_logs_or_stats(tmp_path):
+    client = await _client_for_config(tmp_path, _CONFIG)
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json={
+            "id": "x", "object": "chat.completion",
+            "choices": [{"index": 0, "message": {"role": "assistant",
+              "content": "hi"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3}}))
+    # user A makes a request (has a key)
+    await client.post("/auth/signup", json={"username": "haskey", "password": "password1"})
+    ka = (await client.post("/admin/keys/generate", json={"name": "ka"})).json()["key"]
+    await client.post("/v1/chat/completions", json={"model": "gpt-4o",
+        "messages": [{"role": "user", "content": "hi"}]},
+        headers={"Authorization": f"Bearer {ka}"})
+    # user B has NO key
+    await client.post("/auth/logout")
+    await client.post("/auth/signup", json={"username": "nokey", "password": "password1"})
+    # B should see ZERO logs (not A's logs). The DB pump flushes A's row
+    # asynchronously; if the empty-list leak were present, B would see A's
+    # row once it lands. Poll long enough to catch the leak if it exists.
+    logs = []
+    for _ in range(50):
+        logs = (await client.get("/admin/logs/requests")).json()["logs"]
+        if logs:
+            break
+        await asyncio.sleep(0.05)
+    assert logs == [], "zero-key user must not see other users' logs"
+    # and zero stats (overview minutes==0 hits the DB path)
+    ov = (await client.get("/admin/stats/overview?minutes=0")).json()
+    assert ov.get("requests", 0) == 0, "zero-key user must not see global stats"
+    await client.aclose()
+
+
+@respx.mock
+async def test_stats_scoped_by_key_id(tmp_path):
+    client = await _client_for_config(tmp_path, _CONFIG)
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json={
+            "id": "x", "object": "chat.completion",
+            "choices": [{"index": 0, "message": {"role": "assistant",
+              "content": "hi"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3}}))
+    await client.post("/auth/signup", json={"username": "sa", "password": "password1"})
+    ka = (await client.post("/admin/keys/generate", json={"name": "ka"})).json()["key"]
+    await client.post("/v1/chat/completions", json={"model": "gpt-4o",
+        "messages": [{"role": "user", "content": "hi"}]},
+        headers={"Authorization": f"Bearer {ka}"})
+    await client.post("/auth/logout")
+    await client.post("/auth/signup", json={"username": "sb", "password": "password1"})
+    kb = (await client.post("/admin/keys/generate", json={"name": "kb"})).json()["key"]
+    await client.post("/v1/chat/completions", json={"model": "gpt-4o",
+        "messages": [{"role": "user", "content": "hi"}]},
+        headers={"Authorization": f"Bearer {kb}"})
+    # B sees exactly 1 request (their own), not 2. The DB pump flushes
+    # asynchronously, so poll until B's own row lands before asserting the
+    # count is scoped (not global).
+    for _ in range(50):
+        ov = (await client.get("/admin/stats/overview?minutes=0")).json()
+        if ov.get("requests", 0) >= 1:
+            break
+        await asyncio.sleep(0.05)
+    assert ov.get("requests") == 1, "user stats must be scoped to their own keys"
     await client.aclose()
