@@ -179,6 +179,29 @@ model_list:
 """
 
 
+async def _client_for_config(tmp_path, config_yaml: str) -> AsyncClient:
+    """Build an ASGI-backed client with the app lifespan started.
+
+    The returned client's ``aclose`` also stops the lifespan, so callers
+    just do ``await client.aclose()`` at the end of the test.
+    """
+    app = await _app_for_config(tmp_path, config_yaml)
+    lm = LifespanManager(app)
+    await lm.__aenter__()
+    client = AsyncClient(transport=ASGITransport(app=app), base_url="http://t")
+    # Arrange for lifespan teardown to run when the client closes.
+    _orig_close = client.aclose
+
+    async def _close_then_lifespan():
+        try:
+            await _orig_close()
+        finally:
+            await lm.__aexit__(None, None, None)
+
+    client.aclose = _close_then_lifespan  # type: ignore[method-assign]
+    return client
+
+
 @respx.mock
 async def test_request_logs_key_id_for_virtual_key(tmp_path):
     # Create a virtual key via master, then make a chat call with it.
@@ -204,3 +227,127 @@ async def test_request_logs_key_id_for_virtual_key(tmp_path):
             logs = (await client.get("/admin/logs/requests",
                      headers={"Authorization": "Bearer sk-master-test-123"})).json()["logs"]
             assert any(l["key_id"] and l["key_id"].startswith("k") for l in logs)
+
+
+# -- Task 5: current_user resolution ------------------------------------------
+
+
+async def test_master_key_resolves_to_admin_via_bearer(tmp_path):
+    client = await _client_for_config(tmp_path, _CONFIG)
+    me = (await client.get("/auth/me",
+            headers={"Authorization": "Bearer sk-master-test-123"})).json()
+    assert me["user"]["role"] == "admin"
+    assert me["user"]["id"] == "master"
+    await client.aclose()
+
+
+async def test_auth_me_null_when_anonymous(tmp_path):
+    client = await _client_for_config(tmp_path, _CONFIG)
+    me = (await client.get("/auth/me")).json()
+    assert me["user"] is None
+    await client.aclose()
+
+
+# -- Task 6: /auth/* endpoints -------------------------------------------------
+
+
+async def test_signup_sets_cookie_and_creates_user(tmp_path):
+    client = await _client_for_config(tmp_path, _CONFIG)
+    r = await client.post("/auth/signup", json={"username": "dave",
+                                                "password": "password1"})
+    assert r.status_code == 201
+    assert r.json()["user"]["role"] == "user"
+    assert "wiwi_session" in r.cookies
+    me = (await client.get("/auth/me")).json()
+    assert me["user"]["username"] == "dave"
+    await client.aclose()
+
+
+async def test_signup_duplicate_409(tmp_path):
+    client = await _client_for_config(tmp_path, _CONFIG)
+    await client.post("/auth/signup", json={"username": "eve",
+                                            "password": "password1"})
+    r = await client.post("/auth/signup", json={"username": "eve",
+                                                "password": "password2"})
+    assert r.status_code == 409
+    await client.aclose()
+
+
+async def test_signup_short_password_400(tmp_path):
+    client = await _client_for_config(tmp_path, _CONFIG)
+    r = await client.post("/auth/signup", json={"username": "frank",
+                                                "password": "short"})
+    assert r.status_code == 400
+    await client.aclose()
+
+
+async def test_login_user_success(tmp_path):
+    client = await _client_for_config(tmp_path, _CONFIG)
+    await client.post("/auth/signup", json={"username": "grace",
+                                            "password": "password1"})
+    r = await client.post("/auth/login", json={"username": "grace",
+                                               "password": "password1"})
+    assert r.status_code == 200
+    assert r.json()["user"]["role"] == "user"
+    await client.aclose()
+
+
+async def test_login_user_wrong_password_401(tmp_path):
+    client = await _client_for_config(tmp_path, _CONFIG)
+    await client.post("/auth/signup", json={"username": "heidi",
+                                            "password": "password1"})
+    r = await client.post("/auth/login", json={"username": "heidi",
+                                               "password": "nope"})
+    assert r.status_code == 401
+    await client.aclose()
+
+
+async def test_login_master_key_sets_admin(tmp_path):
+    client = await _client_for_config(tmp_path, _CONFIG)
+    r = await client.post("/auth/login", json={"master_key": "sk-master-test-123"})
+    assert r.status_code == 200
+    assert r.json()["user"] == {"id": "master", "username": "master",
+                                "role": "admin"}
+    await client.aclose()
+
+
+async def test_logout_clears_cookie(tmp_path):
+    client = await _client_for_config(tmp_path, _CONFIG)
+    await client.post("/auth/signup", json={"username": "ivan",
+                                            "password": "password1"})
+    r = await client.post("/auth/logout")
+    assert r.status_code == 200
+    me = (await client.get("/auth/me")).json()
+    assert me["user"] is None
+    await client.aclose()
+
+
+async def test_session_cookie_tamper_rejected(tmp_path):
+    client = await _client_for_config(tmp_path, _CONFIG)
+    await client.post("/auth/signup", json={"username": "judy",
+                                            "password": "password1"})
+    # Tamper the cookie.
+    tok = client.cookies.get("wiwi_session")
+    client.cookies.clear()
+    client.cookies.set("wiwi_session", tok[:-4] + "0000",
+                       domain="t", path="/")
+    me = (await client.get("/auth/me")).json()
+    assert me["user"] is None
+    await client.aclose()
+
+
+async def test_disabled_user_session_rejected(tmp_path):
+    client = await _client_for_config(tmp_path, _CONFIG)
+    r = await client.post("/auth/signup", json={"username": "karl",
+                                                "password": "password1"})
+    uid = r.json()["user"]["id"]
+    await client.post("/auth/login", json={"master_key": "sk-master-test-123"})
+    await client.patch(f"/admin/users/{uid}", json={"disabled": True})
+    # New client with karl's old cookie: simulate by re-logging in as karl first
+    await client.post("/auth/logout")
+    await client.post("/auth/login", json={"username": "karl",
+                                           "password": "password1"})
+    # disabled now → me should be null
+    me = (await client.get("/auth/me")).json()
+    assert me["user"] is None
+    await client.aclose()

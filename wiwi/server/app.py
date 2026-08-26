@@ -111,6 +111,7 @@ class RequestIdMiddleware:
 
 
 from wiwi.auth.service import AuthService
+from wiwi.auth.users import SESSION_TTL, UserInfo, UserService, sign_session, verify_session
 from wiwi.config import PROVIDER_TYPES, ConfigError, WiwiConfig, _interpolate, load_config, load_env
 from wiwi.core.context import RequestContext
 from wiwi.core.gateway import Gateway, build_log_event
@@ -172,6 +173,7 @@ class AppState:
         self.gateways: dict[str, Gateway] = {}
         self.alert_rules: list[dict[str, Any]] = []
         self.config_store: ConfigStore | None = None
+        self.users: UserService | None = None
         # Set during shutdown so long-lived SSE generators break out of their
         # event loop instead of blocking uvicorn's graceful-shutdown drain
         # (which otherwise hangs at "Waiting for connections to close").
@@ -227,6 +229,20 @@ class AppState:
         self._db_engine = aengine
         self.auth = AuthService(aengine, self.config.general_settings.master_key)
         await self.auth.startup()
+        # User accounts + signed session cookies. The session signing secret
+        # is WIWI_SESSION_SECRET when provided; otherwise it is derived from
+        # the master key (or a fixed default if even that is absent).
+        mk = self.config.general_settings.master_key or ""
+        session_secret = (
+            os.environ.get("WIWI_SESSION_SECRET") or mk
+            or "wiwi-default-session-secret"
+        )
+        if not os.environ.get("WIWI_SESSION_SECRET") and mk:
+            import structlog as _sl
+            _sl.get_logger("wiwi.startup").info(
+                "session_secret_derived_from_master_key")
+        self.users = UserService(aengine, session_secret)
+        await self.users.startup()
         from wiwi.logging_core.db_sink import DBSink
         self._db_sink = DBSink(aengine)
         await self._db_sink.startup()
@@ -878,6 +894,50 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return _err(401, "authentication_error", "master key required", request)
         return None
 
+    # -- session / user resolution ----------------------------------------------
+    async def current_user(request: Request) -> UserInfo | None:
+        """Resolve the caller from a signed session cookie OR a bearer master
+        key (back-compat). Returns ``None`` when anonymous or when the session
+        user has been disabled/deleted."""
+        # master key via bearer → synthetic admin (back-compat for /auth/me)
+        mk = config.general_settings.master_key
+        tok = bearer(request)
+        if mk and tok and hmac.compare_digest(tok.encode(), mk.encode()):
+            return UserInfo(id="master", username="master", role="admin")
+        # signed session cookie
+        cookie = request.cookies.get("wiwi_session")
+        if not cookie:
+            return None
+        parsed = verify_session(state.users._secret, cookie)  # type: ignore[union-attr]
+        if parsed is None:
+            return None
+        uid, _role, _exp = parsed
+        if uid == "master":
+            return UserInfo(id="master", username="master", role="admin")
+        if state.users is None:
+            return None
+        info = await state.users.get(uid)
+        if info is None or info.disabled:
+            return None
+        return info
+
+    async def require_user_dep(request: Request) -> ORJSONResponse | None:
+        """401 when the caller is not an authenticated user (nor master)."""
+        if await current_user(request) is None:
+            return _err(401, "authentication_error",
+                        "authentication required", request)
+        return None
+
+    async def require_admin_dep(request: Request) -> ORJSONResponse | None:
+        """401 when anonymous, 403 when authenticated but not an admin."""
+        u = await current_user(request)
+        if u is None:
+            return _err(401, "authentication_error",
+                        "authentication required", request)
+        if u.role != "admin":
+            return _err(403, "permission_error", "admin role required", request)
+        return None
+
     def _key_view(k, now_mono: float, now_wall: float) -> dict:
         cooling = k.status == "cooling" and now_mono < k.cooldown_until
         status = "disabled" if not k.enabled else ("cooling" if cooling else k.status)
@@ -1490,6 +1550,112 @@ def create_app(config: WiwiConfig) -> FastAPI:
         await state.logs.log_audit(actor="master", action="alert_rules.update",
                                    target="*", diff={"count": len(rules)})
         return ORJSONResponse({"rules": state.alert_rules})
+
+    # -- admin: users ----------------------------------------------------------
+    @app.patch("/admin/users/{uid}")
+    async def admin_patch_user(uid: str, request: Request):
+        # Accept the master bearer key (existing admin auth) OR a master/admin
+        # session cookie, so an admin who logged in via /auth/login can manage
+        # users from the UI.
+        resp = await require_admin_dep(request)
+        if resp:
+            return resp
+        if state.users is None:
+            return _err(500, "api_error", "user service not initialized", request)
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        role = body.get("role")
+        disabled = body.get("disabled")
+        try:
+            updated = await state.users.patch(uid, role=role, disabled=disabled)
+        except ValueError as e:
+            return _err(400, "invalid_request_error", str(e), request)
+        if updated is None:
+            return _err(404, "not_found_error", f"unknown user '{uid}'", request)
+        await state.logs.log_audit(actor="master", action="user.update", target=uid,
+                                   diff={k: body[k] for k in body if k in ("role", "disabled")})
+        return ORJSONResponse({"user": updated})
+
+    # -- public auth surface (signup / login / logout / me) --------------------
+    def _set_session_cookie(resp: ORJSONResponse, uid: str, role: str,
+                            *, secure: bool) -> None:
+        tok = sign_session(state.users._secret, uid, role,  # type: ignore[union-attr]
+                           expires=time.time() + SESSION_TTL)
+        resp.set_cookie("wiwi_session", tok, max_age=SESSION_TTL,
+                        httponly=True, samesite="lax", secure=secure,
+                        path="/")
+
+    def _clear_session_cookie(resp: ORJSONResponse) -> None:
+        resp.delete_cookie("wiwi_session", path="/")
+
+    @app.post("/auth/signup")
+    async def auth_signup(request: Request):
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        if state.users is None:
+            return _err(500, "api_error", "user service not initialized", request)
+        try:
+            u = await state.users.create_user(
+                body.get("username", ""), body.get("password", ""))
+        except ValueError as e:
+            # distinguish duplicate (409) from validation (400)
+            if "already taken" in str(e):
+                return _err(409, "conflict", str(e), request)
+            return _err(400, "invalid_request_error", str(e), request)
+        resp = ORJSONResponse(
+            {"user": {"id": u.id, "username": u.username, "role": u.role}},
+            status_code=201)
+        _set_session_cookie(resp, u.id, u.role,
+                            secure=request.url.scheme == "https")
+        return resp
+
+    @app.post("/auth/login")
+    async def auth_login(request: Request):
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        if state.users is None:
+            return _err(500, "api_error", "user service not initialized", request)
+        # master-key login → synthetic master admin
+        mk = body.get("master_key")
+        if mk:
+            if hmac.compare_digest(str(mk).encode(),
+                                   (config.general_settings.master_key or "").encode()):
+                resp = ORJSONResponse(
+                    {"user": {"id": "master", "username": "master", "role": "admin"}})
+                _set_session_cookie(resp, "master", "admin",
+                                    secure=request.url.scheme == "https")
+                return resp
+            return _err(401, "authentication_error", "invalid master key", request)
+        # username/password login
+        try:
+            u = await state.users.verify(body.get("username", ""), body.get("password", ""))
+        except ValueError:
+            # malformed username charset/length — treat as invalid credentials
+            return _err(401, "authentication_error", "invalid credentials", request)
+        if u is None or u.disabled:
+            return _err(401, "authentication_error", "invalid credentials", request)
+        resp = ORJSONResponse(
+            {"user": {"id": u.id, "username": u.username, "role": u.role}})
+        _set_session_cookie(resp, u.id, u.role,
+                            secure=request.url.scheme == "https")
+        return resp
+
+    @app.post("/auth/logout")
+    async def auth_logout(request: Request):
+        resp = ORJSONResponse({"ok": True})
+        _clear_session_cookie(resp)
+        return resp
+
+    @app.get("/auth/me")
+    async def auth_me(request: Request):
+        u = await current_user(request)
+        if u is None:
+            return ORJSONResponse({"user": None})
+        return ORJSONResponse(
+            {"user": {"id": u.id, "username": u.username, "role": u.role}})
 
     # -- admin UI (built SPA; wiwi/server/static produced by `cd web && bun run build`)
     static_dir = Path(os.environ.get("WIWI_STATIC_DIR")
