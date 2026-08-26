@@ -1,5 +1,6 @@
 """User accounts + sessions + role-based scoping regression tests."""
 
+import asyncio
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -224,9 +225,15 @@ async def test_request_logs_key_id_for_virtual_key(tmp_path):
                                          "messages": [{"role": "user", "content": "hi"}]},
                                    headers={"Authorization": f"Bearer {vkey}"})
             assert r2.status_code == 200
-            logs = (await client.get("/admin/logs/requests",
-                     headers={"Authorization": "Bearer sk-master-test-123"})).json()["logs"]
-            assert any(l["key_id"] and l["key_id"].startswith("k") for l in logs)
+            logs = []
+            for _ in range(50):
+                logs = (await client.get("/admin/logs/requests",
+                         headers={"Authorization": "Bearer sk-master-test-123"})).json()["logs"]
+                if any(l.get("key_id") for l in logs):
+                    break
+                await asyncio.sleep(0.05)
+            assert any(l["key_id"] and l["key_id"].startswith("k") for l in logs), \
+                "no request log with key_id was flushed"
 
 
 # -- Task 5: current_user resolution ------------------------------------------
