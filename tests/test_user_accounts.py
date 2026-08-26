@@ -160,8 +160,21 @@ from wiwi.server.app import create_app_from_config_path
 
 
 async def _app_for_config(tmp_path, config_yaml: str):
+    # Isolate the DB per test: point database_url at a fresh file inside tmp_path
+    # so usernames/keys never collide across tests or runs. Inject the line under
+    # general_settings (right after master_key) without mutating the caller's
+    # config_yaml — _CONFIG is shared and must stay constant.
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/app.db"
+    if "database_url:" in config_yaml:
+        patched = config_yaml
+    else:
+        patched = config_yaml.replace(
+            "  master_key: sk-master-test-123\n",
+            f"  master_key: sk-master-test-123\n  database_url: {db_url}\n",
+            1,
+        )
     cfg_path = tmp_path / "wiwi.yaml"
-    cfg_path.write_text(config_yaml)
+    cfg_path.write_text(patched)
     return create_app_from_config_path(str(cfg_path))
 
 
