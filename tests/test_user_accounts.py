@@ -371,3 +371,47 @@ async def test_disabled_user_session_rejected(tmp_path):
     me = (await client.get("/auth/me")).json()
     assert me["user"] is None
     await client.aclose()
+
+
+# -- Task 7: /admin/users endpoints -------------------------------------------
+
+
+async def test_admin_lists_users(tmp_path):
+    client = await _client_for_config(tmp_path, _CONFIG)
+    await client.post("/auth/signup", json={"username": "leo", "password": "password1"})
+    await client.post("/auth/login", json={"master_key": "sk-master-test-123"})
+    r = await client.get("/admin/users")
+    assert r.status_code == 200
+    assert any(u["username"] == "leo" for u in r.json()["users"])
+    await client.aclose()
+
+
+async def test_promote_user_to_admin(tmp_path):
+    client = await _client_for_config(tmp_path, _CONFIG)
+    r = await client.post("/auth/signup", json={"username": "mia", "password": "password1"})
+    uid = r.json()["user"]["id"]
+    await client.post("/auth/login", json={"master_key": "sk-master-test-123"})
+    r2 = await client.patch(f"/admin/users/{uid}", json={"role": "admin"})
+    assert r2.status_code == 200
+    assert r2.json()["role"] == "admin"
+    await client.aclose()
+
+
+async def test_cannot_demote_last_admin_400(tmp_path):
+    client = await _client_for_config(tmp_path, _CONFIG)
+    await client.post("/auth/login", json={"master_key": "sk-master-test-123"})
+    # promote one user to admin, then try to demote them (only admin)
+    r = await client.post("/auth/signup", json={"username": "nia", "password": "password1"})
+    uid = r.json()["user"]["id"]
+    await client.patch(f"/admin/users/{uid}", json={"role": "admin"})
+    r2 = await client.patch(f"/admin/users/{uid}", json={"role": "user"})
+    assert r2.status_code == 400
+    await client.aclose()
+
+
+async def test_user_cannot_access_admin_users_403(tmp_path):
+    client = await _client_for_config(tmp_path, _CONFIG)
+    await client.post("/auth/signup", json={"username": "oscar", "password": "password1"})
+    r = await client.get("/admin/users")
+    assert r.status_code == 403
+    await client.aclose()

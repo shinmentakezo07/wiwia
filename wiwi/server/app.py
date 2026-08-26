@@ -1552,6 +1552,18 @@ def create_app(config: WiwiConfig) -> FastAPI:
         return ORJSONResponse({"rules": state.alert_rules})
 
     # -- admin: users ----------------------------------------------------------
+    @app.get("/admin/users")
+    async def admin_list_users(request: Request):
+        # Accept the master bearer key (existing admin auth) OR a master/admin
+        # session cookie, so an admin who logged in via /auth/login can manage
+        # users from the UI.
+        resp = await require_admin_dep(request)
+        if resp:
+            return resp
+        if state.users is None:
+            return _err(500, "api_error", "user service not initialized", request)
+        return ORJSONResponse({"users": await state.users.list_users()})
+
     @app.patch("/admin/users/{uid}")
     async def admin_patch_user(uid: str, request: Request):
         # Accept the master bearer key (existing admin auth) OR a master/admin
@@ -1567,15 +1579,24 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return jerr
         role = body.get("role")
         disabled = body.get("disabled")
+        # Last-admin guard: if demoting or disabling an admin would leave zero
+        # active admins, reject. The master-key admin (id="master") is synthetic
+        # and not in the users table, so count_admins() only counts DB admins.
+        if role == "user" or disabled is True:
+            cur = await state.users.get(uid)
+            if (cur is not None and cur.role == "admin" and not cur.disabled
+                    and await state.users.count_admins() <= 1):
+                return _err(400, "invalid_request_error",
+                            "cannot demote or disable the last admin", request)
         try:
             updated = await state.users.patch(uid, role=role, disabled=disabled)
         except ValueError as e:
             return _err(400, "invalid_request_error", str(e), request)
         if updated is None:
-            return _err(404, "not_found_error", f"unknown user '{uid}'", request)
+            return _err(404, "not_found_error", "user not found", request)
         await state.logs.log_audit(actor="master", action="user.update", target=uid,
-                                   diff={k: body[k] for k in body if k in ("role", "disabled")})
-        return ORJSONResponse({"user": updated})
+                                   diff={"role": role, "disabled": disabled})
+        return ORJSONResponse(updated)
 
     # -- public auth surface (signup / login / logout / me) --------------------
     def _set_session_cookie(resp: ORJSONResponse, uid: str, role: str,
@@ -1607,8 +1628,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
         resp = ORJSONResponse(
             {"user": {"id": u.id, "username": u.username, "role": u.role}},
             status_code=201)
-        _set_session_cookie(resp, u.id, u.role,
-                            secure=request.url.scheme == "https")
+        # Only log in the new user when the caller is anonymous: an admin
+        # creating a user via signup should keep their own session.
+        if await current_user(request) is None:
+            _set_session_cookie(resp, u.id, u.role,
+                                secure=request.url.scheme == "https")
         return resp
 
     @app.post("/auth/login")
