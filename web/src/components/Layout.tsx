@@ -20,6 +20,7 @@ import {
   KeyRound,
   LayoutDashboard,
   LogOut,
+  Menu,
   ScrollText,
   Server,
   ShieldCheck,
@@ -138,6 +139,7 @@ export function AdminLayout() {
   const location = useLocation();
   const connected = useAdminStream("__noop__", () => undefined);
   const [collapsed, setCollapsed] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
   const sidebarWidth = collapsed ? SIDEBAR_COLLAPSED : SIDEBAR_WIDE;
 
   const isAdmin = user?.role === "admin";
@@ -157,6 +159,9 @@ export function AdminLayout() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  // Close mobile sidebar on route change
+  useEffect(() => setMobileOpen(false), [location.pathname]);
 
   const meta = PAGE_META[location.pathname] ?? { title: "wiwi", section: "Admin" };
   const maskedKey = (() => {
@@ -206,9 +211,21 @@ export function AdminLayout() {
       </div>
 
       {/* ── Sidebar ── */}
+      {/* Mobile backdrop */}
+      {mobileOpen && (
+        <div
+          className="fixed inset-0 z-30 bg-black/60 backdrop-blur-sm lg:hidden"
+          onClick={() => setMobileOpen(false)}
+          aria-hidden
+        />
+      )}
+
+      {/* ── Sidebar ── */}
       <aside
         className={`fixed left-0 top-0 z-40 flex h-screen flex-col bg-[var(--admin-surface)] transition-all duration-300 ${
           collapsed ? "w-[72px]" : "w-[260px]"
+        } ${
+          mobileOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
         }`}
       >
         {/* Ambient glow layers */}
@@ -387,10 +404,18 @@ export function AdminLayout() {
       {/* ── Topbar ── */}
       <div
         className="fixed top-0 z-30 transition-all duration-300"
-        style={{ left: sidebarWidth, right: 0 }}
+        style={{ left: 0, right: 0 }}
       >
         <header className="admin-topbar relative">
-          <div className="flex h-[64px] items-center gap-4 px-6">
+          <div className="flex h-[64px] items-center gap-3 px-4 sm:gap-4 sm:px-6">
+            {/* Mobile sidebar toggle */}
+            <button
+              onClick={() => setMobileOpen(true)}
+              aria-label="Open sidebar"
+              className="-ml-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-white/[0.04] bg-white/[0.02] text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.05] hover:text-[var(--admin-text)] lg:hidden"
+            >
+              <Menu className="h-4.5 w-4.5" />
+            </button>
             <div className="min-w-0 shrink-0">
               <span className="text-[9px] font-semibold uppercase tracking-[0.16em] text-[var(--admin-accent)] opacity-60">
                 {meta.section}
@@ -432,11 +457,11 @@ export function AdminLayout() {
 
       {/* ── Scrollable content ── */}
       <div
-        className="relative h-screen pt-[65px] transition-all duration-300"
-        style={{ marginLeft: sidebarWidth, zIndex: 1 }}
+        className="relative h-screen pt-[65px] transition-all duration-300 lg:ml-[var(--sidebar-w)]"
+        style={{ "--sidebar-w": `${sidebarWidth}px`, zIndex: 1 } as React.CSSProperties}
       >
         <main className="admin-scroll h-full overflow-y-auto">
-          <div className="admin-stagger mx-auto max-w-[1400px] p-8">
+          <div className="admin-stagger mx-auto max-w-[1400px] p-4 sm:p-6 lg:p-8">
             <Outlet />
           </div>
         </main>

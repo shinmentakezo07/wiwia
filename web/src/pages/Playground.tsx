@@ -423,7 +423,7 @@ export function PlaygroundPage() {
   // ── Chat history state ───────────────────────────────────────────────────
   const [chats, setChats] = useState<Conversation[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(typeof window !== "undefined" && window.innerWidth < 768);
 
   // Load chat history from localStorage on mount
   useEffect(() => {

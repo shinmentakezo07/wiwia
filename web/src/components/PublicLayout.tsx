@@ -67,7 +67,7 @@ export function PublicLayout() {
 
       {/* Content */}
       <main className="admin-scroll relative z-10">
-        <div className="admin-stagger mx-auto max-w-[1400px] p-8">
+        <div className="admin-stagger mx-auto max-w-[1400px] p-4 sm:p-6 lg:p-8">
           <Outlet />
         </div>
       </main>
