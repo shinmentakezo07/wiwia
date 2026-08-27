@@ -41,7 +41,7 @@ export function PublicLayout() {
   return (
     <div data-admin className="relative z-0 min-h-screen bg-[var(--admin-bg)]">
       {/* Ambient background: faint grid + radial glows */}
-      <div className="pointer-events-none fixed inset-0" style={{ zIndex: 0 }}>
+      <div className="pointer-events-none fixed inset-0 overflow-hidden" style={{ zIndex: 0 }}>
         <div
           className="absolute inset-0 opacity-[0.02]"
           style={{

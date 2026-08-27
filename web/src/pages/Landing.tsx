@@ -538,12 +538,12 @@ function CodeTabs() {
   const tab = CODE_EXAMPLES[idx];
   return (
     <div className="relative">
-      <div className="flex items-center gap-1 rounded-[10px] border border-[var(--admin-border)] bg-[var(--admin-surface)] p-1">
+      <div className="flex items-center gap-1 overflow-x-auto rounded-[10px] border border-[var(--admin-border)] bg-[var(--admin-surface)] p-1">
         {CODE_EXAMPLES.map((t, i) => (
           <button
             key={t.label}
             onClick={() => { setIdx(i); setCopied(false); }}
-            className={`rounded-md px-3.5 py-1.5 text-[12px] font-medium transition-colors ${
+            className={`shrink-0 whitespace-nowrap rounded-md px-3.5 py-1.5 text-[12px] font-medium transition-colors ${
               i === idx
                 ? "bg-blue-500/10 text-blue-300"
                 : "text-[var(--admin-text-dim)] hover:bg-white/[0.03] hover:text-[var(--admin-text-muted)]"
@@ -554,7 +554,7 @@ function CodeTabs() {
         ))}
         <button
           onClick={async () => { await navigator.clipboard.writeText(tab.code); setCopied(true); setTimeout(() => setCopied(false), 1500); }}
-          className="ml-auto flex items-center gap-1 rounded-md px-2.5 py-1.5 text-[11px] text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]"
+          className="ml-auto flex shrink-0 items-center gap-1 rounded-md px-2.5 py-1.5 text-[11px] text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]"
         >
           {copied ? <Check size={12} /> : <Copy size={12} />}
           {copied ? "Copied" : "Copy"}

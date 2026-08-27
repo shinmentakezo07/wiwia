@@ -72,7 +72,7 @@ export function AnimatedBeam({
       width={dims.width}
       height={dims.height}
       xmlns="http://www.w3.org/2000/svg"
-      className="pointer-events-none absolute left-0 top-0 stroke-2"
+      className="pointer-events-none absolute left-0 top-0 overflow-hidden stroke-2"
       viewBox={`0 0 ${dims.width} ${dims.height}`}
     >
       {/* Static faint path */}

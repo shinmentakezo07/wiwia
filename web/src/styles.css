@@ -20,10 +20,12 @@
 
 :root {
   color-scheme: light dark;
+  overflow-x: hidden;
 }
 
 body {
   @apply bg-zinc-100 text-zinc-900 antialiased dark:bg-zinc-950 dark:text-zinc-100;
+  overflow-x: hidden;
 }
 
 /* thin scrollbars for log tables */
