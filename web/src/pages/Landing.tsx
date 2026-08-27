@@ -21,8 +21,8 @@ import {
   Wallet,
   Zap,
 } from "lucide-react";
-import { Badge, Card } from "@/components/ui";
-import { GraphSection } from "@/components/AnimatedBeam";
+import { Card } from "@/components/ui";
+import { GraphSection, OpenAIIcon, AnthropicIcon, GeminiIcon, OpenRouterIcon, MoonshotIcon } from "@/components/AnimatedBeam";
 
 const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
 
@@ -632,12 +632,31 @@ export function LandingPage() {
             </span>
           </div>
           {/* provider badges */}
-          <div className="mt-8 flex flex-wrap items-center justify-center gap-2">
-            <Badge tone="gray">OpenAI</Badge>
-            <Badge tone="violet">Anthropic</Badge>
-            <Badge tone="blue">Gemini</Badge>
-            <Badge tone="gray">OpenRouter</Badge>
-            <Badge tone="amber">OpenAI-compatible</Badge>
+          <div className="mt-8 flex flex-wrap items-center justify-center gap-2.5">
+            <div className="flex items-center gap-2 rounded-full border border-white/[0.06] bg-white/[0.02] px-3.5 py-1.5 transition-colors hover:border-white/[0.12] hover:bg-white/[0.04]">
+              <OpenAIIcon className="h-4 w-4" />
+              <span className="text-[13px] font-medium text-[var(--admin-text)]">OpenAI</span>
+            </div>
+            <div className="flex items-center gap-2 rounded-full border border-white/[0.06] bg-white/[0.02] px-3.5 py-1.5 transition-colors hover:border-white/[0.12] hover:bg-white/[0.04]">
+              <AnthropicIcon className="h-4 w-4" />
+              <span className="text-[13px] font-medium text-[var(--admin-text)]">Anthropic</span>
+            </div>
+            <div className="flex items-center gap-2 rounded-full border border-white/[0.06] bg-white/[0.02] px-3.5 py-1.5 transition-colors hover:border-white/[0.12] hover:bg-white/[0.04]">
+              <GeminiIcon className="h-4 w-4" />
+              <span className="text-[13px] font-medium text-[var(--admin-text)]">Gemini</span>
+            </div>
+            <div className="flex items-center gap-2 rounded-full border border-white/[0.06] bg-white/[0.02] px-3.5 py-1.5 transition-colors hover:border-white/[0.12] hover:bg-white/[0.04]">
+              <OpenRouterIcon className="h-4 w-4 text-[#C8FF00]" />
+              <span className="text-[13px] font-medium text-[var(--admin-text)]">OpenRouter</span>
+            </div>
+            <div className="flex items-center gap-2 rounded-full border border-white/[0.06] bg-white/[0.02] px-3.5 py-1.5 transition-colors hover:border-white/[0.12] hover:bg-white/[0.04]">
+              <Terminal size={14} className="text-[var(--admin-text-muted)]" />
+              <span className="text-[13px] font-medium text-[var(--admin-text)]">OpenAI-compatible</span>
+            </div>
+            <div className="flex items-center gap-2 rounded-full border border-white/[0.06] bg-white/[0.02] px-3.5 py-1.5 transition-colors hover:border-white/[0.12] hover:bg-white/[0.04]">
+              <MoonshotIcon className="h-4 w-4 text-[var(--admin-text)]" />
+              <span className="text-[13px] font-medium text-[var(--admin-text)]">Moonshot AI</span>
+            </div>
           </div>
         </div>
       </section>
