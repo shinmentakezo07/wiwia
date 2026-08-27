@@ -273,7 +273,7 @@ export function PartnersPage() {
         </div>
         <div className="mt-6 text-center">
           <Link
-            to="/providers"
+            to="/console/providers"
             className="inline-flex items-center gap-1.5 text-[14px] font-medium text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]"
           >
             All {SCX_MODELS.length} SCX models
@@ -318,7 +318,7 @@ export function PartnersPage() {
             <ArrowRight size={16} />
           </Link>
           <Link
-            to="/providers"
+            to="/console/providers"
             className="inline-flex items-center justify-center gap-2 rounded-[10px] border border-white/[0.08] bg-white/[0.02] px-6 py-3 text-[14px] font-medium text-[var(--admin-text)] transition-colors hover:bg-white/[0.04]"
           >
             Browse all providers

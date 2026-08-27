@@ -134,7 +134,7 @@ export function OnboardingPage() {
                     </Button>
                   ) : (
                     <Link
-                      to="/dashboard"
+                      to="/console"
                       className="inline-flex items-center justify-center gap-2 rounded-[10px] bg-gradient-to-b from-brand-500 to-brand-700 px-5 py-2.5 text-[14px] font-medium text-white transition-[filter] hover:brightness-110"
                     >
                       Go to dashboard

@@ -228,7 +228,7 @@ export function BuiltinProvidersPage() {
             >
               <RefreshCw size={14} /> Refresh
             </Button>
-            <Link to="/providers">
+            <Link to="/console/providers">
               <Button variant="ghost">
                 View configured <ArrowRight size={14} />
               </Button>

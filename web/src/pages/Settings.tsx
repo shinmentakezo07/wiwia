@@ -416,8 +416,8 @@ function AboutTab() {
         <div className="px-5 py-4">
           <div className="grid gap-3 sm:grid-cols-3">
             <InfoTile icon={Database} title="Models" desc="configure deployments" to="/models" />
-            <InfoTile icon={Boxes} title="Providers" desc="outbound accounts" to="/providers" />
-            <InfoTile icon={KeyRound} title="Virtual keys" desc="client keys" to="/keys" />
+            <InfoTile icon={Boxes} title="Providers" desc="outbound accounts" to="/console/providers" />
+            <InfoTile icon={KeyRound} title="Virtual keys" desc="client keys" to="/console/keys" />
           </div>
         </div>
       </Card>

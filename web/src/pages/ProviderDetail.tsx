@@ -587,7 +587,7 @@ export function ProviderDetailPage() {
     return (
       <div>
         <PageHeader title={name} subtitle="Unknown provider account." />
-        <Link to="/providers"><Button variant="outline"><ArrowLeft size={14} /> Back to providers</Button></Link>
+        <Link to="/console/providers"><Button variant="outline"><ArrowLeft size={14} /> Back to providers</Button></Link>
       </div>
     );
   }
@@ -597,7 +597,7 @@ export function ProviderDetailPage() {
       <PageHeader
         title={
           <span className="flex items-center gap-3">
-            <Link to="/providers" aria-label="Back to providers"
+            <Link to="/console/providers" aria-label="Back to providers"
                   className="text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]">
               <ArrowLeft size={18} />
             </Link>

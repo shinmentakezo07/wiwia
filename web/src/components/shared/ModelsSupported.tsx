@@ -259,7 +259,7 @@ function ModelCardRow({ model, navigate }: { model: ModelDefinition; navigate: (
   const caps = getCapabilityIcons(provider, model.output);
   return (
     <div
-      onClick={() => navigate(`/models/${encodeURIComponent(model.id)}`)}
+      onClick={() => navigate(`/models`)}
       className="group cursor-pointer rounded-lg border border-[var(--admin-border)] bg-[var(--admin-surface)] p-4 transition-colors hover:border-[var(--admin-border-hover)]"
     >
       <div className="flex items-start justify-between gap-2">
