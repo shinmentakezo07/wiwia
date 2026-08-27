@@ -520,7 +520,7 @@ function AccountSettingsCard(props: { p: Provider; onError: (m: string) => void 
       void qc.invalidateQueries({ queryKey: ["providers"] });
       void qc.invalidateQueries({ queryKey: ["model-groups"] });
       if (data.name !== props.p.name) {
-        navigate(`/providers/${encodeURIComponent(data.name)}`, { replace: true });
+        navigate(`/console/providers/${encodeURIComponent(data.name)}`, { replace: true });
       }
     },
     onError: (e) => setError(e.message),
@@ -574,7 +574,7 @@ export function ProviderDetailPage() {
     mutationFn: () => deleteProvider(name),
     onSuccess: () => {
       setDelOpen(false);
-      navigate("/providers");
+      navigate("/console/providers");
     },
     onError: (e) => setError(e.message),
   });

@@ -285,7 +285,7 @@ export function ModelSearch({ models = [], providers = [] }: { models?: ApiModel
                     <button
                       key={`provider-${p.id}`}
                       type="button"
-                      onClick={() => { navigate(`/providers/${encodeURIComponent(p.id)}`); setOpen(false); }}
+                      onClick={() => { navigate(`/console/providers/${encodeURIComponent(p.id)}`); setOpen(false); }}
                       className="flex w-full items-center gap-3 rounded-md px-2 py-2 text-left transition-colors hover:bg-white/[0.03]"
                     >
                       <div className="flex h-9 w-9 items-center justify-center rounded-full bg-white/[0.04]">

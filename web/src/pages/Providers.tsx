@@ -195,7 +195,7 @@ function ProviderCard(props: {
         </div>
         <div className="flex items-center gap-2">
           <Link
-            to={`/providers/${encodeURIComponent(props.p.name)}`}
+            to={`/console/providers/${encodeURIComponent(props.p.name)}`}
             className="inline-flex"
             title="Open provider detail"
           >
@@ -286,7 +286,7 @@ function ProviderCard(props: {
           ))}
           {props.p.keys.length > 3 && (
             <Link
-              to={`/providers/${encodeURIComponent(props.p.name)}`}
+              to={`/console/providers/${encodeURIComponent(props.p.name)}`}
               className="inline-block pt-1 text-[11px] text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]"
             >
               +{props.p.keys.length - 3} more…
@@ -381,7 +381,7 @@ export function ProvidersPage() {
           )}
         </div>
         <div className="flex items-center gap-2">
-          <Link to="/builtin-providers" className="inline-flex">
+          <Link to="/console/builtin-providers" className="inline-flex">
             <Button variant="ghost">
               <Layers size={14} /> Catalog
             </Button>
