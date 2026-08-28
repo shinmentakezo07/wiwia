@@ -1,15 +1,18 @@
-// OAuth Providers — manage Cline (and future OAuth-backed) providers.
+// OAuth Cline — manage Cline OAuth accounts and cross-account routing.
 //
-// This page lists every configured provider whose type supports OAuth (today:
-// "cline"). For each you can:
-//   • Add a new OAuth-backed provider (creates the account with a placeholder
-//     key, since the real access token lands on that key after connect).
+// This page lists every configured Cline provider. For each you can:
+//   • Add a new Cline provider (creates the account with a placeholder key,
+//     since the real access token lands on that key after connect).
 //   • Connect — automatic redirect flow: click once, log in at Cline, done.
 //     A manual paste-code fallback is available for setups without a public
 //     callback URL (e.g. localhost dev).
 //   • See connection status (email, token expiry, auto-refresh badge).
 //   • Refresh the access token on demand.
 //   • Disconnect — clear the stored OAuth state.
+//
+// When 2+ accounts are connected, a cross-account routing card lets you
+// create a model group that deploys to all Cline providers and toggle the
+// routing strategy between round-robin and fallback.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
@@ -24,9 +27,11 @@ import {
   LogIn,
   Plus,
   RefreshCw,
+  Shuffle,
   Unlink,
 } from "lucide-react";
 import {
+  addDeployment,
   addProvider,
   clineAutoConnect,
   clineConnect,
@@ -34,9 +39,15 @@ import {
   clineLoginUrl,
   clineRefresh,
   clineStatus,
+  getModels,
   getProviders,
+  patchModelGroup,
 } from "@/api/client";
-import type { ClineStatusResponse, Provider } from "@/api/types";
+import type {
+  ClineStatusResponse,
+  ModelGroup,
+  Provider,
+} from "@/api/types";
 import {
   Badge,
   Button,
@@ -48,6 +59,7 @@ import {
   Input,
   PageHeader,
   Spinner,
+  Toggle,
 } from "@/components/ui";
 
 const OAUTH_PROVIDER_TYPES = ["cline"];
@@ -258,6 +270,7 @@ function OAuthProviderCard(props: {
     onError: (e) => setError(e.message),
   });
 
+
   return (
     <Card>
       <CardHeader
@@ -461,6 +474,198 @@ function OAuthProviderCard(props: {
   );
 }
 
+// -- cross-account routing -----------------------------------------------------
+
+function CrossAccountRouting(props: {
+  providers: Provider[];
+  onError: (m: string) => void;
+}) {
+  const qc = useQueryClient();
+  const [modelId, setModelId] = useState("z-ai/glm-5.2");
+  const [groupName, setGroupName] = useState("cline-pool");
+
+  // Fetch existing model groups to show current routing state.
+  const modelsQ = useQuery({
+    queryKey: ["models"],
+    queryFn: getModels,
+    refetchInterval: 15_000,
+  });
+
+  // Find model groups that deploy to any of our Cline providers.
+  const clineProviderNames = useMemo(
+    () => new Set(props.providers.map((p) => p.name)),
+    [props.providers],
+  );
+
+  const clineGroups: ModelGroup[] = useMemo(
+    () =>
+      (modelsQ.data?.groups ?? []).filter((g) =>
+        g.deployments.some((d) => clineProviderNames.has(d.provider)),
+      ),
+    [modelsQ.data, clineProviderNames],
+  );
+
+  const globalStrategy = modelsQ.data?.strategy ?? "simple-shuffle";
+
+  // Create a model group spanning all Cline providers with the given model.
+  const createPool = useMutation({
+    mutationFn: async () => {
+      for (const p of props.providers) {
+        await addDeployment(groupName, {
+          provider: p.name,
+          model_id: modelId,
+          weight: 1,
+        });
+      }
+    },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["models"] });
+    },
+    onError: (e) => props.onError(e.message),
+  });
+
+  // Toggle routing strategy between round-robin and fallback (sequential).
+  const toggleStrategy = useMutation({
+    mutationFn: (strategy: string) =>
+      patchModelGroup(clineGroups[0]?.name ?? groupName, { strategy }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["models"] });
+    },
+    onError: (e) => props.onError(e.message),
+  });
+
+  const isRoundRobin = globalStrategy === "simple-shuffle";
+
+  return (
+    <Card>
+      <CardHeader
+        title={
+          <span className="flex items-center gap-2">
+            <Shuffle size={15} className="text-[var(--admin-text-muted)]" />
+            Cross-account routing
+          </span>
+        }
+        right={
+          <Badge tone={isRoundRobin ? "green" : "amber"}>
+            {isRoundRobin ? "round-robin" : "fallback"}
+          </Badge>
+        }
+      />
+      <div className="space-y-4 px-4 pb-4 pt-2">
+        <p className="text-[12px] text-[var(--admin-text-muted)]">
+          {props.providers.length} Cline accounts configured. Create a model
+          group that deploys to all of them so requests are load-balanced
+          across accounts.
+        </p>
+
+        {/* existing groups that include Cline providers */}
+        {clineGroups.length > 0 && (
+          <div className="space-y-2">
+            <div className="text-[13px] font-medium">Active routing groups</div>
+            {clineGroups.map((g) => (
+              <div
+                key={g.name}
+                className="rounded-lg border border-[var(--admin-border)] bg-white/[0.02] px-3 py-2"
+              >
+                <div className="flex items-center justify-between">
+                  <Link
+                    to="/console/models"
+                    className="text-[13px] font-medium text-blue-300 hover:underline"
+                  >
+                    {g.name}
+                  </Link>
+                  <Badge tone="gray">
+                    {g.deployments.length} deployment{g.deployments.length !== 1 ? "s" : ""}
+                  </Badge>
+                </div>
+                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                  {g.deployments.map((d) => (
+                    <span
+                      key={`${d.provider}/${d.model_id}`}
+                      className="rounded bg-white/[0.04] px-1.5 py-0.5 font-mono text-[11px] text-[var(--admin-text-muted)]"
+                    >
+                      {d.provider}/{d.model_id}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
+
+            {/* routing strategy toggle */}
+            <div className="flex items-center justify-between gap-3 border-t border-[var(--admin-border)] pt-3">
+              <div className="min-w-0">
+                <div className="text-[13px] font-medium">Routing strategy</div>
+                <div className="text-[12px] text-[var(--admin-text-muted)]">
+                  {isRoundRobin
+                    ? "Round-robin — distribute requests across all accounts evenly."
+                    : "Fallback — use the first account until it fails, then move to the next."}
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <span className="text-[11px] font-medium uppercase tracking-wide text-[var(--admin-text-muted)]">
+                  {isRoundRobin ? "Round-robin" : "Fallback"}
+                </span>
+                <Toggle
+                  checked={isRoundRobin}
+                  disabled={toggleStrategy.isPending}
+                  onChange={(v) =>
+                    toggleStrategy.mutate(v ? "simple-shuffle" : "least-busy")
+                  }
+                />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* create a new pool spanning all Cline accounts */}
+        {clineGroups.length === 0 && (
+          <div className="space-y-3 border-t border-[var(--admin-border)] pt-3">
+            <div className="text-[13px] font-medium">Create a routing pool</div>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <div>
+                <label className="mb-1 block text-[11px] font-medium uppercase tracking-wide text-[var(--admin-text-muted)]">
+                  Model group name
+                </label>
+                <Input
+                  value={groupName}
+                  onChange={(e) => setGroupName(e.target.value)}
+                  placeholder="cline-pool"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-[11px] font-medium uppercase tracking-wide text-[var(--admin-text-muted)]">
+                  Upstream model ID
+                </label>
+                <Input
+                  value={modelId}
+                  onChange={(e) => setModelId(e.target.value)}
+                  placeholder="z-ai/glm-5.2"
+                />
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                disabled={!groupName.trim() || !modelId.trim() || createPool.isPending}
+                onClick={() => createPool.mutate()}
+              >
+                {createPool.isPending ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <Plus size={14} />
+                )}
+                {createPool.isPending ? "Creating…" : "Create pool"}
+              </Button>
+              <span className="text-[12px] text-[var(--admin-text-muted)]">
+                Adds {props.providers.length} deployment{props.providers.length !== 1 ? "s" : ""} to the group.
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
+    </Card>
+  );
+}
+
 // -- page --------------------------------------------------------------------
 
 export function OAuthProvidersPage() {
@@ -499,6 +704,15 @@ export function OAuthProvidersPage() {
         onClose={() => setAddOpen(false)}
         onError={setError}
       />
+
+      {oauthProviders.length >= 2 && (
+        <div className="mb-4">
+          <CrossAccountRouting
+            providers={oauthProviders}
+            onError={setError}
+          />
+        </div>
+      )}
 
       {q.isLoading ? (
         <Spinner />
