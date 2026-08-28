@@ -416,3 +416,54 @@ async def test_auto_connect_open_redirect_guard(client):
         follow_redirects=False)
     assert r2.status_code == 302
     assert r2.headers["location"].startswith("/console/oauth")
+
+
+# -- global Cline models fetch -------------------------------------------------
+
+
+@respx.mock
+async def test_cline_models_global_fetch(client):
+    """GET /admin/cline/models fetches from the first available Cline key
+    and returns a sorted model list (no per-account differentiation)."""
+    respx.get("https://api.cline.bot/api/v1/models").mock(
+        return_value=httpx.Response(200, json={"data": [
+            {"id": "z-ai/glm-5.2"},
+            {"id": "anthropic/claude-sonnet-4-20250514"},
+            {"id": "openai/gpt-5"},
+        ]}))
+    r = await client.get("/admin/cline/models", headers=AUTH)
+    assert r.status_code == 200
+    models = [m["id"] for m in r.json()["models"]]
+    assert models == sorted([
+        "z-ai/glm-5.2",
+        "anthropic/claude-sonnet-4-20250514",
+        "openai/gpt-5",
+    ])
+
+
+@respx.mock
+async def test_cline_models_cache(client):
+    """The second call within 5 minutes is served from cache (no upstream hit)."""
+    route = respx.get("https://api.cline.bot/api/v1/models").mock(
+        return_value=httpx.Response(200, json={"data": [
+            {"id": "z-ai/glm-5.2"},
+        ]}))
+    r1 = await client.get("/admin/cline/models", headers=AUTH)
+    assert r1.status_code == 200
+    assert route.call_count == 1
+    r2 = await client.get("/admin/cline/models", headers=AUTH)
+    assert r2.status_code == 200
+    assert route.call_count == 1  # cached, no second upstream call
+    assert r2.json()["models"] == r1.json()["models"]
+
+
+async def test_cline_models_no_cline_provider_409(client):
+    """409 when no Cline provider has an available key."""
+    # The default config has one Cline provider with a key, so we need to
+    # make the key unavailable. Disable it via the admin API.
+    r = await client.patch(
+        "/admin/providers/cline-prov/keys/default",
+        headers=AUTH, json={"enabled": False})
+    assert r.status_code == 200
+    r2 = await client.get("/admin/cline/models", headers=AUTH)
+    assert r2.status_code == 409

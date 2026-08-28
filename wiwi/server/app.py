@@ -1283,6 +1283,63 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         _parse_models_response(acct.provider_type, r.content))
         return ORJSONResponse({"models": [{"id": mid} for mid in models]})
 
+    @app.get("/admin/cline/models")
+    async def admin_cline_models(request: Request):
+        """Fetch model ids from any available Cline provider (global fetch).
+
+        All Cline OAuth accounts share the same upstream model catalog
+        (api.cline.bot/api/v1/models).  Instead of fetching per-account,
+        this endpoint queries the first Cline provider with an available
+        key, caches the result for 5 minutes, and returns it for reuse
+        across every Cline account.
+        """
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        # Check in-memory cache (5-minute TTL)
+        cache = getattr(state, "_cline_models_cache", None)
+        import time as _time
+        if cache and _time.time() - cache["ts"] < 300:
+            return ORJSONResponse({"models": cache["models"]})
+        # Find the first Cline provider with an available key
+        cline_acct = None
+        cline_key = None
+        for acct in state.router.providers.values():
+            if acct.provider_type != "cline":
+                continue
+            key = next((k for k in acct.keys if k.available), None)
+            if key is not None:
+                cline_acct = acct
+                cline_key = key
+                break
+        if cline_acct is None or cline_key is None:
+            return _err(409, "invalid_request_error",
+                        "no available Cline key — connect a Cline account first",
+                        request)
+        adapter = get_adapter("cline")
+        url = _provider_models_url("cline", cline_acct.base_url)
+        headers = adapter.headers(ProviderKeyRef(label=cline_key.label,
+                                                   secret=cline_key.secret))
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as hc:
+                r = await hc.get(url, headers=headers)
+        except httpx.HTTPError:
+            return _err(502, "api_connection_error",
+                        f"could not reach Cline ({url})", request)
+        if r.status_code != 200:
+            etype = ("rate_limit_error" if r.status_code == 429
+                     else "authentication_error" if r.status_code in (401, 403)
+                     else "api_error")
+            return _err(r.status_code if r.status_code < 500 else 502, etype,
+                        f"Cline returned HTTP {r.status_code}: {r.text[:300]}",
+                        request)
+        models = [{"id": mid} for mid in
+                  sorted(m["id"] for m in
+                         _parse_models_response("cline", r.content))]
+        # Cache for 5 minutes
+        state._cline_models_cache = {"models": models, "ts": _time.time()}
+        return ORJSONResponse({"models": models})
+
     @app.post("/admin/model-groups/{name:path}/deployments")
     async def admin_add_deployment(name: str, request: Request):
         """Attach a provider deployment to a model group (creating the group)."""

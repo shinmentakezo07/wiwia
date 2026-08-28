@@ -152,6 +152,9 @@ export const fetchProviderModels = (provider: string) =>
     `/admin/providers/${encodeURIComponent(provider)}/models`,
   );
 
+export const fetchClineModels = () =>
+  api<{ models: UpstreamModel[] }>("/admin/cline/models");
+
 export const addDeployment = (
   group: string,
   body: { provider: string; model_id: string; weight?: number },

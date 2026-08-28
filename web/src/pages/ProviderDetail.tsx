@@ -16,6 +16,7 @@ import {
   clineStatus,
   deleteProvider,
   deleteProviderKey,
+  fetchClineModels,
   fetchProviderModels,
   getModels,
   getProviders,
@@ -350,7 +351,10 @@ function ModelPickerCard(props: { p: Provider; onError: (m: string) => void }) {
   }, [groupsQuery.data, props.p.name]);
 
   const fetchM = useMutation({
-    mutationFn: () => fetchProviderModels(props.p.name),
+    mutationFn: () =>
+      props.p.provider_type === "cline"
+        ? fetchClineModels()
+        : fetchProviderModels(props.p.name),
     onSuccess: (d) => {
       setModels(d.models.map((m) => m.id));
       setSelected([]);
@@ -380,12 +384,15 @@ function ModelPickerCard(props: { p: Provider; onError: (m: string) => void }) {
   const visible = (models ?? []).filter((m) => m.toLowerCase().includes(filter.toLowerCase()));
   const toggle = (mid: string) =>
     setSelected((sel) => (sel.includes(mid) ? sel.filter((x) => x !== mid) : [...sel, mid]));
-
   return (
     <Card>
       <CardHeader
         title="Model IDs"
-        subtitle="Fetch what this account can serve, pick, apply."
+        subtitle={
+          props.p.provider_type === "cline"
+            ? "Global Cline model list (shared across all Cline accounts)."
+            : "Fetch what this account can serve, pick, apply."
+        }
         right={
           <Button
             variant="outline"
@@ -402,7 +409,7 @@ function ModelPickerCard(props: { p: Provider; onError: (m: string) => void }) {
         {models !== null && (
           <>
             {models.length === 0 ? (
-              <EmptyState>No models returned by this account.</EmptyState>
+              <EmptyState>No models returned{props.p.provider_type === "cline" ? " by any Cline account" : " by this account"}.</EmptyState>
             ) : (
               <>
                 <div className="relative">
