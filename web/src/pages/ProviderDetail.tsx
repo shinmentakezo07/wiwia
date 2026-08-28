@@ -9,7 +9,6 @@ import { ArrowLeft, Boxes, CheckCircle2, ChevronDown, ChevronUp, Cloud, Cpu, Eye
 import type { LucideIcon } from "lucide-react";
 import {
   addDeployment,
-  clineAutoConnect,
   clineConnect,
   clineDisconnect,
   clineLoginUrl,
@@ -638,22 +637,18 @@ function ClineOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
 
   const returnPath = `/console/providers/${encodeURIComponent(props.p.name)}`;
 
-  // Automatic connect: POST auto-connect → open the returned Cline auth URL
-  // in a new tab. After login, Cline redirects to /cline/oauth/callback which
-  // persists tokens and redirects here with ?cline_connected=1.
+  // Connect: open Cline's login page. After login, Cline shows a callback
+  // page with ?code=… — the user copies that URL and pastes it below.
+  // (Cline's Google OAuth ignores our callback_url and lands on its own
+  // /auth/callback page, so we can't auto-redirect; the paste-code flow
+  // accepts the full callback URL and handles truncated Google OAuth codes.)
   const autoConnect = useMutation({
-    mutationFn: () => clineAutoConnect(props.p.name, returnPath),
+    mutationFn: () => clineLoginUrl(`${window.location.origin}${returnPath}`),
     onSuccess: (d) => {
       setLocalError(null);
+      setShowManual(true);
       window.open(d.auth_url, "_blank", "noopener,noreferrer");
     },
-    onError: (e) => setLocalError(e.message),
-  });
-
-  // Manual paste-code fallback (kept for localhost / no-public-URL setups).
-  const loginUrl = useMutation({
-    mutationFn: () => clineLoginUrl(`${window.location.origin}${returnPath}`),
-    onSuccess: (d) => window.open(d.auth_url, "_blank", "noopener,noreferrer"),
     onError: (e) => setLocalError(e.message),
   });
 
@@ -770,13 +765,13 @@ function ClineOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
           </dl>
         )}
 
-        {/* not connected: one-click auto connect + manual fallback */}
+        {/* not connected: connect + paste section */}
         {!connected && !statusQ.isLoading && (
           <>
             <div className="space-y-2">
               <p className="text-[12px] text-[var(--admin-text-muted)]">
-                Click once to connect. You'll sign in at Cline and be
-                redirected back automatically — no code to paste.
+                Click to open Cline's login page. After signing in, copy the
+                URL from your browser's address bar and paste it below.
               </p>
               <div className="flex flex-wrap items-center gap-2">
                 <Button
@@ -789,7 +784,7 @@ function ClineOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
                   ) : (
                     <LogIn size={14} />
                   )}
-                  {autoConnect.isPending ? "Starting…" : "Connect with Cline"}
+                  {autoConnect.isPending ? "Opening…" : "Connect with Cline"}
                 </Button>
                 <Button
                   variant="ghost"
@@ -800,32 +795,22 @@ function ClineOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
                   ) : (
                     <ChevronDown size={14} />
                   )}
-                  Manual paste-code
+                  Paste URL / code
                 </Button>
               </div>
             </div>
 
-            {/* collapsible manual paste-code fallback */}
+            {/* collapsible paste section — accepts the full Cline callback URL or bare code */}
             {showManual && (
               <div className="space-y-2 border-t border-[var(--admin-border)] pt-3">
                 <p className="text-[12px] text-[var(--admin-text-muted)]">
-                  Open the Cline login page, sign in, then paste the code
-                  here. Use this when the automatic redirect can't land
-                  (e.g. localhost without a public URL).
+                  After logging in at Cline, copy the full URL from the
+                  address bar (it starts with https://app.cline.bot/auth/
+                  callback?…code=…) and paste it here.
                 </p>
-                <div className="flex flex-wrap items-center gap-2">
-                  <Button
-                    variant="outline"
-                    disabled={loginUrl.isPending}
-                    onClick={() => loginUrl.mutate()}
-                  >
-                    <LogIn size={14} />{" "}
-                    {loginUrl.isPending ? "Opening…" : "Open Cline login"}
-                  </Button>
-                </div>
                 <textarea
                   className="admin-input min-h-20 resize-none font-mono text-[12px]"
-                  placeholder="eyJhY2Nlc3NUb2tlbiI6…"
+                  placeholder="https://app.cline.bot/auth/callback?…code=…"
                   value={code}
                   onChange={(e) => setCode(e.target.value)}
                   autoComplete="off"

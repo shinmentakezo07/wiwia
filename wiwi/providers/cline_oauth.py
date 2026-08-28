@@ -110,6 +110,31 @@ _FIELD_RE = re.compile(
 # Looser pattern for expiresAt whose closing quote may be clobbered by the
 # signature: matches up to a `}` or end-of-data.
 _EXPIRES_RE = re.compile(rb'"expiresAt"\s*:\s*"([0-9T:\.\-]+Z)')
+# Truncated-accessToken pattern: when the signature eats the closing quote
+# and all subsequent fields, the accessToken value runs to end-of-data.
+# Matches "accessToken":"<everything-to-end>.
+_TRUNCATED_ACCESS_RE = re.compile(
+    rb'"accessToken"\s*:\s*"(.+)$'
+)
+
+
+def _jwt_claims(token: str) -> dict[str, Any]:
+    """Decode the payload (middle segment) of a JWT without verifying.
+    Returns {} when the token isn't a well-formed JWT."""
+    parts = token.split(".")
+    if len(parts) < 2:
+        return {}
+    payload_b64 = parts[1]
+    # JWT uses base64url without padding; restore it.
+    pad = len(payload_b64) % 4
+    if pad:
+        payload_b64 += "=" * (4 - pad)
+    try:
+        decoded = base64.urlsafe_b64decode(payload_b64)
+        data = orjson.loads(decoded)
+        return data if isinstance(data, dict) else {}
+    except (ValueError, orjson.JSONDecodeError):
+        return {}
 
 
 def _extract_fields(decoded: bytes) -> dict[str, Any]:
@@ -119,6 +144,11 @@ def _extract_fields(decoded: bytes) -> dict[str, Any]:
     when the trailing signature corrupts the JSON boundary, repairing
     ``expiresAt`` (the field nearest the corruption) by stripping a leading
     digit if the year is 5 digits (e.g. ``22026`` → ``2026``).
+
+    Handles the truncated case where the signature eats the closing quote
+    of ``accessToken`` and all subsequent fields (refreshToken/email/
+    expiresAt). In that case the accessToken value runs to end-of-data;
+    email and expiry are then derived from the JWT claims.
     """
     last_brace = decoded.rfind(b"}")
     if last_brace != -1:
@@ -133,6 +163,24 @@ def _extract_fields(decoded: bytes) -> dict[str, Any]:
     fields: dict[str, Any] = {}
     for m in _FIELD_RE.finditer(decoded):
         fields[m.group(1).decode()] = m.group(2).decode()
+
+    # Truncated code: accessToken has no closing quote (signature ate it
+    # and everything after). Capture the value from the opening quote to
+    # end-of-data, then derive email/expiry from the JWT claims.
+    if "accessToken" not in fields:
+        m = _TRUNCATED_ACCESS_RE.search(decoded)
+        if m:
+            access = m.group(1).decode("utf-8", errors="replace").rstrip('"')
+            if access:
+                fields["accessToken"] = access
+                claims = _jwt_claims(access)
+                if "email" not in fields and claims.get("email"):
+                    fields["email"] = claims["email"]
+                if "expiresAt" not in fields and claims.get("exp"):
+                    from datetime import datetime, timezone
+                    dt = datetime.fromtimestamp(claims["exp"], tz=timezone.utc)
+                    fields["expiresAt"] = dt.strftime(
+                        "%Y-%m-%dT%H:%M:%S.000Z")
 
     # expiresAt is the last field before the signature; its closing quote is
     # frequently clobbered.  Try the looser pattern and repair the year.
@@ -158,8 +206,16 @@ def exchange_code(code: str) -> dict[str, Any]:
     Accepts a bare blob, a URL-encoded blob (as shown in the browser address
     bar), or a full callback URL with ``?code=``.
 
-    Raises ValueError when the code isn't decodable or is missing required
-    fields.
+    Google OAuth codes may be truncated: the signature eats the closing
+    quote of ``accessToken`` and all subsequent fields (refreshToken, email,
+    expiresAt).  In that case the accessToken (a JWT) is extracted to
+    end-of-data, and email/expiry are derived from the JWT claims.  The
+    refresh_token will be ``None`` — auto-refresh won't work until a
+    subsequent ``/auth/refresh`` call produces one, but the access token
+    is usable for its lifetime.
+
+    Raises ValueError when the code isn't decodable or is missing the
+    accessToken.
     """
     raw = _extract_code(code)
     try:
@@ -169,12 +225,12 @@ def exchange_code(code: str) -> dict[str, Any]:
 
     data = _extract_fields(decoded)
     access = data.get("accessToken")
+    if not access:
+        raise ValueError("code payload missing accessToken")
     refresh = data.get("refreshToken")
-    if not access or not refresh:
-        raise ValueError("code payload missing accessToken/refreshToken")
     return {
         "access_token": access,
-        "refresh_token": refresh,
+        "refresh_token": refresh,  # None when truncated (Google OAuth)
         "expires_at": data.get("expiresAt"),
         "email": data.get("email"),
     }

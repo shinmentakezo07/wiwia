@@ -145,6 +145,34 @@ def test_exchange_code_with_trailing_signature():
     # expiresAt may be corrupted by the signature; the decoder repairs it.
     assert tokens["expires_at"] is not None
 
+
+def test_exchange_code_truncated_google_oauth():
+    """Google OAuth codes are truncated: the signature eats the closing
+    quote of accessToken and all subsequent fields (refreshToken, email,
+    expiresAt). The accessToken is a JWT whose claims carry email and exp.
+    The decoder must extract the JWT, derive email/expiry from its claims,
+    and return refresh_token=None."""
+    # Build a payload with only accessToken (a fake JWT) and no closing
+    # quote or subsequent fields — simulating the truncated case.
+    # Use a real-ish JWT structure so _jwt_claims can decode it.
+    import base64 as b64
+    header = b64.b64encode(b'{"alg":"RS256","kid":"key1"}').decode().rstrip("=")
+    claims = {
+        "email": "google@test.io",
+        "exp": 1787952096,
+        "sub": "user_123",
+    }
+    payload_b64 = b64.b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    jwt = f"{header}.{payload_b64}.sig-part"
+    # The decoded payload is: {"accessToken":"<JWT>  (no closing quote)
+    raw_json = b'{"accessToken":"' + jwt.encode()
+    code = base64.b64encode(raw_json).decode()
+    tokens = exchange_code(code)
+    assert tokens["access_token"] == jwt
+    assert tokens["refresh_token"] is None
+    assert tokens["email"] == "google@test.io"
+    assert tokens["expires_at"] is not None
+
 # -- refresh (network) ---------------------------------------------------
 
 
