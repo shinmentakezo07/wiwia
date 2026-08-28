@@ -109,9 +109,37 @@ _COLS = ("ts", "request_id", "surface", "key_alias", "key_id", "model_group",
 
 
 class DBSink:
+    # TTL cache coalesces concurrent log/stat queries so a burst of dashboard
+    # refreshes hits the DB once instead of running N copies of the same heavy
+    # SQL. Matches the AuthService caching pattern: dict of (value, ts) tuples
+    # with a short monotonic-clock TTL. The TTL is intentionally short (5s) —
+    # logs are append-only so staleness is bounded, and a write-driven flush
+    # would defeat the cache under the exact high-traffic load it targets.
+    _CACHE_TTL = 5.0
+
     def __init__(self, engine) -> None:
         self.engine = engine
         self._is_pg = engine.dialect.name == "postgresql"
+        self._query_cache: dict[tuple, tuple] = {}
+
+    def _cache_get(self, key: tuple):
+        hit = self._query_cache.get(key)
+        if hit is None:
+            return None
+        if time.monotonic() - hit[1] < self._CACHE_TTL:
+            return hit[0]
+        # Expired — evict so the dict can't grow without bound (the key
+        # space includes per-user key_ids tuples, so stale entries would
+        # otherwise linger forever as a slow memory leak).
+        self._query_cache.pop(key, None)
+        return None
+
+    def _cache_put(self, key: tuple, value) -> None:
+        self._query_cache[key] = (value, time.monotonic())
+
+    def invalidate_cache(self) -> None:
+        """Drop all cached query results. Call after manual data changes."""
+        self._query_cache.clear()
 
     async def startup(self) -> None:
         async with self.engine.begin() as conn:
@@ -224,6 +252,19 @@ class DBSink:
         """
         if key_ids is not None and not key_ids:
             return []
+        ckey = ("read_requests", int(limit), tuple(key_ids) if key_ids else None)
+        cached = self._cache_get(ckey)
+        if cached is not None:
+            return cached
+        result = await self._read_requests_uncached(limit, key_ids)
+        if result:
+            self._cache_put(ckey, result)
+        return result
+
+    async def _read_requests_uncached(self, limit: int,
+                                      key_ids: list[str] | None) -> list[dict]:
+        if key_ids is not None and not key_ids:
+            return []
         cols = ", ".join(_COLS)
         params: dict = {"l": int(limit)}
         where = ""
@@ -295,6 +336,18 @@ class DBSink:
                 "cost": 0.0,
                 "cache_savings": 0.0,
             }
+        ckey = ("read_overview", int(minutes), tuple(key_ids) if key_ids else None)
+        cached = self._cache_get(ckey)
+        if cached is not None:
+            return cached
+        result = await self._read_overview_uncached(minutes, key_ids)
+        if result.get("requests"):
+            self._cache_put(ckey, result)
+        return result
+
+    async def _read_overview_uncached(self, minutes: int,
+                                      key_ids: list[str] | None) -> dict:
+        now = time.time()
         cutoff = now - minutes * 60 if minutes > 0 else 0.0
         params: dict = {}
         if minutes > 0:
@@ -403,7 +456,20 @@ class DBSink:
             # Zero-row timeseries: same shape the bucket loop below returns
             # when no rows match (by_t empty → no zero-fill → [] buckets).
             return {"bucket_seconds": bucket_seconds, "metric": metric, "buckets": []}
+        ckey = ("read_timeseries", int(bucket_seconds), metric, int(minutes),
+                tuple(key_ids) if key_ids else None)
+        cached = self._cache_get(ckey)
+        if cached is not None:
+            return cached
+        result = await self._read_timeseries_uncached(bucket_seconds, metric,
+                                                       minutes, key_ids)
+        if result.get("buckets"):
+            self._cache_put(ckey, result)
+        return result
 
+    async def _read_timeseries_uncached(self, bucket_seconds: int, metric: str,
+                                        minutes: int,
+                                        key_ids: list[str] | None) -> dict:
         now = time.time()
         params: dict = {}
         where_ts = ""

@@ -39,6 +39,7 @@ PROVIDER_TYPES: tuple[str, ...] = (
     "openrouter",
     "gmicloud",
     "nvidia-nim",
+    "cline",
 )
 
 

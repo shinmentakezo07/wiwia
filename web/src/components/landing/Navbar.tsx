@@ -36,7 +36,6 @@ import {
   Zap,
 } from "lucide-react";
 
-const DOCS_URL = "https://docs.example.com";
 const GITHUB_URL = "https://github.com";
 const DISCORD_URL = "https://discord.com";
 
@@ -299,9 +298,9 @@ export function Navbar({ sticky = true }: { sticky?: boolean }) {
                 />
                 <DropdownMenu label="AI" links={aiLinks} cols="grid-cols-2 md:w-[520px] lg:w-[560px]" />
 
-                <a href={DOCS_URL} target="_blank" rel="noopener noreferrer" className={DESKTOP_LINK_BASE}>
-                  Docs
-                </a>
+<Link to="/docs" className={directLinkClass(isActivePath("/docs"))}>
+  Docs
+</Link>
                 <Link to="/pricing" className={directLinkClass(isActivePath("/pricing"))}>
                   Pricing
                 </Link>
@@ -344,9 +343,9 @@ export function Navbar({ sticky = true }: { sticky?: boolean }) {
                 <li><Link to="/playground" className={directLinkClass(isActivePath("/playground"))}>Playground</Link></li>
                 <li><Link to="/models" className={directLinkClass(isActivePath("/models"))}>Models</Link></li>
                 <li>
-                  <a href={DOCS_URL} target="_blank" rel="noopener noreferrer" className={DESKTOP_LINK_BASE}>
-                    Docs
-                  </a>
+<Link to="/docs" className={directLinkClass(isActivePath("/docs"))}>
+  Docs
+</Link>
                 </li>
                 <li><Link to="/pricing" className={directLinkClass(false)}>Pricing</Link></li>
               </ul>

@@ -1,19 +1,79 @@
 #!/usr/bin/env bash
-# start.sh — install web deps (bun) and run the wiwi backend proxy with
-# auto-reload: edit any Python file under wiwi/ and the server restarts
-# automatically — no manual restart needed.
-# Kills any old process on the proxy port before starting.
+# start.sh — install web deps, then run the wiwi backend AND the Vite dev
+# server together with interleaved, prefixed logs. Ctrl-C stops both.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 PROXY_PORT="${WIWI_PORT:-4000}"
+WEB_PORT="${WIWI_WEB_PORT:-5173}"
 WEB_DIR="$SCRIPT_DIR/web"
 VENV_BIN="$SCRIPT_DIR/.venv/bin"
 WIWI_BIN="${WIWI_BIN:-$VENV_BIN/wiwi}"
-RELOAD="${WIWI_RELOAD:-1}"          # set WIWI_RELOAD=0 to disable
+RELOAD="${WIWI_RELOAD:-1}"          # set WIWI_RELOAD=0 to disable backend reload
 RELOAD_DIRS="${WIWI_RELOAD_DIRS:-wiwi}"  # comma-separated, e.g. "wiwi,tests"
+
+# --- helpers ----------------------------------------------------------------
+
+kill_port() {
+    local port="$1" pids=""
+    # Find PIDs of processes listening on $port via ss.
+    # mawk doesn't support match($0, /re/, arr) — use RSTART/RLENGTH instead.
+    pids="$(ss -tlnp 2>/dev/null | awk -v p=":$port" '
+        $0 ~ p {
+            if (match($0, /pid=[0-9]+/)) {
+                print substr($0, RSTART+4, RLENGTH-4)
+            }
+        }' | sort -u || true)"
+    if [ -z "$pids" ]; then
+        pids="$(pgrep -f "$port" 2>/dev/null || true)"
+    fi
+    if [ -n "$pids" ]; then
+        echo "    killing pid(s): $(echo "$pids" | tr '\n' ' ')"
+        # shellcheck disable=SC2086
+        kill $pids 2>/dev/null || true
+        sleep 1
+        local survivors=""
+        for p in $pids; do
+            kill -0 "$p" 2>/dev/null && survivors="$survivors $p"
+        done
+        if [ -n "$survivors" ]; then
+            echo "    force-killing survivors:$survivors"
+            # shellcheck disable=SC2086
+            kill -9 $survivors 2>/dev/null || true
+            sleep 1
+        fi
+    fi
+}
+
+# Prefix every line from stdin with a label. Use sed for mawk compatibility
+# and line-buffered output. The explicit fflush is for awk; sed is
+# line-buffered by default on pipes.
+prefixed() {
+    local label="$1"
+    sed -u "s/^/${label} | /"
+}
+
+# --- cleanup on exit --------------------------------------------------------
+
+BACKEND_PID=""
+WEB_PID=""
+
+cleanup() {
+    echo ""
+    echo "==> Shutting down ..."
+    for pid in "$BACKEND_PID" "$WEB_PID"; do
+        [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+    done
+    sleep 2
+    for pid in "$BACKEND_PID" "$WEB_PID"; do
+        [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+    done
+}
+trap cleanup EXIT INT TERM
+
+# --- 1. install web deps -----------------------------------------------------
 
 echo "==> Installing web dependencies (bun) in $WEB_DIR ..."
 cd "$WEB_DIR"
@@ -25,88 +85,68 @@ else
 fi
 cd "$SCRIPT_DIR"
 
-echo "==> Checking for processes on port $PROXY_PORT ..."
-PIDS="$(lsof -t -i:"$PROXY_PORT" 2>/dev/null || true)"
-if [ -n "$PIDS" ]; then
-    echo "    Found process(es) on port $PROXY_PORT (pid: $(echo "$PIDS" | tr '\n' ' ')) — killing ..."
-    # shellcheck disable=SC2086
-    kill $PIDS 2>/dev/null || true
-    sleep 1
-    # force-kill any survivors
-    PIDS2="$(lsof -t -i:"$PROXY_PORT" 2>/dev/null || true)"
-    if [ -n "$PIDS2" ]; then
-        echo "    Still alive — force killing (pid: $(echo "$PIDS2" | tr '\n' ' ')) ..."
-        # shellcheck disable=SC2086
-        kill -9 $PIDS2 2>/dev/null || true
-        sleep 1
-    fi
-    echo "    Port $PROXY_PORT is now free."
-else
-    echo "    Port $PROXY_PORT is already free."
-fi
+# --- 2. free up the ports ----------------------------------------------------
 
-# Build the command args
+echo "==> Freeing port $PROXY_PORT (backend) ..."
+kill_port "$PROXY_PORT"
+
+echo "==> Freeing port $WEB_PORT (web) ..."
+kill_port "$WEB_PORT"
+
+# --- 3. build backend command args -------------------------------------------
+
 CMD_ARGS=(--config "$SCRIPT_DIR/wiwi.yaml" --port "$PROXY_PORT")
 if [ "$RELOAD" = "1" ]; then
     CMD_ARGS+=(--reload)
-    # Convert comma-separated WIWI_RELOAD_DIRS into repeated --reload-dir flags
     IFS=',' read -ra DIRS <<< "$RELOAD_DIRS"
     for d in "${DIRS[@]}"; do
         CMD_ARGS+=(--reload-dir "$d")
     done
-    echo "==> Starting wiwi proxy on port $PROXY_PORT (auto-reload ON, watching: $RELOAD_DIRS) ..."
-else
-    echo "==> Starting wiwi proxy on port $PROXY_PORT (reload OFF) ..."
 fi
 
+# --- 4. launch backend -------------------------------------------------------
+# Use process substitution (> >(...)) for prefixing so $! captures the real
+# process PID, not the pipeline subshell. This makes liveness checks and
+# cleanup work on the actual server process.
+
+echo "==> Starting wiwi backend on :$PROXY_PORT (reload: ${RELOAD}) ..."
 if [ -x "$WIWI_BIN" ]; then
-    exec "$WIWI_BIN" "${CMD_ARGS[@]}"
+    "$WIWI_BIN" "${CMD_ARGS[@]}" > >(prefixed "backend") 2>&1 &
 elif command -v wiwi >/dev/null 2>&1; then
-    exec wiwi "${CMD_ARGS[@]}"
+    wiwi "${CMD_ARGS[@]}" > >(prefixed "backend") 2>&1 &
 else
-    echo "ERROR: 'wiwi' not found. Activate the venv or install the package: uv pip install -e .[dev]"
+    echo "ERROR: 'wiwi' not found. Run: uv pip install -e .[dev]"
     exit 1
 fi
+BACKEND_PID=$!
 
-echo "==> Checking for processes on port $PROXY_PORT ..."
-PIDS="$(lsof -t -i:"$PROXY_PORT" 2>/dev/null || true)"
-if [ -n "$PIDS" ]; then
-    echo "    Found process(es) on port $PROXY_PORT (pid: $(echo "$PIDS" | tr '\n' ' ')) — killing ..."
-    # shellcheck disable=SC2086
-    kill $PIDS 2>/dev/null || true
-    sleep 1
-    # force-kill any survivors
-    PIDS2="$(lsof -t -i:"$PROXY_PORT" 2>/dev/null || true)"
-    if [ -n "$PIDS2" ]; then
-        echo "    Still alive — force killing (pid: $(echo "$PIDS2" | tr '\n' ' ')) ..."
-        # shellcheck disable=SC2086
-        kill -9 $PIDS2 2>/dev/null || true
-        sleep 1
+# --- 5. launch web dev server ------------------------------------------------
+
+echo "==> Starting Vite dev server (web) on :$WEB_PORT ..."
+cd "$WEB_DIR"
+if command -v bun >/dev/null 2>&1; then
+    bun run dev --port "$WEB_PORT" > >(prefixed "web") 2>&1 &
+else
+    npx vite --port "$WEB_PORT" > >(prefixed "web") 2>&1 &
+fi
+WEB_PID=$!
+cd "$SCRIPT_DIR"
+
+echo ""
+echo "==> Both running. Backend: http://localhost:$PROXY_PORT  Web: http://localhost:$WEB_PORT"
+echo "==> Press Ctrl-C to stop both."
+echo ""
+
+# --- 6. wait — if either dies, stop the other --------------------------------
+
+while true; do
+    if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+        echo "==> backend exited — stopping web ..."
+        break
     fi
-    echo "    Port $PROXY_PORT is now free."
-else
-    echo "    Port $PROXY_PORT is already free."
-fi
-
-# Build the command args
-CMD_ARGS=(--config "$SCRIPT_DIR/wiwi.yaml" --port "$PROXY_PORT")
-if [ "$RELOAD" = "1" ]; then
-    CMD_ARGS+=(--reload)
-    # Convert comma-separated WIWI_RELOAD_DIRS into repeated --reload-dir flags
-    IFS=',' read -ra DIRS <<< "$RELOAD_DIRS"
-    for d in "${DIRS[@]}"; do
-        CMD_ARGS+=(--reload-dir "$d")
-    done
-    echo "==> Starting wiwi proxy on port $PROXY_PORT (auto-reload ON, watching: $RELOAD_DIRS) ..."
-else
-    echo "==> Starting wiwi proxy on port $PROXY_PORT (reload OFF) ..."
-fi
-
-if [ -x "$WIWI_BIN" ]; then
-    exec "$WIWI_BIN" "${CMD_ARGS[@]}"
-elif command -v wiwi >/dev/null 2>&1; then
-    exec wiwi "${CMD_ARGS[@]}"
-else
-    echo "ERROR: 'wiwi' not found. Activate the venv or install the package: uv pip install -e .[dev]"
-    exit 1
-fi
+    if ! kill -0 "$WEB_PID" 2>/dev/null; then
+        echo "==> web exited — stopping backend ..."
+        break
+    fi
+    sleep 1
+done

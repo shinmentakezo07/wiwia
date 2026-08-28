@@ -16,6 +16,7 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
+    allowedHosts: true,
     proxy: {
       "/admin": "http://localhost:4000",
       "/auth": "http://localhost:4000",

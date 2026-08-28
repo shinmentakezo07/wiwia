@@ -368,6 +368,20 @@ BUILTIN_PROVIDER_TYPES: list[dict[str, str | list[str]]] = [
         "docs_url": "",
     },
     {
+        "provider_type": "cline",
+        "label": "Cline",
+        "default_base_url": "https://api.cline.bot/api/v1",
+        "description": (
+            "Cline's provider gateway (api.cline.bot) via an OpenAI-compatible "
+            "Chat Completions API with streaming-only responses. Authenticates "
+            "with a Cline account OAuth token (WorkOS) and requires Cline "
+            "client-identification headers, which wiwi sends automatically."
+        ),
+        "latest_models": ["z-ai/glm-5.2", "claude-sonnet-5", "gpt-5.5"],
+        "context_window": "varies per model",
+        "docs_url": "https://cline.bot",
+    },
+    {
         "provider_type": "gmicloud",
         "label": "GMI Cloud",
         "default_base_url": "https://api.gmi-serving.com/v1",

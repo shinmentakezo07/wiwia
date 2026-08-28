@@ -5,10 +5,15 @@
 import { useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Boxes, Cloud, Cpu, Eye, EyeOff, Globe, Plus, RefreshCw, Search, Server, Sparkles, Trash2, X, Zap } from "lucide-react";
+import { ArrowLeft, Boxes, Cloud, Cpu, Eye, EyeOff, Globe, Link2, LogIn, Plus, RefreshCw, Search, Server, Sparkles, Trash2, Unlink, X, Zap } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
   addDeployment,
+  clineConnect,
+  clineDisconnect,
+  clineLoginUrl,
+  clineRefresh,
+  clineStatus,
   deleteProvider,
   deleteProviderKey,
   fetchProviderModels,
@@ -52,6 +57,7 @@ const PROVIDER_ICON: Record<string, LucideIcon> = {
   "nvidia-nim": Cpu,
   "openai-compatible": Server,
   gmicloud: Cloud,
+  cline: Link2,
 };
 
 const PROVIDER_TYPE_OPTIONS = [
@@ -61,6 +67,7 @@ const PROVIDER_TYPE_OPTIONS = [
   { value: "nvidia-nim", label: "NVIDIA NIM" },
   { value: "openrouter", label: "OpenRouter" },
   { value: "gmicloud", label: "GMI Cloud" },
+  { value: "cline", label: "Cline" },
   { value: "openai-compatible", label: "OpenAI-compatible URL" },
 ];
 
@@ -561,6 +568,248 @@ function AccountSettingsCard(props: { p: Provider; onError: (m: string) => void 
   );
 }
 
+// -- Cline OAuth (paste-code flow) ---------------------------------------------
+
+function ClineOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
+  const qc = useQueryClient();
+  const [code, setCode] = useState("");
+  const [authUrl, setAuthUrl] = useState<string | null>(null);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+
+  // Poll status every 30s so the "needs refresh" badge stays current without
+  // a manual page reload. Only poll once we've loaded the first response to
+  // avoid wasting requests while disconnected.
+  const statusQ = useQuery({
+    queryKey: ["cline-oauth-status", props.p.name],
+    queryFn: () => clineStatus(props.p.name),
+    refetchInterval: 30_000,
+  });
+
+  const status = statusQ.data;
+  const connected = status?.connected === true;
+  const needsRefresh = status?.needs_refresh === true;
+  const hasKeys = props.p.keys.length > 0;
+  const qKey = ["cline-oauth-status", props.p.name];
+
+  const loginUrl = useMutation({
+    mutationFn: () => clineLoginUrl(window.location.origin + `/console/providers/${encodeURIComponent(props.p.name)}`),
+    onSuccess: (d) => { setAuthUrl(d.auth_url); setLocalError(null); },
+    onError: (e) => setLocalError(e.message),
+  });
+
+  const connect = useMutation({
+    mutationFn: () => clineConnect(props.p.name, code.trim()),
+    onSuccess: () => {
+      setCode("");
+      setAuthUrl(null);
+      setLocalError(null);
+      void qc.invalidateQueries({ queryKey: qKey });
+      void qc.invalidateQueries({ queryKey: ["providers"] });
+    },
+    onError: (e) => setLocalError(e.message),
+  });
+
+  const refresh = useMutation({
+    mutationFn: () => clineRefresh(props.p.name),
+    onSuccess: () => {
+      setLocalError(null);
+      void qc.invalidateQueries({ queryKey: qKey });
+      void qc.invalidateQueries({ queryKey: ["providers"] });
+    },
+    onError: (e) => {
+      setLocalError(e.message);
+      // A 401 means the refresh token is dead — force a status recheck so the
+      // card flips back to the login flow.
+      if (e instanceof Error && e.message.includes("re-login")) {
+        void qc.invalidateQueries({ queryKey: qKey });
+      }
+    },
+  });
+
+  const disconnect = useMutation({
+    mutationFn: () => clineDisconnect(props.p.name),
+    onSuccess: () => {
+      setConfirmDisconnect(false);
+      setLocalError(null);
+      void qc.invalidateQueries({ queryKey: qKey });
+      void qc.invalidateQueries({ queryKey: ["providers"] });
+    },
+    onError: (e) => setLocalError(e.message),
+  });
+
+  const fmtExpiry = (iso: string | null | undefined) => {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  };
+
+  return (
+    <Card className="xl:col-span-3">
+      <CardHeader
+        title="Cline OAuth"
+        subtitle="paste-code flow — tokens live in the first key of the pool"
+        right={
+          statusQ.isLoading ? (
+            <Badge tone="gray">…</Badge>
+          ) : connected ? (
+            <Badge tone={needsRefresh ? "amber" : "green"}>
+              {needsRefresh ? "expires soon" : "connected"}
+            </Badge>
+          ) : (
+            <Badge tone="gray">not connected</Badge>
+          )
+        }
+      />
+      <div className="space-y-4 px-4 pb-4 pt-2">
+        {statusQ.isLoading && (
+          <div className="flex justify-center py-4"><Spinner /></div>
+        )}
+
+        {localError && <ErrorText>{localError}</ErrorText>}
+
+        {!hasKeys && !statusQ.isLoading && (
+          <div className="flex items-center gap-2 rounded-lg border border-amber-500/20 bg-amber-500/[0.04] px-3 py-2 text-[12px] text-amber-300">
+            No pool keys — add a key below before connecting. The access token
+            replaces the secret of the first pool key.
+          </div>
+        )}
+
+        {/* connection status */}
+        {connected && (
+          <dl className="admin-dl">
+            <dt>Account</dt>
+            <dd className="font-mono text-[12px]">{status?.email ?? "—"}</dd>
+            <dt>Access token expires</dt>
+            <dd className="font-mono text-[12px] text-[var(--admin-text-muted)]">
+              {fmtExpiry(status?.expires_at)}
+            </dd>
+          </dl>
+        )}
+
+        {/* step 1: open login URL */}
+        {!connected && !statusQ.isLoading && (
+          <div className="space-y-2">
+            <p className="text-[12px] text-[var(--admin-text-muted)]">
+              Step 1 — open the Cline login page, sign in, then copy the code
+              Cline shows you back here.
+            </p>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                disabled={loginUrl.isPending}
+                onClick={() => loginUrl.mutate()}
+              >
+                <LogIn size={14} /> {loginUrl.isPending ? "Generating…" : "Get login URL"}
+              </Button>
+              {authUrl && (
+                <>
+                  <a href={authUrl} target="_blank" rel="noopener noreferrer">
+                    <Button variant="primary">
+                      <Link2 size={14} /> Open Cline login
+                    </Button>
+                  </a>
+                  <Button variant="ghost" onClick={() => void navigator.clipboard.writeText(authUrl)}>
+                    Copy URL
+                  </Button>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* step 2: paste code */}
+        {!connected && !statusQ.isLoading && (
+          <div className="space-y-2">
+            <p className="text-[12px] text-[var(--admin-text-muted)]">
+              Step 2 — paste the code Cline gave you after login.
+            </p>
+            <textarea
+              className="admin-input min-h-20 resize-none font-mono text-[12px]"
+              placeholder="eyJhY2Nlc3NUb2tlbiI6…"
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+            />
+            <div className="flex justify-end">
+              <Button
+                disabled={!code.trim() || connect.isPending || !hasKeys}
+                onClick={() => connect.mutate()}
+              >
+                {connect.isPending ? "Connecting…" : "Connect"}
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {/* step 3: refresh + disconnect (only when connected) */}
+        {connected && (
+          <div className="space-y-2 border-t border-[var(--admin-border)] pt-3">
+            <p className="text-[12px] text-[var(--admin-text-muted)]">
+              Refresh rotates the access token and the single-use refresh
+              token. Cline tokens auto-refresh in the final 5 minutes before
+              expiry; use this to force a rotation now.
+            </p>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                disabled={refresh.isPending}
+                onClick={() => refresh.mutate()}
+              >
+                <RefreshCw size={14} className={refresh.isPending ? "animate-spin" : ""} />
+                {refresh.isPending ? "Refreshing…" : "Refresh token now"}
+              </Button>
+              <Button variant="ghost" onClick={() => void statusQ.refetch()}>
+                <RefreshCw size={14} /> Recheck status
+              </Button>
+              <Button
+                variant="danger"
+                disabled={disconnect.isPending}
+                onClick={() => setConfirmDisconnect(true)}
+              >
+                <Unlink size={14} /> Disconnect
+              </Button>
+            </div>
+          </div>
+        )}
+
+        <Dialog
+          open={confirmDisconnect}
+          title={`Disconnect Cline OAuth for ${props.p.name}?`}
+          onClose={() => setConfirmDisconnect(false)}
+        >
+          <p className="text-[13px] text-[var(--admin-text-muted)]">
+            Clears the stored OAuth tokens. The pool key keeps its last access
+            token until you reconnect or replace it.
+          </p>
+          <div className="flex justify-end gap-2 pt-4">
+            <Button variant="ghost" onClick={() => setConfirmDisconnect(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              disabled={disconnect.isPending}
+              onClick={() => disconnect.mutate()}
+            >
+              {disconnect.isPending ? "Disconnecting…" : "Disconnect"}
+            </Button>
+          </div>
+        </Dialog>
+
+        <p className="text-[11px] leading-relaxed text-[var(--admin-text-dim)]">
+          Cline uses WorkOS-backed OAuth with no client_id or PKCE. The code
+          you paste embeds the access + refresh tokens as base64 JSON. On
+          connect, the access token replaces the secret of this provider's
+          first pool key; refresh tokens are stored server-side and rotate on
+          each refresh.
+        </p>
+      </div>
+    </Card>
+  );
+}
+
 // -- page -------------------------------------------------------------------------------
 
 export function ProviderDetailPage() {
@@ -652,6 +901,7 @@ export function ProviderDetailPage() {
       </Dialog>
       <div className="admin-stagger grid grid-cols-1 gap-4 xl:grid-cols-3">
         <AccountSettingsCard p={p} onError={setError} />
+        {p.provider_type === "cline" && <ClineOAuthCard p={p} onError={setError} />}
         <KeyPoolCard p={p} providerName={name} onError={setError} />
         <AddKeysCard provider={p.name} existing={p.keys.length} onError={setError} />
         <ModelPickerCard p={p} onError={setError} />

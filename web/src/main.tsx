@@ -49,6 +49,7 @@ import { DashboardPage } from "@/pages/Dashboard";
 import { ProvidersPage } from "@/pages/Providers";
 import { ProviderDetailPage } from "@/pages/ProviderDetail";
 import { BuiltinProvidersPage } from "@/pages/BuiltinProviders";
+import { OAuthProvidersPage } from "@/pages/OAuthProviders";
 import { VirtualKeysPage } from "@/pages/VirtualKeys";
 import { ModelsPage } from "@/pages/Models";
 import { RequestLogsPage } from "@/pages/RequestLogs";
@@ -166,6 +167,14 @@ function AppRoutes() {
           element={
             <RequireAdmin>
               <BuiltinProvidersPage />
+            </RequireAdmin>
+          }
+        />
+        <Route
+          path="/console/oauth"
+          element={
+            <RequireAdmin>
+              <OAuthProvidersPage />
             </RequireAdmin>
           }
         />

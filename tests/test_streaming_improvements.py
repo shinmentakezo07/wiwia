@@ -306,7 +306,57 @@ class TestBuildContinuationMessages:
         tape = StreamTape()
         original = [ir.Message(role="user", parts=[ir.TextPart("Hi")])]
         result = build_continuation_messages(tape, original)
-        assert result == original  # no continuation appended
+        assert result == original
+
+    def test_includes_partial_tool_calls(self):
+        """Partial tool calls must be preserved on resume so the model does
+        not re-emit them (duplicating tool calls the client already saw)."""
+        from wiwi.ir import types as ir
+        tape = StreamTape()
+        tape.append(dl.TextDelta("partial"))
+        tape.append(dl.ToolCallOpen(index=0, id="call_1", name="search"))
+        tape.append(dl.ToolCallArgsDelta(index=0, args_fragment='{"q":'))
+        tape.append(dl.ToolCallArgsDelta(index=0, args_fragment='"x"}'))
+        tape.append(dl.ToolCallClose(index=0))
+        original = [ir.Message(role="user", parts=[ir.TextPart("Q")])]
+        result = build_continuation_messages(tape, original)
+        assistant_msg = result[1]
+        tool_parts = [p for p in assistant_msg.parts if isinstance(p, ir.ToolUsePart)]
+        assert len(tool_parts) == 1
+        assert tool_parts[0].id == "call_1"
+        assert tool_parts[0].name == "search"
+        assert tool_parts[0].args == {"q": "x"}
+
+    def test_truncated_tool_args_repaired(self):
+        """Truncated tool-call args (stream died mid-args) are auto-repaired."""
+        from wiwi.ir import types as ir
+        tape = StreamTape()
+        tape.append(dl.ToolCallOpen(index=0, id="call_1", name="write"))
+        tape.append(dl.ToolCallArgsDelta(index=0, args_fragment='{"path": "/tmp/f'))
+        original = [ir.Message(role="user", parts=[ir.TextPart("Q")])]
+        result = build_continuation_messages(tape, original)
+        tool_parts = [p for p in result[1].parts if isinstance(p, ir.ToolUsePart)]
+        assert len(tool_parts) == 1
+        assert tool_parts[0].name == "write"
+        # Truncated JSON was auto-repaired (unterminated string closed)
+        assert tool_parts[0].args == {"path": "/tmp/f"}
+
+    def test_parallel_tool_calls_preserved(self):
+        """Parallel tool calls in the tape are all reconstructed in order."""
+        from wiwi.ir import types as ir
+        tape = StreamTape()
+        tape.append(dl.ToolCallOpen(index=0, id="c0", name="get"))
+        tape.append(dl.ToolCallOpen(index=1, id="c1", name="set"))
+        tape.append(dl.ToolCallArgsDelta(index=0, args_fragment='{"a":1}'))
+        tape.append(dl.ToolCallArgsDelta(index=1, args_fragment='{"b":2}'))
+        tape.append(dl.ToolCallClose(index=0))
+        tape.append(dl.ToolCallClose(index=1))
+        original = [ir.Message(role="user", parts=[ir.TextPart("Q")])]
+        result = build_continuation_messages(tape, original)
+        tool_parts = [p for p in result[1].parts if isinstance(p, ir.ToolUsePart)]
+        assert len(tool_parts) == 2
+        assert tool_parts[0].name == "get" and tool_parts[0].args == {"a": 1}
+        assert tool_parts[1].name == "set" and tool_parts[1].args == {"b": 2}
 
 
 # -- sse_frame with event_id ---------------------------------------------------
@@ -424,7 +474,7 @@ class TestSplitToolCallName:
             {"index": 0, "function": {"name": "_web"}}
         ]}}]})
         result = adapter.decode_stream_event("", d2)
-        # No ToolCallOpen emitted (index already open), name accumulated
+        # No ToolCallOpen emitted yet (deferred until name complete)
         assert not any(isinstance(d, dl.ToolCallOpen) for d in result)
         assert adapter._tool_names[0] == "search_web"
 
@@ -439,6 +489,91 @@ class TestSplitToolCallName:
         d2 = json.dumps({"choices": [{"finish_reason": "tool_calls"}]})
         adapter.decode_stream_event("", d2)
         assert len(adapter._tool_names) == 0
+
+    def test_fragmented_name_client_sees_full_name(self):
+        """The full accumulated name must reach the client, not just the
+        first fragment.  Regression: some OpenAI-compatible providers
+        (vLLM, etc.) fragment the function name across deltas."""
+        from wiwi.providers.openai_adapter import OpenAIAdapter
+        adapter = OpenAIAdapter()
+        events = [
+            json.dumps({"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "call_1", "function": {"name": "get"}}]}}]}),
+            json.dumps({"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "function": {"name": "_weather"}}]}}]}),
+            json.dumps({"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "function": {"arguments": "{}"}}]}}]}),
+            json.dumps({"choices": [{"finish_reason": "tool_calls"}]}),
+        ]
+        deltas = []
+        for data in events:
+            deltas.extend(adapter.decode_stream_event("", data))
+        opens = [d for d in deltas if isinstance(d, dl.ToolCallOpen)]
+        assert len(opens) == 1
+        assert opens[0].name == "get_weather"
+
+    def test_fragmented_name_no_args_flushed_on_finish(self):
+        """A fragmented name with no arguments is still flushed before
+        the ToolCallClose at finish_reason time."""
+        from wiwi.providers.openai_adapter import OpenAIAdapter
+        adapter = OpenAIAdapter()
+        events = [
+            json.dumps({"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "call_1", "function": {"name": "get"}}]}}]}),
+            json.dumps({"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "function": {"name": "_data"}}]}}]}),
+            json.dumps({"choices": [{"finish_reason": "tool_calls"}]}),
+        ]
+        deltas = []
+        for data in events:
+            deltas.extend(adapter.decode_stream_event("", data))
+        opens = [d for d in deltas if isinstance(d, dl.ToolCallOpen)]
+        closes = [d for d in deltas if isinstance(d, dl.ToolCallClose)]
+        assert len(opens) == 1
+        assert opens[0].name == "get_data"
+        assert len(closes) == 1
+
+    def test_fragmented_name_parallel(self):
+        """Parallel fragmented tool calls: each accumulates independently."""
+        from wiwi.providers.openai_adapter import OpenAIAdapter
+        adapter = OpenAIAdapter()
+        events = [
+            json.dumps({"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "c0", "function": {"name": "get"}},
+                {"index": 1, "id": "c1", "function": {"name": "set"}}]}}]}),
+            json.dumps({"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "function": {"name": "_a"}},
+                {"index": 1, "function": {"name": "_b"}}]}}]}),
+            json.dumps({"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "function": {"arguments": "{}"}},
+                {"index": 1, "function": {"arguments": "{}"}}]}}]}),
+            json.dumps({"choices": [{"finish_reason": "tool_calls"}]}),
+        ]
+        deltas = []
+        for data in events:
+            deltas.extend(adapter.decode_stream_event("", data))
+        opens = {d.index: d.name for d in deltas if isinstance(d, dl.ToolCallOpen)}
+        assert opens == {0: "get_a", 1: "set_b"}
+
+    def test_openrouter_fragmented_name(self):
+        """OpenRouter adapter also defers ToolCallOpen for fragmented names."""
+        from wiwi.providers.openrouter_adapter import OpenRouterAdapter
+        adapter = OpenRouterAdapter()
+        events = [
+            json.dumps({"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "call_1", "function": {"name": "get"}}]}}]}),
+            json.dumps({"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "function": {"name": "_weather"}}]}}]}),
+            json.dumps({"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "function": {"arguments": "{}"}}]}}]}),
+            json.dumps({"choices": [{"finish_reason": "tool_calls"}]}),
+        ]
+        deltas = []
+        for data in events:
+            deltas.extend(adapter.decode_stream_event("", data))
+        opens = [d for d in deltas if isinstance(d, dl.ToolCallOpen)]
+        assert len(opens) == 1
+        assert opens[0].name == "get_weather"
 
 
 # -- token estimation ----------------------------------------------------------

@@ -60,6 +60,11 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
 import type {
   AlertRule,
   BuiltinProvider,
+  ClineConnectResponse,
+  ClineDisconnectResponse,
+  ClineLoginUrlResponse,
+  ClineRefreshResponse,
+  ClineStatusResponse,
   DeploymentInfo,
   ModelPrice,
   ModelsResponse,
@@ -300,3 +305,34 @@ export const getPublicModels = () =>
   api<{ groups: PublicModelGroup[]; aliases: Record<string, string> }>(
     "/public/models",
   );
+
+// -- Cline OAuth (paste-code flow) -------------------------------------------
+
+export const clineLoginUrl = (callbackUrl: string) =>
+  api<ClineLoginUrlResponse>("/admin/cline/oauth/login-url", {
+    method: "POST",
+    body: JSON.stringify({ callback_url: callbackUrl }),
+  });
+
+export const clineConnect = (provider: string, code: string) =>
+  api<ClineConnectResponse>("/admin/cline/oauth/connect", {
+    method: "POST",
+    body: JSON.stringify({ provider, code }),
+  });
+
+export const clineStatus = (provider: string) =>
+  api<ClineStatusResponse>(
+    `/admin/cline/oauth/status?provider=${encodeURIComponent(provider)}`,
+  );
+
+export const clineRefresh = (provider: string) =>
+  api<ClineRefreshResponse>("/admin/cline/oauth/refresh", {
+    method: "POST",
+    body: JSON.stringify({ provider }),
+  });
+
+export const clineDisconnect = (provider: string) =>
+  api<ClineDisconnectResponse>("/admin/cline/oauth/disconnect", {
+    method: "DELETE",
+    body: JSON.stringify({ provider }),
+  });

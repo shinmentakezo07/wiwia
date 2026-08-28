@@ -82,6 +82,55 @@ class StreamTape:
             if isinstance(e.delta, dl.ThinkingDelta) and e.delta.text
         )
 
+    def replay_tool_calls(self) -> list:
+        """Reconstruct partial ToolUseParts from taped tool-call deltas.
+
+        Folds ToolCallOpen/ArgsDelta/Close into ToolUsePart objects with
+        accumulated (and auto-repaired) args, preserving order.  Used by
+        build_continuation_messages so a resumed stream does not re-emit
+        tool calls the client already received.
+        """
+        import json
+
+        from wiwi.ir import types as ir
+        from wiwi.streaming.partial_json import _repair_truncated_json
+        out: list[ir.ToolUsePart] = []
+        open_calls: dict[int, ir.ToolUsePart] = {}
+        arg_bufs: dict[int, str] = {}
+        for e in self._entries:
+            d = e.delta
+            if isinstance(d, dl.ToolCallOpen):
+                open_calls[d.index] = ir.ToolUsePart(id=d.id, name=d.name, args={})
+                arg_bufs[d.index] = ""
+            elif isinstance(d, dl.ToolCallArgsDelta):
+                if d.index in arg_bufs:
+                    arg_bufs[d.index] += d.args_fragment
+            elif isinstance(d, dl.ToolCallClose):
+                tc = open_calls.pop(d.index, None)
+                raw = arg_bufs.pop(d.index, "")
+                if tc is not None:
+                    if raw:
+                        try:
+                            tc.args = json.loads(_repair_truncated_json(raw))
+                        except (json.JSONDecodeError, ValueError):
+                            tc.raw_args = raw
+                    else:
+                        tc.raw_args = raw
+                    out.append(tc)
+        # Flush any still-open tool calls (stream died mid-tool-call).
+        for idx in sorted(open_calls):
+            tc = open_calls[idx]
+            raw = arg_bufs.get(idx, "")
+            if raw:
+                try:
+                    tc.args = json.loads(_repair_truncated_json(raw))
+                except (json.JSONDecodeError, ValueError):
+                    tc.raw_args = raw
+            else:
+                tc.raw_args = raw
+            out.append(tc)
+        return out
+
     def _evict(self) -> None:
         while self._bytes > self._max_bytes and self._entries:
             evicted = self._entries.popleft()
@@ -126,8 +175,11 @@ def build_continuation_messages(
 ) -> list:
     """Build messages for a continuation request after mid-stream failure.
 
-    Appends the partial assistant response as an assistant message, so the
-    upstream continues from where the previous attempt left off.
+    Appends the partial assistant response (text, thinking, and any partial
+    tool calls) as an assistant message, so the upstream continues from
+    where the previous attempt left off.  Without the partial tool calls,
+    the model would re-emit them on resume, duplicating tool calls the
+    client already received.
 
     *original_messages* is a list of ``ir.Message``; the returned list is a
     new list with the assistant continuation appended.
@@ -136,12 +188,15 @@ def build_continuation_messages(
 
     text = tape.replay_text()
     thinking = tape.replay_thinking()
+    # Reconstruct partial tool calls from the tape deltas.
+    tool_calls = tape.replay_tool_calls()
     msgs = list(original_messages)
     parts: list[ir.Part] = []
     if thinking:
         parts.append(ir.ThinkingPart(thinking))
     if text:
         parts.append(ir.TextPart(text))
+    parts.extend(tool_calls)
     if parts:
         msgs.append(ir.Message(role="assistant", parts=parts))
         # Add a minimal user message asking the model to continue.

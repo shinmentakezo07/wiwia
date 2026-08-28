@@ -186,9 +186,13 @@ class OpenRouterAdapter(OpenAIAdapter):
             if choices and choices[0].get("finish_reason") == "error":
                 # Close any open tool calls before the error
                 for open_idx in sorted(self._open_tool_indices):
+                    if open_idx in self._pending_opens:
+                        cid, cname = self._pending_opens.pop(open_idx)
+                        out.append(dl.ToolCallOpen(index=open_idx, id=cid, name=cname))
                     out.append(dl.ToolCallClose(index=open_idx))
                 self._open_tool_indices.clear()
                 self._tool_names.clear()
+                self._pending_opens.clear()
             return out
 
         out: list[dl.IRStreamDelta] = []
@@ -244,19 +248,32 @@ class OpenRouterAdapter(OpenAIAdapter):
                     out.append(dl.ToolCallClose(index=idx))
                 self._open_tool_indices.add(idx)
                 self._tool_names[idx] = name_fragment or ""
-                out.append(dl.ToolCallOpen(index=idx, id=tc["id"],
-                                           name=self._tool_names[idx]))
+                # Defer emitting ToolCallOpen until the name is complete — the
+                # first args fragment or finish signals name completion.
+                self._pending_opens[idx] = (tc["id"], self._tool_names[idx])
             elif name_fragment and idx in self._open_tool_indices:
                 self._tool_names[idx] = self._tool_names.get(idx, "") + name_fragment
+                if idx in self._pending_opens:
+                    cid, _ = self._pending_opens[idx]
+                    self._pending_opens[idx] = (cid, self._tool_names[idx])
             if fn.get("arguments"):
+                # Arguments arriving means the name is complete — flush the
+                # deferred ToolCallOpen (if any) before the args delta.
+                if idx in self._pending_opens:
+                    cid, cname = self._pending_opens.pop(idx)
+                    out.append(dl.ToolCallOpen(index=idx, id=cid, name=cname))
                 out.append(dl.ToolCallArgsDelta(index=idx, args_fragment=fn["arguments"]))
 
         fr = c.get("finish_reason")
         if fr:
             for open_idx in sorted(self._open_tool_indices):
+                if open_idx in self._pending_opens:
+                    cid, cname = self._pending_opens.pop(open_idx)
+                    out.append(dl.ToolCallOpen(index=open_idx, id=cid, name=cname))
                 out.append(dl.ToolCallClose(index=open_idx))
             self._open_tool_indices.clear()
             self._tool_names.clear()
+            self._pending_opens.clear()
             out.append(dl.Finish({"stop": "stop", "length": "length",
                                   "tool_calls": "tool_call",
                                   "content_filter": "content_filter",

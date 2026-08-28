@@ -14,6 +14,7 @@ import {
   DollarSign,
   Globe,
   Layers,
+  Link2,
   Pencil,
   Plus,
   RefreshCw,
@@ -58,6 +59,7 @@ const PROVIDER_ICON: Record<string, LucideIcon> = {
   "nvidia-nim": Cpu,
   "openai-compatible": Server,
   gmicloud: Cloud,
+  cline: Link2,
 };
 
 const PROVIDER_TYPE_OPTIONS = [
@@ -67,6 +69,7 @@ const PROVIDER_TYPE_OPTIONS = [
   { value: "nvidia-nim", label: "NVIDIA NIM" },
   { value: "openrouter", label: "OpenRouter" },
   { value: "gmicloud", label: "GMI Cloud" },
+  { value: "cline", label: "Cline" },
   { value: "openai-compatible", label: "OpenAI-compatible URL" },
 ];
 

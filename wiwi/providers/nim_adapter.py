@@ -273,11 +273,20 @@ class NimAdapter(OpenAIAdapter):
                     out.append(dl.ToolCallClose(index=idx))
                 self._open_tool_indices.add(idx)
                 self._tool_names[idx] = name_fragment or ""
-                out.append(dl.ToolCallOpen(index=idx, id=tc["id"],
-                                           name=self._tool_names[idx]))
+                # Defer emitting ToolCallOpen until the name is complete — the
+                # first args fragment or finish signals name completion.
+                self._pending_opens[idx] = (tc["id"], self._tool_names[idx])
             elif name_fragment and idx in self._open_tool_indices:
                 self._tool_names[idx] = self._tool_names.get(idx, "") + name_fragment
+                if idx in self._pending_opens:
+                    cid, _ = self._pending_opens[idx]
+                    self._pending_opens[idx] = (cid, self._tool_names[idx])
             if fn.get("arguments"):
+                # Arguments arriving means the name is complete — flush the
+                # deferred ToolCallOpen (if any) before the args delta.
+                if idx in self._pending_opens:
+                    cid, cname = self._pending_opens.pop(idx)
+                    out.append(dl.ToolCallOpen(index=idx, id=cid, name=cname))
                 if self._tool_aliases.get(self._tool_names.get(idx, "")):
                     # Aliased tool: buffer fragments so the completed JSON
                     # can be un-aliased before the client sees it.
@@ -294,10 +303,14 @@ class NimAdapter(OpenAIAdapter):
             out.extend(flushed)
             # Close ALL still-open tool calls (parallel tools).
             for open_idx in sorted(self._open_tool_indices):
+                if open_idx in self._pending_opens:
+                    cid, cname = self._pending_opens.pop(open_idx)
+                    out.append(dl.ToolCallOpen(index=open_idx, id=cid, name=cname))
                 self._flush_buffered_args(open_idx, out)
                 out.append(dl.ToolCallClose(index=open_idx))
             self._open_tool_indices.clear()
             self._tool_names.clear()
+            self._pending_opens.clear()
             self._buffered_args.clear()
             out.append(dl.Finish({"stop": "stop", "length": "length",
                                  "tool_calls": "tool_call",

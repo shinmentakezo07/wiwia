@@ -241,6 +241,15 @@ class ConfigStore:
                                {"p": provider_name, "l": label, "s": secret,
                                 "w": weight, "e": int(enabled)})
 
+    async def update_key_secret(self, provider_name: str, label: str,
+                                secret: str) -> None:
+        """Replace a stored key's secret (used by Cline OAuth token rotation)."""
+        async with self.engine.begin() as conn:
+            await conn.execute(
+                sa.text("UPDATE provider_keys SET secret = :s"
+                        " WHERE provider_name = :p AND label = :l"),
+                {"p": provider_name, "l": label, "s": secret})
+
     async def update_key(self, provider_name: str, label: str, *,
                          weight: int | None = None,
                          enabled: bool | None = None) -> None:
@@ -383,6 +392,11 @@ class ConfigStore:
         if row is None:
             return default
         return orjson.loads(row[0])
+
+    async def delete_setting(self, key: str) -> None:
+        async with self.engine.begin() as conn:
+            await conn.execute(sa.text("DELETE FROM settings WHERE key = :k"),
+                               {"k": key})
 
     # -- bulk load at startup ---------------------------------------------------
 

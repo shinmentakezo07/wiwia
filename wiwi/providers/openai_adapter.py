@@ -254,6 +254,12 @@ class OpenAIAdapter:
     def __init__(self) -> None:
         self._open_tool_indices: set[int] = set()
         self._tool_names: dict[int, str] = {}  # accumulated name fragments per index
+        # Deferred ToolCallOpen per index: some OpenAI-compatible providers
+        # (vLLM, etc.) fragment the function name across multiple deltas. We
+        # buffer the open until the name is complete (first args fragment or
+        # finish), then emit it with the full name so the client and every
+        # wire encoder see the complete tool name instead of a partial one.
+        self._pending_opens: dict[int, tuple[str, str]] = {}  # idx -> (id, name)
 
     def decode_stream_event(self, event: str, data: str) -> list[dl.IRStreamDelta]:
         if data == "[DONE]":
@@ -298,20 +304,35 @@ class OpenAIAdapter:
                 # Accumulate name: some providers send the full name on the
                 # first chunk, others fragment it across subsequent deltas.
                 self._tool_names[idx] = name_fragment or ""
-                out.append(dl.ToolCallOpen(index=idx, id=tc["id"],
-                                           name=self._tool_names[idx]))
+                # Defer emitting ToolCallOpen until the name is complete — the
+                # first args fragment or finish signals name completion.
+                self._pending_opens[idx] = (tc["id"], self._tool_names[idx])
             elif name_fragment and idx in self._open_tool_indices:
                 # Name fragment on a subsequent delta (no id): accumulate.
                 self._tool_names[idx] = self._tool_names.get(idx, "") + name_fragment
+                if idx in self._pending_opens:
+                    # Update the deferred open with the accumulated name.
+                    cid, _ = self._pending_opens[idx]
+                    self._pending_opens[idx] = (cid, self._tool_names[idx])
             if fn.get("arguments"):
+                # Arguments arriving means the name is complete — flush the
+                # deferred ToolCallOpen (if any) before the args delta.
+                if idx in self._pending_opens:
+                    cid, cname = self._pending_opens.pop(idx)
+                    out.append(dl.ToolCallOpen(index=idx, id=cid, name=cname))
                 out.append(dl.ToolCallArgsDelta(index=idx, args_fragment=fn["arguments"]))
         fr = c.get("finish_reason")
         if fr:
             # close ALL still-open tool calls before finishing (parallel tools)
             for open_idx in sorted(self._open_tool_indices):
+                # Flush any deferred open (tool call with a name but no args).
+                if open_idx in self._pending_opens:
+                    cid, cname = self._pending_opens.pop(open_idx)
+                    out.append(dl.ToolCallOpen(index=open_idx, id=cid, name=cname))
                 out.append(dl.ToolCallClose(index=open_idx))
             self._open_tool_indices.clear()
             self._tool_names.clear()
+            self._pending_opens.clear()
             out.append(dl.Finish({"stop": "stop", "length": "length",
                                   "tool_calls": "tool_call",
                                   "content_filter": "content_filter"}.get(fr, "stop")))

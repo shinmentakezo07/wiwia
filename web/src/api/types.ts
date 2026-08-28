@@ -208,3 +208,33 @@ export interface BuiltinProvider {
   /** true if at least one configured account uses this provider type */
   configured: boolean;
 }
+
+// -- Cline OAuth -------------------------------------------------------------
+
+export interface ClineLoginUrlResponse {
+  auth_url: string;
+}
+
+export interface ClineConnectResponse {
+  provider: string;
+  email: string | null;
+  access_token_masked: string;
+}
+
+export interface ClineStatusResponse {
+  connected: boolean;
+  email?: string | null;
+  expires_at?: string | null;
+  needs_refresh?: boolean;
+}
+
+export interface ClineRefreshResponse {
+  provider: string;
+  access_token_masked: string;
+  expires_at: string | null;
+}
+
+export interface ClineDisconnectResponse {
+  provider: string;
+  disconnected: boolean;
+}

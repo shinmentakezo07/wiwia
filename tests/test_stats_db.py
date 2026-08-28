@@ -293,3 +293,97 @@ async def test_timeseries_endpoint_all_time(app_client):
     body = r.json()
     assert body["bucket_seconds"] == 86400  # 1-day buckets for all-time
     assert body["metric"] == "tokens"
+
+
+# -- TTL query cache -----------------------------------------------------------
+
+
+async def test_cache_serves_repeated_requests_without_db_hit(db):
+    """A second identical query within the TTL returns the cached result."""
+    now = time.time()
+    await _seed(db, [_evt(now - 5, status=200, tok_in=100, tok_out=50)])
+    first = await db.read_requests(200)
+    assert len(first) == 1
+    # Mutate the DB directly (bypass the cache layer) to prove the second
+    # read is served from cache, not the DB.
+    async with db.engine.connect() as conn:
+        await conn.execute(sa.text("DELETE FROM request_logs"))
+        await conn.commit()
+    second = await db.read_requests(200)
+    assert second is first  # same object — cache hit
+
+
+async def test_cache_does_not_cache_empty_results(db):
+    """Empty results must not be cached, or new writes stay invisible until TTL."""
+    # First read returns [] (no data yet).
+    assert await db.read_requests(200) == []
+    # Write a row directly.
+    now = time.time()
+    await _seed(db, [_evt(now - 5, status=200, tok_in=10)])
+    # Second read must see the new row — not a cached [].
+    logs = await db.read_requests(200)
+    assert len(logs) == 1
+
+
+async def test_cache_invalidated_by_invalidate_cache(db):
+    """invalidate_cache() forces the next read to hit the DB."""
+    now = time.time()
+    await _seed(db, [_evt(now - 5, status=200, tok_in=100, tok_out=50)])
+    first = await db.read_requests(200)
+    assert len(first) == 1
+    # Write more data behind the cache's back.
+    await _seed(db, [_evt(now - 2, status=200, tok_in=20, tok_out=10)])
+    # Cached: still the single-row result.
+    assert len(await db.read_requests(200)) == 1
+    db.invalidate_cache()
+    # Fresh from DB: now two rows.
+    assert len(await db.read_requests(200)) == 2
+
+
+async def test_cache_overview_nonzero_cached(db):
+    """Overview with data is cached; overview with no data is not."""
+    now = time.time()
+    await _seed(db, [_evt(now - 5, status=200, tok_in=100, cost=0.01)])
+    first = await db.read_overview(0)
+    assert first["requests"] == 1
+    # Delete all rows behind the cache.
+    async with db.engine.connect() as conn:
+        await conn.execute(sa.text("DELETE FROM request_logs"))
+        await conn.commit()
+    # Cache hit — still shows 1 request.
+    second = await db.read_overview(0)
+    assert second is first
+
+
+async def test_cache_timeseries_nonzero_cached(db):
+    """Timeseries with data is cached; with no data is not."""
+    now = time.time()
+    await _seed(db, [_evt(now - 5, status=200, tok_in=100, tok_out=50)])
+    first = await db.read_timeseries(3600, "tokens", 0)
+    assert len(first["buckets"]) >= 1
+    async with db.engine.connect() as conn:
+        await conn.execute(sa.text("DELETE FROM request_logs"))
+        await conn.commit()
+    # Cache hit.
+    second = await db.read_timeseries(3600, "tokens", 0)
+    assert second is first
+
+
+async def test_cache_distinct_key_ids_cache_separately(db):
+    """Admin (None) and per-user key_ids are distinct cache entries."""
+    now = time.time()
+    await _seed(db, [
+        _evt(now - 5, status=200, key_id="k1", tok_in=100, tok_out=50),
+        _evt(now - 4, status=200, key_id="k2", tok_in=200, tok_out=10),
+    ])
+    admin = await db.read_requests(200)
+    k1 = await db.read_requests(200, key_ids=["k1"])
+    assert {r["key_id"] for r in admin} == {"k1", "k2"}
+    assert {r["key_id"] for r in k1} == {"k1"}
+    # Mutate: delete k1's row.
+    async with db.engine.connect() as conn:
+        await conn.execute(sa.text("DELETE FROM request_logs WHERE key_id='k1'"))
+        await conn.commit()
+    # admin result still cached (2 rows); k1 result still cached (1 row).
+    assert len(await db.read_requests(200)) == 2
+    assert len(await db.read_requests(200, key_ids=["k1"])) == 1

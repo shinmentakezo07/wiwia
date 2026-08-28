@@ -119,6 +119,7 @@ from wiwi.cost.pricing import CostEngine
 from wiwi.ir import types as ir
 from wiwi.logging_core.events import LogEvent
 from wiwi.logging_core.subsystem import LoggingSubsystem, encode_sse, public_dict
+from wiwi.providers import cline_oauth
 from wiwi.providers.base import ProviderKeyRef, WiwiError
 from wiwi.providers.registry import get_adapter
 from wiwi.ratelimit.memory import RateLimiter
@@ -174,6 +175,7 @@ class AppState:
         self.alert_rules: list[dict[str, Any]] = []
         self.config_store: ConfigStore | None = None
         self.users: UserService | None = None
+        self.cline_refresh: Any = None
         # Set during shutdown so long-lived SSE generators break out of their
         # event loop instead of blocking uvicorn's graceful-shutdown drain
         # (which otherwise hangs at "Waiting for connections to close").
@@ -340,7 +342,13 @@ async def lifespan(app: FastAPI):
     state: AppState = app.state.wiwi
     await state.init_db()
     await state.logs.start()
+    # Background auto-refresh for Cline OAuth tokens (proactively rotates
+    # expiring access tokens so requests don't fail mid-flight).
+    from wiwi.providers.cline_auto_refresh import ClineAutoRefresh
+    state.cline_refresh = ClineAutoRefresh(state)
+    state.cline_refresh.start()
     yield
+    await state.cline_refresh.stop()
     await state.shutdown()
 
 
@@ -1161,6 +1169,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         del state.router.providers[name]
         if state.config_store:
             await state.config_store.delete_provider(name)
+            await state.config_store.delete_setting(_cline_oauth_setting_key(name))
         await state.logs.log_audit(actor="master", action="provider.delete", target=name)
         return ORJSONResponse({"deleted": True, "name": name})
 
@@ -1782,6 +1791,176 @@ def create_app(config: WiwiConfig) -> FastAPI:
     # Powers the public Models catalog page. Strips all health/inflight/
     # cooldown/weight fields — only the model group's name and each
     # deployment's provider + model_id are exposed. Never errors on auth.
+    # -- Cline OAuth (paste-code flow; tokens live in the provider key pool) -----
+
+    def _cline_oauth_setting_key(provider: str) -> str:
+        return f"cline_oauth:{provider}"
+
+    async def _update_provider_secret(provider: str, secret: str) -> bool:
+        """Replace the secret of the provider's first key, in memory and DB.
+
+        Returns False when the provider has no keys (caller should reject the
+        connect/refresh rather than store tokens with no key to land them on).
+        """
+        acct = state.router.providers.get(provider)
+        if acct is None or not acct.keys:
+            return False
+        key0 = acct.keys[0]
+        key0.secret = secret
+        # Reset runtime cooldown state — the credential just changed.
+        key0.status = "active"
+        key0.cooldown_until = 0.0
+        if state.config_store:
+            await state.config_store.update_key_secret(provider, key0.label, secret)
+        return True
+
+    @app.post("/admin/cline/oauth/login-url")
+    async def cline_oauth_login_url(request: Request):
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        callback = str(body.get("callback_url") or "").strip()
+        if not callback:
+            return _err(400, "invalid_request_error",
+                        "callback_url is required", request)
+        return ORJSONResponse({"auth_url": cline_oauth.build_auth_url(callback)})
+
+    @app.post("/admin/cline/oauth/connect")
+    async def cline_oauth_connect(request: Request):
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        provider = str(body.get("provider") or "").strip()
+        code = str(body.get("code") or "").strip()
+        if not provider or not code:
+            return _err(400, "invalid_request_error",
+                        "provider and code are required", request)
+        if provider not in state.router.providers:
+            return _err(404, "not_found_error",
+                        f"unknown provider '{provider}'", request)
+        try:
+            tokens = cline_oauth.exchange_code(code)
+        except ValueError as e:
+            return _err(400, "invalid_request_error",
+                        f"invalid Cline code: {e}", request)
+        if not await _update_provider_secret(provider, tokens["access_token"]):
+            return _err(400, "invalid_request_error",
+                        f"provider '{provider}' has no keys — add a pool key "
+                        f"first, then connect", request)
+        record = {
+            "refresh_token": tokens["refresh_token"],
+            "expires_at": tokens.get("expires_at"),
+            "email": tokens.get("email"),
+        }
+        if state.config_store:
+            await state.config_store.set_setting(
+                _cline_oauth_setting_key(provider), record)
+        await state.logs.log_audit(
+            actor="master", action="cline_oauth.connect", target=provider,
+            diff={"email": tokens.get("email")})
+        return ORJSONResponse({
+            "provider": provider,
+            "email": tokens.get("email"),
+            "access_token_masked": _mask_secret(tokens["access_token"]),
+        })
+
+    @app.get("/admin/cline/oauth/status")
+    async def cline_oauth_status(request: Request):
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        provider = request.query_params.get("provider", "").strip()
+        if not provider or provider not in state.router.providers:
+            return _err(404, "not_found_error",
+                        f"unknown provider '{provider}'", request)
+        record = None
+        if state.config_store:
+            record = await state.config_store.get_setting(
+                _cline_oauth_setting_key(provider))
+        if not record:
+            return ORJSONResponse({"connected": False})
+        expires_epoch = cline_oauth.parse_expires_at(record.get("expires_at"))
+        return ORJSONResponse({
+            "connected": True,
+            "email": record.get("email"),
+            "expires_at": record.get("expires_at"),
+            "needs_refresh": bool(
+                expires_epoch is not None
+                and cline_oauth.expires_within_lead(expires_epoch)),
+        })
+
+    @app.post("/admin/cline/oauth/refresh")
+    async def cline_oauth_refresh(request: Request):
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        provider = str(body.get("provider") or "").strip()
+        if provider not in state.router.providers:
+            return _err(404, "not_found_error",
+                        f"unknown provider '{provider}'", request)
+        record = None
+        if state.config_store:
+            record = await state.config_store.get_setting(
+                _cline_oauth_setting_key(provider))
+        if not record or not record.get("refresh_token"):
+            return _err(400, "invalid_request_error",
+                        f"provider '{provider}' has no stored Cline tokens; "
+                        "connect first", request)
+        result = await cline_oauth.refresh_token(record["refresh_token"])
+        if result is None:
+            return _err(502, "upstream_error",
+                        "Cline token refresh failed (transient); retry later",
+                        request)
+        if result.get("error") == "unrecoverable_refresh_error":
+            return _err(401, "authentication_error",
+                        f"Cline refresh token rejected — re-login required "
+                        f"(code: {result.get('code')})", request)
+        if not await _update_provider_secret(provider, result["access_token"]):
+            return _err(400, "invalid_request_error",
+                        f"provider '{provider}' has no keys — cannot write "
+                        f"refreshed token", request)
+        record["refresh_token"] = result["refresh_token"]
+        if result.get("expires_at"):
+            record["expires_at"] = result["expires_at"]
+        if state.config_store:
+            await state.config_store.set_setting(
+                _cline_oauth_setting_key(provider), record)
+        await state.logs.log_audit(
+            actor="master", action="cline_oauth.refresh", target=provider)
+        return ORJSONResponse({
+            "provider": provider,
+            "access_token_masked": _mask_secret(result["access_token"]),
+            "expires_at": result.get("expires_at"),
+        })
+
+    @app.delete("/admin/cline/oauth/disconnect")
+    async def cline_oauth_disconnect(request: Request):
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        provider = str(body.get("provider") or "").strip()
+        if provider not in state.router.providers:
+            return _err(404, "not_found_error",
+                        f"unknown provider '{provider}'", request)
+        if state.config_store:
+            await state.config_store.delete_setting(
+                _cline_oauth_setting_key(provider))
+        await state.logs.log_audit(
+            actor="master", action="cline_oauth.disconnect", target=provider)
+        return ORJSONResponse({"provider": provider, "disconnected": True})
+
     @app.get("/public/models")
     async def public_models() -> ORJSONResponse:
         groups = []
