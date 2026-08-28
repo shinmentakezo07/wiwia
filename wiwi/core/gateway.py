@@ -44,7 +44,6 @@ class Gateway:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    # -- non-streaming ---------------------------------------------------------
     async def complete(self, ctx: RequestContext) -> ir.AssistantTurn:
         async def call_one(dep: Deployment, key: ProviderKeyRef, c: RequestContext):
             return await self._call(dep, key, c)
@@ -64,6 +63,11 @@ class Gateway:
     async def _call_once(self, dep: Deployment, key: ProviderKeyRef,
                          ctx: RequestContext) -> ir.AssistantTurn:
         adapter = get_adapter(dep.provider.provider_type)
+        # Streaming-only upstream (Cline): the upstream has no non-streaming
+        # mode, so use the streaming pump and reassemble the SSE deltas into
+        # an AssistantTurn for the non-streaming caller.
+        if getattr(adapter, "force_stream", False):
+            return await self._complete_via_stream(dep, key, ctx, adapter)
         ctx.deployment = dep
         ctx.provider_key = key
         params: dict[str, Any] = {"max_tokens": dep.max_tokens,
@@ -101,6 +105,146 @@ class Gateway:
                          "ok", latency)
         dep.latencies.append(latency)
         turn = adapter.decode_response(resp.status_code, resp.content)
+        self._price(ctx, dep, turn.usage)
+        return turn
+
+    async def _complete_via_stream(self, dep: Deployment, key: ProviderKeyRef,
+                                   ctx: RequestContext, adapter) -> ir.AssistantTurn:
+        """Reassemble a streaming-only upstream (force_stream=True) into a
+        non-streaming AssistantTurn.
+
+        Opens a streaming HTTP request, pumps SSE through the adapter's
+        ``decode_stream_event``, folds the deltas into an AssistantTurn, and
+        prices the result — the same outcome ``_call_once`` would produce
+        for a normal JSON upstream.  Mirrors ``_pump_once``'s connect/error
+        handling so retryable failures propagate to ``execute_with_retries``
+        the same way.
+        """
+        import json
+
+        from wiwi.ir import types as ir
+        from wiwi.streaming.partial_json import _repair_truncated_json
+
+        ctx.deployment = dep
+        ctx.provider_key = key
+        params: dict[str, Any] = {"max_tokens": dep.max_tokens,
+                                  "extra_body": dict(dep.extra_body),
+                                  "drop_params": self.drop_params,
+                                  "provider_type": dep.provider.provider_type}
+        url = _build_url(adapter, dep, key, True, self.kind)
+        body = adapter.encode_request(ctx.ir_req, dep.model_id, params)
+        if hasattr(adapter, "set_tool_context"):
+            adapter.set_tool_context(body)
+        headers = {**adapter.headers(key), **dep.provider.extra_headers,
+                   **dep.extra_headers}
+        t0 = time.monotonic()
+        try:
+            resp_cm = self._client.stream("POST", url, json=body, headers=headers,
+                                          timeout=dep.timeout or dep.provider.timeout_s)
+            resp = await resp_cm.__aenter__()
+        except httpx.TransportError as e:
+            ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
+                             type(e).__name__, int((time.monotonic() - t0) * 1000))
+            raise WiwiError(504 if "Timeout" in type(e).__name__ else 502,
+                            "timeout" if "Timeout" in type(e).__name__
+                            else "api_connection_error",
+                            f"upstream {type(e).__name__}", retryable=True) from e
+        if resp.status_code != 200:
+            raw = await resp.aread()
+            await resp_cm.__aexit__(None, None, None)
+            ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
+                             f"http_{resp.status_code}",
+                             int((time.monotonic() - t0) * 1000))
+            err = error_from_provider_status(resp.status_code,
+                                             raw.decode(errors="replace"),
+                                             dep.provider.name)
+            ra = _parse_retry_after(resp.headers.get("retry-after"))
+            if ra is not None:
+                err.retry_after = ra
+            raise err
+        # Connection OK — pump the SSE stream into an AssistantTurn.
+        try:
+            parser = LineSSEParser()
+            text = ""
+            thinking = ""
+            tool_calls: list[ir.ToolUsePart] = []
+            open_calls: dict[int, ir.ToolUsePart] = {}
+            arg_bufs: dict[int, str] = {}
+            usage = ir.Usage()
+            stop_reason: ir.StopReason = "stop"
+            line_iter = resp.aiter_lines().__aiter__()
+            while True:
+                try:
+                    line = await asyncio.wait_for(
+                        line_iter.__anext__(),
+                        timeout=self.router.settings.stream_idle_timeout_s)
+                except TimeoutError:
+                    raise WiwiError(504, "timeout",
+                                    f"upstream idle >{self.router.settings.stream_idle_timeout_s:.0f}s",
+                                    retryable=True)
+                except StopAsyncIteration:
+                    break
+                evt = parser.feed_line(line)
+                if evt is None:
+                    continue
+                for d in adapter.decode_stream_event(evt.event, evt.data):
+                    if isinstance(d, dl.TextDelta):
+                        text += d.text
+                    elif isinstance(d, dl.ThinkingDelta):
+                        thinking += d.text
+                    elif isinstance(d, dl.ToolCallOpen):
+                        open_calls[d.index] = ir.ToolUsePart(
+                            id=d.id, name=d.name, args={}, raw_args="")
+                        arg_bufs[d.index] = ""
+                    elif isinstance(d, dl.ToolCallArgsDelta):
+                        if d.index in arg_bufs:
+                            arg_bufs[d.index] += d.args_fragment
+                    elif isinstance(d, dl.ToolCallClose):
+                        tc = open_calls.pop(d.index, None)
+                        raw = arg_bufs.pop(d.index, "")
+                        if tc is not None:
+                            if raw:
+                                try:
+                                    tc.args = json.loads(_repair_truncated_json(raw))
+                                except (json.JSONDecodeError, ValueError):
+                                    tc.raw_args = raw
+                            else:
+                                tc.raw_args = raw
+                            tool_calls.append(tc)
+                    elif isinstance(d, dl.UsageFinal):
+                        usage = ir.Usage(
+                            prompt_tokens=d.prompt,
+                            completion_tokens=d.output,
+                            cached_tokens=d.cached,
+                            reasoning_tokens=d.reasoning,
+                        )
+                    elif isinstance(d, dl.Finish):
+                        stop_reason = d.stop_reason
+                    elif isinstance(d, dl.StreamError):
+                        raise WiwiError(502, "api_error", d.message,
+                                        retryable=d.kind != "status")
+            # Flush still-open tool calls (stream ended mid-tool-call).
+            for idx in sorted(open_calls):
+                tc = open_calls[idx]
+                raw = arg_bufs.get(idx, "")
+                if raw:
+                    try:
+                        tc.args = json.loads(_repair_truncated_json(raw))
+                    except (json.JSONDecodeError, ValueError):
+                        tc.raw_args = raw
+                else:
+                    tc.raw_args = raw
+                tool_calls.append(tc)
+        finally:
+            await resp_cm.__aexit__(None, None, None)
+        latency = int((time.monotonic() - t0) * 1000)
+        ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
+                         "ok", latency)
+        dep.latencies.append(latency)
+        turn = ir.AssistantTurn(text=text, tool_calls=tool_calls,
+                                stop_reason=stop_reason, usage=usage)
+        if thinking:
+            turn.thinking.append(ir.ThinkingPart(text=thinking))
         self._price(ctx, dep, turn.usage)
         return turn
 

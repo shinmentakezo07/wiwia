@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import hmac
 import os
+import secrets
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -15,7 +16,7 @@ from typing import Any
 import httpx
 import orjson
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
 from starlette.middleware import Middleware
@@ -175,6 +176,10 @@ class AppState:
         self.alert_rules: list[dict[str, Any]] = []
         self.config_store: ConfigStore | None = None
         self.users: UserService | None = None
+        # Pending Cline OAuth sessions for the automatic (redirect-based)
+        # connect flow: state_token → {provider, created_at}. Consumed once
+        # by the /cline/oauth/callback redirect, evicted after 10 minutes.
+        self.cline_pending: dict[str, dict[str, Any]] = {}
         self.cline_refresh: Any = None
         # Set during shutdown so long-lived SSE generators break out of their
         # event loop instead of blocking uvicorn's graceful-shutdown drain
@@ -1869,6 +1874,124 @@ def create_app(config: WiwiConfig) -> FastAPI:
             "email": tokens.get("email"),
             "access_token_masked": _mask_secret(tokens["access_token"]),
         })
+
+    @app.post("/admin/cline/oauth/auto-connect")
+    async def cline_oauth_auto_connect(request: Request):
+        """Initiate an automatic (redirect-based) Cline OAuth connect.
+
+        Unlike the paste-code flow, this returns a Cline auth URL whose
+        callback points back to wiwi's own ``/cline/oauth/callback``. After
+        the admin logs in at Cline, Cline redirects the browser to that
+        callback with ``?code=...``; wiwi decodes the embedded tokens,
+        persists them, and redirects the browser to the SPA. No manual
+        copy-paste required.
+        """
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        provider = str(body.get("provider") or "").strip()
+        return_path = str(body.get("return_path") or "/console/oauth").strip()
+        if not provider:
+            return _err(400, "invalid_request_error",
+                        "provider is required", request)
+        if provider not in state.router.providers:
+            return _err(404, "not_found_error",
+                        f"unknown provider '{provider}'", request)
+        # Guard against open redirect: only allow relative /console paths.
+        if not return_path.startswith("/console/") and return_path != "/console":
+            return_path = "/console/oauth"
+        # Evict expired pending sessions (TTL 10 min).
+        now = time.time()
+        for tok, sess in list(state.cline_pending.items()):
+            if now - sess["created_at"] > 600:
+                state.cline_pending.pop(tok, None)
+        state_token = secrets.token_urlsafe(24)
+        state.cline_pending[state_token] = {
+            "provider": provider,
+            "return_path": return_path,
+            "created_at": now,
+        }
+        # The callback_url Cline redirects to after login. It carries the
+        # state token so we can match the pending session on return.
+        cb = f"{_request_base(request)}/cline/oauth/callback?state={state_token}"
+        return ORJSONResponse({
+            "auth_url": cline_oauth.build_auth_url(cb),
+            "state": state_token,
+            "provider": provider,
+        })
+
+    @app.get("/cline/oauth/callback")
+    async def cline_oauth_callback(request: Request):
+        """Cline redirects the browser here with ?code=...&state=... after a
+        successful login. Decodes the embedded tokens (offline), persists them
+        to the provider, then redirects the browser to the SPA with a
+        success/error flag so the frontend can show a result banner.
+
+        This endpoint is NOT admin-gated — the admin auth happened at
+        auto-connect time when the pending session was created. The state
+        token is a single-use secret that authorizes this one callback.
+        """
+        code = request.query_params.get("code", "").strip()
+        state_token = request.query_params.get("state", "").strip()
+        if not code or not state_token:
+            return _cline_callback_error(request, "missing code or state")
+        sess = state.cline_pending.pop(state_token, None)
+        if sess is None:
+            return _cline_callback_error(request, "invalid or expired session")
+        provider = sess["provider"]
+        return_path = sess["return_path"]
+        if provider not in state.router.providers:
+            return _cline_callback_redirect(return_path, provider,
+                                             error="provider no longer exists")
+        try:
+            tokens = cline_oauth.exchange_code(code)
+        except ValueError as e:
+            return _cline_callback_redirect(return_path, provider,
+                                             error=f"invalid code: {e}")
+        if not await _update_provider_secret(provider, tokens["access_token"]):
+            return _cline_callback_redirect(return_path, provider,
+                                             error="provider has no pool keys")
+        record = {
+            "refresh_token": tokens["refresh_token"],
+            "expires_at": tokens.get("expires_at"),
+            "email": tokens.get("email"),
+        }
+        if state.config_store:
+            await state.config_store.set_setting(
+                _cline_oauth_setting_key(provider), record)
+        await state.logs.log_audit(
+            actor="master", action="cline_oauth.connect", target=provider,
+            diff={"email": tokens.get("email"), "flow": "auto"})
+        return _cline_callback_redirect(return_path, provider,
+                                         email=tokens.get("email"))
+
+    def _request_base(request: Request) -> str:
+        """Best-effort absolute base URL (scheme + host[:port]) for building
+        callback URLs. Honors X-Forwarded-Proto when behind a proxy."""
+        scheme = request.headers.get("x-forwarded-proto",
+                                     request.url.scheme or "https")
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host", "localhost")
+        return f"{scheme}://{host}"
+
+    def _cline_callback_redirect(return_path: str, provider: str,
+                                  email: str | None = None,
+                                  error: str | None = None) -> RedirectResponse:
+        from urllib.parse import urlencode
+        params: dict[str, str] = {"cline_provider": provider}
+        if email:
+            params["cline_connected"] = "1"
+            params["cline_email"] = email
+        if error:
+            params["cline_error"] = error
+        sep = "&" if "?" in return_path else "?"
+        return RedirectResponse(f"{return_path}{sep}{urlencode(params)}",
+                                status_code=302)
+
+    def _cline_callback_error(request: Request, message: str) -> ORJSONResponse:
+        return _err(400, "invalid_request_error", message, request)
 
     @app.get("/admin/cline/oauth/status")
     async def cline_oauth_status(request: Request):

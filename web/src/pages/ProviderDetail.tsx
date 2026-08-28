@@ -2,13 +2,14 @@
 // Three panes: key pool (enable/disable, weights), bulk multi-key add, and
 // model IDs fetched live from the upstream with select-and-attach to a group.
 
-import { useMemo, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Boxes, Cloud, Cpu, Eye, EyeOff, Globe, Link2, LogIn, Plus, RefreshCw, Search, Server, Sparkles, Trash2, Unlink, X, Zap } from "lucide-react";
+import { ArrowLeft, Boxes, CheckCircle2, ChevronDown, ChevronUp, Cloud, Cpu, Eye, EyeOff, Globe, Link2, Loader2, LogIn, Plus, RefreshCw, Search, Server, Sparkles, Trash2, Unlink, X, Zap } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
   addDeployment,
+  clineAutoConnect,
   clineConnect,
   clineDisconnect,
   clineLoginUrl,
@@ -568,14 +569,57 @@ function AccountSettingsCard(props: { p: Provider; onError: (m: string) => void 
   );
 }
 
-// -- Cline OAuth (paste-code flow) ---------------------------------------------
+// -- Cline OAuth (automatic redirect + paste-code fallback) -------------------
+
+type DetailCallbackResult =
+  | { ok: true; email: string }
+  | { ok: false; error: string };
+
+/** Read the ?cline_connected / ?cline_error params left by the redirect
+ * callback and clean the URL. One-shot (guarded by a ref). */
+function useClineCallbackBanner(): DetailCallbackResult | null {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [result, setResult] = useState<DetailCallbackResult | null>(null);
+  const seen = useRef(false);
+  useEffect(() => {
+    if (seen.current) return;
+    const connected = searchParams.get("cline_connected");
+    const error = searchParams.get("cline_error");
+    if (connected === "1") {
+      seen.current = true;
+      setResult({ ok: true, email: searchParams.get("cline_email") ?? "" });
+      _stripClineParams(searchParams, setSearchParams);
+    } else if (error) {
+      seen.current = true;
+      setResult({ ok: false, error });
+      _stripClineParams(searchParams, setSearchParams);
+    }
+  }, [searchParams, setSearchParams]);
+  return result;
+}
+
+function _stripClineParams(
+  searchParams: URLSearchParams,
+  setSearchParams: (
+    nextInit: string | URLSearchParams,
+    opts?: { replace?: boolean },
+  ) => void,
+): void {
+  const next = new URLSearchParams(searchParams);
+  next.delete("cline_connected");
+  next.delete("cline_email");
+  next.delete("cline_error");
+  next.delete("cline_provider");
+  setSearchParams(next.size === 0 ? "" : next, { replace: true });
+}
 
 function ClineOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
   const qc = useQueryClient();
   const [code, setCode] = useState("");
-  const [authUrl, setAuthUrl] = useState<string | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
+  const [showManual, setShowManual] = useState(false);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  const callbackResult = useClineCallbackBanner();
 
   // Poll status every 30s so the "needs refresh" badge stays current without
   // a manual page reload. Only poll once we've loaded the first response to
@@ -592,9 +636,24 @@ function ClineOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
   const hasKeys = props.p.keys.length > 0;
   const qKey = ["cline-oauth-status", props.p.name];
 
+  const returnPath = `/console/providers/${encodeURIComponent(props.p.name)}`;
+
+  // Automatic connect: POST auto-connect → open the returned Cline auth URL
+  // in a new tab. After login, Cline redirects to /cline/oauth/callback which
+  // persists tokens and redirects here with ?cline_connected=1.
+  const autoConnect = useMutation({
+    mutationFn: () => clineAutoConnect(props.p.name, returnPath),
+    onSuccess: (d) => {
+      setLocalError(null);
+      window.open(d.auth_url, "_blank", "noopener,noreferrer");
+    },
+    onError: (e) => setLocalError(e.message),
+  });
+
+  // Manual paste-code fallback (kept for localhost / no-public-URL setups).
   const loginUrl = useMutation({
-    mutationFn: () => clineLoginUrl(window.location.origin + `/console/providers/${encodeURIComponent(props.p.name)}`),
-    onSuccess: (d) => { setAuthUrl(d.auth_url); setLocalError(null); },
+    mutationFn: () => clineLoginUrl(`${window.location.origin}${returnPath}`),
+    onSuccess: (d) => window.open(d.auth_url, "_blank", "noopener,noreferrer"),
     onError: (e) => setLocalError(e.message),
   });
 
@@ -602,7 +661,7 @@ function ClineOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
     mutationFn: () => clineConnect(props.p.name, code.trim()),
     onSuccess: () => {
       setCode("");
-      setAuthUrl(null);
+      setShowManual(false);
       setLocalError(null);
       void qc.invalidateQueries({ queryKey: qKey });
       void qc.invalidateQueries({ queryKey: ["providers"] });
@@ -649,7 +708,7 @@ function ClineOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
     <Card className="xl:col-span-3">
       <CardHeader
         title="Cline OAuth"
-        subtitle="paste-code flow — tokens live in the first key of the pool"
+        subtitle="tokens live in the first key of the pool"
         right={
           statusQ.isLoading ? (
             <Badge tone="gray">…</Badge>
@@ -665,6 +724,29 @@ function ClineOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
       <div className="space-y-4 px-4 pb-4 pt-2">
         {statusQ.isLoading && (
           <div className="flex justify-center py-4"><Spinner /></div>
+        )}
+
+        {/* callback result banner — one-shot after redirect flow */}
+        {callbackResult && (
+          <div
+            className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-[12px] ${
+              callbackResult.ok
+                ? "border-emerald-500/20 bg-emerald-500/[0.04] text-emerald-300"
+                : "border-red-500/20 bg-red-500/[0.04] text-red-300"
+            }`}
+          >
+            {callbackResult.ok ? (
+              <>
+                <CheckCircle2 size={14} />
+                Connected{callbackResult.email ? ` as ${callbackResult.email}` : ""}.
+              </>
+            ) : (
+              <>
+                <Link2 size={14} />
+                {callbackResult.error}
+              </>
+            )}
+          </div>
         )}
 
         {localError && <ErrorText>{localError}</ErrorText>}
@@ -688,63 +770,81 @@ function ClineOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
           </dl>
         )}
 
-        {/* step 1: open login URL */}
+        {/* not connected: one-click auto connect + manual fallback */}
         {!connected && !statusQ.isLoading && (
-          <div className="space-y-2">
-            <p className="text-[12px] text-[var(--admin-text-muted)]">
-              Step 1 — open the Cline login page, sign in, then copy the code
-              Cline shows you back here.
-            </p>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                disabled={loginUrl.isPending}
-                onClick={() => loginUrl.mutate()}
-              >
-                <LogIn size={14} /> {loginUrl.isPending ? "Generating…" : "Get login URL"}
-              </Button>
-              {authUrl && (
-                <>
-                  <a href={authUrl} target="_blank" rel="noopener noreferrer">
-                    <Button variant="primary">
-                      <Link2 size={14} /> Open Cline login
-                    </Button>
-                  </a>
-                  <Button variant="ghost" onClick={() => void navigator.clipboard.writeText(authUrl)}>
-                    Copy URL
+          <>
+            <div className="space-y-2">
+              <p className="text-[12px] text-[var(--admin-text-muted)]">
+                Click once to connect. You'll sign in at Cline and be
+                redirected back automatically — no code to paste.
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  variant="primary"
+                  disabled={autoConnect.isPending || !hasKeys}
+                  onClick={() => autoConnect.mutate()}
+                >
+                  {autoConnect.isPending ? (
+                    <Loader2 size={14} className="animate-spin" />
+                  ) : (
+                    <LogIn size={14} />
+                  )}
+                  {autoConnect.isPending ? "Starting…" : "Connect with Cline"}
+                </Button>
+                <Button
+                  variant="ghost"
+                  onClick={() => setShowManual((s) => !s)}
+                >
+                  {showManual ? (
+                    <ChevronUp size={14} />
+                  ) : (
+                    <ChevronDown size={14} />
+                  )}
+                  Manual paste-code
+                </Button>
+              </div>
+            </div>
+
+            {/* collapsible manual paste-code fallback */}
+            {showManual && (
+              <div className="space-y-2 border-t border-[var(--admin-border)] pt-3">
+                <p className="text-[12px] text-[var(--admin-text-muted)]">
+                  Open the Cline login page, sign in, then paste the code
+                  here. Use this when the automatic redirect can't land
+                  (e.g. localhost without a public URL).
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    variant="outline"
+                    disabled={loginUrl.isPending}
+                    onClick={() => loginUrl.mutate()}
+                  >
+                    <LogIn size={14} />{" "}
+                    {loginUrl.isPending ? "Opening…" : "Open Cline login"}
                   </Button>
-                </>
-              )}
-            </div>
-          </div>
+                </div>
+                <textarea
+                  className="admin-input min-h-20 resize-none font-mono text-[12px]"
+                  placeholder="eyJhY2Nlc3NUb2tlbiI6…"
+                  value={code}
+                  onChange={(e) => setCode(e.target.value)}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <div className="flex justify-end">
+                  <Button
+                    disabled={!code.trim() || connect.isPending || !hasKeys}
+                    onClick={() => connect.mutate()}
+                  >
+                    {connect.isPending ? "Connecting…" : "Connect"}
+                  </Button>
+                </div>
+              </div>
+            )}
+          </>
         )}
 
-        {/* step 2: paste code */}
-        {!connected && !statusQ.isLoading && (
-          <div className="space-y-2">
-            <p className="text-[12px] text-[var(--admin-text-muted)]">
-              Step 2 — paste the code Cline gave you after login.
-            </p>
-            <textarea
-              className="admin-input min-h-20 resize-none font-mono text-[12px]"
-              placeholder="eyJhY2Nlc3NUb2tlbiI6…"
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
-              autoComplete="off"
-              spellCheck={false}
-            />
-            <div className="flex justify-end">
-              <Button
-                disabled={!code.trim() || connect.isPending || !hasKeys}
-                onClick={() => connect.mutate()}
-              >
-                {connect.isPending ? "Connecting…" : "Connect"}
-              </Button>
-            </div>
-          </div>
-        )}
-
-        {/* step 3: refresh + disconnect (only when connected) */}
+        {/* refresh + disconnect (only when connected) */}
         {connected && (
           <div className="space-y-2 border-t border-[var(--admin-border)] pt-3">
             <p className="text-[12px] text-[var(--admin-text-muted)]">
@@ -799,11 +899,11 @@ function ClineOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
         </Dialog>
 
         <p className="text-[11px] leading-relaxed text-[var(--admin-text-dim)]">
-          Cline uses WorkOS-backed OAuth with no client_id or PKCE. The code
-          you paste embeds the access + refresh tokens as base64 JSON. On
-          connect, the access token replaces the secret of this provider's
-          first pool key; refresh tokens are stored server-side and rotate on
-          each refresh.
+          Cline uses WorkOS-backed OAuth with no client_id or PKCE. The
+          automatic flow redirects through wiwi's own callback; the manual
+          paste-code flow is a fallback. The access token replaces the
+          secret of this provider's first pool key; refresh tokens are
+          stored server-side and rotate on each refresh.
         </p>
       </div>
     </Card>

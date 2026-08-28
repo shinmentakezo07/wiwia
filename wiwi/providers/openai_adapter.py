@@ -102,6 +102,7 @@ def _role_parts_to_content(
 
 class OpenAIAdapter:
     provider_type = "openai"
+    force_stream = False  # set True on adapters whose upstream is streaming-only
 
     def headers(self, key: ProviderKeyRef) -> dict[str, str]:
         h = {"Authorization": f"Bearer {key.secret}"}

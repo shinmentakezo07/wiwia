@@ -289,3 +289,130 @@ async def test_provider_delete_cleans_oauth_settings(client_no_models):
     r = await client_no_models.delete("/admin/providers/cline-prov",
                                        headers=AUTH)
     assert r.status_code == 200
+
+
+# -- auto-connect (redirect flow) ---------------------------------------------
+
+
+async def test_auto_connect_returns_callback_url(client):
+    """auto-connect returns an auth_url whose callback_url points at wiwi's
+    own /cline/oauth/callback (not the SPA), and a state token is stored."""
+    r = await client.post("/admin/cline/oauth/auto-connect", headers=AUTH,
+                          json={"provider": "cline-prov"})
+    assert r.status_code == 200
+    body = r.json()
+    assert "auth_url" in body
+    assert "state" in body
+    assert body["provider"] == "cline-prov"
+    # The callback URL embedded in the Cline auth URL must be our endpoint.
+    from urllib.parse import parse_qs, urlparse
+    qs = parse_qs(urlparse(body["auth_url"]).query)
+    callback = qs.get("callback_url", [""])[0]
+    assert "/cline/oauth/callback" in callback
+    assert f"state={body['state']}" in callback
+
+
+async def test_auto_connect_unknown_provider_404(client):
+    r = await client.post("/admin/cline/oauth/auto-connect", headers=AUTH,
+                          json={"provider": "nope"})
+    assert r.status_code == 404
+
+
+async def test_auto_connect_requires_admin(client):
+    r = await client.post("/admin/cline/oauth/auto-connect",
+                          json={"provider": "cline-prov"})
+    assert r.status_code == 401
+
+
+async def test_callback_persists_tokens_and_redirects(client):
+    """The redirect callback decodes the code, stores tokens, and 302s to
+    the SPA with ?cline_connected=1."""
+    # Step 1: initiate auto-connect to get a state token.
+    r = await client.post("/admin/cline/oauth/auto-connect", headers=AUTH,
+                          json={"provider": "cline-prov"})
+    assert r.status_code == 200
+    state = r.json()["state"]
+    # Step 2: simulate Cline redirecting back with a valid code.
+    code = _code_payload()
+    r2 = await client.get(
+        f"/cline/oauth/callback?code={code}&state={state}",
+        follow_redirects=False)
+    assert r2.status_code == 302
+    loc = r2.headers["location"]
+    assert "cline_connected=1" in loc
+    assert "cline_email=u%40x.io" in loc or "cline_email=u@x.io" in loc
+    # Step 3: status should now show connected.
+    r3 = await client.get("/admin/cline/oauth/status?provider=cline-prov",
+                          headers=AUTH)
+    assert r3.json()["connected"] is True
+    assert r3.json()["email"] == "u@x.io"
+
+
+async def test_callback_invalid_state_returns_error(client):
+    """An unknown/expired state token redirects with an error flag."""
+    code = _code_payload()
+    r = await client.get(
+        f"/cline/oauth/callback?code={code}&state=bogus-state",
+        follow_redirects=False)
+    # Missing/invalid state → 400 JSON (not a redirect).
+    assert r.status_code == 400
+
+
+async def test_callback_bad_code_redirects_with_error(client):
+    """A valid state but undecodable code redirects to SPA with error."""
+    r = await client.post("/admin/cline/oauth/auto-connect", headers=AUTH,
+                          json={"provider": "cline-prov"})
+    state = r.json()["state"]
+    r2 = await client.get(
+        f"/cline/oauth/callback?code=garbage&state={state}",
+        follow_redirects=False)
+    assert r2.status_code == 302
+    assert "cline_error=" in r2.headers["location"]
+
+
+async def test_callback_state_is_single_use(client):
+    """The state token is consumed on first use; a second callback with the
+    same state fails."""
+    r = await client.post("/admin/cline/oauth/auto-connect", headers=AUTH,
+                          json={"provider": "cline-prov"})
+    state = r.json()["state"]
+    code = _code_payload()
+    r1 = await client.get(
+        f"/cline/oauth/callback?code={code}&state={state}",
+        follow_redirects=False)
+    assert r1.status_code == 302
+    # Second use of the same state must fail.
+    r2 = await client.get(
+        f"/cline/oauth/callback?code={code}&state={state}",
+        follow_redirects=False)
+    assert r2.status_code == 400
+
+
+async def test_auto_connect_custom_return_path(client):
+    """return_path is honored when it's a /console path."""
+    r = await client.post("/admin/cline/oauth/auto-connect", headers=AUTH,
+                          json={"provider": "cline-prov",
+                                "return_path": "/console/providers/cline-prov"})
+    assert r.status_code == 200
+    state = r.json()["state"]
+    code = _code_payload()
+    r2 = await client.get(
+        f"/cline/oauth/callback?code={code}&state={state}",
+        follow_redirects=False)
+    assert r2.status_code == 302
+    assert r2.headers["location"].startswith("/console/providers/cline-prov")
+
+
+async def test_auto_connect_open_redirect_guard(client):
+    """A non-/console return_path is coerced back to /console/oauth."""
+    r = await client.post("/admin/cline/oauth/auto-connect", headers=AUTH,
+                          json={"provider": "cline-prov",
+                                "return_path": "https://evil.example/"})
+    assert r.status_code == 200
+    state = r.json()["state"]
+    code = _code_payload()
+    r2 = await client.get(
+        f"/cline/oauth/callback?code={code}&state={state}",
+        follow_redirects=False)
+    assert r2.status_code == 302
+    assert r2.headers["location"].startswith("/console/oauth")

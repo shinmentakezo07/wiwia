@@ -8,8 +8,9 @@ Cline (api.cline.bot) is an OpenAI-compatible gateway that requires:
 - Streaming-only upstream (non-streaming requests fail), so the adapter
   forces stream:True in the encoded body while the gateway re-assembles.
 """
-
 import orjson
+import pytest
+import respx
 
 from wiwi.config import PROVIDER_TYPES
 from wiwi.providers.base import ProviderKeyRef
@@ -223,3 +224,172 @@ def test_no_task_id_by_default():
     a = get_adapter("cline")
     h = a.headers(key())
     assert "X-Task-ID" not in h
+
+
+# -- gateway: force_stream reassembly for non-streaming clients ---------------
+
+def test_force_stream_attribute_is_true():
+    """Cline adapter must declare force_stream=True so the gateway knows to
+    route non-streaming client requests through the streaming pump and
+    reassemble the SSE deltas into an AssistantTurn."""
+    assert getattr(get_adapter("cline"), "force_stream", False) is True
+    # The default (OpenAI) adapter must not force stream.
+    assert getattr(get_adapter("openai"), "force_stream", False) is False
+
+
+def _cline_cfg():
+    from wiwi.config import (
+        DeploymentParams,
+        GeneralSettings,
+        KeyDef,
+        ModelEntry,
+        ProviderDef,
+        RouterSettings,
+        WiwiConfig,
+    )
+    return WiwiConfig(
+        providers=[ProviderDef(name="cline-prov", provider="cline",
+                               base_url="https://api.cline.bot/api/v1",
+                               keys=[KeyDef(label="default",
+                                            key="workos:test-token")])],
+        model_list=[ModelEntry(model_name="cline-model",
+                               wiwi_params=DeploymentParams(provider="cline-prov",
+                                                            model="z-ai/glm-5.2"))],
+        general_settings=GeneralSettings(
+            master_key="sk-wiwi-master-test",
+            database_url="sqlite+aiosqlite:///:memory:"),
+        router_settings=RouterSettings(num_retries=0, allowed_fails=2,
+                                       cooldown_time=60.0),
+    )
+
+
+def _sse_chunks() -> bytes:
+    """Cline upstream always responds with SSE, even when the client asked
+    for a non-streaming response (stream:false on the wire, but the adapter
+    forces stream:true in the upstream body)."""
+    parts = [
+        b'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n',
+        b'data: {"choices":[{"delta":{"content":" world"}}]}\n\n',
+        (b'data: {"choices":[{"delta":{},"finish_reason":"stop"}],'
+        b'"usage":{"prompt_tokens":2,"completion_tokens":2}}\n\n'),
+        b'data: ' + bytes([91]) + b'DONE' + bytes([93]) + b'\n\n',
+    ]
+    return b"".join(parts)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_non_streaming_client_gets_reassembled_turn():
+    """A non-streaming client request to a Cline provider must return an
+    AssistantTurn, not crash.  The gateway routes it through the streaming
+    pump (because force_stream=True) and reassembles the SSE deltas."""
+    import httpx
+
+    from wiwi.core.context import RequestContext
+    from wiwi.core.gateway import Gateway
+    from wiwi.cost.pricing import CostEngine
+    from wiwi.ir import types as ir
+    from wiwi.router.router import Router
+
+    respx.post("https://api.cline.bot/api/v1/chat/completions").return_value = (
+        httpx.Response(200, content=_sse_chunks()))
+    g = Gateway(Router(_cline_cfg()), CostEngine())
+    try:
+        req = ir.Request(
+            model="cline-model", stream=False,
+            messages=[ir.Message(role="user", parts=[ir.TextPart("hi")])],
+        )
+        ctx = RequestContext(surface="chat", ir_req=req, group="cline-model")
+        turn = await g.complete(ctx)
+        assert turn.text == "Hello world"
+        assert turn.usage.prompt_tokens == 2
+        assert turn.usage.completion_tokens == 2
+        assert turn.stop_reason == "stop"
+    finally:
+        await g.aclose()
+
+
+def _sse_chunks_enveloped() -> bytes:
+    """Cline often wraps each SSE chunk in {success, data}."""
+    parts = [
+        b'data: {"success":true,"data":{"choices":[{"delta":{"content":"Hi"}}]}}\n\n',
+        b'data: {"success":true,"data":{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}}\n\n',
+        b'data: ' + bytes([91]) + b'DONE' + bytes([93]) + b'\n\n',
+    ]
+    return b"".join(parts)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_non_streaming_reassembles_envelope_wrapped_sse():
+    """The reassembly path must also unwrap Cline's {success,data} envelope
+    on each SSE chunk."""
+    import httpx
+
+    from wiwi.core.context import RequestContext
+    from wiwi.core.gateway import Gateway
+    from wiwi.cost.pricing import CostEngine
+    from wiwi.ir import types as ir
+    from wiwi.router.router import Router
+
+    respx.post("https://api.cline.bot/api/v1/chat/completions").return_value = (
+        httpx.Response(200, content=_sse_chunks_enveloped()))
+    g = Gateway(Router(_cline_cfg()), CostEngine())
+    try:
+        req = ir.Request(
+            model="cline-model", stream=False,
+            messages=[ir.Message(role="user", parts=[ir.TextPart("hi")])],
+        )
+        ctx = RequestContext(surface="chat", ir_req=req, group="cline-model")
+        turn = await g.complete(ctx)
+        assert turn.text == "Hi"
+        assert turn.usage.prompt_tokens == 1
+        assert turn.usage.completion_tokens == 1
+    finally:
+        await g.aclose()
+
+
+def _sse_chunks_tool_call() -> bytes:
+    """SSE stream with a tool call that fragments across deltas."""
+    parts = [
+        b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"get_weather","arguments":""}}]}}]}\n\n',
+        b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"loc\\""}}]}}]}\n\n',
+        b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":": \\"NYC\\"}"}}]}}]}\n\n',
+        b'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":10}}\n\n',
+        b'data: ' + bytes([91]) + b'DONE' + bytes([93]) + b'\n\n',
+    ]
+    return b"".join(parts)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_non_streaming_reassembles_tool_calls():
+    """The reassembly path must fold fragmented tool-call deltas into
+    ToolUseParts with parsed arguments."""
+    import httpx
+
+    from wiwi.core.context import RequestContext
+    from wiwi.core.gateway import Gateway
+    from wiwi.cost.pricing import CostEngine
+    from wiwi.ir import types as ir
+    from wiwi.router.router import Router
+
+    respx.post("https://api.cline.bot/api/v1/chat/completions").return_value = (
+        httpx.Response(200, content=_sse_chunks_tool_call()))
+    g = Gateway(Router(_cline_cfg()), CostEngine())
+    try:
+        req = ir.Request(
+            model="cline-model", stream=False,
+            messages=[ir.Message(role="user", parts=[ir.TextPart("weather?")])],
+        )
+        ctx = RequestContext(surface="chat", ir_req=req, group="cline-model")
+        turn = await g.complete(ctx)
+        assert turn.text == ""
+        assert len(turn.tool_calls) == 1
+        tc = turn.tool_calls[0]
+        assert tc.id == "call_1"
+        assert tc.name == "get_weather"
+        assert tc.args == {"loc": "NYC"}
+        assert turn.stop_reason == "tool_call"
+    finally:
+        await g.aclose()

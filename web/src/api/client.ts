@@ -60,6 +60,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
 import type {
   AlertRule,
   BuiltinProvider,
+  ClineAutoConnectResponse,
   ClineConnectResponse,
   ClineDisconnectResponse,
   ClineLoginUrlResponse,
@@ -305,13 +306,18 @@ export const getPublicModels = () =>
   api<{ groups: PublicModelGroup[]; aliases: Record<string, string> }>(
     "/public/models",
   );
-
-// -- Cline OAuth (paste-code flow) -------------------------------------------
+// -- Cline OAuth (paste-code + automatic redirect flow) ----------------------
 
 export const clineLoginUrl = (callbackUrl: string) =>
   api<ClineLoginUrlResponse>("/admin/cline/oauth/login-url", {
     method: "POST",
     body: JSON.stringify({ callback_url: callbackUrl }),
+  });
+
+export const clineAutoConnect = (provider: string, returnPath?: string) =>
+  api<ClineAutoConnectResponse>("/admin/cline/oauth/auto-connect", {
+    method: "POST",
+    body: JSON.stringify({ provider, return_path: returnPath }),
   });
 
 export const clineConnect = (provider: string, code: string) =>
