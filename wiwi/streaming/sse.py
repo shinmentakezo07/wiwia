@@ -37,6 +37,12 @@ class LineSSEParser:
         return None
 
 
+def _sse_sanitize(value: str) -> str:
+    """Strip CR/LF so a caller-controlled value cannot inject extra SSE lines
+    (or a full forged frame) into the output stream."""
+    return value.replace("\r", "").replace("\n", "")
+
+
 def sse_frame(event: str, payload: str | bytes,
               event_id: int | str | None = None) -> bytes:
     """Build a single SSE frame.
@@ -46,9 +52,9 @@ def sse_frame(event: str, payload: str | bytes,
     """
     parts: list[bytes] = []
     if event_id is not None:
-        parts.append(f"id: {event_id}\n".encode())
+        parts.append(f"id: {_sse_sanitize(str(event_id))}\n".encode())
     if event:
-        parts.append(f"event: {event}\n".encode())
+        parts.append(f"event: {_sse_sanitize(event)}\n".encode())
     data = payload.encode() if isinstance(payload, str) else payload
     parts.append(b"data: " + data + b"\n\n")
     return b"".join(parts)

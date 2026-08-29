@@ -131,16 +131,21 @@ class PartialJSONParser:
         tail of the buffer rather than appending — this preserves the
         most recent arg text (which is what a partial-JSON parser can
         still make sense of) while bounding memory.
+
+        The cap is enforced in **characters** (``MAX_BUFFER_BYTES`` is a
+        count bound, not a strict byte limit): multi-byte UTF-8 text must
+        not cause the head-trim to over-drop characters, and a single huge
+        fragment must not exceed the bound after account for its tail.
         """
         if not fragment:
             return parse_partial(self._buf)[0]
-        # Cheap byte check: if the fragment alone exceeds the cap, only
-        # keep its tail. Otherwise append and trim the head if needed.
-        if len(fragment.encode("utf-8", "replace")) >= MAX_BUFFER_BYTES:
+        # Cheap check: if the fragment alone reaches the cap, only keep
+        # its tail. Otherwise append and trim the head if needed.
+        if len(fragment) >= MAX_BUFFER_BYTES:
             self._buf = fragment[-MAX_BUFFER_BYTES:]
         else:
             self._buf += fragment
-            overflow = len(self._buf.encode("utf-8", "replace")) - MAX_BUFFER_BYTES
+            overflow = len(self._buf) - MAX_BUFFER_BYTES
             if overflow > 0:
                 # Drop the overflow from the head, keeping the most recent
                 # MAX_BUFFER_BYTES characters intact.
