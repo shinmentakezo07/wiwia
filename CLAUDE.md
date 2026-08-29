@@ -18,7 +18,7 @@ uv venv && uv pip install -e ".[dev]"
 wiwi --config wiwi.yaml [--host H] [--port P]
 DATABASE_URL=postgresql+asyncpg://... wiwi --config wiwi.yaml   # Postgres (default is SQLite at wiwi.db)
 
-# tests (all pass currently; ~1s)
+# tests
 .venv/bin/python -m pytest tests/ -q
 .venv/bin/python -m pytest tests/test_codecs.py -q            # single file
 .venv/bin/python -m pytest tests/test_router.py -k cooldown   # single test by name
@@ -52,12 +52,12 @@ Adding an inbound surface = one new module in `wiwi/wire/`; adding a provider = 
 | Path | Role |
 |---|---|
 | `wire/` | Inbound codecs (OpenAI Chat, OpenAI Responses/Codex, Anthropic Messages) |
-| `providers/` | Outbound adapters (`<provider>_adapter.py`) — openai, anthropic, gemini, openrouter, plus `base.py` + `registry.py` |
+| `providers/` | Outbound adapters (`<provider>_adapter.py`) — openai, anthropic, gemini, openrouter, nim, cline (+ `cline_oauth.py`, `cline_auto_refresh.py`), plus `base.py` + `registry.py` |
 | `core/` | Engine: gateway, request context |
 | `ir/` | Internal representation (canonical request/response types in `types.py`) |
-| `streaming/` | `IRStreamDelta` taxonomy — the contract between adapters and encoders (deltas, SSE, coalesce, resume, partial JSON, validation) |
+| `streaming/` | `IRStreamDelta` taxonomy + `sse.py` / `coalesce.py` / `resume.py` / `partial_json.py` / `validation.py` — the contract between adapters and encoders |
 | `router/` | Key pools, weighted round-robin, retries, cooldowns, fallbacks |
-| `auth/` | Virtual keys, budgets, rate limits |
+| `auth/` | Virtual keys, budgets, rate limits (`keys.py`, `service.py`, `users.py`) |
 | `ratelimit/` | Rate-limit enforcement (memory + redis backends) |
 | `cost/` | Token/cost calculation (`pricing.py`, `model_prices.json`) |
 | `logging_core/` | Structured logging (structlog) + DB sink + event taxonomy |
@@ -107,3 +107,9 @@ Error bodies are dialect-correct per surface (OpenAI `{"error":{…}}` vs Anthro
 ## UPDATE.md — changelog for translation work
 
 `UPDATE.md` is the changelog for all OpenAI ↔ Anthropic cross-provider translation fixes, the OpenRouter adapter, and multi-turn conversation fixes. **Read it first** when encountering issues with: reasoning/thinking parameter translation, tool_result message handling, `content: null` errors, OpenRouter `reasoning` parameter, `stream_options`, or error message extraction from upstream providers. It documents every fix with before/after code snippets, the files changed, and the tests that cover them.
+
+## Project rules & skills
+
+- For bug fixes, follow the workflow in `.claude/rules/wiwi-bugfix-workflow.md` (TDD via `.claude/skills/test-driven-development`, root-cause via `.claude/skills/systematic-debugging`, review via `.claude/skills/requesting-code-review`). New bugfix tests go into the next thematic file `test_fix_roundN.py`.
+- Superpowers skills (`/test-driven-development`, `/systematic-debugging`, `/brainstorming`, `/writing-plans`, `/executing-plans`, `/verification-before-completion`, `/using-git-worktrees`) are the methodology for plan → TDD → debug → review → verify.
+- ECC skills are the domain library (Python/FastAPI/React/agent orchestration, security scan, etc.); invoke the matching skill for the task.
