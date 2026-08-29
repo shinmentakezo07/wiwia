@@ -43,6 +43,13 @@ def _extract_error_message(body_text: str) -> str:
         data = orjson.loads(body_text)
     except (json.JSONDecodeError, ValueError):
         return body_text[:500]
+    # Not every upstream returns a JSON *object*: `null`, bare strings,
+    # numbers, booleans and arrays are all valid JSON and do occur in the
+    # wild (proxies, health-check pages, some gateways).  Probing those for
+    # an "error" key raised AttributeError and turned a clean provider 4xx
+    # into an opaque gateway 500 with the real status lost.
+    if not isinstance(data, dict):
+        return body_text[:500]
     # OpenAI shape: {"error": {"message": "..."}}
     err = data.get("error")
     if isinstance(err, dict):

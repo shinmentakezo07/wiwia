@@ -59,6 +59,10 @@ class RequestContext:
     log_buffer: list[LogEvent] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
+    # Set by the streaming path: `execute_with_retries` must NOT credit the key
+    # at connect time (its call_one returns as soon as the pump connects). The
+    # pump credits the key once the stream actually completes. See AUDIT #6.
+    _defer_key_credit: bool = False
 
     def note_attempt(self, deployment: str, provider: str, key_label: str,
                      status: str, latency_ms: int, detail: str = "") -> None:

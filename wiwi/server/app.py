@@ -1082,6 +1082,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             entry = {**p, "builtin": True}
             entry["configured"] = p["provider_type"] in configured
             out.append(entry)
+        return ORJSONResponse(out)
 
     @app.get("/admin/providers")
     async def admin_providers(request: Request):

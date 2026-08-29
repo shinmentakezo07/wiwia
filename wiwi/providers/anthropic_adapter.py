@@ -42,6 +42,53 @@ def _system_blocks_or_text(messages: list[ir.Message]) -> str | list[dict[str, A
     return "\n".join(p.text for p in text_parts)
 
 
+_JSON_ONLY_INSTRUCTION = (
+    "Respond with a single valid JSON object and nothing else — no prose, "
+    "no markdown code fences, no commentary before or after the JSON."
+)
+
+
+def _json_schema_instruction(schema: dict[str, Any] | None) -> str:
+    """Instruction telling the model to match a caller-supplied JSON schema.
+
+    The Messages API has no ``response_format`` parameter, so a request that
+    arrives in the OpenAI dialect (``json_object`` / ``json_schema``) would
+    otherwise be silently dropped and the caller would get prose back.
+    """
+    if not schema:
+        return _JSON_ONLY_INSTRUCTION
+    try:
+        rendered = orjson.dumps(schema).decode()
+    except (TypeError, ValueError):
+        return _JSON_ONLY_INSTRUCTION
+    return (_JSON_ONLY_INSTRUCTION
+            + " The JSON object must conform to this JSON Schema:\n" + rendered)
+
+
+def _with_response_format_instruction(
+    system: str | list[dict[str, Any]] | None,
+    response_format: ir.ResponseFormat | None,
+) -> str | list[dict[str, Any]] | None:
+    """Append the JSON-output instruction to the system prompt.
+
+    Anthropic has no native ``response_format``, so the constraint is carried
+    as a system instruction. When the caller already sent a system prompt the
+    instruction is appended rather than replacing it; when the prompt was in
+    block form (``cache_control`` present) it is appended as a plain trailing
+    block so the cached prefix stays byte-identical.
+    """
+    if response_format is None or response_format.type == "text":
+        return system
+    instruction = _json_schema_instruction(response_format.json_schema)
+    if system is None:
+        return instruction
+    if isinstance(system, str):
+        return system + "\n" + instruction
+    # Block form: don't mutate the caller's blocks (that would invalidate the
+    # cache prefix); append a separate uncached block.
+    return list(system) + [{"type": "text", "text": instruction}]
+
+
 class AnthropicAdapter:
     provider_type = "anthropic"
 
@@ -108,6 +155,7 @@ class AnthropicAdapter:
             "max_tokens": g.max_tokens or deployment_params.get("max_tokens") or DEFAULT_MAX_TOKENS,
             "messages": msgs,
         }
+        system = _with_response_format_instruction(system, g.response_format)
         if system:
             body["system"] = system
         if g.temperature is not None:

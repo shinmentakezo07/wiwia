@@ -688,11 +688,17 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
             try:
                 result = await call_one(
                     dep, ProviderKeyRef(label=key.label, secret=key.secret), ctx)
-                # Success: account the key. For streaming the pump also
-                # increments req_count on clean completion.
-                await dep.provider.on_result_locked(key, 200, None,
-                                                    failover_mode=failover_mode,
-                                                    key_max_consecutive_fails=key_max_fails)
+                # Success: account the key — except for streaming, where
+                # `call_one` returns at *connect* time, long before we know
+                # whether the stream will actually deliver anything. Crediting
+                # here resets err_count to 0, so a key that connects and then
+                # dies mid-stream never accumulates a retirement streak and
+                # keeps getting picked first (AUDIT #6). The pump credits the
+                # key itself once the stream completes cleanly.
+                if not getattr(ctx, "_defer_key_credit", False):
+                    await dep.provider.on_result_locked(key, 200, None,
+                                                        failover_mode=failover_mode,
+                                                        key_max_consecutive_fails=key_max_fails)
                 # bump cycle counters
                 if cycle_n > 0:
                     provider_consec[dep.provider.name] = (

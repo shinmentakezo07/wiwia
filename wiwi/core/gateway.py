@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 import orjson
+import structlog
 
 from wiwi.core.context import RequestContext
 from wiwi.cost.pricing import CostEngine, estimate_tokens, estimate_tokens_async
@@ -29,6 +30,14 @@ from wiwi.streaming import deltas as dl
 from wiwi.streaming.coalesce import DeltaCoalescer
 from wiwi.streaming.resume import StreamTape, build_continuation_messages
 from wiwi.streaming.sse import LineSSEParser
+
+log = structlog.get_logger(__name__)
+
+# How long the consumer waits, after setting `ctx.cancel`, for the pump to
+# notice the flag and release the upstream connection itself before falling
+# back to cancelling it. Long enough to cover a socket teardown, short enough
+# that a client disconnect is not held up.
+_PUMP_CANCEL_GRACE_S = 1.0
 
 
 class Gateway:
@@ -354,10 +363,35 @@ class Gateway:
             # retry on a different deployment.
             await ready.wait()
             if err_box[0] is not None:
-                pump_task.cancel()
+                # Do NOT cancel the pump here: it has already recorded the
+                # error and is on its way out, but it may still be closing the
+                # upstream response (`ready` is set *before* that await).
+                # Cancelling mid-close leaves the httpx response un-released
+                # and leaks the pooled connection — on every retried 429/500/
+                # 401 connect.  Await it instead so cleanup completes.
+                try:
+                    await asyncio.wait_for(pump_task, timeout=5.0)
+                except asyncio.CancelledError:
+                    # The client went away while we waited for cleanup.
+                    # `wait_for` has already cancelled the pump; re-raise so
+                    # the disconnect propagates. Suppressing it here (as
+                    # suppress(BaseException) did) reported the upstream error
+                    # to a caller that no longer exists and hid the
+                    # cancellation from the ASGI disconnect handler.
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    # A wedged close (TimeoutError) or a residual teardown
+                    # error. The result is already known to be a failure, so
+                    # neither carries information the caller needs — but
+                    # neither should pass entirely unremarked.
+                    log.debug("stream pump cleanup did not finish cleanly",
+                              error=type(e).__name__, detail=str(e))
                 raise err_box[0]
             return pump_task
 
+        # Streaming: hold back the key credit until the pump reports a clean
+        # completion. See RequestContext._defer_key_credit / AUDIT #6.
+        ctx._defer_key_credit = True
         try:
             await execute_with_retries(self.router, ctx, call_one)
         except BaseException:
@@ -412,6 +446,22 @@ class Gateway:
                 for cd in coalescer.drain():
                     yield cd
         finally:
+            # Signal the pump that the consumer is gone *before* cancelling it.
+            # The pump polls `ctx.cancel` between upstream chunks so it can stop
+            # pulling, run the grace drain (billing the tokens the client did
+            # receive), and release the upstream connection cleanly. Without
+            # this the pump only ever learns via CancelledError, which skips
+            # that path entirely.
+            ctx.cancel.set()
+            if pump_task and not pump_task.done():
+                # Setting the flag is not enough on its own: this is a
+                # synchronous `finally`, so cancelling on the next line would
+                # deliver CancelledError before the pump is ever rescheduled to
+                # observe the flag. Yield first, bounded, so the pump can run
+                # its own teardown; cancel only if it doesn't finish.
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(asyncio.shield(pump_task),
+                                           timeout=_PUMP_CANCEL_GRACE_S)
             if pump_task and not pump_task.done():
                 pump_task.cancel()
 
@@ -598,7 +648,7 @@ class Gateway:
                 try:
                     line = await asyncio.wait_for(line_iter.__anext__(), timeout=idle_s)
                 except TimeoutError:
-                    self._note_stream_failure(dep, real_key)
+                    await self._note_stream_failure(dep, real_key)
                     self._price_partial(ctx, dep, usage_final, text_len)
                     await queue.put(dl.StreamError(
                         f"upstream idle >{idle_s:.0f}s between chunks", "timeout"))
@@ -647,7 +697,8 @@ class Gateway:
                                             is_loop = True
                                             break
                                     if is_loop:
-                                        self._note_stream_failure(dep, real_key)
+                                        await self._note_stream_failure(
+                                            dep, real_key)
                                         self._price_partial(ctx, dep, usage_final,
                                                             text_len)
                                         await queue.put(dl.StreamError(
@@ -679,12 +730,22 @@ class Gateway:
             if not client_gone:
                 await queue.put(est_usage)
                 if finish is None and usage_final is None:
-                    self._note_stream_failure(dep, real_key)
+                    await self._note_stream_failure(dep, real_key)
                     await queue.put(dl.StreamError(
                         "upstream stream ended without completion", "connection"))
                     return
                 await queue.put(finish or dl.Finish("stop"))
                 await queue.put(dl.StreamEnd())
+                # AUDIT #6: credit the key only now that the stream actually
+                # completed. `execute_with_retries` used to record on_result(200)
+                # at *connect* time, which reset err_count to 0 — so a key that
+                # connects and then dies mid-stream never accumulated a
+                # retirement streak and kept getting picked first.
+                await dep.provider.on_result_locked(
+                    real_key, 200, None,
+                    failover_mode=self.router.settings.failover_mode,
+                    key_max_consecutive_fails=(
+                        self.router.settings.key_max_consecutive_fails))
         except asyncio.CancelledError:
             # client went away mid-stream: still release the upstream response,
             # or the pooled socket stays checked out until GC.  Price the
@@ -706,20 +767,40 @@ class Gateway:
             else:
                 # Mid-stream error — can't retry; bill partial delivery, feed
                 # health stats, send error to client.
-                self._note_stream_failure(dep, real_key)
+                await self._note_stream_failure(dep, real_key)
                 self._price_partial(ctx, dep, usage_final, text_len)
                 await queue.put(dl.StreamError(str(e),
                                                "timeout" if "Timeout" in type(e).__name__
                                                else "connection"))
             await _close_upstream()
 
-    def _note_stream_failure(self, dep: Deployment, real_key) -> None:
+    async def _note_stream_failure(self, dep: Deployment, real_key) -> None:
         """Mid-stream failures carry no HTTP status; feed deployment cooldowns
-        and the key pool so a provider that keeps dying mid-stream cools off."""
-        if real_key is not None:
-            real_key.err_count += 1
+        and the key pool so a provider that keeps dying mid-stream cools off.
+
+        Routing through ``on_result_locked`` (rather than bumping
+        ``err_count`` directly) is what actually rotates traffic: it applies a
+        cooldown window so the next ``pick_key`` skips this key, and retires
+        it outright once it crosses ``key_max_consecutive_fails``.  Streaming
+        attempts already recorded ``on_result(200)`` at connect time, so
+        without the cooldown here a key could die mid-stream indefinitely and
+        still be picked first on every subsequent request.
+        """
         dep.record_fail(self.router.settings.allowed_fails,
                         self.router.settings.cooldown_time)
+        if real_key is None:
+            return
+        # In "standard" failover mode `on_result` handles only 429/401/403 and
+        # silently discards a 5xx, so the penalty below would vanish entirely.
+        # Count it here for that mode only: in "any_error" (default)
+        # `on_result` already increments err_count, and doing both would
+        # double-count and retire keys at half the configured threshold.
+        if self.router.settings.failover_mode == "standard":
+            real_key.err_count += 1
+        await dep.provider.on_result_locked(
+            real_key, 502, None,
+            failover_mode=self.router.settings.failover_mode,
+            key_max_consecutive_fails=self.router.settings.key_max_consecutive_fails)
 
     def _price_partial(self, ctx: RequestContext, dep: Deployment,
                        usage_final: dl.UsageFinal | None, text_len: int) -> None:
