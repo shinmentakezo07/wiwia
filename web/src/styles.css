@@ -175,20 +175,22 @@ body {
   to { --conic-angle: 360deg; }
 }
 
-/* -- login page: glassmorphism card ---------------------------------------- */
+/* Glass card — near-solid so it reads as an object floating over pure black.
+   Backdrop blur still catches the light streaks passing behind it. */
 .wiwi-glass-card {
-  background: rgba(10, 10, 10, 0.72);
+  background: rgba(0, 0, 0, 0.82);
   backdrop-filter: blur(20px) saturate(1.4);
   -webkit-backdrop-filter: blur(20px) saturate(1.4);
 }
 
-/* -- login page: top specular highlight line -------------------------------- */
+/* Top specular highlight line — brighter now that the card sits on pure black,
+   otherwise the card's top edge disappears into the backdrop. */
 .wiwi-top-highlight {
   background: linear-gradient(
     90deg,
     transparent,
-    rgba(59, 130, 246, 0.25),
-    rgba(168, 85, 247, 0.15),
+    rgba(96, 165, 250, 0.5),
+    rgba(168, 85, 247, 0.3),
     transparent
   );
 }
@@ -1252,6 +1254,281 @@ select.admin-input option {
 @keyframes docs-pulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.45); }
   50% { opacity: 0.65; box-shadow: 0 0 0 5px rgba(52, 211, 153, 0); }
+}
+
+/* ─── Login page: split-panel beam console ───────────────────────────────── */
+
+/* Single-screen fit. The page must fill exactly one viewport with no
+   scrolling, so every vertical measurement is a clamp() against viewport
+   *height*: type, block spacing and node sizes shrink together on short
+   screens and grow on tall ones. The showcase diagram is the only flexible
+   child — it absorbs whatever the header block leaves over. */
+.lg-root {
+  --lg-bg: #000000;
+  --lg-pad-y: clamp(14px, 2.6vh, 40px);
+  --lg-title: clamp(21px, 3.2vh, 30px);
+  --lg-body: clamp(11.5px, 1.5vh, 13.5px);
+  --lg-block: clamp(12px, 2vh, 28px);
+  --lg-gap: clamp(10px, 1.5vh, 16px);
+  --lg-card-y: clamp(12px, 1.9vh, 20px);
+  --lg-node: clamp(42px, 6vh, 54px);
+  --lg-hub: clamp(58px, 8.4vh, 76px);
+  --lg-control-h: clamp(38px, 5.2vh, 44px);
+}
+
+/* Hero-style lighting, adapted from landing/Hero.tsx: long rotated radial
+   "streaks" of near-white light, screened over pure black. These are the
+   signature of the hero backdrop, so the login reads as part of the same
+   family. Mix-blend-screen keeps them luminous without washing the black. */
+.lg-streak-1 {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 560px;
+  height: 1280px;
+  transform: rotate(-45deg) translateY(-350px);
+  border-radius: 9999px;
+  background: radial-gradient(
+    68.54% 68.72% at 55.02% 31.46%,
+    hsla(0, 0%, 85%, 0.09) 0,
+    hsla(0, 0%, 55%, 0.02) 50%,
+    hsla(0, 0%, 45%, 0) 80%
+  );
+}
+.lg-streak-2 {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 224px;
+  height: 1280px;
+  border-radius: 9999px;
+  background: radial-gradient(
+    50% 50% at 50% 50%,
+    hsla(0, 0%, 85%, 0.07) 0,
+    hsla(0, 0%, 45%, 0.02) 80%,
+    transparent 100%
+  );
+  transform: rotate(-45deg) translate(5%, -50%);
+}
+.lg-streaks {
+  mix-blend-screen: opacity(0.5);
+}
+
+/* Bottom-anchored vignette — identical to the hero's, but keyed to the login's
+   pure black so the edges fall off to nothing. */
+.lg-vignette {
+  background: radial-gradient(125% 125% at 50% 100%, transparent 0%, var(--lg-bg) 75%);
+}
+
+/* In-card diagram (below lg) — only when the viewport is tall enough to hold
+   the card *and* a 300px graph without scrolling. */
+.lg-showcase-sm {
+  display: block;
+}
+@media (min-width: 1024px) {
+  .lg-showcase-sm {
+    display: none;
+  }
+}
+@media (max-height: 899px) {
+  .lg-showcase-sm {
+    display: none;
+  }
+}
+
+/* Masked grid wash for the showcase panel */
+.lg-beam-grid {
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+  background-size: 44px 44px;
+  -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 45%, #000 0%, transparent 80%);
+  mask-image: radial-gradient(ellipse 80% 70% at 50% 45%, #000 0%, transparent 80%);
+}
+
+/* Slow conic bloom rotating behind the hub node */
+@keyframes lg-bloom {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.lg-bloom {
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg,
+    rgba(59, 130, 246, 0.16) 55deg,
+    rgba(168, 85, 247, 0.14) 110deg,
+    transparent 175deg,
+    transparent 360deg
+  );
+}
+@media (prefers-reduced-motion: no-preference) {
+  .lg-bloom {
+    animation: lg-bloom 14s linear infinite;
+  }
+}
+
+/* Hub breathing ring */
+@keyframes lg-hub-ring {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.8;
+    transform: scale(1.09);
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .lg-hub-ring {
+    animation: lg-hub-ring 3.2s ease-in-out infinite;
+  }
+}
+
+/* Provider node idle breathing */
+@keyframes lg-node-breathe {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .lg-node-breathe {
+    animation: lg-node-breathe 4s ease-in-out infinite;
+  }
+}
+
+/* Panel entrance */
+@keyframes lg-rise {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+    filter: blur(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    filter: blur(0);
+  }
+}
+@keyframes lg-slide-left {
+  from {
+    opacity: 0;
+    transform: translateX(-22px);
+    filter: blur(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    filter: blur(0);
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .lg-rise {
+    animation: lg-rise 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  .lg-slide-left {
+    animation: lg-slide-left 0.9s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+}
+
+/* Vertical hairline divider between the two panels */
+.lg-divider {
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    rgba(59, 130, 246, 0.14) 22%,
+    rgba(168, 85, 247, 0.12) 55%,
+    transparent 100%
+  );
+}
+
+/* Corner brackets on the showcase panel */
+.lg-corner {
+  position: absolute;
+  height: 26px;
+  width: 26px;
+  border-color: rgba(255, 255, 255, 0.1);
+  pointer-events: none;
+}
+.lg-corner-tl {
+  top: 0;
+  left: 0;
+  border-top-width: 1px;
+  border-left-width: 1px;
+}
+.lg-corner-br {
+  bottom: 0;
+  right: 0;
+  border-bottom-width: 1px;
+  border-right-width: 1px;
+}
+
+/* Form panel: soft light that follows the cursor (--mx / --my fed from JS) */
+.lg-spotlight::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(
+    420px circle at var(--mx, 50%) var(--my, 0%),
+    rgba(59, 130, 246, 0.07),
+    transparent 70%
+  );
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+.lg-spotlight:hover::before {
+  opacity: 1;
+}
+
+/* Segmented mode toggle: sliding indicator */
+.lg-seg {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--admin-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.015);
+}
+.lg-seg-indicator {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  /* one grid column: (100% - 2*3px padding - 2px gap) / 2 */
+  width: calc(50% - 4px);
+  border-radius: 8px;
+  background: rgba(59, 130, 246, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.16);
+  transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Input wrapper glow that lights up with the field */
+.lg-field {
+  position: relative;
+  border-radius: var(--admin-radius-sm);
+  transition: box-shadow 0.25s ease;
+}
+.lg-field:focus-within {
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.35), 0 0 24px -6px rgba(59, 130, 246, 0.35);
+}
+
+/* Vertical shrink path for short viewports (≈ ≤700px tall): the showcase hides
+   entirely and the card is allowed to scroll *inside* itself with the submit
+   button pinned, so the page itself still never scrolls. */
+.lg-card-body {
+  overflow-y: auto;
+  max-height: 100%;
+}
+.lg-card-footer {
+  flex-shrink: 0;
 }
 
 /* ─── Landing page: AnimatedGroup + MarqueeContainer keyframes ──────────── */
