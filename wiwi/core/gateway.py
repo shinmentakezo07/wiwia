@@ -40,6 +40,13 @@ class Gateway:
         self.drop_params = drop_params
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(120.0, connect=10.0), http2=True)
+        # Optional on-demand Cline token refresh hook. Set by the app at
+        # startup when a Cline provider is configured. Signature:
+        #   hook(provider_name, key_label) -> bool
+        # Returns True when the access token was rotated and the caller
+        # should retry; False when no rotation happened (caller surfaces
+        # the original 401).
+        self._on_demand_cline_refresh = None
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -100,6 +107,44 @@ class Gateway:
             ra = _parse_retry_after(resp.headers.get("retry-after"))
             if ra is not None:
                 err.retry_after = ra
+            # On-demand Cline refresh: 401 from Cline usually means the
+            # current access token was rotated upstream. Refresh and retry
+            # once before surfacing the error to the client.
+            if (resp.status_code == 401
+                    and dep.provider.provider_type == "cline"
+                    and self._on_demand_cline_refresh is not None):
+                rotated = await self._on_demand_cline_refresh(
+                    dep.provider.name, key.label)
+                if rotated:
+                    # The on-demand refresh rotated every pool key's
+                    # secret; rebuild the headers so the retry uses the
+                    # freshly-issued access token instead of the snapshot
+                    # held by this request's ProviderKeyRef.
+                    live_key = dep.provider.get_key(key.label)
+                    retry_key = (ProviderKeyRef(label=key.label,
+                                                secret=live_key.secret)
+                                 if live_key is not None else key)
+                    retry_headers = {**adapter.headers(retry_key),
+                                     **dep.provider.extra_headers,
+                                     **dep.extra_headers}
+                    try:
+                        retry_resp = await self._client.post(
+                            url, json=body, headers=retry_headers,
+                            timeout=dep.timeout or dep.provider.timeout_s)
+                    except httpx.TransportError as e:
+                        raise WiwiError(502, "api_connection_error",
+                                        f"upstream {type(e).__name__}",
+                                        retryable=True) from e
+                    if retry_resp.status_code == 200:
+                        ctx.note_attempt(f"{dep.group}/{dep.model_id}",
+                                         dep.provider.name, key.label,
+                                         "ok_after_refresh",
+                                         int((time.monotonic() - t0) * 1000))
+                        dep.latencies.append(int((time.monotonic() - t0) * 1000))
+                        turn = adapter.decode_response(retry_resp.status_code,
+                                                      retry_resp.content)
+                        self._price(ctx, dep, turn.usage)
+                        return turn
             raise err
         ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
                          "ok", latency)
@@ -161,7 +206,45 @@ class Gateway:
             ra = _parse_retry_after(resp.headers.get("retry-after"))
             if ra is not None:
                 err.retry_after = ra
-            raise err
+            # On-demand Cline refresh on a streaming connect: 401 means
+            # the access token was rotated upstream. Reconnect once with
+            # the freshly-issued token before surfacing the error.
+            if (resp.status_code == 401
+                    and dep.provider.provider_type == "cline"
+                    and self._on_demand_cline_refresh is not None):
+                rotated = await self._on_demand_cline_refresh(
+                    dep.provider.name, key.label)
+                if rotated:
+                    # Rebuild headers from the live (post-refresh) key
+                    # secret so the reconnect carries the fresh token.
+                    live_key = dep.provider.get_key(key.label)
+                    retry_key = (ProviderKeyRef(label=key.label,
+                                                secret=live_key.secret)
+                                 if live_key is not None else key)
+                    retry_headers = {**adapter.headers(retry_key),
+                                     **dep.provider.extra_headers,
+                                     **dep.extra_headers}
+                    try:
+                        retry_cm = self._client.stream(
+                            "POST", url, json=body, headers=retry_headers,
+                            timeout=dep.timeout or dep.provider.timeout_s)
+                        retry_resp = await retry_cm.__aenter__()
+                    except httpx.TransportError as e:
+                        raise WiwiError(502, "api_connection_error",
+                                        f"upstream {type(e).__name__}",
+                                        retryable=True) from e
+                    if retry_resp.status_code == 200:
+                        # Swap the failed response for the fresh one and
+                        # fall through to the pump loop below.
+                        resp = retry_resp
+                        resp_cm = retry_cm
+                    else:
+                        await retry_cm.__aexit__(None, None, None)
+                        raise err
+                else:
+                    raise err
+            else:
+                raise err
         # Connection OK — pump the SSE stream into an AssistantTurn.
         try:
             parser = LineSSEParser()

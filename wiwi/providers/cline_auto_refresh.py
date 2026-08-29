@@ -142,15 +142,22 @@ class ClineAutoRefresh:
         log.info("cline_auto_refreshed", provider=name)
 
     async def _update_secret(self, provider: str, secret: str) -> None:
-        """Update the first pool key's secret in memory + DB."""
+        """Update every pool key's secret in memory + DB for a Cline provider.
+
+        A Cline provider's key pool entries all authenticate with the same
+        OAuth account (WorkOS), so a rotation invalidates every entry's
+        cached access token.  Updating only ``keys[0]`` (the historical
+        behavior) caused on-demand 401-refresh retries to pick a still-stale
+        sibling key from the round-robin cursor.
+        """
         acct = self._state.router.providers.get(provider)
         if acct is None or not acct.keys:
             return
-        key0 = acct.keys[0]
-        key0.secret = secret
-        key0.status = "active"
-        key0.cooldown_until = 0.0
-        await self._state.config_store.update_key_secret(provider, key0.label, secret)
+        for k in acct.keys:
+            k.secret = secret
+            k.status = "active"
+            k.cooldown_until = 0.0
+            await self._state.config_store.update_key_secret(provider, k.label, secret)
 
     def _trip_circuit(self, name: str) -> None:
         cb = self._circuit.get(name, {"streak": 0, "until": 0})
@@ -158,3 +165,60 @@ class ClineAutoRefresh:
         backoff = min(CIRCUIT_BASE_S * 2 ** (cb["streak"] - 1), CIRCUIT_CAP_S)
         cb["until"] = time.time() + backoff
         self._circuit[name] = cb
+
+
+def refresh_for_provider(state) -> callable:
+    """Build a synchronous-callable hook for on-demand Cline token refresh.
+
+    Returns an async function ``hook(provider_name, key_label) -> bool`` that:
+
+    1. Checks the circuit breaker (in case a recent refresh failed) — returns
+       False if the provider is in backoff so the caller surfaces the
+       original 401 instead of looping.
+    2. Reads ``cline_oauth:<provider>`` from the config store to get the
+       current ``refresh_token``.
+    3. Calls Cline's ``/auth/refresh`` endpoint, persists the new tokens,
+       and updates the in-memory ``ProviderKey.secret`` + DB so the next
+       request uses the fresh access token.
+    4. Updates the circuit breaker on success / failure.
+
+    Returns True when the secret was rotated (caller should retry), False
+    otherwise (caller should surface the original error).
+
+    The hook is injected into ``Gateway._on_demand_cline_refresh`` at app
+    startup so the gateway can call it without depending on the full
+    AppState — see ``wiwi.server.app`` for the wiring.
+    """
+    worker = ClineAutoRefresh(state)
+
+    async def hook(provider_name: str, key_label: str) -> bool:
+        # Circuit breaker: skip if the last refresh attempt is in backoff.
+        cb = worker._circuit.get(provider_name)
+        if cb and time.time() < cb.get("until", 0):
+            return False
+
+        cs = state.config_store
+        if cs is None:
+            return False
+        record = await cs.get_setting(f"cline_oauth:{provider_name}")
+        if not record or not record.get("refresh_token"):
+            return False
+
+        result = await cline_oauth.refresh_token(record["refresh_token"])
+        if result is None:
+            worker._trip_circuit(provider_name)
+            return False
+        if result.get("error") == "unrecoverable_refresh_error":
+            worker._circuit[provider_name] = {"streak": 99, "until": float("inf")}
+            return False
+
+        # Success — persist new tokens and update the in-memory key.
+        await worker._update_secret(provider_name, result["access_token"])
+        record["refresh_token"] = result["refresh_token"]
+        if result.get("expires_at"):
+            record["expires_at"] = result["expires_at"]
+        await cs.set_setting(f"cline_oauth:{provider_name}", record)
+        worker._circuit.pop(provider_name, None)
+        return True
+
+    return hook

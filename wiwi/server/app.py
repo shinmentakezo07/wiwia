@@ -360,9 +360,20 @@ async def lifespan(app: FastAPI):
     await state.logs.start()
     # Background auto-refresh for Cline OAuth tokens (proactively rotates
     # expiring access tokens so requests don't fail mid-flight).
-    from wiwi.providers.cline_auto_refresh import ClineAutoRefresh
+    from wiwi.providers.cline_auto_refresh import (
+        ClineAutoRefresh,
+        refresh_for_provider,
+    )
     state.cline_refresh = ClineAutoRefresh(state)
     state.cline_refresh.start()
+    # On-demand refresh hook: when a Cline request returns 401 mid-session
+    # (the background sweeper only refreshes inside the 5-minute lead
+    # window), the gateway uses this hook to rotate the token and retry
+    # once before surfacing the error.  See wiwi.core.gateway for the
+    # call site and tests/test_fix_round7.py for the regression coverage.
+    cline_refresh_hook = refresh_for_provider(state)
+    for gw in state.gateways.values():
+        gw._on_demand_cline_refresh = cline_refresh_hook  # type: ignore[attr-defined]
     yield
     await state.cline_refresh.stop()
     await state.shutdown()
