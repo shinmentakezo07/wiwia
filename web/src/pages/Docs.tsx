@@ -105,15 +105,93 @@ function CopyBtn(props: { text: string }) {
   );
 }
 
+// Small inline copy button for endpoint paths (visible, not hover-revealed).
+function PathCopyBtn(props: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+  return (
+    <button
+      type="button"
+      onClick={async () => {
+        await navigator.clipboard.writeText(props.text);
+        setCopied(true);
+        timer.current = setTimeout(() => setCopied(false), 1500);
+      }}
+      className="rounded-md border border-white/[0.06] bg-white/[0.02] p-1 text-[var(--admin-text-dim)] transition-all hover:border-white/[0.12] hover:text-blue-300"
+      aria-label={`Copy ${props.text}`}
+    >
+      {copied ? <Check size={11} /> : <Copy size={11} />}
+    </button>
+  );
+}
+
+// ── syntax highlighting (dependency-free, line-safe token coloring) ────────
+
+type Lang = "bash" | "python" | "yaml";
+
+// Ordered alternation — earlier groups win at the same position.
+const LANG_REGEX: Record<Lang, RegExp> = {
+  bash: /(?<com>#.*$)|(?<url>https?:\/\/[^\s"']+)|(?<str>"[^"\n]*"|'[^'\n]*')|(?<var>\$\{?[A-Za-z_][A-Za-z0-9_]*\}?)|(?<flag>\s--?[A-Za-z][\w-]*)|(?<cmd>^export\s|^curl\b)/gm,
+  python: /(?<com>#.*$)|(?<str>f?"[^"\n]*"|f?'[^'\n]*')|(?<kw>\b(?:from|import|print|def|return|class|True|False|None)\b)|(?<num>\b\d+\b)/gm,
+  yaml: /(?<com>(?:^|\s)#.*$)|(?<key>^[ \t]*-?[ \t]*[\w.-]+(?=:))|(?<str>"[^"\n]*"|'[^'\n]*')|(?<bool>\b(?:true|false)\b)|(?<num>\b\d+(?:\.\d+)?\b)/gm,
+};
+
+const TOKEN_CLASS: Record<string, string> = {
+  com: "tok-com",
+  str: "tok-str",
+  var: "tok-var",
+  flag: "tok-flag",
+  cmd: "tok-kw",
+  kw: "tok-kw",
+  key: "tok-key",
+  num: "tok-num",
+  bool: "tok-bool",
+  url: "tok-url",
+};
+
+function highlight(code: string, lang: Lang): ReactNode[] {
+  const out: ReactNode[] = [];
+  let last = 0;
+  let k = 0;
+  for (const m of code.matchAll(LANG_REGEX[lang])) {
+    const idx = m.index ?? 0;
+    if (idx > last) out.push(code.slice(last, idx));
+    const groups = m.groups ?? {};
+    const name = Object.keys(groups).find((g) => groups[g] !== undefined);
+    out.push(
+      <span key={k++} className={name ? TOKEN_CLASS[name] : undefined}>
+        {m[0]}
+      </span>,
+    );
+    last = idx + m[0].length;
+  }
+  if (last < code.length) out.push(code.slice(last));
+  return out;
+}
+
+function langFromLabel(label: string): Lang {
+  const l = label.toLowerCase();
+  if (l.includes("python")) return "python";
+  if (l.includes("yaml") || l.includes("yml")) return "yaml";
+  return "bash";
+}
+
 // ── code block ─────────────────────────────────────────────────────────────
 
-function CodeBlock(props: { code: string; label?: string }) {
+function CodeBlock(props: { code: string; label?: string; lang?: Lang }) {
+  const lang = props.lang ?? (props.label ? langFromLabel(props.label) : "bash");
   return (
     <div className="docs-codeblock group relative overflow-hidden rounded-[10px] border border-[var(--admin-border)] bg-[var(--admin-surface)]">
       <div className="docs-codeblock-glow" aria-hidden />
       {props.label && (
-        <div className="relative z-10 flex items-center justify-between border-b border-[var(--admin-border)] px-3.5 py-1.5">
-          <span className="admin-label text-[10px]">{props.label}</span>
+        <div className="relative z-10 flex items-center justify-between border-b border-[var(--admin-border)] bg-white/[0.015] px-3.5 py-1.5">
+          <div className="flex items-center gap-1.5 pl-0.5">
+            <span className="h-2 w-2 rounded-full bg-[#ff5f57]/70" aria-hidden />
+            <span className="h-2 w-2 rounded-full bg-[#febc2e]/70" aria-hidden />
+            <span className="h-2 w-2 rounded-full bg-[#28c840]/70" aria-hidden />
+            <span className="admin-label ml-1.5 text-[10px]">{props.label}</span>
+          </div>
           <CopyBtn text={props.code} />
         </div>
       )}
@@ -123,7 +201,7 @@ function CodeBlock(props: { code: string; label?: string }) {
         </div>
       )}
       <pre className="relative z-10 overflow-x-auto px-3.5 py-3 text-[12px] leading-relaxed" style={{ fontFamily: MONO }}>
-        <code className="text-[var(--admin-text-muted)]">{props.code}</code>
+        <code className="text-[var(--admin-text-muted)]">{highlight(props.code, lang)}</code>
       </pre>
     </div>
   );
@@ -163,9 +241,9 @@ function TabbedCode(props: {
 
 type Method = "POST" | "GET";
 
-const METHOD_STYLES: Record<Method, { bg: string; text: string }> = {
-  POST: { bg: "bg-amber-500/10", text: "text-amber-400" },
-  GET: { bg: "bg-emerald-500/10", text: "text-emerald-400" },
+const METHOD_STYLES: Record<Method, { bg: string; text: string; accent: string }> = {
+  POST: { bg: "bg-amber-500/10", text: "text-amber-400", accent: "border-l-amber-500/40" },
+  GET: { bg: "bg-emerald-500/10", text: "text-emerald-400", accent: "border-l-emerald-500/40" },
 };
 
 function EndpointCard(props: {
@@ -179,14 +257,15 @@ function EndpointCard(props: {
   const { method, path, desc, auth, example, children } = props;
   const ms = METHOD_STYLES[method];
   return (
-    <div className="rounded-[12px] border border-[var(--admin-border)] bg-[var(--admin-surface)] p-4 transition-colors hover:border-[var(--admin-border-hover)]">
+    <div className={`rounded-[12px] border border-[var(--admin-border)] border-l-2 ${ms.accent} bg-[var(--admin-surface)] p-4 transition-all hover:-translate-y-px hover:border-[var(--admin-border-hover)] hover:shadow-lg hover:shadow-black/20`}>
       <div className="flex flex-wrap items-center gap-2">
-        <span className={`flex h-5 min-w-[48px] items-center justify-center rounded-md px-2 text-[10px] font-bold tracking-wider ${ms.bg} ${ms.text}`}>
+        <span className={`docs-method-badge flex h-5 min-w-[48px] items-center justify-center rounded-md px-2 text-[10px] font-bold tracking-wider ${ms.bg} ${ms.text}`}>
           {method}
         </span>
         <code className="text-[13px] font-semibold text-[var(--admin-text)]" style={{ fontFamily: MONO }}>
           {path}
         </code>
+        <PathCopyBtn text={path} />
       </div>
       <p className="mt-2 text-[12px] leading-relaxed text-[var(--admin-text-muted)]">{desc}</p>
       {auth && (
@@ -207,32 +286,70 @@ function EndpointCard(props: {
 
 // ── feature pill ────────────────────────────────────────────────────────────
 
-function FeatureCard(props: { icon: LucideIcon; title: string; body: string }) {
+const FEATURE_TONES: Record<string, string> = {
+  blue: "text-blue-300 from-blue-500/15 to-blue-500/[0.05]",
+  violet: "text-violet-300 from-violet-500/15 to-violet-500/[0.05]",
+  amber: "text-amber-300 from-amber-500/15 to-amber-500/[0.05]",
+  emerald: "text-emerald-300 from-emerald-500/15 to-emerald-500/[0.05]",
+  cyan: "text-cyan-300 from-cyan-500/15 to-cyan-500/[0.05]",
+  pink: "text-pink-300 from-pink-500/15 to-pink-500/[0.05]",
+};
+
+function FeatureCard(props: { icon: LucideIcon; title: string; body: string; tone?: keyof typeof FEATURE_TONES }) {
   const Icon = props.icon;
+  const tone = FEATURE_TONES[props.tone ?? "blue"].split(" ");
   return (
-    <Card className="p-4 transition-colors hover:border-[var(--admin-border-hover)]">
-      <div className="flex items-center gap-2.5">
-        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-gradient-to-br from-blue-500/15 to-violet-500/15 ring-1 ring-white/[0.06]">
-          <Icon className="h-3.5 w-3.5" style={{ color: "rgba(59,130,246,0.85)" }} />
+    <div
+      className="admin-card docs-spotlight p-4 transition-all hover:-translate-y-px hover:border-[var(--admin-border-hover)] hover:shadow-lg hover:shadow-black/20"
+      onMouseMove={(e) => {
+        const r = e.currentTarget.getBoundingClientRect();
+        e.currentTarget.style.setProperty("--mx", `${e.clientX - r.left}px`);
+        e.currentTarget.style.setProperty("--my", `${e.clientY - r.top}px`);
+      }}
+    >
+      <div className="relative z-10 flex items-center gap-2.5">
+        <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-gradient-to-br ${tone[1]} ${tone[2]} ring-1 ring-white/[0.06]`}>
+          <Icon className={`h-3.5 w-3.5 ${tone[0]}`} />
         </span>
         <h4 className="text-[13px] font-semibold text-[var(--admin-text)]">{props.title}</h4>
       </div>
-      <p className="mt-2 text-[12px] leading-relaxed text-[var(--admin-text-muted)]">{props.body}</p>
-    </Card>
+      <p className="relative z-10 mt-2 text-[12px] leading-relaxed text-[var(--admin-text-muted)]">{props.body}</p>
+    </div>
   );
 }
 
 // ── heading anchor ─────────────────────────────────────────────────────────
 
-function SectionHeading(props: { icon: LucideIcon; title: string; subtitle?: string }) {
+// Per-section accent tones for the heading icon chip (keyed by section index).
+const HEADING_TONES: Record<number, { chip: string; icon: string }> = {
+  1: { chip: "from-blue-500/20 to-blue-500/[0.04]", icon: "text-blue-300" },
+  2: { chip: "from-emerald-500/20 to-emerald-500/[0.04]", icon: "text-emerald-300" },
+  3: { chip: "from-violet-500/20 to-violet-500/[0.04]", icon: "text-violet-300" },
+  4: { chip: "from-amber-500/20 to-amber-500/[0.04]", icon: "text-amber-300" },
+  5: { chip: "from-cyan-500/20 to-cyan-500/[0.04]", icon: "text-cyan-300" },
+  6: { chip: "from-fuchsia-500/20 to-fuchsia-500/[0.04]", icon: "text-fuchsia-300" },
+  7: { chip: "from-sky-500/20 to-sky-500/[0.04]", icon: "text-sky-300" },
+  8: { chip: "from-pink-500/20 to-pink-500/[0.04]", icon: "text-pink-300" },
+};
+
+function SectionHeading(props: { icon: LucideIcon; title: string; subtitle?: string; index?: number }) {
   const Icon = props.icon;
+  const tone = HEADING_TONES[props.index ?? 0] ?? {
+    chip: "from-blue-500/20 to-blue-500/[0.04]",
+    icon: "text-blue-300",
+  };
   return (
     <div className="mb-4 flex items-center gap-3">
-      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-gradient-to-br from-blue-500/15 to-violet-500/15 ring-1 ring-white/[0.06]">
-        <Icon className="h-4 w-4" style={{ color: "rgba(59,130,246,0.85)" }} />
+      <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-gradient-to-br ${tone.chip} ring-1 ring-white/[0.06]`}>
+        <Icon className={`h-4 w-4 ${tone.icon}`} />
       </span>
       <div>
         <h2 className="text-[18px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
+          {props.index != null && (
+            <span className="mr-2 font-mono text-[12px] font-normal text-[var(--admin-text-dim)]">
+              {String(props.index).padStart(2, "0")}
+            </span>
+          )}
           {props.title}
         </h2>
         {props.subtitle && (
@@ -509,6 +626,63 @@ function DocsFlowDiagram() {
   );
 }
 
+// ── hero terminal ──────────────────────────────────────────────────────────
+
+// Fake "live gateway trace" terminal — a streaming curl against the gateway
+// with a routing line, SSE chunks, and a usage footer. Purely decorative.
+function HeroTerminal() {
+  const req = `curl http://localhost:4000/v1/chat/completions \\
+  -H "Authorization: Bearer sk-wiwi-…" \\
+  -d '{"model":"gpt-4o","stream":true,
+       "messages":[{"role":"user","content":"hi"}]}'`;
+  return (
+    <div className="docs-terminal relative hidden overflow-hidden rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] shadow-2xl shadow-black/40 lg:block">
+      <div className="docs-terminal-glow" aria-hidden />
+      <div className="relative z-10 flex items-center gap-2 border-b border-[var(--admin-border)] bg-white/[0.02] px-3.5 py-2.5">
+        <span className="h-2.5 w-2.5 rounded-full bg-[#ff5f57]" aria-hidden />
+        <span className="h-2.5 w-2.5 rounded-full bg-[#febc2e]" aria-hidden />
+        <span className="h-2.5 w-2.5 rounded-full bg-[#28c840]" aria-hidden />
+        <span className="ml-2 text-[10px] tracking-wide text-[var(--admin-text-dim)]" style={{ fontFamily: MONO }}>
+          wiwi gateway
+        </span>
+        <span className="ml-auto inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[9px] font-medium text-emerald-300">
+          <span className="docs-pulse-dot" aria-hidden /> live
+        </span>
+      </div>
+      <pre className="relative z-10 min-h-[252px] overflow-x-auto px-4 py-3.5 text-[10.5px] leading-[1.75]" style={{ fontFamily: MONO }}>
+        <code>
+          {highlight(req, "bash")}
+          {"\n"}
+          <span className="text-violet-300">→ routed</span>
+          <span className="text-[var(--admin-text-dim)]"> · openai-prod · </span>
+          <span className="text-sky-300">gpt-4o</span>
+          <span className="text-[var(--admin-text-dim)]"> · key </span>
+          <span className="text-amber-300">pool-1</span>
+          <span className="text-[var(--admin-text-dim)]"> (w3)</span>
+          {"\n\n"}
+          <span className="text-[var(--admin-text-dim)]">data: </span>
+          <span className="text-[var(--admin-text-muted)]">{'{"delta":{"content":"'}</span>
+          <span className="text-emerald-300">Hel</span>
+          <span className="text-[var(--admin-text-muted)]">{'"}'}</span>
+          {"\n"}
+          <span className="text-[var(--admin-text-dim)]">data: </span>
+          <span className="text-[var(--admin-text-muted)]">{'{"delta":{"content":"'}</span>
+          <span className="text-emerald-300">lo, wiwi.</span>
+          <span className="text-[var(--admin-text-muted)]">{'"}'}</span>
+          {"\n"}
+          <span className="text-[var(--admin-text-dim)]">data: </span>
+          <span className="text-[var(--admin-text-muted)]">[DONE]</span>
+          {"\n\n"}
+          <span className="text-emerald-400">✓ 200 OK</span>
+          <span className="text-[var(--admin-text-dim)]"> · 87 tok · 214 tok/s · </span>
+          <span className="text-amber-300">$0.00021</span>
+          <span className="docs-caret" aria-hidden />
+        </code>
+      </pre>
+    </div>
+  );
+}
+
 // ── page ────────────────────────────────────────────────────────────────────
 
 export function DocsPage() {
@@ -521,7 +695,9 @@ export function DocsPage() {
       {/* Hero banner */}
       <div className="docs-hero relative mb-10 overflow-hidden rounded-2xl border border-[var(--admin-border)] px-6 py-10 sm:px-10 sm:py-14">
         <div className="docs-hero-glow" aria-hidden />
-        <div className="relative z-10">
+        <div className="docs-hero-aurora" aria-hidden />
+        <div className="relative z-10 grid items-center gap-10 lg:grid-cols-[1.05fr_0.95fr]">
+        <div>
           <div className="mb-3 flex items-center gap-2">
             <span className="admin-badge admin-badge-blue inline-flex items-center gap-1.5">
               <BookOpen size={11} /> Documentation
@@ -532,7 +708,7 @@ export function DocsPage() {
           </div>
           <h1 className="text-3xl font-semibold tracking-[-0.02em] text-[var(--admin-text)] sm:text-4xl">
             Point any client at{" "}
-            <span className="bg-gradient-to-r from-blue-400 to-fuchsia-400 bg-clip-text text-transparent">
+            <span className="docs-gradient-text bg-gradient-to-r from-blue-400 via-fuchsia-400 to-blue-400 bg-clip-text text-transparent">
               wiwi
             </span>
           </h1>
@@ -557,6 +733,18 @@ export function DocsPage() {
               <Network size={14} /> API reference
             </button>
           </div>
+          <div className="mt-7 flex flex-wrap items-center gap-x-5 gap-y-1.5 text-[11px] text-[var(--admin-text-dim)]">
+            {["3 inbound dialects", "4+ outbound providers", "1 canonical IR", "SSE streaming"].map(
+              (s, i) => (
+                <span key={s} className="inline-flex items-center gap-5">
+                  {i > 0 && <span className="h-1 w-1 rounded-full bg-white/20" aria-hidden />}
+                  {s}
+                </span>
+              ),
+            )}
+          </div>
+        </div>
+        <HeroTerminal />
         </div>
       </div>
 
@@ -566,7 +754,7 @@ export function DocsPage() {
         <aside className="docs-sidebar">
           <nav className="sticky top-[80px] space-y-0.5">
             <span className="admin-label mb-2 block px-3">On this page</span>
-            {SECTIONS.map((s) => {
+            {SECTIONS.map((s, i) => {
               const Icon = s.icon;
               const isActive = active === s.id;
               return (
@@ -574,12 +762,13 @@ export function DocsPage() {
                   key={s.id}
                   type="button"
                   onClick={() => handleClick(s.id)}
-                  className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-[12px] transition-colors ${
+                  className={`docs-nav-item flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-[12px] transition-colors ${
                     isActive
-                      ? "bg-blue-500/[0.06] font-medium text-blue-200"
+                      ? "is-active bg-blue-500/[0.06] font-medium text-blue-200"
                       : "text-[var(--admin-text-dim)] hover:bg-white/[0.02] hover:text-[var(--admin-text-muted)]"
                   }`}
                 >
+                  <span className="font-mono text-[10px] opacity-50">{String(i + 1).padStart(2, "0")}</span>
                   <Icon className="h-3.5 w-3.5 shrink-0" />
                   <span className="flex-1">{s.label}</span>
                   {isActive && <ChevronRight size={12} className="text-blue-400" />}
@@ -602,6 +791,7 @@ export function DocsPage() {
           {/* overview */}
           <section id="overview" className="docs-section scroll-mt-20">
             <SectionHeading
+              index={1}
               icon={BookOpen}
               title="Overview"
               subtitle="How the gateway translates and routes requests"
@@ -620,6 +810,7 @@ export function DocsPage() {
           {/* quickstart */}
           <section id="quickstart" className="docs-section scroll-mt-20">
             <SectionHeading
+              index={2}
               icon={Terminal}
               title="Quickstart"
               subtitle="Running locally in under a minute"
@@ -652,6 +843,7 @@ curl http://localhost:4000/v1/chat/completions \\
           {/* authentication */}
           <section id="authentication" className="docs-section scroll-mt-20">
             <SectionHeading
+              index={3}
               icon={KeyRound}
               title="Authentication"
               subtitle="Virtual keys — never provider keys"
@@ -704,6 +896,7 @@ curl http://localhost:4000/v1/chat/completions \\
           {/* endpoints */}
           <section id="endpoints" className="docs-section scroll-mt-20">
             <SectionHeading
+              index={4}
               icon={Network}
               title="Endpoints"
               subtitle="The three inbound surfaces plus model listing"
@@ -730,6 +923,7 @@ curl http://localhost:4000/v1/chat/completions \\
           {/* cross-provider */}
           <section id="cross-provider" className="docs-section scroll-mt-20">
             <SectionHeading
+              index={5}
               icon={RefreshCw}
               title="Cross-provider routing"
               subtitle="Decouple the caller's dialect from the upstream provider"
@@ -767,6 +961,7 @@ router_settings:
           {/* streaming */}
           <section id="streaming" className="docs-section scroll-mt-20">
             <SectionHeading
+              index={6}
               icon={Zap}
               title="Streaming"
               subtitle="Server-sent events across all three dialects"
@@ -805,6 +1000,7 @@ router_settings:
           {/* configuration */}
           <section id="config" className="docs-section scroll-mt-20">
             <SectionHeading
+              index={7}
               icon={Settings2}
               title="Configuration"
               subtitle="A single wiwi.yaml — LiteLLM-shaped"
@@ -857,6 +1053,7 @@ router_settings:
           {/* features */}
           <section id="features" className="docs-section scroll-mt-20">
             <SectionHeading
+              index={8}
               icon={Layers}
               title="Features"
               subtitle="Built-in for every deployment — no plugins"
@@ -864,31 +1061,37 @@ router_settings:
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <FeatureCard
                 icon={Layers}
+                tone="blue"
                 title="Three inbound dialects"
                 body="OpenAI Chat, OpenAI Responses (Codex CLI), and Anthropic Messages all speak the same canonical IR."
               />
               <FeatureCard
                 icon={KeyRound}
+                tone="violet"
                 title="Virtual keys"
                 body="Per-client credentials with model allowlists, expiry, and spend caps. Callers never see provider keys."
               />
               <FeatureCard
                 icon={Wallet}
+                tone="amber"
                 title="Budgets & rate limits"
                 body="Per-key spend ceilings and RPM/TPM throttles keep noisy tenants from burning your quota."
               />
               <FeatureCard
                 icon={Boxes}
+                tone="emerald"
                 title="Key pools"
                 body="Pool multiple keys per provider with smooth weighted round-robin. Exhausted keys cool down automatically."
               />
               <FeatureCard
                 icon={RefreshCw}
+                tone="cyan"
                 title="Retries & fallbacks"
                 body="Automatic retries on transient failures, per-key cooldowns, and fallback model groups."
               />
               <FeatureCard
                 icon={Palette}
+                tone="pink"
                 title="Cost tracking"
                 body="Token usage and cost calculation for every call, per key, per model, per provider."
               />

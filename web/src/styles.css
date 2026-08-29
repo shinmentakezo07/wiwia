@@ -1025,7 +1025,233 @@ select.admin-input option {
 
 /* CTA card */
 .docs-cta {
+  position: relative;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.02) 0%, transparent 100%);
+}
+
+/* Gradient ring border on the CTA card */
+.docs-cta::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(
+    135deg,
+    rgba(59, 130, 246, 0.25) 0%,
+    transparent 35%,
+    transparent 65%,
+    rgba(168, 85, 247, 0.25) 100%
+  );
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* Hero: fading dot-grid backdrop */
+.docs-hero::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(rgba(255, 255, 255, 0.07) 1px, transparent 1px);
+  background-size: 22px 22px;
+  -webkit-mask-image: radial-gradient(ellipse 70% 85% at 50% 0%, black 30%, transparent 75%);
+  mask-image: radial-gradient(ellipse 70% 85% at 50% 0%, black 30%, transparent 75%);
+  pointer-events: none;
+}
+
+/* Sidebar nav: accent rail on the active item */
+.docs-nav-item {
+  position: relative;
+}
+.docs-nav-item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 22%;
+  bottom: 22%;
+  width: 2px;
+  border-radius: 2px;
+  background: transparent;
+  transition: background 0.2s ease;
+}
+.docs-nav-item.is-active::before {
+  background: linear-gradient(180deg, #60a5fa, #a78bfa);
+}
+
+/* Hairline divider between content sections */
+.docs-section + .docs-section::before {
+  content: "";
+  position: absolute;
+  top: -2rem;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.05), transparent);
+  pointer-events: none;
+}
+.docs-section {
+  position: relative;
+}
+
+/* Inline code chips in docs prose (not inside <pre>) */
+.docs-content :not(pre) > code {
+  padding: 0.1em 0.35em;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 0.85em;
+  color: #bfdbfe;
+}
+
+/* Syntax highlighting tokens (dependency-free) */
+.docs-codeblock .tok-com {
+  color: rgba(139, 148, 158, 0.8);
+  font-style: italic;
+}
+.docs-codeblock .tok-str {
+  color: #6ee7b7;
+  opacity: 0.9;
+}
+.docs-codeblock .tok-kw {
+  color: #c4b5fd;
+}
+.docs-codeblock .tok-key {
+  color: #7dd3fc;
+}
+.docs-codeblock .tok-var {
+  color: #fcd34d;
+}
+.docs-codeblock .tok-flag {
+  color: #93c5fd;
+  opacity: 0.85;
+}
+.docs-codeblock .tok-num {
+  color: #fde68a;
+}
+.docs-codeblock .tok-bool {
+  color: #f9a8d4;
+}
+.docs-codeblock .tok-url {
+  color: #67e8f9;
+}
+
+/* ─── Docs page: visual enhancements ─────────────────────────────────────── */
+
+/* Hero aurora — drifting color fields behind the hero (blurred, ambient) */
+.docs-hero-aurora {
+  position: absolute;
+  inset: -20%;
+  pointer-events: none;
+  background:
+    radial-gradient(420px 240px at 14% 12%, rgba(59, 130, 246, 0.12), transparent 65%),
+    radial-gradient(460px 280px at 86% 88%, rgba(168, 85, 247, 0.10), transparent 65%),
+    radial-gradient(320px 200px at 70% 8%, rgba(34, 211, 238, 0.06), transparent 70%);
+  filter: blur(28px);
+}
+
+/* Hero accent word: gradient pans slowly across the text */
+.docs-gradient-text {
+  background-size: 200% auto;
+}
+
+/* Hero terminal window: corner glows */
+.docs-terminal-glow {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 320px 140px at 80% 0%, rgba(139, 92, 246, 0.10) 0%, transparent 70%),
+    radial-gradient(ellipse 260px 120px at 10% 100%, rgba(59, 130, 246, 0.07) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+/* Blinking caret at the end of the terminal trace */
+.docs-caret {
+  display: inline-block;
+  width: 7px;
+  height: 13px;
+  margin-left: 3px;
+  vertical-align: -2px;
+  background: #93c5fd;
+}
+
+/* Pulsing "live" dot in the terminal chrome */
+.docs-pulse-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 9999px;
+  background: #34d399;
+}
+
+/* Code blocks: gradient ring + soft glow on hover */
+.docs-codeblock {
+  transition: border-color 0.25s ease, box-shadow 0.25s ease;
+}
+.docs-codeblock:hover {
+  border-color: rgba(96, 165, 250, 0.35);
+  box-shadow:
+    0 0 0 1px rgba(96, 165, 250, 0.10),
+    0 10px 28px -14px rgba(59, 130, 246, 0.30);
+}
+
+/* Feature cards: mouse-tracking spotlight (position fed via --mx / --my) */
+.docs-spotlight {
+  position: relative;
+  overflow: hidden;
+}
+.docs-spotlight::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  background: radial-gradient(
+    260px circle at var(--mx, 50%) var(--my, 50%),
+    rgba(96, 165, 250, 0.10),
+    transparent 65%
+  );
+  pointer-events: none;
+}
+.docs-spotlight:hover::before {
+  opacity: 1;
+}
+
+/* Endpoint method badges: soft glow tinted by the badge text color */
+.docs-method-badge {
+  box-shadow: 0 0 14px -6px currentColor;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .docs-hero-aurora {
+    animation: docs-aurora-drift 16s ease-in-out infinite alternate;
+  }
+  .docs-gradient-text {
+    animation: docs-gradient-pan 7s linear infinite;
+  }
+  .docs-caret {
+    animation: docs-caret-blink 1.1s steps(1) infinite;
+  }
+  .docs-pulse-dot {
+    animation: docs-pulse 1.8s ease-in-out infinite;
+  }
+}
+
+@keyframes docs-aurora-drift {
+  0% { transform: translate3d(0, 0, 0) scale(1); }
+  50% { transform: translate3d(3%, -4%, 0) scale(1.06); }
+  100% { transform: translate3d(-3%, 3%, 0) scale(1.03); }
+}
+@keyframes docs-gradient-pan {
+  to { background-position: 200% center; }
+}
+@keyframes docs-caret-blink {
+  50% { opacity: 0; }
+}
+@keyframes docs-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.45); }
+  50% { opacity: 0.65; box-shadow: 0 0 0 5px rgba(52, 211, 153, 0); }
 }
 
 /* ─── Landing page: AnimatedGroup + MarqueeContainer keyframes ──────────── */

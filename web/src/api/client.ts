@@ -82,8 +82,12 @@ import type {
   VirtualKey,
 } from "./types";
 
+export interface ProvidersResponse {
+  providers: Provider[];
+  alias_to_provider: Record<string, string>;
+}
 export const getProviders = () =>
-  api<{ providers: Provider[] }>("/admin/providers");
+  api<ProvidersResponse>("/admin/providers");
 
 export const getBuiltinProviders = () =>
   api<{ providers: BuiltinProvider[] }>("/admin/provider-catalog");
@@ -123,7 +127,8 @@ export const deleteProvider = (name: string) =>
 
 export const patchProvider = (
   name: string,
-  patch: { name?: string; base_url?: string; provider_type?: string; round_robin?: boolean },
+  patch: { name?: string; base_url?: string; provider_type?: string;
+            round_robin?: boolean; alias_id?: string | null },
 ) =>
   api<Provider>(`/admin/providers/${encodeURIComponent(name)}`, {
     method: "PATCH",

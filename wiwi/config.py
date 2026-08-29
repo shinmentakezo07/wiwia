@@ -84,12 +84,30 @@ class ProviderDef(BaseModel):
     # When False, keys are used sequentially (first available, in label order).
     round_robin: bool = True
     keys: list[KeyDef] = Field(default_factory=list)
+    # Optional caller-facing alias for this account.  When set, clients can
+    # request a model by the alias id and the router will resolve it to a
+    # model_name the same way ``model_group_alias`` does.  Multiple providers
+    # that share an alias automatically pool into a single cross-provider
+    # weighted round-robin for any model_name they both serve.
+    alias_id: str | None = None
 
     @field_validator("keys")
     @classmethod
     def _need_keys(cls, v: list[KeyDef]) -> list[KeyDef]:
         if not v:
             raise ValueError("provider needs at least one key entry")
+        return v
+
+    @field_validator("alias_id")
+    @classmethod
+    def _alias_id_format(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            return None
+        if any(c.isspace() for c in v):
+            raise ValueError("alias_id must not contain whitespace")
         return v
 
 
@@ -143,7 +161,19 @@ class RouterSettings(BaseModel):
     # Prometheus /metrics endpoint
     prometheus_enabled: bool = False
     prometheus_path: str = "/metrics"
-
+    # Cycle rotation: every N successful requests served by the same provider
+    # or the same key, force the WRR cursor to advance so traffic actually
+    # rotates, not just spreads by weight.  Set to 0 to disable the cadence
+    # and keep weight-driven WRR only.
+    cycle_every_n: int = 3
+    # Failover policy: "any_error" rotates to the next key on any non-200
+    # (counting consecutive fails so we can still permanently retire a key
+    # after a sustained auth failure); "standard" keeps the historical
+    # 429/5xx-only cooldown behaviour.
+    failover_mode: Literal["any_error", "standard"] = "any_error"
+    # Consecutive failures before a key is permanently retired.  Only
+    # relevant in "any_error" mode.  401/403 errors count twice.
+    key_max_consecutive_fails: int = 5
 
 class GeneralSettings(BaseModel):
     master_key: str = ""
@@ -184,6 +214,18 @@ class WiwiConfig(BaseModel):
     @model_validator(mode="after")
     def _model_refs_exist(self) -> WiwiConfig:
         names = {p.name for p in self.providers}
+        # alias_id must be unique across providers so cross-provider pool
+        # resolution is unambiguous.
+        seen_alias: dict[str, str] = {}
+        for p in self.providers:
+            if p.alias_id is None:
+                continue
+            prior = seen_alias.get(p.alias_id)
+            if prior is not None:
+                raise ValueError(
+                    f"alias_id {p.alias_id!r} is used by both provider"
+                    f" {prior!r} and {p.name!r}")
+            seen_alias[p.alias_id] = p.name
         for entry in self.model_list:
             if entry.wiwi_params.provider not in names:
                 raise ValueError(
@@ -203,7 +245,6 @@ def load_config(path: str | Path) -> WiwiConfig:
     if not isinstance(raw, dict):
         raise ConfigError(f"{p} must contain a YAML mapping at top level")
     return _validate(raw)
-
 
 def load_config_from_string(raw_yaml: str) -> WiwiConfig:
     """Load config from inline YAML (for WIWI_CONFIG env var in containers)."""

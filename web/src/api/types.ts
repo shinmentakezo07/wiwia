@@ -18,6 +18,7 @@ export interface Provider {
   provider_type: string;
   base_url: string;
   round_robin: boolean;
+  alias_id: string | null;
   healthy: boolean;
   keys: PoolKey[];
 }
@@ -40,6 +41,7 @@ export interface ModelGroup {
 export interface ModelsResponse {
   groups: ModelGroup[];
   aliases: Record<string, string>;
+  provider_aliases: Record<string, string>;
   strategy: string;
 }
 

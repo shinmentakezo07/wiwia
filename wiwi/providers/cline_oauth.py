@@ -20,6 +20,7 @@ from __future__ import annotations
 import base64
 import re
 import time
+from datetime import UTC
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
@@ -177,8 +178,8 @@ def _extract_fields(decoded: bytes) -> dict[str, Any]:
                 if "email" not in fields and claims.get("email"):
                     fields["email"] = claims["email"]
                 if "expiresAt" not in fields and claims.get("exp"):
-                    from datetime import datetime, timezone
-                    dt = datetime.fromtimestamp(claims["exp"], tz=timezone.utc)
+                    from datetime import datetime
+                    dt = datetime.fromtimestamp(claims["exp"], tz=UTC)
                     fields["expiresAt"] = dt.strftime(
                         "%Y-%m-%dT%H:%M:%S.000Z")
 

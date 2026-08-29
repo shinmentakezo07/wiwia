@@ -295,7 +295,16 @@ class AppState:
                 name=p["name"], provider_type=p["provider_type"],
                 base_url=p["base_url"], timeout_s=p["timeout_s"],
                 extra_headers=p.get("extra_headers", {}),
-                round_robin=p.get("round_robin", True))
+                round_robin=p.get("round_robin", True),
+                alias_id=p.get("alias_id"))
+        # reapply admin-saved alias_id (and the alias-to-provider map)
+        for p in data["providers"]:
+            alias = p.get("alias_id")
+            if alias and p["name"] in self.router.providers:
+                try:
+                    self.router.set_provider_alias(p["name"], alias)
+                except ValueError:
+                    pass  # duplicate alias; surface via the PATCH path
         # keys
         for k in data["keys"]:
             acct = self.router.providers.get(k["provider_name"])
@@ -317,6 +326,8 @@ class AppState:
             dep = Deployment(group=d["group_name"], provider=acct,
                              model_id=d["model_id"], weight=d["weight"])
             self.router.groups.setdefault(d["group_name"], []).append(dep)
+        # cross-provider pools may have grown from admin-added deployments
+        self.router.rebuild_cross_provider_pools()
         # alert rules
         rules = await self.config_store.get_setting("alert_rules")
         if rules is not None:
@@ -1003,7 +1014,6 @@ def create_app(config: WiwiConfig) -> FastAPI:
             entry = {**p, "builtin": True}
             entry["configured"] = p["provider_type"] in configured
             out.append(entry)
-        return ORJSONResponse({"providers": out})
 
     @app.get("/admin/providers")
     async def admin_providers(request: Request):
@@ -1019,10 +1029,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 "provider_type": acct.provider_type,
                 "base_url": acct.base_url,
                 "round_robin": acct.round_robin,
+                "alias_id": acct.alias_id,
                 "healthy": acct.healthy,
                 "keys": [_key_view(k, mono, wall) for k in acct.keys],
             })
-        return ORJSONResponse({"providers": out})
+        return ORJSONResponse({"providers": out,
+                               "alias_to_provider": dict(state.router.alias_to_provider)})
 
     @app.patch("/admin/providers/{name}/keys/{label}")
     async def admin_patch_provider_key(name: str, label: str, request: Request):
@@ -1129,6 +1141,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
         base_url = str(_interpolate(body.get("base_url")) or "") or _default_base_url(ptype)
         label = str(body.get("label") or "default")
         secret = str(_interpolate(body.get("key")) or "")
+        alias_raw = body.get("alias_id")
+        alias_id = (str(alias_raw).strip() if alias_raw is not None else None) or None
+        if alias_id is not None and any(c.isspace() for c in alias_id):
+            return _err(400, "invalid_request_error",
+                        "alias_id must not contain whitespace", request)
         if not name or not secret:
             return _err(400, "invalid_request_error", "name and key are required",
                         request)
@@ -1142,16 +1159,27 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return _err(400, "invalid_request_error",
                         f"base_url is required for provider type '{ptype}'",
                         request)
+        if alias_id is not None and alias_id in state.router.alias_to_provider:
+            return _err(409, "invalid_request_error",
+                        f"alias_id '{alias_id}' already used by provider"
+                        f" '{state.router.alias_to_provider[alias_id]}'",
+                        request)
         state.router.providers[name] = ProviderAccount(
             name=name, provider_type=ptype, base_url=base_url,
-            keys=[ProviderKey(label=label, secret=secret)])
+            keys=[ProviderKey(label=label, secret=secret)],
+            alias_id=alias_id)
+        if alias_id is not None:
+            state.router.alias_to_provider[alias_id] = name
         if state.config_store:
-            await state.config_store.add_provider(name, ptype, base_url)
+            await state.config_store.add_provider(name, ptype, base_url,
+                                                  alias_id=alias_id)
             await state.config_store.add_key(name, label, secret)
         await state.logs.log_audit(actor="master", action="provider.create",
                                    target=name,
-                                   diff={"provider_type": ptype, "base_url": base_url})
-        return ORJSONResponse({"name": name, "provider_type": ptype, "base_url": base_url})
+                                   diff={"provider_type": ptype, "base_url": base_url,
+                                         "alias_id": alias_id})
+        return ORJSONResponse({"name": name, "provider_type": ptype,
+                               "base_url": base_url, "alias_id": alias_id})
 
     @app.delete("/admin/providers/{name}")
     async def admin_delete_provider(name: str, request: Request):
@@ -1171,6 +1199,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         f"provider still referenced by groups: "
                         f"{', '.join(referencing)} — remove those deployments first",
                         request)
+        # drop any alias_id entry that points at this provider
+        for k, v in list(state.router.alias_to_provider.items()):
+            if v == name:
+                del state.router.alias_to_provider[k]
         del state.router.providers[name]
         if state.config_store:
             await state.config_store.delete_provider(name)
@@ -1221,6 +1253,22 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if "round_robin" in body:
             acct.round_robin = bool(body["round_robin"])
             diff["round_robin"] = acct.round_robin
+        alias_change: tuple[str | None, bool] | None = None
+        if "alias_id" in body:
+            alias_raw = body["alias_id"]
+            if alias_raw is None or (isinstance(alias_raw, str) and not alias_raw.strip()):
+                new_alias: str | None = None
+            else:
+                new_alias = str(alias_raw).strip()
+                if any(c.isspace() for c in new_alias):
+                    return _err(400, "invalid_request_error",
+                                "alias_id must not contain whitespace", request)
+            prior = state.router.alias_to_provider.get(new_alias) if new_alias else None
+            if new_alias is not None and prior is not None and prior != name:
+                return _err(409, "invalid_request_error",
+                            f"alias_id '{new_alias}' already used by provider"
+                            f" '{prior}'", request)
+            alias_change = (new_alias, True)
         # apply rename last so identity-based deployment refs stay valid
         if new_name is not None and new_name != name:
             acct.name = new_name
@@ -1229,11 +1277,27 @@ def create_app(config: WiwiConfig) -> FastAPI:
             target = f"{name}→{new_name}"
         else:
             target = name
+        if alias_change is not None:
+            new_alias, _ = alias_change
+            # remove old mapping pointing at this provider (any alias_id)
+            for k, v in list(state.router.alias_to_provider.items()):
+                if v == acct.name:
+                    del state.router.alias_to_provider[k]
+            if new_alias is not None:
+                state.router.alias_to_provider[new_alias] = acct.name
+            acct.alias_id = new_alias
+            diff["alias_id"] = new_alias
         if state.config_store:
-            await state.config_store.update_provider(
-                name, provider_type=diff.get("provider_type"),
-                base_url=diff.get("base_url"),
-                round_robin=diff.get("round_robin"), new_name=new_name)
+            update_kwargs: dict[str, Any] = {
+                "provider_type": diff.get("provider_type"),
+                "base_url": diff.get("base_url"),
+                "round_robin": diff.get("round_robin"),
+                "new_name": new_name,
+            }
+            if alias_change is not None:
+                update_kwargs["alias_id"] = alias_change[0]
+                update_kwargs["alias_id_set"] = True
+            await state.config_store.update_provider(name, **update_kwargs)
         await state.logs.log_audit(actor="master", action="provider.update",
                                    target=target, diff=diff)
         mono, wall = time.monotonic(), time.time()
@@ -1242,6 +1306,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             "provider_type": acct.provider_type,
             "base_url": acct.base_url,
             "round_robin": acct.round_robin,
+            "alias_id": acct.alias_id,
             "healthy": acct.healthy,
             "keys": [_key_view(k, mono, wall) for k in acct.keys],
         })
@@ -1371,6 +1436,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         f" to group '{gname}'",
                         request)
         state.router.groups.setdefault(gname, []).append(dep)
+        # adding to an existing group may promote it to a cross-provider pool
+        state.router.rebuild_cross_provider_pools()
         if state.config_store:
             await state.config_store.add_deployment(gname, pname, model_id, weight)
         await state.logs.log_audit(actor="master", action="deployment.create",
@@ -1415,6 +1482,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         settings = state.router.settings
         return ORJSONResponse({"groups": groups,
                              "aliases": dict(settings.model_group_alias),
+                             "provider_aliases": dict(state.router.alias_to_provider),
                              "strategy": settings.routing_strategy})
 
     @app.patch("/admin/model-groups/{name:path}")

@@ -488,6 +488,43 @@ function DeploymentsCard(props: { provider: string }) {
       ),
     [q.data, props.provider],
   );
+  // Cross-provider pool hint: for every model_id this account serves, find
+  // other providers that also serve the same model_id under the same group.
+  const poolPeers = useMemo(() => {
+    if (!q.data) return [];
+    const mineById = new Map<string, Set<string>>();
+    for (const g of q.data.groups) {
+      for (const d of g.deployments) {
+        if (d.provider === props.provider) {
+          if (!mineById.has(d.model_id)) mineById.set(d.model_id, new Set());
+          mineById.get(d.model_id)!.add(g.name);
+        }
+      }
+    }
+    const peers: Array<{ model_id: string; group: string; others: string[] }> = [];
+    for (const g of q.data.groups) {
+      for (const d of g.deployments) {
+        if (d.provider === props.provider) continue;
+        if (mineById.has(d.model_id)) {
+          for (const gname of mineById.get(d.model_id)!) {
+            if (gname === g.name) {
+              peers.push({ model_id: d.model_id, group: g.name,
+                            others: [d.provider] });
+            }
+          }
+        }
+      }
+    }
+    // de-dupe per (group, model_id) and merge provider names
+    const merged = new Map<string, { model_id: string; group: string; others: Set<string> }>();
+    for (const p of peers) {
+      const k = `${p.group}::${p.model_id}`;
+      if (!merged.has(k)) merged.set(k, { model_id: p.model_id, group: p.group, others: new Set() });
+      merged.get(k)!.others.add(p.others[0]);
+    }
+    return Array.from(merged.values());
+  }, [q.data, props.provider]);
+
   return (
     <Card>
       <CardHeader title="Models" right={<Badge tone="blue">{rows.length}</Badge>} />
@@ -496,16 +533,32 @@ function DeploymentsCard(props: { provider: string }) {
       ) : rows.length === 0 ? (
         <EmptyState>Not referenced by any model group yet.</EmptyState>
       ) : (
-        <Table head={["Model", "Model ID", "Weight", "Ready"]}>
-          {rows.map((d) => (
-            <tr key={`${d.group}/${d.model_id}`}>
-              <TD className="font-medium">{d.group}</TD>
-              <TD className="font-mono text-[12px]">{d.model_id}</TD>
-              <TD className="tabular-nums">{d.weight}</TD>
-              <TD><Badge tone={d.available ? "green" : "amber"}>{d.available ? "yes" : "cooldown"}</Badge></TD>
-            </tr>
-          ))}
-        </Table>
+        <>
+          {poolPeers.length > 0 && (
+            <div className="mx-4 mt-3 rounded-lg border border-blue-500/15 bg-blue-500/[0.04] px-3 py-2 text-[11px] text-blue-200">
+              <div className="font-semibold uppercase tracking-wide text-blue-300">
+                Cross-provider pool active
+              </div>
+              <ul className="mt-1 space-y-0.5 font-mono text-[11px]">
+                {poolPeers.map((p) => (
+                  <li key={`${p.group}::${p.model_id}`}>
+                    {p.group}/{p.model_id} — shares WRR with {Array.from(p.others).join(", ")}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <Table head={["Model", "Model ID", "Weight", "Ready"]}>
+            {rows.map((d) => (
+              <tr key={`${d.group}/${d.model_id}`}>
+                <TD className="font-medium">{d.group}</TD>
+                <TD className="font-mono text-[12px]">{d.model_id}</TD>
+                <TD className="tabular-nums">{d.weight}</TD>
+                <TD><Badge tone={d.available ? "green" : "amber"}>{d.available ? "yes" : "cooldown"}</Badge></TD>
+              </tr>
+            ))}
+          </Table>
+        </>
       )}
     </Card>
   );
@@ -519,14 +572,20 @@ function AccountSettingsCard(props: { p: Provider; onError: (m: string) => void 
   const [name, setName] = useState(props.p.name);
   const [type, setType] = useState(props.p.provider_type);
   const [baseUrl, setBaseUrl] = useState(props.p.base_url);
+  const [aliasId, setAliasId] = useState(props.p.alias_id ?? "");
   const [error, setError] = useState<string | null>(null);
 
   const save = useMutation({
     mutationFn: () => {
-      const patch: { name?: string; base_url?: string; provider_type?: string } = {};
+      const patch: { name?: string; base_url?: string;
+                     provider_type?: string; alias_id?: string | null } = {};
       if (name.trim() !== props.p.name) patch.name = name.trim();
       if (type !== props.p.provider_type) patch.provider_type = type;
       if (baseUrl.trim() !== props.p.base_url) patch.base_url = baseUrl.trim();
+      const trimmedAlias = aliasId.trim();
+      if (trimmedAlias !== (props.p.alias_id ?? "")) {
+        patch.alias_id = trimmedAlias === "" ? null : trimmedAlias;
+      }
       return patchProvider(props.p.name, patch);
     },
     onSuccess: (data) => {
@@ -543,11 +602,12 @@ function AccountSettingsCard(props: { p: Provider; onError: (m: string) => void 
   const dirty =
     name.trim() !== props.p.name ||
     type !== props.p.provider_type ||
-    baseUrl.trim() !== props.p.base_url;
+    baseUrl.trim() !== props.p.base_url ||
+    aliasId.trim() !== (props.p.alias_id ?? "");
 
   return (
     <Card className="xl:col-span-3">
-      <CardHeader title="Account settings" subtitle="Rename, change type or base URL." />
+      <CardHeader title="Account settings" subtitle="Rename, change type, base URL, or alias id." />
       <div className="space-y-3 px-4 pb-4 pt-2">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <Field label="Name">
@@ -563,6 +623,17 @@ function AccountSettingsCard(props: { p: Provider; onError: (m: string) => void 
         </div>
         <Field label="Base URL" hint="Optional for openai/anthropic/gemini/openrouter/gmicloud/nvidia-nim. Required for compatible URLs.">
           <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://…" />
+        </Field>
+        <Field
+          label="Alias id"
+          hint="Optional caller-facing alias. Providers sharing an alias form a cross-provider weighted round-robin pool for any model id both serve. Leave blank to clear."
+        >
+          <Input
+            value={aliasId}
+            onChange={(e) => setAliasId(e.target.value)}
+            placeholder="e.g. shared-openai"
+            className="font-mono"
+          />
         </Field>
         {error && <ErrorText>{error}</ErrorText>}
         <div className="flex justify-end">
