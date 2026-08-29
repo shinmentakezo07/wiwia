@@ -28,10 +28,13 @@ DATABASE_URL=postgresql+asyncpg://... wiwi --config wiwi.yaml   # Postgres (defa
 
 # admin UI
 cd web && bun install && bun run dev     # dev server (proxies to running gateway)
-cd web && bun run build                  # build → wiwi/server/static/
+cd web && bun run build                  # tsc -b && vite build → wiwi/server/static/
+cd web && bun run lint                   # eslint src (web/ is NOT covered by ruff)
+./start.sh                               # backend (:4000) + Vite (:5173) together, prefixed logs
 
 # docker
 docker compose up --build
+docker compose --profile pg up --build   # with Postgres instead of SQLite
 ```
 
 ## Architecture
@@ -66,15 +69,28 @@ Adding an inbound surface = one new module in `wiwi/wire/`; adding a provider = 
 | `tests/` | Pytest suite — thematic regression files (`test_audit_fixes.py`, `test_fix_roundN.py`, …) for bugfixes |
 | `docs/` | Design specs (intentionally run ahead of implementation) |
 
+Two adapters carry provider-specific quirks that live in `providers/` (never in `core/`):
+
+- **NVIDIA NIM** (`nim_adapter.py` + `nim_tool_schema.py` + `nim_native_tools.py`) — NIM is vLLM-backed and rejects JSON Schema boolean subschemas (`"additionalProperties": true`) and parameters named `type`, which collide with the schema keyword inside vLLM's tool parser. `nim_tool_schema.py` strips the former and aliases the latter to `_nim_arg_<name>`, keeping a mapping so agent-facing names are restored on the way back.
+- **Cline** (`cline_adapter.py` + `cline_oauth.py` + `cline_auto_refresh.py`) — OAuth-based; tokens refresh on demand, which is what makes Cline-backed requests survive a 401.
+
+`registry.get_adapter()` dispatches on provider type, and an import-time `assert` at the bottom of `registry.py` fails loudly if a type is added to `PROVIDER_TYPES` without a matching branch — so adding a provider is safe-by-construction: new adapter + one branch, and the assert catches the case where you forget the branch.
+
 ### Non-negotiable streaming contract
 
 `streaming/deltas.py` defines the `IRStreamDelta` taxonomy — the contract between adapters and encoders: exactly one `StreamStart`; `ToolCallOpen→ArgsDelta*→Close` nested per index; exactly one `UsageFinal` after last content delta; then `Finish`; then `StreamEnd` xor `StreamError`. Adapters guarantee legality; encoders never defend against malformed sequences.
+
+Note the one asymmetry in that contract: `StreamError` may terminate at **any** point, replacing everything after the last emitted delta. It is the abnormal-path terminal and needs no preceding `Finish`.
 
 ### Admin web UI
 
 - Source lives in `web/`; production build output lands in `wiwi/server/static/` and is served by `app.py` under `/admin/ui` (SPA history fallback).
 - Dev: `cd web && bun install && bun run dev` (Vite dev server proxies to a running gateway); ship: `bun run build`.
 - Backend rollups live in `wiwi/server/stats.py` (pure functions over LogEvent lists — unit-testable without DB).
+
+## Where to start reading
+
+`server/app.py` is ~2.5k lines and `core/gateway.py` ~900 — don't read either top to bottom. For a request's full path, start at `run_chat_like` (`server/app.py:576`) and follow the pipeline it names; `RequestContext` (`core/context.py`) is the single mutable object threaded through every stage, so reading its fields tells you what the pipeline carries. For streaming, read `streaming/deltas.py` (87 lines, the whole contract) before any adapter.
 
 ## Config
 
@@ -86,8 +102,9 @@ Error bodies are dialect-correct per surface (OpenAI `{"error":{…}}` vs Anthro
 
 - `pytest` + `pytest-asyncio` with `asyncio_mode = "auto"` — write bare `async def test_…`, no `@pytest.mark.asyncio` decorator.
 - Upstream mocking with `respx`; app-level tests via `asgi-lifespan` + `httpx.ASGITransport` (see `tests/test_integration.py`).
-- New bug fixes go alongside the existing thematic regression files (`test_audit_fixes.py`, `test_fix_round2.py`, `test_fix_round3.py`, …) rather than scattered into topic files.
-- Run full pytest + ruff before claiming work done or committing.
+- Property-based round-trip tests use `hypothesis` (see `tests/test_property_roundtrip.py`) — the right tool for codec/adapter invariants.
+- New bug fixes go alongside the existing thematic regression files (`test_audit_fixes.py`, `test_fix_round2.py`, … through `test_fix_round8.py`) rather than scattered into topic files. **Next unused number is `test_fix_round9.py`.**
+- Run full pytest + ruff before claiming work done or committing. Both are currently green (763 tests collected).
 
 ## Conventions & guardrails
 
@@ -110,6 +127,6 @@ Error bodies are dialect-correct per surface (OpenAI `{"error":{…}}` vs Anthro
 
 ## Project rules & skills
 
-- For bug fixes, follow the workflow in `.claude/rules/wiwi-bugfix-workflow.md` (TDD via `.claude/skills/test-driven-development`, root-cause via `.claude/skills/systematic-debugging`, review via `.claude/skills/requesting-code-review`). New bugfix tests go into the next thematic file `test_fix_roundN.py`.
+- For bug fixes, follow the workflow in `.claude/rules/wiwi-bugfix-workflow.md` (TDD via `.claude/skills/test-driven-development`, root-cause via `.claude/skills/systematic-debugging`, review via `.claude/skills/requesting-code-review`). New bugfix tests go into the next thematic file `test_fix_roundN.py` — **next unused is `test_fix_round9.py`** (`test_fix_round8.py` exists and the rule file's "round6" pointer is stale).
 - Superpowers skills (`/test-driven-development`, `/systematic-debugging`, `/brainstorming`, `/writing-plans`, `/executing-plans`, `/verification-before-completion`, `/using-git-worktrees`) are the methodology for plan → TDD → debug → review → verify.
 - ECC skills are the domain library (Python/FastAPI/React/agent orchestration, security scan, etc.); invoke the matching skill for the task.
