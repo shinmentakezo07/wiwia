@@ -28,6 +28,7 @@ import {
   LogIn,
   Plus,
   RefreshCw,
+  Search,
   Shuffle,
   Trash2,
   Unlink,
@@ -510,6 +511,16 @@ function GlobalDefaultModelCard(props: {
     if (settingsQ.data) setSelected(new Set(settingsQ.data.default_models));
   }, [settingsQ.data]);
 
+  // Free-text filter on the catalog (case-insensitive substring match).
+  // Saved ids always stay visible even if they aren't in the live catalog,
+  // so the admin can still see + remove what they previously saved.
+  const [search, setSearch] = useState("");
+  const filteredOptions = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return allOptions;
+    return allOptions.filter((m) => m.id.toLowerCase().includes(q));
+  }, [allOptions, search]);
+
   const isSelected = (id: string) => selected.has(id);
   const toggle = (id: string) => {
     setSelected((prev) => {
@@ -604,26 +615,58 @@ function GlobalDefaultModelCard(props: {
         )}
 
         {allOptions.length > 0 && (
-          <div className="max-h-72 space-y-1 overflow-y-auto rounded-lg border border-[var(--admin-border)] bg-white/[0.02] p-2">
-            {allOptions.map((m) => (
-              <label
-                key={m.id}
-                className="flex cursor-pointer items-center justify-between gap-2 rounded px-2 py-1.5 hover:bg-white/[0.04]"
-              >
-                <div className="flex min-w-0 items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={isSelected(m.id)}
-                    onChange={() => toggle(m.id)}
-                    className="h-3.5 w-3.5 cursor-pointer accent-blue-500"
-                  />
-                  <span className="truncate font-mono text-[12px]">{m.id}</span>
-                  {m.source === "saved" && (
-                    <Badge tone="blue">saved</Badge>
-                  )}
+          <div className="space-y-2">
+            <div className="relative">
+              <Search
+                size={13}
+                className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--admin-text-muted)]"
+              />
+              <Input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search model id (e.g. glm-5.2, claude-sonnet-5)"
+                className="pl-8"
+              />
+            </div>
+            <div className="max-h-72 space-y-1 overflow-y-auto rounded-lg border border-[var(--admin-border)] bg-white/[0.02] p-2">
+              {filteredOptions.length === 0 && (
+                <div className="px-2 py-3 text-center text-[12px] text-[var(--admin-text-muted)]">
+                  No model ids match “{search}”.
                 </div>
-              </label>
-            ))}
+              )}
+              {filteredOptions.map((m) => (
+                <label
+                  key={m.id}
+                  className="flex cursor-pointer items-center justify-between gap-2 rounded px-2 py-1.5 hover:bg-white/[0.04]"
+                >
+                  <div className="flex min-w-0 items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={isSelected(m.id)}
+                      onChange={() => toggle(m.id)}
+                      className="h-3.5 w-3.5 cursor-pointer accent-blue-500"
+                    />
+                    <span className="truncate font-mono text-[12px]">{m.id}</span>
+                    {m.source === "saved" && (
+                      <Badge tone="blue">saved</Badge>
+                    )}
+                  </div>
+                </label>
+              ))}
+            </div>
+            {search && (
+              <div className="text-[11px] text-[var(--admin-text-muted)]">
+                Showing {filteredOptions.length} of {allOptions.length} models.
+                <button
+                  type="button"
+                  onClick={() => setSearch("")}
+                  className="ml-2 text-blue-300 hover:underline"
+                >
+                  clear
+                </button>
+              </div>
+            )}
           </div>
         )}
 
