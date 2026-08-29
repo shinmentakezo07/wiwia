@@ -649,8 +649,9 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
             if cycle_n > 0:
                 for d in deps:
                     pname = d.provider.name
-                if pname in excluded_providers or provider_consec.get(pname, 0) >= cycle_n:
-                    prefer_exclude.add(id(d))
+                    if (pname in excluded_providers
+                            or provider_consec.get(pname, 0) >= cycle_n):
+                        prefer_exclude.add(id(d))
             dep = router.pick_deployment(deps, ctx, exclude=prefer_exclude)
             if dep is None:
                 # relax cycle exclusion and try again with just the tried dep set

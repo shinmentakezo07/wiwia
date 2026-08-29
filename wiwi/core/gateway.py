@@ -496,7 +496,11 @@ class Gateway:
             idle_s = self.router.settings.stream_idle_timeout_s
             loop_limit = (self.router.settings.stream_loop_limit
                           if self.router.settings.stream_loop_detection else 0)
-            loop_window: deque[str] = deque(maxlen=16)
+            # Window must be at least as large as the limit, otherwise the
+            # `len(loop_window) >= loop_limit` check can never fire (a deque
+            # with maxlen < loop_limit saturates below the limit forever).
+            # When detection is off (limit 0), skip the window entirely.
+            loop_window: deque[str] = deque(maxlen=max(2, loop_limit) if loop_limit else 1)
             line_iter = resp.aiter_lines().__aiter__()
             closed = False  # True once resp_cm.__aexit__ has been called
 
