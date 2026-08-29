@@ -22,30 +22,38 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Globe2,
   Link2,
   Loader2,
   LogIn,
   Plus,
   RefreshCw,
   Shuffle,
+  Trash2,
   Unlink,
 } from "lucide-react";
 import {
   addDeployment,
   addProvider,
+  api,
   clineConnect,
   clineDisconnect,
   clineLoginUrl,
   clineRefresh,
   clineStatus,
+  deleteClineDefaultModel,
+  fetchClineModels,
+  getClineSettings,
   getModels,
   getProviders,
   patchModelGroup,
+  putClineSettings,
 } from "@/api/client";
 import type {
   ClineStatusResponse,
   ModelGroup,
   Provider,
+  UpstreamModel,
 } from "@/api/types";
 import {
   Badge,
@@ -459,6 +467,199 @@ function OAuthProviderCard(props: {
   );
 }
 
+// -- global default model ------------------------------------------------------
+// Pick model ids once and have them auto-deployed to every Cline account
+// (existing + future).  The backend creates a router group
+// ``cline:<model_id>`` with one Deployment per Cline provider and a
+// cross-provider WRR cursor, so requests smooth-round-robin across
+// accounts.  Catalog comes from a 5-minute in-memory cache on the
+// backend; ``?refresh=true`` busts it.
+
+function GlobalDefaultModelCard(props: {
+  providers: Provider[];
+  onError: (m: string) => void;
+}) {
+  const qc = useQueryClient();
+  const settingsQ = useQuery({
+    queryKey: ["cline-settings"],
+    queryFn: getClineSettings,
+  });
+  const catalogQ = useQuery({
+    queryKey: ["cline-catalog"],
+    queryFn: fetchClineModels,
+    refetchOnWindowFocus: false,
+  });
+
+  const savedIds: string[] = settingsQ.data?.default_models ?? [];
+  const catalog: { id: string }[] = catalogQ.data?.models ?? [];
+
+  // Combine the saved ids (top of the picker, even if not in catalog) with
+  // the live catalog so the admin sees both.
+  const allOptions = useMemo(() => {
+    const out = new Map<string, { id: string; source: "saved" | "catalog" }>();
+    for (const id of savedIds) out.set(id, { id, source: "saved" });
+    for (const m of catalog) {
+      if (!out.has(m.id)) out.set(m.id, { id: m.id, source: "catalog" });
+    }
+    return Array.from(out.values());
+  }, [savedIds, catalog]);
+
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Sync local selection with the persisted list once it loads.
+  useEffect(() => {
+    if (settingsQ.data) setSelected(new Set(settingsQ.data.default_models));
+  }, [settingsQ.data]);
+
+  const isSelected = (id: string) => selected.has(id);
+  const toggle = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else if (next.size < 32) next.add(id);
+      return next;
+    });
+  };
+
+  const save = useMutation({
+    mutationFn: () => putClineSettings(Array.from(selected)),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["cline-settings"] });
+      void qc.invalidateQueries({ queryKey: ["models"] });
+    },
+    onError: (e) => props.onError(e.message),
+  });
+
+  const removeOne = useMutation({
+    mutationFn: (id: string) => deleteClineDefaultModel(id),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["cline-settings"] });
+      void qc.invalidateQueries({ queryKey: ["models"] });
+    },
+    onError: (e) => props.onError(e.message),
+  });
+
+  const refresh = useMutation({
+    mutationFn: () =>
+      api<{ models: UpstreamModel[] }>("/admin/cline/models?refresh=true"),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["cline-catalog"] });
+    },
+    onError: (e) => props.onError(e.message),
+  });
+
+  const dirty = useMemo(() => {
+    const a = Array.from(selected).sort();
+    const b = [...savedIds].sort();
+    return a.length !== b.length || a.some((x, i) => x !== b[i]);
+  }, [selected, savedIds]);
+
+  const clineCount = props.providers.filter((p) => p.provider_type === "cline").length;
+
+  return (
+    <Card>
+      <CardHeader
+        title={
+          <span className="flex items-center gap-2">
+            <Globe2 size={15} className="text-[var(--admin-text-muted)]" />
+            Global default model
+          </span>
+        }
+        right={
+          <div className="flex items-center gap-2">
+            <Badge tone={savedIds.length > 0 ? "green" : "gray"}>
+              {savedIds.length} default{savedIds.length !== 1 ? "s" : ""}
+            </Badge>
+            <Button
+              variant="ghost"
+              disabled={refresh.isPending || catalogQ.isLoading}
+              onClick={() => refresh.mutate()}
+            >
+              <RefreshCw
+                size={12}
+                className={refresh.isPending ? "animate-spin" : ""}
+              />
+              Refresh catalog
+            </Button>
+          </div>
+        }
+      />
+      <div className="space-y-4 px-4 pb-4 pt-2">
+        <p className="text-[12px] text-[var(--admin-text-muted)]">
+          Pick a model id once and it auto-deploys to every Cline account
+          (existing + new). Requests to <code>cline:&lt;id&gt;</code> then
+          smooth-round-robin across all {clineCount} account
+          {clineCount !== 1 ? "s" : ""} via the cross-provider WRR cursor.
+        </p>
+
+        {allOptions.length === 0 && catalogQ.isLoading && (
+          <div className="flex items-center gap-2 text-[12px] text-[var(--admin-text-muted)]">
+            <Loader2 size={12} className="animate-spin" /> Loading catalog…
+          </div>
+        )}
+
+        {allOptions.length === 0 && !catalogQ.isLoading && (
+          <div className="text-[12px] text-[var(--admin-text-muted)]">
+            No Cline catalog available — connect a Cline account first.
+          </div>
+        )}
+
+        {allOptions.length > 0 && (
+          <div className="max-h-72 space-y-1 overflow-y-auto rounded-lg border border-[var(--admin-border)] bg-white/[0.02] p-2">
+            {allOptions.map((m) => (
+              <label
+                key={m.id}
+                className="flex cursor-pointer items-center justify-between gap-2 rounded px-2 py-1.5 hover:bg-white/[0.04]"
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={isSelected(m.id)}
+                    onChange={() => toggle(m.id)}
+                    className="h-3.5 w-3.5 cursor-pointer accent-blue-500"
+                  />
+                  <span className="truncate font-mono text-[12px]">{m.id}</span>
+                  {m.source === "saved" && (
+                    <Badge tone="blue">saved</Badge>
+                  )}
+                </div>
+              </label>
+            ))}
+          </div>
+        )}
+
+        <div className="flex items-center justify-between gap-3 border-t border-[var(--admin-border)] pt-3">
+          <div className="text-[12px] text-[var(--admin-text-muted)]">
+            {selected.size} selected
+            {selected.size >= 32 ? " (max)" : ""}
+          </div>
+          <div className="flex items-center gap-2">
+            {savedIds.length > 0 && (
+              <Button
+                variant="ghost"
+                disabled={removeOne.isPending}
+                onClick={() => {
+                  // Remove all saved defaults one at a time (simple, safe).
+                  for (const id of savedIds) removeOne.mutate(id);
+                }}
+              >
+                <Trash2 size={12} />
+                Clear all
+              </Button>
+            )}
+            <Button
+              disabled={!dirty || save.isPending || selected.size === 0}
+              onClick={() => save.mutate()}
+            >
+              {save.isPending ? <Loader2 size={12} className="animate-spin" /> : null}
+              Save
+            </Button>
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 // -- cross-account routing -----------------------------------------------------
 
 function CrossAccountRouting(props: {
@@ -689,6 +890,15 @@ export function OAuthProvidersPage() {
         onClose={() => setAddOpen(false)}
         onError={setError}
       />
+
+      {oauthProviders.length >= 1 && (
+        <div className="mb-4">
+          <GlobalDefaultModelCard
+            providers={oauthProviders}
+            onError={setError}
+          />
+        </div>
+      )}
 
       {oauthProviders.length >= 2 && (
         <div className="mb-4">

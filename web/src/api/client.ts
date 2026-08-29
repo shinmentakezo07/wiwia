@@ -160,6 +160,26 @@ export const fetchProviderModels = (provider: string) =>
 export const fetchClineModels = () =>
   api<{ models: UpstreamModel[] }>("/admin/cline/models");
 
+// Global Cline default-model settings — a list of model ids that should
+// be auto-deployed to every Cline account. Persists across restarts and
+// auto-applies to providers added at runtime. See backend
+// ``/admin/cline/settings`` and tests/test_cline_global_model.py.
+export interface ClineSettingsResponse {
+  default_models: string[];
+}
+export const getClineSettings = () =>
+  api<ClineSettingsResponse>("/admin/cline/settings");
+export const putClineSettings = (default_models: string[]) =>
+  api<ClineSettingsResponse>("/admin/cline/settings", {
+    method: "PUT",
+    body: JSON.stringify({ default_models }),
+  });
+export const deleteClineDefaultModel = (modelId: string) =>
+  api<{ default_models: string[] }>(
+    `/admin/cline/settings/default-models/${encodeURIComponent(modelId)}`,
+    { method: "DELETE" },
+  );
+
 export const addDeployment = (
   group: string,
   body: { provider: string; model_id: string; weight?: number },
