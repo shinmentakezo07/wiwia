@@ -80,13 +80,30 @@ def test_provider_auth_errors_preserve_status():
 
 
 def test_auth_error_invalidates_key():
+    """In standard mode (historical behavior), a single 401 immediately
+    invalidates the key.  In any_error mode, 401 increments err_count by 2
+    and only invalidates after key_max_consecutive_fails (default 5)."""
     key = ProviderKey(label="a", secret="k")
     acct = ProviderAccount(name="p", provider_type="openai",
                            base_url="https://x/v1", keys=[key])
-    acct.on_result(key, 401, None)
+    # standard: 401 -> invalid immediately
+    acct.on_result(key, 401, None, failover_mode="standard")
     assert key.status == "invalid"
     assert not key.available
     assert not acct.healthy
+    # any_error: 401 increments err_count by 2 but does not invalidate yet
+    key2 = ProviderKey(label="b", secret="k")
+    acct2 = ProviderAccount(name="p", provider_type="openai",
+                            base_url="https://x/v1", keys=[key2])
+    acct2.on_result(key2, 401, None, failover_mode="any_error",
+                    key_max_consecutive_fails=5)
+    assert key2.status == "cooling"
+    assert key2.err_count == 2
+    # after enough consecutive auth failures, the key retires
+    for _ in range(2):
+        acct2.on_result(key2, 401, None, failover_mode="any_error",
+                        key_max_consecutive_fails=5)
+    assert key2.status == "invalid"
 
 
 def test_504_is_retryable_and_cools_deployment():

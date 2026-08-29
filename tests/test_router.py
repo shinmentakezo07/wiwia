@@ -145,7 +145,7 @@ def test_exhausted_provider_keys_fall_through_to_sibling_deployment():
 
     r = Router(_config(routing_strategy="least-busy"))  # deterministic: p1 dep first
 
-    async def exhausted_pick():
+    async def exhausted_pick(exclude_labels=None):
         return None, 5.0  # simulates last key cooling between pick and use
 
     calls = []
