@@ -75,14 +75,9 @@ trap cleanup EXIT INT TERM
 
 # --- 1. install web deps -----------------------------------------------------
 
-echo "==> Installing web dependencies (bun) in $WEB_DIR ..."
+echo "==> Installing web dependencies (npm) in $WEB_DIR ..."
 cd "$WEB_DIR"
-if command -v bun >/dev/null 2>&1; then
-    bun install
-else
-    echo "    bun not found, falling back to npm ..."
-    npm install
-fi
+npm install
 cd "$SCRIPT_DIR"
 
 # --- 2. free up the ports ----------------------------------------------------
@@ -124,11 +119,7 @@ BACKEND_PID=$!
 
 echo "==> Starting Vite dev server (web) on :$WEB_PORT ..."
 cd "$WEB_DIR"
-if command -v bun >/dev/null 2>&1; then
-    bun run dev --port "$WEB_PORT" > >(prefixed "web") 2>&1 &
-else
-    npx vite --port "$WEB_PORT" > >(prefixed "web") 2>&1 &
-fi
+npm run dev -- --port "$WEB_PORT" > >(prefixed "web") 2>&1 &
 WEB_PID=$!
 cd "$SCRIPT_DIR"
 

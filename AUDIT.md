@@ -9,6 +9,14 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ## 🔴 Critical
 
+### 54. Default session secret permits forged admin cookies when `master_key` is unset
+**File:** `wiwi/server/app.py:283-295, 1015-1039`; `wiwi/auth/users.py:85-107`; `wiwi/config.py:174-181`
+**Trigger:** the gateway is started with the default/empty `general_settings.master_key` and without `WIWI_SESSION_SECRET`.
+
+The configuration permits an empty master key, and startup then selects the public, fixed string `wiwi-default-session-secret` as the session-signing secret. `current_user()` accepts any validly signed cookie whose user id is the literal `master` as a synthetic admin, without requiring a configured master key or checking a database row. An attacker can therefore locally compute `sign_session("wiwi-default-session-secret", "master", "admin", future_expiry)` and access admin endpoints. This was reproduced against an app with an empty master key: the forged cookie returned admin identity from `/auth/me` and successfully called `POST /admin/keys/generate` and `GET /admin/keys`.
+
+**Fix:** fail closed at startup unless a high-entropy master/session secret is configured; never use a fixed fallback for an authorization-bearing signing key. Also reject the synthetic `master` session when no master key is configured.
+
 ### 1. Stream pump deadlocks forever if `encode_request` throws before `ready.set()`
 **File:** `wiwi/core/gateway.py:284-335` (`_pump_once`)
 **Trigger:** Any streaming request whose IR→provider encoding raises (unsupported tool schema, bad content type, `set_tool_context` failure).
@@ -356,24 +364,109 @@ Order is `[TextPart, ThinkingPart, ToolUsePart]`; Anthropic extended-thinking re
 
 `ThinkingDelta` with empty text (signature-only) emits `{reasoning_content: ''}` — a useless empty-string delta. `ResponsesStreamEncoder` correctly returns `None`.
 
+### 52. Hard budget caps can be bypassed when a request exceeds the remaining budget
+**File:** `wiwi/server/app.py:640-643, 756-759`; `wiwi/auth/service.py:237-265`
+**Trigger:** a priced request's actual cost is greater than the key's remaining `max_budget`.
+
+The request is sent upstream and its response is returned before spend accounting runs. `AuthService.update_spend()` uses a conditional update that returns `False` when adding the actual cost would exceed `max_budget`, leaving `spend_to_date` unchanged. Both response paths ignore that return value while suppressing exceptions. A request costing `$1.20` on a `$1.00` key therefore returns `200`, logs cost `1.2`, and leaves spend at `$0.00`; repeated requests continue to pass the pre-check indefinitely. This was reproduced end-to-end with a registered test price.
+
+**Fix:** reserve budget before dispatch using a conservative token/cost estimate and reconcile afterward, or record the actual charge even when it crosses the cap and block subsequent requests. Do not discard the `False` result from authoritative accounting.
+
+### 53. Non-object JSON bodies cause HTTP 500 instead of a dialect-correct 400
+**File:** `wiwi/server/app.py:533-539, 576-582, 762-784`; `wiwi/wire/openai_chat.py:21-27`, `wiwi/wire/openai_responses.py:22-26`, `wiwi/wire/anthropic_messages.py:17-29`
+**Trigger:** a caller sends valid JSON whose top-level value is an array, string, number, boolean, or `null` to `/v1/chat/completions`, `/v1/responses`, or `/v1/messages`.
+
+`json_body()` accepts any JSON value and returns it as `Any`, while the three handlers pass it to decoders that immediately call `.get()`. The decoder exception is an `AttributeError`, which is not caught by `run_chat_like()`'s `DialectError`/`ValueError` handler, so the request reaches FastAPI's 500 path. The same behavior was reproduced with `[]` on all three public surfaces.
+
+**Fix:** validate that the parsed body is a mapping before decoding and return the caller's dialect-specific `invalid_request_error` with status 400. Apply the same boundary validation to other JSON endpoints that assume `body.get()`.
+
+### 55. Login endpoint has no brute-force protection
+**File:** `wiwi/server/app.py:2041-2074`; `wiwi/auth/users.py:62-73`
+**Trigger:** an attacker can reach `/auth/login` repeatedly from the network.
+
+`/auth/login` performs an expensive PBKDF2 password verification for every username/password attempt, but it does not call the gateway's rate limiter and does not maintain per-account, per-source, or global failed-login state. The master-key branch is also checked directly with no attempt throttling. A probe of 20 consecutive incorrect password requests returned `401` for every attempt, with no `429`, delay, lockout, or other backoff. This permits online password guessing and enables CPU exhaustion against the PBKDF2 verifier; if the master key is accepted through this endpoint, it can be guessed without throttling as well.
+
+**Fix:** add a dedicated authentication-attempt limiter keyed by a normalized account identifier and source/IP, with bounded exponential backoff and a global circuit breaker. Apply it before password verification and to master-key attempts, while using a dummy password hash for unknown users to reduce username-enumeration timing differences. Do not reuse the model TPM/RPM limiter without separating authentication scopes.
+
+### 56. Untrusted forwarded headers can redirect Cline OAuth callbacks to an attacker host
+**File:** `wiwi/server/app.py:2240-2245, 2294-2300`
+**Trigger:** the gateway is reachable directly or through a proxy that does not strip untrusted `X-Forwarded-Host`/`X-Forwarded-Proto` headers, and an admin starts Cline auto-connect.
+
+`_request_base()` trusts client-supplied forwarded headers when constructing the callback URL sent to Cline. A request with `X-Forwarded-Proto: https` and `X-Forwarded-Host: attacker.example` produced both `callback_url` and `redirect_uri` pointing to `https://attacker.example/cline/oauth/callback?...`. After the admin completes authentication at Cline, the embedded authorization code is delivered to that attacker-controlled origin, where it can be decoded into the access token and refresh token. The pending state token does not protect the code from being observed at the poisoned callback host.
+
+**Fix:** derive the callback origin from a configured public/base URL, or only honor forwarded headers after they have been validated by a trusted proxy middleware. Validate the host against an allowlist and reject unexpected schemes/ports; never construct credential-bearing OAuth redirect URIs from arbitrary request headers.
+
+### 57. Users can mint unlimited unbounded virtual keys to bypass per-key limits
+**File:** `wiwi/server/app.py:2029-2039, 2102-2116`; `wiwi/auth/service.py:127-149`
+**Trigger:** any authenticated non-admin user can call `/auth/playground-key` repeatedly, or create additional keys through `/admin/keys/generate`.
+
+The playground-key path calls `create_key()` with only `alias` and `owner_id`; it supplies no `max_budget`, `rpm`, `tpm`, `models`, or expiry. There is no per-user key-count/quota limit, and the endpoint has no issuance rate limit. A single session minted five distinct keys successfully; all five were stored with `max_budget=None`, `rpm=None`, and `tpm=None`, and each independently authenticated against `/v1/models`. Since the request limiter and spend cap are keyed by virtual-key ID, a user can rotate across unlimited unbounded keys to avoid any per-key RPM/TPM or budget policy and multiply billable upstream traffic.
+
+**Fix:** enforce account-level quotas and aggregate spend/rate limits across all keys owned by a user, or make playground keys short-lived and subject to a configured shared budget and rate limit. Apply issuance throttling and a maximum active-key count; do not treat per-key controls as an account-wide quota when the account can create unlimited keys.
+
+### 58. Public signup has no registration throttling or account quota
+**File:** `wiwi/server/app.py:1996-2027`; `wiwi/auth/users.py:132-148`
+**Trigger:** an unauthenticated caller can reach `POST /auth/signup`.
+
+The endpoint has no IP/source limiter, global registration budget, email/verification requirement, or account quota. Every accepted registration performs a 200,000-iteration PBKDF2 hash, writes a user row, and attempts to mint a playground virtual key. A probe of eight sequential unique registrations returned `201` for all eight; a 1,000,000-character password was also accepted and hashed. An attacker can therefore create unbounded accounts and database rows, consume CPU with signup hashing, and obtain fresh account-owned API keys without first authenticating. This is distinct from #55, which covers password-verification abuse against existing accounts, and #57, which covers key rotation after authentication.
+
+**Fix:** add registration throttling keyed by source/IP and, where appropriate, a global circuit breaker; cap registrations per time window and total active accounts. Require an operator-selected verification or invitation policy for public deployments, cap password length before hashing, and avoid minting an unlimited unbounded playground key until registration abuse controls pass.
+
+### 59. Negative virtual-key rate limits crash completion requests with HTTP 500
+**File:** `wiwi/server/app.py:845-857, 1751-1754`; `wiwi/auth/service.py:127-149`; `wiwi/ratelimit/memory.py:70-81`
+**Trigger:** an authenticated user or admin creates a key with `rpm: -1` or `tpm: -1`, then sends a real completion request with that key.
+
+The key-generation and patch handlers pass numeric limit values through without requiring positive integers. The memory limiter treats a negative value as an active limit because it is truthy; the first request has `w.count() + cost > limit`, then the rejection path reads `w.events[0]` even though the window is empty. This raises `IndexError` and returns an internal server error before the upstream provider is called. The behavior was reproduced for both negative `rpm` and negative `tpm`; `/v1/models` does not expose it because that endpoint intentionally skips rate-limit reservation.
+
+**Fix:** reject non-positive or otherwise invalid limit values at every key create/patch boundary (or normalize them explicitly to unlimited), validate finite numeric budgets/TTLs, and make the limiter's rejection path safe when a window has no prior events. Malformed client-controlled limits must produce a dialect-correct 400, never an unhandled exception.
+
+### 60. Configured request-body limit is bypassed for chunked bodies
+**File:** `wiwi/server/app.py:40-111`
+**Trigger:** a caller sends a request without a `Content-Length` header, such as a chunked HTTP/1.1 or HTTP/2 request, whose body exceeds `wiwi_settings.max_request_body_mb`.
+
+`RequestIdMiddleware` performs the only early body-size check by reading `Content-Length`. If that header is absent or non-numeric, it passes the original ASGI `receive` callable through unchanged. FastAPI then consumes the complete body in `request.json()`, so there is no streaming byte counter or overflow cutoff. A direct middleware probe with a 1 MiB limit delivered a 1.4 MiB body to the downstream application and returned 200 despite the configured cap. An unauthenticated caller can use this to bypass the memory-protection control and drive unbounded request-body buffering/JSON parsing; the same applies to API and admin routes once authenticated.
+
+**Fix:** wrap `receive` with an ASGI byte counter that rejects or truncates once the cumulative body exceeds the configured maximum, while preserving normal `http.disconnect` and `more_body` semantics. Keep the `Content-Length` fast path, but treat it only as an optimization—not as the enforcement mechanism.
+
+### 61. Gemini API keys leak in provider-model connection errors
+**File:** `wiwi/server/app.py:1405-1416`
+**Trigger:** an admin requests `GET /admin/providers/{name}/models` for a Gemini provider and the upstream request raises an `httpx.HTTPError`.
+
+The endpoint appends the provider key to the Gemini model-list URL as `?key={key.secret}`. Its connection-error handler then returns that complete URL in the client-visible 502 message. A forced `httpx.ConnectError` produced `could not reach 'gem' (https://generativelanguage.googleapis.com/v1beta/models?key=AIza-SUPER-SECRET-123)`. The credential is therefore exposed to the admin browser, reverse-proxy/access logs, API clients, and any error collector that records response bodies. The route is admin-gated, so this is an administrator-side secret disclosure rather than an unauthenticated gateway compromise.
+
+**Fix:** never include credential-bearing URLs in errors. Redact query parameters before formatting connection errors, or keep the message to the provider name and sanitized endpoint origin. Apply the same rule to logs and exception telemetry around all providers.
+
+### 62. Virtual-key mutation accepts malformed types, truncates limits, and returns HTTP 500
+**File:** `wiwi/server/app.py:837-864, 1739-1758`; `wiwi/auth/service.py:127-151, 175-222`
+**Trigger:** an authenticated user or admin supplies malformed virtual-key fields to `POST /admin/keys/generate` or `PATCH /admin/keys/{key_id}`.
+
+The create handler forwards `max_budget`, `rpm`, `tpm`, and `ttl_seconds` directly to `AuthService.create_key()` without type, finiteness, or range validation. `rpm: "bad"` and `max_budget: "bad"` are accepted and stored as SQLite-coerced zero values; `rpm: 1.5` is accepted and stored as `1`, changing the requested limit; and `ttl_seconds: "bad"` raises an uncaught `TypeError`/`ValueError` and returns HTTP 500. The patch path is worse: `tpm: "bad"`, `max_budget: "bad"`, `ttl_seconds: "bad"`, and `expires_at: "bad"` each return HTTP 500, while `models: "abc"` silently becomes `['a', 'b', 'c']`. These are client-controlled mutation inputs and should never produce an internal error or silently create a different policy than the one requested. This is distinct from #59, which covers valid negative rate limits reaching a broken limiter rejection path.
+
+**Fix:** validate the complete key schema at the HTTP boundary: require finite numbers, integer rate limits, list-of-string model allowlists, and explicit positive/zero semantics for budgets and TTLs. Catch conversion/DB exceptions and return a dialect-correct 400; reject rather than truncate fractional values or coerce strings through SQLite.
+
 ---
 
 ## Summary by severity
 
 | Severity | Count | Notable |
-|---|---|---|
-| 🔴 Critical | 1 | Stream pump deadlock on encode failure |
-| 🟠 High | 11 | Parallel tool-call corruption (×2 surfaces), streaming Retry-After, Anthropic cost bugs, /metrics auth gap |
-| 🟡 Medium | 18 | SSE id injection, partial-JSON, grace-drain deadlock, loop detection, UI TDZ + routing |
+|---|---:|---|
+| 🔴 Critical | 2 | Stream-pump deadlock; forged admin session with default secret |
+| 🟠 High | 17 | OAuth callback poisoning, signup/body-size abuse, unlimited-key limit bypass, budget-cap bypass, parallel tool-call corruption, Anthropic cost bugs, /metrics auth gap |
+| 🟡 Medium | 21 | Provider-key error leak, negative-limit completion 500s, SSE id injection, partial-JSON, grace-drain deadlock, malformed-body 500s, UI TDZ + routing |
 | ⚪ Low | 21 | Redis limiter (dormant), percentile inconsistency, WRR starvation, doc/contract footguns |
-| **Total** | **51** | |
+| **Total** | **61** | |
 
 ## Top recommendations (fix order)
 
-1. **#1** — stream pump deadlock (wrap encode in try/except + `ready.set()`). Trivial fix, prevents permanent hangs.
-2. **#2 + #3** — parallel tool-call encoder corruption (Responses + Anthropic). Core translation contract violation; affects every interleaved tool-call stream.
-3. **#9 + #10** — Anthropic cost accounting (double-subtraction + unpriced cache-creation). Direct revenue impact.
-4. **#4** — streaming Retry-After. Affects cooldown correctness under 429s.
-5. **#7** — deployment exclusion after key exhaustion. Causes premature 503s.
-6. **#12** — /metrics auth gap. Security exposure.
-7. **#27 + #28** — UI: Models strategy dropdown crash + Settings routing 404. User-visible breakage.
+1. **#54** — remove the fixed default session secret and fail closed when no master/session secret is configured.
+2. **#56 + #58 + #60** — prevent attacker-controlled OAuth callback origins, throttle public account registration, and enforce request-body limits while receiving.
+3. **#57** — enforce account-wide quotas and key issuance limits so users cannot rotate unbounded keys around per-key controls.
+4. **#52** — hard budget-cap enforcement. Prevent repeated billable requests from bypassing a configured spend ceiling.
+5. **#1** — stream pump deadlock (wrap encode in try/except + `ready.set()`). Trivial fix, prevents permanent hangs.
+6. **#2 + #3** — parallel tool-call encoder corruption (Responses + Anthropic). Core translation contract violation; affects every interleaved tool-call stream.
+7. **#9 + #10** — Anthropic cost accounting (double-subtraction + unpriced cache-creation). Direct revenue impact.
+8. **#4** — streaming Retry-After. Affects cooldown correctness under 429s.
+9. **#7** — deployment exclusion after key exhaustion. Causes premature 503s.
+10. **#12** — /metrics auth gap. Security exposure.
+11. **#53 + #55 + #59 + #61** — reject malformed request/limit values, add authentication-attempt throttling, and redact provider credentials from errors.
+12. **#27 + #28** — UI: Models strategy dropdown crash + Settings routing 404. User-visible breakage.

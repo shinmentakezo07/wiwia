@@ -1,14 +1,101 @@
 # wiwi
 
-Unified LLM gateway proxy — speak **OpenAI Chat Completions**, **OpenAI Responses (Codex CLI)**, or **Anthropic Messages (Claude Code)** on the inbound side; route to **OpenAI, Anthropic, Gemini, OpenRouter, or any OpenAI-compatible endpoint** on the outbound side. LiteLLM-style `wiwi.yaml` config with provider key pools (multiple API keys per provider, smooth weighted round-robin), retries, cooldowns, fallbacks, virtual keys, budgets, RPM/TPM rate limits, spend tracking, request logs, and a built-in admin web UI.
+> **One gateway. Every dialect. Any provider.**
+>
+> Speak **OpenAI Chat Completions**, **OpenAI Responses (Codex CLI)**, or **Anthropic Messages (Claude Code)** on the inbound side; route to **OpenAI, Anthropic, Gemini, OpenRouter, NVIDIA NIM, Cline (OAuth), or any OpenAI-compatible endpoint** on the outbound side.
 
-Any surface reaches any provider — Claude Code can be backed by GPT, Codex by Gemini, and responses always come back in the caller's dialect.
+```
+   OpenAI Chat ─┐
+ OpenAI Resp. ──┤    ┌── Canonical IR ── router ──┬── openai
+Anthropic Msg. ─┘    │     (wiwi/ir)      (WRR,  ├── anthropic
+        ▲            │                    retries,├── gemini
+        │            ▼                    cooldown├── openrouter
+   Dialect-correct   Pricing · Logging · Coalesce ├── nvidia-nim
+   responses back    · Rate limits · Auth         ├── cline (OAuth)
+   to the caller     · Streaming IR deltas        ├── gmicloud
+                                                     └── openai-compatible
+```
 
-Reasoning translates across dialects too: `reasoning_effort` (OpenAI), `thinking.budget_tokens` (Anthropic), and OpenRouter's unified `reasoning` object are all mapped through one canonical IR form (`low`/`medium`/`high`/… ↔ token budgets), and thinking blocks round-trip across providers so multi-turn conversations survive a mid-conversation model switch.
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](#)
+[![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](#)
+[![React 19](https://img.shields.io/badge/React-19-149eca?logo=react&logoColor=white)](#)
+[![Vite](https://img.shields.io/badge/Vite-646CFF?logo=vite&logoColor=white)](#)
+[![Tests](https://img.shields.io/badge/tests-763%20passing-34d399)](#tests--lint)
+[![Lint](https://img.shields.io/badge/lint-ruff-9CA3AF?logo=ruff&logoColor=white)](#tests--lint)
+[![Built with uv](https://img.shields.io/badge/built%20with-uv-7C3AED)](#requirements)
+
+## Contents
+
+- [Why wiwi?](#why-wiwi)
+- [Features](#features)
+- [How it works](#how-it-works)
+- [Surfaces (inbound)](#surfaces-inbound)
+- [Providers (outbound)](#providers-outbound)
+- [Quickstart](#quickstart)
+- [All commands](#all-commands)
+- [Connecting clients](#connecting-clients)
+- [Configuration (`wiwi.yaml`)](#configuration-wiwiyaml)
+- [Project structure](#project-structure)
+- [Admin](#admin)
+- [Tests & lint](#tests--lint)
+- [Docs](#docs)
+- [Guardrails](#guardrails)
+
+## Why wiwi?
+
+> LiteLLM gives you routing. wiwi gives you **routing + a live control plane**.
+
+| Problem | wiwi's answer |
+|---|---|
+| One client dialect, many models behind it | **Hub-and-spoke** translation: any of 3 inbound dialects ↔ any of 8 outbound providers, no pairwise converters. |
+| Rate-limit pain across many keys | **Smooth weighted round-robin** key pools with per-key cooldowns, retries, fallbacks, and a dedicated cooldown reset endpoint. |
+| Reasoning parameters don't line up | Canonical IR: `reasoning_effort`, `thinking.budget_tokens`, and OpenRouter's `reasoning{}` all collapse to one `low / medium / high / N tokens` form. Thinking blocks round-trip across providers — multi-turn survives a mid-conversation model switch. |
+| Want a UI, not just a YAML | Built-in dark admin SPA — keys, providers, key pools, model groups, request logs, live SSE tail, per-request stats (TTFT, TPS, cost, cache savings, retry chain). |
+| Mutating config means a restart | Live `/admin/*` mutations: edit routing weights, disable keys, reset cooldowns, attach deployments, all without dropping traffic. Every mutation writes an `audit_logs` event. |
+| Costs and budgets | Virtual keys with budget / RPM / TPM / model allowlist / TTL. Per-request cost + token breakdown, with aggregate + timeseries stats. |
+
+## Features
+
+**Translation**
+- 3 inbound dialects × 8 outbound providers, with `drop_params` and `extra_headers` for the awkward edges.
+- OpenRouter unified `reasoning{}` translation for `low`/`medium`/`high`/explicit token budgets.
+- Anthropic `cache_control` blocks pass through untouched; cache hits and savings appear in stats.
+- Tool/function-call translation across dialects (round-trips in `UPDATE.md`).
+- Count-tokens endpoint for Anthropic Messages.
+
+**Routing & resilience**
+- Key pools with **smooth weighted round-robin** (per-key `weight`, `enabled`).
+- Cooldowns on failure, `allowed_fails` threshold, configurable `cooldown_time`.
+- Retries with fallbacks (`fallbacks:` table) and a separate `context_window_fallbacks:` table for overflow errors.
+- Strategies: `simple-shuffle`, `least-busy`, `latency-based`.
+- Aliases: `model_group_alias` rewrites legacy names.
+- Cycle-N rotation: re-tries on the same provider are tracked and excluded after N attempts.
+
+**Auth, cost, limits**
+- Virtual keys (`sk-wiwi-…`), SHA-256-hashed at rest, plaintext shown once at mint time. Optional `custom_key` (≥16 chars).
+- Per-key: `max_budget`, `rpm`, `tpm`, model allowlist, TTL, enable/disable.
+- Per-deployment: `rpm`, `tpm`, `timeout`, `extra_headers`, `max_tokens`.
+- Optional global `global_rpm` / `global_tpm` sliding-window caps.
+- Cost engine with token estimation fallback.
+
+**Observability**
+- Per-request DB log: input / cached / reasoning / output tokens, TTFT, latency, TPS, cost, cache hit + savings, full retry chain, which key served it.
+- Proxy-level ring-buffer log.
+- `/admin/stream` SSE live tail with `Last-Event-ID` replay and keepalive pings.
+- `/admin/stats/overview` + `/admin/stats/timeseries?bucket=…&metric=…`.
+- Spend / error alert rules (storage; evaluation engine is post-MVP).
+
+**Admin & operations**
+- Dark SPA at `/admin/ui`: Dashboard, Providers (+ per-provider detail with key pool and live upstream model list), Virtual Keys, Models, Request Logs, Proxy Logs, Usage, Analytics, Budgets & Alerts, Settings, plus OAuth/Builtin providers views.
+- Master-key-gated REST API at `/admin/*`.
+- Audit trail for every mutation.
+- SQLite by default; Postgres via `[pg]` extra (`DATABASE_URL=postgresql+asyncpg://…`).
+- Optional Redis backend for rate limits via `[redis]` extra.
+- `--reload` dev mode and `start.sh` wrapper (backend + Vite together).
 
 ## How it works
 
-Hub-and-spoke design: every direction goes `dialect → IR → provider`. No pairwise converters — adding an inbound surface is one module in `wiwi/wire/`, adding a provider is one adapter in `wiwi/providers/` plus a line in the registry. Core code never branches on dialect or provider name.
+Hub-and-spoke design. Every direction goes `dialect → IR → provider`. Core code never branches on dialect or provider name — adding a new surface is one module in `wiwi/wire/`, adding a new provider is one adapter in `wiwi/providers/` plus a line in the registry.
 
 ```
 Client (openai SDK / Codex CLI / Claude Code)
@@ -17,31 +104,36 @@ Client (openai SDK / Codex CLI / Claude Code)
 wiwi/wire/* ──► Canonical IR (wiwi/ir) ──► router (key pools, WRR, retries, cooldowns)
                                                 │
                                                 ▼
-Client ◄── outbound dialect ◄── wire encoder ◄── providers/* (openai · anthropic · gemini · openrouter · openai-compatible)
+Client ◄── outbound dialect ◄── wire encoder ◄── providers/* (openai · anthropic · gemini · openrouter · nvidia-nim · cline · gmicloud · openai-compatible)
 ```
 
-## Project structure
+The request lifecycle lives in `wiwi/server/app.py:run_chat_like` — decode → auth → rate limit → router retries/fallbacks → gateway complete/stream — and back out through the wire encoders. `wiwi/core/context.py:RequestContext` is the single mutable holder threaded through all of it.
 
-| Path | Role |
-|---|---|
-| `wiwi/main.py` | CLI entrypoint (`wiwi --config …`) |
-| `wiwi/config.py` | YAML → pydantic models; env interpolation; fail-fast validation |
-| `wiwi/ir/types.py` | Canonical IR: tagged parts, messages, tools, params, usage |
-| `wiwi/wire/` | Inbound codecs: `openai_chat.py`, `openai_responses.py`, `anthropic_messages.py` |
-| `wiwi/providers/` | Outbound adapters: `openai`, `anthropic`, `gemini`, `openrouter`, `openai-compatible` + `base.py` protocol |
-| `wiwi/router/router.py` | Model groups, key pools (smooth WRR), cooldowns, retries, fallbacks |
-| `wiwi/core/gateway.py` | Surface-agnostic execution engine, pricing, log events |
-| `wiwi/core/context.py` | `RequestContext` — mutable holder threaded through the pipeline |
-| `wiwi/streaming/` | `IRStreamDelta` taxonomy + SSE helpers |
-| `wiwi/auth/` | Key generation/hashing + budget/spend service |
-| `wiwi/cost/pricing.py` | Cost engine + token estimation fallback |
-| `wiwi/ratelimit/` | RPM/TPM sliding-window limits |
-| `wiwi/logging_core/` | Log events + SSE ring buffer for admin tail |
-| `wiwi/server/app.py` | FastAPI factory: proxy routes, middleware, `/admin/*` |
-| `web/` | Admin UI source (React 19 + TypeScript + Vite + Tailwind 4) |
-| `tests/` | Pytest suite: unit (`respx` HTTP mocks), ASGI end-to-end, Hypothesis property round-trips |
-| `bench.py` | Stress / latency / TPS tester for wiwi and any OpenAI-compatible proxy |
-| `docs/` | Architecture and design specs |
+## Surfaces (inbound)
+
+| Method | Endpoint | Dialect | Works with |
+|---|---|---|---|
+| `POST` | `/v1/chat/completions` | OpenAI Chat | openai SDK, LangChain, curl |
+| `POST` | `/v1/responses` | OpenAI Responses | Codex CLI (`base_url` → wiwi) |
+| `POST` | `/v1/messages` · `/v1/messages/count_tokens` | Anthropic Messages | Claude Code (`ANTHROPIC_BASE_URL` → wiwi), anthropic SDK |
+| `GET` | `/v1/models` | model list | all |
+
+Error bodies are dialect-correct per surface (OpenAI `{"error":{…}}` vs Anthropic `{"type":"error",…}`). Every response carries `x-wiwi-request-id` and `x-wiwi-latency-ms`; request bodies over `max_request_body_mb` (default 50) get a 413.
+
+## Providers (outbound)
+
+| Adapter | Native dialect | Notes |
+|---|---|---|
+| `openai` | OpenAI Chat / Responses | `base_url` configurable |
+| `anthropic` | Anthropic Messages | thinking + cache_control pass through |
+| `gemini` | Gemini (OpenAI-compat) | via configurable `base_url` |
+| `openrouter` | OpenAI-compat | unified `reasoning{}` translation |
+| `nvidia-nim` | NVIDIA NIM (OpenAI-compat) | native tool-schema adapter; see `wiwi/providers/nim_*.py` |
+| `cline` | Cline (OAuth) | on-demand OAuth refresh, cross-account WRR, global default model |
+| `gmicloud` | OpenAI-compat | GMI serving endpoint |
+| `openai-compatible` | OpenAI-compat | any URL (Ollama, vLLM, LM Studio, …) |
+
+Provider keys enter as `os.environ/NAME` in YAML; nothing is committed to the repo.
 
 ## Requirements
 
@@ -111,17 +203,6 @@ On startup it prints the listen address plus the number of deployments and provi
 
 Measures TTFT, total latency, tokens, and output TPS per request; aggregates p50/p95, success rate, and throughput per concurrency level. Edit `TARGETS` / `MODEL` at the top of `bench.py` to point at your gateways.
 
-## Surfaces
-
-| Method | Endpoint | Dialect | Works with |
-|---|---|---|---|
-| POST | `/v1/chat/completions` | OpenAI Chat | openai SDK, LangChain, curl |
-| POST | `/v1/responses` | OpenAI Responses | Codex CLI (`base_url` → wiwi) |
-| POST | `/v1/messages`, `/v1/messages/count_tokens` | Anthropic Messages | Claude Code (`ANTHROPIC_BASE_URL` → wiwi), anthropic SDK |
-| GET | `/v1/models` | model list | all |
-
-Error bodies are dialect-correct per surface (OpenAI `{"error":{…}}` vs Anthropic `{"type":"error",…}`). Every response carries `x-wiwi-request-id` and `x-wiwi-latency-ms`; request bodies over `max_request_body_mb` (default 50) get a 413. Anthropic `cache_control` blocks pass through untouched, so Claude Code-style prompt caching works end-to-end and savings show up in stats.
-
 ## Connecting clients
 
 **Claude Code** (backed by any provider):
@@ -153,7 +234,7 @@ Single LiteLLM-shaped file. **Any string value may be `os.environ/NAME`.**
 ```yaml
 providers:              # named provider accounts, each with a pool of keyed entries
   - name: openai-main
-    provider: openai    # openai | anthropic | gemini | openrouter | openai-compatible
+    provider: openai    # openai | anthropic | gemini | openai-compatible | openrouter | gmicloud | nvidia-nim
     keys:
       - {label: main, key: os.environ/OPENAI_API_KEY, weight: 3}
       - {label: backup, key: os.environ/OPENAI_API_KEY_2, weight: 1}
@@ -163,10 +244,19 @@ providers:              # named provider accounts, each with a pool of keyed ent
     base_url: https://openrouter.ai/api/v1
     keys: [{label: main, key: os.environ/OPENROUTER_API_KEY}]
 
+  - name: nvidia-nim
+    provider: nvidia-nim
+    base_url: https://integrate.api.nvidia.com/v1
+    keys: [{label: main, key: os.environ/NVIDIA_NIM_API_KEY}]
+
   - name: local-ollama
     provider: openai-compatible
     base_url: http://localhost:11434/v1
     keys: [{label: local, key: "ollama"}]
+
+  # Cline (OAuth) is not declared here — accounts are added at runtime through
+  # the admin UI or `POST /admin/cline/oauth/login-url` + `/connect` flow.
+  # See `wiwi.yaml.example` for the full reference.
 
 model_list:             # model_name clients request → provider account + native model id
   - model_name: gpt-4o
@@ -198,6 +288,29 @@ wiwi_settings:
   drop_params: true     # silently drop params the target provider doesn't support
   port: 4000
 ```
+
+## Project structure
+
+| Path | Role |
+|---|---|
+| `wiwi/main.py` | CLI entrypoint (`wiwi --config …`) |
+| `wiwi/config.py` | YAML → pydantic models; env interpolation; fail-fast validation |
+| `wiwi/ir/types.py` | Canonical IR: tagged parts, messages, tools, params, usage |
+| `wiwi/wire/` | Inbound codecs: `openai_chat.py`, `openai_responses.py`, `anthropic_messages.py` |
+| `wiwi/providers/` | Outbound adapters: `openai`, `anthropic`, `gemini`, `openrouter`, `nvidia-nim`, `cline` (+ `cline_oauth.py`, `cline_auto_refresh.py`), `gmicloud`, `openai-compatible`; `base.py` protocol; `registry.py` |
+| `wiwi/router/router.py` | Model groups, key pools (smooth WRR), cooldowns, retries, fallbacks |
+| `wiwi/core/gateway.py` | Surface-agnostic execution engine, pricing, log events |
+| `wiwi/core/context.py` | `RequestContext` — mutable holder threaded through the pipeline |
+| `wiwi/streaming/` | `IRStreamDelta` taxonomy + `sse.py`, `coalesce.py`, `resume.py`, `partial_json.py`, `validation.py` |
+| `wiwi/auth/` | Virtual key generation/hashing + budget/spend service + user accounts |
+| `wiwi/cost/pricing.py` | Cost engine + token estimation fallback |
+| `wiwi/ratelimit/` | RPM/TPM sliding-window limits (memory + redis backends) |
+| `wiwi/logging_core/` | Structured log events + DB sink + SSE ring buffer for admin tail |
+| `wiwi/server/app.py` | FastAPI factory: proxy routes, middleware, `/admin/*` |
+| `web/` | Admin UI source (React 19 + TypeScript + Vite + Tailwind 4, built with **bun**) |
+| `tests/` | Pytest suite — unit (`respx` HTTP mocks), ASGI end-to-end, Hypothesis round-trips. Bugfix regressions live in `test_fix_roundN.py` (latest: `test_fix_round9.py`). |
+| `bench.py` | Stress / latency / TPS tester for wiwi and any OpenAI-compatible proxy |
+| `docs/` | Architecture and design specs (`ARCHITECTURE`, `CORE`, `MVP`, `PLAN`, `ADMIN`, `TECHSTACK`, `STREAMING_PERFORMANCE_RECOVERY`) |
 
 ## Admin
 
@@ -333,6 +446,21 @@ curl "localhost:4000/admin/stats/timeseries?bucket=minute&metric=cost&minutes=60
 curl localhost:4000/admin/stream -H "$MK"            # SSE live tail
 curl localhost:4000/admin/alert-rules -H "$MK"       # GET / PUT alert rules
 
+# Cline (OAuth) accounts — start the redirect, connect, check status, refresh, disconnect
+curl -X POST localhost:4000/admin/cline/oauth/login-url -H "$MK" -d '{}'      # {auth_url, state}
+curl -X POST localhost:4000/admin/cline/oauth/connect -H "$MK" -d '{"code": "..."}'
+curl -X POST localhost:4000/admin/cline/oauth/auto-connect -H "$MK" -d '{}'   # background polling
+curl localhost:4000/admin/cline/oauth/status -H "$MK"
+curl -X POST localhost:4000/admin/cline/oauth/refresh -H "$MK" -d '{"provider": "cline-main"}'
+curl -X DELETE localhost:4000/admin/cline/oauth/disconnect -H "$MK" -d '{"provider": "cline-main"}'
+
+# Cline global model — pick model ids once, auto-deploy to every Cline account
+curl localhost:4000/admin/cline/models -H "$MK"
+curl localhost:4000/admin/cline/settings -H "$MK"
+curl -X PUT localhost:4000/admin/cline/settings -H "$MK" \
+  -d '{"default_models": ["anthropic/claude-sonnet-4-5", "openai/gpt-4o"]}'
+curl -X DELETE localhost:4000/admin/cline/settings/default-models/anthropic%2Fclaude-sonnet-4-5 -H "$MK"
+
 # misc
 curl localhost:4000/health
 curl localhost:4000/v1/models -H "Authorization: Bearer sk-wiwi-..."
@@ -361,6 +489,9 @@ Route map:
 | `GET /admin/stream` | SSE live tail of log events (`Last-Event-ID` replay, keepalive pings) |
 | `GET /admin/stats/overview` · `GET /admin/stats/timeseries` | aggregate + time-bucketed stats |
 | `GET / PUT /admin/alert-rules` | spend/error alert rules (storage; evaluation engine is post-MVP) |
+| `GET /admin/cline/models` · `GET/PUT/DELETE /admin/cline/settings` | Cline global model catalog and the cross-account default-model list |
+| `POST /admin/cline/oauth/login-url` · `POST /admin/cline/oauth/connect` · `POST /admin/cline/oauth/auto-connect` | start the Cline OAuth redirect, submit the code, or run a background auto-connect |
+| `GET /admin/cline/oauth/status` · `POST /admin/cline/oauth/refresh` · `DELETE /admin/cline/oauth/disconnect` | OAuth account state, on-demand token refresh, disconnect |
 
 Per-request stats tracked: input / cached / reasoning / output tokens, TPS, TTFT, latency, cost, cache hit + cache savings, retry chain (per-attempt deployment/provider/key/status), and which provider key served it.
 
@@ -369,14 +500,15 @@ Every admin mutation writes an audit event (`actor`/`action`/`target`/`diff`) to
 ## Tests & lint
 
 ```bash
-.venv/bin/python -m pytest tests/ -q                          # all tests (219, ~18s)
-.venv/bin/python -m pytest tests/test_codecs.py -q            # single file
-.venv/bin/python -m pytest tests/test_router.py -k cooldown   # single test by name
+.venv/bin/python -m pytest tests/ -q                                 # all tests (763, currently green)
+.venv/bin/python -m pytest tests/test_fix_round9.py -q               # latest regression file
+.venv/bin/python -m pytest tests/test_codecs.py -q                  # single file
+.venv/bin/python -m pytest tests/test_router.py -k cooldown         # single test by name
 
-.venv/bin/ruff check wiwi/ tests/                             # lint (line-length 100)
+.venv/bin/ruff check wiwi/ tests/                                    # lint (line-length 100, target py311)
 ```
 
-The suite mixes unit tests (`respx` HTTP mocks), ASGI end-to-end tests through the full app, and Hypothesis property-based round-trip tests over the dialect ↔ IR codecs.
+The suite mixes unit tests (`respx` HTTP mocks), ASGI end-to-end tests through the full app, and Hypothesis property-based round-trip tests over the dialect ↔ IR codecs. New bug fixes land in the next thematic file — currently `test_fix_round9.py`.
 
 ## Docs
 
