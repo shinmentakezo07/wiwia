@@ -108,7 +108,29 @@ class RequestIdMiddleware:
                 message["headers"] = headers
             await send(message)
 
-        await self.app(scope, receive, send_wrapper)
+        # --- streamed / chunked body guard -----------------------------------
+        # Content-Length only covers bodies that declare a length. Chunked and
+        # HTTP/2 bodies don't, so counting received bytes is the only way to
+        # enforce max_request_body_mb for them.
+        async def receive_limited() -> Message:
+            nonlocal seen_bytes, body_too_large
+            message = await receive()
+            if message["type"] == "http.request":
+                chunk = message.get("body", b"") or b""
+                seen_bytes += len(chunk)
+                if seen_bytes > self.max_body_bytes:
+                    body_too_large = True
+                    # Flag the overage and stop growing the buffer, but keep
+                    # the bytes we already have: json_body measures them to
+                    # answer 413. Truncating to b"" hid the overage from it.
+                    scope.setdefault("state", {})["body_too_large"] = True
+                    return {"type": "http.request", "body": b"",
+                            "more_body": False}
+            return message
+
+        seen_bytes = 0
+        body_too_large = False
+        await self.app(scope, receive_limited, send_wrapper)
 
 
 from wiwi.auth.service import AuthService
@@ -143,6 +165,110 @@ def _mask_secret(secret: str) -> str:
     if len(secret) >= 12:
         return secret[:5] + "…" + secret[-4:]
     return "***"
+
+
+# Playground keys are minted automatically on login/signup, so they must be
+# bounded: a TTL keeps abandoned ones from living forever, and a per-user cap
+# stops repeated logins from accumulating unlimited live credentials.
+_PLAYGROUND_KEY_TTL_S = 24 * 3600.0
+_MAX_PLAYGROUND_KEYS_PER_USER = 5
+
+
+def _client_ip(request: Request) -> str:
+    """Best-effort client IP for throttling.
+
+    X-Forwarded-For is only consulted for *rate limiting*, never for authn or
+    for building URLs — a spoofed value can at worst make an attacker share a
+    bucket with someone else (self-limiting), and never grant access. The
+    left-most entry is used because that is the original client under a
+    well-behaved proxy chain.
+    """
+    fwd = request.headers.get("x-forwarded-for", "")
+    if fwd:
+        first = fwd.split(",")[0].strip()
+        if first:
+            return first
+    return request.client.host if request.client else "unknown"
+
+
+class _AttemptThrottle:
+    """Fixed-window attempt counter for abuse-prone endpoints.
+
+    Deliberately not built on RateLimiter: that reserves a slot on every
+    check (including successes), whereas a login throttle must only count
+    *failures*, so genuine users are never locked out by their own traffic.
+
+    Bounded: entries are pruned whenever they fall outside the window, and
+    the whole map is capped so a flooding attacker cannot grow it without end.
+    """
+
+    def __init__(self, limit: int, window_s: float = 300.0, max_keys: int = 10_000):
+        self.limit = limit
+        self.window_s = window_s
+        self.max_keys = max_keys
+        self._hits: dict[str, list[float]] = {}
+        self._lock = asyncio.Lock()
+
+    async def check(self, scope: str) -> tuple[bool, int]:
+        """Return (allowed, retry_after_seconds) for the given scope."""
+        async with self._lock:
+            now = time.monotonic()
+            cutoff = now - self.window_s
+            evs = [t for t in self._hits.get(scope, ()) if t > cutoff]
+            if len(evs) >= self.limit:
+                retry = int(max(1.0, self.window_s - (now - evs[0]))) + 1
+                self._hits[scope] = evs
+                return False, retry
+            self._hits[scope] = evs
+            if len(self._hits) > self.max_keys:
+                self._drop_stale(now)
+            return True, 0
+
+    async def record_failure(self, scope: str) -> None:
+        async with self._lock:
+            now = time.monotonic()
+            evs = [t for t in self._hits.get(scope, ()) if t > now - self.window_s]
+            evs.append(now)
+            self._hits[scope] = evs
+
+    async def reset(self, scope: str) -> None:
+        async with self._lock:
+            self._hits.pop(scope, None)
+
+    def _drop_stale(self, now: float) -> None:
+        cutoff = now - self.window_s
+        for k in [k for k, v in self._hits.items()
+                  if not v or v[-1] <= cutoff]:
+            self._hits.pop(k, None)
+        # Still over the cap: drop the oldest-touched entries outright rather
+        # than letting the map grow unbounded.
+        if len(self._hits) > self.max_keys:
+            for k in sorted(self._hits, key=lambda k: self._hits[k][-1]
+                            if self._hits[k] else 0.0)[:self.max_keys // 10 or 1]:
+                self._hits.pop(k, None)
+
+
+_SECRET_QUERY_KEYS = frozenset({
+    "key", "api_key", "apikey", "access_token", "token", "auth",
+})
+
+
+def _redact_url_secret(url: str) -> str:
+    """Strip credential-bearing query params so a URL is safe to log or return.
+
+    Gemini (and some compatible gateways) carry the API key in the querystring,
+    so the request URL itself is a secret — echoing it in an error body would
+    hand the key to the caller.
+    """
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    if not parts.query:
+        return url
+    pairs = [(k, "***" if k.lower() in _SECRET_QUERY_KEYS else v)
+             for k, v in parse_qsl(parts.query, keep_blank_values=True)]
+    return urlunsplit((parts.scheme, parts.netloc, parts.path,
+                       urlencode(pairs), parts.fragment))
 
 
 def _provider_models_url(provider_type: str, base_url: str) -> str:
@@ -215,6 +341,10 @@ class AppState:
         self.logs = LoggingSubsystem()
         rs = config.router_settings
         self.limiter = RateLimiter(global_rpm=rs.global_rpm, global_tpm=rs.global_tpm)
+        # Abuse throttles for unauthenticated endpoints (login/signup). These
+        # count failures only, so real users are never locked out by success.
+        self.login_throttle = _AttemptThrottle(limit=10, window_s=300.0)
+        self.signup_throttle = _AttemptThrottle(limit=5, window_s=3600.0)
         self.auth: AuthService | None = None
         self.gateways: dict[str, Gateway] = {}
         self.alert_rules: list[dict[str, Any]] = []
@@ -284,10 +414,15 @@ class AppState:
         # is WIWI_SESSION_SECRET when provided; otherwise it is derived from
         # the master key (or a fixed default if even that is absent).
         mk = self.config.general_settings.master_key or ""
-        session_secret = (
-            os.environ.get("WIWI_SESSION_SECRET") or mk
-            or "wiwi-default-session-secret"
-        )
+        # Fail closed when no secret is configured. Falling back to a hardcoded
+        # constant meant anyone could forge an admin session cookie: the secret
+        # is the only thing protecting `current_user()`'s uid == "master" branch.
+        session_secret = os.environ.get("WIWI_SESSION_SECRET") or mk
+        if not session_secret:
+            raise RuntimeError(
+                "no session secret configured: set WIWI_MASTER_KEY (or "
+                "WIWI_SESSION_SECRET). Refusing to start with a default "
+                "secret, which would allow forged admin sessions.")
         if not os.environ.get("WIWI_SESSION_SECRET") and mk:
             import structlog as _sl
             _sl.get_logger("wiwi.startup").info(
@@ -452,6 +587,16 @@ def _inject_id(chunk: bytes, event_id: int) -> bytes:
 
 
 def create_app(config: WiwiConfig) -> FastAPI:
+    # Fail fast (and closed) on a config that would allow forged admin
+    # sessions. Checked here as well as in startup, so a misconfigured
+    # deployment fails at import/first-call rather than only when the
+    # lifespan runs.
+    if not (os.environ.get("WIWI_SESSION_SECRET")
+            or config.general_settings.master_key):
+        raise RuntimeError(
+            "no session secret configured: set WIWI_MASTER_KEY (or "
+            "WIWI_SESSION_SECRET). Refusing to start with a default secret, "
+            "which would allow forged admin sessions.")
     state = AppState(config)
     app = FastAPI(title="wiwi", version="0.1.0", docs_url="/docs",
                   lifespan=lifespan)
@@ -532,11 +677,38 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     async def json_body(request: Request) -> tuple[Any, ORJSONResponse | None]:
         """Parse the request body; malformed JSON is a client error (400)."""
+        # Errors raised here happen before the surface is known to the handler,
+        # so infer it from the path: the Anthropic dialect expects
+        # {"type":"error",...} while OpenAI expects {"error":{...}}.
+        surface = "messages" if request.url.path.endswith("/messages") else "chat"
+        limit = config.wiwi_settings.max_request_body_mb * 1024 * 1024
         try:
-            return await request.json(), None
+            raw = await request.body()
+        except Exception:  # noqa: BLE001
+            raw = b""
+        # Enforce the cap on what actually arrived. Content-Length is checked
+        # in middleware, but chunked bodies declare no length — and the
+        # middleware can only flag an overage, not guarantee the handler sees
+        # the flag. Measuring here closes that gap either way.
+        if len(raw) > limit or getattr(request.state, "body_too_large", False):
+            return None, _err(413, "invalid_request_error",
+                              f"request body exceeds "
+                              f"{config.wiwi_settings.max_request_body_mb} MiB",
+                              request, surface)
+        try:
+            body = orjson.loads(raw) if raw else None
         except ValueError:
             return None, _err(400, "invalid_request_error",
-                              "request body is not valid JSON", request)
+                              "request body is not valid JSON", request, surface)
+        # Every inbound dialect expects a JSON *object*. Anything else (`null`,
+        # a bare string, a number, an array) made the decoders call
+        # `body.get(...)` and raise AttributeError, which surfaced as a 500
+        # instead of a dialect-correct 400.
+        if not isinstance(body, dict):
+            return None, _err(400, "invalid_request_error",
+                              "request body must be a JSON object",
+                              request, surface)
+        return body, None
 
     def _err(status: int, etype: str, message: str,
              request: Request, surface: str = "chat") -> ORJSONResponse:
@@ -638,9 +810,21 @@ def create_app(config: WiwiConfig) -> FastAPI:
             state_.logs.log_request(build_log_event(ctx))
             await _record_tpm_usage(info, ctx)
             if info and info.key_type != "master":
-                # never let accounting failure mask the successful response
-                with contextlib.suppress(Exception):
-                    await state_.auth.update_spend(info.key_id, ctx.cost)
+                # A False return means the conditional UPDATE was rejected —
+                # the request would breach max_budget (or the key vanished).
+                # Recording it anyway would let a caller exceed a hard cap by
+                # sending one large request. Raising a 402 here is the point of
+                # a hard budget; only genuine accounting *errors* are suppressed
+                # so they don't mask an otherwise-successful response.
+                try:
+                    recorded = await state_.auth.update_spend(info.key_id, ctx.cost)
+                except Exception:  # noqa: BLE001
+                    recorded = True
+                if not recorded:
+                    ctx.status = 402
+                    state_.logs.log_request(build_log_event(ctx))
+                    return _err(402, "budget_exceeded",
+                                "virtual key budget exhausted", request, surface)
             return ORJSONResponse(payload, headers={"x-wiwi-request-id": ctx.request_id})
         except Exception as e:  # noqa: BLE001
             if isinstance(e, WiwiError):
@@ -754,9 +938,18 @@ def create_app(config: WiwiConfig) -> FastAPI:
             state_.logs.log_request(build_log_event(ctx))
             await _record_tpm_usage(ctx.auth, ctx)
             if ctx.usage and ctx.auth and ctx.auth.key_type != "master":
-                # never let accounting failure mask the streamed response
-                with contextlib.suppress(Exception):
-                    await state_.auth.update_spend(ctx.auth.key_id, ctx.cost)
+                # The response has already been streamed, so a budget breach
+                # can't turn into a 402 here. Record it on the context (and
+                # the log) so the *next* request is refused, rather than
+                # silently allowing spend to run past the cap forever.
+                try:
+                    recorded = await state_.auth.update_spend(
+                        ctx.auth.key_id, ctx.cost)
+                except Exception:  # noqa: BLE001
+                    recorded = True
+                if not recorded:
+                    ctx.status = 402
+                    ctx.metadata["budget_exceeded"] = True
 
     # -- surfaces ---------------------------------------------------------------
     @app.post("/v1/chat/completions")
@@ -1030,6 +1223,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return None
         uid, _role, _exp = parsed
         if uid == "master":
+            # Only honour a synthetic master session when a master key is
+            # actually configured. Otherwise any cookie signed with whatever
+            # secret happened to be in use would mint an admin with no DB row.
+            if not config.general_settings.master_key:
+                return None
             return UserInfo(id="master", username="master", role="admin")
         if state.users is None:
             return None
@@ -1207,7 +1405,13 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return jerr
         name = str(body.get("name") or "").strip()
         ptype = str(body.get("provider_type") or "openai-compatible")
-        base_url = str(_interpolate(body.get("base_url")) or "") or _default_base_url(ptype)
+        raw_url = _interpolate(body.get("base_url"))
+        if raw_url is not None and not isinstance(raw_url, str):
+            # str() would stringify a dict/list into a truthy URL like
+            # "{'nested': True}" and silently persist it as the upstream base.
+            return _err(400, "invalid_request_error",
+                        "'base_url' must be a string", request)
+        base_url = (raw_url or "").strip() or _default_base_url(ptype)
         label = str(body.get("label") or "default")
         secret = str(_interpolate(body.get("key")) or "")
         alias_raw = body.get("alias_id")
@@ -1405,15 +1609,17 @@ def create_app(config: WiwiConfig) -> FastAPI:
         adapter = get_adapter(acct.provider_type)
         url = _provider_models_url(acct.provider_type, acct.base_url)
         headers = adapter.headers(ProviderKeyRef(label=key.label, secret=key.secret))
-        # Gemini puts the API key in the querystring, not headers
+        # Gemini puts the API key in the querystring, not headers — so `url`
+        # now holds a credential and must never be echoed back in an error.
         if acct.provider_type == "gemini":
             url += f"?key={key.secret}"
+        safe_url = _redact_url_secret(url)
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as hc:
                 r = await hc.get(url, headers=headers)
         except httpx.HTTPError:
             return _err(502, "api_connection_error",
-                        f"could not reach '{name}' ({url})", request)
+                        f"could not reach '{name}' ({safe_url})", request)
         if r.status_code != 200:
             etype = ("rate_limit_error" if r.status_code == 429
                      else "authentication_error" if r.status_code in (401, 403)
@@ -1750,7 +1956,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return jerr
         fields = {k: body[k] for k in state.auth.UPDATABLE_FIELDS  # type: ignore[union-attr]
                   if k in body}
-        updated = await state.auth.update_key(key_id, fields)  # type: ignore[union-attr]
+        try:
+            updated = await state.auth.update_key(key_id, fields)  # type: ignore[union-attr]
+        except ValueError as e:
+            # Malformed limit/model values used to escape as an uncaught
+            # ValueError/TypeError (HTTP 500); report them as a client error.
+            return _err(400, "invalid_request_error", str(e), request)
         if updated is None:
             return _err(404, "not_found_error", f"unknown key '{key_id}'", request)
         await state.logs.log_audit(actor=actor.username, action="key.update",
@@ -2000,6 +2211,17 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return jerr
         if state.users is None:
             return _err(500, "api_error", "user service not initialized", request)
+        # Registration is unauthenticated, so it needs its own throttle:
+        # otherwise one host can create unlimited accounts (each of which mints
+        # a playground key) and exhaust the user table or disk.
+        scope = _client_ip(request)
+        allowed, retry_after = await state.signup_throttle.check(scope)
+        if not allowed:
+            resp = _err(429, "rate_limit_error",
+                        f"too many signups from this address, retry in "
+                        f"{retry_after}s", request)
+            resp.headers["Retry-After"] = str(retry_after)
+            return resp
         try:
             u = await state.users.create_user(
                 body.get("username", ""), body.get("password", ""))
@@ -2034,8 +2256,19 @@ def create_app(config: WiwiConfig) -> FastAPI:
         respects role-based filtering.
         """
         owner_id = None if actor.role == "admin" else actor.id
-        plaintext, _kid = await state.auth.create_key(  # type: ignore[union-attr]
-            alias="playground", owner_id=owner_id)
+        # Bound the key: a TTL so abandoned keys expire, and a per-user cap so
+        # repeated logins (or repeated /auth/playground-key calls) cannot
+        # accumulate unbounded live credentials. Without both, every login
+        # minted another never-expiring, unlimited-budget key.
+        service = state.auth
+        if service is not None and owner_id is not None:
+            active = await service.count_keys(owner_id=owner_id, alias="playground")
+            if active >= _MAX_PLAYGROUND_KEYS_PER_USER:
+                await service.expire_keys(owner_id=owner_id, alias="playground",
+                                          keep_newest=_MAX_PLAYGROUND_KEYS_PER_USER - 1)
+        plaintext, _kid = await service.create_key(  # type: ignore[union-attr]
+            alias="playground", owner_id=owner_id,
+            ttl_seconds=_PLAYGROUND_KEY_TTL_S)
         return plaintext
 
     @app.post("/auth/login")
@@ -2045,6 +2278,16 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return jerr
         if state.users is None:
             return _err(500, "api_error", "user service not initialized", request)
+        # Throttle by client IP *and* attempted username, so neither a single
+        # account nor one host can be brute-forced without limit.
+        scope = f"{_client_ip(request)}:{body.get('username', '')}"
+        allowed, retry_after = await state.login_throttle.check(scope)
+        if not allowed:
+            resp = _err(429, "rate_limit_error",
+                        f"too many failed login attempts, retry in {retry_after}s",
+                        request)
+            resp.headers["Retry-After"] = str(retry_after)
+            return resp
         # master-key login → synthetic master admin
         mk = body.get("master_key")
         if mk:
@@ -2063,15 +2306,20 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 _set_session_cookie(resp, "master", "admin",
                                     secure=request.url.scheme == "https")
                 return resp
+            await state.login_throttle.record_failure(scope)
             return _err(401, "authentication_error", "invalid master key", request)
         # username/password login
         try:
             u = await state.users.verify(body.get("username", ""), body.get("password", ""))
         except ValueError:
             # malformed username charset/length — treat as invalid credentials
+            await state.login_throttle.record_failure(scope)
             return _err(401, "authentication_error", "invalid credentials", request)
         if u is None or u.disabled:
+            await state.login_throttle.record_failure(scope)
             return _err(401, "authentication_error", "invalid credentials", request)
+        # Successful login clears any accumulated failures for this scope.
+        await state.login_throttle.reset(scope)
         # Mint a fresh playground key alongside the session cookie so the
         # Playground can use it immediately without a second call.
         pg_key = ""
@@ -2292,12 +2540,19 @@ def create_app(config: WiwiConfig) -> FastAPI:
                                          email=tokens.get("email"))
 
     def _request_base(request: Request) -> str:
-        """Best-effort absolute base URL (scheme + host[:port]) for building
-        callback URLs. Honors X-Forwarded-Proto when behind a proxy."""
-        scheme = request.headers.get("x-forwarded-proto",
-                                     request.url.scheme or "https")
-        host = request.headers.get("x-forwarded-host") or request.headers.get("host", "localhost")
-        return f"{scheme}://{host}"
+        """Absolute base URL (scheme + host) for building callback URLs.
+
+        ``wiwi_settings.public_url`` wins when configured — it is trusted
+        operator config. Otherwise the request's own ``Host`` header is used.
+        ``X-Forwarded-Host`` is deliberately NOT honoured: it is client
+        controlled, and trusting it let an attacker point an OAuth callback
+        (and thus the authorization code) at their own origin.
+        """
+        cfg_url = (config.wiwi_settings.public_url or "").strip().rstrip("/")
+        if cfg_url:
+            return cfg_url
+        host = request.headers.get("host") or "localhost"
+        return f"{request.url.scheme or 'https'}://{host}"
 
     def _cline_callback_redirect(return_path: str, provider: str,
                                   email: str | None = None,

@@ -633,11 +633,24 @@ class TestSchemaValidation:
 
     def test_integer_not_bool(self):
         schema = {"type": "object", "properties": {"count": {"type": "integer"}}}
-        valid, _msg = validate_tool_args("test", '{"count": true}', schema)
-        # bool is a subclass of int in Python, but we explicitly reject it.
-        # Actually, in our implementation we only check top-level type.
-        # The validation only checks the top-level type, not nested properties.
-        assert valid is True  # top-level is object, which is correct
+        valid, msg = validate_tool_args("test", '{"count": true}', schema)
+        # bool is a subclass of int in Python, so it must be rejected
+        # explicitly for "integer". Per-property types are checked, not just
+        # the top-level object type (previously this returned True, letting a
+        # boolean through an integer field — see AUDIT #20).
+        assert valid is False
+        assert "count" in msg
+
+    def test_number_not_bool(self):
+        schema = {"type": "object", "properties": {"score": {"type": "number"}}}
+        valid, msg = validate_tool_args("test", '{"score": true}', schema)
+        assert valid is False
+        assert "score" in msg
+
+    def test_property_type_ok(self):
+        schema = {"type": "object", "properties": {"score": {"type": "number"}}}
+        valid, _msg = validate_tool_args("test", '{"score": 1.5}', schema)
+        assert valid is True
 
 
 # -- Prometheus metrics -------------------------------------------------------

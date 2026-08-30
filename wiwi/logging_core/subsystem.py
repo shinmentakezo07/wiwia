@@ -49,10 +49,15 @@ class SSEBroadcastSink:
     """Fan-out to admin SSE clients. Ring buffer per stream for Last-Event-ID replay."""
 
     def __init__(self, ring_size: int = 500):
-        self._subs: dict[str, list[asyncio.Queue]] = {"request": [], "proxy": []}
+        self._subs: dict[str, list[asyncio.Queue]] = {"request": [], "proxy": [],
+                                                      "audit": []}
         self._rings: dict[str, deque] = {
             "request": deque(maxlen=ring_size),
             "proxy": deque(maxlen=ring_size),
+            # Audit events had no ring, so they were dropped outright whenever
+            # the DB sink was unavailable (they bypass the queue path and are
+            # awaited directly). A ring keeps them replayable.
+            "audit": deque(maxlen=ring_size),
         }
         self._seq = 0
         self._lock = asyncio.Lock()
@@ -128,11 +133,19 @@ class LoggingSubsystem:
                         diff: dict | None = None) -> None:
         evt = LogEvent(stream="audit", ts=time.time(), actor=actor,
                        action=action, target=target, diff=diff or {})
+        # Always record to the audit ring first, so the event survives even
+        # when there is no DB sink (or the write fails): admin audit trails
+        # must not vanish silently on a database outage.
+        await self.sse.publish("audit", evt)
         if self._db_sink is not None:
-            await self._db_sink.write_audit(evt)
-        else:
-            log.warning("audit_event_dropped", actor=actor, action=action,
-                        target=target)
+            try:
+                await self._db_sink.write_audit(evt)
+                return
+            except Exception:
+                log.warning("audit_write_failed", actor=actor, action=action,
+                            target=target, exc_info=True)
+                return
+        log.warning("audit_no_db_sink", actor=actor, action=action, target=target)
 
     # -- lifecycle ------------------------------------------------------------
     async def start(self) -> None:

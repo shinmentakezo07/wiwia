@@ -19,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 PBKDF2_ITERS = 200_000
 SESSION_TTL = 7 * 24 * 3600  # 7 days, seconds
+# Cap password length so PBKDF2 cost stays bounded (see create_user).
+_MAX_PASSWORD_LEN = 1024
 USERNAME_RE = __import__("re").compile(r"^[a-zA-Z0-9_-]+$")
 
 
@@ -133,6 +135,12 @@ class UserService:
         uname = _validate_username(username)
         if len(password) < 8:
             raise ValueError("password must be at least 8 characters")
+        # The upper bound matters as much as the lower one: PBKDF2 cost scales
+        # with input length, so an unbounded password is a CPU-exhaustion
+        # vector on an endpoint that needs no authentication.
+        if len(password) > _MAX_PASSWORD_LEN:
+            raise ValueError(
+                f"password must be at most {_MAX_PASSWORD_LEN} characters")
         uid = _user_id()
         now = _now()
         try:

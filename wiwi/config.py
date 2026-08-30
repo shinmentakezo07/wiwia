@@ -196,6 +196,13 @@ class WiwiSettings(BaseModel):
     log_retention_days: int = 30
     host: str = "0.0.0.0"
     port: int = 4000
+    # Absolute public base URL (scheme + host, no trailing slash) when the
+    # gateway sits behind a proxy — e.g. "https://wiwi.example.com". When set,
+    # it is the ONLY origin used to build OAuth callback URLs and
+    # X-Forwarded-* headers are ignored. Unset falls back to the request's own
+    # Host header (never X-Forwarded-Host) so an attacker cannot point an
+    # OAuth callback at their own origin.
+    public_url: str = ""
     header_allowlist: list[str] = Field(
         default_factory=lambda: [
             "anthropic-version", "anthropic-beta",

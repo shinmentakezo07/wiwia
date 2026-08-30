@@ -73,6 +73,12 @@ class RateLimiter:
                 checks.append((self._window(f"{key_id}:tpm", is_token=True), key_tpm))
 
             for w, limit in checks:
+                # Guard against a nonsensical limit reaching us from stored key
+                # config: a negative or zero limit must reject cleanly rather
+                # than read w.events[0] on an empty window (IndexError -> HTTP
+                # 500 on every request using that key).
+                if limit is None or limit <= 0:
+                    return False, 60
                 self._prune(w, now)
                 # prospective admission: the incoming request's cost must fit
                 cost = est_tokens if w.is_token else 1

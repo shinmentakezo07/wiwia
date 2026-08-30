@@ -214,10 +214,15 @@ class Deployment:
     def record_fail(self, allowed_fails: int, cooldown_time: float) -> None:
         now = time.monotonic()
         self.fails.append(now)
-        # Use a window at least 2x the cooldown time so chronic slow-fail
-        # deployments (failing once every >60s) still accumulate enough
-        # failures to trigger a cooldown.
-        window = max(60.0, 2 * cooldown_time)
+        # The window must outlast the interval at which a chronically failing
+        # deployment fails, otherwise each failure is pruned before the next
+        # arrives and `allowed_fails` is never reached. At the shipped
+        # cooldown_time of 30s the old max(60, 2*30) == 60s window was
+        # identical to the original 60s, so anything failing less often than
+        # once a minute never cooled down at all. The floor keeps a
+        # near-zero cooldown from making the window uselessly small; the
+        # ceiling bounds how many timestamps we retain.
+        window = max(300.0, min(6.0 * max(cooldown_time, 1.0), 3600.0))
         recent = [t for t in self.fails if now - t < window]
         self.fails = recent
         if len(recent) >= allowed_fails:

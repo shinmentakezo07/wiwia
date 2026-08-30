@@ -75,7 +75,42 @@ def validate_tool_args(
             log.warning("tool_args_missing_required", tool=tool_name, missing=missing)
             return False, msg
 
+        # Per-property types. Without this the declared types were never
+        # enforced at all — `_check_type` only ran on the whole args object, so
+        # a boolean in a "number" field passed validation untouched.
+        properties = schema.get("properties") or {}
+        for prop, value in args.items():
+            spec = properties.get(prop)
+            if not isinstance(spec, dict):
+                continue
+            want = spec.get("type")
+            if not want or not _check_type(value, want):
+                msg = (f"tool '{tool_name}': property '{prop}' expected "
+                       f"{want}, got {_type_name(value)}")
+                log.warning("tool_args_property_type_mismatch", tool=tool_name,
+                            prop=prop, expected=want, actual=_type_name(value))
+                return False, msg
+
     return True, ""
+
+
+def _type_name(value: Any) -> str:
+    """JSON-schema-ish name for a decoded value (for messages/logs only)."""
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    if value is None:
+        return "null"
+    return type(value).__name__
 
 
 def _check_type(value: Any, expected: str) -> bool:

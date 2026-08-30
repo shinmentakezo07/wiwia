@@ -15,7 +15,7 @@ import orjson
 import structlog
 
 from wiwi.core.context import RequestContext
-from wiwi.cost.pricing import CostEngine, estimate_tokens, estimate_tokens_async
+from wiwi.cost.pricing import CostEngine, estimate_tokens_async
 from wiwi.ir import types as ir
 from wiwi.logging_core.events import LogEvent
 from wiwi.providers.base import (
@@ -649,7 +649,7 @@ class Gateway:
                     line = await asyncio.wait_for(line_iter.__anext__(), timeout=idle_s)
                 except TimeoutError:
                     await self._note_stream_failure(dep, real_key)
-                    self._price_partial(ctx, dep, usage_final, text_len)
+                    await self._price_partial(ctx, dep, usage_final, text_len)
                     await queue.put(dl.StreamError(
                         f"upstream idle >{idle_s:.0f}s between chunks", "timeout"))
                     await _close_upstream()
@@ -699,8 +699,8 @@ class Gateway:
                                     if is_loop:
                                         await self._note_stream_failure(
                                             dep, real_key)
-                                        self._price_partial(ctx, dep, usage_final,
-                                                            text_len)
+                                        await self._price_partial(
+                                            ctx, dep, usage_final, text_len)
                                         await queue.put(dl.StreamError(
                                             f"model loop detected ({loop_limit} "
                                             f"repeating chunks)", "unknown"))
@@ -752,7 +752,10 @@ class Gateway:
             # partial delivery so the log and virtual-key spend reflect
             # tokens actually consumed before the disconnect.
             if started:
-                self._price_partial(ctx, dep, usage_final, text_len)
+                # Shielded: we are already being cancelled, so an unshielded
+                # await would be interrupted immediately and skip billing.
+                await asyncio.shield(self._price_partial(
+                    ctx, dep, usage_final, text_len))
                 await asyncio.shield(asyncio.wait_for(_close_upstream(), timeout=5.0))
             raise
         except Exception as e:  # noqa: BLE001
@@ -768,7 +771,7 @@ class Gateway:
                 # Mid-stream error — can't retry; bill partial delivery, feed
                 # health stats, send error to client.
                 await self._note_stream_failure(dep, real_key)
-                self._price_partial(ctx, dep, usage_final, text_len)
+                await self._price_partial(ctx, dep, usage_final, text_len)
                 await queue.put(dl.StreamError(str(e),
                                                "timeout" if "Timeout" in type(e).__name__
                                                else "connection"))
@@ -802,14 +805,20 @@ class Gateway:
             failover_mode=self.router.settings.failover_mode,
             key_max_consecutive_fails=self.router.settings.key_max_consecutive_fails)
 
-    def _price_partial(self, ctx: RequestContext, dep: Deployment,
-                       usage_final: dl.UsageFinal | None, text_len: int) -> None:
+    async def _price_partial(self, ctx: RequestContext, dep: Deployment,
+                             usage_final: dl.UsageFinal | None,
+                             text_len: int) -> None:
         """Price what was delivered even when the stream failed, so virtual-key
-        spend reflects tokens actually consumed."""
+        spend reflects tokens actually consumed.
+
+        Async because the estimator runs tiktoken, which blocks; this is called
+        from the stream pump, so the sync variant stalled the event loop for
+        every concurrent request (AUDIT #33).
+        """
         u = usage_final or dl.UsageFinal()
         if u.prompt == 0:
             u = dl.UsageFinal(
-                prompt=estimate_tokens(_flatten(ctx), dep.model_id),
+                prompt=await estimate_tokens_async(_flatten(ctx), dep.model_id),
                 cached=u.cached, reasoning=u.reasoning,
                 output=u.output or max(1, text_len // 4),
                 cache_creation=u.cache_creation, estimated=True)

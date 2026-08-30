@@ -16,6 +16,53 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from wiwi.auth.keys import generate_virtual_key, hash_key
 
 
+def _coerce_limit(value: object, name: str) -> float | None:
+    """Validate a numeric key limit.
+
+    Rejects negatives and non-numeric input up front. A stored negative rpm/tpm
+    made the rate limiter read an empty window and raise IndexError, returning
+    HTTP 500 for every request on that key — and a negative budget would let
+    spend run backwards.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        # ValueError (not TypeError) on purpose: every caller translates
+        # ValueError into a 400 for the client, and these are input problems.
+        raise ValueError(f"{name} must be a number, not a boolean")  # noqa: TRY004
+    try:
+        num = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a number") from None
+    # NaN is the only value that is not equal to itself.
+    if num != num or num in (float("inf"), float("-inf")):  # noqa: PLR0124
+        raise ValueError(f"{name} must be a finite number")
+    if num < 0:
+        raise ValueError(f"{name} must be >= 0")
+    return num
+
+
+def _coerce_models(value: object) -> list[str] | None:
+    """Normalize the models allowlist.
+
+    A bare string was being iterated into per-character entries, so
+    ``models: "abc"`` silently became ``["a", "b", "c"]``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        out: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                # ValueError: callers map it to a 400 for the client.
+                raise ValueError("models must be a list of strings")  # noqa: TRY004
+            out.append(item)
+        return out
+    raise ValueError("models must be a list of strings")
+
+
 @dataclass
 class AuthInfo:
     key_id: str
@@ -133,6 +180,11 @@ class AuthService:
         plaintext = custom_key or generate_virtual_key()
         if custom_key and len(custom_key) < 16:
             raise ValueError("custom key must be >= 16 characters")
+        models = _coerce_models(models)
+        rpm = _coerce_limit(rpm, "rpm")
+        tpm = _coerce_limit(tpm, "tpm")
+        max_budget = _coerce_limit(max_budget, "max_budget")
+        ttl_seconds = _coerce_limit(ttl_seconds, "ttl_seconds")
         kid = "k" + secrets_hex()
         now = time.time()
         expires = now + ttl_seconds if ttl_seconds else None
@@ -192,17 +244,25 @@ class AuthService:
                 continue
             val = fields[name]
             if name == "models":
-                val = __import__("json").dumps(list(val or []))
+                val = __import__("json").dumps(_coerce_models(val) or [])
             elif name == "ttl_seconds":
                 # Relative duration -> absolute epoch; ttl_seconds is not a
                 # DB column, it maps to expires_at.
                 if val is not None:
-                    sets["expires_at"] = time.time() + float(val)
+                    sets["expires_at"] = time.time() + _coerce_limit(val, "ttl_seconds")
                 else:
                     sets["expires_at"] = None
                 continue
             elif val is not None:
-                val = float(val) if name in ("max_budget", "expires_at") else int(val)
+                # Validate rather than letting float()/int() raise: a malformed
+                # value used to escape as an uncaught ValueError/TypeError and
+                # surface as HTTP 500, and int(1.5) silently truncated.
+                num = _coerce_limit(val, name)
+                if num is not None and name not in ("max_budget", "expires_at"):
+                    if num != int(num):
+                        raise ValueError(f"{name} must be a whole number")
+                    num = int(num)
+                val = num
             sets[name] = val
         # ttl_seconds maps to expires_at; don't emit it as a column.
         sets.pop("ttl_seconds", None)
@@ -289,6 +349,47 @@ class AuthService:
                  "max_budget": r[3], "spend_to_date": r[4], "rpm": r[5],
                  "tpm": r[6], "expires_at": r[7], "disabled": bool(r[8])}
                 for r in rows]
+
+    async def count_keys(self, owner_id: str, alias: str | None = None) -> int:
+        """Count live (non-expired, non-revoked) keys for an owner."""
+        now = time.time()
+        sql = ("SELECT COUNT(*) FROM vkeys WHERE owner_id = :o"
+               " AND (expires_at IS NULL OR expires_at > :now)"
+               " AND COALESCE(disabled, 0) = 0")
+        params: dict[str, object] = {"o": owner_id, "now": now}
+        if alias is not None:
+            sql += " AND key_alias = :a"
+            params["a"] = alias
+        async with self.engine.connect() as conn:
+            row = (await conn.execute(sa.text(sql), params)).first()
+        return int(row[0]) if row else 0
+
+    async def expire_keys(self, owner_id: str, alias: str | None = None,
+                          keep_newest: int = 0) -> int:
+        """Expire an owner's oldest keys, keeping the newest ``keep_newest``.
+
+        Caps how many live credentials one account can accumulate (e.g.
+        playground keys minted on every login). Expiring rather than deleting
+        preserves audit history. Returns the number expired.
+        """
+        now = time.time()
+        sql = ("SELECT id FROM vkeys WHERE owner_id = :o"
+               " AND (expires_at IS NULL OR expires_at > :now)"
+               " AND COALESCE(disabled, 0) = 0")
+        params: dict[str, object] = {"o": owner_id, "now": now}
+        if alias is not None:
+            sql += " AND key_alias = :a"
+            params["a"] = alias
+        sql += " ORDER BY created_at DESC"
+        async with self.engine.begin() as conn:
+            rows = (await conn.execute(sa.text(sql), params)).all()
+            stale = [r[0] for r in rows[keep_newest:]]
+            for kid in stale:
+                await conn.execute(
+                    sa.text("UPDATE vkeys SET expires_at = :now,"
+                            " updated_at = :now WHERE id = :id"),
+                    {"now": now, "id": kid})
+        return len(stale)
 
     async def key_owner(self, key_id: str) -> str | None:
         async with self.engine.connect() as conn:
