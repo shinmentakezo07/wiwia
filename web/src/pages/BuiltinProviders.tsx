@@ -200,7 +200,7 @@ export function BuiltinProvidersPage() {
     refetchInterval: 15_000,
   });
 
-  const catalog = catalogQuery.data?.providers ?? [];
+  const catalog = catalogQuery.data ?? [];
   const configured = providersQuery.data?.providers ?? [];
 
   const accountsByType = new Map<string, Provider[]>();

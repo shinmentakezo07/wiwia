@@ -90,7 +90,7 @@ export const getProviders = () =>
   api<ProvidersResponse>("/admin/providers");
 
 export const getBuiltinProviders = () =>
-  api<{ providers: BuiltinProvider[] }>("/admin/provider-catalog");
+  api<BuiltinProvider[]>("/admin/provider-catalog");
 
 export const patchProviderKey = (
   provider: string,
