@@ -2013,7 +2013,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if actor.role != "admin":
             kids = [k["id"] for k in await state.auth.list_keys_for_owner(actor.id)]
         sink = state.logs.db_sink
-        if sink is not None and (minutes == 0 or minutes > 1440):
+        # Every window reads from the DB when a sink exists: the in-memory ring
+        # starts empty after a restart, so routing small windows (1h/6h/24h)
+        # through the ring made usage stats silently reset on every redeploy.
+        if sink is not None:
             return ORJSONResponse(await sink.read_overview(minutes, key_ids=kids))
         minutes_ring = minutes if minutes > 0 else 1440
         evs = await _request_events()
@@ -2033,7 +2036,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
             if actor.role != "admin":
                 kids = [k["id"] for k in await state.auth.list_keys_for_owner(actor.id)]
             sink = state.logs.db_sink
-            if sink is not None and (minutes == 0 or minutes > 1440):
+            # Same as overview: DB for every window so 1h/6h/24h buckets
+            # survive a restart (the ring does not).
+            if sink is not None:
                 bs = stats_mod.bucket_size_for(minutes)
                 return ORJSONResponse(
                     await sink.read_timeseries(bs, metric, minutes, key_ids=kids))

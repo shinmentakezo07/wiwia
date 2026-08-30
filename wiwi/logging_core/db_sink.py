@@ -517,20 +517,23 @@ class DBSink:
 
         # GROUP BY skips empty buckets; zero-fill to a dense array so the
         # chart has no gaps (matching the in-memory stats.timeseries() shape).
+        # Bounded windows (minutes > 0) always zero-fill the fixed grid — even
+        # with zero rows — so the shape contract (exactly n_buckets buckets)
+        # holds right after a restart when the DB path serves small windows.
         by_t: dict[int, object] = {int(r.bucket_t): r for r in rows}
-        if by_t:
-            if minutes > 0:
-                # Fixed grid: bucket_start .. now, n_buckets slots.
-                first_t = bucket_start
-                n_fill = n_buckets
-            else:
-                # All-time: span the oldest..newest populated buckets.
-                first_t = min(by_t)
-                n_fill = (max(by_t) - first_t) // bucket_seconds + 1
-            for i in range(n_fill):
-                t = first_t + i * bucket_seconds
-                if t not in by_t:
-                    by_t[t] = None  # placeholder for a zero-valued bucket
+        if minutes > 0:
+            first_t = bucket_start
+            n_fill = n_buckets
+        elif by_t:
+            # All-time: span the oldest..newest populated buckets.
+            first_t = min(by_t)
+            n_fill = (max(by_t) - first_t) // bucket_seconds + 1
+        else:
+            n_fill = 0
+        for i in range(n_fill):
+            t = first_t + i * bucket_seconds
+            if t not in by_t:
+                by_t[t] = None  # placeholder for a zero-valued bucket
 
         if metric == "tokens":
             buckets = [
