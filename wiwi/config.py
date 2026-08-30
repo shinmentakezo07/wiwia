@@ -179,6 +179,18 @@ class GeneralSettings(BaseModel):
     master_key: str = ""
     database_url: str = "sqlite+aiosqlite:///wiwi.db"
     redis_url: str = ""
+    # Ceiling on live virtual keys per non-admin owner. Without it a user can
+    # mint unbounded keys and rotate around any per-key budget or rate limit,
+    # making those controls advisory. Admins are exempt.
+    max_keys_per_user: int = 50
+
+    @field_validator("max_keys_per_user")
+    @classmethod
+    def _key_cap_sane(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("max_keys_per_user must be >= 1")
+        return v
+
 
     @field_validator("database_url")
     @classmethod

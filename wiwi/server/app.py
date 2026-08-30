@@ -133,6 +133,8 @@ class RequestIdMiddleware:
         await self.app(scope, receive_limited, send_wrapper)
 
 
+
+from wiwi.auth.keys import mask_key
 from wiwi.auth.service import AuthService
 from wiwi.auth.users import SESSION_TTL, UserInfo, UserService, sign_session, verify_session
 from wiwi.config import PROVIDER_TYPES, ConfigError, WiwiConfig, _interpolate, load_config, load_env
@@ -144,7 +146,7 @@ from wiwi.logging_core.events import LogEvent
 from wiwi.logging_core.subsystem import LoggingSubsystem, encode_sse, public_dict
 from wiwi.providers import cline_oauth
 from wiwi.providers.base import ProviderKeyRef, WiwiError
-from wiwi.providers.registry import get_adapter
+from wiwi.providers.registry import fresh_adapter
 from wiwi.ratelimit.memory import RateLimiter
 from wiwi.router.router import (
     BUILTIN_PROVIDER_TYPES,
@@ -159,13 +161,6 @@ from wiwi.server.config_store import ConfigStore
 from wiwi.wire import anthropic_messages as am
 from wiwi.wire import openai_chat as oc
 from wiwi.wire import openai_responses as orp
-
-
-def _mask_secret(secret: str) -> str:
-    if len(secret) >= 12:
-        return secret[:5] + "…" + secret[-4:]
-    return "***"
-
 
 # Playground keys are minted automatically on login/signup, so they must be
 # bounded: a TTL keeps abandoned ones from living forever, and a per-user cap
@@ -408,7 +403,8 @@ class AppState:
                 cursor.execute("PRAGMA foreign_keys=ON")
                 cursor.close()
         self._db_engine = aengine
-        self.auth = AuthService(aengine, self.config.general_settings.master_key)
+        self.auth = AuthService(aengine, self.config.general_settings.master_key,
+                                self.config.general_settings.max_keys_per_user)
         await self.auth.startup()
         # User accounts + signed session cookies. The session signing secret
         # is WIWI_SESSION_SECRET when provided; otherwise it is derived from
@@ -451,7 +447,7 @@ class AppState:
         await self.config_store.startup()
         await self._load_db_config()
         self.gateways = {
-            "chat": Gateway(self.router, self.cost, "chat",
+            "chat": Gateway(self.router, self.cost,
                             drop_params=self.config.wiwi_settings.drop_params),
         }
         self.shutdown_event = asyncio.Event()
@@ -1258,7 +1254,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         status = "disabled" if not k.enabled else ("cooling" if cooling else k.status)
         return {
             "label": k.label,
-            "masked": _mask_secret(k.secret),
+            "masked": mask_key(k.secret),
             "weight": k.weight,
             "enabled": k.enabled,
             "status": status,
@@ -1606,7 +1602,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return _err(409, "invalid_request_error",
                         f"no available key on provider '{name}' to fetch models",
                         request)
-        adapter = get_adapter(acct.provider_type)
+        adapter = fresh_adapter(acct.provider_type)
         url = _provider_models_url(acct.provider_type, acct.base_url)
         headers = adapter.headers(ProviderKeyRef(label=key.label, secret=key.secret))
         # Gemini puts the API key in the querystring, not headers — so `url`
@@ -1667,7 +1663,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return _err(409, "invalid_request_error",
                         "no available Cline key — connect a Cline account first",
                         request)
-        adapter = get_adapter("cline")
+        adapter = fresh_adapter("cline")
         url = _provider_models_url("cline", cline_acct.base_url)
         headers = adapter.headers(ProviderKeyRef(label=cline_key.label,
                                                    secret=cline_key.secret))
@@ -2443,7 +2439,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         return ORJSONResponse({
             "provider": provider,
             "email": tokens.get("email"),
-            "access_token_masked": _mask_secret(tokens["access_token"]),
+            "access_token_masked": mask_key(tokens["access_token"]),
         })
 
     @app.post("/admin/cline/oauth/auto-connect")
@@ -2639,7 +2635,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             actor="master", action="cline_oauth.refresh", target=provider)
         return ORJSONResponse({
             "provider": provider,
-            "access_token_masked": _mask_secret(result["access_token"]),
+            "access_token_masked": mask_key(result["access_token"]),
             "expires_at": result.get("expires_at"),
         })
 
