@@ -13,6 +13,13 @@ wiwi.yaml
 key.md
 wiwi.db
 
+# Local opencode agent config (holds live provider keys, e.g. ptcider-alt)
+opencode.json
+opencode.jsonc
+
+# Local scratch project (not part of wiwi)
+tryproxy/
+
 # omp CLI local secrets (provider keys)
 .env
 
