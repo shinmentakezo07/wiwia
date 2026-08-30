@@ -167,6 +167,20 @@ class AnthropicStreamEncoder:
         self._usage: dl.UsageFinal | None = None
         self._stop = "end_turn"
         self._started = False
+        # Per-delta skeleton, allocated once: only `index` and the delta body
+        # change between consecutive deltas of the same kind.
+        self._text_delta: dict[str, Any] = {
+            "type": "content_block_delta", "index": 0,
+            "delta": {"type": "text_delta", "text": ""}}
+        self._think_delta: dict[str, Any] = {
+            "type": "content_block_delta", "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": ""}}
+        self._sig_delta: dict[str, Any] = {
+            "type": "content_block_delta", "index": 0,
+            "delta": {"type": "signature_delta", "signature": ""}}
+        self._json_delta: dict[str, Any] = {
+            "type": "content_block_delta", "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": ""}}
 
     def _evt(self, event: str, payload: dict[str, Any]) -> bytes:
         return sse_frame(event, orjson.dumps(payload).decode())
@@ -220,17 +234,18 @@ class AnthropicStreamEncoder:
                     "content_block": {"type": "text", "text": ""}}))
                 self._open_block = "text"
                 self._block_idx += 1
-            out.append(self._evt("content_block_delta", {
-                "type": "content_block_delta", "index": self._block_idx - 1,
-                "delta": {"type": "text_delta", "text": d.text}}))
+            td = self._text_delta
+            td["index"] = self._block_idx - 1
+            td["delta"]["text"] = d.text
+            out.append(self._evt("content_block_delta", td))
             return b"".join(out)
         if isinstance(d, dl.ThinkingDelta):
             if not d.text and d.signature:
                 if self._open_block == "thinking":
-                    return self._evt("content_block_delta", {
-                        "type": "content_block_delta",
-                        "index": self._block_idx - 1,
-                        "delta": {"type": "signature_delta", "signature": d.signature}})
+                    sd = self._sig_delta
+                    sd["index"] = self._block_idx - 1
+                    sd["delta"]["signature"] = d.signature
+                    return self._evt("content_block_delta", sd)
                 # No thinking block open: buffer instead of stamping a signature
                 # onto a nonexistent (or wrong-type) block.
                 self._pending_sig = d.signature
@@ -243,9 +258,10 @@ class AnthropicStreamEncoder:
                     "content_block": {"type": "thinking", "thinking": ""}}))
                 self._open_block = "thinking"
                 self._block_idx += 1
-            out.append(self._evt("content_block_delta", {
-                "type": "content_block_delta", "index": self._block_idx - 1,
-                "delta": {"type": "thinking_delta", "thinking": d.text}}))
+            thd = self._think_delta
+            thd["index"] = self._block_idx - 1
+            thd["delta"]["thinking"] = d.text
+            out.append(self._evt("content_block_delta", thd))
             # Preserve signature if both text and signature arrived together
             if d.signature:
                 self._pending_sig = d.signature
@@ -266,10 +282,10 @@ class AnthropicStreamEncoder:
             self._block_idx += 1
             return b"".join(out)
         if isinstance(d, dl.ToolCallArgsDelta):
-            idx = self._tool_blocks.get(d.index, self._block_idx - 1)
-            return self._evt("content_block_delta", {
-                "type": "content_block_delta", "index": idx,
-                "delta": {"type": "input_json_delta", "partial_json": d.args_fragment}})
+            jd = self._json_delta
+            jd["index"] = self._tool_blocks.get(d.index, self._block_idx - 1)
+            jd["delta"]["partial_json"] = d.args_fragment
+            return self._evt("content_block_delta", jd)
         if isinstance(d, dl.ToolCallClose):
             return b"".join(self._close_block(tool_index=d.index))
         if isinstance(d, dl.UsageFinal):

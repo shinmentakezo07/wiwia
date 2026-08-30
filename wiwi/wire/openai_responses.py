@@ -186,8 +186,10 @@ class ResponsesStreamEncoder:
         self._open_out = -1                  # output_index of the currently open item
         self._usage: dl.UsageFinal | None = None
         self._stop = "stop"
-        self._text_buf = ""
-        self._think_buf = ""
+        # Piece lists rather than repeated `+=`: joining once at close is
+        # O(n) total instead of O(n^2) copying for a long stream.
+        self._text_buf: list[str] = []
+        self._think_buf: list[str] = []
         # Per-tool-call state keyed by the IR stream's tool index, so
         # interleaved parallel tool calls (Open(0) Open(1) Args(0) ...) don't
         # corrupt each other's item ids / argument buffers.
@@ -233,17 +235,19 @@ class ResponsesStreamEncoder:
                 "output_index": idx,
                 "item": {"type": "message", "id": f"msg_{self.req_id}",
                          "status": "completed", "role": "assistant",
-                         "content": [{"type": "output_text", "text": self._text_buf,
+                         "content": [{"type": "output_text",
+                                      "text": "".join(self._text_buf),
                                       "annotations": []}]}})]
         if kind == "thinking":
+            think = "".join(self._think_buf)
             return [self._evt("response.reasoning_text.done", {
                 "item_id": f"rs_{self.req_id}_{idx}", "output_index": idx,
-                "text": self._think_buf}),
+                "text": think}),
                 self._evt("response.output_item.done", {
                     "output_index": idx,
                     "item": {"type": "reasoning", "id": f"rs_{self.req_id}_{idx}",
                              "summary": [{"type": "summary_text",
-                                          "text": self._think_buf}]}})]
+                                          "text": think}]}})]
         # kind == "tool"
         t = self._tools.get(self._open_tool) if self._open_tool is not None else None
         if t is None:
@@ -282,8 +286,8 @@ class ResponsesStreamEncoder:
                     "content_index": 0,
                     "part": {"type": "output_text", "text": "", "annotations": []}}))
                 self._item_open = "message"
-                self._text_buf = ""
-            self._text_buf += d.text
+                self._text_buf = []
+            self._text_buf.append(d.text)
             out.append(self._evt("response.output_text.delta", {
                 "item_id": f"msg_{self.req_id}", "output_index": self._open_out,
                 "content_index": 0, "delta": d.text}))
@@ -300,8 +304,8 @@ class ResponsesStreamEncoder:
                     "item": {"type": "reasoning", "id": f"rs_{self.req_id}_{oi}",
                              "summary": []}}))
                 self._item_open = "thinking"
-                self._think_buf = ""
-            self._think_buf += d.text
+                self._think_buf = []
+            self._think_buf.append(d.text)
             out.append(self._evt("response.reasoning_text.delta", {
                 "item_id": f"rs_{self.req_id}_{self._open_out}",
                 "output_index": self._open_out, "delta": d.text}))

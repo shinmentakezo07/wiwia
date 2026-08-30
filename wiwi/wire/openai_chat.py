@@ -195,17 +195,25 @@ class ChatStreamEncoder:
         self._finished = False
         self._usage: dl.UsageFinal | None = None
         self._stop: str = "stop"
+        # Chunk skeleton built once: id/object/created/model never change for
+        # the life of the stream, so only `choices[0]` is mutated per delta
+        # instead of re-allocating the whole chunk dict on every token.
+        self._chunk: dict[str, Any] = {
+            "id": f"chatcmpl-{req_id}", "object": "chat.completion.chunk",
+            "created": int(time.time()), "model": model,
+            "choices": [{"index": 0, "delta": None, "finish_reason": None}],
+        }
+        self._choice = self._chunk["choices"][0]
 
     def _shell(self, delta: dict[str, Any], finish: str | None = None,
                usage: dict[str, Any] | None = None) -> bytes:
-        obj: dict[str, Any] = {
-            "id": f"chatcmpl-{self.req_id}", "object": "chat.completion.chunk",
-            "created": int(time.time()), "model": self.model,
-            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
-        }
-        if usage is not None:
-            obj["usage"] = usage
-        return sse_frame("", orjson.dumps(obj).decode())
+        self._choice["delta"] = delta
+        self._choice["finish_reason"] = finish
+        if usage is None:
+            self._chunk.pop("usage", None)
+        else:
+            self._chunk["usage"] = usage
+        return sse_frame("", orjson.dumps(self._chunk).decode())
 
     def feed(self, d: dl.IRStreamDelta) -> bytes | None:
         if isinstance(d, dl.StreamStart):
