@@ -34,11 +34,20 @@ def bucket_size_for(minutes: int) -> int:
     return 86400
 
 
-def _p95(values: list[float]) -> float:
+def percentile(values: list[float], p: float = 0.95) -> float:
+    """Nearest-rank percentile of *values* (0.0 < p <= 1.0); 0.0 when empty.
+
+    Single source of truth: the Prometheus exporter, the admin rollups and
+    per-deployment latency all use this so their numbers cannot drift apart.
+    """
     if not values:
         return 0.0
     s = sorted(values)
-    return s[max(0, min(len(s) - 1, math.ceil(len(s) * 0.95) - 1))]
+    return s[max(0, min(len(s) - 1, math.ceil(len(s) * p) - 1))]
+
+
+def _p95(values: list[float]) -> float:
+    return percentile(values, 0.95)
 
 
 def window_events(events: list[LogEvent], minutes: int,

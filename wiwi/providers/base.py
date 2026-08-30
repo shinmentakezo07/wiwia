@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 import orjson
@@ -29,6 +29,23 @@ class WiwiError(Exception):
 
 
 RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504, 529}
+
+
+def status_for_key_pool(e: WiwiError) -> int | None:
+    """HTTP status a WiwiError should report to the key pool, if any.
+
+    Returns the status that key-pool accounting cares about (429, 401/403,
+    and other retryable upstream failures), or ``None`` for statuses that
+    say nothing about the key's health (e.g. a caller-side 400). Shared by
+    the router's retry loop and the gateway's stream pump/resume path.
+    """
+    if e.status == 429:
+        return 429
+    if e.status in (401, 403):
+        return e.status
+    if e.status in RETRYABLE_STATUS:
+        return e.status
+    return None
 
 
 def _extract_error_message(body_text: str) -> str:
@@ -104,24 +121,12 @@ class ProviderKeyRef:
     secret: str
 
 
-@dataclass
-class ProviderRequest:
-    url: str
-    headers: dict[str, str] = field(default_factory=dict)
-    json_body: dict[str, Any] | None = None
-
-
-class CredentialProvider(Protocol):
-    """G5 seam: static keys now; Entra-ID/OAuth/SigV4 signers later."""
-
-    def headers(self, key: ProviderKeyRef) -> dict[str, str]: ...
-
 
 class ProviderAdapter(Protocol):
     provider_type: str
 
     def headers(self, key: ProviderKeyRef) -> dict[str, str]: ...
-    def build_url(self, base_url: str, model_id: str, stream: bool, kind: str) -> str: ...
+    def build_url(self, base_url: str, model_id: str, stream: bool) -> str: ...
     def encode_request(self, req: IRRequest, model_id: str,
                        deployment_params: dict[str, Any]) -> dict[str, Any]: ...
     def decode_response(self, status: int, body: bytes) -> AssistantTurn: ...

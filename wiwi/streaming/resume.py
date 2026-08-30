@@ -160,13 +160,6 @@ def _delta_size(delta: dl.IRStreamDelta) -> int:
     return 0
 
 
-@dataclass
-class ResumeResult:
-    """Outcome of a mid-stream resume attempt."""
-    success: bool
-    text_prefix: str = ""
-    thinking_prefix: str = ""
-    error: str = ""
 
 
 def build_continuation_messages(

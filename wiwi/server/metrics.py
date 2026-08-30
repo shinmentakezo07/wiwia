@@ -28,9 +28,17 @@ def _escape_label(value: str) -> str:
     return value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
 
 def _percentile(sorted_vals: list[float], p: float) -> float:
+    """Nearest-rank percentile of an already-sorted list; *p* is 0-100.
+
+    Same nearest-rank formula as :func:`wiwi.server.stats.percentile`
+    (which owns it for the admin rollups); this variant takes a pre-sorted
+    list because several quantiles are rendered from one sample.
+    """
     if not sorted_vals:
         return 0.0
-    idx = max(0, min(len(sorted_vals) - 1, math.ceil(len(sorted_vals) * p / 100) - 1))
+    # Pre-sorted input, so index directly; stats.percentile owns the formula.
+    idx = max(0, min(len(sorted_vals) - 1,
+                     math.ceil(len(sorted_vals) * p / 100) - 1))
     return sorted_vals[idx]
 
 

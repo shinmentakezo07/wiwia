@@ -4,7 +4,6 @@ round-robin, cooldowns, retries, fallbacks (docs/ADMIN.md ยง2, ARCHITECTURE.md ย
 from __future__ import annotations
 
 import asyncio
-import math
 import random
 import time
 from collections import deque
@@ -14,10 +13,11 @@ from typing import Any
 from wiwi.config import PROVIDER_TYPES, RouterSettings, WiwiConfig
 from wiwi.core.context import RequestContext
 from wiwi.providers.base import (
-    RETRYABLE_STATUS,
     ProviderKeyRef,
     WiwiError,
+    status_for_key_pool,
 )
+from wiwi.server.stats import percentile
 
 
 @dataclass
@@ -230,10 +230,7 @@ class Deployment:
             self.fails.clear()
 
     def p95_latency(self) -> float:
-        if not self.latencies:
-            return 0.0
-        s = sorted(self.latencies)
-        return s[max(0, min(len(s) - 1, math.ceil(len(s) * 0.95) - 1))]
+        return percentile(self.latencies, 0.95)
 
 
 class Router:
@@ -765,10 +762,4 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
 
 
 def _status_of(e: WiwiError) -> int | None:
-    if e.status == 429:
-        return 429
-    if e.status in (401, 403):
-        return e.status
-    if e.status in RETRYABLE_STATUS:
-        return e.status
-    return None
+    return status_for_key_pool(e)

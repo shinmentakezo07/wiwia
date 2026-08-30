@@ -24,12 +24,6 @@ class AttemptRecord:
     detail: str = ""
 
 
-@dataclass
-class DeltaCounters:
-    text: int = 0
-    thinking: int = 0
-    tool_opens: int = 0
-    reasoning_dropped: int = 0
 
 
 @dataclass
@@ -48,7 +42,7 @@ class RequestContext:
     # stream state
     first_token_at: float | None = None
     last_token_at: float | None = None
-    deltas_seen: DeltaCounters = field(default_factory=DeltaCounters)
+
     usage: Usage | None = None
     cost: float = 0.0
     # outcomes

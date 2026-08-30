@@ -14,27 +14,9 @@ When Redis is unavailable, falls back to the in-memory implementation.
 from __future__ import annotations
 
 import time
-from collections import deque
-from dataclasses import dataclass, field
 from typing import Any
 
 from wiwi.ratelimit.memory import RateLimiter as MemoryRateLimiter
-
-
-@dataclass
-class _Event:
-    ts: float
-    tokens: int
-    estimated: bool = False
-
-
-@dataclass
-class _Window:
-    events: deque = field(default_factory=deque)
-    is_token: bool = False
-
-    def count(self) -> int:
-        return sum(e.tokens for e in self.events)
 
 
 def compute_retry_after_seconds(
