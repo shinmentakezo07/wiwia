@@ -6,12 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **wiwi** is a self-hosted unified LLM gateway proxy (LiteLLM-shaped). Three inbound API dialects — OpenAI Chat Completions, OpenAI Responses (Codex CLI), Anthropic Messages (Claude Code) — all route through one canonical internal representation (IR) to any outbound provider (OpenAI, Anthropic, Gemini, OpenRouter, NVIDIA NIM, Cline/OAuth, GMI Cloud, any OpenAI-compatible URL). Responses are always re-encoded in the caller's inbound dialect (e.g. Claude Code backed by GPT). Adds virtual keys, budgets, rate limits, key pools with smooth weighted round-robin, retries/cooldowns/fallbacks, cost tracking, request logs, and an admin web UI.
 
-Venv at `.venv` (a symlink) — use `.venv/bin/python`, `.venv/bin/ruff` directly. The admin UI (`web/`) is React 19 + TypeScript + Vite + Tailwind 4, built with **bun** (not npm).
+`.venv` is a symlink to an empty uv venv — it has no site-packages, so do **not** use `.venv/bin/python`. Use the ambient `python3` / `pytest` / `ruff` on PATH (they have the project installed). The admin UI (`web/`) is React 19 + TypeScript + Vite + Tailwind 4, built with **bun** (not npm).
 
 ## Commands
 
 ```bash
-# setup
+# setup — only needed on a fresh machine; the current checkout's .venv is
+# empty and the project is already installed into the ambient interpreter.
 uv venv && uv pip install -e ".[dev]"
 
 # run server (default 0.0.0.0:4000; needs wiwi.yaml — cp wiwi.yaml.example wiwi.yaml)
@@ -19,12 +20,12 @@ wiwi --config wiwi.yaml [--host H] [--port P]
 DATABASE_URL=postgresql+asyncpg://... wiwi --config wiwi.yaml   # Postgres (default is SQLite at wiwi.db)
 
 # tests
-.venv/bin/python -m pytest tests/ -q
-.venv/bin/python -m pytest tests/test_codecs.py -q            # single file
-.venv/bin/python -m pytest tests/test_router.py -k cooldown   # single test by name
+python3 -m pytest tests/ -q                                 # 813 pass, ~52s
+python3 -m pytest tests/test_codecs.py -q                   # single file
+python3 -m pytest tests/test_router.py -k cooldown          # single test by name
 
 # lint (ruff, line-length 100, target py311)
-.venv/bin/ruff check wiwi/ tests/
+ruff check wiwi/ tests/
 
 # admin UI
 cd web && bun install && bun run dev     # dev server (proxies to running gateway)
@@ -62,7 +63,7 @@ Adding an inbound surface = one new module in `wiwi/wire/`; adding a provider = 
 | `router/` | Key pools, weighted round-robin, retries, cooldowns, fallbacks |
 | `auth/` | Virtual keys, budgets, rate limits (`keys.py`, `service.py`, `users.py`) |
 | `ratelimit/` | Rate-limit enforcement (memory + redis backends) |
-| `cost/` | Token/cost calculation (`pricing.py`, `model_prices.json`) |
+| `cost/` | Token/cost calculation (`pricing.py` only) |
 | `logging_core/` | Structured logging (structlog) + DB sink + event taxonomy |
 | `server/` | FastAPI app, admin API, stats rollups, static SPA serving |
 | `web/` | Admin UI (React 19 + TypeScript + Vite + Tailwind 4) |
@@ -90,7 +91,7 @@ Note the one asymmetry in that contract: `StreamError` may terminate at **any** 
 
 ## Where to start reading
 
-`server/app.py` is ~2.5k lines and `core/gateway.py` ~900 — don't read either top to bottom. For a request's full path, start at `run_chat_like` (`server/app.py:576`) and follow the pipeline it names; `RequestContext` (`core/context.py`) is the single mutable object threaded through every stage, so reading its fields tells you what the pipeline carries. For streaming, read `streaming/deltas.py` (87 lines, the whole contract) before any adapter.
+`server/app.py` is ~2.7k lines and `core/gateway.py` ~970 — don't read either top to bottom. For a request's full path, start at `run_chat_like` (`server/app.py:748`) and follow the pipeline it names; `RequestContext` (`core/context.py`) is the single mutable object threaded through every stage, so reading its fields tells you what the pipeline carries. For streaming, read `streaming/deltas.py` (87 lines, the whole contract) before any adapter.
 
 ## Config
 
@@ -104,13 +105,13 @@ Error bodies are dialect-correct per surface (OpenAI `{"error":{…}}` vs Anthro
 - Upstream mocking with `respx`; app-level tests via `asgi-lifespan` + `httpx.ASGITransport` (see `tests/test_integration.py`).
 - Property-based round-trip tests use `hypothesis` (see `tests/test_property_roundtrip.py`) — the right tool for codec/adapter invariants.
 - New bug fixes go alongside the existing thematic regression files (`test_audit_fixes.py`, `test_fix_round2.py`, … through `test_fix_round9.py`) rather than scattered into topic files. **Next unused number is `test_fix_round10.py`.**
-- Run full pytest + ruff before claiming work done or committing. Both are currently green (763 tests collected).
+- Run full pytest + ruff before claiming work done or committing. Both are currently green (**813 tests pass**, ruff clean).
 
 ## Conventions & guardrails
 
 - Ruff only (`line-length = 100`, target `py311`). Pydantic v2 for config; plain dataclasses for IR / streaming hot paths.
 - Async throughout (`httpx.AsyncClient`, SQLAlchemy async, `orjson` in hot paths). Never `print` from library code — use `structlog`.
-- Naming: wire modules named after dialect (`openai_chat.py`); adapters `<provider>_adapter.py`; tests `test_<area>.py`. UI: one routed page per admin concern in `web/src/pages/*.tsx`. **Bun** is authoritative for `web/` (not npm).
+- Naming: wire modules named after dialect (`openai_chat.py`); adapters `<provider>_adapter.py`; tests `test_<area>.py`. **Bun** is authoritative for `web/` (not npm). In `web/src/pages/` the ~15 admin console pages (Dashboard, Providers, VirtualKeys, RequestLogs, …) sit alongside ~30 public marketing pages (Landing, Pricing, Blog, Docs, …) — don't assume a page is admin-facing from the directory alone.
 - Virtual keys are SHA-256-hashed at rest with constant-time compare; provider keys enter via `os.environ/NAME` interpolation in config.
 - **Never commit `wiwi.yaml`, `wiwi.db`, `key.md`, `.env`, or anything under `.verify/`** — they hold live provider keys and runtime state (all gitignored). Master key comes from `WIWI_MASTER_KEY`.
 - Never add dialect- or provider-specific branches in `core/`, `router/`, or `auth/` — dialect logic belongs in `wire/`, provider logic in `providers/`.
