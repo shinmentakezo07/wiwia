@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-wiwi is a self-hosted unified LLM gateway proxy (LiteLLM-style). Three inbound API dialects — OpenAI Chat Completions, OpenAI Responses (Codex CLI), Anthropic Messages (Claude Code) — all route through one canonical internal representation (IR) to any outbound provider (OpenAI, Anthropic, Gemini, any OpenAI-compatible URL). Responses are always re-encoded in the caller's inbound dialect, so e.g. Claude Code can be backed by GPT. Adds virtual keys, budgets, rate limits, key pools with smooth weighted round-robin, retries/cooldowns/fallbacks, cost tracking, request logs, and an admin web UI.
+**wiwi** is a self-hosted unified LLM gateway proxy (LiteLLM-shaped). Three inbound API dialects — OpenAI Chat Completions, OpenAI Responses (Codex CLI), Anthropic Messages (Claude Code) — all route through one canonical internal representation (IR) to any outbound provider (OpenAI, Anthropic, Gemini, OpenRouter, NVIDIA NIM, Cline/OAuth, GMI Cloud, any OpenAI-compatible URL). Responses are always re-encoded in the caller's inbound dialect (e.g. Claude Code backed by GPT). Adds virtual keys, budgets, rate limits, key pools with smooth weighted round-robin, retries/cooldowns/fallbacks, cost tracking, request logs, and an admin web UI.
 
-The venv lives at `.venv` (a symlink) — use `.venv/bin/python`, `.venv/bin/ruff` directly. The admin UI (`web/`) is React 19 + TypeScript + Vite + Tailwind 4, built with bun (not npm).
+Venv at `.venv` (a symlink) — use `.venv/bin/python`, `.venv/bin/ruff` directly. The admin UI (`web/`) is React 19 + TypeScript + Vite + Tailwind 4, built with **bun** (not npm).
 
 ## Commands
 
@@ -103,7 +103,7 @@ Error bodies are dialect-correct per surface (OpenAI `{"error":{…}}` vs Anthro
 - `pytest` + `pytest-asyncio` with `asyncio_mode = "auto"` — write bare `async def test_…`, no `@pytest.mark.asyncio` decorator.
 - Upstream mocking with `respx`; app-level tests via `asgi-lifespan` + `httpx.ASGITransport` (see `tests/test_integration.py`).
 - Property-based round-trip tests use `hypothesis` (see `tests/test_property_roundtrip.py`) — the right tool for codec/adapter invariants.
-- New bug fixes go alongside the existing thematic regression files (`test_audit_fixes.py`, `test_fix_round2.py`, … through `test_fix_round8.py`) rather than scattered into topic files. **Next unused number is `test_fix_round9.py`.**
+- New bug fixes go alongside the existing thematic regression files (`test_audit_fixes.py`, `test_fix_round2.py`, … through `test_fix_round9.py`) rather than scattered into topic files. **Next unused number is `test_fix_round10.py`.**
 - Run full pytest + ruff before claiming work done or committing. Both are currently green (763 tests collected).
 
 ## Conventions & guardrails
@@ -125,8 +125,12 @@ Error bodies are dialect-correct per surface (OpenAI `{"error":{…}}` vs Anthro
 
 `UPDATE.md` is the changelog for all OpenAI ↔ Anthropic cross-provider translation fixes, the OpenRouter adapter, and multi-turn conversation fixes. **Read it first** when encountering issues with: reasoning/thinking parameter translation, tool_result message handling, `content: null` errors, OpenRouter `reasoning` parameter, `stream_options`, or error message extraction from upstream providers. It documents every fix with before/after code snippets, the files changed, and the tests that cover them.
 
+## AUDIT.md — known-bug register
+
+`AUDIT.md` enumerates bugs verified by source-reading, with severity, file:line citations, and a one-line fix sketch. Read it before starting any bugfix work so you don't redo an already-known fix or miss a related one.
+
 ## Project rules & skills
 
-- For bug fixes, follow the workflow in `.claude/rules/wiwi-bugfix-workflow.md` (TDD via `.claude/skills/test-driven-development`, root-cause via `.claude/skills/systematic-debugging`, review via `.claude/skills/requesting-code-review`). New bugfix tests go into the next thematic file `test_fix_roundN.py` — **next unused is `test_fix_round9.py`** (`test_fix_round8.py` exists and the rule file's "round6" pointer is stale).
+- For bug fixes, follow the workflow in `.claude/rules/wiwi-bugfix-workflow.md` (TDD via `.claude/skills/test-driven-development`, root-cause via `.claude/skills/systematic-debugging`, review via `.claude/skills/requesting-code-review`). New bugfix tests go into the next thematic file `test_fix_roundN.py` — **next unused is `test_fix_round10.py`** (`test_fix_round9.py` exists and the rule file's "round6" pointer is stale).
 - Superpowers skills (`/test-driven-development`, `/systematic-debugging`, `/brainstorming`, `/writing-plans`, `/executing-plans`, `/verification-before-completion`, `/using-git-worktrees`) are the methodology for plan → TDD → debug → review → verify.
 - ECC skills are the domain library (Python/FastAPI/React/agent orchestration, security scan, etc.); invoke the matching skill for the task.
