@@ -3,7 +3,6 @@
 export interface PoolKey {
   label: string;
   masked: string;
-  secret: string;
   weight: number;
   enabled: boolean;
   status: "active" | "cooling" | "invalid" | "disabled";

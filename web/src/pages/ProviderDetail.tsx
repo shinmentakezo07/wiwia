@@ -23,6 +23,7 @@ import {
   patchProvider,
   patchProviderKey,
   addProviderKey,
+  revealProviderKey,
 } from "@/api/client";
 import type { PoolKey, Provider } from "@/api/types";
 import {
@@ -90,6 +91,22 @@ function KeyRow(props: { provider: string; k: PoolKey; onError: (m: string) => v
   const [editingWeight, setEditingWeight] = useState(false);
   const [weight, setWeight] = useState(String(props.k.weight));
   const [revealed, setRevealed] = useState(false);
+  const [secret, setSecret] = useState<string | null>(null);
+
+  const reveal = useMutation({
+    mutationFn: () => revealProviderKey(props.provider, props.k.label),
+    onSuccess: (r) => { setSecret(r.secret); setRevealed(true); },
+    onError: (e) => props.onError(e.message),
+  });
+
+  const toggleReveal = () => {
+    if (revealed) {
+      setRevealed(false);
+      return;
+    }
+    if (secret !== null) setRevealed(true);
+    else reveal.mutate();
+  };
 
   const patch = useMutation({
     mutationFn: (p: { enabled?: boolean; weight?: number }) =>
@@ -115,16 +132,17 @@ function KeyRow(props: { provider: string; k: PoolKey; onError: (m: string) => v
       <TD className="font-mono text-[12px] text-[var(--admin-text-dim)]">
         <div className="flex items-center gap-1.5">
           <span className={revealed ? "break-all" : ""}>
-            {revealed ? props.k.secret : props.k.masked}
+            {revealed ? (secret ?? props.k.masked) : props.k.masked}
           </span>
           <button
             type="button"
-            onClick={() => setRevealed((v) => !v)}
-            className="shrink-0 rounded p-1 text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.03] hover:text-[var(--admin-text-muted)]"
+            onClick={toggleReveal}
+            disabled={reveal.isPending}
+            className="shrink-0 rounded p-1 text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.03] hover:text-[var(--admin-text-muted)] disabled:opacity-50"
             title={revealed ? "Hide key" : "Reveal key"}
             aria-label={revealed ? "Hide key" : "Reveal key"}
           >
-            {revealed ? <EyeOff size={12} /> : <Eye size={12} />}
+            {reveal.isPending ? <Loader2 size={12} className="animate-spin" /> : revealed ? <EyeOff size={12} /> : <Eye size={12} />}
           </button>
         </div>
       </TD>

@@ -1299,6 +1299,28 @@ def create_app(config: WiwiConfig) -> FastAPI:
         return ORJSONResponse({"providers": out,
                                "alias_to_provider": dict(state.router.alias_to_provider)})
 
+    @app.get("/admin/providers/{name}/keys/{label}/secret")
+    async def admin_reveal_provider_key(name: str, label: str, request: Request):
+        """Return the plaintext provider key secret (admin-only).
+
+        The pool listing only carries a masked form; the UI fetches the
+        plaintext on demand when an admin explicitly reveals a key. Reveals
+        are audit-logged like mutations since they expose a credential.
+        """
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        acct = state.router.providers.get(name)
+        if acct is None:
+            return _err(404, "not_found_error", f"unknown provider '{name}'", request)
+        key = acct.get_key(label)
+        if key is None:
+            return _err(404, "not_found_error",
+                        f"unknown key '{label}' on provider '{name}'", request)
+        await state.logs.log_audit(actor="master", action="provider_key.reveal",
+                                   target=f"{name}/{label}", diff={})
+        return ORJSONResponse({"label": label, "secret": key.secret})
+
     @app.patch("/admin/providers/{name}/keys/{label}")
     async def admin_patch_provider_key(name: str, label: str, request: Request):
         resp = _require_admin(request)

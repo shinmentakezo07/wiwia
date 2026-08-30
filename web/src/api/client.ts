@@ -111,6 +111,12 @@ export const addProviderKey = (
     body: JSON.stringify(body),
   });
 
+export const revealProviderKey = (provider: string, label: string) =>
+  api<{ label: string; secret: string }>(
+    `/admin/providers/${encodeURIComponent(provider)}/keys/${encodeURIComponent(label)}/secret`,
+    { method: "GET" },
+  );
+
 export const addProvider = (body: {
   name: string;
   provider_type: string;

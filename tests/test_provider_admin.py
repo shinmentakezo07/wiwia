@@ -153,6 +153,41 @@ async def test_patch_provider_unknown(client):
     assert r.status_code == 404
 
 
+async def test_reveal_provider_key_happy(client):
+    """GET the plaintext secret for a provider key (admin-only reveal)."""
+    r = await client.get("/admin/providers/p1/keys/a/secret", headers=H)
+    assert r.status_code == 200, r.text
+    assert r.json() == {"label": "a", "secret": "test-key"}
+
+
+async def test_reveal_provider_key_unknown_provider(client):
+    r = await client.get("/admin/providers/nope/keys/a/secret", headers=H)
+    assert r.status_code == 404
+
+
+async def test_reveal_provider_key_unknown_label(client):
+    r = await client.get("/admin/providers/p1/keys/nope/secret", headers=H)
+    assert r.status_code == 404
+
+
+async def test_reveal_provider_key_requires_admin(client):
+    r = await client.get("/admin/providers/p1/keys/a/secret")
+    assert r.status_code == 401
+
+
+async def test_listing_still_masks_long_secret(client):
+    """The pool listing must keep masking even with a reveal endpoint present."""
+    r = await client.post("/admin/providers", json={
+        "name": "p2", "provider_type": "openai",
+        "label": "long", "key": "sk-abcdefghijklmnop-1234"}, headers=H)
+    assert r.status_code == 200, r.text
+    listing = (await client.get("/admin/providers", headers=H)).json()
+    p2 = next(p for p in listing["providers"] if p["name"] == "p2")
+    k = next(k for k in p2["keys"] if k["label"] == "long")
+    assert k["masked"] != "sk-abcdefghijklmnop-1234"
+    assert "secret" not in k
+
+
 async def test_patch_provider_requires_admin(client):
     r = await client.patch("/admin/providers/p1", json={"name": "x"})
     assert r.status_code == 401
