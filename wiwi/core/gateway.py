@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from collections import deque
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -420,7 +419,10 @@ class Gateway:
                 if isinstance(d, dl.StreamStart):
                     continue  # we emitted our own
                 # Record content-bearing deltas to the tape for resume/replay.
-                tape.append(d)
+                # Skipped when resume is off (the default): the tape is only
+                # read by _attempt_resume, so recording it is pure waste.
+                if resume_mode != "off":
+                    tape.append(d)
                 # Mid-stream failover: if the upstream died after content,
                 # attempt a resume on a fallback deployment.
                 if (isinstance(d, dl.StreamError) and content_flowed
@@ -629,7 +631,8 @@ class Gateway:
             idle_s = self.router.settings.stream_idle_timeout_s
             loop_limit = (self.router.settings.stream_loop_limit
                           if self.router.settings.stream_loop_detection else 0)
-            loop_window: deque[str] = deque(maxlen=max(2, loop_limit) if loop_limit else 1)
+            # O(1) per token: tracks repetition runs for short periods only,
+            # rather than rescanning the whole window every token.
             loop_detector = LoopDetector(loop_limit)
             line_iter = resp.aiter_lines().__aiter__()
             closed = False  # True once resp_cm.__aexit__ has been called
@@ -682,27 +685,6 @@ class Gateway:
                     else:
                         if isinstance(d, dl.TextDelta):
                             text_len += len(d.text)
-                            if loop_limit > 0:
-                                loop_window.append(d.text)
-                                if len(loop_window) >= loop_limit:
-                                    chunks = list(loop_window)
-                                    n = len(chunks)
-                                    is_loop = False
-                                    for period in range(1, n // 2 + 1):
-                                        if all(chunks[i] == chunks[i - period]
-                                               for i in range(period, n)):
-                                            is_loop = True
-                                            break
-                                    if is_loop:
-                                        await self._note_stream_failure(
-                                            dep, real_key)
-                                        await self._price_partial(
-                                            ctx, dep, usage_final, text_len)
-                                        await queue.put(dl.StreamError(
-                                            f"model loop detected ({loop_limit} "
-                                            f"repeating chunks)", "unknown"))
-                                        await _close_upstream()
-                                        return
                             if loop_detector.feed(d.text):
                                 await self._note_stream_failure(
                                     dep, real_key)
