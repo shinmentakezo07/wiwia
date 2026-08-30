@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from wiwi.config import PROVIDER_TYPES
 from wiwi.providers.anthropic_adapter import AnthropicAdapter
+from wiwi.providers.bai_adapter import BAIAdapter
 from wiwi.providers.base import ProviderAdapter
 from wiwi.providers.cline_adapter import ClineAdapter
 from wiwi.providers.gemini_adapter import GeminiAdapter
@@ -21,7 +22,7 @@ from wiwi.providers.openrouter_adapter import OpenRouterAdapter
 # Provider types that fall through to the OpenAI adapter (they share the
 # Chat Completions wire format). Every other type in PROVIDER_TYPES must have
 # an explicit branch in get_adapter.
-_OPENAI_WIRE_TYPES = frozenset({"openai", "openai-compatible", "gmicloud"})
+_OPENAI_WIRE_TYPES = frozenset({"openai", "openai-compatible", "gmicloud", "bai"})
 
 _SINGLETONS: dict[str, ProviderAdapter] = {
     "anthropic": AnthropicAdapter(),
@@ -30,6 +31,7 @@ _SINGLETONS: dict[str, ProviderAdapter] = {
     "nvidia-nim": NimAdapter(),
     "cline": ClineAdapter(),
     "openai": OpenAIAdapter(),
+    "bai": BAIAdapter(),
 }
 
 
@@ -63,6 +65,8 @@ def fresh_adapter(provider_type: str) -> ProviderAdapter:
         return NimAdapter()
     if provider_type == "cline":
         return ClineAdapter()
+    if provider_type == "bai":
+        return BAIAdapter()
     if provider_type in _OPENAI_WIRE_TYPES:
         return OpenAIAdapter()
     raise ValueError(f"unsupported provider type {provider_type!r}")

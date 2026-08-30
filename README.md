@@ -2,7 +2,7 @@
 
 > **One gateway. Every dialect. Any provider.**
 >
-> Speak **OpenAI Chat Completions**, **OpenAI Responses (Codex CLI)**, or **Anthropic Messages (Claude Code)** on the inbound side; route to **OpenAI, Anthropic, Gemini, OpenRouter, NVIDIA NIM, Cline (OAuth), or any OpenAI-compatible endpoint** on the outbound side.
+> Speak **OpenAI Chat Completions**, **OpenAI Responses (Codex CLI)**, or **Anthropic Messages (Claude Code)** on the inbound side; route to **OpenAI, Anthropic, Gemini, OpenRouter, NVIDIA NIM, B.AI, Cline (OAuth), or any OpenAI-compatible endpoint** on the outbound side.
 
 ```
    OpenAI Chat ─┐
@@ -13,6 +13,7 @@ Anthropic Msg. ─┘    │     (wiwi/ir)      (WRR,  ├── anthropic
    Dialect-correct   Pricing · Logging · Coalesce ├── nvidia-nim
    responses back    · Rate limits · Auth         ├── cline (OAuth)
    to the caller     · Streaming IR deltas        ├── gmicloud
+                                                     ├── bai
                                                      └── openai-compatible
 ```
 
@@ -47,7 +48,7 @@ Anthropic Msg. ─┘    │     (wiwi/ir)      (WRR,  ├── anthropic
 
 | Problem | wiwi's answer |
 |---|---|
-| One client dialect, many models behind it | **Hub-and-spoke** translation: any of 3 inbound dialects ↔ any of 8 outbound providers, no pairwise converters. |
+| One client dialect, many models behind it | **Hub-and-spoke** translation: any of 3 inbound dialects ↔ any of 9 outbound providers, no pairwise converters. |
 | Rate-limit pain across many keys | **Smooth weighted round-robin** key pools with per-key cooldowns, retries, fallbacks, and a dedicated cooldown reset endpoint. |
 | Reasoning parameters don't line up | Canonical IR: `reasoning_effort`, `thinking.budget_tokens`, and OpenRouter's `reasoning{}` all collapse to one `low / medium / high / N tokens` form. Thinking blocks round-trip across providers — multi-turn survives a mid-conversation model switch. |
 | Want a UI, not just a YAML | Built-in dark admin SPA — keys, providers, key pools, model groups, request logs, live SSE tail, per-request stats (TTFT, TPS, cost, cache savings, retry chain). |
@@ -57,7 +58,7 @@ Anthropic Msg. ─┘    │     (wiwi/ir)      (WRR,  ├── anthropic
 ## Features
 
 **Translation**
-- 3 inbound dialects × 8 outbound providers, with `drop_params` and `extra_headers` for the awkward edges.
+- 3 inbound dialects × 9 outbound providers, with `drop_params` and `extra_headers` for the awkward edges.
 - OpenRouter unified `reasoning{}` translation for `low`/`medium`/`high`/explicit token budgets.
 - Anthropic `cache_control` blocks pass through untouched; cache hits and savings appear in stats.
 - Tool/function-call translation across dialects (round-trips in `UPDATE.md`).
@@ -104,7 +105,7 @@ Client (openai SDK / Codex CLI / Claude Code)
 wiwi/wire/* ──► Canonical IR (wiwi/ir) ──► router (key pools, WRR, retries, cooldowns)
                                                 │
                                                 ▼
-Client ◄── outbound dialect ◄── wire encoder ◄── providers/* (openai · anthropic · gemini · openrouter · nvidia-nim · cline · gmicloud · openai-compatible)
+Client ◄── outbound dialect ◄── wire encoder ◄── providers/* (openai · anthropic · gemini · openrouter · nvidia-nim · bai · cline · gmicloud · openai-compatible)
 ```
 
 The request lifecycle lives in `wiwi/server/app.py:run_chat_like` — decode → auth → rate limit → router retries/fallbacks → gateway complete/stream — and back out through the wire encoders. `wiwi/core/context.py:RequestContext` is the single mutable holder threaded through all of it.
@@ -131,6 +132,7 @@ Error bodies are dialect-correct per surface (OpenAI `{"error":{…}}` vs Anthro
 | `nvidia-nim` | NVIDIA NIM (OpenAI-compat) | native tool-schema adapter; see `wiwi/providers/nim_*.py` |
 | `cline` | Cline (OAuth) | on-demand OAuth refresh, cross-account WRR, global default model |
 | `gmicloud` | OpenAI-compat | GMI serving endpoint |
+| `bai` | OpenAI-compat | B.AI unified gateway (api.b.ai); one key across Chat/Responses/Messages protocols |
 | `openai-compatible` | OpenAI-compat | any URL (Ollama, vLLM, LM Studio, …) |
 
 Provider keys enter as `os.environ/NAME` in YAML; nothing is committed to the repo.
@@ -234,7 +236,7 @@ Single LiteLLM-shaped file. **Any string value may be `os.environ/NAME`.**
 ```yaml
 providers:              # named provider accounts, each with a pool of keyed entries
   - name: openai-main
-    provider: openai    # openai | anthropic | gemini | openai-compatible | openrouter | gmicloud | nvidia-nim
+    provider: openai    # openai | anthropic | gemini | openai-compatible | openrouter | gmicloud | bai | nvidia-nim
     keys:
       - {label: main, key: os.environ/OPENAI_API_KEY, weight: 3}
       - {label: backup, key: os.environ/OPENAI_API_KEY_2, weight: 1}
@@ -297,7 +299,7 @@ wiwi_settings:
 | `wiwi/config.py` | YAML → pydantic models; env interpolation; fail-fast validation |
 | `wiwi/ir/types.py` | Canonical IR: tagged parts, messages, tools, params, usage |
 | `wiwi/wire/` | Inbound codecs: `openai_chat.py`, `openai_responses.py`, `anthropic_messages.py` |
-| `wiwi/providers/` | Outbound adapters: `openai`, `anthropic`, `gemini`, `openrouter`, `nvidia-nim`, `cline` (+ `cline_oauth.py`, `cline_auto_refresh.py`), `gmicloud`, `openai-compatible`; `base.py` protocol; `registry.py` |
+| `wiwi/providers/` | Outbound adapters: `openai`, `anthropic`, `gemini`, `openrouter`, `nvidia-nim`, `bai`, `cline` (+ `cline_oauth.py`, `cline_auto_refresh.py`), `gmicloud`, `openai-compatible`; `base.py` protocol; `registry.py` |
 | `wiwi/router/router.py` | Model groups, key pools (smooth WRR), cooldowns, retries, fallbacks |
 | `wiwi/core/gateway.py` | Surface-agnostic execution engine, pricing, log events |
 | `wiwi/core/context.py` | `RequestContext` — mutable holder threaded through the pipeline |

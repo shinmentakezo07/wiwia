@@ -59,6 +59,7 @@ const PROVIDER_ICON: Record<string, LucideIcon> = {
   "nvidia-nim": Cpu,
   "openai-compatible": Server,
   gmicloud: Cloud,
+  bai: Globe,
   cline: Link2,
 };
 
@@ -69,6 +70,7 @@ const PROVIDER_TYPE_OPTIONS = [
   { value: "nvidia-nim", label: "NVIDIA NIM" },
   { value: "openrouter", label: "OpenRouter" },
   { value: "gmicloud", label: "GMI Cloud" },
+  { value: "bai", label: "B.AI" },
   { value: "cline", label: "Cline" },
   { value: "openai-compatible", label: "OpenAI-compatible URL" },
 ];
@@ -639,7 +641,7 @@ function AccountSettingsCard(props: { p: Provider; onError: (m: string) => void 
             />
           </Field>
         </div>
-        <Field label="Base URL" hint="Optional for openai/anthropic/gemini/openrouter/gmicloud/nvidia-nim. Required for compatible URLs.">
+        <Field label="Base URL" hint="Optional for openai/anthropic/gemini/openrouter/gmicloud/bai/nvidia-nim. Required for compatible URLs.">
           <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://…" />
         </Field>
         <Field

@@ -31,6 +31,12 @@ providers:
     keys:
       - {label: main, key: os.environ/GMI_API_KEY}
 
+  - name: bai
+    provider: bai
+    base_url: https://api.b.ai/v1
+    keys:
+      - {label: main, key: os.environ/BAI_API_KEY}
+
   - name: nvidia-nim
     provider: nvidia-nim
     base_url: https://integrate.api.nvidia.com/v1

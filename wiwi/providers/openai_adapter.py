@@ -124,7 +124,7 @@ class OpenAIAdapter:
         # `reasoning_content` on input).
         ptype = deployment_params.get("provider_type")
         emit_per_message_reasoning = ptype not in {
-            "openai-compatible", "gmicloud", "openrouter",
+            "openai-compatible", "gmicloud", "openrouter", "bai",
         }
         body: dict[str, Any] = {
             "model": model_id,
@@ -154,7 +154,9 @@ class OpenAIAdapter:
         # is unknown, which preserves the default behaviour for direct-OpenAI
         # tests).
         ptype = deployment_params.get("provider_type")
-        is_native_openai = ptype not in {"openai-compatible", "gmicloud", "nvidia-nim"}
+        is_native_openai = ptype not in {
+            "openai-compatible", "gmicloud", "nvidia-nim", "bai",
+        }
         if g.reasoning_effort:
             if is_native_openai:
                 body["reasoning_effort"] = g.reasoning_effort

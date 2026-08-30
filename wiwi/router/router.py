@@ -561,6 +561,22 @@ BUILTIN_PROVIDER_TYPES: list[dict[str, str | list[str]]] = [
         "docs_url": "https://docs.gmicloud.ai/quickstart",
     },
     {
+        "provider_type": "bai",
+        "label": "B.AI",
+        "default_base_url": "https://api.b.ai/v1",
+        "description": (
+            "B.AI's unified LLM service (api.b.ai): one API key across the "
+            "OpenAI Chat Completions, OpenAI Responses, and Anthropic "
+            "Messages protocols. wiwi speaks Chat Completions and re-encodes "
+            "any inbound dialect. Hosts DeepSeek thinking-mode models — the "
+            "adapter replays reasoning_content on tool-call turns so their "
+            "documented 400 round-trip requirement never fires."
+        ),
+        "latest_models": ["deepseek-v4-flash-vision-exp", "deepseek-v4-flash"],
+        "context_window": "varies per model",
+        "docs_url": "https://docs.b.ai/llmservice/api/",
+    },
+    {
         "provider_type": "nvidia-nim",
         "label": "NVIDIA NIM",
         "default_base_url": "https://integrate.api.nvidia.com/v1",
