@@ -102,12 +102,39 @@ CREATE TABLE IF NOT EXISTS vkeys (
 
 
 class AuthService:
-    def __init__(self, engine: AsyncEngine, master_key_plaintext: str):
+    def __init__(self, engine: AsyncEngine, master_key_plaintext: str,
+                 max_keys_per_user: int = 50):
         self.engine = engine
         self.master_hash = hash_key(master_key_plaintext)
         self._cache: dict[str, tuple[AuthInfo | None, float]] = {}
         self._ttl = 60.0
         self._is_pg = engine.dialect.name == "postgresql"
+        # Ceiling on live keys per owner. Admins mint keys with owner_id=None
+        # and are exempt; the check below only fires for a real owner.
+        self.max_keys_per_user = max_keys_per_user
+        # Hard ceiling on cached lookups. Entries are removed on create/
+        # delete/update, but a scan of nonexistent keys inserts negative
+        # entries that nothing ever removes, so the read path also bounds it.
+        self._max_cache_entries = 10_000
+
+    def _sweep_cache(self, now: float) -> None:
+        """Drop expired entries; if still over the cap, drop the oldest.
+
+        Called on cache insertion, so the dict stays bounded no matter how
+        many distinct (possibly bogus) keys are presented.
+        """
+        if len(self._cache) < self._max_cache_entries:
+            return
+        for h, (_info, ts) in list(self._cache.items()):
+            if now - ts >= self._ttl:
+                del self._cache[h]
+        if len(self._cache) < self._max_cache_entries:
+            return
+        # Still full: everything is fresh, so evict by insertion age. dicts
+        # preserve insertion order and refreshed entries are re-inserted
+        # below, so the front is the least recently written.
+        for h in list(self._cache)[:len(self._cache) // 2]:
+            del self._cache[h]
 
     async def startup(self) -> None:
         async with self.engine.begin() as conn:
@@ -145,8 +172,11 @@ class AuthService:
             if info is None or info.max_budget is None:
                 return info
         info = await self._lookup_db(h)
+        self._sweep_cache(now)
+        self._cache[h] = (info, now)
         self._cache[h] = (info, now)
         return info
+
 
     async def _lookup_db(self, h: str) -> AuthInfo | None:
         async with self.engine.connect() as conn:
@@ -185,6 +215,13 @@ class AuthService:
         tpm = _coerce_limit(tpm, "tpm")
         max_budget = _coerce_limit(max_budget, "max_budget")
         ttl_seconds = _coerce_limit(ttl_seconds, "ttl_seconds")
+        # Cap live keys per owner. Without this a user mints unbounded keys
+        # and rotates around any per-key budget or rate limit. Admins pass
+        # owner_id=None (unowned keys) and are exempt.
+        if owner_id is not None and await self.count_keys(owner_id) >= self.max_keys_per_user:
+            raise ValueError(
+                f"key limit reached ({self.max_keys_per_user} live keys); "
+                f"delete or expire an existing key first")
         kid = "k" + secrets_hex()
         now = time.time()
         expires = now + ttl_seconds if ttl_seconds else None
