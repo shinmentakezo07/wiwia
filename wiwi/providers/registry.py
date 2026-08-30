@@ -1,4 +1,11 @@
-"""Adapter registry: provider account name -> adapter instance."""
+"""Adapter registry: provider type -> adapter instance.
+
+Adapters are stateless between requests, so a single instance per provider
+type is shared process-wide. They *do* accumulate state while decoding a
+stream (open tool indices, framers, buffered args), so ``get_adapter``
+resets the instance before handing it out — without that, a stream that died
+mid-flight would leak its state into the next request.
+"""
 
 from __future__ import annotations
 
@@ -16,8 +23,36 @@ from wiwi.providers.openrouter_adapter import OpenRouterAdapter
 # an explicit branch in get_adapter.
 _OPENAI_WIRE_TYPES = frozenset({"openai", "openai-compatible", "gmicloud"})
 
+_SINGLETONS: dict[str, ProviderAdapter] = {
+    "anthropic": AnthropicAdapter(),
+    "gemini": GeminiAdapter(),
+    "openrouter": OpenRouterAdapter(),
+    "nvidia-nim": NimAdapter(),
+    "cline": ClineAdapter(),
+    "openai": OpenAIAdapter(),
+}
+
 
 def get_adapter(provider_type: str) -> ProviderAdapter:
+    """Return the shared adapter for *provider_type*, reset to a clean state."""
+    adapter = _SINGLETONS.get(provider_type)
+    if adapter is None and provider_type in _OPENAI_WIRE_TYPES:
+        adapter = _SINGLETONS["openai"]
+    if adapter is None:
+        # Should never happen: config validation and the admin API both reject
+        # unknown provider types before we get here, but fail loudly if they do.
+        raise ValueError(f"unsupported provider type {provider_type!r}")
+    adapter.reset()
+    return adapter
+
+
+def fresh_adapter(provider_type: str) -> ProviderAdapter:
+    """Return a *private* adapter instance for *provider_type*.
+
+    For callers that hold an adapter across awaits where another request
+    could reset the shared instance underneath them. Not used on the request
+    hot path.
+    """
     if provider_type == "anthropic":
         return AnthropicAdapter()
     if provider_type == "gemini":
@@ -30,8 +65,6 @@ def get_adapter(provider_type: str) -> ProviderAdapter:
         return ClineAdapter()
     if provider_type in _OPENAI_WIRE_TYPES:
         return OpenAIAdapter()
-    # Should never happen: config validation and the admin API both reject
-    # unknown provider types before we get here, but fail loudly if they do.
     raise ValueError(f"unsupported provider type {provider_type!r}")
 
 

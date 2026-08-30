@@ -93,7 +93,7 @@ def test_headers_sanitize_newlines():
 def test_build_url():
     a = get_adapter("cline")
     assert (a.build_url("https://api.cline.bot/api/v1", "z-ai/glm-5.2",
-                        False, "chat")
+                        False)
             == "https://api.cline.bot/api/v1/chat/completions")
 
 

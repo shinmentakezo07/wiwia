@@ -19,15 +19,16 @@ from wiwi.cost.pricing import CostEngine, estimate_tokens_async
 from wiwi.ir import types as ir
 from wiwi.logging_core.events import LogEvent
 from wiwi.providers.base import (
-    RETRYABLE_STATUS,
     ProviderKeyRef,
     WiwiError,
     error_from_provider_status,
+    status_for_key_pool,
 )
 from wiwi.providers.registry import get_adapter
 from wiwi.router.router import Deployment, Router, execute_with_retries
 from wiwi.streaming import deltas as dl
 from wiwi.streaming.coalesce import DeltaCoalescer
+from wiwi.streaming.loopdetect import LoopDetector
 from wiwi.streaming.resume import StreamTape, build_continuation_messages
 from wiwi.streaming.sse import LineSSEParser
 
@@ -41,11 +42,10 @@ _PUMP_CANCEL_GRACE_S = 1.0
 
 
 class Gateway:
-    def __init__(self, router: Router, cost_engine: CostEngine, kind: str = "chat",
+    def __init__(self, router: Router, cost_engine: CostEngine,
                  drop_params: bool = True):
         self.router = router
         self.cost = cost_engine
-        self.kind = kind  # "chat"
         self.drop_params = drop_params
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(120.0, connect=10.0), http2=True)
@@ -90,7 +90,7 @@ class Gateway:
                                   "extra_body": dict(dep.extra_body),
                                   "drop_params": self.drop_params,
                                   "provider_type": dep.provider.provider_type}
-        url = _build_url(adapter, dep, key, False, self.kind)
+        url = _build_url(adapter, dep, key, False)
         body = adapter.encode_request(ctx.ir_req, dep.model_id, params)
         if hasattr(adapter, "set_tool_context"):
             adapter.set_tool_context(body)
@@ -185,7 +185,7 @@ class Gateway:
                                   "extra_body": dict(dep.extra_body),
                                   "drop_params": self.drop_params,
                                   "provider_type": dep.provider.provider_type}
-        url = _build_url(adapter, dep, key, True, self.kind)
+        url = _build_url(adapter, dep, key, True)
         body = adapter.encode_request(ctx.ir_req, dep.model_id, params)
         if hasattr(adapter, "set_tool_context"):
             adapter.set_tool_context(body)
@@ -531,7 +531,7 @@ class Gateway:
                 return True, new_pump_task
             # Connection failed — feed the key pool and deployment cooldown
             # so a provider that keeps failing on resume cools off.
-            status = _status_of_wiwi_error(err_box[0])
+            status = status_for_key_pool(err_box[0])
             await dep.provider.on_result_locked(key, status, err_box[0].retry_after)
             if status in (408, 500, 502, 503, 504, 529):
                 dep.record_fail(self.router.settings.allowed_fails,
@@ -566,7 +566,7 @@ class Gateway:
                                   "extra_body": dict(dep.extra_body),
                                   "drop_params": self.drop_params,
                                   "provider_type": dep.provider.provider_type}
-        url = _build_url(adapter, dep, key, True, self.kind)
+        url = _build_url(adapter, dep, key, True)
         try:
             body = adapter.encode_request(ctx.ir_req, dep.model_id, params)
             if hasattr(adapter, "set_tool_context"):
@@ -629,11 +629,8 @@ class Gateway:
             idle_s = self.router.settings.stream_idle_timeout_s
             loop_limit = (self.router.settings.stream_loop_limit
                           if self.router.settings.stream_loop_detection else 0)
-            # Window must be at least as large as the limit, otherwise the
-            # `len(loop_window) >= loop_limit` check can never fire (a deque
-            # with maxlen < loop_limit saturates below the limit forever).
-            # When detection is off (limit 0), skip the window entirely.
             loop_window: deque[str] = deque(maxlen=max(2, loop_limit) if loop_limit else 1)
+            loop_detector = LoopDetector(loop_limit)
             line_iter = resp.aiter_lines().__aiter__()
             closed = False  # True once resp_cm.__aexit__ has been called
 
@@ -706,6 +703,16 @@ class Gateway:
                                             f"repeating chunks)", "unknown"))
                                         await _close_upstream()
                                         return
+                            if loop_detector.feed(d.text):
+                                await self._note_stream_failure(
+                                    dep, real_key)
+                                await self._price_partial(
+                                    ctx, dep, usage_final, text_len)
+                                await queue.put(dl.StreamError(
+                                    f"model loop detected ({loop_limit} "
+                                    f"repeating chunks)", "unknown"))
+                                await _close_upstream()
+                                return
                         if not client_gone:
                             await queue.put(d)
             await _close_upstream()
@@ -927,15 +934,11 @@ def build_log_event(ctx: RequestContext) -> LogEvent:
     return evt
 
 
-def encode_json(obj: Any) -> bytes:
-    return orjson.dumps(obj)
 
-
-def _build_url(adapter, dep: Deployment, key: ProviderKeyRef,
-               stream: bool, kind: str) -> str:
+def _build_url(adapter, dep: Deployment, key: ProviderKeyRef, stream: bool) -> str:
     """Build the upstream URL, appending the API key for providers that require it
     in the querystring (e.g. Gemini) rather than headers."""
-    url = adapter.build_url(dep.provider.base_url, dep.model_id, stream, kind)
+    url = adapter.build_url(dep.provider.base_url, dep.model_id, stream)
     if dep.provider.provider_type == "gemini" and url.endswith(("?key=", "&key=")):
         url += key.secret
     return url
@@ -961,12 +964,3 @@ def _parse_retry_after(value: str | None) -> float | None:
     return None
 
 
-def _status_of_wiwi_error(e: WiwiError) -> int | None:
-    """Extract the HTTP status from a WiwiError for key-pool accounting."""
-    if e.status == 429:
-        return 429
-    if e.status in (401, 403):
-        return e.status
-    if e.status in RETRYABLE_STATUS:
-        return e.status
-    return None

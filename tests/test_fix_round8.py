@@ -134,7 +134,7 @@ async def test_provider_catalog_requires_master(client):
 
 
 def _make_gateway(cfg: WiwiConfig) -> Gateway:
-    return Gateway(Router(cfg), CostEngine(), "chat")
+    return Gateway(Router(cfg), CostEngine())
 
 
 async def _pump_stream_that_dies_midway(gw: Gateway, ctx: RequestContext):
@@ -349,7 +349,7 @@ class TrackedClient(httpx.AsyncClient):
 async def _stream_with_tracked_client(status: int):
     """Drive one failing stream connect through a TrackedClient."""
     cfg = _config()
-    gw = Gateway(Router(cfg), CostEngine(), "chat")
+    gw = Gateway(Router(cfg), CostEngine())
     await gw.aclose()  # discard the default client
     tracked = TrackedClient(timeout=httpx.Timeout(10.0))
     gw._client = tracked
@@ -390,7 +390,7 @@ async def test_stream_connect_failure_still_surfaces_error():
     """Fixing the leak must not swallow the upstream error."""
     from wiwi.providers.base import WiwiError
     cfg = _config()
-    gw = Gateway(Router(cfg), CostEngine(), "chat")
+    gw = Gateway(Router(cfg), CostEngine())
     try:
         with respx.mock:
             respx.post(UPSTREAM).mock(return_value=httpx.Response(
@@ -514,7 +514,7 @@ async def test_client_disconnect_during_failed_connect_propagates_cancel():
     ASGI disconnect never propagates.
     """
     cfg = _config()
-    gw = Gateway(Router(cfg), CostEngine(), "chat")
+    gw = Gateway(Router(cfg), CostEngine())
     await gw.aclose()  # discard the default client
     client = TrackedClient(timeout=httpx.Timeout(10.0))
     # Hold `__aexit__` open so the consumer is provably parked inside the
@@ -574,7 +574,7 @@ async def test_stream_success_is_counted_at_completion_not_connect():
     then dies mid-stream therefore never accumulates a retirement streak.
     """
     cfg = _config()
-    gw = Gateway(Router(cfg), CostEngine(), "chat")
+    gw = Gateway(Router(cfg), CostEngine())
     try:
         # Connects fine (200), then the body ends with no content at all —
         # a connect-then-drop, the exact case AUDIT #6 describes.
@@ -600,7 +600,7 @@ async def test_note_stream_failure_penalises_key_in_standard_mode():
     that `_note_stream_failure` reports is discarded entirely.
     """
     cfg = _config(failover_mode="standard")
-    gw = Gateway(Router(cfg), CostEngine(), "chat")
+    gw = Gateway(Router(cfg), CostEngine())
     try:
         dep = gw.router.groups["gpt-x"][0]
         key = dep.provider.keys[0]
@@ -623,7 +623,7 @@ async def test_disconnect_lets_pump_observe_cancel_flag():
     set, rather than being cut off inside it.
     """
     cfg = _config(stream_grace_drain_s=0.0)
-    gw = Gateway(Router(cfg), CostEngine(), "chat")
+    gw = Gateway(Router(cfg), CostEngine())
     await gw.aclose()
     client = TrackedClient(timeout=httpx.Timeout(10.0))
     gw._client = client

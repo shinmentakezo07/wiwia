@@ -65,8 +65,8 @@ def test_gemini_streaming_url_includes_key():
     dep = Deployment(group="gem", provider=acct, model_id="gemini-pro")
     ref = ProviderKeyRef(label="k", secret="AIzaSECRET")
 
-    url_s = _build_url(GeminiAdapter(), dep, ref, True, "chat")
-    url_n = _build_url(GeminiAdapter(), dep, ref, False, "chat")
+    url_s = _build_url(GeminiAdapter(), dep, ref, True)
+    url_n = _build_url(GeminiAdapter(), dep, ref, False)
     assert url_s.endswith("key=AIzaSECRET"), url_s
     assert url_n.endswith("key=AIzaSECRET"), url_n
 

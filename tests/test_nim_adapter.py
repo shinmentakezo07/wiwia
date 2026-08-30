@@ -37,15 +37,9 @@ def test_provider_type_attribute():
 def test_build_url_chat():
     ad = NimAdapter()
     assert ad.build_url("https://integrate.api.nvidia.com/v1",
-                        "nvidia/nemotron", False, "chat") == (
+                        "nvidia/nemotron", False) == (
         "https://integrate.api.nvidia.com/v1/chat/completions")
 
-
-def test_build_url_embeddings():
-    ad = NimAdapter()
-    assert ad.build_url("https://integrate.api.nvidia.com/v1",
-                        "nvidia/nemotron", False, "embeddings") == (
-        "https://integrate.api.nvidia.com/v1/embeddings")
 
 
 def test_headers():

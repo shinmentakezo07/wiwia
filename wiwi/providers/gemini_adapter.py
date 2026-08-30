@@ -20,10 +20,16 @@ class GeminiAdapter:
         self._saw_function_call = False
         self._tool_seq = 0
 
+    def reset(self) -> None:
+        """Drop per-stream state so the adapter can serve another stream."""
+        self._started = False
+        self._saw_function_call = False
+        self._tool_seq = 0
+
     def headers(self, key: ProviderKeyRef) -> dict[str, str]:
         return {}  # key goes in querystring
 
-    def build_url(self, base_url: str, model_id: str, stream: bool, kind: str) -> str:
+    def build_url(self, base_url: str, model_id: str, stream: bool) -> str:
         base = base_url.rstrip("/") or "https://generativelanguage.googleapis.com/v1beta"
         method = "streamGenerateContent?alt=sse&key=" if stream else "generateContent?key="
         return f"{base}/models/{model_id}:{method}"

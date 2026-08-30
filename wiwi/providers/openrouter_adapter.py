@@ -44,7 +44,7 @@ class OpenRouterAdapter(OpenAIAdapter):
     def headers(self, key: ProviderKeyRef) -> dict[str, str]:
         return {"Authorization": f"Bearer {key.secret}"}
 
-    def build_url(self, base_url: str, model_id: str, stream: bool, kind: str) -> str:
+    def build_url(self, base_url: str, model_id: str, stream: bool) -> str:
         base = base_url.rstrip("/")
         return f"{base}/chat/completions"
 

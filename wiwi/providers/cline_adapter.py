@@ -83,6 +83,15 @@ class ClineAdapter(OpenAIAdapter):
         super().__init__()
         self._context: dict[str, str] = {}
 
+    def reset(self) -> None:
+        """Drop per-request header context, then the base-class state.
+
+        ``_context`` carries a client-sent task id into outgoing headers, so
+        it must never survive into another request.
+        """
+        super().reset()
+        self._context = {}
+
     def set_header_context(self, context: dict[str, str]) -> None:
         """Set per-request identity context (e.g. a client-sent task id).
 
@@ -111,7 +120,7 @@ class ClineAdapter(OpenAIAdapter):
         h["Authorization"] = f"Bearer {_ensure_workos_prefix(key.secret)}"
         return h
 
-    def build_url(self, base_url: str, model_id: str, stream: bool, kind: str) -> str:
+    def build_url(self, base_url: str, model_id: str, stream: bool) -> str:
         base = (base_url or _CLINE_BASE).rstrip("/")
         return f"{base}/chat/completions"
 

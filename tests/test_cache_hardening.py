@@ -66,7 +66,7 @@ def _gateway_ctx() -> tuple[Gateway, RequestContext]:
                                wiwi_params=DeploymentParams(provider="p", model="m"))],
         general_settings=GeneralSettings(master_key="x"),
     )
-    g = Gateway(Router(cfg), CostEngine(), "chat")
+    g = Gateway(Router(cfg), CostEngine())
     req = ir.Request(model="m", messages=[ir.Message(role="user",
                                                      parts=[ir.TextPart("hi")])])
     return g, RequestContext(surface="chat", ir_req=req)
@@ -109,7 +109,7 @@ def test_log_event_has_cache_savings_computed():
                                wiwi_params=DeploymentParams(provider="p", model="m"))],
         general_settings=GeneralSettings(master_key="x"),
     )
-    g = Gateway(Router(cfg), ce, "chat")
+    g = Gateway(Router(cfg), ce)
     req = ir.Request(model="m", messages=[ir.Message(role="user",
                                                      parts=[ir.TextPart("hi")])])
     ctx = RequestContext(surface="chat", ir_req=req, group="m")

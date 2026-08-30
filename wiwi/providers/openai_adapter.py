@@ -108,10 +108,8 @@ class OpenAIAdapter:
         h = {"Authorization": f"Bearer {key.secret}"}
         return h
 
-    def build_url(self, base_url: str, model_id: str, stream: bool, kind: str) -> str:
+    def build_url(self, base_url: str, model_id: str, stream: bool) -> str:
         base = base_url.rstrip("/")
-        if kind == "embeddings":
-            return f"{base}/embeddings"
         return f"{base}/chat/completions"
 
     def encode_request(self, req: ir.Request, model_id: str,
@@ -261,6 +259,17 @@ class OpenAIAdapter:
         # finish), then emit it with the full name so the client and every
         # wire encoder see the complete tool name instead of a partial one.
         self._pending_opens: dict[int, tuple[str, str]] = {}  # idx -> (id, name)
+
+    def reset(self) -> None:
+        """Drop all per-stream state so the adapter can serve another stream.
+
+        Adapters are stateless between *requests* but accumulate state while
+        decoding a stream. A stream that dies before ``finish_reason`` leaves
+        that state behind, so a reused adapter must be reset explicitly.
+        """
+        self._open_tool_indices.clear()
+        self._tool_names.clear()
+        self._pending_opens.clear()
 
     def decode_stream_event(self, event: str, data: str) -> list[dl.IRStreamDelta]:
         if data == "[DONE]":

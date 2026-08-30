@@ -79,10 +79,8 @@ class NimAdapter(OpenAIAdapter):
     def headers(self, key: ProviderKeyRef) -> dict[str, str]:
         return {"Authorization": f"Bearer {key.secret}"}
 
-    def build_url(self, base_url: str, model_id: str, stream: bool, kind: str) -> str:
+    def build_url(self, base_url: str, model_id: str, stream: bool) -> str:
         base = base_url.rstrip("/")
-        if kind == "embeddings":
-            return f"{base}/embeddings"
         return f"{base}/chat/completions"
 
     # -- encode: reasoning -> chat_template_kwargs + tool schema sanitization ---
@@ -197,6 +195,15 @@ class NimAdapter(OpenAIAdapter):
         # Args fragments for tools with aliased params are buffered per
         # index and emitted once (un-aliased) when the call closes.
         self._buffered_args: dict[int, str] = {}
+
+    def reset(self) -> None:
+        """Drop per-request framer/tool state, then the base-class state."""
+        super().reset()
+        self._content_framer = MiniMaxFramer()
+        self._reasoning_framer = MiniMaxFramer()
+        self._tool_schemas = {}
+        self._tool_aliases = {}
+        self._buffered_args = {}
 
     def set_tool_context(self, body: dict[str, Any]) -> None:
         """Capture tool schemas and aliases from the encoded request body.

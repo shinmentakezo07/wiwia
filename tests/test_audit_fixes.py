@@ -38,7 +38,7 @@ def test_gemini_url_includes_key():
                            keys=[ProviderKey(label="k", secret="AIzaSECRET")])
     dep = Deployment(group="gem", provider=acct, model_id="gemini-pro")
     url = _build_url(GeminiAdapter(), dep,
-                     ProviderKeyRef(label="k", secret="AIzaSECRET"), False, "chat")
+                     ProviderKeyRef(label="k", secret="AIzaSECRET"), False)
     assert url.endswith("key=AIzaSECRET")
     # non-gemini adapters are untouched
     oacct = ProviderAccount(name="o", provider_type="openai",
@@ -46,7 +46,7 @@ def test_gemini_url_includes_key():
                             keys=[ProviderKey(label="k", secret="sk-x")])
     odep = Deployment(group="gpt", provider=oacct, model_id="gpt-4o")
     ourl = _build_url(OpenAIAdapter(), odep,
-                      ProviderKeyRef(label="k", secret="sk-x"), False, "chat")
+                      ProviderKeyRef(label="k", secret="sk-x"), False)
     assert "sk-x" not in ourl
 
 
@@ -224,9 +224,9 @@ def test_mask_key_short():
 # -- wire: gemini adapter still builds valid URLs without gateway helper ---------
 def test_gemini_build_url_shapes():
     g = GeminiAdapter()
-    u = g.build_url("https://x/", "m", False, "chat")
+    u = g.build_url("https://x/", "m", False)
     assert ":generateContent?key=" in u
-    u2 = g.build_url("https://x/", "m", True, "chat")
+    u2 = g.build_url("https://x/", "m", True)
     assert ":streamGenerateContent?alt=sse&key=" in u2
 
 

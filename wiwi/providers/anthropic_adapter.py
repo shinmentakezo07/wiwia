@@ -95,13 +95,15 @@ class AnthropicAdapter:
     def __init__(self) -> None:
         self._tool_indices: set[int] = set()
 
+    def reset(self) -> None:
+        """Drop per-stream tool state so the adapter can serve another stream."""
+        self._tool_indices.clear()
+
     def headers(self, key: ProviderKeyRef) -> dict[str, str]:
         return {"x-api-key": key.secret, "anthropic-version": "2023-06-01"}
 
-    def build_url(self, base_url: str, model_id: str, stream: bool, kind: str) -> str:
+    def build_url(self, base_url: str, model_id: str, stream: bool) -> str:
         base = base_url.rstrip("/")
-        if kind == "count_tokens":
-            return f"{base}/messages/count_tokens"
         return f"{base}/messages"
 
     def encode_request(self, req: ir.Request, model_id: str,
