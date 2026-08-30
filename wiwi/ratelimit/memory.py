@@ -24,9 +24,13 @@ class _Window:
     # rpm windows store request events; tpm windows store token events.
     events: deque = field(default_factory=deque)
     is_token: bool = False
+    # Running token total, kept in sync by append/prune so count() is O(1).
+    # The naive `sum(e.tokens for e in events)` rescanned the whole 60s window
+    # on every one of up to 4 admission checks per request.
+    total: int = 0
 
     def count(self) -> int:
-        return sum(e.tokens for e in self.events)
+        return self.total
 
 
 class RateLimiter:
@@ -39,6 +43,22 @@ class RateLimiter:
         # both pass the limit at the same instant, and so a reservation can
         # be replaced (not appended alongside) when the actual usage arrives.
         self._lock = asyncio.Lock()
+        # Per-key windows are created on first use and nothing removes them,
+        # so a key deleted from the DB would leave its windows behind forever.
+        # Sweep periodically instead of paying to detect deletion.
+        self._max_windows = 10_000
+
+    def _sweep_windows(self, now: float) -> None:
+        """Drop windows that have no events left, then hard-cap the rest."""
+        if len(self._windows) < self._max_windows:
+            return
+        for scope in [s for s, w in self._windows.items() if not w.events]:
+            del self._windows[scope]
+        # Everything still holds traffic: prune and drop what that empties.
+        for scope, w in list(self._windows.items()):
+            self._prune(w, now)
+            if not w.events:
+                del self._windows[scope]
 
     def _window(self, scope: str, is_token: bool = False) -> _Window:
         w = self._windows.get(scope)
@@ -50,7 +70,7 @@ class RateLimiter:
     def _prune(w: _Window, now: float) -> None:
         cutoff = now - 60.0
         while w.events and w.events[0].ts < cutoff:
-            w.events.popleft()
+            w.total -= w.events.popleft().tokens
 
     async def check(self, key_id: str, key_rpm: int | None = None,
                     key_tpm: int | None = None, est_tokens: int = 0,
@@ -62,6 +82,7 @@ class RateLimiter:
         """
         async with self._lock:
             now = time.monotonic()
+            self._sweep_windows(now)
             checks: list[tuple[_Window, int]] = []
             if self.global_rpm:
                 checks.append((self._window("global:rpm"), self.global_rpm))
@@ -92,6 +113,7 @@ class RateLimiter:
                                            estimated=True, request_id=request_id))
                 else:
                     w.events.append(_Event(ts=now, tokens=1))
+                w.total += w.events[-1].tokens
             return True, 0
 
     async def record_tokens(self, key_id: str, tokens: int,
@@ -130,7 +152,9 @@ class RateLimiter:
                             target = e
                             break
                 if target is not None:
+                    w.total += max(0, tokens) - target.tokens
                     target.tokens = max(0, tokens)
                     target.estimated = False
                 else:
                     w.events.append(_Event(ts=now, tokens=max(0, tokens)))
+                    w.total += max(0, tokens)
