@@ -577,6 +577,27 @@ BUILTIN_PROVIDER_TYPES: list[dict[str, str | list[str]]] = [
         "docs_url": "https://docs.b.ai/llmservice/api/",
     },
     {
+        "provider_type": "workbuddy",
+        "label": "WorkBuddy",
+        "default_base_url": "https://copilot.tencent.com",
+        "description": (
+            "WorkBuddy / CodeBuddy (Tencent copilot.tencent.com, workbuddy.ai) "
+            "via an OpenAI-compatible Chat Completions API. Authenticates with "
+            "an OAuth access token + account uid headers, is streaming-only "
+            "upstream, requires string tool_choice, and wraps errors in a "
+            "{code,msg,data} envelope. wiwi sends the account headers and "
+            "handles token refresh automatically."
+        ),
+        "latest_models": [
+            "deepseek-v4-flash",
+            "glm-5.3",
+            "kimi-k3",
+            "hy3",
+        ],
+        "context_window": "varies per model",
+        "docs_url": "https://www.codebuddy.cn",
+    },
+    {
         "provider_type": "nvidia-nim",
         "label": "NVIDIA NIM",
         "default_base_url": "https://integrate.api.nvidia.com/v1",
