@@ -8,7 +8,7 @@
 // /admin/stream SSE stays live.
 
 import { useEffect, useMemo, useState } from "react";
-import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   Activity,
   BarChart3,
@@ -248,7 +248,7 @@ export function AdminLayout() {
         />
 
         {/* Logo */}
-        <div className="relative flex h-[72px] items-center px-5">
+        <Link to="/" className="relative flex h-[72px] items-center px-5">
           {collapsed ? (
             <img src="/wiwi-logo.png" alt="wiwi" className="mx-auto h-9 w-9 rounded-[10px] object-cover ring-1 ring-white/[0.06] ring-inset" />
           ) : (
@@ -267,7 +267,7 @@ export function AdminLayout() {
               </div>
             </div>
           )}
-        </div>
+        </Link>
 
         {/* Navigation */}
         <nav className="admin-scroll flex-1 space-y-6 overflow-y-auto px-3 py-5">
