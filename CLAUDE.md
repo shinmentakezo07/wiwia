@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-**wiwi** is a self-hosted unified LLM gateway proxy (LiteLLM-shaped). Three inbound API dialects — OpenAI Chat Completions, OpenAI Responses (Codex CLI), Anthropic Messages (Claude Code) — all route through one canonical internal representation (IR) to any outbound provider (OpenAI, Anthropic, Gemini, OpenRouter, NVIDIA NIM, Cline/OAuth, GMI Cloud, any OpenAI-compatible URL). Responses are always re-encoded in the caller's inbound dialect (e.g. Claude Code backed by GPT). Adds virtual keys, budgets, rate limits, key pools with smooth weighted round-robin, retries/cooldowns/fallbacks, cost tracking, request logs, and an admin web UI.
+**wiwi** is a self-hosted unified LLM gateway proxy (LiteLLM-shaped): three inbound API dialects — OpenAI Chat, OpenAI Responses (Codex CLI), Anthropic Messages — all route through one canonical internal representation (IR) to any outbound provider; responses are always re-encoded in the caller's inbound dialect (e.g. Claude Code backed by GPT). Adds virtual keys, budgets, rate limits, key pools with smooth weighted round-robin, retries/cooldowns/fallbacks, cost tracking, request logs, and an admin web UI.
 
-`.venv` is a symlink to an empty uv venv — it has no site-packages, so do **not** use `.venv/bin/python`. Use the ambient `python3` / `pytest` / `ruff` on PATH (they have the project installed). The admin UI (`web/`) is React 19 + TypeScript + Vite + Tailwind 4, built with **bun** (not npm).
+`.venv` is a symlink to an empty uv venv — it has no site-packages, so do **not** use `.venv/bin/python`. Use the ambient `python3` / `pytest` / `ruff` on PATH (they have the project installed). The admin UI (`web/`) is a React 19 + Vite SPA built with **bun** (not npm).
 
 ## Commands
 
@@ -20,7 +20,7 @@ wiwi --config wiwi.yaml [--host H] [--port P]
 DATABASE_URL=postgresql+asyncpg://... wiwi --config wiwi.yaml   # Postgres (default is SQLite at wiwi.db)
 
 # tests
-python3 -m pytest tests/ -q                                 # 813 pass, ~52s
+python3 -m pytest tests/ -q                                 # full suite — verify green; don't trust a pinned pass-count
 python3 -m pytest tests/test_codecs.py -q                   # single file
 python3 -m pytest tests/test_router.py -k cooldown          # single test by name
 
@@ -91,7 +91,7 @@ Note the one asymmetry in that contract: `StreamError` may terminate at **any** 
 
 ## Where to start reading
 
-`server/app.py` is ~2.7k lines and `core/gateway.py` ~970 — don't read either top to bottom. For a request's full path, start at `run_chat_like` (`server/app.py:748`) and follow the pipeline it names; `RequestContext` (`core/context.py`) is the single mutable object threaded through every stage, so reading its fields tells you what the pipeline carries. For streaming, read `streaming/deltas.py` (87 lines, the whole contract) before any adapter.
+`server/app.py` is ~2.7k lines and `core/gateway.py` ~970 — don't read either top to bottom. For a request's full path, start at `run_chat_like` in `server/app.py` and follow the pipeline it names; `RequestContext` (`core/context.py`) is the single mutable object threaded through every stage, so reading its fields tells you what the pipeline carries. For streaming, read `streaming/deltas.py` (87 lines, the whole contract) before any adapter.
 
 ## Config
 
@@ -104,8 +104,8 @@ Error bodies are dialect-correct per surface (OpenAI `{"error":{…}}` vs Anthro
 - `pytest` + `pytest-asyncio` with `asyncio_mode = "auto"` — write bare `async def test_…`, no `@pytest.mark.asyncio` decorator.
 - Upstream mocking with `respx`; app-level tests via `asgi-lifespan` + `httpx.ASGITransport` (see `tests/test_integration.py`).
 - Property-based round-trip tests use `hypothesis` (see `tests/test_property_roundtrip.py`) — the right tool for codec/adapter invariants.
-- New bug fixes go alongside the existing thematic regression files (`test_audit_fixes.py`, `test_fix_round2.py`, … through `test_fix_round9.py`) rather than scattered into topic files. **Next unused number is `test_fix_round10.py`.**
-- Run full pytest + ruff before claiming work done or committing. Both are currently green (**813 tests pass**, ruff clean).
+- New bug fixes go alongside the existing thematic regression files (`test_audit_fixes.py`, `test_fix_round2.py`, …) rather than scattered into topic files. Find the next unused `test_fix_roundN.py` number with `ls tests/test_fix_round*.py` — never assume one.
+- Run full pytest + ruff before claiming work done or committing — both green at commit time.
 
 ## Conventions & guardrails
 
@@ -132,6 +132,6 @@ Error bodies are dialect-correct per surface (OpenAI `{"error":{…}}` vs Anthro
 
 ## Project rules & skills
 
-- For bug fixes, follow the workflow in `.claude/rules/wiwi-bugfix-workflow.md` (TDD via `.claude/skills/test-driven-development`, root-cause via `.claude/skills/systematic-debugging`, review via `.claude/skills/requesting-code-review`). New bugfix tests go into the next thematic file `test_fix_roundN.py` — **next unused is `test_fix_round10.py`** (`test_fix_round9.py` exists and the rule file's "round6" pointer is stale).
+- For bug fixes, follow the workflow in `.claude/rules/wiwi-bugfix-workflow.md` (TDD via `.claude/skills/test-driven-development`, root-cause via `.claude/skills/systematic-debugging`, review via `.claude/skills/requesting-code-review`). New bugfix tests go into the next thematic `test_fix_roundN.py` file (see Testing above for how to find the next number).
 - Superpowers skills (`/test-driven-development`, `/systematic-debugging`, `/brainstorming`, `/writing-plans`, `/executing-plans`, `/verification-before-completion`, `/using-git-worktrees`) are the methodology for plan → TDD → debug → review → verify.
 - ECC skills are the domain library (Python/FastAPI/React/agent orchestration, security scan, etc.); invoke the matching skill for the task.
