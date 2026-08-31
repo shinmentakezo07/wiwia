@@ -105,7 +105,7 @@ export function OpenSourcePage() {
             <ArrowRight size={16} />
           </Link>
           <a
-            href="https://github.com/theopenco/llmgateway"
+            href="https://github.com/shinmentakezo07/wiwia"
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center justify-center gap-2 rounded-[10px] border border-white/[0.08] bg-white/[0.02] px-6 py-3 text-[14px] font-medium text-[var(--admin-text)] transition-colors hover:bg-white/[0.04]"

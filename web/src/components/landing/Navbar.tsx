@@ -36,7 +36,7 @@ import {
   Zap,
 } from "lucide-react";
 
-const GITHUB_URL = "https://github.com";
+const GITHUB_URL = "https://github.com/shinmentakezo07/wiwia";
 const DISCORD_URL = "https://discord.com";
 
 // ── dropdown link data ────────────────────────────────────────────────────

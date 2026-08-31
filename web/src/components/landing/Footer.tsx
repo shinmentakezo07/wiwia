@@ -7,7 +7,7 @@ import { Link } from "react-router-dom";
 import { Newsletter } from "./Newsletter";
 
 const CONFIG = {
-  githubUrl: "https://github.com",
+  githubUrl: "https://github.com/shinmentakezo07/wiwia",
   twitterUrl: "https://x.com",
   discordUrl: "https://discord.com",
 };

@@ -27,7 +27,7 @@ const VALUES: { icon: LucideIcon; title: string; body: string }[] = [
 ];
 
 const LINKS: { icon: LucideIcon; label: string; href: string; external?: boolean }[] = [
-  { icon: Github, label: "GitHub", href: "https://github.com" },
+  { icon: Github, label: "GitHub", href: "https://github.com/shinmentakezo07/wiwia" },
   { icon: BookOpen, label: "Documentation", href: "/docs" },
   { icon: Terminal, label: "Playground", href: "/playground" },
 ];

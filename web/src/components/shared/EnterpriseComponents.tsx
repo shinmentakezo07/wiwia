@@ -601,7 +601,7 @@ export function InfrastructureAsCodeEnterprise() {
 export function OpenSourceEnterprise() {
   const [stars, setStars] = useState<string | null>(null);
   useEffect(() => {
-    fetch("https://api.github.com/repos/theopenco/llmgateway").then((r) => r.json()).then((d) => setStars(d.stargazers_count ? `${Math.floor(d.stargazers_count / 1000)}K` : "20K+")).catch(() => setStars("20K+"));
+    fetch("https://api.github.com/repos/shinmentakezo07/wiwia").then((r) => r.json()).then((d) => setStars(d.stargazers_count ? `${Math.floor(d.stargazers_count / 1000)}K` : "20K+")).catch(() => setStars("20K+"));
   }, []);
   return (
     <section className="bg-white/[0.01] py-20 sm:py-28">
@@ -616,7 +616,7 @@ export function OpenSourceEnterprise() {
               </div>
               <div className="flex flex-wrap gap-3">
                 <a href="/docs" target="_blank" rel="noopener noreferrer" className="admin-btn admin-btn-primary"><BookOpen className="mr-2 h-4 w-4" />Read the docs</a>
-                <a href="https://github.com" target="_blank" rel="noopener noreferrer" className="admin-btn admin-btn-ghost"><Code2 className="mr-2 h-4 w-4" />View the code</a>
+                <a href="https://github.com/shinmentakezo07/wiwia" target="_blank" rel="noopener noreferrer" className="admin-btn admin-btn-ghost"><Code2 className="mr-2 h-4 w-4" />View the code</a>
               </div>
             </div>
             <div className="space-y-12">

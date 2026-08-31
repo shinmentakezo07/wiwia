@@ -44,7 +44,7 @@ export function CTA() {
               <ArrowRight className="size-4" />
             </Link>
             <a
-              href="https://github.com"
+              href="https://github.com/shinmentakezo07/wiwia"
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-[var(--admin-border)] bg-transparent px-8 py-4 text-base text-[var(--admin-text)] transition-colors hover:bg-white/[0.04] sm:w-auto"

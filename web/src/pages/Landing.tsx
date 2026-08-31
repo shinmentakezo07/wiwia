@@ -1143,7 +1143,7 @@ export function LandingPage() {
               Create Free Account
               <ArrowRight size={18} className="transition-transform duration-150 group-hover:translate-x-0.5" />
             </Link>
-            <a href="https://github.com/theopenco/llmgateway" target="_blank" rel="noopener noreferrer" className="inline-flex h-12 items-center justify-center gap-2 rounded-[10px] border border-[var(--admin-border)] bg-transparent px-8 text-base font-medium text-[var(--admin-text)] transition-colors hover:bg-white/[0.04]">
+            <a href="https://github.com/shinmentakezo07/wiwia" target="_blank" rel="noopener noreferrer" className="inline-flex h-12 items-center justify-center gap-2 rounded-[10px] border border-[var(--admin-border)] bg-transparent px-8 text-base font-medium text-[var(--admin-text)] transition-colors hover:bg-white/[0.04]">
               Self-host LLM Gateway
             </a>
           </div>

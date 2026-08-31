@@ -20,7 +20,7 @@ const CHANNELS: { icon: LucideIcon; label: string; value: string; href: string; 
     icon: Github,
     label: "GitHub",
     value: "github.com/wiwi",
-    href: "https://github.com",
+    href: "https://github.com/shinmentakezo07/wiwia",
     external: true,
   },
   {
@@ -170,7 +170,7 @@ export function ContactPage() {
               We typically reply within one business day. For urgent production issues,
               open an issue on{" "}
               <a
-                href="https://github.com"
+                href="https://github.com/shinmentakezo07/wiwia"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-blue-400 transition-colors hover:text-blue-300"

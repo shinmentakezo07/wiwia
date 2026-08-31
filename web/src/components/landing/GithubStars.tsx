@@ -5,7 +5,7 @@
 import { useEffect, useState } from "react";
 import { Github, Star } from "lucide-react";
 
-const REPO = "theopenco/llmgateway";
+const REPO = "shinmentakezo07/wiwia";
 
 function formatNumber(num: number | null): string {
   if (num === null) return "\u2605";
@@ -39,7 +39,7 @@ export function GithubStars() {
 
   return (
     <a
-      href="https://github.com"
+      href="https://github.com/shinmentakezo07/wiwia"
       target="_blank"
       rel="noopener noreferrer"
       className="group relative flex items-center gap-0.5 rounded-full p-1.5 text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]"
