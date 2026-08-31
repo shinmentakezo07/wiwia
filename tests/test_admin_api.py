@@ -274,6 +274,109 @@ async def test_add_deployment_runtime(client):
     assert badw.status_code == 400
 
 
+async def test_add_deployment_rejects_whitespace_model_id(client):
+    # Ids are typed by hand in the provider-detail UI; an embedded space is
+    # always a typo and upstreams reject it with a confusing 404.
+    r = await client.post("/admin/model-groups/grp/deployments",
+                          json={"provider": "p1", "model_id": "gpt 4o"},
+                          headers=AUTH)
+    assert r.status_code == 400
+    assert "whitespace" in r.json()["error"]["message"]
+    # Surrounding whitespace is trimmed rather than rejected.
+    ok = await client.post("/admin/model-groups/grp/deployments",
+                           json={"provider": "p1", "model_id": " gpt-4o "},
+                           headers=AUTH)
+    assert ok.status_code == 201
+    assert ok.json()["deployment"]["model_id"] == "gpt-4o"
+
+
+async def test_add_deployment_model_id_with_slash(client):
+    # Slashed ids (z-ai/glm-5.2) must survive; the group is the id itself.
+    r = await client.post("/admin/model-groups/z-ai/glm-5.2/deployments",
+                          json={"provider": "p1", "model_id": "z-ai/glm-5.2"},
+                          headers=AUTH)
+    assert r.status_code == 201
+    groups = (await client.get("/admin/models", headers=AUTH)).json()["groups"]
+    g = next(g for g in groups if g["name"] == "z-ai/glm-5.2")
+    assert g["deployments"][0]["model_id"] == "z-ai/glm-5.2"
+
+
+async def test_delete_deployment_removes_only_target(client):
+    await client.post("/admin/model-groups/grp/deployments",
+                      json={"provider": "p1", "model_id": "a"}, headers=AUTH)
+    await client.post("/admin/model-groups/grp/deployments",
+                      json={"provider": "p1", "model_id": "b"}, headers=AUTH)
+    r = await client.delete("/admin/model-groups/grp/deployments"
+                            "?provider=p1&model_id=a", headers=AUTH)
+    assert r.status_code == 200
+    assert r.json()["deleted"] is True
+    assert r.json()["group_emptied"] is False
+    g = next(g for g in (await client.get("/admin/models",
+                                          headers=AUTH)).json()["groups"]
+             if g["name"] == "grp")
+    assert sorted(d["model_id"] for d in g["deployments"]) == ["b"]
+
+
+async def test_delete_deployment_pops_emptied_group(client):
+    await client.post("/admin/model-groups/grp/deployments",
+                      json={"provider": "p1", "model_id": "solo"}, headers=AUTH)
+    r = await client.delete("/admin/model-groups/grp/deployments"
+                            "?provider=p1&model_id=solo", headers=AUTH)
+    assert r.status_code == 200
+    assert r.json()["group_emptied"] is True
+    names = [g["name"] for g in (await client.get("/admin/models",
+                                                  headers=AUTH)).json()["groups"]]
+    assert "grp" not in names
+
+
+async def test_delete_deployment_slashed_model_id(client):
+    # The target travels as query params precisely so slashed ids survive.
+    await client.post("/admin/model-groups/z-ai/glm-5.2/deployments",
+                      json={"provider": "p1", "model_id": "z-ai/glm-5.2"},
+                      headers=AUTH)
+    r = await client.delete("/admin/model-groups/z-ai/glm-5.2/deployments"
+                            "?provider=p1&model_id=z-ai%2Fglm-5.2", headers=AUTH)
+    assert r.status_code == 200
+    assert r.json()["model_id"] == "z-ai/glm-5.2"
+    names = [g["name"] for g in (await client.get("/admin/models",
+                                                  headers=AUTH)).json()["groups"]]
+    assert "z-ai/glm-5.2" not in names
+
+
+async def test_delete_deployment_errors(client):
+    unknown_group = await client.delete(
+        "/admin/model-groups/nope/deployments?provider=p1&model_id=a",
+        headers=AUTH)
+    assert unknown_group.status_code == 404
+    # group exists, deployment does not
+    await client.post("/admin/model-groups/grp/deployments",
+                      json={"provider": "p1", "model_id": "a"}, headers=AUTH)
+    missing = await client.delete("/admin/model-groups/grp/deployments"
+                                  "?provider=p1&model_id=ghost", headers=AUTH)
+    assert missing.status_code == 404
+    wrong_provider = await client.delete("/admin/model-groups/grp/deployments"
+                                         "?provider=ghost&model_id=a", headers=AUTH)
+    assert wrong_provider.status_code == 404
+    no_params = await client.delete("/admin/model-groups/grp/deployments",
+                                    headers=AUTH)
+    assert no_params.status_code == 400
+
+
+async def test_delete_deployment_requires_master(client):
+    await client.post("/admin/model-groups/grp/deployments",
+                      json={"provider": "p1", "model_id": "a"}, headers=AUTH)
+    r = await client.delete("/admin/model-groups/grp/deployments"
+                            "?provider=p1&model_id=a")
+    assert r.status_code == 401
+    g = next(g for g in (await client.get("/admin/models",
+                                          headers=AUTH)).json()["groups"]
+             if g["name"] == "grp")
+    assert [d["model_id"] for d in g["deployments"]] == ["a"]
+
+
+
+
+
 # -- virtual keys PATCH ------------------------------------------------------------
 
 async def test_patch_virtual_key_fields(client):

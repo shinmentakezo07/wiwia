@@ -261,6 +261,55 @@ async def test_provider_rename_survives_restart(tmp_path):
     await _shutdown(lm2, c2)
 
 
+# -- detached deployments stay detached -----------------------------------------
+
+async def test_deleted_deployment_stays_deleted(tmp_path):
+    """Detach must persist: a removed deployment must not reappear after restart."""
+    db_url = _file_db_path(tmp_path)
+
+    cfg = _config(db_url)
+    _, lm, c = await _create_client(cfg)
+    for mid in ("a", "b"):
+        r = await c.post("/admin/model-groups/grp/deployments",
+                         json={"provider": "p1", "model_id": mid}, headers=H)
+        assert r.status_code == 201, r.text
+    r = await c.delete("/admin/model-groups/grp/deployments"
+                       "?provider=p1&model_id=a", headers=H)
+    assert r.status_code == 200, r.text
+    await _shutdown(lm, c)
+
+    # session 2: only "b" should come back
+    cfg2 = _config(db_url)
+    _, lm2, c2 = await _create_client(cfg2)
+    groups = (await c2.get("/admin/models", headers=H)).json()["groups"]
+    grp = next((g for g in groups if g["name"] == "grp"), None)
+    assert grp is not None, f"group lost after restart: {[g['name'] for g in groups]}"
+    assert [d["model_id"] for d in grp["deployments"]] == ["b"]
+    await _shutdown(lm2, c2)
+
+
+async def test_deleted_deployment_emptied_group_stays_gone(tmp_path):
+    """Detaching the only deployment of a group keeps the group away on restart."""
+    db_url = _file_db_path(tmp_path)
+
+    cfg = _config(db_url)
+    _, lm, c = await _create_client(cfg)
+    r = await c.post("/admin/model-groups/grp/deployments",
+                     json={"provider": "p1", "model_id": "solo"}, headers=H)
+    assert r.status_code == 201, r.text
+    r = await c.delete("/admin/model-groups/grp/deployments"
+                       "?provider=p1&model_id=solo", headers=H)
+    assert r.status_code == 200, r.text
+    assert r.json()["group_emptied"] is True
+    await _shutdown(lm, c)
+
+    cfg2 = _config(db_url)
+    _, lm2, c2 = await _create_client(cfg2)
+    groups = (await c2.get("/admin/models", headers=H)).json()["groups"]
+    assert "grp" not in [g["name"] for g in groups]
+    await _shutdown(lm2, c2)
+
+
 # -- key weight update persists --------------------------------------------------
 
 async def test_key_weight_update_survives_restart(tmp_path):

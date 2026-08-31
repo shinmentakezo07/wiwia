@@ -1858,6 +1858,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if not gname or not pname or not model_id:
             return _err(400, "invalid_request_error",
                         "group, provider and model_id are required", request)
+        # Model ids are typed by hand in the provider-detail UI now, so guard
+        # the one mistake upstreams never forgive: embedded whitespace.
+        if any(ch.isspace() for ch in model_id):
+            return _err(400, "invalid_request_error",
+                        "model_id must not contain whitespace", request)
         acct = state.router.providers.get(pname)
         if acct is None:
             return _err(404, "not_found_error", f"unknown provider '{pname}'", request)
@@ -1891,6 +1896,50 @@ def create_app(config: WiwiConfig) -> FastAPI:
             "p95_latency_ms": round(dep.p95_latency(), 1),
             "cooldown_remaining_s": round(max(0.0, dep.cooldown_until - mono), 1),
         }}, status_code=201)
+
+    @app.delete("/admin/model-groups/{name:path}/deployments")
+    async def admin_delete_deployment(name: str, request: Request):
+        """Detach one deployment from a model group.
+
+        The target is identified by query params (``?provider=&model_id=``)
+        rather than path segments: model ids routinely contain slashes
+        (e.g. ``z-ai/glm-5.2``), which a greedy ``{name:path}`` prefix would
+        otherwise swallow into the group name.
+        """
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        gname, deps = state.router.resolve_group(name)
+        if gname is None or not deps:
+            return _err(404, "not_found_error", f"unknown model group '{name}'",
+                        request)
+        pname = (request.query_params.get("provider") or "").strip()
+        model_id = (request.query_params.get("model_id") or "").strip()
+        if not pname or not model_id:
+            return _err(400, "invalid_request_error",
+                        "provider and model_id query params are required", request)
+        match = next((d for d in deps
+                      if d.provider.name == pname and d.model_id == model_id), None)
+        if match is None:
+            return _err(404, "not_found_error",
+                        f"no deployment {pname}/{model_id} on group '{gname}'",
+                        request)
+        remaining = [d for d in deps if d is not match]
+        if remaining:
+            state.router.groups[gname] = remaining
+        else:
+            # Dropping the last deployment leaves an empty group that would
+            # otherwise linger as a routable-but-failing target.
+            state.router.groups.pop(gname, None)
+        state.router.rebuild_cross_provider_pools()
+        if state.config_store:
+            await state.config_store.delete_deployment(gname, pname, model_id)
+        await state.logs.log_audit(actor="master", action="deployment.delete",
+                                   target=f"{gname}/{pname}/{model_id}",
+                                   diff={"group_emptied": not remaining})
+        return ORJSONResponse({"deleted": True, "group": gname,
+                               "provider": pname, "model_id": model_id,
+                               "group_emptied": not remaining})
 
     # -- admin: models & routing -------------------------------------------------
     @app.get("/admin/models")

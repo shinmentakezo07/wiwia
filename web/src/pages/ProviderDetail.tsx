@@ -16,6 +16,7 @@ import {
   clineStatus,
   deleteProvider,
   deleteProviderKey,
+  deleteDeployment,
   fetchClineModels,
   fetchProviderModels,
   getModels,
@@ -359,6 +360,8 @@ function ModelPickerCard(props: { p: Provider; onError: (m: string) => void }) {
   const [selected, setSelected] = useState<string[]>([]);
   const [filter, setFilter] = useState("");
   const [weight, setWeight] = useState("1");
+  const [customId, setCustomId] = useState("");
+  const [customError, setCustomError] = useState<string | null>(null);
 
   const groupsQuery = useQuery({ queryKey: ["model-groups"], queryFn: getModels });
 
@@ -403,6 +406,27 @@ function ModelPickerCard(props: { p: Provider; onError: (m: string) => void }) {
     onError: (e) => props.onError(e.message),
   });
 
+  // Hand-typed model id: for upstreams whose /models listing is incomplete or
+  // behind a key that can't list, and for ids that don't exist in it at all.
+  const addCustom = useMutation({
+    mutationFn: () => {
+      const mid = customId.trim();
+      if (!mid) throw new Error("enter a model id");
+      if (/\s/.test(mid)) throw new Error("model id cannot contain spaces");
+      return addDeployment(mid, {
+        provider: props.p.name,
+        model_id: mid,
+        weight: Math.max(1, parseInt(weight, 10) || 1),
+      });
+    },
+    onSuccess: () => {
+      setCustomId("");
+      setCustomError(null);
+      void qc.invalidateQueries({ queryKey: ["model-groups"] });
+    },
+    onError: (e) => setCustomError(e.message),
+  });
+
   const visible = (models ?? []).filter((m) => m.toLowerCase().includes(filter.toLowerCase()));
   const toggle = (mid: string) =>
     setSelected((sel) => (sel.includes(mid) ? sel.filter((x) => x !== mid) : [...sel, mid]));
@@ -426,6 +450,51 @@ function ModelPickerCard(props: { p: Provider; onError: (m: string) => void }) {
         }
       />
       <div className="space-y-3 px-4 pb-4 pt-1">
+        {/* Add by id, without needing a successful upstream fetch first. */}
+        <form
+          className="space-y-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            addCustom.mutate();
+          }}
+        >
+          <div className="flex items-start gap-2">
+            <Input
+              value={customId}
+              placeholder="Add a model id (e.g. gpt-4o, z-ai/glm-5.2)"
+              aria-label="Model id"
+              onChange={(e) => {
+                setCustomId(e.target.value);
+                setCustomError(null);
+              }}
+            />
+            <div className="w-20">
+              <Field label="Weight">
+                <Input type="number" min={1} value={weight}
+                       onChange={(e) => setWeight(e.target.value)} />
+              </Field>
+            </div>
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-[var(--admin-text-dim)]">
+              Becomes its own model group, named after the id.
+            </span>
+            <Button
+              type="submit"
+              disabled={!customId.trim() || addCustom.isPending}
+            >
+              <Plus size={14} /> {addCustom.isPending ? "Adding…" : "Add model"}
+            </Button>
+          </div>
+          {customError && <ErrorText>{customError}</ErrorText>}
+        </form>
+
+        <div className="flex items-center gap-2">
+          <span className="h-px flex-1 bg-white/[0.06]" />
+          <span className="text-[11px] text-[var(--admin-text-dim)]">or pick from upstream</span>
+          <span className="h-px flex-1 bg-white/[0.06]" />
+        </div>
+
         {fetchM.error && <ErrorText>{fetchM.error.message}</ErrorText>}
 
         {models !== null && (
@@ -466,15 +535,9 @@ function ModelPickerCard(props: { p: Provider; onError: (m: string) => void }) {
                     <p className="px-2 py-3 text-[12px] text-[var(--admin-text-dim)]">No matches.</p>
                   )}
                 </div>
-                <div className="w-20">
-                  <Field label="Weight">
-                    <Input type="number" min={1} value={weight}
-                           onChange={(e) => setWeight(e.target.value)} />
-                  </Field>
-                </div>
                 <div className="flex items-center justify-between">
                   <span className="text-[11px] text-[var(--admin-text-dim)]">
-                    {selected.length} selected{selected.length > 1 ? " — added as fallback deployments" : ""}
+                    {selected.length} selected{selected.length > 1 ? " — added as fallback deployments" : ""} · weight {Math.max(1, parseInt(weight, 10) || 1)}
                   </span>
                   <Button
                     disabled={selected.length === 0 || attach.isPending}
@@ -499,8 +562,21 @@ function ModelPickerCard(props: { p: Provider; onError: (m: string) => void }) {
 
 // -- deployments referencing this account ---------------------------------------------
 
-function DeploymentsCard(props: { provider: string }) {
+function DeploymentsCard(props: { provider: string; onError: (m: string) => void }) {
   const q = useQuery({ queryKey: ["model-groups"], queryFn: getModels });
+  const qc = useQueryClient();
+  const [pending, setPending] = useState<{ group: string; model_id: string } | null>(null);
+
+  const detach = useMutation({
+    mutationFn: (t: { group: string; model_id: string }) =>
+      deleteDeployment(t.group, props.provider, t.model_id),
+    onSuccess: () => {
+      setPending(null);
+      void qc.invalidateQueries({ queryKey: ["model-groups"] });
+    },
+    onError: (e) => props.onError(e.message),
+  });
+
   const rows = useMemo(
     () =>
       (q.data?.groups ?? []).flatMap((g) =>
@@ -570,18 +646,56 @@ function DeploymentsCard(props: { provider: string }) {
               </ul>
             </div>
           )}
-          <Table head={["Model", "Model ID", "Weight", "Ready"]}>
+          <Table head={["Model", "Model ID", "Weight", "Ready", ""]}>
             {rows.map((d) => (
               <tr key={`${d.group}/${d.model_id}`}>
                 <TD className="font-medium">{d.group}</TD>
                 <TD className="font-mono text-[12px]">{d.model_id}</TD>
                 <TD className="tabular-nums">{d.weight}</TD>
                 <TD><Badge tone={d.available ? "green" : "amber"}>{d.available ? "yes" : "cooldown"}</Badge></TD>
+                <TD>
+                  <Button
+                    variant="ghost"
+                    title={`Detach ${d.model_id} from ${d.group}`}
+                    aria-label={`Detach ${d.model_id}`}
+                    onClick={() => setPending({ group: d.group, model_id: d.model_id })}
+                  >
+                    <Unlink size={14} />
+                  </Button>
+                </TD>
               </tr>
             ))}
           </Table>
         </>
       )}
+      <Dialog
+        open={pending !== null}
+        title={pending ? `Detach ${pending.model_id}?` : ""}
+        onClose={() => setPending(null)}
+      >
+        <p className="text-[13px] text-[var(--admin-text-muted)]">
+          Removes this deployment from the{" "}
+          <span className="font-mono">{pending?.group}</span> model group. Requests
+          for that model will stop routing to this account.
+          {pending && rows.filter((r) => r.group === pending.group).length === 1 &&
+            " This is the only deployment, so the group disappears too."}
+        </p>
+        {detach.error && (
+          <div className="mt-3"><ErrorText>{detach.error.message}</ErrorText></div>
+        )}
+        <div className="flex justify-end gap-2 pt-4">
+          <Button variant="ghost" type="button" onClick={() => setPending(null)}>
+            Cancel
+          </Button>
+          <Button
+            variant="danger"
+            disabled={detach.isPending}
+            onClick={() => pending && detach.mutate(pending)}
+          >
+            {detach.isPending ? "Detaching…" : "Detach"}
+          </Button>
+        </div>
+      </Dialog>
     </Card>
   );
 }
@@ -1090,7 +1204,7 @@ export function ProviderDetailPage() {
         <KeyPoolCard p={p} providerName={name} onError={setError} />
         <AddKeysCard provider={p.name} existing={p.keys.length} onError={setError} />
         <ModelPickerCard p={p} onError={setError} />
-        <DeploymentsCard provider={p.name} />
+        <DeploymentsCard provider={p.name} onError={setError} />
       </div>
     </div>
   );

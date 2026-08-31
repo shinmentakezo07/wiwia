@@ -200,6 +200,17 @@ export const addDeployment = (
     { method: "POST", body: JSON.stringify(body) },
   );
 
+// provider/model_id travel as query params, not path segments: model ids
+// contain slashes (e.g. z-ai/glm-5.2) that a path param would mangle.
+export const deleteDeployment = (group: string, provider: string, modelId: string) =>
+  api<{ deleted: boolean; group: string; provider: string; model_id: string;
+         group_emptied: boolean }>(
+    `/admin/model-groups/${encodeURIComponent(group)}/deployments`
+    + `?provider=${encodeURIComponent(provider)}`
+    + `&model_id=${encodeURIComponent(modelId)}`,
+    { method: "DELETE" },
+  );
+
 export const listKeys = () => api<{ keys: VirtualKey[] }>("/admin/keys");
 
 export const generateKey = (body: {
