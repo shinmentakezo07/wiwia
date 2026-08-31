@@ -25,6 +25,7 @@ const PROVIDER_LOGO: Record<string, string> = {
   "openai-compatible": "/logos/openai-compatible.png",
   gmicloud: "/logos/gmicloud.png",
   bai: "/logos/bai.png",
+  workbuddy: "/logos/workbuddy.svg",
   "nvidia-nim": "/logos/nvidia-nim.png",
 };
 

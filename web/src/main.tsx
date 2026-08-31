@@ -50,6 +50,7 @@ import { ProvidersPage } from "@/pages/Providers";
 import { ProviderDetailPage } from "@/pages/ProviderDetail";
 import { BuiltinProvidersPage } from "@/pages/BuiltinProviders";
 import { OAuthProvidersPage } from "@/pages/OAuthProviders";
+import { WorkBuddyAccountsPage } from "@/pages/WorkBuddyAccounts";
 import { VirtualKeysPage } from "@/pages/VirtualKeys";
 import { ModelsPage } from "@/pages/Models";
 import { RequestLogsPage } from "@/pages/RequestLogs";
@@ -175,6 +176,14 @@ function AppRoutes() {
           element={
             <RequireAdmin>
               <OAuthProvidersPage />
+            </RequireAdmin>
+          }
+        />
+        <Route
+          path="/console/workbuddy"
+          element={
+            <RequireAdmin>
+              <WorkBuddyAccountsPage />
             </RequireAdmin>
           }
         />

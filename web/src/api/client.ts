@@ -78,6 +78,11 @@ import type {
   TimeseriesMetric,
   TimeseriesResponse,
   UpstreamModel,
+  WorkBuddyAccountsResponse,
+  WorkBuddyAuthFile,
+  WorkBuddyExportResponse,
+  WorkBuddyImportResponse,
+  WorkBuddyRefreshResponse,
   User,
   VirtualKey,
 } from "./types";
@@ -375,4 +380,29 @@ export const clineDisconnect = (provider: string) =>
   api<ClineDisconnectResponse>("/admin/cline/oauth/disconnect", {
     method: "DELETE",
     body: JSON.stringify({ provider }),
+  });
+
+// -- WorkBuddy accounts (auths/ JSON import/export) ---------------------------
+
+export const workbuddyAccounts = () =>
+  api<WorkBuddyAccountsResponse>("/admin/workbuddy/accounts");
+
+export const workbuddyImport = (
+  provider: string,
+  accounts: WorkBuddyAuthFile[] | WorkBuddyAuthFile,
+) =>
+  api<WorkBuddyImportResponse>("/admin/workbuddy/import", {
+    method: "POST",
+    body: JSON.stringify({ provider, accounts }),
+  });
+
+export const workbuddyExport = (provider?: string) => {
+  const q = provider ? `?provider=${encodeURIComponent(provider)}` : "";
+  return api<WorkBuddyExportResponse>(`/admin/workbuddy/export${q}`);
+};
+
+export const workbuddyRefresh = (provider: string, label: string) =>
+  api<WorkBuddyRefreshResponse>("/admin/workbuddy/refresh", {
+    method: "POST",
+    body: JSON.stringify({ provider, label }),
   });

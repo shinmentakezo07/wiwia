@@ -245,3 +245,56 @@ export interface ClineDisconnectResponse {
   provider: string;
   disconnected: boolean;
 }
+
+// -- WorkBuddy accounts ------------------------------------------------------
+
+export interface WorkBuddyAccount {
+  provider: string;
+  label: string;
+  status: string;
+  enabled: boolean;
+  valid_auth: boolean;
+  uid?: string;
+  nickname?: string;
+  domain?: string;
+  region?: "cn" | "global";
+  expires_at?: number | null;
+  needs_refresh?: boolean;
+  has_refresh_token?: boolean;
+  access_token_masked?: string;
+}
+
+export interface WorkBuddyAccountsResponse {
+  accounts: WorkBuddyAccount[];
+}
+
+export interface WorkBuddyImportResponse {
+  provider: string;
+  imported: number;
+  labels: string[];
+}
+
+export interface WorkBuddyExportResponse {
+  accounts: WorkBuddyAuthFile[];
+}
+
+/** One account in the workbuddy2api auths/ file shape. */
+export interface WorkBuddyAuthFile {
+  auth: {
+    accessToken: string;
+    refreshToken: string;
+    expiresAt: number;
+    domain: string;
+  };
+  account: {
+    uid: string;
+    enterpriseId: string;
+    nickname: string;
+  };
+}
+
+export interface WorkBuddyRefreshResponse {
+  provider: string;
+  label: string;
+  refreshed: boolean;
+}
