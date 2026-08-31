@@ -55,6 +55,20 @@ class Gateway:
         # should retry; False when no rotation happened (caller surfaces
         # the original 401).
         self._on_demand_cline_refresh = None
+        # On-demand refresh hooks per provider type (e.g. "workbuddy"), set
+        # by the app at startup. Cline keeps its legacy attribute above for
+        # backward compatibility with existing wiring/tests.
+        self._on_demand_refresh_hooks: dict[str, Any] = {}
+
+    def _resolve_refresh_hook(self, dep: Deployment):
+        """Return the on-demand 401-refresh hook for a deployment's provider.
+
+        Cline's hook wins when set (legacy seam); otherwise the
+        provider-type-keyed registry supplies the hook.
+        """
+        if dep.provider.provider_type == "cline":
+            return self._on_demand_cline_refresh
+        return self._on_demand_refresh_hooks.get(dep.provider.provider_type)
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -115,14 +129,12 @@ class Gateway:
             ra = _parse_retry_after(resp.headers.get("retry-after"))
             if ra is not None:
                 err.retry_after = ra
-            # On-demand Cline refresh: 401 from Cline usually means the
-            # current access token was rotated upstream. Refresh and retry
-            # once before surfacing the error to the client.
-            if (resp.status_code == 401
-                    and dep.provider.provider_type == "cline"
-                    and self._on_demand_cline_refresh is not None):
-                rotated = await self._on_demand_cline_refresh(
-                    dep.provider.name, key.label)
+            # On-demand token refresh: 401 from an OAuth-backed provider
+            # (Cline, WorkBuddy) usually means the access token was rotated
+            # upstream. Refresh and retry once before surfacing the error.
+            refresh_hook = self._resolve_refresh_hook(dep)
+            if resp.status_code == 401 and refresh_hook is not None:
+                rotated = await refresh_hook(dep.provider.name, key.label)
                 if rotated:
                     # The on-demand refresh rotated every pool key's
                     # secret; rebuild the headers so the retry uses the
@@ -214,14 +226,12 @@ class Gateway:
             ra = _parse_retry_after(resp.headers.get("retry-after"))
             if ra is not None:
                 err.retry_after = ra
-            # On-demand Cline refresh on a streaming connect: 401 means
+            # On-demand token refresh on a streaming connect: 401 means
             # the access token was rotated upstream. Reconnect once with
             # the freshly-issued token before surfacing the error.
-            if (resp.status_code == 401
-                    and dep.provider.provider_type == "cline"
-                    and self._on_demand_cline_refresh is not None):
-                rotated = await self._on_demand_cline_refresh(
-                    dep.provider.name, key.label)
+            refresh_hook = self._resolve_refresh_hook(dep)
+            if resp.status_code == 401 and refresh_hook is not None:
+                rotated = await refresh_hook(dep.provider.name, key.label)
                 if rotated:
                     # Rebuild headers from the live (post-refresh) key
                     # secret so the reconnect carries the fresh token.
@@ -919,7 +929,12 @@ def build_log_event(ctx: RequestContext) -> LogEvent:
 
 def _build_url(adapter, dep: Deployment, key: ProviderKeyRef, stream: bool) -> str:
     """Build the upstream URL, appending the API key for providers that require it
-    in the querystring (e.g. Gemini) rather than headers."""
+    in the querystring (e.g. Gemini) rather than headers. Adapters may declare
+    ``build_url_for_key(base_url, model_id, stream, key)`` when the credential
+    itself routes the URL (e.g. WorkBuddy CN vs global account domains)."""
+    build = getattr(adapter, "build_url_for_key", None)
+    if build is not None:
+        return build(dep.provider.base_url, dep.model_id, stream, key)
     url = adapter.build_url(dep.provider.base_url, dep.model_id, stream)
     if dep.provider.provider_type == "gemini" and url.endswith(("?key=", "&key=")):
         url += key.secret
