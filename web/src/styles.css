@@ -20,12 +20,19 @@
 
 :root {
   color-scheme: light dark;
-  overflow-x: hidden;
+  overflow-x: clip;
+  scroll-behavior: smooth;
 }
 
 body {
   @apply bg-zinc-100 text-zinc-900 antialiased dark:bg-zinc-950 dark:text-zinc-100;
-  overflow-x: hidden;
+  overflow-x: clip;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    scroll-behavior: auto;
+  }
 }
 
 /* thin scrollbars for log tables */
@@ -1063,10 +1070,13 @@ select.admin-input option {
   mask-image: radial-gradient(ellipse 70% 85% at 50% 0%, black 30%, transparent 75%);
   pointer-events: none;
 }
-
 /* Sidebar nav: accent rail on the active item */
 .docs-nav-item {
   position: relative;
+  transition: background-color 0.25s ease, color 0.25s ease, transform 0.25s ease;
+}
+.docs-nav-item:hover {
+  transform: translateX(2px);
 }
 .docs-nav-item::before {
   content: "";
@@ -1077,8 +1087,9 @@ select.admin-input option {
   width: 2px;
   border-radius: 2px;
   background: transparent;
-  transition: background 0.2s ease;
+  transition: background 0.25s ease;
 }
+
 .docs-nav-item.is-active::before {
   background: linear-gradient(180deg, #60a5fa, #a78bfa);
 }
