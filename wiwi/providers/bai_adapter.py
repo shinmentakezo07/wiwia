@@ -73,18 +73,23 @@ class BAIAdapter(OpenAIAdapter):
         params = dict(deployment_params)
         params["provider_type"] = "openai" if deepseek_roundtrip else "openai-compatible"
         body = super().encode_request(req, model_id, params)
+        # "none" is NOT a valid reasoning_effort value on any OpenAI-compatible
+        # surface (B.AI is not native OpenAI). Whether DeepSeek or not, the
+        # "disable thinking" intent must use B.AI's thinking toggle rather than
+        # forwarding an unsupported "none" string (which would 400 upstream).
+        # A disabled state never triggers the round-trip rule (which requires
+        # effort != "none"), so it always returns.
+        if effort == "none":
+            body.pop("reasoning_effort", None)
+            body["thinking"] = {"type": "disabled"}
+            return body
         if not deepseek:
-            # Plain B.AI model: reasoning_effort accepted, nothing else needed.
+            # Plain B.AI model: named effort levels accepted, nothing else needed.
             if effort:
                 body["reasoning_effort"] = effort
             return body
         # DeepSeek: normalize the reasoning controls.
-        if effort == "none":
-            # Explicit disable must use DeepSeek's thinking toggle, not
-            # reasoning_effort (which has no "none" value in their API).
-            body.pop("reasoning_effort", None)
-            body["thinking"] = {"type": "disabled"}
-        elif effort:
+        if effort:
             body["reasoning_effort"] = effort
         if deepseek_roundtrip:
             # The thinking-mode tool round-trip: EVERY history assistant
