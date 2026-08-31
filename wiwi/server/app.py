@@ -144,9 +144,10 @@ from wiwi.cost.pricing import CostEngine
 from wiwi.ir import types as ir
 from wiwi.logging_core.events import LogEvent
 from wiwi.logging_core.subsystem import LoggingSubsystem, encode_sse, public_dict
-from wiwi.providers import cline_oauth
+from wiwi.providers import cline_oauth, workbuddy_auth
 from wiwi.providers.base import ProviderKeyRef, WiwiError
 from wiwi.providers.registry import fresh_adapter
+from wiwi.providers.workbuddy_auto_refresh import refresh_key_now
 from wiwi.ratelimit.memory import RateLimiter
 from wiwi.router.router import (
     BUILTIN_PROVIDER_TYPES,
@@ -350,6 +351,7 @@ class AppState:
         # by the /cline/oauth/callback redirect, evicted after 10 minutes.
         self.cline_pending: dict[str, dict[str, Any]] = {}
         self.cline_refresh: Any = None
+        self.workbuddy_refresh: Any = None
         # Set during shutdown so long-lived SSE generators break out of their
         # event loop instead of blocking uvicorn's graceful-shutdown drain
         # (which otherwise hangs at "Waiting for connections to close").
@@ -549,6 +551,18 @@ async def lifespan(app: FastAPI):
     cline_refresh_hook = refresh_for_provider(state)
     for gw in state.gateways.values():
         gw._on_demand_cline_refresh = cline_refresh_hook  # type: ignore[attr-defined]
+    # WorkBuddy per-key token refresh: same on-demand contract as Cline
+    # (hook(provider, label) -> bool) but keyed per pool key, since each
+    # WorkBuddy key holds its own account auth JSON.
+    from wiwi.providers.workbuddy_auto_refresh import WorkBuddyAutoRefresh
+    from wiwi.providers.workbuddy_auto_refresh import (
+        refresh_for_provider as workbuddy_refresh_for_provider,
+    )
+    state.workbuddy_refresh = WorkBuddyAutoRefresh(state)
+    state.workbuddy_refresh.start()
+    workbuddy_refresh_hook = workbuddy_refresh_for_provider(state)
+    for gw in state.gateways.values():
+        gw._on_demand_refresh_hooks["workbuddy"] = workbuddy_refresh_hook  # type: ignore[attr-defined]
     # Reconcile persisted Cline default-model settings (one global model
     # id → one Deployment per Cline account under ``cline:<model_id>``).
     if state.config_store is not None:
@@ -563,6 +577,8 @@ async def lifespan(app: FastAPI):
                 "cline_default_apply_failed_at_startup", err=str(e),
             )
     yield
+    if state.workbuddy_refresh is not None:
+        await state.workbuddy_refresh.stop()
     await state.cline_refresh.stop()
     await state.shutdown()
 
@@ -2684,6 +2700,193 @@ def create_app(config: WiwiConfig) -> FastAPI:
         await state.logs.log_audit(
             actor="master", action="cline_oauth.disconnect", target=provider)
         return ORJSONResponse({"provider": provider, "disconnected": True})
+
+    # -- WorkBuddy accounts ---------------------------------------------------
+    # WorkBuddy pool keys each hold a full account auth JSON (see
+    # wiwi.providers.workbuddy_auth), so the admin surface here is about
+    # account *files*: list connected accounts with expiry state, bulk-import
+    # the auth JSONs produced by the upstream plugin / CPA panel (the
+    # workbuddy2api ``auths/`` format), and export them back out in the same
+    # shape for backup or re-import elsewhere.
+
+    def _workbuddy_accounts() -> list[dict[str, Any]]:
+        accounts: list[dict[str, Any]] = []
+        for name, acct in sorted(state.router.providers.items()):
+            if acct.provider_type != "workbuddy":
+                continue
+            for k in acct.keys:
+                entry: dict[str, Any] = {
+                    "provider": name, "label": k.label, "status": k.status,
+                    "enabled": k.enabled, "valid_auth": False,
+                }
+                try:
+                    a = workbuddy_auth.parse_auth(k.secret)
+                except workbuddy_auth.WorkBuddyAuthError:
+                    accounts.append(entry)
+                    continue
+                entry.update({
+                    "valid_auth": True,
+                    "uid": a.uid,
+                    "nickname": a.nickname,
+                    "domain": a.domain,
+                    "region": a.region(),
+                    "expires_at": a.expires_at or None,
+                    "needs_refresh": a.needs_refresh(
+                        workbuddy_auth.REFRESH_LEAD_S),
+                    "has_refresh_token": bool(a.refresh_token),
+                    "access_token_masked": mask_key(a.access_token),
+                })
+                accounts.append(entry)
+        return accounts
+
+    @app.get("/admin/workbuddy/accounts")
+    async def workbuddy_accounts(request: Request):
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        return ORJSONResponse({"accounts": _workbuddy_accounts()})
+
+    @app.post("/admin/workbuddy/import")
+    async def workbuddy_import(request: Request):
+        """Import WorkBuddy account auth JSONs as provider pool keys.
+
+        Accepts the workbuddy2api ``auths/`` file format — either a single
+        auth object (nested ``{auth, account}`` or flat) or a list of them.
+        Each entry becomes one pool key on the target provider (created on
+        first import with the default WorkBuddy base URL). Import succeeds
+        only if every entry parses; partial failures are rejected so the
+        admin can fix the file rather than end up with a half-imported set.
+        """
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        provider = str(body.get("provider") or "workbuddy-main").strip()
+        base_url = (str(body.get("base_url") or "").strip()
+                    or _default_base_url("workbuddy"))
+        accounts = body.get("accounts")
+        if accounts is None and isinstance(body.get("auth"), dict):
+            accounts = [{"auth": body["auth"],
+                         "account": body.get("account") or {}}]
+        if not isinstance(accounts, list) or not accounts:
+            return _err(400, "invalid_request_error",
+                        "'accounts' must be a non-empty list of WorkBuddy "
+                        "auth JSON objects (or a single auth object)",
+                        request)
+        parsed: list[tuple[str, str]] = []
+        for i, raw in enumerate(accounts):
+            if not isinstance(raw, dict):
+                return _err(400, "invalid_request_error",
+                            f"accounts[{i}] is not a JSON object", request)
+            try:
+                a = workbuddy_auth.parse_auth(orjson.dumps(raw).decode())
+            except workbuddy_auth.WorkBuddyAuthError as e:
+                return _err(400, "invalid_request_error",
+                            f"accounts[{i}]: {e}", request)
+            label = (a.nickname or a.uid or f"wb-{i + 1}").strip()[:64] \
+                or f"wb-{i + 1}"
+            parsed.append((label, a.to_secret()))
+        existing = state.router.providers.get(provider)
+        if existing is not None and existing.provider_type != "workbuddy":
+            return _err(409, "invalid_request_error",
+                        f"provider '{provider}' exists with type "
+                        f"'{existing.provider_type}'", request)
+        taken = {k.label for k in existing.keys} if existing else set()
+        for label, _ in parsed:
+            if label in taken:
+                return _err(409, "invalid_request_error",
+                            f"account label '{label}' already exists on "
+                            f"provider '{provider}' — nothing imported",
+                            request)
+        if existing is None:
+            state.router.providers[provider] = ProviderAccount(
+                name=provider, provider_type="workbuddy", base_url=base_url,
+                keys=[ProviderKey(label=label, secret=secret) for label,
+                      secret in parsed])
+            if state.config_store:
+                await state.config_store.add_provider(provider, "workbuddy",
+                                                      base_url)
+                for label, secret in parsed:
+                    await state.config_store.add_key(provider, label, secret)
+        else:
+            for label, secret in parsed:
+                existing.keys.append(ProviderKey(label=label, secret=secret))
+                if state.config_store:
+                    await state.config_store.add_key(provider, label, secret)
+        await state.logs.log_audit(
+            actor="master", action="workbuddy.import", target=provider,
+            diff={"accounts": len(parsed)})
+        return ORJSONResponse({
+            "provider": provider, "imported": len(parsed),
+            "labels": [label for label, _ in parsed],
+        })
+
+    @app.get("/admin/workbuddy/export")
+    async def workbuddy_export(request: Request):
+        """Export every WorkBuddy account in the workbuddy2api auths/ shape.
+
+        Optionally scoped with ?provider=name. Secrets (access + refresh
+        tokens) are returned in full — this is a credential backup, guarded
+        by the master key like key reveals, and audit-logged.
+        """
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        provider_filter = request.query_params.get("provider", "").strip()
+        out: list[dict[str, Any]] = []
+        for name, acct in sorted(state.router.providers.items()):
+            if acct.provider_type != "workbuddy":
+                continue
+            if provider_filter and name != provider_filter:
+                continue
+            for k in acct.keys:
+                try:
+                    a = workbuddy_auth.parse_auth(k.secret)
+                except workbuddy_auth.WorkBuddyAuthError:
+                    continue  # bare-token or corrupt secret: not exportable
+                out.append({
+                    "auth": {
+                        "accessToken": a.access_token,
+                        "refreshToken": a.refresh_token,
+                        "expiresAt": a.expires_at,
+                        "domain": a.domain,
+                    },
+                    "account": {
+                        "uid": a.uid,
+                        "enterpriseId": a.enterprise_id,
+                        "nickname": a.nickname,
+                    },
+                })
+        await state.logs.log_audit(
+            actor="master", action="workbuddy.export", target=provider_filter,
+            diff={"accounts": len(out)})
+        return ORJSONResponse({"accounts": out})
+
+    @app.post("/admin/workbuddy/refresh")
+    async def workbuddy_refresh(request: Request):
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        provider = str(body.get("provider") or "").strip()
+        label = str(body.get("label") or "").strip()
+        if not provider or not label:
+            return _err(400, "invalid_request_error",
+                        "provider and label are required", request)
+        result = await refresh_key_now(state, provider, label)
+        if not result["ok"]:
+            return _err(502, "api_error",
+                        f"workbuddy refresh failed: {result['error']}",
+                        request)
+        await state.logs.log_audit(
+            actor="master", action="workbuddy.refresh",
+            target=f"{provider}/{label}", diff={})
+        return ORJSONResponse({"provider": provider, "label": label,
+                               "refreshed": True})
 
     @app.get("/public/models")
     async def public_models() -> ORJSONResponse:
