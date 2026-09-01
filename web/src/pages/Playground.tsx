@@ -58,6 +58,13 @@ import {
 type Role = "user" | "assistant";
 type Msg = { id: string; role: Role; content: string };
 
+/** Token usage as reported by an OpenAI-shaped streaming response. */
+type Usage = {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+};
+
 function uid(): string {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
@@ -82,9 +89,11 @@ async function streamSSE(
   resp: Response,
   assistantId: string,
   setMessages: React.Dispatch<React.SetStateAction<Msg[]>>,
-  setUsage: React.Dispatch<
-    React.SetStateAction<{ prompt_tokens: number; completion_tokens: number; total_tokens: number } | null>
-  >,
+  // Narrower than React's Dispatch<SetStateAction<Usage | null>>: this only
+  // ever forwards a decoded usage object (or null), never an updater
+  // function. Passing the full Dispatch type would force every caller to
+  // also accept the function form it never receives.
+  setUsage: (u: Usage | null) => void,
   opts: { signal?: AbortSignal; startedAt: number; onFirstToken: (ms: number) => void },
 ): Promise<string> {
   const reader = resp.body?.getReader();
@@ -108,7 +117,7 @@ async function streamSSE(
         try {
           const parsed = JSON.parse(data) as {
             choices?: { delta?: { content?: string } }[];
-            usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+            usage?: Usage;
           };
           const delta = parsed.choices?.[0]?.delta?.content;
           if (delta) {
@@ -443,7 +452,7 @@ export function PlaygroundPage() {
   const [busy, setBusy] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [usage, setUsage] = useState<{ prompt_tokens: number; completion_tokens: number; total_tokens: number } | null>(null);
+  const [usage, setUsage] = useState<Usage | null>(null);
   const [ttftMs, setTtftMs] = useState<number | null>(null);
   const [tps, setTps] = useState<number | null>(null);
   const [keyReady, setKeyReady] = useState(false);
@@ -570,9 +579,12 @@ export function PlaygroundPage() {
       const controller = new AbortController();
       abortRef.current = controller;
       const startedAt = performance.now();
-      let lastUsage: { completion_tokens: number } | null = null;
-      const captureUsage = (u: { prompt_tokens: number; completion_tokens: number; total_tokens: number }) => {
-        lastUsage = { completion_tokens: u.completion_tokens };
+      // `as` keeps the declared union visible to control-flow analysis: a
+      // plain `= null` initializer narrows to `null` at the use site below,
+      // because the real assignment happens inside the captureUsage closure.
+      let lastUsage = null as Pick<Usage, "completion_tokens"> | null;
+      const captureUsage = (u: Usage | null) => {
+        if (u) lastUsage = { completion_tokens: u.completion_tokens };
         setUsage(u);
       };
 
