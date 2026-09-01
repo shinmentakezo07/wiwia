@@ -164,20 +164,23 @@ export function ModelsPage() {
   const [error, setError] = useState<string | null>(null);
   const query = useQuery({ queryKey: ["models"], queryFn: getModels, refetchInterval: 10_000 });
 
-  if (query.isLoading) return <Spinner />;
-  if (query.error) return <ErrorText>{query.error.message}</ErrorText>;
-
-  const data = query.data!;
-
+  // Hooks must run unconditionally: declared before the loading/error early
+  // returns, reading query.data at call time inside the mutation.
   const setStrategy = useMutation({
     mutationFn: (strategy: string) => {
-      if (!data.groups.length) return Promise.reject(new Error("no groups to patch"));
+      const groups = query.data?.groups ?? [];
+      if (!groups.length) return Promise.reject(new Error("no groups to patch"));
       // strategy is global router state; any known group path applies it
-      return patchModelGroup(data.groups[0].name, { strategy });
+      return patchModelGroup(groups[0].name, { strategy });
     },
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["models"] }),
     onError: (e) => setError(e.message),
   });
+
+  if (query.isLoading) return <Spinner />;
+  if (query.error) return <ErrorText>{query.error.message}</ErrorText>;
+
+  const data = query.data!;
 
   // Strategy label for the read-only (non-admin) view.
   const strategyLabel = STRATEGIES.find((s) => s.value === data.strategy)?.label ?? data.strategy;
