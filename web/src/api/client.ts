@@ -10,16 +10,46 @@ export class ApiError extends Error {
 
 const TOKEN_KEY = "wiwi.master_key";
 
+// Same-tab token changes don't fire the window "storage" event (cross-tab
+// only), so components that hold a long-lived connection keyed to the token
+// (AdminStreamProvider's SSE) subscribe here to notice set/clear. Cross-tab
+// writes of the same key are bridged in via the storage event so subscribers
+// see both.
+const tokenListeners = new Set<() => void>();
+
+function onStorageEvent(e: StorageEvent): void {
+  if (e.key === TOKEN_KEY || e.key === null) notifyTokenChanged();
+}
+
+export function subscribeToken(listener: () => void): () => void {
+  if (tokenListeners.size === 0 && typeof window !== "undefined") {
+    window.addEventListener("storage", onStorageEvent);
+  }
+  tokenListeners.add(listener);
+  return () => {
+    tokenListeners.delete(listener);
+    if (tokenListeners.size === 0 && typeof window !== "undefined") {
+      window.removeEventListener("storage", onStorageEvent);
+    }
+  };
+}
+
+function notifyTokenChanged(): void {
+  for (const listener of tokenListeners) listener();
+}
+
 export function getToken(): string {
   return localStorage.getItem(TOKEN_KEY) ?? "";
 }
 
 export function setToken(token: string): void {
   localStorage.setItem(TOKEN_KEY, token);
+  notifyTokenChanged();
 }
 
 export function clearToken(): void {
   localStorage.removeItem(TOKEN_KEY);
+  notifyTokenChanged();
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {

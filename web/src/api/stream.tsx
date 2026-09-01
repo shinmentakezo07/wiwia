@@ -1,11 +1,11 @@
 // Single admin SSE connection shared app-wide; pages subscribe per event type.
 // The connection lives while the user is authenticated.
 
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { WiwiStream } from "./sse";
-import { getToken } from "./client";
+import { getToken, subscribeToken } from "./client";
 
 type Handler = (data: unknown, id: number) => void;
 
@@ -19,12 +19,20 @@ const Ctx = createContext<StreamCtx>({
   subscribe: () => () => undefined,
 });
 
+// Reactive token snapshot: re-reads on any setToken/clearToken (same tab via
+// subscribeToken, cross-tab via the storage event bridged inside subscribeToken),
+// so the effect below re-runs and the SSE connection always carries the current
+// credential — not the one that happened to exist at mount.
+function useToken(): string {
+  return useSyncExternalStore(subscribeToken, getToken, () => "");
+}
+
 export function AdminStreamProvider({ children }: { children: ReactNode }) {
   const [connected, setConnected] = useState(false);
   const handlers = useRef(new Map<string, Set<Handler>>());
+  const token = useToken();
 
   useEffect(() => {
-    const token = getToken();
     if (!token) return;
     const stream = new WiwiStream("/admin/stream", token, {
       "log.created": (data, id) =>
@@ -34,8 +42,11 @@ export function AdminStreamProvider({ children }: { children: ReactNode }) {
     });
     stream.onStateChange = setConnected;
     stream.start();
-    return () => stream.close();
-  }, []);
+    return () => {
+      stream.close();
+      setConnected(false);
+    };
+  }, [token]);
 
   const subscribe = (event: string, handler: Handler) => {
     let set = handlers.current.get(event);
