@@ -3,19 +3,24 @@
 // auth context) as the bearer for /v1/chat/completions. If no key is cached
 // (new tab with a valid session), it mints a fresh one via /auth/playground-key.
 // Enhanced model selector with provider info, availability, and
-// deployment details. Full-page chat arena with SSE streaming, hero empty
-// state, message actions, and localStorage-backed conversation history.
+// deployment details. Full-page chat arena with SSE streaming (abortable),
+// markdown-rendered replies, per-message actions, hero empty state, latency /
+// throughput stats, and localStorage-backed conversation history.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowDown,
+  Bot,
   Check,
   ChevronDown,
+  Clock,
   Copy,
+  Gauge,
   MessageSquarePlus,
   PanelLeftClose,
   PanelLeftOpen,
+  Plug,
   RefreshCcw,
   Search,
   Send,
@@ -23,17 +28,17 @@ import {
   Square,
   Terminal,
   Trash2,
-  Zap,
+  User,
 } from "lucide-react";
 import { getModels } from "@/api/client";
 import { useAuth } from "@/api/auth";
 import type { ModelGroup } from "@/api/types";
 import { Link } from "react-router-dom";
 import {
-  Badge,
   ErrorText,
   Spinner,
 } from "@/components/ui";
+import { Markdown } from "@/components/Markdown";
 import {
   heroSuggestionGroupNames,
   heroSuggestionGroups,
@@ -62,7 +67,17 @@ function fmtTokens(n: number | undefined): string {
   return n.toLocaleString();
 }
 
-/** Shared SSE reader. */
+function fmtMs(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function fmtTps(n: number): string {
+  return `${n.toFixed(1)} tok/s`;
+}
+
+/** Shared SSE reader. Returns the accumulated text; records first-token time
+ * via onFirstToken and honors an AbortController signal. */
 async function streamSSE(
   resp: Response,
   assistantId: string,
@@ -70,41 +85,52 @@ async function streamSSE(
   setUsage: React.Dispatch<
     React.SetStateAction<{ prompt_tokens: number; completion_tokens: number; total_tokens: number } | null>
   >,
+  opts: { signal?: AbortSignal; startedAt: number; onFirstToken: (ms: number) => void },
 ): Promise<string> {
   const reader = resp.body?.getReader();
   if (!reader) throw new Error("no response body");
   const decoder = new TextDecoder();
   let buffer = "";
   let accumulated = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-    for (const line of lines) {
-      const trimmedLine = line.trim();
-      if (!trimmedLine || !trimmedLine.startsWith("data:")) continue;
-      const data = trimmedLine.slice(5).trim();
-      if (!data) continue;
-      try {
-        const parsed = JSON.parse(data) as {
-          choices?: { delta?: { content?: string } }[];
-          usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
-        };
-        const delta = parsed.choices?.[0]?.delta?.content;
-        if (delta) {
-          accumulated += delta;
-          const snapshot = accumulated;
-          setMessages((prev) =>
-            prev.map((m) => (m.id === assistantId ? { ...m, content: snapshot } : m)),
-          );
+  let firstToken = false;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const trimmedLine = line.trim();
+        if (!trimmedLine || !trimmedLine.startsWith("data:")) continue;
+        const data = trimmedLine.slice(5).trim();
+        if (!data) continue;
+        try {
+          const parsed = JSON.parse(data) as {
+            choices?: { delta?: { content?: string } }[];
+            usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+          };
+          const delta = parsed.choices?.[0]?.delta?.content;
+          if (delta) {
+            if (!firstToken) {
+              firstToken = true;
+              opts.onFirstToken(performance.now() - opts.startedAt);
+            }
+            accumulated += delta;
+            const snapshot = accumulated;
+            setMessages((prev) =>
+              prev.map((m) => (m.id === assistantId ? { ...m, content: snapshot } : m)),
+            );
+          }
+          if (parsed.usage) setUsage(parsed.usage);
+        } catch {
+          // ignore malformed chunks
         }
-        if (parsed.usage) setUsage(parsed.usage);
-      } catch {
-        // ignore malformed chunks
       }
     }
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") return accumulated;
+    throw e;
   }
   return accumulated;
 }
@@ -418,7 +444,10 @@ export function PlaygroundPage() {
   const [streaming, setStreaming] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [usage, setUsage] = useState<{ prompt_tokens: number; completion_tokens: number; total_tokens: number } | null>(null);
+  const [ttftMs, setTtftMs] = useState<number | null>(null);
+  const [tps, setTps] = useState<number | null>(null);
   const [keyReady, setKeyReady] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
 
   // ── Chat history state ───────────────────────────────────────────────────
   const [chats, setChats] = useState<Conversation[]>([]);
@@ -523,30 +552,29 @@ export function PlaygroundPage() {
 
   // ── streaming send ────────────────────────────────────────────────────────
 
-  const send = useCallback(
-    async (text: string) => {
-      const trimmed = text.trim();
-      if (!trimmed || busy) return;
-      if (!bearer.trim()) {
-        setErr("Waiting for playground key to be created…");
-        return;
-      }
-      if (!effectiveModel) {
-        setErr("No models available. Add a provider with a model group first.");
-        return;
-      }
+  // ── streaming core (shared by send + regenerate) ─────────────────────────
 
+  const runStream = useCallback(
+    async (history: Msg[], userText: string | null) => {
+      const assistantId = uid();
+      const assistantMsg: Msg = { id: assistantId, role: "assistant", content: "" };
+      const userMsg: Msg | null = userText != null ? { id: uid(), role: "user", content: userText } : null;
+      setMessages((prev) => [...prev, ...(userMsg ? [userMsg] : []), assistantMsg]);
       setErr(null);
       setBusy(true);
       setStreaming(true);
       setUsage(null);
+      setTtftMs(null);
+      setTps(null);
 
-      const userMsg: Msg = { id: uid(), role: "user", content: trimmed };
-      const assistantId = uid();
-      const assistantMsg: Msg = { id: assistantId, role: "assistant", content: "" };
-      const outgoingMessages = [...messages, { role: "user" as Role, content: trimmed }];
-      setMessages((prev) => [...prev, userMsg, assistantMsg]);
-      setDraft("");
+      const controller = new AbortController();
+      abortRef.current = controller;
+      const startedAt = performance.now();
+      let lastUsage: { completion_tokens: number } | null = null;
+      const captureUsage = (u: { prompt_tokens: number; completion_tokens: number; total_tokens: number }) => {
+        lastUsage = { completion_tokens: u.completion_tokens };
+        setUsage(u);
+      };
 
       try {
         const resp = await fetch("/v1/chat/completions", {
@@ -558,9 +586,10 @@ export function PlaygroundPage() {
           },
           body: JSON.stringify({
             model: effectiveModel,
-            messages: outgoingMessages.map((m) => ({ role: m.role, content: m.content })),
+            messages: history.map((m) => ({ role: m.role, content: m.content })),
             stream: true,
           }),
+          signal: controller.signal,
         });
 
         if (!resp.ok) {
@@ -573,7 +602,15 @@ export function PlaygroundPage() {
           throw new Error(msg ?? `HTTP ${resp.status}`);
         }
 
-        const accumulated = await streamSSE(resp, assistantId, setMessages, setUsage);
+        const accumulated = await streamSSE(resp, assistantId, setMessages, captureUsage, {
+          signal: controller.signal,
+          startedAt,
+          onFirstToken: setTtftMs,
+        });
+        if (lastUsage) {
+          const secs = (performance.now() - startedAt) / 1000;
+          setTps(secs > 0 ? lastUsage.completion_tokens / secs : null);
+        }
 
         if (!accumulated) {
           setMessages((prev) =>
@@ -581,15 +618,47 @@ export function PlaygroundPage() {
           );
         }
       } catch (e) {
-        setErr(e instanceof Error ? e.message : "request failed");
-        setMessages((prev) => prev.filter((m) => m.id !== assistantId));
+        if (e instanceof DOMException && e.name === "AbortError") {
+          // user stopped — keep whatever streamed so far, mark it if nothing arrived
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId && !m.content ? { ...m, content: "(stopped)" } : m,
+            ),
+          );
+        } else {
+          setErr(e instanceof Error ? e.message : "request failed");
+          setMessages((prev) => prev.filter((m) => m.id !== assistantId));
+        }
       } finally {
         setBusy(false);
         setStreaming(false);
+        abortRef.current = null;
       }
     },
-    [bearer, effectiveModel, busy, messages],
+    [bearer, effectiveModel],
   );
+
+  const send = useCallback(
+    async (text: string) => {
+      const trimmed = text.trim();
+      if (!trimmed || busy) return;
+      if (!bearer.trim()) {
+        setErr("Waiting for playground key to be created…");
+        return;
+      }
+      if (!effectiveModel) {
+        setErr("No models available. Add a provider with a model group first.");
+        return;
+      }
+      setDraft("");
+      await runStream([...messages, { id: uid(), role: "user", content: trimmed }], trimmed);
+    },
+    [bearer, effectiveModel, busy, messages, runStream],
+  );
+
+  const stop = useCallback(() => {
+    abortRef.current?.abort();
+  }, []);
 
   // ── regenerate last ───────────────────────────────────────────────────────
 
@@ -599,51 +668,9 @@ export function PlaygroundPage() {
     if (!lastUser) return;
     const idx = messages.findIndex((m) => m.id === lastUser.id);
     const upTo = messages.slice(0, idx + 1);
-    setMessages(upTo);
-
-    const assistantId = uid();
-    setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: "" }]);
-    setBusy(true);
-    setStreaming(true);
-    setErr(null);
-    setUsage(null);
-
-    void (async () => {
-      try {
-        const resp = await fetch("/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${bearer.trim()}`,
-            Accept: "text/event-stream",
-          },
-          body: JSON.stringify({
-            model: effectiveModel,
-            messages: upTo.map((m) => ({ role: m.role, content: m.content })),
-            stream: true,
-          }),
-        });
-        if (!resp.ok) {
-          const body = await resp.json().catch(() => null);
-          throw new Error(
-            (body as { error?: { message?: string } } | null)?.error?.message ?? `HTTP ${resp.status}`,
-          );
-        }
-        const accumulated = await streamSSE(resp, assistantId, setMessages, setUsage);
-        if (!accumulated) {
-          setMessages((prev) =>
-            prev.map((m) => (m.id === assistantId ? { ...m, content: "(empty response)" } : m)),
-          );
-        }
-      } catch (e) {
-        setErr(e instanceof Error ? e.message : "request failed");
-        setMessages((prev) => prev.filter((m) => m.id !== assistantId));
-      } finally {
-        setBusy(false);
-        setStreaming(false);
-      }
-    })();
-  }, [busy, messages, bearer, effectiveModel]);
+    setMessages(upTo); // drop the old answer; runStream appends the new placeholder
+    void runStream(upTo, null);
+  }, [busy, messages, runStream]);
 
   // ── scroll management ─────────────────────────────────────────────────────
 
@@ -772,6 +799,7 @@ export function PlaygroundPage() {
                 suggestions={heroSuggestions}
                 onPick={(s) => void send(s)}
                 keyReady={!!bearer}
+                model={effectiveModel}
               />
             ) : (
               <div className="mx-auto max-w-[760px] px-6 py-6">
@@ -803,13 +831,38 @@ export function PlaygroundPage() {
             </button>
           )}
 
-          {/* Usage badges */}
-          {usage && (
-            <div className="shrink-0 px-6 pb-1">
-              <div className="mx-auto flex max-w-[760px] flex-wrap gap-2">
-                <Badge tone="blue">in {fmtTokens(usage.prompt_tokens)}</Badge>
-                <Badge tone="violet">out {fmtTokens(usage.completion_tokens)}</Badge>
-                <Badge tone="gray">total {fmtTokens(usage.total_tokens)}</Badge>
+          {/* Response stats */}
+          {(usage || ttftMs != null) && (
+            <div className="pg-stats-enter shrink-0 px-6 pb-1">
+              <div className="mx-auto flex max-w-[760px] flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[11px] text-[var(--admin-text-dim)]">
+                {ttftMs != null && (
+                  <span className="inline-flex items-center gap-1.5" title="Time to first token">
+                    <Clock size={11} className="text-blue-400/80" />
+                    {fmtMs(ttftMs)} <span className="text-[var(--admin-text-dim)]/60">ttft</span>
+                  </span>
+                )}
+                {usage && tps != null && (
+                  <span className="inline-flex items-center gap-1.5" title="Completion speed">
+                    <Gauge size={11} className="text-violet-400/80" />
+                    {fmtTps(tps)}
+                  </span>
+                )}
+                {usage && (
+                  <>
+                    <span className="inline-flex items-center gap-1.5" title="Prompt tokens">
+                      <span className="h-1.5 w-1.5 rounded-full bg-blue-400/70" />
+                      {fmtTokens(usage.prompt_tokens)} in
+                    </span>
+                    <span className="inline-flex items-center gap-1.5" title="Completion tokens">
+                      <span className="h-1.5 w-1.5 rounded-full bg-violet-400/70" />
+                      {fmtTokens(usage.completion_tokens)} out
+                    </span>
+                    <span className="inline-flex items-center gap-1.5" title="Total tokens">
+                      <span className="h-1.5 w-1.5 rounded-full bg-white/30" />
+                      {fmtTokens(usage.total_tokens)} total
+                    </span>
+                  </>
+                )}
               </div>
             </div>
           )}
@@ -829,14 +882,26 @@ export function PlaygroundPage() {
                     rows={1}
                     className="pg-textarea flex-1 resize-none bg-transparent px-3 py-2 text-[14px] leading-relaxed text-[var(--admin-text)] outline-none placeholder:text-[var(--admin-text-dim)] disabled:opacity-50"
                   />
-                  <button
-                    type="submit"
-                    disabled={busy || keyLoading || !draft.trim()}
-                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-b from-brand-400 to-brand-700 text-white shadow-lg shadow-brand-600/20 transition-[filter,transform] duration-150 hover:brightness-110 active:scale-95 disabled:opacity-40 disabled:grayscale"
-                    aria-label={streaming ? "Stop" : "Send"}
-                  >
-                    {streaming ? <Square size={16} /> : busy ? <Spinner className="h-4 w-4" /> : <Send size={16} />}
-                  </button>
+                  {streaming ? (
+                    <button
+                      type="button"
+                      onClick={stop}
+                      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-red-500/25 bg-red-500/10 text-red-400 transition-[background-color,transform] duration-150 hover:bg-red-500/20 active:scale-95"
+                      aria-label="Stop generating"
+                      title="Stop generating"
+                    >
+                      <Square size={14} fill="currentColor" />
+                    </button>
+                  ) : (
+                    <button
+                      type="submit"
+                      disabled={busy || keyLoading || !draft.trim()}
+                      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-b from-brand-400 to-brand-700 text-white shadow-lg shadow-brand-600/20 transition-[filter,transform] duration-150 hover:brightness-110 active:scale-95 disabled:opacity-40 disabled:grayscale"
+                      aria-label="Send"
+                    >
+                      {busy ? <Spinner className="h-4 w-4" /> : <Send size={16} />}
+                    </button>
+                  )}
                 </div>
               </div>
             </form>
@@ -855,34 +920,43 @@ function HeroEmptyState(props: {
   suggestions: Record<HeroSuggestionGroup, readonly string[]> | null;
   onPick: (s: string) => void;
   keyReady: boolean;
+  model: string;
 }) {
-  const { activeGroup, onGroupChange, suggestions, onPick, keyReady } = props;
+  const { activeGroup, onGroupChange, suggestions, onPick, keyReady, model } = props;
   const visible = heroSuggestionGroupNames;
   const current = suggestions?.[activeGroup] ?? [];
 
   return (
     <div className="relative flex min-h-full items-center justify-center overflow-hidden">
-      <div className="hero-orb-1 pointer-events-none absolute -left-16 top-0 h-[340px] w-[340px] rounded-full" style={{ background: "radial-gradient(circle, rgba(59,130,246,0.08) 0%, transparent 60%)" }} aria-hidden />
-      <div className="hero-orb-2 pointer-events-none absolute -bottom-20 -right-16 h-[300px] w-[300px] rounded-full" style={{ background: "radial-gradient(circle, rgba(168,85,247,0.06) 0%, transparent 60%)" }} aria-hidden />
+      <div className="hero-orb-1 pointer-events-none absolute -left-16 top-0 h-[340px] w-[340px] rounded-full" style={{ background: "radial-gradient(circle, rgba(135,87,247,0.10) 0%, transparent 60%)" }} aria-hidden />
+      <div className="hero-orb-2 pointer-events-none absolute -bottom-20 -right-16 h-[300px] w-[300px] rounded-full" style={{ background: "radial-gradient(circle, rgba(59,130,246,0.08) 0%, transparent 60%)" }} aria-hidden />
 
       <div className="animate-hero-enter relative w-full max-w-[640px] px-6 text-center">
         <div className="mb-5 flex justify-center">
-          <div className="relative flex h-14 w-14 items-center justify-center rounded-2xl border border-[var(--admin-border)] bg-[var(--admin-surface)] shadow-lg">
-            <div className="absolute inset-0 rounded-2xl bg-blue-500/5 blur-xl" aria-hidden />
+          <div className="pg-hero-badge relative flex h-14 w-14 items-center justify-center rounded-2xl border border-white/[0.08] shadow-xl shadow-brand-900/30">
             {keyReady ? (
-              <Terminal className="relative h-6 w-6 text-blue-400" />
+              <Sparkles className="relative h-6 w-6 text-white" />
             ) : (
               <Spinner className="relative h-5 w-5" />
             )}
           </div>
         </div>
 
-        <h2 className="text-2xl font-semibold tracking-tight text-[var(--admin-text)]">
+        <h2 className="text-[26px] font-semibold tracking-tight text-[var(--admin-text)]">
           {keyReady ? "How can I help you?" : "Preparing your playground…"}
         </h2>
         <p className="mx-auto mt-1.5 max-w-md text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
           {keyReady ? "Pick a suggestion or type your own message below." : "Creating a virtual key for your session."}
         </p>
+
+        {keyReady && model && (
+          <div className="mt-4 flex justify-center">
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--admin-border)] bg-[var(--admin-surface)] px-3 py-1 font-mono text-[11px] text-[var(--admin-text-muted)]">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+              {model}
+            </span>
+          </div>
+        )}
 
         {keyReady && (
           <>
@@ -895,7 +969,7 @@ function HeroEmptyState(props: {
                   onClick={() => onGroupChange(g)}
                   className={`rounded-full px-4 py-1.5 text-[13px] font-medium transition-colors ${
                     activeGroup === g
-                      ? "bg-blue-500/15 text-blue-300"
+                      ? "bg-brand-500/15 text-brand-300 ring-1 ring-brand-500/25"
                       : "border border-[var(--admin-border)] bg-[var(--admin-surface)] text-[var(--admin-text-muted)] hover:text-[var(--admin-text)]"
                   }`}
                 >
@@ -911,15 +985,30 @@ function HeroEmptyState(props: {
                   key={s}
                   type="button"
                   onClick={() => onPick(s)}
-                  className="pg-sugg-enter group w-full rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] px-4 py-3 text-left text-[14px] text-[var(--admin-text-muted)] transition-all hover:border-[var(--admin-border-hover)] hover:bg-white/[0.02] hover:text-[var(--admin-text)] hover:shadow-lg hover:shadow-black/20"
+                  className="pg-sugg-enter group w-full rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] px-4 py-3 text-left text-[14px] text-[var(--admin-text-muted)] transition-all hover:-translate-y-px hover:border-brand-500/25 hover:bg-white/[0.02] hover:text-[var(--admin-text)] hover:shadow-lg hover:shadow-black/20"
                   style={{ animationDelay: `${i * 0.04}s` }}
                 >
                   <div className="flex items-center gap-2.5">
-                    <Sparkles className="h-3.5 w-3.5 shrink-0 text-[var(--admin-text-dim)] transition-colors group-hover:text-blue-400" />
+                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-white/[0.04] transition-colors group-hover:bg-brand-500/15">
+                      <Sparkles className="h-3.5 w-3.5 text-[var(--admin-text-dim)] transition-colors group-hover:text-brand-400" />
+                    </span>
                     <span>{s}</span>
                   </div>
                 </button>
               ))}
+            </div>
+
+            {/* Hint row */}
+            <div className="mt-5 flex items-center justify-center gap-4 text-[11px] text-[var(--admin-text-dim)]">
+              <span className="inline-flex items-center gap-1.5">
+                <kbd className="pg-kbd">Enter</kbd> send
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <kbd className="pg-kbd">Shift</kbd>+<kbd className="pg-kbd">Enter</kbd> newline
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <Plug size={11} /> streamed live
+              </span>
             </div>
           </>
         )}
@@ -949,42 +1038,62 @@ function MessageBubble(props: {
     setTimeout(() => setCopied(false), 1500);
   };
 
-  const isStreamingThis = isLast && streaming && !isUser && !msg.content;
+  const isStreamingThis = isLast && streaming && !isUser;
 
-  return (
-    <div className={`pg-msg-enter group flex ${isUser ? "justify-end" : "justify-start"} py-1.5`}>
-      <div className={`flex max-w-[80%] flex-col ${isUser ? "items-end" : "items-start"}`}>
-        {!isUser && (
-          <div className="mb-1 flex items-center gap-1.5">
-            <Zap size={10} className="text-blue-400" />
-            <span className="font-mono text-[10px] uppercase tracking-wider text-[var(--admin-text-dim)]">
-              {model}
-            </span>
+  if (isUser) {
+    return (
+      <div className="pg-msg-enter group flex justify-end gap-3 py-1.5">
+        <div className="flex max-w-[80%] flex-col items-end">
+          <div className="pg-user-bubble rounded-2xl rounded-br-md px-4 py-2.5 text-[14px] leading-relaxed text-white shadow-lg shadow-brand-900/20">
+            <p className="whitespace-pre-wrap break-words">{msg.content}</p>
           </div>
-        )}
-        <div
-          className={`rounded-2xl px-4 py-2.5 text-[14px] leading-relaxed ${
-            isUser
-              ? "bg-blue-500/15 text-[var(--admin-text)]"
-              : "border border-[var(--admin-border)] bg-white/[0.03] text-[var(--admin-text)]"
-          }`}
-        >
-          {isStreamingThis ? (
-            <TypingDots />
-          ) : (
-            <p className={`whitespace-pre-wrap break-words ${isLast && streaming && !isUser ? "pg-caret" : ""}`}>
-              {msg.content || (isLast && !isUser && busy ? "…" : "")}
-            </p>
+          {msg.content && (
+            <div className="mt-1 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+              <ActionButton onClick={handleCopy} label={copied ? "Copied" : "Copy"}>
+                {copied ? <Check size={13} className="text-emerald-400" /> : <Copy size={13} />}
+              </ActionButton>
+            </div>
           )}
         </div>
-        {!isUser && isLast && !streaming && msg.content && (
-          <div className="mt-1 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+        <div className="pg-avatar-user mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg">
+          <User size={14} className="text-white" />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="pg-msg-enter group flex gap-3 py-2">
+      <div className="pg-avatar-assistant mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-[var(--admin-border)] bg-[var(--admin-surface-elevated)]">
+        <Bot size={14} className="text-brand-400" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="mb-1 flex items-center gap-1.5">
+          <span className="font-mono text-[10px] uppercase tracking-wider text-[var(--admin-text-dim)]">
+            {model}
+          </span>
+        </div>
+        <div className="text-[14px] leading-relaxed text-[var(--admin-text)]">
+          {isStreamingThis && !msg.content ? (
+            <TypingDots />
+          ) : (
+            <Markdown content={msg.content} caret={isStreamingThis && !!msg.content} />
+          )}
+        </div>
+        {!isStreamingThis && msg.content && (
+          <div
+            className={`mt-1 flex items-center gap-1 transition-opacity ${
+              isLast ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+            }`}
+          >
             <ActionButton onClick={handleCopy} label={copied ? "Copied" : "Copy"}>
               {copied ? <Check size={13} className="text-emerald-400" /> : <Copy size={13} />}
             </ActionButton>
-            <ActionButton onClick={onRetry} label="Retry" disabled={busy}>
-              <RefreshCcw size={13} />
-            </ActionButton>
+            {isLast && (
+              <ActionButton onClick={onRetry} label="Retry" disabled={busy}>
+                <RefreshCcw size={13} />
+              </ActionButton>
+            )}
           </div>
         )}
       </div>
