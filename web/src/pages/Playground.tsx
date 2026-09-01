@@ -58,6 +58,12 @@ import {
 type Role = "user" | "assistant";
 type Msg = { id: string; role: Role; content: string };
 
+/** How many times to retry minting a playground key before giving up. */
+const _MAX_KEY_ATTEMPTS = 4;
+
+/** Coalesce localStorage writes to at most one per this many ms. */
+const _PERSIST_DEBOUNCE_MS = 400;
+
 /** Token usage as reported by an OpenAI-shaped streaming response. */
 type Usage = {
   prompt_tokens: number;
@@ -456,6 +462,14 @@ export function PlaygroundPage() {
   const [ttftMs, setTtftMs] = useState<number | null>(null);
   const [tps, setTps] = useState<number | null>(null);
   const [keyReady, setKeyReady] = useState(false);
+  // Key minting is retried on failure so the UI can't sit on "Creating key…"
+  // forever. `keyAttempts` counts tries (a ref, so incrementing it never
+  // re-triggers the effect — the backoff timer does that via `keyTick`);
+  // `keyFailed` is display-only and deliberately NOT an effect dep, so
+  // updating the message can't restart the loop.
+  const [keyTick, setKeyTick] = useState(0);
+  const [keyFailed, setKeyFailed] = useState<string | null>(null);
+  const keyAttempts = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
 
   // ── Chat history state ───────────────────────────────────────────────────
@@ -479,13 +493,43 @@ export function PlaygroundPage() {
     }
   }, []);
 
-  // Persist messages to localStorage whenever they change
+  // Persist messages to localStorage, debounced.
+  //
+  // Streaming calls setMessages once per token, and each call re-ran a full
+  // read → JSON.stringify → write → parse over every stored conversation on
+  // the main thread. A long reply meant thousands of those cycles, which is
+  // what made the page heavier the longer you used it. Coalesce to at most
+  // one write per _PERSIST_DEBOUNCE_MS; a trailing flush covers unmount and
+  // chat switches so a pending write is never dropped.
+  const pendingSave = useRef<{ id: string; msgs: ChatMsg[]; model?: string } | null>(null);
   useEffect(() => {
     if (!activeChatId) return;
-    updateChat(activeChatId, toChatMsgs(messages), model || undefined);
-    // Refresh chat list ordering (most recent first)
-    setChats(loadChats());
+    const payload = {
+      id: activeChatId,
+      msgs: toChatMsgs(messages),
+      model: model || undefined,
+    };
+    pendingSave.current = payload;
+    const timer = window.setTimeout(() => {
+      updateChat(payload.id, payload.msgs, payload.model);
+      // Refresh chat list ordering (most recent first)
+      setChats(loadChats());
+      if (pendingSave.current?.id === payload.id) pendingSave.current = null;
+    }, _PERSIST_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
   }, [messages, activeChatId, model]);
+
+  // Flush a pending save when unmounting or switching chats. Reads from the
+  // ref (not the closure) so it always writes current data.
+  useEffect(() => {
+    return () => {
+      const p = pendingSave.current;
+      if (p) {
+        updateChat(p.id, p.msgs, p.model);
+        pendingSave.current = null;
+      }
+    };
+  }, [activeChatId]);
 
   // hero suggestion state
   const [activeGroup, setActiveGroup] = useState<HeroSuggestionGroup>("Create");
@@ -504,17 +548,55 @@ export function PlaygroundPage() {
   // session cookie when sessionStorage is empty (new tab / first visit).
   useEffect(() => {
     let cancelled = false;
+    let timer: number | undefined;
     if (bearer || keyReady) return;
     void (async () => {
-      const key = await ensurePlaygroundKey();
+      let key = "";
+      try {
+        key = await ensurePlaygroundKey();
+      } catch (e) {
+        const authFailure = (e as { cause?: { auth?: boolean } })?.cause?.auth;
+        if (cancelled) return;
+        // A dead session can never succeed on retry — stop and tell the user.
+        if (authFailure) {
+          setKeyFailed("auth: your session expired. Please log in again.");
+          return;
+        }
+        key = "";
+      }
       if (cancelled) return;
-      setBearer(key);
-      setKeyReady(!!key);
-      if (key) void qc.invalidateQueries({ queryKey: ["keys"] });
-      else setErr("Could not create a playground key. Please log in again.");
+      if (key) {
+        setBearer(key);
+        setKeyReady(true);
+        setKeyFailed(null);
+        void qc.invalidateQueries({ queryKey: ["keys"] });
+        return;
+      }
+      // Mint failed: retry with capped backoff instead of leaving the UI
+      // stuck on "Creating key…". After the cap, surface a manual retry.
+      const used = keyAttempts.current + 1;
+      keyAttempts.current = used;
+      if (used >= _MAX_KEY_ATTEMPTS) {
+        setKeyFailed("Could not create a playground key. Please log in again.");
+        return;
+      }
+      const delay = Math.min(500 * 2 ** (used - 1), 8000);
+      setKeyFailed(`Retrying in ${Math.round(delay / 1000)}s…`);
+      timer = window.setTimeout(() => setKeyTick((n) => n + 1), delay);
     })();
-    return () => { cancelled = true; };
-  }, [bearer, keyReady, ensurePlaygroundKey, qc]);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [bearer, keyReady, keyTick, ensurePlaygroundKey, qc]);
+
+  // Manual retry after key minting gave up: reset the attempt budget and
+  // re-trigger the mint effect.
+  const retryKey = useCallback(() => {
+    keyAttempts.current = 0;
+    setKeyFailed(null);
+    setKeyTick((n) => n + 1);
+  }, []);
 
   // ── Chat management ───────────────────────────────────────────────────────
 
@@ -760,6 +842,28 @@ export function PlaygroundPage() {
             {keyLoading && (
               <span className="mr-2 flex items-center gap-1.5 text-[12px] text-[var(--admin-text-dim)]">
                 <Spinner className="h-3.5 w-3.5" /> creating key…
+              </span>
+            )}
+            {keyFailed && (
+              <span className="mr-2 flex items-center gap-1.5 text-[12px]">
+                <span
+                  className={
+                    keyFailed.startsWith("auth:")
+                      ? "text-amber-400"
+                      : "text-[var(--admin-text-dim)]"
+                  }
+                >
+                  {keyFailed}
+                </span>
+                {!keyFailed.startsWith("Retrying") && (
+                  <button
+                    type="button"
+                    onClick={retryKey}
+                    className="rounded-md border border-[var(--admin-border)] px-1.5 py-0.5 text-[11px] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]"
+                  >
+                    Retry
+                  </button>
+                )}
               </span>
             )}
             <Link

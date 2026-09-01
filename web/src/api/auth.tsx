@@ -14,6 +14,7 @@
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import {
+  ApiError,
   clearToken,
   getMe,
   getToken,
@@ -37,7 +38,9 @@ interface AuthCtx {
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
   /** Mint a fresh playground key on demand (used by the Playground when
-   * sessionStorage has no cached key). Returns the key or "" on failure. */
+   * sessionStorage has no cached key). Returns the key, or throws with a
+   * `.cause` of `{ auth: true }` on a 401/403 so the caller can stop
+   * retrying; throws the underlying error otherwise. */
   ensurePlaygroundKey: () => Promise<string>;
 }
 
@@ -125,12 +128,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const cached = loadPlaygroundKey();
     if (cached) return cached;
     // New tab / first visit with a valid session cookie — mint a fresh key.
+    // Propagate a typed failure instead of swallowing it: the caller needs
+    // to tell "session expired, stop" (401/403) apart from "try again".
+    // Returning "" for both left the Playground stuck on "Creating key…".
     try {
       const { key } = await mintPlaygroundKey();
+      if (!key) throw new Error("empty playground key returned");
       storePlaygroundKey(key);
       return key;
-    } catch {
-      return "";
+    } catch (e) {
+      const status = e instanceof ApiError ? e.status : 0;
+      const err = new Error(
+        status === 401 || status === 403
+          ? "auth: session expired"
+          : "could not mint playground key",
+        ) as Error & { cause?: { auth: boolean } };
+      err.cause = { auth: status === 401 || status === 403 };
+      throw err;
     }
   }, []);
 

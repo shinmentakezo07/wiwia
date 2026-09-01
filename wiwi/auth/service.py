@@ -387,13 +387,23 @@ class AuthService:
                  "tpm": r[6], "expires_at": r[7], "disabled": bool(r[8])}
                 for r in rows]
 
-    async def count_keys(self, owner_id: str, alias: str | None = None) -> int:
-        """Count live (non-expired, non-revoked) keys for an owner."""
+    async def count_keys(self, owner_id: str | None, alias: str | None = None) -> int:
+        """Count live (non-expired, non-revoked) keys for an owner.
+
+        ``owner_id=None`` selects *unowned* keys — the ones minted for admin
+        sessions, which have a NULL owner. Those are otherwise invisible to
+        both this query and the per-user cap in :meth:`create_key`, so they
+        accumulated without bound.
+        """
         now = time.time()
-        sql = ("SELECT COUNT(*) FROM vkeys WHERE owner_id = :o"
+        # `= NULL` never matches, so unowned keys need an explicit IS NULL.
+        owner_clause = "owner_id IS NULL" if owner_id is None else "owner_id = :o"
+        sql = (f"SELECT COUNT(*) FROM vkeys WHERE {owner_clause}"
                " AND (expires_at IS NULL OR expires_at > :now)"
                " AND COALESCE(disabled, 0) = 0")
-        params: dict[str, object] = {"o": owner_id, "now": now}
+        params: dict[str, object] = {"now": now}
+        if owner_id is not None:
+            params["o"] = owner_id
         if alias is not None:
             sql += " AND key_alias = :a"
             params["a"] = alias
@@ -401,19 +411,25 @@ class AuthService:
             row = (await conn.execute(sa.text(sql), params)).first()
         return int(row[0]) if row else 0
 
-    async def expire_keys(self, owner_id: str, alias: str | None = None,
+    async def expire_keys(self, owner_id: str | None, alias: str | None = None,
                           keep_newest: int = 0) -> int:
         """Expire an owner's oldest keys, keeping the newest ``keep_newest``.
 
         Caps how many live credentials one account can accumulate (e.g.
         playground keys minted on every login). Expiring rather than deleting
         preserves audit history. Returns the number expired.
+
+        ``owner_id=None`` targets unowned keys (admin sessions), which need
+        ``IS NULL`` — see :meth:`count_keys`.
         """
         now = time.time()
-        sql = ("SELECT id FROM vkeys WHERE owner_id = :o"
+        owner_clause = "owner_id IS NULL" if owner_id is None else "owner_id = :o"
+        sql = (f"SELECT id FROM vkeys WHERE {owner_clause}"
                " AND (expires_at IS NULL OR expires_at > :now)"
                " AND COALESCE(disabled, 0) = 0")
-        params: dict[str, object] = {"o": owner_id, "now": now}
+        params: dict[str, object] = {"now": now}
+        if owner_id is not None:
+            params["o"] = owner_id
         if alias is not None:
             sql += " AND key_alias = :a"
             params["a"] = alias

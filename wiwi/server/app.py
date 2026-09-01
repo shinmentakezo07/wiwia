@@ -2344,12 +2344,18 @@ def create_app(config: WiwiConfig) -> FastAPI:
         respects role-based filtering.
         """
         owner_id = None if actor.role == "admin" else actor.id
-        # Bound the key: a TTL so abandoned keys expire, and a per-user cap so
+        # Bound the key: a TTL so abandoned keys expire, and a per-owner cap so
         # repeated logins (or repeated /auth/playground-key calls) cannot
         # accumulate unbounded live credentials. Without both, every login
         # minted another never-expiring, unlimited-budget key.
+        #
+        # The cap applies to admins too (owner_id=None → unowned keys). Those
+        # were previously exempt twice over: `create_key`'s per-owner limit
+        # skips owner_id=None, and this branch skipped them as well, so admin
+        # playground keys grew without limit. React StrictMode double-invokes
+        # the mint effect in dev, so the leak was 2 keys per mount.
         service = state.auth
-        if service is not None and owner_id is not None:
+        if service is not None:
             active = await service.count_keys(owner_id=owner_id, alias="playground")
             if active >= _MAX_PLAYGROUND_KEYS_PER_USER:
                 await service.expire_keys(owner_id=owner_id, alias="playground",
