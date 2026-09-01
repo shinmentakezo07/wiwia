@@ -226,6 +226,14 @@ class AnthropicStreamEncoder:
                             "stop_reason": None, "stop_sequence": None,
                             "usage": {"input_tokens": 0, "output_tokens": 0}}})
         if isinstance(d, dl.TextDelta):
+            # A text delta can never be emitted while a tool_use block is
+            # open: Anthropic content blocks are strictly sequential, and
+            # closing the tool block would lose its index mapping so a later
+            # ToolCallArgsDelta would land on the text block (Claude Code
+            # rejects "Content block is not a input_json block"). Interleaved
+            # text is suppressed; the tool's args keep streaming legally.
+            if self._open_block == "tool":
+                return None
             out = []
             if self._open_block != "text":
                 out.extend(self._close_block())
@@ -250,6 +258,12 @@ class AnthropicStreamEncoder:
                 # onto a nonexistent (or wrong-type) block.
                 self._pending_sig = d.signature
                 return None
+            # Thinking with text while a tool block is open: suppress it so a
+            # later ToolCallArgsDelta keeps routing to the tool block.
+            if self._open_block == "tool":
+                if d.signature:
+                    self._pending_sig = d.signature
+                return None
             out = []
             if self._open_block != "thinking":
                 out.extend(self._close_block())
@@ -272,9 +286,12 @@ class AnthropicStreamEncoder:
             # tool calls are siblings, not sequential.
             if self._open_block is not None and self._open_block != "tool":
                 out.extend(self._close_block())
+            # `id` must be a string (Claude Code rejects "string id" style
+            # errors when a provider hands back an integer tool id).
+            tool_id = d.id if isinstance(d.id, str) else str(d.id)
             out.append(self._evt("content_block_start", {
                 "type": "content_block_start", "index": self._block_idx,
-                "content_block": {"type": "tool_use", "id": d.id, "name": d.name,
+                "content_block": {"type": "tool_use", "id": tool_id, "name": d.name,
                                   "input": {}}}))
             self._tool_blocks[d.index] = self._block_idx
             self._open_tool = d.index
@@ -282,8 +299,16 @@ class AnthropicStreamEncoder:
             self._block_idx += 1
             return b"".join(out)
         if isinstance(d, dl.ToolCallArgsDelta):
+            idx = self._tool_blocks.get(d.index)
+            if idx is None:
+                # No open tool_use block for this index. The IR contract
+                # guarantees ToolCallOpen precedes its ArgsDelta, so this only
+                # fires on a malformed stream. NEVER stamp input_json_delta
+                # onto a text/thinking block (Claude Code rejects that), so
+                # drop the fragment rather than corrupt the stream.
+                return None
             jd = self._json_delta
-            jd["index"] = self._tool_blocks.get(d.index, self._block_idx - 1)
+            jd["index"] = idx
             jd["delta"]["partial_json"] = d.args_fragment
             return self._evt("content_block_delta", jd)
         if isinstance(d, dl.ToolCallClose):

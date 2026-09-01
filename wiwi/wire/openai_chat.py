@@ -226,8 +226,10 @@ class ChatStreamEncoder:
                 return None  # signature-only delta: no content to emit
             return self._shell({"reasoning_content": d.text})
         if isinstance(d, dl.ToolCallOpen):
+            # `id` must be a string; some providers return integer ids.
+            tool_id = d.id if isinstance(d.id, str) else str(d.id)
             return self._shell({"tool_calls": [{
-                "index": d.index, "id": d.id, "type": "function",
+                "index": d.index, "id": tool_id, "type": "function",
                 "function": {"name": d.name, "arguments": ""}}]})
         if isinstance(d, dl.ToolCallArgsDelta):
             return self._shell({"tool_calls": [{

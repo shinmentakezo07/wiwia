@@ -37,6 +37,13 @@ class ToolUsePart:
     args: dict[str, Any] = field(default_factory=dict)
     raw_args: str | None = None  # original JSON string if provider gave one
 
+    def __post_init__(self) -> None:
+        # Providers/decoders can hand us a non-string id (OpenAI-compatible
+        # gateways sometimes emit numeric ids). Wire dialects and adapters
+        # must emit a string id, so coerce once at the IR boundary.
+        if not isinstance(self.id, str):
+            self.id = str(self.id)
+
 
 @dataclass
 class ToolResultPart:
@@ -44,6 +51,10 @@ class ToolResultPart:
     content: str
     is_error: bool = False
     cache_control: CacheControl = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.tool_use_id, str):
+            self.tool_use_id = str(self.tool_use_id)
 
 
 @dataclass

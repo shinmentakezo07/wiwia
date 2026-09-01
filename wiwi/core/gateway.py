@@ -597,6 +597,7 @@ class Gateway:
         finish: dl.Finish | None = None
         text_len = 0
         started = False
+        saw_terminal = False
         try:
             try:
                 resp_cm = self._client.stream("POST", url, json=body, headers=headers,
@@ -691,6 +692,7 @@ class Gateway:
                     elif isinstance(d, dl.Finish):
                         finish = d
                     elif isinstance(d, dl.StreamEnd):
+                        saw_terminal = True
                         continue
                     else:
                         if isinstance(d, dl.TextDelta):
@@ -729,10 +731,19 @@ class Gateway:
             if not client_gone:
                 await queue.put(est_usage)
                 if finish is None and usage_final is None:
-                    await self._note_stream_failure(dep, real_key)
-                    await queue.put(dl.StreamError(
-                        "upstream stream ended without completion", "connection"))
-                    return
+                    if not saw_terminal:
+                        # No [DONE] and no finish_reason: the upstream
+                        # connection dropped mid-stream — a real failure.
+                        await self._note_stream_failure(dep, real_key)
+                        await queue.put(dl.StreamError(
+                            "upstream stream ended without completion", "connection"))
+                        return
+                    # DeepSeek/B.AI and other OpenAI-compatible servers signal
+                    # completion purely with [DONE], omitting a trailing
+                    # finish_reason/usage chunk. Treat a [DONE]-terminated
+                    # stream as a clean "stop" so the client's OpenAI SDK sees
+                    # a finish_reason instead of a truncated stream.
+                    finish = dl.Finish("stop")
                 await queue.put(finish or dl.Finish("stop"))
                 await queue.put(dl.StreamEnd())
                 # AUDIT #6: credit the key only now that the stream actually

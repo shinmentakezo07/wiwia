@@ -156,15 +156,18 @@ async def test_midstream_failure_marks_key_cooling():
     cfg = _config()
     gw = _make_gateway(cfg)
     try:
+        # A true mid-stream death is a connection that ends WITHOUT the SSE
+        # [DONE] sentinel (which signals clean completion). Simulate content
+        # then an abrupt close so the pump sees no terminal marker.
         respx.post(UPSTREAM).mock(return_value=httpx.Response(
             200,
-            content=_sse(_text_chunk("partial"), "[DONE]")))
+            content=_sse(_text_chunk("partial"))))
         ctx = RequestContext(surface="chat", ir_req=_req(), group="gpt-x")
         await _pump_stream_that_dies_midway(gw, ctx)
 
         acct = gw.router.providers["p1"]
         key = next(k for k in acct.keys if k.label == ctx.provider_key.label)
-        # Stream ended without completion -> treated as a failure.
+        # No [DONE] and no finish_reason -> treated as a failure.
         assert key.status == "cooling", (
             f"expected cooling after mid-stream death, got {key.status!r}")
         assert key.cooldown_until > 0
