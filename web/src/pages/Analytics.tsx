@@ -730,11 +730,14 @@ export function AnalyticsPage() {
   // Selected model's pricing entry.
   const selectedPrice = useMemo(() => {
     if (selectedModel === "all") return undefined;
-    // Try exact match, then suffix match (e.g. "gpt-4o" matches provider/model id)
+    // Exact match, then segment-boundary suffix match (e.g. "gpt-4o" matches
+    // pricing row "openai/gpt-4o"). The boundary "/" keeps unrelated rows out:
+    // a bare suffix would let "o" match "gpt-4o" and "gpt-4o" match
+    // "openai/gpt-4o-mini".
     return (
       pricingMap.get(selectedModel) ??
       pricingQuery.data?.models?.find(
-        (p) => p.model_id === selectedModel || p.model_id.endsWith(selectedModel),
+        (p) => p.model_id === selectedModel || p.model_id.endsWith(`/${selectedModel}`),
       )
     );
   }, [selectedModel, pricingMap, pricingQuery.data]);
