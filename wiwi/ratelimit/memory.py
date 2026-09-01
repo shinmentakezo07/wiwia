@@ -104,7 +104,13 @@ class RateLimiter:
                 # prospective admission: the incoming request's cost must fit
                 cost = est_tokens if w.is_token else 1
                 if w.count() + cost > limit:
-                    retry_after = int(max(1.0, 60.0 - (now - w.events[0].ts))) + 1
+                    if w.events:
+                        retry_after = int(max(1.0, 60.0 - (now - w.events[0].ts))) + 1
+                    else:
+                        # Empty window after pruning: the request itself exceeds
+                        # the limit (e.g. est_tokens > key_tpm), so nothing ages
+                        # out sooner — the retry horizon is the full window.
+                        retry_after = 60
                     return False, min(retry_after, 60)
             # reserve: one event per rpm scope; an estimated-cost event per tpm scope
             for w, limit in checks:

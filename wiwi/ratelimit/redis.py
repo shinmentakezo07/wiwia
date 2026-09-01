@@ -9,14 +9,25 @@ Usage:
     limiter.record_tokens(key_id, actual_tokens)
 
 When Redis is unavailable, falls back to the in-memory implementation.
+
+Token accounting: each sorted-set member is ``"{ts}:{cost}:{uid}"`` — the
+score carries the timestamp for window pruning, and the member carries the
+token cost so TPM windows enforce a token *sum* (not a request count) plus a
+unique uid so concurrent same-second, same-cost reservations cannot collide
+(zadd overwrites same-member entries, silently dropping a reservation). The
+uid is the request id when one is given, which is what lets
+:meth:`record_tokens` reconcile the estimate down to actual usage.
 """
 
 from __future__ import annotations
 
 import time
 from typing import Any
+from uuid import uuid4
 
 from wiwi.ratelimit.memory import RateLimiter as MemoryRateLimiter
+
+_WINDOW_S = 60.0
 
 
 def compute_retry_after_seconds(
@@ -44,6 +55,10 @@ def compute_retry_after_seconds(
     # race); clamp into [1, window_s] so the value is always a sensible
     # whole-second Retry-After.
     return max(1, min(int(window_s), int(seconds_until_free) + 1))
+
+
+def _member(ts: float, cost: int, uid: str) -> str:
+    return f"{ts}:{cost}:{uid}"
 
 
 class RedisRateLimiter:
@@ -85,42 +100,43 @@ class RedisRateLimiter:
             scopes.append((f"{key_id}:tpm", key_tpm, True))
 
         try:
+            members: list[str] = []
+            for _scope, _limit, is_token in scopes:
+                cost = est_tokens if is_token else 1
+                uid = request_id or uuid4().hex
+                members.append(_member(now, cost, uid))
+
             pipe = self._redis.pipeline()
             for scope, _limit, _is_token in scopes:
-                pipe.zremrangebyscore(scope, 0, now - 60.0)
-            for scope, _limit, is_token in scopes:
-                score = now
-                value = f"{now}:{est_tokens if is_token else 1}"
-                pipe.zadd(scope, {value: score})
+                pipe.zremrangebyscore(scope, 0, now - _WINDOW_S)
+            for (scope, _limit, _is_token), member in zip(scopes, members):
+                pipe.zadd(scope, {member: now})
+            # Tokens-per-minute is a token budget, not a request budget: sum
+            # the per-member token costs (zrange withscores would only give
+            # timestamps; the cost lives in the member string). One fetch
+            # serves both the sum and the oldest-timestamp read.
             for scope, _limit, _is_token in scopes:
-                pipe.zcard(scope)
+                pipe.zrange(scope, 0, -1)
             results = await pipe.execute()
 
-            # results: [pruned x N, added x N, counts x N]
+            # results: [pruned x N, added x N, members x N]
             n = len(scopes)
-            counts = results[2 * n:]
-            for i, (scope, limit, _is_token) in enumerate(scopes):
-                count = int(counts[i])
-                # The score includes our just-added member; count is total
-                # including our reservation. Check if over limit.
-                if count > 0 and count > limit:
-                    # Undo our reservation
-                    await self._undo_reservations(scopes, now, est_tokens)
-                    # Compute retry_after from the oldest live member's score
-                    # (the next moment it'll age out of the 60s window).
-                    # Falls back to a safe 60s if the read fails.
-                    retry_after = await self._compute_retry_after(
-                        scope, now, est_tokens
-                    )
-                    return False, min(retry_after, 60)
+            raw_members = results[2 * n:]
+            for i, (scope, limit, is_token) in enumerate(scopes):
+                live = raw_members[i]
+                total = sum(int(m.split(":")[1]) for m in live)
+                if total > limit:
+                    # Undo our reservation and report when the window frees up.
+                    await self._undo_reservations(scopes, members)
+                    retry_after = await self._compute_retry_after(scope, now)
+                    return False, min(retry_after, int(_WINDOW_S))
             return True, 0
         except Exception:  # noqa: BLE001
             # Redis error: fall back to memory
             return await self._memory.check(key_id, key_rpm, key_tpm,
                                             est_tokens, request_id)
 
-    async def _compute_retry_after(self, scope: str, now: float,
-                                   est_tokens: int) -> int:
+    async def _compute_retry_after(self, scope: str, now: float) -> int:
         """Return Retry-After seconds based on the oldest live member in *scope*.
 
         The arithmetic itself lives in :func:`compute_retry_after_seconds`;
@@ -141,28 +157,56 @@ class RedisRateLimiter:
         oldest_ts = float(oldest[0][1])
         return compute_retry_after_seconds(oldest_ts, now)
 
-    async def _undo_reservations(self, scopes: list, now: float, est_tokens: int) -> None:
+    async def _undo_reservations(self, scopes: list, members: list[str]) -> None:
         if self._redis is None:
             return
         try:
             pipe = self._redis.pipeline()
-            for scope, _limit, is_token in scopes:
-                value = f"{now}:{est_tokens if is_token else 1}"
-                pipe.zrem(scope, value)
+            for (_scope, _limit, _is_token), member in zip(scopes, members):
+                pipe.zrem(_scope, member)
             await pipe.execute()
         except Exception:  # noqa: BLE001, S110
             pass
 
     async def record_tokens(self, key_id: str, tokens: int,
                             request_id: str = "") -> None:
-        """Post-request confirmation of actual token usage."""
+        """Post-request confirmation of actual token usage.
+
+        Reconciles the Redis reservation tagged with *request_id* down to the
+        actual usage (delta via zadd on the same member) so the next admission
+        check sums real consumption, not just estimates. Falls back to memory
+        when the request is unknown there (e.g. it was already pruned) or when
+        no request id was supplied.
+        """
         if self._redis is None:
             await self._memory.record_tokens(key_id, tokens, request_id)
             return
-        # In Redis mode, we rely on the check-time reservation being accurate
-        # enough. True reconciliation would require finding and replacing the
-        # estimated member. For simplicity, we update the memory fallback too
-        # so cost accounting stays consistent.
+
+        actual = max(0, tokens)
+        try:
+            for scope in (f"{key_id}:tpm", "global:tpm"):
+                members = await self._redis.zrange(scope, 0, -1)
+                target = None
+                if request_id:
+                    for m in members:
+                        # member format: "{ts}:{cost}:{uid}"
+                        if m.split(":")[2] == request_id:
+                            target = m
+                            break
+                if target is None:
+                    continue
+                ts, _est, uid = target.split(":", 2)
+                # The replacement member differs from the original whenever
+                # est != actual, so a plain zadd would leave the estimate in
+                # place alongside the reconciled member (double-counting).
+                # Remove the old one first; keeping the uid makes a second
+                # record_tokens call for the same request idempotent.
+                pipe = self._redis.pipeline()
+                pipe.zrem(scope, target)
+                pipe.zadd(scope, {_member(float(ts), actual, uid): float(ts)})
+                await pipe.execute()
+        except Exception:  # noqa: BLE001, S110
+            pass
         await self._memory.record_tokens(key_id, tokens, request_id)
 
     async def close(self) -> None:
