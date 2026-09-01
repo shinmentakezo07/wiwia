@@ -14,16 +14,20 @@ import { Check, Copy } from "lucide-react";
 
 // ── inline parsing ─────────────────────────────────────────────────────────
 
-const INLINE_RE =
-  /(`[^`\n]+`)|(\*\*[^*\n]+\*\*)|(__[^_\n]+__)|(\*[^*\n]+\*)|(_[^_\n]+_)|(\[[^\]\n]+\]\([^)\s]+\))/g;
+/** Inline-token pattern. Kept as a string so each call can build a fresh
+ * `/g` regex: the old module-level regex shared `lastIndex` across the
+ * recursion in `parseInline`, so a nested bold/italic call reset it and the
+ * outer loop re-matched the same token forever (frozen main thread). */
+const INLINE_PATTERN =
+  "(`[^`\\n]+`)|(\\*\\*[^*\\n]+\\*\\*)|(__[^_\\n]+__)|(\\*[^*\\n]+\\*)|(_[^_\\n]+_)|(\\[[^\\]\\n]+\\]\\([^)\\s]+\\))";
 
 function parseInline(text: string, keyBase: string): React.ReactNode[] {
   const nodes: React.ReactNode[] = [];
   let last = 0;
   let m: RegExpExecArray | null;
   let i = 0;
-  INLINE_RE.lastIndex = 0;
-  while ((m = INLINE_RE.exec(text)) !== null) {
+  const re = new RegExp(INLINE_PATTERN, "g");
+  while ((m = re.exec(text)) !== null) {
     if (m.index > last) nodes.push(text.slice(last, m.index));
     const tok = m[0];
     const key = `${keyBase}-i${i++}`;
