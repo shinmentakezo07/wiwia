@@ -2132,6 +2132,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
             }
             if "cache_read_input_cost_per_token" in p:
                 entry["cache_read_per_1m"] = round(p["cache_read_input_cost_per_token"] * 1_000_000, 6)
+            if "cache_creation_input_cost_per_token" in p:
+                entry["cache_creation_per_1m"] = round(
+                    p["cache_creation_input_cost_per_token"] * 1_000_000, 6)
             if "max_input_tokens" in p:
                 entry["max_input_tokens"] = p["max_input_tokens"]
             if "max_output_tokens" in p:
@@ -2164,6 +2167,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
         }
         if isinstance(body.get("cache_read_per_1m"), (int, float)):
             entry["cache_read_input_cost_per_token"] = round(body["cache_read_per_1m"] / 1_000_000, 12)
+        if isinstance(body.get("cache_creation_per_1m"), (int, float)):
+            entry["cache_creation_input_cost_per_token"] = round(
+                body["cache_creation_per_1m"] / 1_000_000, 12)
         if isinstance(body.get("max_input_tokens"), int):
             entry["max_input_tokens"] = body["max_input_tokens"]
         if isinstance(body.get("max_output_tokens"), int):
@@ -2184,6 +2190,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
         }
         if "cache_read_input_cost_per_token" in entry:
             result["cache_read_per_1m"] = round(entry["cache_read_input_cost_per_token"] * 1_000_000, 6)
+        if "cache_creation_input_cost_per_token" in entry:
+            result["cache_creation_per_1m"] = round(
+                entry["cache_creation_input_cost_per_token"] * 1_000_000, 6)
         if "max_input_tokens" in entry:
             result["max_input_tokens"] = entry["max_input_tokens"]
         if "max_output_tokens" in entry:
