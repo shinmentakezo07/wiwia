@@ -3107,6 +3107,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if accounts is None and isinstance(body.get("auth"), dict):
             accounts = [{"auth": body["auth"],
                          "account": body.get("account") or {}}]
+        elif isinstance(accounts, dict):
+            # A single auth object may be sent as ``accounts`` itself (the
+            # /console/workbuddy dialog nests one paste this way); treat it
+            # as a one-element list.
+            accounts = [accounts]
         if not isinstance(accounts, list) or not accounts:
             return _err(400, "invalid_request_error",
                         "'accounts' must be a non-empty list of WorkBuddy "
