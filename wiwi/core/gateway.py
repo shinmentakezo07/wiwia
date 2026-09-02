@@ -29,7 +29,7 @@ from wiwi.streaming import deltas as dl
 from wiwi.streaming.coalesce import DeltaCoalescer
 from wiwi.streaming.loopdetect import LoopDetector
 from wiwi.streaming.resume import StreamTape, build_continuation_messages
-from wiwi.streaming.sse import LineSSEParser
+from wiwi.streaming.sse import LineSSEParser, SSEEvent
 
 log = structlog.get_logger(__name__)
 
@@ -273,21 +273,9 @@ class Gateway:
             arg_bufs: dict[int, str] = {}
             usage = ir.Usage()
             stop_reason: ir.StopReason = "stop"
-            line_iter = resp.aiter_lines().__aiter__()
-            while True:
-                try:
-                    line = await asyncio.wait_for(
-                        line_iter.__anext__(),
-                        timeout=self.router.settings.stream_idle_timeout_s)
-                except TimeoutError:
-                    raise WiwiError(504, "timeout",
-                                    f"upstream idle >{self.router.settings.stream_idle_timeout_s:.0f}s",
-                                    retryable=True)
-                except StopAsyncIteration:
-                    break
-                evt = parser.feed_line(line)
-                if evt is None:
-                    continue
+
+            def _apply_event(evt: SSEEvent) -> None:
+                nonlocal text, thinking, usage, stop_reason
                 for d in adapter.decode_stream_event(evt.event, evt.data):
                     if isinstance(d, dl.TextDelta):
                         text += d.text
@@ -324,6 +312,28 @@ class Gateway:
                     elif isinstance(d, dl.StreamError):
                         raise WiwiError(502, "api_error", d.message,
                                         retryable=d.kind != "status")
+
+            line_iter = resp.aiter_lines().__aiter__()
+            while True:
+                try:
+                    line = await asyncio.wait_for(
+                        line_iter.__anext__(),
+                        timeout=self.router.settings.stream_idle_timeout_s)
+                except TimeoutError:
+                    raise WiwiError(504, "timeout",
+                                    f"upstream idle >{self.router.settings.stream_idle_timeout_s:.0f}s",
+                                    retryable=True)
+                except StopAsyncIteration:
+                    break
+                evt = parser.feed_line(line)
+                if evt is not None:
+                    _apply_event(evt)
+            # Flush any frame buffered without a trailing blank line
+            # (DeepSeek/B.A.I close with "data: [DONE]\n"). Without this the
+            # final content delta is silently dropped.
+            _flushed = parser.flush()
+            if _flushed is not None:
+                _apply_event(_flushed)
             # Flush still-open tool calls (stream ended mid-tool-call).
             for idx in sorted(open_calls):
                 tc = open_calls[idx]
@@ -655,6 +665,34 @@ class Gateway:
                     with contextlib.suppress(Exception):
                         await resp_cm.__aexit__(None, None, None)
 
+            async def _apply_delta(deltas: list[dl.IRStreamDelta]) -> bool:
+                """Route one decoded event's deltas; returns True = abort pump."""
+                nonlocal text_len, usage_final, finish, saw_terminal
+                for d in deltas:
+                    if isinstance(d, dl.UsageFinal):
+                        usage_final = d
+                    elif isinstance(d, dl.Finish):
+                        finish = d
+                    elif isinstance(d, dl.StreamEnd):
+                        saw_terminal = True
+                        continue
+                    else:
+                        if isinstance(d, dl.TextDelta):
+                            text_len += len(d.text)
+                            if loop_detector.feed(d.text):
+                                await self._note_stream_failure(
+                                    dep, real_key)
+                                await self._price_partial(
+                                    ctx, dep, usage_final, text_len)
+                                await queue.put(dl.StreamError(
+                                    f"model loop detected ({loop_limit} "
+                                    f"repeating chunks)", "unknown"))
+                                await _close_upstream()
+                                return True
+                        if not client_gone:
+                            await queue.put(d)
+                return False
+
             while True:
                 try:
                     line = await asyncio.wait_for(line_iter.__anext__(), timeout=idle_s)
@@ -686,29 +724,18 @@ class Gateway:
                 evt = parser.feed_line(line)
                 if evt is None:
                     continue
-                for d in adapter.decode_stream_event(evt.event, evt.data):
-                    if isinstance(d, dl.UsageFinal):
-                        usage_final = d
-                    elif isinstance(d, dl.Finish):
-                        finish = d
-                    elif isinstance(d, dl.StreamEnd):
-                        saw_terminal = True
-                        continue
-                    else:
-                        if isinstance(d, dl.TextDelta):
-                            text_len += len(d.text)
-                            if loop_detector.feed(d.text):
-                                await self._note_stream_failure(
-                                    dep, real_key)
-                                await self._price_partial(
-                                    ctx, dep, usage_final, text_len)
-                                await queue.put(dl.StreamError(
-                                    f"model loop detected ({loop_limit} "
-                                    f"repeating chunks)", "unknown"))
-                                await _close_upstream()
-                                return
-                        if not client_gone:
-                            await queue.put(d)
+                aborted = await _apply_delta(adapter.decode_stream_event(evt.event, evt.data))
+                if aborted:
+                    return
+            # Flush any frame buffered without a trailing blank line
+            # (DeepSeek/B.A.I close with "data: [DONE]\n"). Without this the
+            # final [DONE] stays buffered, is never seen, and the stream is
+            # misread as a mid-stream drop.
+            _flushed = parser.flush()
+            if _flushed is not None:
+                aborted = await _apply_delta(adapter.decode_stream_event(_flushed.event, _flushed.data))
+                if aborted:
+                    return
             await _close_upstream()
             # upstream closed; on_result(200) already fired in
             # execute_with_retries when the stream started — don't double count.

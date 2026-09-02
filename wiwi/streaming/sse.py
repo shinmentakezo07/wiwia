@@ -36,6 +36,22 @@ class LineSSEParser:
             self._data.append(line[5:].removeprefix(" "))
         return None
 
+    def flush(self) -> SSEEvent | None:
+        """Emit a pending frame at end of stream.
+
+        ``feed_line`` only emits at a blank-line boundary, so a stream that ends
+        on the last ``data:`` line with no trailing blank line — DeepSeek/B.A.I
+        close with ``"data: [DONE]\\n"`` — would drop the final frame. Call once
+        after the line feed loop completes. Idempotent: after emitting, the
+        buffer is drained and a second flush returns None.
+        """
+        if self._data:
+            evt = SSEEvent(self._event, "\n".join(self._data))
+            self._event, self._data = "", []
+            return evt
+        self._event = ""
+        return None
+
 
 def _sse_sanitize(value: str) -> str:
     """Strip CR/LF so a caller-controlled value cannot inject extra SSE lines
