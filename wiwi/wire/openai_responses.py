@@ -270,22 +270,14 @@ class ResponsesStreamEncoder:
                     self._evt("response.output_item.done", {
                         "output_index": idx, "item": item})]
         # kind == "tool"
-        t = self._tools.get(self._open_tool) if self._open_tool is not None else None
-        if t is None:
+        if self._open_tool is None:
             self._item_open = None
             return []
-        idx = t["output_index"]
-        n = t["index"]
-        item_id = f"fc_{self.req_id}_{n}"
-        item = {"type": "function_call", "id": item_id,
-                "call_id": t["call_id"], "name": t["name"],
-                "arguments": t["args"]}
-        self._output.append(item)
-        return [self._evt("response.function_call_arguments.done", {
-            "item_id": item_id, "output_index": idx,
-            "arguments": t["args"]}),
-            self._evt("response.output_item.done", {
-                "output_index": idx, "item": item})]
+        # Delegate to _close_tool, which POPS the entry from self._tools.
+        # Reading it in place would leave the tool recorded as open, so the
+        # tool's own ToolCallClose later re-emits a second output_item.done at
+        # the same output_index — Codex CLI then counts a phantom tool call.
+        return self._close_tool(self._open_tool)
 
     def feed(self, d: dl.IRStreamDelta) -> bytes | None:
         if isinstance(d, dl.StreamStart):

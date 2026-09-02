@@ -484,3 +484,38 @@ Known limitations carried forward (deliberate, not bugs):
 - `previous_response_id` is rejected on the Responses surface (MVP scope).
 
 The findings below predate this session and remain the live register.
+
+---
+
+## Addendum — parallel tool-call integrity, Round 7 (2026-09-02)
+
+Items **#1, #2, #3, #4** were re-verified against current source and are
+**fixed**; do not re-fix. They had shipped without regression tests, which is
+why they still read as open. All four are now pinned in
+`tests/test_fix_round25.py` (see `UPDATE.md` Round 7).
+
+| Item | State | Test |
+|---|---|---|
+| #1 stream-pump deadlock on `encode_request` throw | fixed `84b084a`, newly pinned | `test_stream_pump_survives_encode_failure` |
+| #2 Responses parallel `output_index` corruption | fixed `84b084a`, newly pinned | `test_responses_parallel_args_route_to_own_output_index`, `test_responses_parallel_close_uses_own_output_index`, `test_responses_sibling_open_does_not_close_first_tool` |
+| #3 Anthropic parallel args misroute / `IndexError` | fixed `4a70889f`, newly pinned | `test_anthropic_parallel_args_route_to_own_block_index`, `test_anthropic_args_delta_with_no_open_tool_is_dropped_not_crashed` |
+| #4 streaming `Retry-After` never parsed | fixed `84b084a`, newly pinned | `test_stream_error_path_parses_retry_after` |
+
+### New bug found while writing those tests — fixed
+
+**`ResponsesStreamEncoder._close_item()` emitted a duplicate
+`output_item.done`.** It read the open tool's entry from `self._tools` without
+popping it, so a later `ToolCallClose` for the same index closed it a second
+time at the same `output_index`. Triggered by a `TextDelta`/`ThinkingDelta`
+while two tool calls are open. Codex CLI counts a phantom tool call.
+Fix: `_close_item` delegates to `_close_tool` (which pops).
+Covered by `test_responses_no_duplicate_output_item_done_after_text_interleave`
+and `..._after_thinking_interleave`.
+
+Note that #2's original finding was partly right for the wrong reason: per-tool
+`output_index` bookkeeping was already correct, but the pre-existing test
+(`test_responses_encoder_parallel_tool_calls_preserved`, round 6) only asserted
+`call_id`/`name` containment and never `output_index` — so the index-corruption
+class of bug could pass. The round-25 tests assert index routing directly.
+
+**Baseline after this round:** 1116 tests pass, ruff clean.

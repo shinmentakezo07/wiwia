@@ -866,3 +866,62 @@ Non-dict content items are skipped (no 500); string `thinking` values ignored; `
 - `message_start` usage zeros in the Anthropic stream encoder: real usage only arrives at `UsageFinal`.
 - `cache_creation_tokens` has no standard field in OpenAI usage; stays Anthropic-surface-only.
 - `previous_response_id` stays rejected (MVP scope).
+
+## Round 7 — parallel tool-call encoder integrity (2026-09-02)
+
+Items #1–#4 of the AUDIT register, re-verified against current source.
+
+### 7.1 Already fixed, now pinned by tests
+
+- **#1 stream-pump deadlock** (`core/gateway.py` `_pump_once`): the IR→provider
+  encode phase is wrapped in `try/except` that fills `err_box[0]` and calls
+  `ready.set()`, so `call_one` cannot block forever on `ready.wait()`. Fixed in
+  `84b084a`; previously untested — pinned by
+  `test_stream_pump_survives_encode_failure` (a 2s `wait_for` fails loudly if
+  the guard regresses).
+- **#4 streaming `Retry-After`** (`core/gateway.py`): the streaming error path
+  parses `Retry-After` and sets `err.retry_after`, so key-pool cooldown and
+  retry backoff use the provider's value instead of the 30s default. Fixed in
+  `84b084a`; pinned by `test_stream_error_path_parses_retry_after`.
+- **#2 / #3 parallel tool-call routing**: both encoders already key per-tool
+  state by IR index. `ResponsesStreamEncoder` stores `output_index` at
+  `ToolCallOpen` and reads it back in `_close_tool`/`ToolCallArgsDelta`; a
+  sibling `ToolCallOpen` no longer closes the already-open tool.
+  `AnthropicStreamEncoder` resolves the block index from `_tool_blocks[d.index]`
+  (not `_open_block`) and drops an orphan `ArgsDelta` instead of raising
+  `IndexError` on `"text".split(":")[1]`.
+
+### 7.2 New bug found and fixed — duplicate `output_item.done`
+
+`ResponsesStreamEncoder._close_item()` emitted `output_item.done` for the
+currently-open tool but **read the entry without popping it**, leaving the tool
+recorded as open in `self._tools`. A later `ToolCallClose` for that index
+therefore emitted a **second** `output_item.done` at the same `output_index`.
+
+Reachable whenever a `TextDelta`/`ThinkingDelta` arrives while two tool calls
+are open: the interleave closes tool 1, then `ToolCallClose(1)` closes it
+again. Observed sequence:
+
+```
+output_item.done  output_index=1   <- emitted by the interleave
+output_item.done  output_index=0
+output_item.done  output_index=1   <- duplicate, from ToolCallClose(1)
+```
+
+A duplicate `output_item.done` makes Codex CLI count a phantom tool call.
+Fix — `_close_item` delegates to `_close_tool`, which pops:
+
+```python
+# kind == "tool"
+if self._open_tool is None:
+    self._item_open = None
+    return []
+return self._close_tool(self._open_tool)
+```
+
+`_close_tool` was already correct (it pops) and already idempotent for an
+unknown index, so the delegate is also safe when the interleave and the
+explicit close race.
+
+**Files changed:** `wiwi/wire/openai_responses.py` (`_close_item`)
+**Tests:** `tests/test_fix_round25.py`
