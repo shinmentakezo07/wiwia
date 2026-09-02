@@ -20,6 +20,7 @@ import {
   Database,
   KeyRound,
   LayoutDashboard,
+  Layers,
   Link2,
   LogOut,
   Menu,
@@ -86,6 +87,7 @@ const ADMIN_ONLY_SECTIONS: NavSection[] = [
       { to: "/console/oauth", label: "OAuth Cline", icon: Link2 },
       { to: "/console/workbuddy", label: "WorkBuddy", icon: Briefcase },
       { to: "/console/builtin-providers", label: "Built-in Providers", icon: Boxes },
+      { to: "/console/combos", label: "Combos", icon: Layers },
     ],
   },
   {
@@ -109,6 +111,7 @@ const PAGE_META: Record<string, { title: string; section: string }> = {
   "/console/workbuddy": { title: "WorkBuddy", section: "Configuration" },
   "/console/builtin-providers": { title: "Built-in Providers", section: "Configuration" },
   "/console/models": { title: "Models", section: "Configuration" },
+  "/console/combos": { title: "Combos", section: "Configuration" },
   "/console/keys": { title: "Virtual Keys", section: "Configuration" },
   "/console/budgets": { title: "Budgets & Alerts", section: "Admin" },
   "/console/settings": { title: "Settings", section: "Admin" },

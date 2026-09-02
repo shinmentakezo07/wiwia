@@ -53,6 +53,7 @@ import { OAuthProvidersPage } from "@/pages/OAuthProviders";
 import { WorkBuddyAccountsPage } from "@/pages/WorkBuddyAccounts";
 import { VirtualKeysPage } from "@/pages/VirtualKeys";
 import { ModelsPage } from "@/pages/Models";
+import { CombosPage } from "@/pages/Combos";
 import { RequestLogsPage } from "@/pages/RequestLogs";
 import { ProxyLogsPage } from "@/pages/ProxyLogs";
 import { UsagePage } from "@/pages/Usage";
@@ -143,6 +144,14 @@ function AppRoutes() {
         <Route path="/console" element={<DashboardPage />} />
         <Route path="/console/keys" element={<VirtualKeysPage />} />
         <Route path="/console/models" element={<ModelsPage />} />
+        <Route
+          path="/console/combos"
+          element={
+            <RequireAdmin>
+              <CombosPage />
+            </RequireAdmin>
+          }
+        />
         <Route path="/console/request-logs" element={<RequestLogsPage />} />
         <Route path="/console/usage" element={<UsagePage />} />
         <Route path="/console/analytics" element={<AnalyticsPage />} />
