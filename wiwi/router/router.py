@@ -250,6 +250,10 @@ class Router:
         self.settings: RouterSettings = config.router_settings
         self.providers: dict[str, ProviderAccount] = {}
         self.groups: dict[str, list[Deployment]] = {}
+        # Proxy-log emitter for gateway-op events (upstream 5xx, key cooldown,
+        # retries, fallback switches). Wired to the LoggingSubsystem by the app
+        # at startup. No-op by default so Router works standalone (tests/fakes).
+        self.log_proxy = self._noop_log_proxy
         # alias_id -> provider_name (per-provider alias registry, distinct
         # from router_settings.model_group_alias which is a string->string
         # group name rewrite).  Built from config.providers[*].alias_id
@@ -260,6 +264,11 @@ class Router:
         # single-provider groups keep their original shuffle semantics.
         self._group_provider_rr: dict[str, _CrossProviderWRR] = {}
         self._build(config)
+
+    def _noop_log_proxy(self, level: str, message: str, request_id: str = "",
+                        **kw: object) -> None:
+        """Default proxy-log emitter: does nothing. Overridden at startup."""
+        return
 
     def _build(self, config: WiwiConfig) -> None:
         for p in config.providers:
@@ -683,6 +692,14 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
         queue.append(ctx.group)
     seen: set[str] = set(queue)
 
+    # Proxy-log emitter for gateway-op events. `log_proxy` defaults to a no-op
+    # on Router; the app wires it to the LoggingSubsystem at startup.
+    proxy_log = router.log_proxy
+    req_id = getattr(ctx, "request_id", "")
+
+    def _proxy(level: str, message: str) -> None:
+        proxy_log(level, message, req_id)
+
     while queue:
         group_name = queue.pop(0)
         _, deps = router.resolve_group(group_name)
@@ -771,6 +788,10 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                 # re-picked.
                 key_consec.pop((dep.provider.name, key.label), None)
                 provider_consec.pop(dep.provider.name, None)
+                if status is not None:
+                    _proxy("warn",
+                           f"upstream {status} on {dep.group}/{dep.model_id} "
+                           f"[{dep.provider.name}/{key.label}]: {e.message}")
                 if status in (408, 500, 502, 503, 504, 529):
                     dep.record_fail(router.settings.allowed_fails,
                                     router.settings.cooldown_time)
@@ -798,6 +819,8 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
             if fb not in seen:
                 seen.add(fb)
                 queue.append(fb)
+                _proxy("info",
+                       f"failing over '{group_name}' to fallback group '{fb}'")
         # Context-window fallbacks: when the failure was a context-window
         # exceeded error, also enqueue groups from context_window_fallbacks
         # (e.g. a model with a larger context window).
@@ -806,6 +829,8 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                 if fb not in seen:
                     seen.add(fb)
                     queue.append(fb)
+                    _proxy("info",
+                           f"context-window fallback for '{group_name}' -> '{fb}'")
 
     raise first_error or WiwiError(503, "service_unavailable", "no deployment could serve request")
 

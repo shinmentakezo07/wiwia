@@ -706,7 +706,7 @@ class Gateway:
                             text_len += len(d.text)
                             if loop_detector.feed(d.text):
                                 await self._note_stream_failure(
-                                    dep, real_key)
+                                    dep, real_key, ctx)
                                 await self._price_partial(
                                     ctx, dep, usage_final, text_len)
                                 await queue.put(dl.StreamError(
@@ -732,7 +732,7 @@ class Gateway:
                 try:
                     line = await asyncio.wait_for(line_iter.__anext__(), timeout=idle_s)
                 except TimeoutError:
-                    await self._note_stream_failure(dep, real_key)
+                    await self._note_stream_failure(dep, real_key, ctx)
                     await self._price_partial(ctx, dep, usage_final, text_len)
                     await queue.put(dl.StreamError(
                         f"upstream idle >{idle_s:.0f}s between chunks", "timeout"))
@@ -799,7 +799,7 @@ class Gateway:
                     # a finish_reason for and the key still looks healthy.
                     # [DONE] is the only clean end-of-stream marker that
                     # legitimately replaces a finish_reason (DeepSeek/B.A.I).
-                    await self._note_stream_failure(dep, real_key)
+                    await self._note_stream_failure(dep, real_key, ctx)
                     await queue.put(dl.StreamError(
                         "upstream stream ended without completion", "connection"))
                     return
@@ -846,14 +846,15 @@ class Gateway:
             else:
                 # Mid-stream error — can't retry; bill partial delivery, feed
                 # health stats, send error to client.
-                await self._note_stream_failure(dep, real_key)
+                await self._note_stream_failure(dep, real_key, ctx)
                 await self._price_partial(ctx, dep, usage_final, text_len)
                 await queue.put(dl.StreamError(str(e),
                                                "timeout" if "Timeout" in type(e).__name__
                                                else "connection"))
             await _close_upstream()
 
-    async def _note_stream_failure(self, dep: Deployment, real_key) -> None:
+    async def _note_stream_failure(self, dep: Deployment, real_key,
+                                   ctx: RequestContext | None = None) -> None:
         """Mid-stream failures carry no HTTP status; feed deployment cooldowns
         and the key pool so a provider that keeps dying mid-stream cools off.
 
@@ -867,6 +868,13 @@ class Gateway:
         """
         dep.record_fail(self.router.settings.allowed_fails,
                         self.router.settings.cooldown_time)
+        self.router.log_proxy(
+            "warn",
+            f"stream to {dep.group}/{dep.model_id} "
+            f"[{dep.provider.name}/{getattr(real_key, 'label', '?')}] "
+            f"failed mid-stream",
+            getattr(ctx, "request_id", ""),
+        )
         if real_key is None:
             return
         # In "standard" failover mode `on_result` handles only 429/401/403 and
