@@ -266,3 +266,43 @@ async def test_stream_response_closes_pump_on_encoder_error():
     assert tracker is not None
     assert tracker.aclosed, \
         "the gateway pump stream was not aclosed after the encoder raised"
+
+
+# ---------------------------------------------------------------------------
+# Anthropic surface: an errored stream must still terminate with message_stop
+# ---------------------------------------------------------------------------
+
+@respx.mock
+async def test_anthropic_error_path_ends_with_message_stop():
+    """When the pump converts a mid-stream truncation (content, no finish, no
+    [DONE]) to a StreamError, the inbound Anthropic encoder emits an ``error``
+    frame — but the client's SSE reader is left waiting for the terminal
+    ``message_stop``. The stream must still be well-formed: error then
+    message_stop."""
+    app = create_app(_app_config())
+    # Upstream OpenAI chat: one content chunk, then the connection ends with no
+    # finish_reason and no [DONE] (a real mid-stream drop).
+    body = (
+        b"data: " + _text_chunk("hello").encode() + b"\n\n"
+    )
+    async with LifespanManager(app):
+        respx.post("https://round20.example/v1/chat/completions").mock(
+            return_value=httpx.Response(200, content=body))
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as c:
+            r = await c.post("/v1/messages", json={
+                "model": "gpt-x", "max_tokens": 100, "stream": True,
+                "messages": [{"role": "user", "content": "hi"}]},
+                headers={"x-api-key": "sk-wiwi-master-test",
+                         "anthropic-version": "2023-06-01"})
+        text = r.text
+        # The stream must have produced an error frame AND then terminated with
+        # a message_stop, so the dialec-correct SSE stream is well-formed.
+        assert 'event: error' in text or '"type": "error"' in text, \
+            f"expected an error frame, got:\n{text}"
+        # Terminal frame must be message_stop, present after the error.
+        assert '"type": "message_stop"' in text, \
+            f"expected a terminating message_stop after the error, got:\n{text}"
+        # message_stop is the LAST event in the stream (no dangling frames).
+        assert text.rstrip().endswith('"type": "message_stop"}'), text

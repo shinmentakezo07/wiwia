@@ -1124,7 +1124,13 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     yield _inject_id(chunk, _seq) if event_ids else chunk
             # terminal frames, correct order per dialect:
             if errored:
-                pass  # error frame already emitted by the encoder's feed()
+                # The error frame was already emitted by the encoder's feed();
+                # still terminate the client's stream so it is well-formed. A
+                # lone Anthropic `error` with no following `message_stop`
+                # leaves Claude Code's SSE reader waiting for the stream to
+                # end. (OpenAI/Responses clients close on the error frame.)
+                if style == "anthropic":
+                    yield b"event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n"
             elif style == "chat":
                 chunk = encoder.final_frame()
                 yield _inject_id(chunk, _seq) if event_ids else chunk
