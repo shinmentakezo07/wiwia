@@ -34,6 +34,7 @@ from wiwi.core.context import RequestContext
 from wiwi.core.gateway import Gateway
 from wiwi.cost.pricing import CostEngine
 from wiwi.ir import types as ir
+from wiwi.providers.openai_adapter import OpenAIAdapter
 from wiwi.router.router import Router
 from wiwi.server.app import _inject_id, create_app
 from wiwi.streaming import deltas as dl
@@ -506,3 +507,66 @@ async def test_exhausted_resumes_still_emit_one_terminal():
     out = await _h2_drain(hang_primary=True, hang_fallback=True)
     _assert_single_logical_stream(out, "resumes-exhausted")
     assert isinstance(out[-1], dl.StreamError)
+
+# ---------------------------------------------------------------------------
+# Fix M5: ToolCallOpen must precede ToolCallArgsDelta when a provider omits id
+# ---------------------------------------------------------------------------
+
+
+def _tool_chunk(index: int, args=None, cid=None, name=None) -> str:
+    fn: dict[str, Any] = {}
+    if name is not None:
+        fn["name"] = name
+    if args is not None:
+        fn["arguments"] = args
+    tc: dict[str, Any] = {"index": index, "function": fn}
+    if cid is not None:
+        tc["id"] = cid
+    return orjson.dumps({"choices": [{"delta": {"tool_calls": [tc]}}]}).decode()
+
+
+def test_openai_adapter_emits_open_before_args_when_id_omitted():
+    """Some OpenAI-compatible providers send ``arguments`` with no ``id`` on the
+    first tool chunk (the id arrives later, or never). That must still produce
+    a ``ToolCallOpen`` *before* the ``ToolCallArgsDelta`` — the contract
+    requires strict Open -> ArgsDelta* -> Close nesting per index."""
+    ad = OpenAIAdapter()
+    ad.reset()
+    deltas = ad.decode_stream_event("", _tool_chunk(index=0, args='{"a":1}'))
+    kinds = [type(d).__name__ for d in deltas]
+    assert "ToolCallArgsDelta" in kinds, kinds
+    assert "ToolCallOpen" in kinds, \
+        f"args emitted with no preceding ToolCallOpen (contract violation): {kinds}"
+    assert kinds.index("ToolCallOpen") < kinds.index("ToolCallArgsDelta"), \
+        f"ToolCallOpen must precede ToolCallArgsDelta, got {kinds}"
+    # The synthesized open must carry the same index as the args delta.
+    assert next(d for d in deltas if isinstance(d, dl.ToolCallOpen)).index == 0
+
+
+def test_openai_adapter_no_second_open_when_id_arrives_after_args():
+    """The id arriving on a later chunk must not emit a duplicate Open for an
+    index that is already open — the synthesized one stands in for it."""
+    ad = OpenAIAdapter()
+    ad.reset()
+    first = ad.decode_stream_event("", _tool_chunk(index=0, args='{"a":1}'))
+    second = ad.decode_stream_event(
+        "", _tool_chunk(index=0, args='"x"}', cid="call_1", name="f"))
+    all_deltas = first + second
+    opens = [d for d in all_deltas if isinstance(d, dl.ToolCallOpen)]
+    assert len(opens) == 1, \
+        f"expected exactly one ToolCallOpen for index 0, got {len(opens)}"
+    # Args fragments must survive intact and in order.
+    frags = "".join(d.args_fragment for d in all_deltas
+                    if isinstance(d, dl.ToolCallArgsDelta))
+    assert frags == '{"a":1}"x"}', frags
+
+
+def test_openai_adapter_normal_id_then_args_still_works():
+    """The ordinary id-first ordering is unchanged: Open then args, one Open."""
+    ad = OpenAIAdapter()
+    ad.reset()
+    d1 = ad.decode_stream_event("", _tool_chunk(index=0, cid="call_1", name="f"))
+    d2 = ad.decode_stream_event("", _tool_chunk(index=0, args='{"a":1}'))
+    all_deltas = d1 + d2
+    kinds = [type(d).__name__ for d in all_deltas]
+    assert kinds == ["ToolCallOpen", "ToolCallArgsDelta"], kinds

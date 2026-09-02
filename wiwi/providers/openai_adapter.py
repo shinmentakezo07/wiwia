@@ -261,6 +261,13 @@ class OpenAIAdapter:
         # finish), then emit it with the full name so the client and every
         # wire encoder see the complete tool name instead of a partial one.
         self._pending_opens: dict[int, tuple[str, str]] = {}  # idx -> (id, name)
+        # Indices where we synthesized an Open because the provider sent args
+        # with no id (see decode_stream_event). A real id arriving later must
+        # be adopted, not open a second tool call on the same index.
+        self._synthesized_opens: set[int] = set()
+        # (id, name) of Opens already emitted, so a late id can be re-read by
+        # callers that correlate tool_result frames back to the open call.
+        self._emitted_opens: dict[int, tuple[str, str]] = {}
 
     def reset(self) -> None:
         """Drop all per-stream state so the adapter can serve another stream.
@@ -272,6 +279,8 @@ class OpenAIAdapter:
         self._open_tool_indices.clear()
         self._tool_names.clear()
         self._pending_opens.clear()
+        self._synthesized_opens.clear()
+        self._emitted_opens.clear()
 
     def decode_stream_event(self, event: str, data: str) -> list[dl.IRStreamDelta]:
         if data == "[DONE]":
@@ -309,6 +318,20 @@ class OpenAIAdapter:
             fn = tc.get("function") or {}
             name_fragment = fn.get("name", "")
             if tc.get("id"):
+                if idx in self._synthesized_opens:
+                    # The provider omitted the id on the first chunk, so we
+                    # synthesized an Open for this index; the real id has now
+                    # arrived. Adopt it instead of closing/re-opening — two
+                    # Opens for one index would break the contract. The Open
+                    # was already emitted, so record the id for later frames
+                    # (tool_result correlation) and keep the call open.
+                    self._synthesized_opens.discard(idx)
+                    self._tool_names[idx] = name_fragment or ""
+                    self._emitted_opens[idx] = (tc["id"], self._tool_names[idx])
+                    if fn.get("arguments"):
+                        out.append(dl.ToolCallArgsDelta(
+                            index=idx, args_fragment=fn["arguments"]))
+                    continue
                 # a new tool call opening on the same index closes the previous one
                 if idx in self._open_tool_indices:
                     out.append(dl.ToolCallClose(index=idx))
@@ -332,6 +355,18 @@ class OpenAIAdapter:
                 if idx in self._pending_opens:
                     cid, cname = self._pending_opens.pop(idx)
                     out.append(dl.ToolCallOpen(index=idx, id=cid, name=cname))
+                elif idx not in self._open_tool_indices:
+                    # Some OpenAI-compatible providers send `arguments` on the
+                    # very first tool chunk with no `id` (it may arrive on a
+                    # later chunk, or never). Emitting args with no preceding
+                    # Open violates the strictly nested
+                    # Open -> ArgsDelta* -> Close contract, so synthesize the
+                    # Open first. If a real id shows up later it is ignored —
+                    # this index is already open — keeping exactly one Open.
+                    self._open_tool_indices.add(idx)
+                    self._tool_names[idx] = name_fragment or ""
+                    self._synthesized_opens.add(idx)
+                    out.append(dl.ToolCallOpen(index=idx, id="", name=""))
                 out.append(dl.ToolCallArgsDelta(index=idx, args_fragment=fn["arguments"]))
         fr = c.get("finish_reason")
         if fr:
