@@ -561,6 +561,52 @@ def test_openai_adapter_no_second_open_when_id_arrives_after_args():
     assert frags == '{"a":1}"x"}', frags
 
 
+def test_openai_adapter_flushes_superseded_open_on_same_index():
+    """A provider reusing the same index for a new tool call closes the previous
+    one. If that previous call's Open was still deferred (id seen, no args
+    yet), it must be flushed first — otherwise the stream carries a Close for
+    an index that was never opened."""
+    ad = OpenAIAdapter()
+    ad.reset()
+    # id seen, name complete, but no args yet -> Open is deferred.
+    first = ad.decode_stream_event(
+        "", _tool_chunk(index=0, cid="call_old", name="old"))
+    # A new id on the same index supersedes it.
+    second = ad.decode_stream_event(
+        "", _tool_chunk(index=0, cid="call_new", name="new"))
+    seq = first + second
+    kinds = [type(d).__name__ for d in seq]
+    assert kinds == ["ToolCallOpen", "ToolCallClose"], \
+        f"superseded call emitted a Close with no Open: {kinds}"
+    opened = seq[0]
+    assert opened.id == "call_old", \
+        f"the flushed Open must belong to the superseded call, got {opened.id!r}"
+
+
+def test_openai_adapter_superseded_call_closes_at_finish():
+    """End-to-end on the supersede path: old call completes Open -> Close, then
+    the new one opens and closes at finish_reason. No orphaned Close, every
+    Open matched by a Close."""
+    ad = OpenAIAdapter()
+    ad.reset()
+    out = []
+    out += ad.decode_stream_event(
+        "", _tool_chunk(index=0, cid="call_old", name="old"))
+    out += ad.decode_stream_event(
+        "", _tool_chunk(index=0, cid="call_new", name="new"))
+    out += ad.decode_stream_event("", _tool_chunk(index=0, args='{"a":1}'))
+    out += ad.decode_stream_event("", _H1_FINISH)
+    kinds = [type(d).__name__ for d in out]
+    assert kinds == [
+        "ToolCallOpen", "ToolCallClose",
+        "ToolCallOpen", "ToolCallArgsDelta", "ToolCallClose", "Finish",
+    ], kinds
+    opens = [d for d in out if isinstance(d, dl.ToolCallOpen)]
+    closes = [d for d in out if isinstance(d, dl.ToolCallClose)]
+    assert [o.id for o in opens] == ["call_old", "call_new"]
+    assert len(closes) == 2
+
+
 def test_openai_adapter_normal_id_then_args_still_works():
     """The ordinary id-first ordering is unchanged: Open then args, one Open."""
     ad = OpenAIAdapter()

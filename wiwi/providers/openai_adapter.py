@@ -334,6 +334,12 @@ class OpenAIAdapter:
                     continue
                 # a new tool call opening on the same index closes the previous one
                 if idx in self._open_tool_indices:
+                    # The superseded call's Open may still be deferred (id
+                    # seen, args not yet). Flush it before closing, or the
+                    # stream carries a Close for an index that never opened.
+                    if idx in self._pending_opens:
+                        cid, cname = self._pending_opens.pop(idx)
+                        out.append(dl.ToolCallOpen(index=idx, id=cid, name=cname))
                     out.append(dl.ToolCallClose(index=idx))
                 self._open_tool_indices.add(idx)
                 # Accumulate name: some providers send the full name on the
