@@ -1137,6 +1137,14 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 chunk = encoder._completed()
                 yield _inject_id(chunk, _seq) if event_ids else chunk
         finally:
+            # Release the gateway pump's upstream connection no matter how we
+            # leave this generator. The body (`encoder.feed(...)`) can raise, and
+            # Starlette's StreamingResponse does NOT aclose our async iterator on
+            # error — an `async for` that raises leaves `stream` abandoned, so
+            # the pump task keeps its upstream socket checked out until GC.
+            # aclose() here drives the pump's own teardown (site-2 `finally`).
+            with contextlib.suppress(Exception):
+                await stream.aclose()
             if store_prompts:
                 stream_usage = getattr(ctx, "_stream_usage", None)
                 ctx.metadata["response_body"] = {

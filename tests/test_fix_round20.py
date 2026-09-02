@@ -13,7 +13,9 @@ Regression targets (see the SSE/streaming audit and the round-20 fix plan):
 from __future__ import annotations
 
 import httpx
+import pytest
 import respx
+from asgi_lifespan import LifespanManager
 
 from wiwi.config import (
     DeploymentParams,
@@ -29,9 +31,10 @@ from wiwi.core.gateway import Gateway
 from wiwi.cost.pricing import CostEngine
 from wiwi.ir import types as ir
 from wiwi.router.router import Router
-from wiwi.server.app import _inject_id
+from wiwi.server.app import _inject_id, create_app
 from wiwi.streaming import deltas as dl
 from wiwi.streaming.sse import LineSSEParser
+from wiwi.wire import openai_chat as oc
 
 # ---------------------------------------------------------------------------
 # LineSSEParser.flush
@@ -163,3 +166,103 @@ async def test_done_no_blank_line_is_clean_completion():
         assert key.status == "active"
     finally:
         await gw.aclose()
+
+
+# ---------------------------------------------------------------------------
+# _stream_response must aclose the pump stream even when the encoder raises
+# ---------------------------------------------------------------------------
+
+def _app_config() -> WiwiConfig:
+    return WiwiConfig(
+        providers=[ProviderDef(name="p1", provider="openai",
+                               base_url="https://round20.example/v1",
+                               keys=[KeyDef(label="k1", key="sk-1")])],
+        model_list=[ModelEntry(model_name="gpt-x",
+                               wiwi_params=DeploymentParams(provider="p1",
+                                                            model="gpt-x"))],
+        general_settings=GeneralSettings(master_key="sk-wiwi-master-test",
+                                         database_url="sqlite+aiosqlite:///:memory:"),
+        router_settings=RouterSettings(num_retries=0, allowed_fails=1,
+                                       cooldown_time=60.0),
+    )
+
+
+class _CloseTracker:
+    """Wrap the gateway's stream generator to record ``aclose()`` calls made on
+    the wrapper object itself — exactly what ``_stream_response`` does to the
+    ``stream`` it is handed. Unlike monkeypatching the generator's teardown,
+    this only flips when the consumer explicitly acloses the stream."""
+
+    def __init__(self, gen):
+        self._gen = gen
+        self.aclosed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        return await self._gen.__anext__()
+
+    async def aclose(self):
+        self.aclosed = True
+        await self._gen.aclose()
+
+
+@respx.mock
+async def test_stream_response_closes_pump_on_encoder_error():
+    """If encoder.feed() raises mid-stream (abnormal), the gateway pump's
+    stream must be aclosed so its upstream connection is released — not left
+    running to leak."""
+    app = create_app(_app_config())
+    held: dict[str, _CloseTracker] = {}
+
+    async with LifespanManager(app):
+        gw = app.state.wiwi.gateways["chat"]
+        orig_stream = gw.stream
+
+        def spy_stream(ctx):
+            gen = orig_stream(ctx)
+            tracker = _CloseTracker(gen)
+            held["t"] = tracker
+            return tracker
+
+        gw.stream = spy_stream
+
+        # Make the encoder raise on the SECOND feed() call (mid-stream).
+        orig_feed = oc.ChatStreamEncoder.feed
+        calls = {"n": 0}
+
+        def boom_feed(self, d):
+            if calls["n"] >= 1:
+                raise RuntimeError("encoder exploded")
+            calls["n"] += 1
+            return orig_feed(self, d)
+
+        oc.ChatStreamEncoder.feed = boom_feed
+
+        try:
+            respx.post("https://round20.example/v1/chat/completions").mock(
+                return_value=httpx.Response(200, content=(
+                    b"data: " + _text_chunk("hello").encode() + b"\n\n"
+                    b"data: " + _text_chunk(" world").encode() + b"\n\n"
+                )))
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as c:
+                # The encoder raises mid-stream; the ASGI app lets the
+                # exception escape (it has already written a partial body), and
+                # the important contract is that it acloses the pump stream so
+                # the upstream connection is released.
+                with pytest.raises(RuntimeError, match="encoder exploded"):
+                    await c.post("/v1/chat/completions", json={
+                        "model": "gpt-x", "stream": True,
+                        "messages": [{"role": "user", "content": "hi"}]},
+                        headers={"Authorization": "Bearer sk-wiwi-master-test"})
+        finally:
+            oc.ChatStreamEncoder.feed = orig_feed
+            await gw.aclose()
+
+    tracker = held.get("t")
+    assert tracker is not None
+    assert tracker.aclosed, \
+        "the gateway pump stream was not aclosed after the encoder raised"
