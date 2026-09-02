@@ -4,7 +4,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { getModels, patchModelGroup } from "@/api/client";
-import type { ModelGroup } from "@/api/types";
+import { aliasDisplayName, aliasTarget, type ModelAliasEntry, type ModelGroup } from "@/api/types";
 import { useAuth } from "@/api/auth";
 import {
   Badge,
@@ -116,7 +116,7 @@ function WeightChip(props: {
   );
 }
 
-function GroupCard(props: { g: ModelGroup; strategy: string; aliases: Record<string, string>; editable: boolean; onError: (m: string) => void }) {
+function GroupCard(props: { g: ModelGroup; strategy: string; aliases: Record<string, string | ModelAliasEntry>; editable: boolean; onError: (m: string) => void }) {
   return (
     <Card className="p-4">
       <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -124,12 +124,19 @@ function GroupCard(props: { g: ModelGroup; strategy: string; aliases: Record<str
           {props.g.name}
         </h3>
         {Object.entries(props.aliases)
-          .filter(([, target]) => target === props.g.name)
-          .map(([alias]) => (
-            <Badge key={alias} tone="blue" title={`alias → ${props.g.name}`}>
-              alias: {alias}
-            </Badge>
-          ))}
+          .filter(([, v]) => aliasTarget(v) === props.g.name)
+          .map(([alias, v]) => {
+            const dn = aliasDisplayName(v);
+            return (
+              <Badge
+                key={alias}
+                tone="blue"
+                title={dn ? `${dn} (alias → ${props.g.name})` : `alias → ${props.g.name}`}
+              >
+                alias: {alias}{dn ? ` · ${dn}` : ""}
+              </Badge>
+            );
+          })}
         <span className="font-mono text-[11px] text-[var(--admin-text-dim)]">
           {props.g.deployments.length} deployment{props.g.deployments.length === 1 ? "" : "s"}
         </span>

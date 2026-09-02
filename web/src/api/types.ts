@@ -37,9 +37,46 @@ export interface ModelGroup {
   deployments: DeploymentInfo[];
 }
 
+// Rich alias value (shinway-style ModelAliasEntry). Plain strings remain
+// legal in alias maps and are treated as target-only (force_mapping default
+// = true, no display name, no fork).
+export interface ModelAliasEntry {
+  target: string;
+  force_mapping?: boolean;
+  display_name?: string | null;
+  fork?: boolean;
+}
+
+// True when the alias value is a rich entry rather than a plain string.
+export function isModelAliasEntry(
+  v: string | ModelAliasEntry | undefined | null,
+): v is ModelAliasEntry {
+  return typeof v === "object" && v !== null && "target" in v;
+}
+
+// Extract the target group name from a value that may be a string or a
+// rich entry. Returns the value unchanged if neither.
+export function aliasTarget(v: string | ModelAliasEntry | undefined | null): string {
+  if (v == null) return "";
+  if (isModelAliasEntry(v)) return v.target;
+  return v;
+}
+
+// ForceMapping flag for a value; defaults to true for plain strings and
+// when the rich form omits the field (matches wiwi's Pydantic default).
+export function aliasForceMapping(v: string | ModelAliasEntry | undefined | null): boolean {
+  if (isModelAliasEntry(v)) return v.force_mapping !== false;
+  return true;
+}
+
+// Optional display name (rich entry only).
+export function aliasDisplayName(v: string | ModelAliasEntry | undefined | null): string | null {
+  return isModelAliasEntry(v) ? (v.display_name ?? null) : null;
+}
+
 export interface ModelsResponse {
   groups: ModelGroup[];
-  aliases: Record<string, string>;
+  aliases: Record<string, string | ModelAliasEntry>;
   provider_aliases: Record<string, string>;
   strategy: string;
 }

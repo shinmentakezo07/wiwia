@@ -97,6 +97,7 @@ import type {
   ClineRefreshResponse,
   ClineStatusResponse,
   DeploymentInfo,
+  ModelAliasEntry,
   ModelPrice,
   ModelsResponse,
   OverviewStats,
@@ -183,6 +184,15 @@ export const deleteProviderKey = (provider: string, label: string) =>
   );
 
 export const getModels = () => api<ModelsResponse>("/admin/models");
+
+export const updateAliases = (body: {
+  set: Record<string, string | ModelAliasEntry>;
+  unset: string[];
+}) =>
+  api<{ aliases: Record<string, string | ModelAliasEntry> }>("/admin/aliases", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 
 export const patchModelGroup = (
   group: string,

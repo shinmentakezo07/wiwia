@@ -137,7 +137,15 @@ class RequestIdMiddleware:
 from wiwi.auth.keys import mask_key
 from wiwi.auth.service import AuthService
 from wiwi.auth.users import SESSION_TTL, UserInfo, UserService, sign_session, verify_session
-from wiwi.config import PROVIDER_TYPES, ConfigError, WiwiConfig, _interpolate, load_config, load_env
+from wiwi.config import (
+    PROVIDER_TYPES,
+    ConfigError,
+    ModelAliasEntry,
+    WiwiConfig,
+    _interpolate,
+    load_config,
+    load_env,
+)
 from wiwi.core.context import RequestContext
 from wiwi.core.gateway import Gateway, build_log_event
 from wiwi.cost.pricing import CostEngine
@@ -271,6 +279,167 @@ def _provider_models_url(provider_type: str, base_url: str) -> str:
     """Upstream model-list endpoint per provider type."""
     base = (base_url or _default_base_url(provider_type)).rstrip("/")
     return f"{base}/models"  # openai/compatible, anthropic, and gemini share the path
+
+
+# Alias-chain walk bound. Must match `Router.resolve_group` (router.py) so a
+# legal-but-truncated chain can't degrade silently at runtime — if this number
+# changes in the router, update the validation below and the bound there too.
+_ALIAS_CHAIN_MAX_HOPS = 8
+
+
+def _coerce_alias_value(v: object) -> str | ModelAliasEntry | None:
+    """Normalize a ``model_group_alias`` value to ``str | ModelAliasEntry``.
+
+    - ``str`` → returned as-is (back-compat for plain YAML aliases).
+    - ``ModelAliasEntry`` → returned as-is.
+    - ``dict`` (from JSON / DB overlay) → validated via ``ModelAliasEntry``;
+      returns ``None`` if the dict is malformed (caller treats as error).
+    Anything else returns ``None`` (caller treats as error)."""
+    if isinstance(v, ModelAliasEntry):
+        return v
+    if isinstance(v, str):
+        return v
+    if isinstance(v, dict):
+        try:
+            return ModelAliasEntry.model_validate(v)
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def _alias_value_to_json(v: object) -> str | dict:
+    """Serialize a ``model_group_alias`` value for JSON output.
+
+    Plain strings pass through; ``ModelAliasEntry`` values are dumped via
+    ``model_dump`` so ``/admin/models`` and ``/public/models`` always emit a
+    consistent shape for clients to parse."""
+    if isinstance(v, ModelAliasEntry):
+        return v.model_dump()
+    return v  # str, or whatever was loaded (string back-compat)
+
+
+def _alias_value_eq(a: object, b: object) -> bool:
+    """Compare two alias values regardless of form (str vs ModelAliasEntry
+    vs dict). Used to compute the overlay diff at write time without
+    spuriously re-persisting values that didn't change form."""
+    a_d = _alias_value_to_json(a) if not isinstance(a, dict) else a
+    b_d = _alias_value_to_json(b) if not isinstance(b, dict) else b
+    return a_d == b_d
+
+
+def _alias_first_hop(entry_map: dict, name: str) -> str | ModelAliasEntry | None:
+    """Look up the entry the client typed (first hop only). Returns
+    ``None`` if the name is not a direct alias. Used to decide whether the
+    response should echo the alias or show the resolved group."""
+    return entry_map.get(name)
+
+
+def _validate_alias_batch(current: dict, set_map: object, unset: object,
+                          groups: dict, provider_aliases: dict[str, str]
+                          ) -> tuple[dict | None, str | None]:
+    """Validate an admin alias update batch.
+
+    Each value in ``set_map`` may be a plain string (legacy) or a
+    ``ModelAliasEntry``-shaped dict (rich form, modelled on shinway's
+    ``OAuthModelAlias``). The live map type is therefore
+    ``dict[str, str | ModelAliasEntry]``.
+
+    Returns ``(new_live_map, None)`` on success or ``(None, error_message)`` on
+    the first violation. Validation order: type/shape, then shadow / provider
+    alias / self-loop rejections (so the error messages are most informative),
+    then cycle/depth checks against the merged map.
+
+    Atomicity: if any single entry in the batch is invalid, the whole batch
+    is rejected and the live map is not touched.
+    """
+    live: dict = dict(current)
+    if not isinstance(unset, list):
+        return None, "'unset' must be an array of alias keys"
+    for k in unset:
+        if not isinstance(k, str) or not k:
+            return None, "alias keys must be non-empty strings"
+        if k not in live:
+            return None, f"unknown alias '{k}'"
+        live.pop(k)
+    if not isinstance(set_map, dict):
+        return None, "'set' must be an object mapping alias -> target"
+    # Track keys whose values need to be re-coerced (dict input → ModelAliasEntry)
+    # so the live map holds normalized types, not raw dicts.
+    coerced: dict[str, str | ModelAliasEntry] = {}
+    for k, raw in set_map.items():
+        if not isinstance(k, str) or not k.strip():
+            return None, "alias keys must be non-empty strings"
+        if k in groups:
+            return None, (f"alias '{k}' shadows model group '{k}' — "
+                          "pick a different alias name")
+        if k in provider_aliases:
+            return None, (f"alias '{k}' collides with provider alias_id"
+                          f" '{provider_aliases[k]}' — provider aliases win"
+                          " in resolve_group, so this entry would be dead")
+        if isinstance(raw, str):
+            if not raw.strip():
+                return None, "alias targets must be non-empty strings"
+            if raw == k:
+                return None, f"alias '{k}' points to itself"
+            coerced[k] = raw
+            continue
+        # Rich form: dict or ModelAliasEntry.
+        # Pydantic v2 treats bools as int-subtypes by default, so accept
+        # only true booleans (and reject dicts that fail extra="forbid"
+        # by re-checking the raw payload shape).
+        if isinstance(raw, dict):
+            if "target" not in raw:
+                return None, f"alias '{k}' is missing required 'target'"
+            if "force_mapping" in raw and not isinstance(
+                    raw["force_mapping"], bool):
+                return None, (f"alias '{k}'.force_mapping must be a"
+                              " boolean")
+            if "display_name" in raw and raw["display_name"] is not None \
+                    and not isinstance(raw["display_name"], str):
+                return None, (f"alias '{k}'.display_name must be a"
+                              " string or null")
+            if "fork" in raw and not isinstance(raw["fork"], bool):
+                return None, f"alias '{k}'.fork must be a boolean"
+        entry = _coerce_alias_value(raw)
+        if entry is None:
+            return None, (f"alias '{k}' has an invalid value; expected a"
+                          f" string or {{target, force_mapping?,"
+                          f" display_name?, fork?}}")
+        if isinstance(entry, ModelAliasEntry):
+            if not entry.target or not entry.target.strip():
+                return None, f"alias '{k}' has empty target"
+            if entry.target == k:
+                return None, f"alias '{k}' points to itself"
+            if entry.fork:
+                return None, (f"alias '{k}' uses fork=true, which is not"
+                              " implemented yet")
+            coerced[k] = entry
+        else:
+            if not entry.strip():
+                return None, "alias targets must be non-empty strings"
+            if entry == k:
+                return None, f"alias '{k}' points to itself"
+            coerced[k] = entry
+    live.update(coerced)
+    # Cycle + depth check on every touched key against the merged map.
+    for k in set_map:
+        seen: set[str] = set()
+        name = k
+        for _ in range(_ALIAS_CHAIN_MAX_HOPS + 1):
+            if name in seen:
+                return None, f"alias cycle detected starting at '{k}'"
+            seen.add(name)
+            entry = live.get(name)
+            if entry is None:
+                break
+            nxt = entry.target if isinstance(entry, ModelAliasEntry) else entry
+            if nxt == name:
+                break
+            name = nxt
+        else:
+            return None, (f"alias chain from '{k}' exceeds"
+                          f" {_ALIAS_CHAIN_MAX_HOPS} hops")
+    return live, None
 
 
 def _parse_models_response(provider_type: str, body: bytes) -> list[dict[str, str]]:
@@ -513,6 +682,28 @@ class AppState:
         strategy = await self.config_store.get_setting("routing_strategy")
         if strategy is not None:
             self.router.settings.routing_strategy = strategy
+        # model_group_alias: DB overlay merges over the YAML map (per key;
+        # null value = tombstone removing a YAML-defined alias).
+        # `alias_yaml_base` is captured BEFORE the overlay so write-time
+        # persistence can recompute the overlay as diff(live vs YAML).
+        self.alias_yaml_base = dict(self.router.settings.model_group_alias)
+        alias_overlay = await self.config_store.get_setting("model_group_alias")
+        if alias_overlay:
+            merged = dict(self.router.settings.model_group_alias)
+            for _k, _v in alias_overlay.items():
+                if _v is None:
+                    merged.pop(_k, None)
+                else:
+                    coerced = _coerce_alias_value(_v)
+                    if coerced is None:
+                        # Malformed overlay entry — skip with a log so a
+                        # bad row doesn't poison the whole merge.
+                        import structlog
+                        structlog.get_logger().warning(
+                            "alias_overlay_dropped", key=_k, value=_v)
+                        continue
+                    merged[_k] = coerced
+            self.router.settings.model_group_alias = merged
         # custom model pricing overrides (admin-added; survive restarts)
         for p in await self.config_store.load_prices():
             mid = p["model_id"]
@@ -773,6 +964,19 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if group is None:
             return _err(404, "not_found_error",
                         f"model '{ir_req.model}' not found", request, surface)
+        # ForceMapping rewrite: if the client typed a rich alias entry whose
+        # ``force_mapping`` is False, the response should reveal the resolved
+        # group rather than echoing the alias. The first-hop entry wins —
+        # intermediate chain hops don't change the response name.
+        # Default behavior (plain-string alias, or force_mapping=True) keeps
+        # wiwi/LiteLLM's "echo the client's model" semantics.
+        resp_model = ir_req.model
+        first_hop = _alias_first_hop(
+            state_.router.settings.model_group_alias, ir_req.model)
+        if (isinstance(first_hop, ModelAliasEntry)
+                and not first_hop.force_mapping
+                and group != ir_req.model):
+            resp_model = group
         import uuid as _uuid
         request_id = _uuid.uuid4().hex[:16]
         rl_err = await enforce_rate_limit(info, est, request, surface, request_id)
@@ -785,7 +989,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             ctx.metadata["request_body"] = body
         try:
             if ir_req.stream:
-                encoder_pair = _encoder_for(surface, ir_req.model, ctx.request_id)
+                encoder_pair = _encoder_for(surface, resp_model, ctx.request_id)
                 # Pull the first delta before committing to a streaming
                 # response: if the upstream fails during connect (bad request,
                 # auth, rate limit...), execute_with_retries raises before any
@@ -816,7 +1020,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                              "x-wiwi-request-id": ctx.request_id})
             turn = await gateway.complete(ctx)
             ctx.status = 200
-            payload = codec_encode_response(ctx, turn, ir_req.model, ctx.request_id)
+            payload = codec_encode_response(ctx, turn, resp_model, ctx.request_id)
             if config.wiwi_settings.store_prompts_in_spend_logs:
                 ctx.metadata["response_body"] = _serialize_turn(turn, payload)
             state_.logs.log_request(build_log_event(ctx))
@@ -1968,7 +2172,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
             })
         settings = state.router.settings
         return ORJSONResponse({"groups": groups,
-                             "aliases": dict(settings.model_group_alias),
+                             "aliases": {k: _alias_value_to_json(v)
+                                          for k, v in settings.model_group_alias.items()},
                              "provider_aliases": dict(state.router.alias_to_provider),
                              "strategy": settings.routing_strategy})
 
@@ -2023,6 +2228,60 @@ def create_app(config: WiwiConfig) -> FastAPI:
         await state.logs.log_audit(actor="master", action="model_group.update",
                                    target=gname, diff=diff)
         return ORJSONResponse({"group": gname, **diff})
+
+    # -- admin: model_group_alias CRUD -------------------------------------------
+    # Batch endpoint (POST /admin/aliases) — body {"set": {...}, "unset": [...]}.
+    # Batch avoids path-param URL encoding for alias keys (which may contain
+    # slashes) and gives atomic validate-then-mutate semantics with one audit
+    # event, mirroring the `weights` block in admin_patch_model_group above.
+    @app.post("/admin/aliases")
+    async def admin_update_aliases(request: Request):
+        actor = await current_user(request)
+        if actor is None:
+            return _err(401, "authentication_error", "authentication required", request)
+        if actor.role != "admin":
+            return _err(403, "permission_error", "admin only", request)
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        set_map = body.get("set") or {}
+        unset = body.get("unset") or []
+        new_live, err = _validate_alias_batch(
+            dict(state.router.settings.model_group_alias),
+            set_map, unset,
+            state.router.groups,
+            state.router.alias_to_provider,
+        )
+        if err:
+            return _err(400, "invalid_request_error", err, request)
+        # Mutate live state. resolve_group reads this dict per request, so no
+        # router rebuild is needed for changes to take effect.
+        state.router.settings.model_group_alias = new_live
+        # Recompute overlay = diff(live vs alias_yaml_base); null = tombstone
+        # removing a YAML-defined alias so the unset survives a restart.
+        # Coerce each side to its JSON form so str vs ModelAliasEntry compare
+        # cleanly (a plain YAML alias and a rich entry pointing at the same
+        # target are not equal as Python objects).
+        base = getattr(state, "alias_yaml_base", {})
+        overlay: dict[str, Any] = {}
+        for k, v in base.items():
+            if k not in new_live:
+                overlay[k] = None
+            elif not _alias_value_eq(new_live[k], v):
+                overlay[k] = _alias_value_to_json(new_live[k])
+        for k, v in new_live.items():
+            if k not in base:
+                overlay[k] = _alias_value_to_json(v)
+        if state.config_store is not None:
+            await state.config_store.set_setting("model_group_alias", overlay)
+        await state.logs.log_audit(actor="master", action="aliases.update",
+                                   target="model_group_alias",
+                                   diff={"set": dict(set_map),
+                                         "unset": list(unset)})
+        dumped = {k: _alias_value_to_json(v) for k, v in new_live.items()}
+        return ORJSONResponse({"aliases": dumped,
+                               "set": dict(set_map),
+                               "unset": list(unset)})
 
     # -- admin: virtual keys PATCH -----------------------------------------------
     @app.patch("/admin/keys/{key_id}")
@@ -2966,7 +3225,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
             })
         return ORJSONResponse({
             "groups": groups,
-            "aliases": dict(state.router.settings.model_group_alias),
+            "aliases": {k: _alias_value_to_json(v)
+                        for k, v in state.router.settings.model_group_alias.items()},
         })
 
     # -- admin UI (built SPA; wiwi/server/static produced by `cd web && bun run build`)

@@ -2,7 +2,7 @@
 // Three panes: key pool (enable/disable, weights), bulk multi-key add, and
 // model IDs fetched live from the upstream with select-and-attach to a group.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Boxes, Briefcase, CheckCircle2, ChevronDown, ChevronUp, Cloud, Cpu, Eye, EyeOff, Globe, Link2, Loader2, LogIn, Plus, RefreshCw, Search, Server, Sparkles, Trash2, Unlink, X, Zap } from "lucide-react";
@@ -24,9 +24,15 @@ import {
   patchProvider,
   patchProviderKey,
   addProviderKey,
+  updateAliases,
   revealProviderKey,
 } from "@/api/client";
-import type { PoolKey, Provider } from "@/api/types";
+import type { ModelAliasEntry, PoolKey, Provider } from "@/api/types";
+import {
+  aliasDisplayName,
+  aliasForceMapping,
+  aliasTarget,
+} from "@/api/types";
 import {
   Badge,
   Button,
@@ -577,6 +583,63 @@ function DeploymentsCard(props: { provider: string; onError: (m: string) => void
     onError: (e) => props.onError(e.message),
   });
 
+  // -- per-group alias editor (model_group_alias, the `ox-alpha → stealth/...`
+  //    style rewrites). The aliases map arrives in `q.data.aliases` from the
+  //    existing /admin/models call (ModelsResponse.aliases). State is held
+  //    per-group: `openGroup` controls which row is expanded; `draft` is the
+  //    new/edit alias key → target for that group; `removed` is the keys the
+  //    admin wants to delete. A single Apply submits the batch via POST
+  //    /admin/aliases (atomic validate-then-mutate on the backend).
+  const [openGroup, setOpenGroup] = useState<string | null>(null);
+  // Rich-form draft: a value may be a plain string (target only) or a
+  // ModelAliasEntry dict (target + force_mapping + display_name + fork).
+  // ForceMapping defaults to true on the backend; we keep the explicit flag
+  // in the staged payload only when the user has toggled it off, so existing
+  // str-only aliases stay str-only on the wire.
+  const [draft, setDraft] = useState<Record<string, string | ModelAliasEntry>>({});
+  const [removed, setRemoved] = useState<string[]>([]);
+  const [newAliasInput, setNewAliasInput] = useState("");
+  // Per-new-alias options for the add-row (force_mapping + display_name).
+  // Reset on submit / on input change.
+  const [newForceMapping, setNewForceMapping] = useState(true);
+  const [newDisplayName, setNewDisplayName] = useState("");
+
+  const aliasUpdate = useMutation({
+    mutationFn: () => updateAliases({ set: draft, unset: removed }),
+    onSuccess: () => {
+      setOpenGroup(null);
+      setDraft({});
+      setRemoved([]);
+      setNewAliasInput("");
+      setNewForceMapping(true);
+      setNewDisplayName("");
+      void qc.invalidateQueries({ queryKey: ["model-groups"] });
+    },
+    onError: (e) => props.onError(e.message),
+  });
+
+  const openGroupAliases = useMemo(() => {
+    if (!openGroup || !q.data) return [] as [string, string | ModelAliasEntry][];
+    return Object.entries(q.data.aliases).filter(
+      ([, v]) => aliasTarget(v) === openGroup,
+    );
+  }, [openGroup, q.data]);
+  // Dirty gate: don't allow Apply unless there's at least one new or removed
+  // alias staged for the currently-open group.
+  const dirty = Object.keys(draft).length > 0 || removed.length > 0;
+
+  // Build the rich payload for a new alias: defaults to a plain string when
+  // nothing differentiates from the legacy shape; emits a dict form only
+  // when force_mapping is off or display_name is set.
+  const buildNewAlias = (target: string): string | ModelAliasEntry => {
+    if (newForceMapping && !newDisplayName.trim()) return target;
+    return {
+      target,
+      force_mapping: newForceMapping,
+      ...(newDisplayName.trim() ? { display_name: newDisplayName.trim() } : {}),
+    };
+  };
+
   const rows = useMemo(
     () =>
       (q.data?.groups ?? []).flatMap((g) =>
@@ -647,24 +710,229 @@ function DeploymentsCard(props: { provider: string; onError: (m: string) => void
             </div>
           )}
           <Table head={["Model", "Model ID", "Weight", "Ready", ""]}>
-            {rows.map((d) => (
-              <tr key={`${d.group}/${d.model_id}`}>
-                <TD className="font-medium">{d.group}</TD>
-                <TD className="font-mono text-[12px]">{d.model_id}</TD>
-                <TD className="tabular-nums">{d.weight}</TD>
-                <TD><Badge tone={d.available ? "green" : "amber"}>{d.available ? "yes" : "cooldown"}</Badge></TD>
-                <TD>
-                  <Button
-                    variant="ghost"
-                    title={`Detach ${d.model_id} from ${d.group}`}
-                    aria-label={`Detach ${d.model_id}`}
-                    onClick={() => setPending({ group: d.group, model_id: d.model_id })}
-                  >
-                    <Unlink size={14} />
-                  </Button>
-                </TD>
-              </tr>
-            ))}
+            {(() => {
+              const seen = new Set<string>();
+              return rows.map((d) => {
+                const isFirst = !seen.has(d.group);
+                const expanded = openGroup === d.group;
+                if (isFirst) seen.add(d.group);
+                return (
+                  <Fragment key={`${d.group}/${d.model_id}`}>
+                    <tr>
+                      <TD className="font-medium">{d.group}</TD>
+                      <TD className="font-mono text-[12px]">{d.model_id}</TD>
+                      <TD className="tabular-nums">{d.weight}</TD>
+                      <TD><Badge tone={d.available ? "green" : "amber"}>{d.available ? "yes" : "cooldown"}</Badge></TD>
+                      <TD>
+                        <div className="flex items-center gap-1">
+                          <Button
+                            variant="ghost"
+                            title={expanded ? `Hide aliases for ${d.group}` : `Show aliases for ${d.group}`}
+                            aria-label={expanded ? `Hide aliases for ${d.group}` : `Show aliases for ${d.group}`}
+                            aria-expanded={expanded}
+                            onClick={() => {
+                              setOpenGroup(expanded ? null : d.group);
+                              setDraft({});
+                              setRemoved([]);
+                              setNewAliasInput("");
+                            }}
+                          >
+                            {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            title={`Detach ${d.model_id} from ${d.group}`}
+                            aria-label={`Detach ${d.model_id}`}
+                            onClick={() => setPending({ group: d.group, model_id: d.model_id })}
+                          >
+                            <Unlink size={14} />
+                          </Button>
+                        </div>
+                      </TD>
+                    </tr>
+                    {expanded && isFirst && (
+                      <tr>
+                        <td colSpan={5} className="bg-[var(--admin-bg-raised)] px-4 py-3">
+                          <div className="space-y-3">
+                            <div>
+                              <div className="mb-1 text-[11px] uppercase tracking-wide text-[var(--admin-text-dim)]">
+                                Aliases pointing to {d.group}
+                              </div>
+                              {openGroupAliases.length === 0 ? (
+                                <p className="text-[12px] text-[var(--admin-text-dim)]">None yet.</p>
+                              ) : (
+                                <div className="flex flex-wrap gap-2">
+                                  {openGroupAliases.map(([k, v]) => {
+                                    const isRemoved = removed.includes(k);
+                                    const fm = aliasForceMapping(v);
+                                    const dn = aliasDisplayName(v);
+                                    return (
+                                      <span
+                                        key={k}
+                                        title={
+                                          dn
+                                            ? `${dn} (force_mapping=${String(fm)})`
+                                            : `force_mapping=${String(fm)}`
+                                        }
+                                        className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 font-mono text-[11px] ${
+                                          isRemoved
+                                            ? "border-red-500/30 bg-red-500/10 text-red-300 line-through"
+                                            : "border-blue-500/30 bg-blue-500/10 text-blue-200"
+                                        }`}
+                                      >
+                                        {k}
+                                        {dn && (
+                                          <span className="text-[var(--admin-text-dim)]">
+                                            · {dn}
+                                          </span>
+                                        )}
+                                        {!fm && (
+                                          <span className="rounded bg-amber-500/20 px-1 text-[10px] text-amber-200">
+                                            real
+                                          </span>
+                                        )}
+                                        <button
+                                          type="button"
+                                          className="ml-1 inline-flex items-center text-[var(--admin-text-dim)] hover:text-red-300"
+                                          aria-label={isRemoved ? `Restore alias ${k}` : `Remove alias ${k}`}
+                                          onClick={() =>
+                                            setRemoved((rs) =>
+                                              isRemoved ? rs.filter((x) => x !== k) : [...rs, k],
+                                            )
+                                          }
+                                        >
+                                          <X size={11} />
+                                        </button>
+                                      </span>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
+                            <div>
+                              <div className="mb-1 text-[11px] uppercase tracking-wide text-[var(--admin-text-dim)]">
+                                Add alias
+                              </div>
+                              <div className="flex flex-wrap items-center gap-2">
+                                <Input
+                                  className="min-w-[10rem] flex-1 font-mono"
+                                  value={newAliasInput}
+                                  placeholder="new-alias-name"
+                                  aria-label="New alias name"
+                                  onChange={(e) => setNewAliasInput(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter" && newAliasInput.trim()) {
+                                      e.preventDefault();
+                                      const v = buildNewAlias(d.group);
+                                      setDraft((dr) => ({ ...dr, [newAliasInput.trim()]: v }));
+                                      setNewAliasInput("");
+                                    }
+                                  }}
+                                />
+                                <Input
+                                  className="min-w-[8rem] flex-1"
+                                  value={newDisplayName}
+                                  placeholder="display name (optional)"
+                                  aria-label="New alias display name"
+                                  onChange={(e) => setNewDisplayName(e.target.value)}
+                                />
+                                <label
+                                  className="flex items-center gap-1 text-[11px] text-[var(--admin-text-dim)]"
+                                  title="When checked, the response model field echoes the alias. Uncheck to reveal the resolved group instead."
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={newForceMapping}
+                                    onChange={(e) => setNewForceMapping(e.target.checked)}
+                                  />
+                                  Force mapping
+                                </label>
+                                <Button
+                                  variant="outline"
+                                  type="button"
+                                  disabled={!newAliasInput.trim()}
+                                  onClick={() => {
+                                    const v = buildNewAlias(d.group);
+                                    setDraft((dr) => ({ ...dr, [newAliasInput.trim()]: v }));
+                                    setNewAliasInput("");
+                                  }}
+                                >
+                                  <Plus size={14} /> Add
+                                </Button>
+                              </div>
+                              {Object.keys(draft).length > 0 && (
+                                <div className="mt-2 flex flex-wrap gap-2">
+                                  {Object.entries(draft).map(([k, v]) => {
+                                    const target = aliasTarget(v);
+                                    const fm = aliasForceMapping(v);
+                                    const dn = aliasDisplayName(v);
+                                    return (
+                                      <span
+                                        key={k}
+                                        className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 font-mono text-[11px] text-emerald-200"
+                                      >
+                                        {k} → {target}
+                                        {dn && (
+                                          <span className="text-[var(--admin-text-dim)]">
+                                            · {dn}
+                                          </span>
+                                        )}
+                                        {!fm && (
+                                          <span className="rounded bg-amber-500/20 px-1 text-[10px] text-amber-200">
+                                            real
+                                          </span>
+                                        )}
+                                        <button
+                                          type="button"
+                                          className="ml-1 inline-flex items-center text-[var(--admin-text-dim)] hover:text-red-300"
+                                          aria-label={`Discard staged alias ${k}`}
+                                          onClick={() =>
+                                            setDraft((dr) => {
+                                              const c = { ...dr };
+                                              delete c[k];
+                                              return c;
+                                            })
+                                          }
+                                        >
+                                          <X size={11} />
+                                        </button>
+                                      </span>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
+                            {aliasUpdate.error && (
+                              <ErrorText>{aliasUpdate.error.message}</ErrorText>
+                            )}
+                            <div className="flex items-center justify-end gap-2 border-t border-white/[0.06] pt-2">
+                              <Button
+                                variant="ghost"
+                                type="button"
+                                disabled={aliasUpdate.isPending}
+                                onClick={() => {
+                                  setDraft({});
+                                  setRemoved([]);
+                                  setNewAliasInput("");
+                                }}
+                              >
+                                Reset
+                              </Button>
+                              <Button
+                                disabled={!dirty || aliasUpdate.isPending}
+                                onClick={() => aliasUpdate.mutate()}
+                              >
+                                {aliasUpdate.isPending ? "Applying…" : "Apply"}
+                              </Button>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              });
+            })()}
           </Table>
         </>
       )}

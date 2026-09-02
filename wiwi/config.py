@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ConfigError(Exception):
@@ -133,6 +133,22 @@ class ModelEntry(BaseModel):
     wiwi_params: DeploymentParams
 
 
+class ModelAliasEntry(BaseModel):
+    """Rich-form entry in ``model_group_alias``. Modelled on shinway's
+    ``OAuthModelAlias``: ``target`` is the resolved group, ``force_mapping``
+    controls whether the response echoes the client alias (``True`` — the
+    wiwi/LiteLLM default) or reveals the resolved group (``False``),
+    ``display_name`` is an optional human label surfaced by the admin UI
+    and the public catalog, and ``fork`` is accepted for config parity but
+    is rejected by the admin endpoint until implemented.
+    """
+    model_config = ConfigDict(extra="forbid")
+    target: str
+    force_mapping: bool = True
+    display_name: str | None = None
+    fork: bool = False
+
+
 class RouterSettings(BaseModel):
     routing_strategy: Literal["simple-shuffle", "least-busy", "latency-based"] = "simple-shuffle"
     num_retries: int = 2
@@ -141,7 +157,7 @@ class RouterSettings(BaseModel):
     cooldown_time: float = 30.0
     fallbacks: dict[str, list[str]] = Field(default_factory=dict)
     context_window_fallbacks: dict[str, list[str]] = Field(default_factory=dict)
-    model_group_alias: dict[str, str] = Field(default_factory=dict)
+    model_group_alias: dict[str, str | ModelAliasEntry] = Field(default_factory=dict)
     global_rpm: int | None = None
     global_tpm: int | None = None
     # Streaming resilience

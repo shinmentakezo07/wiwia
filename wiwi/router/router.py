@@ -10,7 +10,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
-from wiwi.config import PROVIDER_TYPES, RouterSettings, WiwiConfig
+from wiwi.config import PROVIDER_TYPES, ModelAliasEntry, RouterSettings, WiwiConfig
 from wiwi.core.context import RequestContext
 from wiwi.providers.base import (
     ProviderKeyRef,
@@ -233,6 +233,18 @@ class Deployment:
         return percentile(self.latencies, 0.95)
 
 
+def _alias_target(v: str | ModelAliasEntry) -> str:
+    """Extract the next-hop group name from a ``model_group_alias`` value.
+
+    Plain-string values pass through; rich entries (shinway-style
+    ``ModelAliasEntry``) expose their ``target`` field. This lets the alias
+    chain walk in ``Router.resolve_group`` stay agnostic to the value form.
+    """
+    if isinstance(v, ModelAliasEntry):
+        return v.target
+    return v
+
+
 class Router:
     def __init__(self, config: WiwiConfig):
         self.settings: RouterSettings = config.router_settings
@@ -296,7 +308,7 @@ class Router:
             return (requested, deps) if deps else (None, [])
         name = requested
         for _ in range(8):  # bounded walk: aliases may chain, never cycle
-            nxt = self.settings.model_group_alias.get(name)
+            nxt = _alias_target(self.settings.model_group_alias.get(name))
             if nxt is None or nxt == name:
                 break
             name = nxt

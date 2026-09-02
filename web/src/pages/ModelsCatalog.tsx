@@ -7,6 +7,7 @@ import { Link } from "react-router-dom";
 import { Boxes, ArrowRight } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { getPublicModels } from "@/api/client";
+import { aliasDisplayName, aliasTarget } from "@/api/types";
 import { Badge, Card, EmptyState, ErrorText, Spinner } from "@/components/ui";
 
 export function ModelsCatalogPage() {
@@ -45,13 +46,21 @@ export function ModelsCatalogPage() {
                 <Card className="mb-5 p-4">
                   <span className="admin-label mb-2 block">Aliases</span>
                   <div className="flex flex-wrap gap-2">
-                    {Object.entries(query.data.aliases).map(([alias, target]) => (
-                      <Badge key={alias} tone="blue" title={`alias → ${target}`}>
-                        <span className="font-mono">{alias}</span>
-                        <span className="mx-1.5 text-[var(--admin-text-dim)]">→</span>
-                        <span className="font-mono">{target}</span>
-                      </Badge>
-                    ))}
+                    {Object.entries(query.data.aliases).map(([alias, v]) => {
+                      const target = aliasTarget(v);
+                      const dn = aliasDisplayName(v);
+                      return (
+                        <Badge
+                          key={alias}
+                          tone="blue"
+                          title={dn ? `${dn} (alias → ${target})` : `alias → ${target}`}
+                        >
+                          <span className="font-mono">{dn ?? alias}</span>
+                          <span className="mx-1.5 text-[var(--admin-text-dim)]">→</span>
+                          <span className="font-mono">{target}</span>
+                        </Badge>
+                      );
+                    })}
                   </div>
                 </Card>
               )}
