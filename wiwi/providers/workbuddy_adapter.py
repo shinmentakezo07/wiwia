@@ -101,6 +101,21 @@ def _sanitize_messages(messages: list[Any]) -> None:
             msg["content"] = _sanitize_content(msg["content"])
 
 
+_DEFAULT_SYSTEM = "You are a helpful assistant."
+
+
+def _prepend_system_message(messages: list[Any]) -> None:
+    """The upstream rejects a request whose ``messages[0]`` is not ``system``
+    (code 11128, "first message is not system prompt"). Prepending a default
+    system message satisfies the check; an already-system-leading request is
+    left untouched.
+    """
+    if messages and isinstance(messages[0], dict) \
+            and messages[0].get("role") == "system":
+        return
+    messages.insert(0, {"role": "system", "content": _DEFAULT_SYSTEM})
+
+
 # -- tool_choice normalization (port of normalizeToolChoice) -----------------
 
 def _normalize_tool_choice(body: dict[str, Any]) -> None:
@@ -200,6 +215,7 @@ class WorkBuddyAdapter(OpenAIAdapter):
         body.pop("stream_options", None)
         _normalize_tool_choice(body)
         if isinstance(body.get("messages"), list):
+            _prepend_system_message(body["messages"])
             _sanitize_messages(body["messages"])
         return body
 
