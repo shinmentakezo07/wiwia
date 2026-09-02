@@ -2156,6 +2156,91 @@ select.admin-input option {
 }
 .pg-md-table tbody tr:hover { background: rgba(255, 255, 255, 0.02); }
 
+/* ── Playground: visual polish ────────────────────────────────────────────── */
+
+/* Soft brand glow behind the top of the chat arena */
+.pg-arena-glow {
+  position: absolute;
+  top: -140px;
+  left: 50%;
+  width: 680px;
+  height: 340px;
+  transform: translateX(-50%);
+  background: radial-gradient(ellipse at center, rgba(135, 87, 247, 0.07) 0%, transparent 65%);
+  pointer-events: none;
+}
+
+/* Gradient headline in the hero — white falling off into brand purple */
+.pg-hero-title {
+  background: linear-gradient(100deg, var(--admin-text) 35%, var(--color-brand-300) 75%, var(--color-brand-400));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+/* Thin, quiet scrollbars inside the playground */
+.pg-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+}
+.pg-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+.pg-scroll::-webkit-scrollbar-track { background: transparent; }
+.pg-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border: 2px solid transparent;
+  border-radius: 8px;
+  background-clip: padding-box;
+}
+.pg-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.16);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+/* Active chat item: brand accent bar on the left edge */
+.pg-chat-item { position: relative; }
+.pg-chat-item[data-active="true"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 22%;
+  bottom: 22%;
+  width: 2px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--color-brand-400), var(--color-brand-600));
+}
+
+/* User bubble: inner top highlight + brand-tinted drop shadow. Owns the
+   element's box-shadow entirely — the TSX must not also apply a Tailwind
+   shadow utility or it will override this. */
+.pg-user-bubble {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    0 8px 24px -10px rgba(99, 51, 209, 0.5);
+}
+
+/* Composer: brand focus glow replaces the plain border-color change */
+.pg-composer {
+  transition: border-color 0.15s ease, box-shadow 0.2s ease;
+}
+.pg-composer:focus-within {
+  border-color: rgba(135, 87, 247, 0.35);
+  box-shadow:
+    0 0 0 1px rgba(135, 87, 247, 0.18),
+    0 8px 32px -12px rgba(135, 87, 247, 0.35);
+}
+
+/* Scroll-to-bottom button: gentle float-in */
+@keyframes pg-float-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .pg-scroll-btn { animation: pg-float-in 0.2s ease both; }
+}
+.pg-scroll-btn { box-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.55); }
+
 /* ── Reliability page: failover diagram + uptime timeline ────────────────── */
 
 /* Flowing packets along the request path: a dot travels the connector line. */

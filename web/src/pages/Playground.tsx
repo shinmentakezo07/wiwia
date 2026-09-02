@@ -10,16 +10,19 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  AlertCircle,
   ArrowDown,
   Bot,
   Check,
   ChevronDown,
   Clock,
   Copy,
+  Eraser,
   Gauge,
   MessageSquarePlus,
   PanelLeftClose,
   PanelLeftOpen,
+  Pencil,
   Plug,
   RefreshCcw,
   Search,
@@ -29,13 +32,13 @@ import {
   Terminal,
   Trash2,
   User,
+  X,
 } from "lucide-react";
 import { getModels } from "@/api/client";
 import { useAuth } from "@/api/auth";
 import type { ModelGroup } from "@/api/types";
 import { Link } from "react-router-dom";
 import {
-  ErrorText,
   Spinner,
 } from "@/components/ui";
 import { Markdown } from "@/components/Markdown";
@@ -48,15 +51,32 @@ import {
 import {
   type ChatMsg,
   type Conversation,
+  clearAllChats,
   createChat,
   deleteChat,
   loadChats,
   relativeTime,
+  renameChat,
   updateChat,
 } from "@/lib/chat-store";
 
 type Role = "user" | "assistant";
 type Msg = { id: string; role: Role; content: string };
+
+/** Date group labels for the sidebar chat list, newest first. */
+const SIDEBAR_GROUPS = ["Today", "Yesterday", "Previous 7 days", "Older"] as const;
+
+function chatDateGroup(updated: number): (typeof SIDEBAR_GROUPS)[number] {
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const d = new Date(updated);
+  const startOfDay = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const dayDiff = Math.floor((startOfToday - startOfDay) / 86_400_000);
+  if (dayDiff <= 0) return "Today";
+  if (dayDiff === 1) return "Yesterday";
+  if (dayDiff <= 7) return "Previous 7 days";
+  return "Older";
+}
 
 /** How many times to retry minting a playground key before giving up. */
 const _MAX_KEY_ATTEMPTS = 4;
@@ -204,8 +224,15 @@ function ModelSelector(props: {
     const onClick = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
     };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
     document.addEventListener("mousedown", onClick);
-    return () => document.removeEventListener("mousedown", onClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onClick);
+      document.removeEventListener("keydown", onKey);
+    };
   }, [open]);
 
   const selected = groups.find((g) => g.name === value);
@@ -226,6 +253,8 @@ function ModelSelector(props: {
         type="button"
         disabled={disabled}
         onClick={() => setOpen((o) => !o)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
         className="group flex items-center gap-2 rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] px-3 py-2 text-[13px] transition-colors hover:border-[var(--admin-border-hover)] disabled:opacity-50"
       >
         <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-blue-500/10">
@@ -265,7 +294,7 @@ function ModelSelector(props: {
           </div>
 
           {/* Model list */}
-          <div className="max-h-[360px] overflow-y-auto p-1.5">
+          <div className="pg-scroll max-h-[360px] overflow-y-auto p-1.5">
             {filtered.length === 0 ? (
               <div className="py-8 text-center text-[13px] text-[var(--admin-text-dim)]">No models found</div>
             ) : (
@@ -327,10 +356,41 @@ function ChatSidebar(props: {
   onSelect: (id: string) => void;
   onNew: () => void;
   onDelete: (id: string) => void;
+  onRename: (id: string, title: string) => void;
+  onClearAll: () => void;
   collapsed: boolean;
   onToggle: () => void;
 }) {
-  const { chats, activeId, onSelect, onNew, onDelete, collapsed, onToggle } = props;
+  const { chats, activeId, onSelect, onNew, onDelete, onRename, onClearAll, collapsed, onToggle } = props;
+  const [query, setQuery] = useState("");
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [confirmingClear, setConfirmingClear] = useState(false);
+  // Two-step confirm auto-resets so a stale armed state can't linger.
+  const clearTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(clearTimer.current), []);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return chats;
+    return chats.filter(
+      (c) =>
+        (c.title || "New chat").toLowerCase().includes(q) ||
+        c.messages.some((m) => m.content.toLowerCase().includes(q)),
+    );
+  }, [chats, query]);
+
+  // Group filtered chats by recency, preserving the newest-first order.
+  const grouped = useMemo(() => {
+    const map = new Map<(typeof SIDEBAR_GROUPS)[number], Conversation[]>();
+    for (const c of filtered) {
+      const g = chatDateGroup(c.updated);
+      const bucket = map.get(g);
+      if (bucket) bucket.push(c);
+      else map.set(g, [c]);
+    }
+    return SIDEBAR_GROUPS.filter((g) => map.has(g)).map((g) => [g, map.get(g)!] as const);
+  }, [filtered]);
 
   if (collapsed) {
     return (
@@ -356,6 +416,11 @@ function ChatSidebar(props: {
       </div>
     );
   }
+
+  const commitRename = () => {
+    if (renamingId) onRename(renamingId, renameDraft);
+    setRenamingId(null);
+  };
 
   return (
     <div className="pg-sidebar flex shrink-0 flex-col border-r border-[var(--admin-border)] bg-[var(--admin-surface)]">
@@ -387,58 +452,164 @@ function ChatSidebar(props: {
         </button>
       </div>
 
-      {/* Chat list */}
-      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
-        {chats.length === 0 ? (
+      {/* Search */}
+      <div className="px-3 pb-2">
+        <div className="flex items-center gap-2 rounded-lg border border-[var(--admin-border)] bg-white/[0.02] px-2.5 py-1.5 transition-colors focus-within:border-[var(--admin-border-hover)]">
+          <Search className="h-3.5 w-3.5 shrink-0 text-[var(--admin-text-dim)]" />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search chats…"
+            className="w-full bg-transparent text-[12px] text-[var(--admin-text)] outline-none placeholder:text-[var(--admin-text-dim)]"
+          />
+          {query && (
+            <button
+              type="button"
+              onClick={() => setQuery("")}
+              className="shrink-0 text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]"
+              aria-label="Clear search"
+            >
+              <X size={12} />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Chat list, grouped by recency */}
+      <div className="pg-scroll min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+        {filtered.length === 0 ? (
           <div className="px-3 py-8 text-center text-[12px] text-[var(--admin-text-dim)]">
-            No conversations yet.
+            {query ? "No chats match your search." : "No conversations yet."}
           </div>
         ) : (
-          <div className="space-y-0.5">
-            {chats.map((c) => (
-              <div
-                key={c.id}
-                data-active={c.id === activeId}
-                onClick={() => onSelect(c.id)}
-                className="pg-chat-item group flex cursor-pointer items-start gap-2 rounded-lg border border-transparent px-2.5 py-2"
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5">
-                    <span className={`truncate text-[13px] ${c.id === activeId ? "text-blue-300 font-medium" : "text-[var(--admin-text-muted)]"}`}>
-                      {c.title || "New chat"}
-                    </span>
-                  </div>
-                  <span className="text-[10px] text-[var(--admin-text-dim)]">
-                    {relativeTime(c.updated)} · {c.messages.length} msgs
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDelete(c.id);
-                  }}
-                  className="mt-0.5 shrink-0 rounded p-1 text-[var(--admin-text-dim)] opacity-0 transition-opacity hover:text-red-400 group-hover:opacity-100"
-                  aria-label="Delete chat"
-                  title="Delete chat"
-                >
-                  <Trash2 size={13} />
-                </button>
+          grouped.map(([group, items]) => (
+            <div key={group} className="mb-2">
+              <div className="px-2 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--admin-text-dim)]">
+                {group}
               </div>
-            ))}
-          </div>
+              <div className="space-y-0.5">
+                {items.map((c) =>
+                  renamingId === c.id ? (
+                    <div key={c.id} className="rounded-lg border border-brand-500/30 bg-white/[0.03] px-2 py-1.5">
+                      <input
+                        autoFocus
+                        value={renameDraft}
+                        onChange={(e) => setRenameDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                            e.preventDefault();
+                            commitRename();
+                          } else if (e.key === "Escape") {
+                            e.stopPropagation();
+                            setRenamingId(null);
+                          }
+                        }}
+                        onBlur={commitRename}
+                        className="w-full bg-transparent text-[13px] text-[var(--admin-text)] outline-none"
+                        aria-label="Chat name"
+                      />
+                    </div>
+                  ) : (
+                    <div
+                      key={c.id}
+                      data-active={c.id === activeId}
+                      onClick={() => onSelect(c.id)}
+                      className="pg-chat-item group flex cursor-pointer items-start gap-2 rounded-lg border border-transparent px-2.5 py-2"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5">
+                          <span className={`truncate text-[13px] ${c.id === activeId ? "text-blue-300 font-medium" : "text-[var(--admin-text-muted)]"}`}>
+                            {c.title || "New chat"}
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-[var(--admin-text-dim)]">
+                          {relativeTime(c.updated)} · {c.messages.length} msgs
+                        </span>
+                      </div>
+                      <div className="mt-0.5 flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setRenamingId(c.id);
+                            setRenameDraft(c.title || "");
+                          }}
+                          className="rounded p-1 text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]"
+                          aria-label="Rename chat"
+                          title="Rename chat"
+                        >
+                          <Pencil size={12} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onDelete(c.id);
+                          }}
+                          className="rounded p-1 text-[var(--admin-text-dim)] transition-colors hover:text-red-400"
+                          aria-label="Delete chat"
+                          title="Delete chat"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    </div>
+                  ),
+                )}
+              </div>
+            </div>
+          ))
         )}
       </div>
 
       {/* Footer */}
       <div className="shrink-0 border-t border-[var(--admin-border)] px-3 py-2">
-        <Link
-          to="/console"
-          className="flex items-center gap-2 text-[12px] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]"
-        >
-          <Terminal size={12} />
-          Dashboard
-        </Link>
+        <div className="flex items-center justify-between">
+          <Link
+            to="/console"
+            className="flex items-center gap-2 text-[12px] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]"
+          >
+            <Terminal size={12} />
+            Dashboard
+          </Link>
+          {chats.length > 0 && !confirmingClear && (
+            <button
+              type="button"
+              onClick={() => {
+                setConfirmingClear(true);
+                window.clearTimeout(clearTimer.current);
+                clearTimer.current = window.setTimeout(() => setConfirmingClear(false), 4000);
+              }}
+              className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] text-[var(--admin-text-dim)] transition-colors hover:text-red-400"
+              aria-label="Clear all chats"
+              title="Clear all chats"
+            >
+              <Eraser size={12} />
+              Clear all
+            </button>
+          )}
+          {confirmingClear && (
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => {
+                  onClearAll();
+                  setConfirmingClear(false);
+                }}
+                className="rounded-md border border-red-500/30 bg-red-500/10 px-1.5 py-0.5 text-[11px] text-red-400 transition-colors hover:bg-red-500/20"
+              >
+                Confirm
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmingClear(false)}
+                className="rounded-md px-1 py-0.5 text-[11px] text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -476,6 +647,19 @@ export function PlaygroundPage() {
   const [chats, setChats] = useState<Conversation[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(typeof window !== "undefined" && window.innerWidth < 768);
+  // Unsent composer text, kept per chat so switching conversations doesn't
+  // lose a half-written message. Cleared entries are fine to keep around —
+  // they're tiny strings, and the ref dies with the component.
+  const draftsRef = useRef<Record<string, string>>({});
+  // The most recent failed request, kept so the error banner can offer a
+  // one-click retry that replays the exact same request.
+  const failedRef = useRef<{ history: Msg[]; userText: string | null } | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const focusComposer = useCallback(() => {
+    // Streamed updates steal focus back constantly if we're eager here; only
+    // focus when the composer isn't already focused elsewhere.
+    if (document.activeElement?.tagName !== "TEXTAREA") textareaRef.current?.focus();
+  }, []);
 
   // Load chat history from localStorage on mount
   useEffect(() => {
@@ -607,21 +791,31 @@ export function PlaygroundPage() {
     setMessages([]);
     setErr(null);
     setUsage(null);
-    setDraft("");
+    setDraft(draftsRef.current[chat.id] ?? "");
+    void setTimeout(() => focusComposer(), 0);
   }
 
   function handleSelectChat(id: string) {
+    if (id === activeChatId) return;
+    // A stream is bound to the conversation it started in; switching chats
+    // mid-stream would otherwise append tokens into the *previous* chat's
+    // storage. Stop the stream rather than let it bleed across chats.
+    abortRef.current?.abort();
+    failedRef.current = null;
     const chat = chats.find((c) => c.id === id);
     if (!chat) return;
+    draftsRef.current[activeChatId ?? ""] = draft;
     setActiveChatId(id);
     setMessages(chat.messages.map((m) => ({ id: m.id, role: m.role, content: m.content })));
     setModel(chat.model);
     setErr(null);
     setUsage(null);
-    setDraft("");
+    setDraft(draftsRef.current[id] ?? "");
+    void setTimeout(() => focusComposer(), 0);
   }
 
   function handleDeleteChat(id: string) {
+    delete draftsRef.current[id];
     const remaining = deleteChat(id);
     setChats(remaining);
     if (activeChatId === id) {
@@ -630,6 +824,7 @@ export function PlaygroundPage() {
         setActiveChatId(next.id);
         setMessages(next.messages.map((m) => ({ id: m.id, role: m.role, content: m.content })));
         setModel(next.model);
+        setDraft(draftsRef.current[next.id] ?? "");
       } else {
         // Create a fresh empty chat
         const chat = createChat(effectiveModel);
@@ -637,8 +832,28 @@ export function PlaygroundPage() {
         setActiveChatId(chat.id);
         setMessages([]);
         setModel(effectiveModel);
+        setDraft("");
       }
     }
+  }
+
+  function handleRenameChat(id: string, title: string) {
+    const remaining = renameChat(id, title);
+    if (remaining) setChats(remaining);
+  }
+
+  function handleClearAllChats() {
+    abortRef.current?.abort();
+    clearAllChats();
+    draftsRef.current = {};
+    const chat = createChat(effectiveModel);
+    setChats([chat]);
+    setActiveChatId(chat.id);
+    setMessages([]);
+    setModel(effectiveModel);
+    setErr(null);
+    setUsage(null);
+    setDraft("");
   }
 
   // ── streaming send ────────────────────────────────────────────────────────
@@ -701,6 +916,7 @@ export function PlaygroundPage() {
           startedAt,
           onFirstToken: setTtftMs,
         });
+        failedRef.current = null;
         if (lastUsage) {
           const secs = (performance.now() - startedAt) / 1000;
           setTps(secs > 0 ? lastUsage.completion_tokens / secs : null);
@@ -721,6 +937,7 @@ export function PlaygroundPage() {
           );
         } else {
           setErr(e instanceof Error ? e.message : "request failed");
+          failedRef.current = { history, userText };
           setMessages((prev) => prev.filter((m) => m.id !== assistantId));
         }
       } finally {
@@ -745,14 +962,46 @@ export function PlaygroundPage() {
         return;
       }
       setDraft("");
+      draftsRef.current[activeChatId ?? ""] = "";
       await runStream([...messages, { id: uid(), role: "user", content: trimmed }], trimmed);
     },
-    [bearer, effectiveModel, busy, messages, runStream],
+    [bearer, effectiveModel, busy, messages, runStream, activeChatId],
   );
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
   }, []);
+
+  // Escape aborts an in-flight stream — same as the stop button.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // The rename input and model dropdown handle their own Escape; only
+      // act when the event isn't consumed by an editable surface that isn't
+      // the composer (which is allowed to stop the stream).
+      const target = e.target as HTMLElement | null;
+      const inComposer = target === textareaRef.current;
+      const inOtherInput =
+        target?.tagName === "INPUT" ||
+        (target?.tagName === "TEXTAREA" && !inComposer) ||
+        target?.isContentEditable;
+      if (e.key === "Escape" && streaming && !inOtherInput) {
+        e.preventDefault();
+        stop();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [streaming, stop]);
+
+  // One-click retry of the last failed request: clears the banner and
+  // replays the exact same conversation state through runStream.
+  const retryFailed = useCallback(() => {
+    const failed = failedRef.current;
+    if (!failed || busy) return;
+    failedRef.current = null;
+    setErr(null);
+    void runStream(failed.history, failed.userText);
+  }, [busy, runStream]);
 
   // ── regenerate last ───────────────────────────────────────────────────────
 
@@ -798,6 +1047,12 @@ export function PlaygroundPage() {
 
   const isEmpty = messages.length === 0;
   const keyLoading = !keyReady && !bearer;
+
+  // Focus the composer once the key is minted (or restored) so the user can
+  // type immediately.
+  useEffect(() => {
+    if (keyReady) focusComposer();
+  }, [keyReady, focusComposer]);
 
   return (
     <div data-admin className="relative z-0 flex h-dvh flex-col overflow-hidden bg-[var(--admin-bg)] text-[var(--admin-text)]">
@@ -886,16 +1141,39 @@ export function PlaygroundPage() {
           onSelect={handleSelectChat}
           onNew={handleNewChat}
           onDelete={handleDeleteChat}
+          onRename={handleRenameChat}
+          onClearAll={handleClearAllChats}
           collapsed={sidebarCollapsed}
           onToggle={() => setSidebarCollapsed((v) => !v)}
         />
 
         {/* Chat arena */}
         <main className="relative flex min-h-0 flex-1 flex-col">
+          {/* Soft brand ambience behind the top of the arena */}
+          <div className="pg-arena-glow" aria-hidden />
+
           {err && (
             <div className="shrink-0 px-6 py-2">
-              <div className="mx-auto max-w-[760px]">
-                <ErrorText>{err}</ErrorText>
+              <div className="mx-auto flex max-w-[760px] items-center gap-2 rounded-[10px] border border-red-500/15 bg-red-500/[0.05] px-3 py-2 text-[12px] text-red-400">
+                <AlertCircle size={14} className="shrink-0" />
+                <span className="min-w-0 flex-1 break-words">{err}</span>
+                {failedRef.current && !busy && (
+                  <button
+                    type="button"
+                    onClick={retryFailed}
+                    className="shrink-0 rounded-md border border-red-500/25 px-2 py-0.5 text-[11px] font-medium transition-colors hover:bg-red-500/15"
+                  >
+                    Retry
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setErr(null)}
+                  className="shrink-0 rounded p-0.5 text-red-400/60 transition-colors hover:text-red-400"
+                  aria-label="Dismiss error"
+                >
+                  <X size={13} />
+                </button>
               </div>
             </div>
           )}
@@ -904,7 +1182,7 @@ export function PlaygroundPage() {
           <div
             ref={scrollRef}
             onScroll={handleScroll}
-            className="min-h-0 flex-1 overflow-y-auto"
+            className="pg-scroll min-h-0 flex-1 overflow-y-auto"
             role="log"
             aria-live="polite"
           >
@@ -940,7 +1218,7 @@ export function PlaygroundPage() {
             <button
               type="button"
               onClick={scrollToBottom}
-              className="absolute bottom-24 left-1/2 z-10 flex h-9 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-[var(--admin-border)] bg-[var(--admin-surface-elevated)] text-[var(--admin-text-muted)] shadow-lg transition-colors hover:text-[var(--admin-text)]"
+              className="pg-scroll-btn absolute bottom-24 left-1/2 z-10 flex h-9 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-[var(--admin-border)] bg-[var(--admin-surface-elevated)] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]"
               aria-label="Scroll to bottom"
             >
               <ArrowDown size={16} />
@@ -988,8 +1266,9 @@ export function PlaygroundPage() {
             <form onSubmit={onSubmit} className="mx-auto max-w-[760px] px-6 pb-4">
               <div className="relative">
                 <div className="pointer-events-none absolute -inset-0.5 rounded-2xl bg-gradient-to-r from-blue-500/8 via-transparent to-fuchsia-500/8 opacity-0 transition-opacity focus-within:opacity-100" aria-hidden />
-                <div className="relative flex items-end gap-2 rounded-2xl border border-[var(--admin-border)] bg-[var(--admin-surface)] p-2 shadow-lg shadow-black/30 transition-colors focus-within:border-[var(--admin-border-hover)]">
+                <div className="pg-composer relative flex items-end gap-2 rounded-2xl border border-[var(--admin-border)] bg-[var(--admin-surface)] p-2 shadow-lg shadow-black/30">
                   <textarea
+                    ref={textareaRef}
                     value={draft}
                     onChange={(e) => setDraft(e.target.value)}
                     onKeyDown={onKeyDown}
@@ -999,15 +1278,20 @@ export function PlaygroundPage() {
                     className="pg-textarea flex-1 resize-none bg-transparent px-3 py-2 text-[14px] leading-relaxed text-[var(--admin-text)] outline-none placeholder:text-[var(--admin-text-dim)] disabled:opacity-50"
                   />
                   {streaming ? (
-                    <button
-                      type="button"
-                      onClick={stop}
-                      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-red-500/25 bg-red-500/10 text-red-400 transition-[background-color,transform] duration-150 hover:bg-red-500/20 active:scale-95"
-                      aria-label="Stop generating"
-                      title="Stop generating"
-                    >
-                      <Square size={14} fill="currentColor" />
-                    </button>
+                    <>
+                      <span className="pg-kbd mr-1 shrink-0 self-center" title="Press Escape to stop">
+                        Esc
+                      </span>
+                      <button
+                        type="button"
+                        onClick={stop}
+                        className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-red-500/25 bg-red-500/10 text-red-400 transition-[background-color,transform] duration-150 hover:bg-red-500/20 active:scale-95"
+                        aria-label="Stop generating"
+                        title="Stop generating"
+                      >
+                        <Square size={14} fill="currentColor" />
+                      </button>
+                    </>
                   ) : (
                     <button
                       type="submit"
@@ -1058,7 +1342,7 @@ function HeroEmptyState(props: {
           </div>
         </div>
 
-        <h2 className="text-[26px] font-semibold tracking-tight text-[var(--admin-text)]">
+        <h2 className="pg-hero-title text-[26px] font-semibold tracking-tight">
           {keyReady ? "How can I help you?" : "Preparing your playground…"}
         </h2>
         <p className="mx-auto mt-1.5 max-w-md text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
@@ -1160,7 +1444,7 @@ function MessageBubble(props: {
     return (
       <div className="pg-msg-enter group flex justify-end gap-3 py-1.5">
         <div className="flex max-w-[80%] flex-col items-end">
-          <div className="pg-user-bubble rounded-2xl rounded-br-md px-4 py-2.5 text-[14px] leading-relaxed text-white shadow-lg shadow-brand-900/20">
+          <div className="pg-user-bubble rounded-2xl rounded-br-md px-4 py-2.5 text-[14px] leading-relaxed text-white">
             <p className="whitespace-pre-wrap break-words">{msg.content}</p>
           </div>
           {msg.content && (

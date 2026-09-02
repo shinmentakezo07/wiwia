@@ -103,6 +103,24 @@ export function deleteChat(id: string): Conversation[] {
   return chats.sort((a, b) => b.updated - a.updated);
 }
 
+/** Rename a conversation in place. Returns the new chat list, or null if the
+ * id is unknown. An empty/whitespace title falls back to "New chat". */
+export function renameChat(id: string, title: string): Conversation[] | null {
+  const chats = read();
+  const idx = chats.findIndex((c) => c.id === id);
+  if (idx === -1) return null;
+  const clean = title.trim();
+  chats[idx] = {
+    ...chats[idx]!,
+    title: clean || "New chat",
+    // Renaming is metadata-only: don't bump `updated` (which drives ordering
+    // and the relative-time label in the sidebar).
+    updated: chats[idx]!.updated,
+  };
+  write(chats);
+  return chats.sort((a, b) => b.updated - a.updated);
+}
+
 /** Clear all conversations. */
 export function clearAllChats(): void {
   try {
