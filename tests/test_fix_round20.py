@@ -12,7 +12,11 @@ Regression targets (see the SSE/streaming audit and the round-20 fix plan):
 
 from __future__ import annotations
 
+import asyncio
+from typing import Any
+
 import httpx
+import orjson
 import pytest
 import respx
 from asgi_lifespan import LifespanManager
@@ -306,3 +310,98 @@ async def test_anthropic_error_path_ends_with_message_stop():
             f"expected a terminating message_stop after the error, got:\n{text}"
         # message_stop is the LAST event in the stream (no dangling frames).
         assert text.rstrip().endswith('"type": "message_stop"}'), text
+
+
+# ---------------------------------------------------------------------------
+# Fix H1: concurrent streams must not corrupt each other's tool state
+# ---------------------------------------------------------------------------
+
+def _h1_config() -> WiwiConfig:
+    return WiwiConfig(
+        providers=[ProviderDef(name="p1", provider="openai",
+                               base_url="https://round20-h1.example/v1",
+                               keys=[KeyDef(label="k1", key="sk-1"),
+                                     KeyDef(label="k2", key="sk-2")])],
+        model_list=[ModelEntry(model_name="gpt-x",
+                               wiwi_params=DeploymentParams(provider="p1",
+                                                            model="gpt-x"))],
+        general_settings=GeneralSettings(master_key="sk-wiwi-master-test",
+                                         database_url="sqlite+aiosqlite:///:memory:"),
+        router_settings=RouterSettings(num_retries=0, allowed_fails=1,
+                                       cooldown_time=60.0),
+    )
+
+
+def _tool_chunk(index: int, args=None, cid=None, name=None) -> str:
+    fn: dict[str, Any] = {}
+    if name is not None:
+        fn["name"] = name
+    if args is not None:
+        fn["arguments"] = args
+    tc: dict[str, Any] = {"index": index, "function": fn}
+    if cid is not None:
+        tc["id"] = cid
+    return orjson.dumps({"choices": [{"delta": {"tool_calls": [tc]}}]}).decode()
+
+
+_H1_FINISH = orjson.dumps(
+    {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}).decode()
+
+
+def _sse(*parts: str) -> bytes:
+    return b"".join(f"data: {p}\n\n".encode() for p in parts)
+
+
+@respx.mock
+async def test_concurrent_streams_do_not_corrupt_tool_state():
+    """Two concurrent streams share one provider type. Stream A opens a tool
+    call (id seen, args pending), then — before A's next upstream chunk
+    arrives — stream B is acquired. With a shared adapter, B's acquisition
+    reset wipes A's deferred open, so A emits args with no Open/Close at all.
+    Each stream must own its decoding state."""
+    gw = Gateway(Router(_h1_config()), CostEngine())
+
+    async def body_a():
+        # Chunk 1 opens the tool call and leaves its Open deferred (no args
+        # yet). Then a window: B is acquired and would reset the shared state.
+        yield _sse(_tool_chunk(0, cid="call_A", name="alpha"))
+        await asyncio.sleep(0.15)
+        yield _sse(_tool_chunk(0, args='{"a":1}'), _H1_FINISH, "[DONE]")
+
+    async def body_b():
+        yield _sse(_tool_chunk(0, cid="call_B", name="beta"),
+                   _tool_chunk(0, args='{"b":2}'), _H1_FINISH, "[DONE]")
+
+    async def drain(tag: str) -> tuple[str, list]:
+        ctx = RequestContext(surface="chat", ir_req=_gw_req(), group="gpt-x")
+        out = []
+        async for d in gw.stream(ctx):
+            out.append(d)
+        return tag, out
+
+    try:
+        respx.post("https://round20-h1.example/v1/chat/completions").mock(
+            side_effect=[httpx.Response(200, content=body_a()),
+                         httpx.Response(200, content=body_b())])
+        task_a = asyncio.create_task(drain("A"))
+        # Let A connect and consume its first chunk, then start B — while A's
+        # upstream is still mid-flight.
+        await asyncio.sleep(0.05)
+        _, out_b = await drain("B")
+        _, out_a = await task_a
+
+        for tag, out in (("A", out_a), ("B", out_b)):
+            tool_deltas = [d for d in out if isinstance(
+                d, (dl.ToolCallOpen, dl.ToolCallArgsDelta, dl.ToolCallClose))]
+            opens = [d for d in tool_deltas if isinstance(d, dl.ToolCallOpen)]
+            closes = [d for d in tool_deltas if isinstance(d, dl.ToolCallClose)]
+            assert len(opens) == 1, \
+                f"stream {tag} lost its ToolCallOpen: {tool_deltas}"
+            assert len(closes) == 1, \
+                f"stream {tag} lost its ToolCallClose: {tool_deltas}"
+            expected = "call_A" if tag == "A" else "call_B"
+            assert opens[0].id == expected, \
+                f"stream {tag} got {opens[0].id!r}, expected {expected!r} — " \
+                "another stream's tool call leaked in"
+    finally:
+        await gw.aclose()

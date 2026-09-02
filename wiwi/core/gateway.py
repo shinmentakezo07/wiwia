@@ -23,7 +23,7 @@ from wiwi.providers.base import (
     error_from_provider_status,
     status_for_key_pool,
 )
-from wiwi.providers.registry import get_adapter
+from wiwi.providers.registry import fresh_adapter
 from wiwi.router.router import Deployment, Router, execute_with_retries
 from wiwi.streaming import deltas as dl
 from wiwi.streaming.coalesce import DeltaCoalescer
@@ -91,7 +91,12 @@ class Gateway:
 
     async def _call_once(self, dep: Deployment, key: ProviderKeyRef,
                          ctx: RequestContext) -> ir.AssistantTurn:
-        adapter = get_adapter(dep.provider.provider_type)
+        # Private adapter, same rationale as the stream pump below: adapters
+        # stash per-request decode state (e.g. NIM's tool schemas and argument
+        # aliases, set by `set_tool_context` after encode_request) that is read
+        # back after the request await. A concurrent acquisition of the shared
+        # singleton resets that state in between.
+        adapter = fresh_adapter(dep.provider.provider_type)
         # Streaming-only upstream (Cline): the upstream has no non-streaming
         # mode, so use the streaming pump and reassemble the SSE deltas into
         # an AssistantTurn for the non-streaming caller.
@@ -580,7 +585,13 @@ class Gateway:
         """Stream pump.  Sets *ready* once the upstream connection is established
         (so the caller can begin consuming the queue) or puts a WiwiError into
         *err_box* and sets *ready* if it fails before any data flows."""
-        adapter = get_adapter(dep.provider.provider_type)
+        # Private adapter: this pump holds the adapter across every await for
+        # the whole stream, accumulating per-stream decode state (deferred tool
+        # opens, name fragments, open indices). The shared singleton is reset on
+        # each acquisition, so a concurrent request that acquires the same
+        # provider type mid-stream wipes this stream's state — losing
+        # ToolCallOpen/Close. A fresh instance makes ownership exclusive.
+        adapter = fresh_adapter(dep.provider.provider_type)
         ctx.deployment = dep
         ctx.provider_key = key
         real_key = dep.provider.get_key(key.label)  # live pool entry for on_result
