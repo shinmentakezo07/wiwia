@@ -115,6 +115,15 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
     thinking = body.get("thinking")
     if not isinstance(thinking, dict):
         thinking = {}  # malformed (e.g. a string): ignore rather than crash
+    # Structured outputs GA: output_config.format is the native json_schema
+    # carrier (analogous to OpenAI's response_format.json_schema).
+    response_format: ir.ResponseFormat | None = None
+    oc_fmt = ((body.get("output_config") or {}).get("format")
+              if isinstance(body.get("output_config"), dict) else None)
+    if isinstance(oc_fmt, dict) and oc_fmt.get("type") == "json_schema":
+        response_format = ir.ResponseFormat(
+            type="json_schema", json_schema=oc_fmt.get("schema"),
+            name=oc_fmt.get("name"), strict=oc_fmt.get("strict"))
     g = ir.GenParams(
         temperature=body.get("temperature"),
         top_p=body.get("top_p"),
@@ -123,6 +132,7 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         thinking_budget=(thinking.get("budget_tokens")
                          if thinking.get("type") == "enabled" else None),
         disable_parallel_tool_use=disable_parallel,
+        response_format=response_format,
     )
     return ir.Request(model=body["model"], messages=messages, tools=tools,
                       tool_choice=tool_choice, gen_params=g,

@@ -170,7 +170,21 @@ class AnthropicAdapter:
             "max_tokens": g.max_tokens or deployment_params.get("max_tokens") or DEFAULT_MAX_TOKENS,
             "messages": msgs,
         }
-        system = _with_response_format_instruction(system, g.response_format)
+        # Structured outputs: json_schema rides natively as output_config.format
+        # (2026 GA shape, no beta header); json_object has no native equivalent
+        # and stays a system-prompt instruction.
+        if g.response_format is not None and g.response_format.type == "json_schema":
+            fmt: dict[str, Any] = {
+                "type": "json_schema",
+                "schema": g.response_format.json_schema or {"type": "object"},
+            }
+            if g.response_format.name is not None:
+                fmt["name"] = g.response_format.name
+            if g.response_format.strict is not None:
+                fmt["strict"] = g.response_format.strict
+            body["output_config"] = {"format": fmt}
+        else:
+            system = _with_response_format_instruction(system, g.response_format)
         if system:
             body["system"] = system
         if g.temperature is not None:

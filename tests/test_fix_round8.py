@@ -436,14 +436,9 @@ def test_anthropic_honours_json_schema():
     gp = ir.GenParams(response_format=ir.ResponseFormat(type="json_schema",
                                                         json_schema=schema))
     body = _anthropic_encode(gp)
-    assert body.get("response_format") is not None or _system_mentions_json(body)
-    # When the adapter injects a system instruction it must include the schema,
-    # otherwise the model has no idea what shape to return.
-    system = body.get("system")
-    if system is not None and not isinstance(system, str):
-        system = " ".join(b.get("text", "") for b in system)
-    if system:
-        assert "json" in system.lower()
+    # json_schema is now native: rides as output_config.format (2026 GA),
+    # no system-prompt injection needed.
+    assert body.get("output_config", {}).get("format", {}).get("schema") == schema
 
 
 def test_anthropic_without_response_format_unchanged():

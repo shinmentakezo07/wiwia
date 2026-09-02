@@ -604,3 +604,104 @@ def test_anthropic_dialect_stream_no_stream_options():
     assert "stream_options" not in body
 
 
+
+
+# -- C3: Anthropic structured outputs GA (native output_config) ----------------
+
+def test_anthropic_json_schema_uses_native_output_config():
+    """json_schema response_format must ride as Anthropic's native
+    output_config.format (2026 GA shape) — NOT as a prompt injection."""
+    req = ir.Request(
+        model="claude",
+        messages=[ir.Message(role="user", parts=[ir.TextPart("hi")])],
+        gen_params=ir.GenParams(response_format=ir.ResponseFormat(
+            type="json_schema",
+            json_schema={"type": "object", "properties": {"a": {"type": "string"}}},
+            name="my_schema", strict=True)),
+    )
+    body = AnthropicAdapter().encode_request(req, "claude-sonnet-4-5", {})
+    assert body["output_config"] == {
+        "format": {
+            "type": "json_schema",
+            "schema": {"type": "object", "properties": {"a": {"type": "string"}}},
+            "name": "my_schema",
+            "strict": True,
+        }
+    }
+    # the schema instruction must NOT be injected into the system prompt
+    sys_val = body.get("system")
+    sys_text = sys_val if isinstance(sys_val, str) else (
+        " ".join(b.get("text", "") for b in sys_val or [])
+        if isinstance(sys_val, list) else "")
+    assert "JSON Schema" not in sys_text and "json_schema" not in sys_text
+
+
+def test_anthropic_json_object_still_prompt_injected():
+    """json_object has no native Anthropic equivalent; instruction injection
+    remains the fallback."""
+    req = ir.Request(
+        model="claude",
+        messages=[ir.Message(role="user", parts=[ir.TextPart("hi")])],
+        gen_params=ir.GenParams(response_format=ir.ResponseFormat(
+            type="json_object")),
+    )
+    body = AnthropicAdapter().encode_request(req, "claude-sonnet-4-5", {})
+    assert "output_config" not in body
+    sys_val = body.get("system")
+    sys_text = sys_val if isinstance(sys_val, str) else (
+        " ".join(b.get("text", "") for b in sys_val or [])
+        if isinstance(sys_val, list) else "")
+    assert "JSON object" in sys_text
+
+
+def test_anthropic_decode_output_config_to_response_format():
+    """Anthropic-inbound output_config must decode into IR response_format so
+    it routes natively when headed to an OpenAI upstream."""
+    req = am.decode_request({
+        "model": "claude-sonnet-4-5",
+        "max_tokens": 100,
+        "messages": [{"role": "user", "content": "hi"}],
+        "output_config": {"format": {
+            "type": "json_schema",
+            "schema": {"type": "object", "properties": {"a": {"type": "string"}}},
+            "name": "my_schema",
+            "strict": True}},
+    })
+    rf = req.gen_params.response_format
+    assert rf is not None and rf.type == "json_schema"
+    assert rf.json_schema == {"type": "object",
+                              "properties": {"a": {"type": "string"}}}
+    assert rf.name == "my_schema"
+    assert rf.strict is True
+
+
+def test_anthropic_output_config_roundtrip():
+    """Anthropic dialect in -> IR -> Anthropic adapter out: output_config must
+    survive a same-dialect round trip (passthrough fidelity)."""
+    req = am.decode_request({
+        "model": "claude-sonnet-4-5",
+        "max_tokens": 100,
+        "messages": [{"role": "user", "content": "hi"}],
+        "output_config": {"format": {
+            "type": "json_schema",
+            "schema": {"type": "object"},
+            "name": "s", "strict": True}},
+    })
+    body = AnthropicAdapter().encode_request(req, "claude-sonnet-4-5", {})
+    assert body["output_config"]["format"]["name"] == "s"
+    assert body["output_config"]["format"]["strict"] is True
+
+
+def test_openai_json_schema_to_anthropic_native():
+    """OpenAI dialect response_format.json_schema -> Anthropic upstream:
+    becomes native output_config, not an injected instruction."""
+    req = oc.decode_request({
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "hi"}],
+        "response_format": {"type": "json_schema",
+                            "json_schema": {"name": "out",
+                                            "schema": {"type": "object"}}},
+    })
+    body = AnthropicAdapter().encode_request(req, "claude-sonnet-4-5", {})
+    assert body["output_config"]["format"]["type"] == "json_schema"
+    assert body["output_config"]["format"]["schema"] == {"type": "object"}
