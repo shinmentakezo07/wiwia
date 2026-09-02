@@ -13,6 +13,7 @@ Regression targets (see the SSE/streaming audit and the round-20 fix plan):
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import httpx
@@ -34,6 +35,14 @@ from wiwi.core.context import RequestContext
 from wiwi.core.gateway import Gateway
 from wiwi.cost.pricing import CostEngine
 from wiwi.ir import types as ir
+from wiwi.providers.nim_adapter import NimAdapter
+from wiwi.providers.nim_native_tools import (
+    _NAMESPACE,
+    _TOOL_BLOCK_END,
+    _TOOL_BLOCK_START,
+    NativeToolCall,
+    native_calls_to_deltas,
+)
 from wiwi.providers.openai_adapter import OpenAIAdapter
 from wiwi.router.router import Router
 from wiwi.server.app import _inject_id, create_app
@@ -616,3 +625,91 @@ def test_openai_adapter_normal_id_then_args_still_works():
     all_deltas = d1 + d2
     kinds = [type(d).__name__ for d in all_deltas]
     assert kinds == ["ToolCallOpen", "ToolCallArgsDelta"], kinds
+
+
+# ---------------------------------------------------------------------------
+# Fix M7: NIM native tool calls must emit ToolCallClose
+# ---------------------------------------------------------------------------
+
+def _nim_block(*invokes: str) -> str:
+    """Wrap native MiniMax ``<invoke>`` markup in a tool block."""
+    body = "".join(
+        f'{_NAMESPACE}<invoke name="{n}">{_NAMESPACE}<{a}>{v}'
+        f'{_NAMESPACE}</{a}>{_NAMESPACE}</invoke>'
+        for n, a, v in invokes)
+    return _TOOL_BLOCK_START + body + _TOOL_BLOCK_END
+
+
+def _nim_adapter(tools: dict) -> NimAdapter:
+    ad = NimAdapter()
+    ad.set_tool_context(tools)
+    return ad
+
+
+def _nim_tool_body(*names: str) -> dict:
+    return {"tools": [{"type": "function", "function": {
+        "name": n,
+        "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+    }} for n in names]}
+
+
+def test_nim_native_calls_emit_toolcallclose():
+    """``native_calls_to_deltas`` documents Open + ArgsDelta + Close but never
+    emitted the Close, so a native tool call stayed open for the rest of the
+    stream — the contract requires every Open be matched by a Close."""
+    ad = _nim_adapter(_nim_tool_body("get_weather"))
+    deltas = ad.decode_stream_event(
+        "", json.dumps({"choices": [{"delta": {"content": _nim_block(
+            ("get_weather", "q", "London"))}}]}))
+    kinds = [type(d).__name__ for d in deltas]
+    assert kinds == ["ToolCallOpen", "ToolCallArgsDelta", "ToolCallClose"], \
+        f"native tool call left open (no ToolCallClose): {kinds}"
+    assert deltas[-1].index == deltas[0].index
+    # The helper is directly reachable too, and must behave the same way.
+    direct = native_calls_to_deltas(
+        (NativeToolCall(index=0, name="t", arguments={"q": "x"}),), set(), {})
+    assert [type(d).__name__ for d in direct] == [
+        "ToolCallOpen", "ToolCallArgsDelta", "ToolCallClose"]
+
+
+def test_nim_native_calls_close_every_index():
+    """Multiple native calls in one block: one Close per Open, per index."""
+    ad = _nim_adapter(_nim_tool_body("f", "g"))
+    deltas = ad.decode_stream_event(
+        "", json.dumps({"choices": [{"delta": {"content": _nim_block(
+            ("f", "q", "a"), ("g", "q", "b"))}}]}))
+    opens = [d for d in deltas if isinstance(d, dl.ToolCallOpen)]
+    closes = [d for d in deltas if isinstance(d, dl.ToolCallClose)]
+    assert len(opens) == 2, deltas
+    assert sorted(c.index for c in closes) == sorted(o.index for o in opens)
+    assert len(closes) == len(opens)
+
+
+def test_nim_native_calls_closed_before_stream_end():
+    """A stream that ends on ``[DONE]`` without ``finish_reason`` must not leave
+    a native tool call open: the Close has to land before ``StreamEnd``."""
+    ad = _nim_adapter(_nim_tool_body("get_weather"))
+    out = ad.decode_stream_event(
+        "", json.dumps({"choices": [{"delta": {"content": _nim_block(
+            ("get_weather", "q", "London"))}}]}))
+    out += ad.decode_stream_event("", "[DONE]")
+    kinds = [type(d).__name__ for d in out]
+    assert kinds == ["ToolCallOpen", "ToolCallArgsDelta", "ToolCallClose",
+                     "StreamEnd"], kinds
+    # Nothing may follow the terminal.
+    assert isinstance(out[-1], dl.StreamEnd)
+
+
+def test_nim_native_calls_closed_exactly_once_with_finish_reason():
+    """The ``finish_reason`` path already closed still-open indices; the native
+    call must therefore be closed exactly once, not twice."""
+    ad = _nim_adapter(_nim_tool_body("get_weather"))
+    out = ad.decode_stream_event(
+        "", json.dumps({"choices": [{"delta": {"content": _nim_block(
+            ("get_weather", "q", "London"))}}]}))
+    out += ad.decode_stream_event(
+        "", json.dumps({"choices": [{"delta": {}, "finish_reason": "tool_calls"}],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1}}))
+    kinds = [type(d).__name__ for d in out]
+    assert kinds == ["ToolCallOpen", "ToolCallArgsDelta", "ToolCallClose",
+                     "UsageFinal", "Finish"], kinds

@@ -423,7 +423,10 @@ def native_calls_to_deltas(
     """Convert parsed native tool calls into IRStreamDelta tool-call deltas.
 
     Emits ToolCallOpen + ToolCallArgsDelta + ToolCallClose for each call,
-    mirroring how the OpenAI adapter emits structured tool_calls.
+    mirroring how the OpenAI adapter emits structured tool_calls. The call is
+    closed immediately: a native block arrives whole, so there is nothing to
+    wait for, and leaving it open would strand it — a stream that hits
+    ``[DONE]`` with no ``finish_reason`` never runs the close-all sweep.
     """
     out: list[dl.IRStreamDelta] = []
     for call in calls:
@@ -431,12 +434,15 @@ def native_calls_to_deltas(
         call_id = f"call_nim_{uuid.uuid4().hex}"
         if idx in open_indices:
             out.append(dl.ToolCallClose(index=idx))
-        open_indices.add(idx)
         tool_names[idx] = call.name
         out.append(dl.ToolCallOpen(index=idx, id=call_id, name=call.name))
         args_json = json.dumps(call.arguments, ensure_ascii=False,
                                separators=(",", ":"))
         out.append(dl.ToolCallArgsDelta(index=idx, args_fragment=args_json))
+        # Close it now and drop it from the open set, so the finish_reason
+        # sweep does not close the same call a second time.
+        out.append(dl.ToolCallClose(index=idx))
+        open_indices.discard(idx)
     return out
 
 
