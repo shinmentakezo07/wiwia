@@ -1363,7 +1363,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
     async def admin_stream(request: Request):
         if not is_admin(request):
             return _err(401, "authentication_error", "master key required", request)
-        last_id = int(request.headers.get("last-event-id", "0") or 0)
+        # SSE reconnect ids are client-supplied: a malformed one must fall
+        # back to 0 (full replay), not 500 the endpoint before a byte is sent.
+        try:
+            last_id = int(request.headers.get("last-event-id", "0") or 0)
+        except ValueError:
+            last_id = 0
 
         async def gen():
             q = await state.logs.sse.subscribe("request")

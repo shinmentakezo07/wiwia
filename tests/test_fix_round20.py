@@ -13,6 +13,7 @@ Regression targets (see the SSE/streaming audit and the round-20 fix plan):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from typing import Any
 
@@ -911,3 +912,76 @@ async def test_stream_pump_undeclared_tool_not_validated():
         assert "tool_args_violations" not in ctx.metadata
     finally:
         await gw.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Fix B15: a non-numeric last-event-id header must not 500 the admin stream
+# ---------------------------------------------------------------------------
+
+class _HeadReceived(Exception):
+    """Sentinel: stop the ASGI app once a response head has been captured."""
+
+
+async def _admin_stream_head(last_event_id: str) -> tuple[int, str]:
+    """Drive /admin/stream at the ASGI layer and capture the response head.
+
+    httpx's ASGITransport only returns once the whole body has been sent, and
+    this SSE body never ends (keepalive pings) — so talk to the app directly
+    and stop at the first ``http.response.start`` message. A pre-fix endpoint
+    that raises before sending anything yields a 500 head here; post-fix the
+    head is 200 text/event-stream.
+    """
+    app = create_app(_app_config())
+    headers = [(b"authorization", b"Bearer sk-wiwi-master-test"),
+               (b"last-event-id", last_event_id.encode())]
+    scope = {"type": "http", "asgi": {"version": "3.0"},
+             "http_version": "1.1", "method": "GET", "scheme": "http",
+             "path": "/admin/stream", "raw_path": b"/admin/stream",
+             "query_string": b"", "root_path": "", "headers": headers,
+             "client": ("testclient", 0), "server": ("testserver", 80)}
+    head: dict = {}
+    # A GET to an SSE endpoint has no body; blocking receive (never resolving)
+    # is what the framework expects once the request "body" is done — an
+    # instantly-returning http.request here wedges the middleware body guard.
+    _never = asyncio.Event()
+
+    async def receive():
+        await _never.wait()
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            if "status" not in head:
+                head["status"] = message["status"]
+                head["headers"] = {k.decode().lower(): v.decode()
+                                   for k, v in message.get("headers", [])}
+            raise _HeadReceived
+
+    async with LifespanManager(app):
+        task = asyncio.create_task(app(scope, receive, send))
+        with contextlib.suppress(TimeoutError, _HeadReceived, ValueError):
+            await asyncio.wait_for(asyncio.shield(task), timeout=10)
+        task.cancel()
+        # CancelledError (and whatever the mid-stream teardown raises) is the
+        # expected outcome of killing an SSE generator: nothing to record.
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+    return head.get("status", 0), head.get("headers", {}).get("content-type", "")
+
+
+async def test_admin_stream_bad_last_event_id_is_tolerated():
+    """``int(last-event-id)`` on garbage input used to raise ValueError and 500
+    the admin SSE endpoint before a single byte was written. Malformed
+    reconnect ids must fall back to 0 (full replay), per SSE reconnect
+    semantics."""
+    status, ctype = await _admin_stream_head("not-a-number; DROP TABLE logs")
+    assert status == 200, \
+        f"garbage last-event-id broke the admin stream: status {status}"
+    assert ctype.startswith("text/event-stream"), ctype
+
+
+async def test_admin_stream_numeric_last_event_id_still_works():
+    """Well-formed integer ids keep working."""
+    for last_id in ("0", "42"):
+        status, ctype = await _admin_stream_head(last_id)
+        assert status == 200, (last_id, status)
+        assert ctype.startswith("text/event-stream"), (last_id, ctype)
