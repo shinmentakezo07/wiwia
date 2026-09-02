@@ -785,8 +785,8 @@ def _inject_id(chunk: bytes, event_id: int) -> bytes:
     """
     id_line = f"id: {event_id}\n".encode()
     frames = chunk.split(b"\n\n")
-    tagged = [id_line + f for f in frames if f]
-    return b"\n\n".join(tagged)
+    tagged = [id_line + f + b"\n\n" for f in frames if f]
+    return b"".join(tagged)
 
 
 def create_app(config: WiwiConfig) -> FastAPI:

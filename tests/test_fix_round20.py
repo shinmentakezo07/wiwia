@@ -29,6 +29,7 @@ from wiwi.core.gateway import Gateway
 from wiwi.cost.pricing import CostEngine
 from wiwi.ir import types as ir
 from wiwi.router.router import Router
+from wiwi.server.app import _inject_id
 from wiwi.streaming import deltas as dl
 from wiwi.streaming.sse import LineSSEParser
 
@@ -67,6 +68,38 @@ def test_sse_parser_flush_joins_multiline_data():
     p.feed_line("data: b")
     evt = p.flush()
     assert evt is not None and evt.data == "a\nb"
+
+
+# ---------------------------------------------------------------------------
+# _inject_id must preserve SSE frame terminators
+# ---------------------------------------------------------------------------
+
+def test_inject_id_preserves_single_frame_terminator():
+    """A single SSE frame ending in b'\\n\\n' must keep its terminator so the
+    next yielded chunk does not fuse onto it (SSE reconnect framing)."""
+    out = _inject_id(b"data: one\n\n", 1)
+    assert out == b"id: 1\ndata: one\n\n"
+    assert out.endswith(b"\n\n")
+
+
+def test_inject_id_preserves_terminator_across_two_chunks():
+    """Two consecutively-yielded chunks each keep their own '\\n\\n' terminator,
+    so the client's SSE parser sees two distinct frames (id:1 then id:2)."""
+    chunk1 = _inject_id(b"data: one\n\n", 1)
+    chunk2 = _inject_id(b"data: two\n\n", 2)
+    concat = chunk1 + chunk2
+    assert concat.endswith(b"\n\n")
+    frames = concat.split(b"\n\n")
+    assert frames == [b"id: 1\ndata: one", b"id: 2\ndata: two", b""]
+
+
+def test_inject_id_tags_every_frame_in_multi_frame_chunk():
+    """A chunk already containing two frames (blank-line-joined) tags each with
+    the same id line, keeping each frame terminated."""
+    chunk = b"data: one\n\ndata: two\n\n"
+    out = _inject_id(chunk, 7)
+    assert out.count(b"\n\n") == 2
+    assert out.count(b"id: 7\n") == 2
 
 
 # ---------------------------------------------------------------------------
