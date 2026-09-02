@@ -909,3 +909,242 @@ def test_anthropic_thinking_enabled_still_budgeted():
     assert req.gen_params.thinking_budget == 4000
     body = AnthropicAdapter().encode_request(req, "claude-opus-4-6", {})
     assert body["thinking"] == {"type": "enabled", "budget_tokens": 4000}
+
+
+# == C5: multimodal wiring ====================================================
+
+def test_anthropic_document_base64_decoded_to_ir():
+    """Anthropic document blocks (base64 PDF) decode into DocumentPart
+    instead of being silently dropped."""
+    req = am.decode_request({
+        "model": "claude-sonnet-4-5", "max_tokens": 64,
+        "messages": [{"role": "user", "content": [
+            {"type": "document",
+             "source": {"type": "base64", "media_type": "application/pdf",
+                        "data": "JVBERi0xLjQ="}},
+            {"type": "text", "text": "summarize this"},
+        ]}],
+    })
+    parts = req.messages[0].parts
+    doc = parts[0]
+    assert isinstance(doc, ir.DocumentPart)
+    assert doc.b64 == "JVBERi0xLjQ="
+    assert doc.mime == "application/pdf"
+    assert isinstance(parts[1], ir.TextPart)
+
+
+def test_anthropic_document_url_decoded_to_ir():
+    req = am.decode_request({
+        "model": "claude-sonnet-4-5", "max_tokens": 64,
+        "messages": [{"role": "user", "content": [
+            {"type": "document", "title": "Q3 report",
+             "source": {"type": "url", "url": "https://example.com/r.pdf"}},
+        ]}],
+    })
+    doc = req.messages[0].parts[0]
+    assert isinstance(doc, ir.DocumentPart)
+    assert doc.url == "https://example.com/r.pdf"
+    assert doc.name == "Q3 report"
+
+
+def test_anthropic_document_roundtrip_through_adapter():
+    req = am.decode_request({
+        "model": "claude-sonnet-4-5", "max_tokens": 64,
+        "messages": [{"role": "user", "content": [
+            {"type": "document",
+             "source": {"type": "base64", "media_type": "application/pdf",
+                        "data": "JVBERi0xLjQ="}},
+        ]}],
+    })
+    body = AnthropicAdapter().encode_request(req, "claude-sonnet-4-5", {})
+    blocks = body["messages"][0]["content"]
+    assert blocks[0] == {"type": "document",
+                         "source": {"type": "base64",
+                                    "media_type": "application/pdf",
+                                    "data": "JVBERi0xLjQ="}}
+
+
+def test_anthropic_document_url_roundtrip():
+    req = am.decode_request({
+        "model": "claude-sonnet-4-5", "max_tokens": 64,
+        "messages": [{"role": "user", "content": [
+            {"type": "document", "title": "spec",
+             "source": {"type": "url", "url": "https://example.com/s.pdf"}},
+        ]}],
+    })
+    body = AnthropicAdapter().encode_request(req, "claude-sonnet-4-5", {})
+    block = body["messages"][0]["content"][0]
+    assert block["type"] == "document"
+    assert block["source"]["type"] == "url"
+    assert block["source"]["url"] == "https://example.com/s.pdf"
+    assert block["title"] == "spec"
+
+
+def test_document_part_dropped_safely_by_openai_adapter():
+    """OpenAI has no document-input equivalent; DocumentPart must not crash
+    the adapter (silently dropped today is acceptable)."""
+    req = ir.Request(
+        model="gpt-4o",
+        messages=[ir.Message(role="user", parts=[
+            ir.DocumentPart(b64="JVBERi0xLjQ="),
+            ir.TextPart("summarize"),
+        ])],
+    )
+    body = OpenAIAdapter().encode_request(req, "gpt-4o", {})
+    assert body["messages"][0]["content"] == "summarize"
+
+
+def test_openai_input_audio_decoded_to_ir():
+    """OpenAI input_audio content parts decode into AudioPart."""
+    req = oc.decode_request({
+        "model": "gpt-4o-audio-preview",
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "transcribe this"},
+            {"type": "input_audio",
+             "input_audio": {"data": "AQIDBA==", "format": "wav"}},
+        ]}],
+    })
+    parts = req.messages[0].parts
+    assert isinstance(parts[0], ir.TextPart)
+    audio = parts[1]
+    assert isinstance(audio, ir.AudioPart)
+    assert audio.b64 == "AQIDBA=="
+    assert audio.mime == "audio/wav"
+
+
+def test_openai_input_audio_no_empty_text_fallback():
+    """An audio-only message must not fall into the empty-TextPart fallback
+    (previously an all-audio message became TextPart(""))."""
+    req = oc.decode_request({
+        "model": "gpt-4o-audio-preview",
+        "messages": [{"role": "user", "content": [
+            {"type": "input_audio",
+             "input_audio": {"data": "AQIDBA==", "format": "mp3"}},
+        ]}],
+    })
+    assert len(req.messages[0].parts) == 1
+    assert isinstance(req.messages[0].parts[0], ir.AudioPart)
+
+
+def test_anthropic_image_file_source_decoded():
+    """Anthropic image source.type=file carries a file_id so
+    Anthropic->Anthropic passthrough works."""
+    req = am.decode_request({
+        "model": "claude-sonnet-4-5", "max_tokens": 64,
+        "messages": [{"role": "user", "content": [
+            {"type": "image",
+             "source": {"type": "file", "file_id": "file-abc123"}},
+        ]}],
+    })
+    img = req.messages[0].parts[0]
+    assert isinstance(img, ir.ImagePart)
+    assert img.file_id == "file-abc123"
+
+
+def test_anthropic_image_file_source_roundtrip():
+    req = am.decode_request({
+        "model": "claude-sonnet-4-5", "max_tokens": 64,
+        "messages": [{"role": "user", "content": [
+            {"type": "image",
+             "source": {"type": "file", "file_id": "file-abc123"}},
+        ]}],
+    })
+    body = AnthropicAdapter().encode_request(req, "claude-sonnet-4-5", {})
+    block = body["messages"][0]["content"][0]
+    assert block["source"] == {"type": "file", "file_id": "file-abc123"}
+
+
+def test_anthropic_tool_result_images_collected():
+    """tool_result content lists with image blocks: text joined into content,
+    images collected into ToolResultPart.images."""
+    req = am.decode_request({
+        "model": "claude-sonnet-4-5", "max_tokens": 64,
+        "messages": [{"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "tu_1",
+             "content": [
+                 {"type": "text", "text": "screenshot attached"},
+                 {"type": "image", "source": {"type": "base64",
+                                              "media_type": "image/png",
+                                              "data": "aGk="}},
+             ]},
+        ]}],
+    })
+    tr = req.messages[0].parts[0]
+    assert isinstance(tr, ir.ToolResultPart)
+    assert tr.content == "screenshot attached"
+    assert len(tr.images) == 1
+    assert tr.images[0].b64 == "aGk="
+    assert tr.images[0].mime == "image/png"
+
+
+def test_anthropic_tool_result_images_roundtrip():
+    """ToolResultPart.images re-encode as block-form tool_result content
+    (text + image blocks) on the Anthropic upstream."""
+    req = am.decode_request({
+        "model": "claude-sonnet-4-5", "max_tokens": 64,
+        "messages": [{"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "tu_1",
+             "content": [
+                 {"type": "text", "text": "screenshot attached"},
+                 {"type": "image", "source": {"type": "base64",
+                                              "media_type": "image/png",
+                                              "data": "aGk="}},
+             ]},
+        ]}],
+    })
+    body = AnthropicAdapter().encode_request(req, "claude-sonnet-4-5", {})
+    block = body["messages"][0]["content"][0]
+    assert block["type"] == "tool_result"
+    assert block["tool_use_id"] == "tu_1"
+    assert isinstance(block["content"], list)
+    kinds = [c["type"] for c in block["content"]]
+    assert kinds == ["text", "image"]
+    assert block["content"][0]["text"] == "screenshot attached"
+    assert block["content"][1]["source"]["data"] == "aGk="
+
+
+def test_openai_tool_message_image_content():
+    """OpenAI tool messages with image content parts: text concatenated into
+    ToolResultPart.content, images collected into .images."""
+    req = oc.decode_request({
+        "model": "gpt-4o",
+        "messages": [
+            {"role": "user", "content": "look"},
+            {"role": "tool", "tool_call_id": "call_1",
+             "content": [
+                 {"type": "text", "text": "found a button"},
+                 {"type": "image_url",
+                  "image_url": {"url": "data:image/png;base64,aGk="}},
+             ]},
+        ],
+    })
+    tr = req.messages[1].parts[0]
+    assert isinstance(tr, ir.ToolResultPart)
+    assert tr.tool_use_id == "call_1"
+    assert tr.content == "found a button"
+    assert len(tr.images) == 1
+    assert tr.images[0].b64 == "aGk="
+    assert tr.images[0].mime == "image/png"
+
+
+def test_openai_adapter_emits_multimodal_tool_result():
+    """ToolResultPart with images crosses to OpenAI as content-parts form."""
+    req = oc.decode_request({
+        "model": "gpt-4o",
+        "messages": [
+            {"role": "user", "content": "look"},
+            {"role": "tool", "tool_call_id": "call_1",
+             "content": [
+                 {"type": "text", "text": "found a button"},
+                 {"type": "image_url",
+                  "image_url": {"url": "data:image/png;base64,aGk="}},
+             ]},
+        ],
+    })
+    body = OpenAIAdapter().encode_request(req, "gpt-4o", {})
+    tool_msg = next(m for m in body["messages"] if m.get("role") == "tool")
+    assert isinstance(tool_msg["content"], list)
+    kinds = [c["type"] for c in tool_msg["content"]]
+    assert kinds == ["text", "image_url"]
+    assert tool_msg["content"][0]["text"] == "found a button"
+    assert tool_msg["content"][1]["image_url"]["url"] == "data:image/png;base64,aGk="

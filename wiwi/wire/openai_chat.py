@@ -49,6 +49,11 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                         parts.append(ir.ImagePart(b64=b64, mime=mime))
                     else:
                         parts.append(ir.ImagePart(url=url))
+                elif c.get("type") == "input_audio":
+                    ia = c.get("input_audio") or {}
+                    parts.append(ir.AudioPart(
+                        b64=ia.get("data"),
+                        mime=f"audio/{ia.get('format') or 'wav'}"))
         # Reasoning models (o1/o3, DeepSeek-R1, etc.) emit a separate
         # reasoning_content field on assistant messages. Lift it into a
         # ThinkingPart so the IR carries the thinking context forward —
@@ -86,6 +91,7 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
             # — which all type ToolResultPart.content as str — never receive a
             # list/dict that would be JSON-serialized into the wire body in a
             # way the upstream provider rejects.
+            tool_images: list[ir.ImagePart] = []
             if content is None:
                 tool_content: str = ""
             elif isinstance(content, str):
@@ -97,10 +103,24 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                 pieces = [b.get("text", "") for b in content
                           if isinstance(b, dict) and b.get("type") == "text"]
                 tool_content = "\n".join(pieces) if pieces else orjson.dumps(content).decode()
+                # Multimodal tool results: collect image blocks (base64 data
+                # URLs or remote URLs) so providers with native image support
+                # can re-emit them.
+                for b in content:
+                    if not isinstance(b, dict) or b.get("type") != "image_url":
+                        continue
+                    url = (b.get("image_url") or {}).get("url", "")
+                    if url.startswith("data:"):
+                        header, _, b64 = url.partition(",")
+                        mime = header[5:].split(";")[0] or "image/png"
+                        tool_images.append(ir.ImagePart(b64=b64, mime=mime))
+                    elif url:
+                        tool_images.append(ir.ImagePart(url=url))
             else:
                 tool_content = str(content)
             parts = [ir.ToolResultPart(tool_use_id=m.get("tool_call_id", ""),
-                                       content=tool_content)]
+                                       content=tool_content,
+                                       images=tool_images)]
         if not parts and role != "assistant":
             parts = [ir.TextPart("")]
         messages.append(ir.Message(role=role, parts=parts))  # type: ignore[arg-type]

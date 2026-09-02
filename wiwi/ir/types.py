@@ -28,6 +28,7 @@ class ImagePart:
     b64: str | None = None
     mime: str = "image/png"
     detail: str | None = None
+    file_id: str | None = None  # Anthropic Files API reference (source.type=file)
 
 
 @dataclass
@@ -51,6 +52,10 @@ class ToolResultPart:
     content: str
     is_error: bool = False
     cache_control: CacheControl = None
+    # Multimodal tool results (e.g. screenshots from computer-use tools).
+    # Adapters with native image support re-emit them as block-form content;
+    # others drop them (text-only providers).
+    images: list[ImagePart] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not isinstance(self.tool_use_id, str):
@@ -75,7 +80,8 @@ class DocumentPart:
     b64: str | None = None
     url: str | None = None
     mime: str = "application/pdf"
-    name: str | None = None
+    name: str | None = None  # Anthropic block-level "title"
+    context: str | None = None  # Anthropic block-level "context"
 
 
 Part = (

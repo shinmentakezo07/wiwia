@@ -35,7 +35,17 @@ def _role_parts_to_content(
         if m.role == "tool":
             for p in m.parts:
                 if isinstance(p, ir.ToolResultPart):
-                    content = f"[tool error] {p.content}" if p.is_error else p.content
+                    content: Any = f"[tool error] {p.content}" if p.is_error else p.content
+                    if p.images:
+                        # Multimodal tool result: OpenAI content-parts form.
+                        parts_out: list[dict[str, Any]] = []
+                        if p.content:
+                            parts_out.append({"type": "text", "text": content})
+                        for img in p.images:
+                            url = img.url or f"data:{img.mime};base64,{img.b64}"
+                            parts_out.append({"type": "image_url",
+                                              "image_url": {"url": url}})
+                        content = parts_out
                     out.append({"role": "tool", "tool_call_id": p.tool_use_id,
                                 "content": content})
             continue
@@ -69,7 +79,17 @@ def _role_parts_to_content(
                 # Anthropic convention: tool results arrive as user-role
                 # messages with tool_result content blocks. OpenAI expects
                 # them as role=tool messages, so emit one per result.
-                tool_content = f"[tool error] {p.content}" if p.is_error else p.content
+                tool_content: Any = (f"[tool error] {p.content}"
+                                     if p.is_error else p.content)
+                if p.images:
+                    parts_out = []
+                    if p.content:
+                        parts_out.append({"type": "text", "text": tool_content})
+                    for img in p.images:
+                        url = img.url or f"data:{img.mime};base64,{img.b64}"
+                        parts_out.append({"type": "image_url",
+                                          "image_url": {"url": url}})
+                    tool_content = parts_out
                 out.append({"role": "tool", "tool_call_id": p.tool_use_id,
                             "content": tool_content})
                 emitted_tool_results = True

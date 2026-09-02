@@ -143,9 +143,27 @@ class AnthropicAdapter:
                         b["cache_control"] = p.cache_control
                     blocks.append(b)
                 elif isinstance(p, ir.ImagePart):
-                    src = ({"type": "url", "url": p.url} if p.url
-                           else {"type": "base64", "media_type": p.mime, "data": p.b64})
+                    if p.file_id:
+                        src = {"type": "file", "file_id": p.file_id}
+                    elif p.url:
+                        src = {"type": "url", "url": p.url}
+                    else:
+                        src = {"type": "base64", "media_type": p.mime, "data": p.b64}
                     blocks.append({"type": "image", "source": src})
+                elif isinstance(p, ir.DocumentPart):
+                    doc: dict[str, Any]
+                    if p.url:
+                        doc = {"type": "document",
+                               "source": {"type": "url", "url": p.url}}
+                    else:
+                        doc = {"type": "document",
+                               "source": {"type": "base64", "media_type": p.mime,
+                                          "data": p.b64}}
+                    if p.name:
+                        doc["title"] = p.name
+                    if p.context:
+                        doc["context"] = p.context
+                    blocks.append(doc)
                 elif isinstance(p, ir.ToolUsePart):
                     blocks.append({"type": "tool_use", "id": p.id, "name": p.name,
                                    "input": p.args})
@@ -157,6 +175,22 @@ class AnthropicAdapter:
                         tr["is_error"] = True
                     if p.cache_control:
                         tr["cache_control"] = p.cache_control
+                    if p.images:
+                        # Multimodal tool result: block-form content
+                        # (text + image blocks) instead of a bare string.
+                        content_blocks: list[dict[str, Any]] = []
+                        if p.content:
+                            content_blocks.append({"type": "text", "text": p.content})
+                        for img in p.images:
+                            if img.file_id:
+                                src = {"type": "file", "file_id": img.file_id}
+                            elif img.url:
+                                src = {"type": "url", "url": img.url}
+                            else:
+                                src = {"type": "base64", "media_type": img.mime,
+                                       "data": img.b64}
+                            content_blocks.append({"type": "image", "source": src})
+                        tr["content"] = content_blocks
                     blocks.append(tr)
                 elif isinstance(p, ir.ThinkingPart):
                     tb: dict[str, Any] = {"type": "thinking", "thinking": p.text}

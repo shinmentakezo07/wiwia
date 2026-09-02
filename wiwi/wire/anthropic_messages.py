@@ -47,6 +47,19 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                                                   mime=src.get("media_type", "image/png")))
                     elif src.get("type") == "url":
                         parts.append(ir.ImagePart(url=src.get("url")))
+                    elif src.get("type") == "file":
+                        parts.append(ir.ImagePart(file_id=src.get("file_id")))
+                elif btype == "document":
+                    src = b.get("source") or {}
+                    if src.get("type") == "base64":
+                        parts.append(ir.DocumentPart(
+                            b64=src.get("data"),
+                            mime=src.get("media_type", "application/pdf"),
+                            name=b.get("title"), context=b.get("context")))
+                    elif src.get("type") == "url":
+                        parts.append(ir.DocumentPart(
+                            url=src.get("url"), name=b.get("title"),
+                            context=b.get("context")))
                 elif btype == "tool_use":
                     parts.append(ir.ToolUsePart(id=b.get("id", ""), name=b.get("name", ""),
                                                 args=b.get("input") or {}))
@@ -61,6 +74,7 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                     # family (web_search_tool_result, code_execution_tool_result,
                     # mcp_tool_result, computer_tool_result, browser_tool_result).
                     c = b.get("content")
+                    images: list[ir.ImagePart] = []
                     if isinstance(c, str):
                         text = c
                     elif isinstance(c, list):
@@ -74,6 +88,21 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                             others = [b for b in c if isinstance(b, dict)
                                       and b.get("type") not in ("image", "input_image")]
                             text = json.dumps(others) if others else ""
+                        for blk in c:
+                            # Multimodal tool results: collect image blocks
+                            # (base64/url/file sources) so providers with
+                            # native image support can re-emit them.
+                            if not isinstance(blk, dict) or blk.get("type") != "image":
+                                continue
+                            src = blk.get("source") or {}
+                            if src.get("type") == "base64":
+                                images.append(ir.ImagePart(
+                                    b64=src.get("data"),
+                                    mime=src.get("media_type", "image/png")))
+                            elif src.get("type") == "url":
+                                images.append(ir.ImagePart(url=src.get("url")))
+                            elif src.get("type") == "file":
+                                images.append(ir.ImagePart(file_id=src.get("file_id")))
                     elif c is None:
                         text = ""
                     else:
@@ -81,7 +110,8 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                     parts.append(ir.ToolResultPart(tool_use_id=b.get("tool_use_id", ""),
                                                    content=text,
                                                    is_error=bool(b.get("is_error")),
-                                                   cache_control=b.get("cache_control")))
+                                                   cache_control=b.get("cache_control"),
+                                                   images=images))
                 elif btype == "thinking":
                     parts.append(ir.ThinkingPart(b.get("thinking", ""),
                                                  b.get("signature")))
