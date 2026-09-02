@@ -125,7 +125,8 @@ class Part:            # tagged union
     # tool_result: tool_use_id, content · thinking: text, signature
 
 Message(role, parts)
-Tool(name, description, parameters_json_schema, strict: bool | None)
+Tool(name, description, parameters_json_schema, strict: bool | None,
+     builtin: str | None, builtin_config: dict | None)   # builtin = canonical hosted-tool name
 ToolChoice = Auto | None_ | Required | Named(name)
 GenParams(temperature, top_p, max_tokens, stop, seed, n: int = 1,
           response_format: None | JsonObjectMode | JsonSchema(schema),
@@ -139,7 +140,7 @@ Usage(prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens)
 StreamDelta  # text delta | tool-call open/args delta | thinking delta | usage-final
 ```
 
-Field policies: `n > 1` is rejected on backends without native support (open question #5); `response_format=json_schema` maps to provider-native structured outputs where they exist, else degrades per `drop_params`; `cache_control` on text parts round-trips verbatim to Anthropic and is dropped (with proxy-log note) elsewhere.
+Field policies: `n > 1` is rejected on backends without native support (open question #5); `response_format=json_schema` maps to provider-native structured outputs where they exist, else degrades per `drop_params`; `cache_control` on text parts round-trips verbatim to Anthropic and is dropped (with proxy-log note) elsewhere. A builtin `Tool` (`builtin="web_search"`, config in `builtin_config`) renders as the host's native hosted-tool shape — Anthropic `web_search_20250305`, Responses `web_search`, OpenRouter `openrouter:web_search`, Gemini `google_search` — and is dropped with a warning on providers without hosted search (Chat Completions has none); unknown builtins ride along builtin-shaped and drop the same way. Canonical↔surface name mapping lives in `ir/builtin_tools.py`, the neutral hub both `wire/` and `providers/` import.
 
 **Header forwarding**: an explicit allowlist of client headers is forwarded to upstreams — `anthropic-version`, `anthropic-beta` (comma-list merged with deployment defaults), `openai-organization`, `openai-project`, `openai-beta` — everything else is stripped. Without this, beta features (interleaved thinking, prompt caching) silently break. Response header `x-wiwi-request-id` is echoed on every response for log correlation.
 
@@ -310,7 +311,7 @@ The inbound surface determines the outbound event dialect; each wire encoder kee
 
 Upstream provider deltas land as IR deltas; encoders translate them frame-by-frame with no whole-response buffering. Heartbeat comments keep intermediaries alive on long gaps. Client disconnect cancels the upstream call; partial usage is estimated and logged. Every stream produces one complete `request_logs` row after the final frame.
 
-Stateless Responses mode: MVP treats each `/v1/responses` call as self-contained (Codex sends full history with `store:false`). Server-side `previous_response_id` session storage and hosted-tool execution are post-MVP.
+Stateless Responses mode: MVP treats each `/v1/responses` call as self-contained (Codex sends full history with `store:false`). Server-side `previous_response_id` session storage remains post-MVP. Hosted-tool *translation* (the `web_search` builtin across surfaces, see G21) shipped 2026-09-02; hosted-tool *execution extras* (citations, response traces, allowlist) are post-MVP (G22).
 
 ---
 
@@ -369,7 +370,8 @@ wiwi/
 │   ├── main.py                 # CLI entrypoint: wiwi --config wiwi.yaml
 │   ├── config.py               # YAML load, env interpolation, validation
 │   ├── ir/
-│   │   └── types.py            # canonical IR: parts, messages, tools, usage, stop
+│   │   ├── types.py            # canonical IR: parts, messages, tools, usage, stop
+│   │   └── builtin_tools.py    # hosted-tool registry: canonical ↔ per-surface type names
 │   ├── wire/                   # inbound dialect codecs (decode→IR, encode←IR)
 │   │   ├── openai_chat/        # /v1/chat/completions, /v1/completions, /v1/embeddings
 │   │   ├── openai_responses/   # /v1/responses (Codex, Agents SDK)
@@ -430,6 +432,6 @@ wiwi/
 | Teams/users hierarchy | P6 |
 | Admin web UI | P6 |
 | Response caching (exact match) | P6 |
-| Stateful Responses (previous_response_id store, hosted tools) | post-MVP |
+| Stateful Responses (previous_response_id store), hosted-tool execution extras (G22) | post-MVP |
 | Guardrails/hooks, pass-through endpoints, semantic cache, SSO | post-MVP |
-| WebSocket Realtime proxy (G9), audio/images/moderations passthrough (G10), hedging (G11), load shedding (G12), session affinity (G13), cost-cap pre-check (G14), files/batches (G15), raw pass-through (G16), mock provider (G17), replay (G18), priority lanes (G19), webhooks (G20) | post-MVP — full register in `MVP.md` §3.1 |
+| WebSocket Realtime proxy (G9), audio/images/moderations passthrough (G10), hedging (G11), load shedding (G12), session affinity (G13), cost-cap pre-check (G14), files/batches (G15), raw pass-through (G16), mock provider (G17), replay (G18), priority lanes (G19), webhooks (G20) | post-MVP — full register in `MVP.md` §3.1 (G21 hosted-tool translation shipped) |

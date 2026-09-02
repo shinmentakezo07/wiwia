@@ -239,3 +239,122 @@ def test_chat_stream_encoder_produces_valid_sse(content_deltas):
     # No malformed JSON (each frame should be valid SSE: data: {...}\n\n)
     for frame in frames:
         assert frame.endswith(b"\n\n"), f"Frame not SSE-terminated: {frame[:50]}"
+
+
+# -- Property 7: builtin tool translation --------------------------------------
+
+builtin_config_strategy = st.dictionaries(
+    keys=st.sampled_from(["max_uses", "allowed_domains", "blocked_domains",
+                          "user_location", "search_context_size"]),
+    values=st.one_of(st.integers(min_value=1, max_value=20),
+                     st.lists(st.text(min_size=1, max_size=50), max_size=3),
+                     st.sampled_from(["low", "medium", "high"]),
+                     st.dictionaries(
+                         keys=st.sampled_from(["type", "city", "country"]),
+                         values=st.text(min_size=1, max_size=30), max_size=3)),
+    max_size=3,
+)
+
+builtin_tool_strategy = st.builds(
+    ir.Tool,
+    name=st.just("web_search"),
+    description=st.just(""),
+    parameters_json_schema=st.just({"type": "object"}),
+    builtin=st.just("web_search"),
+    builtin_config=st.one_of(st.none(), builtin_config_strategy),
+)
+
+
+@given(t=builtin_tool_strategy)
+@settings(max_examples=50)
+def test_builtin_tool_decode_encode_preserves_builtin(t: ir.Tool):
+    """A web_search builtin decoded from any surface re-encodes with the
+    canonical builtin flag intact — never as a function tool."""
+    req = ir.Request(model="m", messages=[ir.Message(role="user",
+                                                     parts=[ir.TextPart("hi")])],
+                     tools=[t])
+    # Anthropic surface round-trip: IR -> adapter -> Anthropic wire decode -> IR
+    from wiwi.providers.anthropic_adapter import AnthropicAdapter
+    body = AnthropicAdapter().encode_request(req, "claude-x", {})
+    if not body.get("tools"):
+        # Config values the Anthropic render drops (e.g. search_context_size)
+        # can leave an empty tools list only when the builtin was the sole
+        # tool and render failed — assert it never is.
+        assert t.builtin is None, "builtin dropped from Anthropic encode"
+        return
+    decoded = am.decode_request({
+        "model": "claude-x", "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": body["tools"],
+    })
+    assert len(decoded.tools) == 1
+    assert decoded.tools[0].builtin == "web_search"
+    # The config subset the surface understands survives the round-trip.
+    cfg = t.builtin_config or {}
+    for k in ("max_uses", "allowed_domains", "blocked_domains", "user_location"):
+        if k in cfg:
+            assert decoded.tools[0].builtin_config is not None
+            assert decoded.tools[0].builtin_config.get(k) == cfg[k]
+
+
+@given(t=builtin_tool_strategy)
+@settings(max_examples=50)
+def test_builtin_tool_never_renders_as_function(t: ir.Tool):
+    """A builtin tool in the IR never emits a Chat `type: "function"` entry
+    on any provider — hostable surfaces render their native shape, the rest
+    drop it with a warning."""
+    req = ir.Request(model="m", messages=[ir.Message(role="user",
+                                                     parts=[ir.TextPart("hi")])],
+                     tools=[t])
+    from wiwi.providers.anthropic_adapter import AnthropicAdapter
+    from wiwi.providers.gemini_adapter import GeminiAdapter
+    from wiwi.providers.openai_adapter import OpenAIAdapter
+    from wiwi.providers.openrouter_adapter import OpenRouterAdapter
+
+    a_body = AnthropicAdapter().encode_request(req, "claude-x", {})
+    for entry in a_body.get("tools") or []:
+        assert entry.get("type") != "function", f"Anthropic: {entry}"
+
+    g_body = GeminiAdapter().encode_request(req, "gemini-x", {})
+    for entry in g_body.get("tools") or []:
+        assert "functionDeclarations" not in entry, f"Gemini: {entry}"
+
+    o_body = OpenAIAdapter().encode_request(req, "gpt-x", {"drop_params": True})
+    assert "tools" not in o_body, f"OpenAI chat: {o_body.get('tools')}"
+
+    or_body = OpenRouterAdapter().encode_request(req, "openai/gpt-x", {})
+    for entry in or_body.get("tools") or []:
+        assert entry.get("type") != "function", f"OpenRouter: {entry}"
+        assert entry.get("type") == "openrouter:web_search"
+
+
+@given(t=builtin_tool_strategy)
+@settings(max_examples=50)
+def test_builtin_tool_responses_wire_roundtrip(t: ir.Tool):
+    """The Responses surface decodes web_search (and its aliases) back to the
+    same builtin IR tool."""
+    from wiwi.wire import openai_responses as orp
+
+    tool_def: dict = {"type": "web_search"}
+    cfg = t.builtin_config or {}
+    if "search_context_size" in cfg:
+        tool_def["search_context_size"] = cfg["search_context_size"]
+    if "user_location" in cfg:
+        tool_def["user_location"] = cfg["user_location"]
+    domains = []
+    if "allowed_domains" in cfg:
+        domains.append(("allowed_domains", cfg["allowed_domains"]))
+    if "blocked_domains" in cfg:
+        domains.append(("blocked_domains", cfg["blocked_domains"]))
+    if domains:
+        tool_def["filters"] = {k: v for k, v in domains}
+
+    decoded = orp.decode_request({
+        "model": "gpt-5",
+        "input": [{"type": "message", "role": "user",
+                   "content": [{"type": "input_text", "text": "hi"}]}],
+        "tools": [tool_def],
+    })
+    assert len(decoded.tools) == 1
+    assert decoded.tools[0].builtin == "web_search"
+    assert decoded.tools[0].name == "web_search"

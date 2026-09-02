@@ -925,3 +925,165 @@ explicit close race.
 
 **Files changed:** `wiwi/wire/openai_responses.py` (`_close_item`)
 **Tests:** `tests/test_fix_round25.py`
+
+---
+
+## Round 8 — built-in web search tool translation (2026-09-02)
+
+> **Status**: all changes verified — 1170 tests pass, ruff clean
+> **Scope**: cross-provider translation of provider-hosted web search:
+> Anthropic `web_search_20250305` ↔ OpenAI Responses `web_search` ↔ OpenRouter
+> `openrouter:web_search` ↔ Gemini `google_search`. Citations/annotations stay
+> **round 2** — this round ships the tool itself.
+
+Clients could ask for hosted web search before this round, but the request
+mangled or vanished in translation. Three loss points, all fixed:
+
+1. **Anthropic surface mangled the tool.** `wire/anthropic_messages.py` decoded
+   `{"type": "web_search_20250305", "name": "web_search", ...}` as a *function*
+   tool — upstream Anthropic received a broken
+   `{"name": "web_search", "input_schema": {"type": "object"}}` custom tool.
+2. **Responses surface silently dropped it.** `wire/openai_responses.py` kept
+   only `type == "function"`, so a Codex-shaped `{"type": "web_search"}` never
+   reached any provider.
+3. **Gemini / OpenRouter never saw it.** No provider encoded a builtin search
+   tool at all — unreachable from any surface.
+
+### 8.1 IR: builtin discriminator + result block type
+
+**Files**: `wiwi/ir/types.py`, **new** `wiwi/ir/builtin_tools.py`
+
+`Tool` gains `builtin: str | None` + `builtin_config: dict | None` — a string
+discriminator, not a type enum: a future `code_execution` builtin adds a
+registry row, not a dataclass variant. `ToolResultPart.block_type: str =
+"tool_result"` preserves the original Anthropic result-block type so replayed
+history re-emits `web_search_tool_result` (not `tool_result`). `ToolUsePart`
+gets no new field — builtin-ness is recoverable via `is_builtin_name(name)`.
+
+`wiwi/ir/builtin_tools.py` is the neutral registry (the hub both `wire/` and
+`providers/` may import; keeps the layering rule): canonical↔per-surface type
+maps, reverse maps (the Anthropic reverse accepts any `web_search_*` prefix —
+20250305/20260209/20260318 and future versions), config keys
+`("max_uses", "allowed_domains", "blocked_domains", "user_location",
+"search_context_size")`, and helpers `canonical_for` / `wire_type_for` /
+`is_builtin_name`. Canonical name: `web_search` (D1).
+
+Unknown builtins (`code_execution_20250522`, `file_search`, `computer`) decode
+to a builtin `ir.Tool` with the raw wire type kept in
+`builtin_config["_wire_type"]`; providers that can't host it drop it with a
+`log.warning` — never mangled into a function tool (the old bug), never
+hard-error.
+
+### 8.2 Wire decode: Anthropic + Responses
+
+**Files**: `wiwi/wire/anthropic_messages.py`, `wiwi/wire/openai_responses.py`
+
+Anthropic tools loop: no `type`/`"custom"` → function tool (unchanged);
+`canonical_for("anthropic", type)` → `ir.Tool(builtin="web_search", …)` with
+the config subset; unknown type → the D5 path above. `*_tool_result` decode
+keeps `block_type`. `server_tool_use` history decode is unchanged (plain
+`ToolUsePart`; the name carries builtin-ness).
+
+Responses tools filter: `"function"` unchanged; `web_search` /
+`web_search_preview` / `web_search_2025_08_26` → canonical `web_search` with
+`builtin_config` from `search_context_size`, `user_location`,
+`filters.allowed_domains`, `filters.blocked_domains`; other types → D5. Per
+A2, `web_search_call` items in the Responses *input* array stay skipped:
+decoding them would replay as an unpaired `server_tool_use` on an Anthropic
+upstream (the A1 trap, inbound side). Codex history stays valid — text turns
+remain.
+
+### 8.3 Provider encode: four surfaces, four shapes
+
+**Files**: `wiwi/providers/anthropic_adapter.py`, `gemini_adapter.py`,
+`openai_adapter.py`, `openrouter_adapter.py`
+
+- **Anthropic**: builtins render `{"type": "web_search_20250305", "name":
+  "web_search", **config}` (only `max_uses`, `allowed_domains`,
+  `blocked_domains`, `user_location`, `cache_control`; `search_context_size`
+  dropped — no clean map). History: `is_builtin_name(name)` re-emits
+  `server_tool_use`; `ToolResultPart` emits its `block_type`, so a real
+  `server_tool_use` + `web_search_tool_result` pair replays paired, in order.
+- **Gemini**: builtin `web_search` → sibling `{"google_search": {}}` entry in
+  the same `tools` list (config dropped; Gemini takes `{}`). Grounding decode
+  synthesizes **nothing** — a synthesized `ToolUsePart` would set
+  `stop_reason="tool_call"` and invite clients to return a result the model
+  never requested.
+- **OpenAI Chat** (base `_encode_tools`): drops builtins with
+  `log.warning("dropping_unhostable_builtin_tool")` — Chat Completions has no
+  hosted search tool. The tools block was refactored into
+  `_encode_tools(req) -> list | None` (used by NIM/BAI/WorkBuddy/Cline via
+  subclassing; behavior unchanged for them). `web_search_options` extras
+  passthrough still forwards for always-search models.
+- **OpenRouter**: overrides `_encode_tools` — the one adapter that *hosts*
+  rather than drops: `{"type": "openrouter:web_search", "parameters": {…}}`
+  with `blocked_domains → excluded_domains`.
+
+The drop is capability-driven, independent of `drop_params`.
+
+### 8.4 Streaming: delta flag + per-surface suppression (A1)
+
+**Files**: `wiwi/streaming/deltas.py`, `wire/anthropic_messages.py`,
+`wire/openai_chat.py`, `wire/openai_responses.py`,
+`providers/anthropic_adapter.py`
+
+`dl.ToolCallOpen.builtin: str | None = None` — encoders use it to suppress or
+re-render as a hosted item. The Anthropic stream decoder tags **any**
+`server_tool_use` block start (`builtin = name or "server_tool"`): any such
+block is provider-executed by definition, registry-known or not — an unmapped
+one (e.g. `code_execution`) must not leak as a phantom function call.
+
+While citations are deferred, our responses must not emit half a search trace:
+
+- **Anthropic surface**: builtin tool calls suppressed entirely (text only).
+  `server_tool_use` requires a paired `web_search_tool_result` when history
+  replays; emitting the call without the result risks a 400 on turn 2 and
+  gains nothing.
+- **Chat surface**: same suppression — a function `tool_calls` frame for
+  `web_search` invites the client to execute a phantom function.
+- **Responses surface**: **emits** self-contained `web_search_call` output
+  items (single `output_item.added` at open, single `output_item.done` at
+  close; no `function_call_arguments` events; query from the call's args).
+- **Guard**: `stop_reason == "tool_call"` with every call suppressed
+  downgrades to `stop` (Chat) / `end_turn` (Anthropic) — an Anthropic response
+  with `stop_reason: tool_use` and no `tool_use` block is spec-invalid.
+
+Suppressing a `ToolCallOpen` turns the paired `ArgsDelta`/`Close` into
+orphans, which both encoders already drop (round-25 defenses), so no
+args-only phantom frames leak.
+
+### 8.5 Gateway + logging
+
+`core/gateway.py` `_tool_schemas` excludes `t.builtin is not None` — advisory
+validation never flags a provider-correct builtin call (IR-level flag, not a
+dialect/provider branch). `server/app.py` `_capture_delta` records
+`"builtin": d.builtin` in the tools_map log entry.
+
+### 8.6 Known losses (v1, deliberate)
+
+- `max_uses` ↔ `search_context_size` has no clean map — dropped on the
+  surface that lacks it, with warning.
+- Version-specific Anthropic features (20260209 dynamic filtering beyond
+  domains, 20260318 response inclusion) collapse to the 20250305 common
+  subset on encode.
+- Response-side search trace invisible to Anthropic/Chat clients (A1) — the
+  direct consequence of deferring citations. Round 2 adds proper result
+  carrying (`AssistantTurn` extension + delta contract change) and the full
+  trace.
+- Anthropic bills `web_search_requests` separately (`usage.server_tool_use`) —
+  not modeled; pricing may undercount search costs. Flagged for
+  `cost/pricing.py` future work.
+- **Phase 2 (separate change)**: OpenAI-outbound hosting requires a Responses
+  pivot — hosted `web_search` is Responses-API-only on OpenAI, and
+  `_build_url` runs *before* `encode_request` at all three gateway call
+  sites, so the adapter can't pick `/v1/responses` after seeing the body.
+
+**Files changed** (this round): `wiwi/ir/types.py`,
+`wiwi/ir/builtin_tools.py` (new), `wiwi/wire/anthropic_messages.py`,
+`wiwi/wire/openai_responses.py`, `wiwi/wire/openai_chat.py`,
+`wiwi/providers/anthropic_adapter.py`, `wiwi/providers/gemini_adapter.py`,
+`wiwi/providers/openai_adapter.py`, `wiwi/providers/openrouter_adapter.py`,
+`wiwi/streaming/deltas.py`, `wiwi/core/gateway.py`, `wiwi/server/app.py`.
+
+**Tests**: `tests/test_web_search_translation.py` (new, 51 tests) +
+`tests/test_property_roundtrip.py` (3 new properties).

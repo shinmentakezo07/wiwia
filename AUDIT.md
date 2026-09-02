@@ -519,3 +519,27 @@ Note that #2's original finding was partly right for the wrong reason: per-tool
 class of bug could pass. The round-25 tests assert index routing directly.
 
 **Baseline after this round:** 1116 tests pass, ruff clean.
+
+---
+
+## Addendum — built-in web search translation, Round 8 (2026-09-02)
+
+The two silent-drop bugs and the Anthropic mangle are **fixed**; do not re-fix.
+All covered by `tests/test_web_search_translation.py` (51 tests) + 3 new
+properties in `tests/test_property_roundtrip.py` — see `UPDATE.md` Round 8.
+
+| Bug (as it existed) | State |
+|---|---|
+| Anthropic surface decoded `web_search_20250305` as a *function* tool → upstream received broken `{"name":"web_search","input_schema":{…}}` | fixed — registry-driven builtin decode (`wire/anthropic_messages.py`) |
+| Responses surface silently dropped `{"type":"web_search"}` tools (`type=="function"` filter only) | fixed — `web_search`/`web_search_preview`/`web_search_2025_08_26` decode to the builtin IR tool (`wire/openai_responses.py`) |
+| Gemini/OpenRouter never encoded a builtin search tool (unreachable) | fixed — `google_search` sibling entry / `openrouter:web_search` hosting (`gemini_adapter.py`, `openrouter_adapter.py`) |
+
+Deliberate v1 losses, **not** bugs (documented in `UPDATE.md` §8.6):
+response-side search traces suppressed on Anthropic/Chat surfaces (A1 — a
+half-trace would 400 on turn-2 replay while citations are unimplemented);
+Responses input history skips `web_search_call` items (A2 — same trap,
+inbound side); `max_uses` ↔ `search_context_size` have no clean map;
+Anthropic's separate `web_search_requests` billing is unmodeled (pricing
+follow-up).
+
+**Baseline after this round:** 1170 tests pass, ruff clean.

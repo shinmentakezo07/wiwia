@@ -1083,7 +1083,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
         elif isinstance(d, dl.ThinkingDelta):
             thinking_buf.append(d.text)
         elif isinstance(d, dl.ToolCallOpen):
-            tools_map[d.index] = {"id": d.id, "name": d.name, "arguments": ""}
+            tools_map[d.index] = {"id": d.id, "name": d.name, "arguments": "",
+                                  "builtin": d.builtin}
         elif isinstance(d, dl.ToolCallArgsDelta):
             entry = tools_map.get(d.index)
             if entry is not None:

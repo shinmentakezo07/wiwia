@@ -9,6 +9,7 @@ from typing import Any
 import orjson
 
 from wiwi.core.context import RequestContext
+from wiwi.ir import builtin_tools as bt
 from wiwi.ir import types as ir
 from wiwi.streaming import deltas as dl
 from wiwi.streaming.sse import sse_frame
@@ -183,12 +184,15 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
                     req_id: str) -> dict[str, Any]:
     message: dict[str, Any] = {"role": "assistant",
                                "content": turn.text if turn.text else None}
-    if turn.tool_calls:
+    # A1: provider-hosted builtin calls (web_search) are suppressed — the
+    # client would otherwise try to execute a phantom function.
+    tool_calls = [t for t in turn.tool_calls if not bt.is_builtin_name(t.name)]
+    if tool_calls:
         message["tool_calls"] = [
             {"id": t.id, "type": "function",
              "function": {"name": t.name,
                           "arguments": t.raw_args or json.dumps(t.args)}}
-            for t in turn.tool_calls
+            for t in tool_calls
         ]
     # Reasoning models emit a separate reasoning_content field; include it
     # when the provider returned thinking blocks so downstream clients that
@@ -204,6 +208,9 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
     }
     fr = {"stop": "stop", "length": "length", "tool_call": "tool_calls",
           "content_filter": "content_filter"}.get(turn.stop_reason, "stop")
+    # A1 downgrade guard: tool_calls finish with every call suppressed is wrong.
+    if fr == "tool_calls" and not tool_calls:
+        fr = "stop"
     return {
         "id": f"chatcmpl-{req_id}", "object": "chat.completion",
         "created": int(time.time()), "model": model,
@@ -226,6 +233,14 @@ class ChatStreamEncoder:
         self._finished = False
         self._usage: dl.UsageFinal | None = None
         self._stop: str = "stop"
+        # A1 stop_reason guard: a builtin tool call was suppressed (so the
+        # provider's tool_call finish may no longer have a call behind it).
+        self._suppressed_builtin = False
+        # Any real (non-builtin) tool_calls frame emitted?
+        self._saw_tool_calls = False
+        # Tool indices that emitted an Open (legal or suppressed): ArgsDelta
+        # for a suppressed builtin must not emit a phantom args-only frame.
+        self._tool_indices: set[int] = set()
         # Chunk skeleton built once: id/object/created/model never change for
         # the life of the stream, so only `choices[0]` is mutated per delta
         # instead of re-allocating the whole chunk dict on every token.
@@ -253,12 +268,25 @@ class ChatStreamEncoder:
                 return None  # signature-only delta: no content to emit
             return self._shell({"reasoning_content": d.text})
         if isinstance(d, dl.ToolCallOpen):
+            # A1: provider-hosted builtin calls (web_search) are suppressed —
+            # a function tool_calls frame would invite the client to execute
+            # a phantom function. The index stays unregistered so the paired
+            # ArgsDelta drops too (no args-only phantom frame).
+            if d.builtin is not None:
+                self._suppressed_builtin = True
+                return None
+            self._tool_indices.add(d.index)
             # `id` must be a string; some providers return integer ids.
             tool_id = d.id if isinstance(d.id, str) else str(d.id)
+            self._saw_tool_calls = True
             return self._shell({"tool_calls": [{
                 "index": d.index, "id": tool_id, "type": "function",
                 "function": {"name": d.name, "arguments": ""}}]})
         if isinstance(d, dl.ToolCallArgsDelta):
+            if d.index not in self._tool_indices:
+                # ArgsDelta with no preceding Open: contract-illegal; drop
+                # rather than emit a phantom args-only frame.
+                return None
             return self._shell({"tool_calls": [{
                 "index": d.index, "function": {"arguments": d.args_fragment}}]})
         if isinstance(d, dl.ToolCallClose):
@@ -268,6 +296,12 @@ class ChatStreamEncoder:
             return None  # emitted with the Finish frame
         if isinstance(d, dl.Finish):
             self._stop = d.stop_reason
+            # A1 downgrade guard: only when suppression actually removed the
+            # only tool call. A plain tool_call finish with no calls seen is
+            # upstream behavior — pass it through untouched.
+            if (self._stop == "tool_call" and self._suppressed_builtin
+                    and not self._saw_tool_calls):
+                self._stop = "stop"
             return None  # final_frame() emits finish_reason + usage together
         if isinstance(d, dl.StreamEnd):
             return None  # [DONE] is emitted by the caller after final_frame()

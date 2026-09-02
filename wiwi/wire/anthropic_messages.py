@@ -8,6 +8,7 @@ from typing import Any
 import orjson
 
 from wiwi.core.context import RequestContext
+from wiwi.ir import builtin_tools as bt
 from wiwi.ir import types as ir
 from wiwi.streaming import deltas as dl
 from wiwi.streaming.sse import sse_frame
@@ -111,7 +112,8 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                                                    content=text,
                                                    is_error=bool(b.get("is_error")),
                                                    cache_control=b.get("cache_control"),
-                                                   images=images))
+                                                   images=images,
+                                                   block_type=btype))
                 elif btype == "thinking":
                     parts.append(ir.ThinkingPart(b.get("thinking", ""),
                                                  b.get("signature")))
@@ -119,14 +121,38 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
             messages.append(ir.Message(role="assistant" if role == "assistant" else "user",
                                        parts=parts))
 
-    tools = [
-        ir.Tool(name=t.get("name", ""), description=t.get("description", ""),
+    tools: list[ir.Tool] = []
+    for t in body.get("tools") or []:
+        if not isinstance(t, dict):
+            continue  # junk entry: skip rather than crash the whole request
+        ttype = t.get("type")
+        if ttype in (None, "custom", "function"):
+            # Plain function tool (Anthropic function tools may omit "type").
+            tools.append(ir.Tool(
+                name=t.get("name", ""), description=t.get("description", ""),
                 parameters_json_schema=t.get("input_schema") or {"type": "object"},
                 strict=t.get("strict"),
                 input_examples=t.get("input_examples"),
-                cache_control=t.get("cache_control"))
-        for t in body.get("tools") or []
-    ]
+                cache_control=t.get("cache_control")))
+            continue
+        canonical = bt.canonical_for("anthropic", ttype)
+        if canonical is not None:
+            # Provider-hosted builtin (web_search family): keep the canonical
+            # name + config subset; never emit it as a function tool.
+            config = {k: t[k] for k in bt.BUILTIN_CONFIG_KEYS if k in t}
+            tools.append(ir.Tool(name=t.get("name") or canonical,
+                                 builtin=canonical,
+                                 builtin_config=config,
+                                 cache_control=t.get("cache_control")))
+        else:
+            # Unknown server tool (code_execution, computer, ...): preserve it
+            # as an unmapped builtin so no surface mangles it into a function
+            # tool; providers that can't host it drop it with a warning.
+            tools.append(ir.Tool(
+                name=t.get("name") or ttype,
+                builtin=ttype,
+                builtin_config={bt.WIRE_TYPE_KEY: ttype},
+                cache_control=t.get("cache_control")))
     tc_raw = body.get("tool_choice") or {}
     tool_choice: ir.ToolChoice | None = None
     disable_parallel: bool | None = None
@@ -200,6 +226,11 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
     if turn.text:
         content.append({"type": "text", "text": turn.text})
     for t in turn.tool_calls:
+        # A1: provider-hosted builtin calls are suppressed — their result
+        # blocks (web_search_tool_result) are round 2, and an unpaired
+        # server_tool_use in replayed history is rejected by Anthropic.
+        if bt.is_builtin_name(t.name):
+            continue
         content.append({"type": "tool_use", "id": t.id, "name": t.name,
                         "input": t.args})
     if not content:
@@ -207,6 +238,9 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
     u = turn.usage
     sr = {"stop": "end_turn", "length": "max_tokens", "tool_call": "tool_use",
           "content_filter": "refusal"}.get(turn.stop_reason, "end_turn")
+    # A1 downgrade guard: tool_call with every call suppressed is invalid.
+    if sr == "tool_use" and not any(b["type"] == "tool_use" for b in content):
+        sr = "end_turn"
     return {
         "id": f"msg_{req_id}", "type": "message", "role": "assistant",
         "model": model, "content": content,
@@ -234,6 +268,10 @@ class AnthropicStreamEncoder:
         # interleaved parallel tool calls route args to the right block.
         self._tool_blocks: dict[int, int] = {}
         self._open_tool: int | None = None
+        # A1 stop_reason guard: any real (non-builtin) tool_use block emitted?
+        # A suppressed-builtin-only stream must not finish with stop_reason
+        # tool_use — Anthropic rejects a tool_use finish with no tool_use block.
+        self._saw_tool_use = False
         # Signature seen while no thinking block is open (cross-provider quirk);
         # flushed into the next thinking block right before it closes.
         self._pending_sig: str | None = None
@@ -379,6 +417,13 @@ class AnthropicStreamEncoder:
                 self._pending_sig = d.signature
             return b"".join(out)
         if isinstance(d, dl.ToolCallOpen):
+            # A1: provider-hosted builtin calls (web_search) are suppressed —
+            # their result block (web_search_tool_result) is deferred to round
+            # 2, and an unpaired server_tool_use in replayed history is
+            # rejected by Anthropic. The paired ArgsDelta/Close become orphans
+            # and drop via the _tool_blocks lookups below.
+            if d.builtin is not None:
+                return None
             out: list[bytes] = []
             # Only close the open block if it's text/thinking — parallel
             # tool calls are siblings, not sequential.
@@ -391,6 +436,7 @@ class AnthropicStreamEncoder:
                 "type": "content_block_start", "index": self._block_idx,
                 "content_block": {"type": "tool_use", "id": tool_id, "name": d.name,
                                   "input": {}}}))
+            self._saw_tool_use = True
             self._tool_blocks[d.index] = self._block_idx
             self._open_tool = d.index
             self._open_block = "tool"
@@ -419,6 +465,10 @@ class AnthropicStreamEncoder:
                           "tool_call": "tool_use",
                           "content_filter": "refusal"}.get(d.stop_reason, "end_turn")
             self._stop_seq = d.stop_sequence
+            # A1 downgrade guard: suppression may have removed the only tool
+            # call — a tool_use stop_reason with no tool_use block is invalid.
+            if self._stop == "tool_use" and not self._saw_tool_use:
+                self._stop = "end_turn"
             return None
         if isinstance(d, dl.StreamEnd):
             return None  # caller emits message_delta (final_frame) then message_stop

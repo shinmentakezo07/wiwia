@@ -23,6 +23,7 @@ from typing import Any
 
 import orjson
 
+from wiwi.ir import builtin_tools as bt
 from wiwi.ir import types as ir
 from wiwi.providers.base import ProviderKeyRef
 from wiwi.providers.openai_adapter import OpenAIAdapter
@@ -49,6 +50,40 @@ class OpenRouterAdapter(OpenAIAdapter):
         return f"{base}/chat/completions"
 
     # -- encode: translate IR reasoning config to OpenRouter's ``reasoning`` param -
+
+    def _encode_tools(self, req: ir.Request) -> list[dict[str, Any]] | None:
+        """Render IR tools as OpenRouter ``tools`` entries (or None).
+
+        Unlike the OpenAI base, OpenRouter can host builtins: a web_search
+        builtin rides the tools array as ``{"type": "openrouter:web_search",
+        "parameters": {...}}``. OpenRouter spells the domain blocklist
+        ``excluded_domains`` (Anthropic/Responses say ``blocked_domains``).
+        """
+        if not req.tools:
+            return None
+        out: list[dict[str, Any]] = []
+        for t in req.tools:
+            wt = bt.wire_type_for("openrouter", t.builtin) if t.builtin else None
+            if t.builtin is not None and wt is None:
+                # Unhostable builtin (e.g. code_execution): drop, don't mangle.
+                continue
+            if t.builtin is not None:
+                cfg = t.builtin_config or {}
+                params: dict[str, Any] = {}
+                for k in ("max_uses", "allowed_domains", "user_location",
+                          "search_context_size"):
+                    if k in cfg:
+                        params[k] = cfg[k]
+                if "blocked_domains" in cfg:
+                    params["excluded_domains"] = cfg["blocked_domains"]
+                out.append({"type": wt, "parameters": params})
+                continue
+            fn: dict[str, Any] = {"name": t.name, "description": t.description,
+                                  "parameters": t.parameters_json_schema}
+            if t.strict is not None:
+                fn["strict"] = t.strict
+            out.append({"type": "function", "function": fn})
+        return out or None
 
     def encode_request(self, req: ir.Request, model_id: str,
                        deployment_params: dict[str, Any]) -> dict[str, Any]:

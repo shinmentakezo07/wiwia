@@ -6,10 +6,14 @@ import json
 from typing import Any
 
 import orjson
+import structlog
 
+from wiwi.ir import builtin_tools as bt
 from wiwi.ir import types as ir
 from wiwi.providers.base import ProviderKeyRef
 from wiwi.streaming import deltas as dl
+
+log = structlog.get_logger("wiwi.anthropic_adapter")
 
 DEFAULT_MAX_TOKENS = 4096
 MIN_THINKING_BUDGET = 1024  # Anthropic API minimum for budget_tokens
@@ -165,10 +169,18 @@ class AnthropicAdapter:
                         doc["context"] = p.context
                     blocks.append(doc)
                 elif isinstance(p, ir.ToolUsePart):
-                    blocks.append({"type": "tool_use", "id": p.id, "name": p.name,
+                    # Server-hosted builtins (web_search, ...) replay as
+                    # server_tool_use blocks; their results arrive as
+                    # *_tool_result blocks (see ToolResultPart below).
+                    utype = ("server_tool_use" if bt.is_builtin_name(p.name)
+                             else "tool_use")
+                    blocks.append({"type": utype, "id": p.id, "name": p.name,
                                    "input": p.args})
                 elif isinstance(p, ir.ToolResultPart):
-                    tr: dict[str, Any] = {"type": "tool_result",
+                    # block_type preserves the inbound result-block type
+                    # (web_search_tool_result, ...) so replayed server-tool
+                    # history keeps its original shape.
+                    tr: dict[str, Any] = {"type": p.block_type,
                                           "tool_use_id": p.tool_use_id,
                                           "content": p.content}
                     if p.is_error:
@@ -271,22 +283,44 @@ class AnthropicAdapter:
                 body.setdefault(k, v)
 
         if req.tools:
-            body["tools"] = [
-                {"name": t.name, "description": t.description,
-                 "input_schema": t.parameters_json_schema}
-                for t in req.tools
-            ]
-            # Forward optional tool properties that Anthropic supports.
-            # strict: OpenAI structured-output strictness maps directly.
-            # input_examples: Anthropic-specific, helps Claude call tools.
-            # cache_control: Anthropic prompt-cache breakpoint on the tool def.
-            for i, t in enumerate(req.tools):
-                if t.strict is not None:
-                    body["tools"][i]["strict"] = t.strict
-                if t.input_examples is not None:
-                    body["tools"][i]["input_examples"] = t.input_examples
+            rendered: list[dict[str, Any]] = []
+            for t in req.tools:
+                if t.builtin is None:
+                    # Function tool with the optional properties Anthropic
+                    # supports: strict (OpenAI structured-output strictness),
+                    # input_examples (Anthropic-specific), cache_control
+                    # (prompt-cache breakpoint on the tool def).
+                    entry = {"name": t.name, "description": t.description,
+                             "input_schema": t.parameters_json_schema}
+                    if t.strict is not None:
+                        entry["strict"] = t.strict
+                    if t.input_examples is not None:
+                        entry["input_examples"] = t.input_examples
+                    if t.cache_control is not None:
+                        entry["cache_control"] = t.cache_control
+                    rendered.append(entry)
+                    continue
+                wt = bt.wire_type_for("anthropic", t.builtin)
+                if wt is None:
+                    # Unhostable on Anthropic (e.g. code_execution from another
+                    # surface, or an unknown server tool): drop, don't mangle.
+                    log.warning("dropping_unhostable_builtin_tool",
+                                builtin=t.builtin, provider="anthropic")
+                    continue
+                # Native server-tool shape: type + canonical name + the config
+                # keys Anthropic understands. search_context_size has no
+                # Anthropic equivalent (count vs context budget) — dropped.
+                entry = {"type": wt, "name": t.name or t.builtin}
+                cfg = t.builtin_config or {}
+                for k in ("max_uses", "allowed_domains", "blocked_domains",
+                          "user_location"):
+                    if k in cfg:
+                        entry[k] = cfg[k]
                 if t.cache_control is not None:
-                    body["tools"][i]["cache_control"] = t.cache_control
+                    entry["cache_control"] = t.cache_control
+                rendered.append(entry)
+            if rendered:
+                body["tools"] = rendered
             tc = req.tool_choice
             disable = g.disable_parallel_tool_use
             if isinstance(tc, ir.ToolChoiceNone):
@@ -372,7 +406,15 @@ class AnthropicAdapter:
             idx = payload.get("index", 0)
             if cb.get("type") in ("tool_use", "server_tool_use"):
                 self._tool_indices.add(idx)
-                out.append(dl.ToolCallOpen(index=idx, id=cb.get("id", ""), name=cb.get("name", "")))
+                # server_tool_use = provider-hosted builtin call (web_search,
+                # code_execution, ...): tag the delta so downstream encoders
+                # suppress (A1) or re-render as a hosted item instead of a
+                # phantom function call. Any server_tool_use block is
+                # provider-executed by definition, known to the registry or not.
+                is_server = cb.get("type") == "server_tool_use"
+                out.append(dl.ToolCallOpen(
+                    index=idx, id=cb.get("id", ""), name=cb.get("name", ""),
+                    builtin=(cb.get("name") or "server_tool") if is_server else None))
         elif etype == "content_block_delta":
             d = payload.get("delta", {})
             dtype = d.get("type")

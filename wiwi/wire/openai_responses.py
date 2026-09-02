@@ -13,6 +13,7 @@ from typing import Any
 import orjson
 
 from wiwi.core.context import RequestContext
+from wiwi.ir import builtin_tools as bt
 from wiwi.ir import types as ir
 from wiwi.streaming import deltas as dl
 from wiwi.streaming.sse import sse_frame
@@ -101,12 +102,35 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
 
     tools = []
     for t in body.get("tools") or []:
-        if t.get("type") == "function":
+        if not isinstance(t, dict):
+            continue  # junk entry: skip rather than crash the whole request
+        ttype = t.get("type")
+        if ttype == "function":
             tools.append(ir.Tool(name=t.get("name", ""),
                                  description=t.get("description", ""),
                                  parameters_json_schema=t.get("parameters")
                                  or {"type": "object"},
                                  strict=t.get("strict")))
+            continue
+        canonical = bt.canonical_for("openai_responses", ttype)
+        if canonical is not None:
+            # Hosted builtin (web_search family). OpenAI nests domain filters
+            # under "filters"; normalize to the flat config subset.
+            config: dict[str, Any] = {k: t[k] for k in bt.BUILTIN_CONFIG_KEYS
+                                      if k in t}
+            filters = t.get("filters") if isinstance(t.get("filters"), dict) else {}
+            if "allowed_domains" in filters:
+                config["allowed_domains"] = filters["allowed_domains"]
+            if "blocked_domains" in filters:
+                config["blocked_domains"] = filters["blocked_domains"]
+            tools.append(ir.Tool(name=canonical, builtin=canonical,
+                                 builtin_config=config))
+        else:
+            # Unknown hosted tool (file_search, computer, ...): keep it
+            # builtin-shaped so no surface mangles it into a function tool;
+            # providers that can't host it drop it with a warning.
+            tools.append(ir.Tool(name=t.get("name") or ttype, builtin=ttype,
+                                 builtin_config={bt.WIRE_TYPE_KEY: ttype}))
     tc_raw = body.get("tool_choice")
     tool_choice: ir.ToolChoice | None = None
     if tc_raw == "auto":
@@ -158,9 +182,17 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
                                     "annotations": []}]})
         out_id += 1
     for t in turn.tool_calls:
-        output.append({"type": "function_call", "id": f"fc_{req_id}_{out_id}",
-                       "call_id": t.id, "name": t.name,
-                       "arguments": t.raw_args or json.dumps(t.args)})
+        if bt.is_builtin_name(t.name):
+            # A1 carve-out: hosted builtin calls emit as self-contained
+            # web_search_call items on this surface.
+            output.append({"type": "web_search_call", "id": t.id,
+                           "status": "completed",
+                           "action": {"type": "search",
+                                      "query": t.args.get("query", "")}})
+        else:
+            output.append({"type": "function_call", "id": f"fc_{req_id}_{out_id}",
+                           "call_id": t.id, "name": t.name,
+                           "arguments": t.raw_args or json.dumps(t.args)})
         out_id += 1
     u = turn.usage
     # Truncated output surfaces as status "incomplete" + incomplete_details,
@@ -225,6 +257,20 @@ class ResponsesStreamEncoder:
             return []
         idx = t["output_index"]
         n = t["index"]
+        if t.get("builtin"):
+            # A1 carve-out: a hosted builtin call closes as a self-contained
+            # web_search_call item — no result item exists in the Responses
+            # protocol, so replay needs no pairing.
+            try:
+                args = orjson.loads(t["args"]) if t["args"] else {}
+            except orjson.JSONDecodeError:
+                args = {}
+            item = {"type": "web_search_call", "id": t["call_id"] or f"ws_{self.req_id}_{n}",
+                    "status": "completed",
+                    "action": {"type": "search", "query": args.get("query", "")}}
+            self._output.append(item)
+            return [self._evt("response.output_item.done", {
+                "output_index": idx, "item": item})]
         item_id = f"fc_{self.req_id}_{n}"
         item = {"type": "function_call", "id": item_id,
                 "call_id": t["call_id"], "name": t["name"],
@@ -334,12 +380,24 @@ class ResponsesStreamEncoder:
             n = d.index
             oi = self._next_output_index()
             self._tools[n] = {"index": n, "name": d.name,
-                              "call_id": d.id, "args": "", "output_index": oi}
+                              "call_id": d.id, "args": "", "output_index": oi,
+                              "builtin": d.builtin}
             self._open_tool = n
-            out.append(self._evt("response.output_item.added", {
-                "output_index": oi,
-                "item": {"type": "function_call", "id": f"fc_{self.req_id}_{n}",
-                         "call_id": d.id, "name": d.name, "arguments": ""}}))
+            if d.builtin is not None:
+                # A1 carve-out: the Responses surface emits hosted builtin
+                # calls as self-contained web_search_call items (replay-safe:
+                # no separate result item exists in this protocol).
+                out.append(self._evt("response.output_item.added", {
+                    "output_index": oi,
+                    "item": {"type": "web_search_call",
+                             "id": d.id or f"ws_{self.req_id}_{n}",
+                             "status": "in_progress",
+                             "action": {"type": "search", "query": ""}}}))
+            else:
+                out.append(self._evt("response.output_item.added", {
+                    "output_index": oi,
+                    "item": {"type": "function_call", "id": f"fc_{self.req_id}_{n}",
+                             "call_id": d.id, "name": d.name, "arguments": ""}}))
             self._item_open = "tool"
             return b"".join(out)
         if isinstance(d, dl.ToolCallArgsDelta):

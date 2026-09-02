@@ -169,7 +169,7 @@ Handler 30 wires both: lookup → `serve_now` on hit; on miss, registers a compl
 StreamStart(request_id, model, group)
 TextDelta(text: str)
 ThinkingDelta(text: str, signature: str | None)
-ToolCallOpen(index: int, id: str, name: str)
+ToolCallOpen(index: int, id: str, name: str, builtin: str | None = None)
 ToolCallArgsDelta(index: int, args_fragment: str)     # partial JSON string
 ToolCallClose(index: int)
 UsageFinal(prompt: int, cached: int, reasoning: int,
@@ -180,6 +180,8 @@ StreamError(err)     # failure terminator (mutually exclusive with StreamEnd)
 ```
 
 Contract: exactly one `StreamStart` first; `ToolCallOpen → ArgsDelta* → ToolCallClose` strictly nested per index; `UsageFinal` exactly once, always after the last content delta; then `Finish`; then `StreamEnd`/`StreamError`. Adapters guarantee this regardless of provider quirks — encoders downstream never defend against malformed sequences.
+
+`ToolCallOpen.builtin` marks a provider-hosted builtin call (e.g. Anthropic `server_tool_use` → `"web_search"`): the call executes on the provider, so the client owes no result. Encoders use the flag to suppress the call (Anthropic/Chat surfaces — a half search-trace would 400 on replay while citations are unimplemented) or re-render it as a hosted item (Responses surface's self-contained `web_search_call`). The canonical-name registry that `Tool.builtin` and this field share lives in `ir/builtin_tools.py` — canonical `web_search` maps to `web_search_20250305` (Anthropic, any `web_search_*` accepted inbound), `web_search`/`web_search_preview` (Responses), `openrouter:web_search` (OpenRouter), `google_search` (Gemini).
 
 ### 7.2 End-to-end flow
 

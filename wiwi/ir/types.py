@@ -52,6 +52,10 @@ class ToolResultPart:
     content: str
     is_error: bool = False
     cache_control: CacheControl = None
+    # Original result-block type when the inbound dialect distinguishes them
+    # (Anthropic's server-tool family: web_search_tool_result, ...). Replay
+    # must re-emit the same block type or Anthropic rejects the history.
+    block_type: str = "tool_result"
     # Multimodal tool results (e.g. screenshots from computer-use tools).
     # Adapters with native image support re-emit them as block-form content;
     # others drop them (text-only providers).
@@ -104,6 +108,12 @@ class Tool:
     strict: bool | None = None  # G3: OpenAI structured-output strictness / Anthropic strict tool use
     input_examples: list[dict[str, Any]] | None = None  # Anthropic tool-use examples
     cache_control: CacheControl = None  # Anthropic prompt-cache breakpoint on tool def
+    # Provider-hosted builtin tool (e.g. web_search): canonical name from
+    # ir/builtin_tools.py, not a function tool the model defines. builtin_config
+    # carries the provider-common subset (max_uses, allowed_domains, ...);
+    # an unknown builtin keeps its raw wire type under "_wire_type".
+    builtin: str | None = None
+    builtin_config: dict[str, Any] | None = None
 
 
 @dataclass

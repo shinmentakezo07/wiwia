@@ -6,10 +6,14 @@ import json
 from typing import Any
 
 import orjson
+import structlog
 
+from wiwi.ir import builtin_tools as bt
 from wiwi.ir import types as ir
 from wiwi.providers.base import ProviderKeyRef
 from wiwi.streaming import deltas as dl
+
+log = structlog.get_logger("wiwi.gemini_adapter")
 
 
 class GeminiAdapter:
@@ -104,11 +108,26 @@ class GeminiAdapter:
         if gen:
             body["generationConfig"] = gen
         if req.tools:
-            body["tools"] = [{"functionDeclarations": [
-                {"name": t.name, "description": t.description,
-                 "parameters": t.parameters_json_schema}
-                for t in req.tools
-            ]}]
+            # Function tools and hosted builtins are separate tool entries:
+            # builtins render as their native key ({"google_search": {}}) —
+            # Gemini takes no config for search, so builtin_config is dropped.
+            decls = [{"name": t.name, "description": t.description,
+                      "parameters": t.parameters_json_schema}
+                     for t in req.tools if t.builtin is None]
+            entries: list[dict[str, Any]] = []
+            if decls:
+                entries.append({"functionDeclarations": decls})
+            for t in req.tools:
+                if t.builtin is None:
+                    continue
+                wt = bt.wire_type_for("gemini", t.builtin)
+                if wt is None:
+                    log.warning("dropping_unhostable_builtin_tool",
+                                builtin=t.builtin, provider="gemini")
+                    continue
+                entries.append({wt: {}})
+            if entries:
+                body["tools"] = entries
         return body
 
     def decode_response(self, status: int, body: bytes) -> ir.AssistantTurn:

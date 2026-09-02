@@ -40,6 +40,10 @@ class ToolCallOpen:
     index: int
     id: str
     name: str
+    # Canonical builtin name (ir/builtin_tools.py) when this call invokes a
+    # provider-hosted tool (e.g. Anthropic server_tool_use for web_search).
+    # Encoders use it to suppress (A1) or re-render as a hosted item.
+    builtin: str | None = None
 
 
 @dataclass(frozen=True)

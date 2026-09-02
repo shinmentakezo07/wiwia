@@ -629,8 +629,11 @@ class Gateway:
         # open call's raw args so they can be checked against the request's
         # declared tool schema at ToolCallClose. Violations are logged and
         # flagged in ctx.metadata — advisory, never stream-failing.
+        # Builtin tools carry no schema (they are provider-hosted) — excluded
+        # so a provider-correct web_search call is never flagged.
         _tool_schemas = {t.name: t.parameters_json_schema
-                         for t in (ctx.ir_req.tools or [])}
+                         for t in (ctx.ir_req.tools or [])
+                         if t.builtin is None}
         _open_tools: dict[int, str] = {}  # index -> tool name
         _arg_bufs: dict[int, str] = {}  # index -> accumulated raw args
         try:

@@ -75,6 +75,8 @@ Everything identified in the proxy audit, tracked to a phase. "P2" etc. refer to
 | G18 | Request replay from logs page | one-click re-run of failed requests | post-MVP (UI) |
 | G19 | Priority lanes (`priority: high` routing) | premium deployments for urgent traffic | post-MVP |
 | G20 | Webhook event system spec (events, signatures, retries) | outbound integrations beyond SSE | post-MVP |
+| G21 | Hosted-tool **translation** (built-in web search: Anthropic `web_search_*` ↔ Responses `web_search` ↔ OpenRouter `openrouter:web_search` ↔ Gemini `google_search`) | clients on any dialect can request provider-hosted search from any hostable provider; before this, requests were mangled or silently dropped | **shipped 2026-09-02** (Round 8) — tool translation only |
+| G22 | Hosted-tool *execution* extras: citations/annotations carrying, response-side search traces beyond `web_search_call` items, `allowed_builtin_tools` allowlist knob, Anthropic `web_search_requests` billing | search results/cost visibility and cost control policy | post-MVP |
 
 Also reserved: IR multimodal part kinds (`audio`, `video`, `document`) get field names in M2 even though translation ships later (Gemini video, Anthropic PDFs).
 

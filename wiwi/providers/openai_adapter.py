@@ -6,10 +6,13 @@ import json
 from typing import Any
 
 import orjson
+import structlog
 
 from wiwi.ir import types as ir
 from wiwi.providers.base import ProviderKeyRef
 from wiwi.streaming import deltas as dl
+
+log = structlog.get_logger("wiwi.openai_adapter")
 
 
 def _role_parts_to_content(
@@ -195,17 +198,9 @@ class OpenAIAdapter:
                 if g.response_format.strict is not None:
                     rf["json_schema"]["strict"] = g.response_format.strict
             body["response_format"] = rf
-        if req.tools:
-            body["tools"] = [
-                {"type": "function",
-                 "function": {"name": t.name, "description": t.description,
-                              "parameters": t.parameters_json_schema}}
-                for t in req.tools
-            ]
-            # Forward strict mode (OpenAI structured outputs / Anthropic strict tool use).
-            for i, t in enumerate(req.tools):
-                if t.strict is not None:
-                    body["tools"][i]["function"]["strict"] = t.strict
+        encoded_tools = self._encode_tools(req)
+        if encoded_tools:
+            body["tools"] = encoded_tools
             if req.tool_choice is not None:
                 tc = req.tool_choice
                 if isinstance(tc, ir.ToolChoiceNone):
@@ -238,6 +233,33 @@ class OpenAIAdapter:
             if k in _STANDARD or not deployment_params.get("drop_params", True):
                 body.setdefault(k, v)
         return body
+
+    def _encode_tools(self, req: ir.Request) -> list[dict[str, Any]] | None:
+        """Render IR tools as Chat Completions ``tools`` entries (or None).
+
+        The base implementation emits function tools only: Chat Completions
+        has no hosted-tool representation, so a provider-hosted builtin
+        (e.g. web_search) is dropped with a warning rather than mangled into
+        a function tool the upstream would reject. Subclasses that can host
+        a builtin (OpenRouter) override this. The drop is capability-driven,
+        independent of drop_params.
+        """
+        if not req.tools:
+            return None
+        out: list[dict[str, Any]] = []
+        for t in req.tools:
+            if t.builtin is not None:
+                log.warning("dropping_unhostable_builtin_tool",
+                            builtin=t.builtin, provider=self.provider_type)
+                continue
+            fn: dict[str, Any] = {"name": t.name, "description": t.description,
+                                  "parameters": t.parameters_json_schema}
+            # Forward strict mode (OpenAI structured outputs / Anthropic
+            # strict tool use).
+            if t.strict is not None:
+                fn["strict"] = t.strict
+            out.append({"type": "function", "function": fn})
+        return out or None
 
     # -- response decoding -----------------------------------------------------
     def decode_response(self, status: int, body: bytes) -> ir.AssistantTurn:
