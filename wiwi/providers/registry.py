@@ -1,10 +1,15 @@
 """Adapter registry: provider type -> adapter instance.
 
-Adapters are stateless between requests, so a single instance per provider
-type is shared process-wide. They *do* accumulate state while decoding a
-stream (open tool indices, framers, buffered args), so ``get_adapter``
-resets the instance before handing it out — without that, a stream that died
-mid-flight would leak its state into the next request.
+Adapters *do* accumulate state while decoding a stream (open tool indices,
+framers, buffered args, deferred tool opens), so ownership matters:
+
+- ``fresh_adapter`` returns a private instance and is what the request hot
+  path uses — the non-streaming call and the stream pump both hold the
+  adapter across awaits, so a shared instance would be reset underneath an
+  in-flight stream by a concurrent request.
+- ``get_adapter`` returns the shared singleton, reset before handing it out.
+  It is for callers that use the adapter synchronously and do not hold it
+  across an await.
 """
 
 from __future__ import annotations
@@ -53,9 +58,12 @@ def get_adapter(provider_type: str) -> ProviderAdapter:
 def fresh_adapter(provider_type: str) -> ProviderAdapter:
     """Return a *private* adapter instance for *provider_type*.
 
-    For callers that hold an adapter across awaits where another request
-    could reset the shared instance underneath them. Not used on the request
-    hot path.
+    This is the acquisition to use on the request hot path: both the
+    non-streaming call and the stream pump hold the adapter across awaits
+    while accumulating per-stream decode state (deferred tool opens, name
+    fragments, open indices, NIM tool schemas/aliases), so they must own their
+    instance exclusively. ``get_adapter``'s shared singleton is reset on every
+    acquisition, which would wipe a concurrent in-flight stream's state.
     """
     if provider_type == "anthropic":
         return AnthropicAdapter()
