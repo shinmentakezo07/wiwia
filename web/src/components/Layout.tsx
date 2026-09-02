@@ -152,10 +152,31 @@ export function AdminLayout() {
   const sidebarWidth = collapsed ? SIDEBAR_COLLAPSED : SIDEBAR_WIDE;
 
   const isAdmin = user?.role === "admin";
-  const navSections = useMemo<NavSection[]>(
-    () => (isAdmin ? [...USER_NAV_SECTIONS, ...ADMIN_ONLY_SECTIONS] : USER_NAV_SECTIONS),
-    [isAdmin],
-  );
+  // Fold the admin-only sections into their user counterparts by title so
+  // each section renders exactly once. USER_NAV_SECTIONS and
+  // ADMIN_ONLY_SECTIONS both define "Configuration" and "Admin" sections —
+  // concatenating them produced duplicate React keys AND duplicated
+  // headers for admins. Merging keeps a single section per title while an
+  // admin still sees every item.
+  const navSections = useMemo<NavSection[]>(() => {
+    const merged: NavSection[] = [];
+    const byTitle = new Map<string, NavSection>();
+    const lists = isAdmin ? [USER_NAV_SECTIONS, ADMIN_ONLY_SECTIONS]
+                          : [USER_NAV_SECTIONS];
+    for (const list of lists) {
+      for (const section of list) {
+        const existing = byTitle.get(section.title);
+        if (existing) {
+          existing.items.push(...section.items);
+        } else {
+          const copy: NavSection = { title: section.title, items: [...section.items] };
+          byTitle.set(section.title, copy);
+          merged.push(copy);
+        }
+      }
+    }
+    return merged;
+  }, [isAdmin]);
 
   // Cmd/Ctrl+B toggles the sidebar
   useEffect(() => {
