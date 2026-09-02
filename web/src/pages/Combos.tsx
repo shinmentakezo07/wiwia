@@ -14,6 +14,11 @@
 // therefore attaches at least one deployment under the chosen name; a combo
 // can't exist empty. The same dialog handles create and edit (add/remove
 // deployments on an existing group).
+//
+// The dialog lists only model ids that are already registered for a provider
+// (i.e. deployed in some model group) — read from /admin/models — plus a small
+// "add custom model id" input per provider for ids not yet registered. It does
+// NOT fetch the provider's full upstream catalog.
 
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -23,8 +28,6 @@ import type { LucideIcon } from "lucide-react";
 import {
   addDeployment,
   deleteDeployment,
-  fetchClineModels,
-  fetchProviderModels,
   getModels,
   getProviders,
   patchModelGroup,
@@ -58,8 +61,6 @@ interface ProviderOption {
   type: string;
 }
 
-// -- model fetch: one provider's catalog -> string[] ---------------------------
-
 interface DeploymentPick {
   provider: string;
   model_id: string;
@@ -71,23 +72,20 @@ interface DeploymentPick {
 // for this purpose.
 const depKey = (d: DeploymentPick) => `${d.provider}/${d.model_id}`;
 
-async function fetchCatalog(p: ProviderOption): Promise<string[]> {
-  const d = p.type === "cline" ? await fetchClineModels() : await fetchProviderModels(p.name);
-  return d.models.map((m) => m.id);
-}
-
 // -- create/edit dialog --------------------------------------------------------
 //
 // The dialog is the whole compose UX. It collects a combo name and, grouped by
-// provider, a checkbox list of model ids. "Create" attaches the ticking models
-// under the name; "Edit" adds newly ticked ones and detaches unticked ones on
-// an existing combo. The backend has no empty-group endpoint, so the name is
-// only meaningful once at least one deployment is attached.
+// provider, a checkbox list of registered model ids (plus any custom ids the
+// admin types). "Create" attaches the ticking models under the name; "Edit"
+// adds newly ticked ones and detaches unticked ones on an existing combo. The
+// backend has no empty-group endpoint, so the name is only meaningful once at
+// least one deployment is attached.
 
 function ComboDialog(props: {
   open: boolean;
   editing: ModelGroup | null; // null = create mode
   providerOptions: ProviderOption[];
+  registeredByProvider: Record<string, string[]>;
   onClose: () => void;
   onError: (m: string) => void;
 }) {
@@ -95,25 +93,32 @@ function ComboDialog(props: {
   const isEdit = props.editing !== null;
 
   const [name, setName] = useState("");
-  // Per-provider catalog cache + selected deployments, keyed by provider/model_id.
-  const [catalogs, setCatalogs] = useState<Record<string, string[] | "loading" | "error">>({});
   const [selected, setSelected] = useState<Map<string, DeploymentPick>>(new Map());
   const [localError, setLocalError] = useState<string | null>(null);
   // Case-insensitive filter across every provider's model id.
   const [search, setSearch] = useState("");
+  // Per-provider drafts for the "add custom model id" inputs.
+  const [customDrafts, setCustomDrafts] = useState<Record<string, string>>({});
 
-  // Which model ids to show per provider, filtered by `search` ("" shows all).
+  // The model ids shown per provider: the registered ones, plus any custom ids
+  // the admin has already ticked for that provider (so they stay visible).
+  // Filtered by `search` ("" shows all).
   const visibleByProvider = useMemo(() => {
     const q = search.trim().toLowerCase();
+    const match = (m: string) => !q || m.toLowerCase().includes(q);
     const out: Record<string, string[]> = {};
-    for (const [pname, status] of Object.entries(catalogs)) {
-      if (!Array.isArray(status)) continue;
-      out[pname] = q ? status.filter((m) => m.toLowerCase().includes(q)) : status;
+    for (const p of props.providerOptions) {
+      const registered = props.registeredByProvider[p.name] ?? [];
+      const custom = Array.from(selected.values())
+        .filter((s) => s.provider === p.name)
+        .map((s) => s.model_id);
+      // De-dupe, prefer registered order, then filter by search.
+      out[p.name] = Array.from(new Set([...custom, ...registered])).filter(match);
     }
     return out;
-  }, [catalogs, search]);
+  }, [props.providerOptions, props.registeredByProvider, selected, search]);
 
-  // Toggle every visible model in a provider that has a loaded catalog.
+  // Toggle every visible model in a provider.
   const toggleProvider = (pname: string) => {
     setSelected((s) => {
       const n = new Map(s);
@@ -146,19 +151,9 @@ function ComboDialog(props: {
       setSelected(new Map());
     }
     setSearch("");
-    const next: Record<string, string[] | "loading" | "error"> = {};
-    for (const p of props.providerOptions) next[p.name] = "loading";
-    setCatalogs(next);
+    setCustomDrafts({});
     setLocalError(null);
-    // Fire catalog fetches for every provider and stow results per name.
-    for (const p of props.providerOptions) {
-      fetchCatalog(p)
-        .then((ids) =>
-          setCatalogs((c) => (c[p.name] === "loading" ? { ...c, [p.name]: ids } : c)),
-        )
-        .catch(() => setCatalogs((c) => (c[p.name] === "loading" ? { ...c, [p.name]: "error" } : c)));
-    }
-  }, [props.open, props.editing, props.providerOptions]);
+  }, [props.open, props.editing]);
 
   const toggle = (p: DeploymentPick) =>
     setSelected((s) => {
@@ -171,6 +166,24 @@ function ComboDialog(props: {
       }
       return n;
     });
+
+  // Add a custom model id for a provider straight into the selection (registers
+  // it on save via addDeployment) and keep it visible.
+  const selectCustom = (pname: string) => {
+    const mid = (customDrafts[pname] ?? "").trim();
+    if (!mid) return;
+    if (/\s/.test(mid)) {
+      setLocalError("model id cannot contain spaces");
+      return;
+    }
+    setSelected((s) => {
+      const n = new Map(s);
+      n.set(depKey({ provider: pname, model_id: mid }), { provider: pname, model_id: mid });
+      return n;
+    });
+    setCustomDrafts((d) => ({ ...d, [pname]: "" }));
+    setLocalError(null);
+  };
 
   const save = useMutation({
     mutationFn: async () => {
@@ -198,8 +211,6 @@ function ComboDialog(props: {
     },
     onError: (e) => setLocalError(e.message),
   });
-
-  const catalogStatus = (p: ProviderOption) => catalogs[p.name];
 
   return (
     <Dialog
@@ -264,13 +275,10 @@ function ComboDialog(props: {
             )}
 
             {props.providerOptions.map((p) => {
-              const status = catalogStatus(p);
               const visible = visibleByProvider[p.name] ?? [];
-              const loaded = Array.isArray(status);
-              const selectedHere = loaded ? visible.filter((m) => selected.has(depKey({ provider: p.name, model_id: m }))).length : 0;
+              const registered = props.registeredByProvider[p.name] ?? [];
+              const selectedHere = visible.filter((m) => selected.has(depKey({ provider: p.name, model_id: m }))).length;
               const allOn = selectedHere > 0 && selectedHere === visible.length;
-              // A provider only matches the search if it has at least one visible model.
-              const hasMatch = loaded && visible.length > 0;
 
               return (
                 <div key={p.name}>
@@ -282,45 +290,32 @@ function ComboDialog(props: {
                     <span className="shrink-0">
                       <Badge tone="gray">{p.type}</Badge>
                     </span>
-                    {loaded && (
-                      <span className="ml-auto shrink-0 text-[10px] text-[var(--admin-text-dim)]">
-                        {hasMatch ? `${visible.filter((m) => selected.has(depKey({ provider: p.name, model_id: m }))).length}/${visible.length}` : ""}
-                      </span>
-                    )}
-                    {loaded && hasMatch && (
-                      <button
-                        type="button"
-                        aria-label={allOn ? `Deselect all ${p.name} models` : `Select all ${p.name} models`}
-                        onClick={() => toggleProvider(p.name)}
-                        className="shrink-0 rounded-md border border-white/[0.06] px-1.5 py-0.5 text-[10px] text-[var(--admin-text-dim)] transition-colors hover:border-blue-500/30 hover:text-blue-300"
-                      >
-                        {allOn ? "clear" : "all"}
-                      </button>
+                    {visible.length > 0 && (
+                      <>
+                        <span className="ml-auto shrink-0 text-[10px] text-[var(--admin-text-dim)]">
+                          {selectedHere}/{visible.length}
+                        </span>
+                        <button
+                          type="button"
+                          aria-label={allOn ? `Deselect all ${p.name} models` : `Select all ${p.name} models`}
+                          onClick={() => toggleProvider(p.name)}
+                          className="shrink-0 rounded-md border border-white/[0.06] px-1.5 py-0.5 text-[10px] text-[var(--admin-text-dim)] transition-colors hover:border-blue-500/30 hover:text-blue-300"
+                        >
+                          {allOn ? "clear" : "all"}
+                        </button>
+                      </>
                     )}
                   </div>
 
-                  {status === "loading" && (
-                    <div className="flex items-center gap-2 px-1 py-2 text-[11px] text-[var(--admin-text-dim)]">
-                      <Spinner className="h-3 w-3" /> loading catalog…
-                    </div>
-                  )}
-                  {status === "error" && (
+                  {visible.length === 0 ? (
                     <p className="px-1 py-2 text-[11px] text-[var(--admin-text-dim)]">
-                      Couldn't fetch this provider's models — type the id in the top input and
-                      tick it below instead.
+                      {registered.length === 0
+                        ? "No registered models for this provider yet."
+                        : search.trim()
+                          ? `No match for “${search.trim()}”.`
+                          : "No models to show."}
                     </p>
-                  )}
-                  {loaded && !hasMatch && status.length > 0 && (
-                    <p className="px-1 py-2 text-[11px] text-[var(--admin-text-dim)]">
-                      No match for “{search.trim()}”.
-                    </p>
-                  )}
-                  {loaded && status.length === 0 && (
-                    <p className="px-1 py-2 text-[11px] text-[var(--admin-text-dim)]">
-                      No models returned.
-                    </p>
-                  )}
-                  {loaded && hasMatch && (
+                  ) : (
                     <div className="space-y-0.5">
                       {visible.map((mid) => {
                         const pick = { provider: p.name, model_id: mid };
@@ -351,6 +346,32 @@ function ComboDialog(props: {
                       })}
                     </div>
                   )}
+
+                  {/* add a not-yet-registered model id for this provider */}
+                  <form
+                    className="mt-1.5 flex items-center gap-1"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      selectCustom(p.name);
+                    }}
+                  >
+                    <Input
+                      value={customDrafts[p.name] ?? ""}
+                      placeholder="add custom model id"
+                      aria-label={`Add custom model id for ${p.name}`}
+                      onChange={(e) => setCustomDrafts((d) => ({ ...d, [p.name]: e.target.value }))}
+                      className="h-auto py-1 font-mono text-[11px]"
+                    />
+                    <Button
+                      type="submit"
+                      variant="outline"
+                      disabled={!(customDrafts[p.name] ?? "").trim()}
+                      aria-label={`Add custom model id to ${p.name}`}
+                      className="h-auto px-2 py-1"
+                    >
+                      <Plus size={12} />
+                    </Button>
+                  </form>
                 </div>
               );
             })}
@@ -527,6 +548,19 @@ export function CombosPage() {
     [providersQ.data],
   );
 
+  // "Registered" model ids per provider = every model_id deployed in ANY model
+  // group for that provider. This is the only catalog the dialog shows.
+  const registeredByProvider = useMemo(() => {
+    const m: Record<string, string[]> = {};
+    for (const g of groups) {
+      for (const d of g.deployments) {
+        (m[d.provider] ??= []).push(d.model_id);
+      }
+    }
+    for (const k of Object.keys(m)) m[k] = Array.from(new Set(m[k])).sort();
+    return m;
+  }, [groups]);
+
   // Dialog modes: explicit create, or edit the currently selected combo.
   const openDialog = (mode: "create" | "edit") => {
     setEditingGroup(mode === "edit" ? (groups.find((g) => g.name === selectedName) ?? null) : null);
@@ -632,6 +666,7 @@ export function CombosPage() {
         open={dialogOpen}
         editing={editingGroup}
         providerOptions={providerOptions}
+        registeredByProvider={registeredByProvider}
         onClose={() => setDialogOpen(false)}
         onError={setError}
       />
