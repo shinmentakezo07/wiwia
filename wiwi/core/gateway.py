@@ -30,8 +30,14 @@ from wiwi.streaming.coalesce import DeltaCoalescer
 from wiwi.streaming.loopdetect import LoopDetector
 from wiwi.streaming.resume import StreamTape, build_continuation_messages
 from wiwi.streaming.sse import LineSSEParser, SSEEvent
+from wiwi.streaming.validation import MAX_TOOL_ARGS_BYTES, validate_tool_args
 
 log = structlog.get_logger(__name__)
+
+
+def _flag(ctx: RequestContext, msg: str) -> None:
+    """Record an advisory tool-args violation on the request context."""
+    ctx.metadata.setdefault("tool_args_violations", []).append(msg)
 
 # How long the consumer waits, after setting `ctx.cancel`, for the pump to
 # notice the flag and release the upstream connection itself before falling
@@ -619,6 +625,14 @@ class Gateway:
         text_len = 0
         started = False
         saw_terminal = False
+        # Tool-call arg validation (streaming/validation.py): buffer each
+        # open call's raw args so they can be checked against the request's
+        # declared tool schema at ToolCallClose. Violations are logged and
+        # flagged in ctx.metadata — advisory, never stream-failing.
+        _tool_schemas = {t.name: t.parameters_json_schema
+                         for t in (ctx.ir_req.tools or [])}
+        _open_tools: dict[int, str] = {}  # index -> tool name
+        _arg_bufs: dict[int, str] = {}  # index -> accumulated raw args
         try:
             try:
                 resp_cm = self._client.stream("POST", url, json=body, headers=headers,
@@ -700,6 +714,16 @@ class Gateway:
                                     f"repeating chunks)", "unknown"))
                                 await _close_upstream()
                                 return True
+                        elif isinstance(d, dl.ToolCallOpen):
+                            _open_tools[d.index] = d.name
+                            _arg_bufs[d.index] = ""
+                        elif isinstance(d, dl.ToolCallArgsDelta):
+                            buf = _arg_bufs.get(d.index)
+                            if buf is not None:
+                                _arg_bufs[d.index] = buf + d.args_fragment
+                        elif isinstance(d, dl.ToolCallClose):
+                            self._validate_closed_tool_args(
+                                ctx, _tool_schemas, _open_tools, _arg_bufs, d.index)
                         if not client_gone:
                             await queue.put(d)
                 return False
@@ -856,6 +880,36 @@ class Gateway:
             real_key, 502, None,
             failover_mode=self.router.settings.failover_mode,
             key_max_consecutive_fails=self.router.settings.key_max_consecutive_fails)
+
+    def _validate_closed_tool_args(
+        self,
+        ctx: RequestContext,
+        tool_schemas: dict[str, dict[str, Any]],
+        open_tools: dict[int, str],
+        arg_bufs: dict[int, str],
+        index: int,
+    ) -> None:
+        """Validate one closed tool call's args against the request's schema.
+
+        Violations are logged by ``validate_tool_args`` and appended to
+        ``ctx.metadata["tool_args_violations"]`` — the tool call still reaches
+        the client (validation is advisory; agents handle their own errors).
+        Oversize args skip validation and get flagged without parsing.
+        """
+        name = open_tools.pop(index, None)
+        raw = arg_bufs.pop(index, "")
+        if name is None:
+            return  # never opened (or already handled): nothing to validate
+        schema = tool_schemas.get(name)
+        if not schema:
+            return  # undeclared tool / no schema: nothing to check against
+        if len(raw.encode("utf-8", "replace")) > MAX_TOOL_ARGS_BYTES:
+            _flag(ctx, f"tool '{name}': arguments exceed "
+                       f"{MAX_TOOL_ARGS_BYTES} byte cap")
+            return
+        valid, msg = validate_tool_args(name, raw, schema)
+        if not valid:
+            _flag(ctx, msg)
 
     async def _price_partial(self, ctx: RequestContext, dep: Deployment,
                              usage_final: dl.UsageFinal | None,

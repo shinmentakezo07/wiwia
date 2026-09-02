@@ -797,3 +797,117 @@ async def test_finish_reason_after_usage_is_clean():
     assert len(finishes) == 1 and finishes[0].stop_reason == "stop"
     assert isinstance(out[-1], dl.StreamEnd)
     assert key.status == "active"
+
+
+# ---------------------------------------------------------------------------
+# Fix B4: validate_tool_args wired at ToolCallClose
+# ---------------------------------------------------------------------------
+
+def _tool_schema_req(schema: dict | None, raw: str) -> RequestContext:
+    """A chat request declaring one tool *schema* (None = no tools declared)."""
+    tools = [ir.Tool(name="t", description="", parameters_json_schema=schema)] \
+        if schema is not None else []
+    return RequestContext(surface="chat", ir_req=ir.Request(
+        model="gpt-x",
+        messages=[ir.Message(role="user", parts=[ir.TextPart("hi")])],
+        tools=tools, stream=True), group="gpt-x")
+
+
+def _tool_stream_body(name: str, raw_args: str) -> bytes:
+    """An OpenAI-shaped upstream that streams one complete tool call."""
+    return _sse(
+        orjson.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "call_1", "type": "function",
+             "function": {"name": name}}]}}]}).decode(),
+        orjson.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": raw_args}}]}}]}).decode(),
+        _H1_FINISH, "[DONE]")
+
+
+@respx.mock
+async def test_stream_pump_validates_tool_args_on_close():
+    """Malformed tool args (broken JSON) must be caught at ToolCallClose by the
+    previously-dead ``validate_tool_args`` — logged and flagged in request
+    metadata, never stream-failing (the validator's documented contract)."""
+    body = _tool_stream_body("t", '{"broken":')
+    gw = Gateway(Router(_gw_config()), CostEngine())
+    try:
+        respx.post("https://round20.example/v1/chat/completions").mock(
+            return_value=httpx.Response(200, content=body))
+        ctx = _tool_schema_req({"type": "object", "properties": {}}, '{"broken":')
+        out = []
+        async for d in gw.stream(ctx):
+            out.append(d)
+        # Stream completes normally — validation is advisory, not fatal.
+        assert isinstance(out[-1], dl.StreamEnd), out
+        flags = ctx.metadata.get("tool_args_violations")
+        assert flags, "invalid JSON tool args passed through with no violation flag"
+        assert "t" in flags[0], flags
+        assert "not valid JSON" in flags[0], flags
+    finally:
+        await gw.aclose()
+
+
+@respx.mock
+async def test_stream_pump_flags_schema_type_mismatch():
+    """Args that parse but violate the declared schema (bool in a number field)
+    are flagged at close too."""
+    body = _tool_stream_body("t", '{"n": true}')
+    gw = Gateway(Router(_gw_config()), CostEngine())
+    try:
+        respx.post("https://round20.example/v1/chat/completions").mock(
+            return_value=httpx.Response(200, content=body))
+        schema = {"type": "object",
+                  "properties": {"n": {"type": "number"}}, "required": ["n"]}
+        ctx = _tool_schema_req(schema, '{"n": true}')
+        out = []
+        async for d in gw.stream(ctx):
+            out.append(d)
+        assert isinstance(out[-1], dl.StreamEnd), out
+        flags = ctx.metadata.get("tool_args_violations")
+        assert flags, "schema-violating args passed through with no flag"
+        assert "n" in flags[0], flags
+    finally:
+        await gw.aclose()
+
+
+@respx.mock
+async def test_stream_pump_valid_args_untouched():
+    """Valid args produce no violation flag and an unmodified tool call."""
+    body = _tool_stream_body("t", '{"n": 1.5}')
+    gw = Gateway(Router(_gw_config()), CostEngine())
+    try:
+        respx.post("https://round20.example/v1/chat/completions").mock(
+            return_value=httpx.Response(200, content=body))
+        schema = {"type": "object",
+                  "properties": {"n": {"type": "number"}}, "required": ["n"]}
+        ctx = _tool_schema_req(schema, '{"n": 1.5}')
+        out = []
+        async for d in gw.stream(ctx):
+            out.append(d)
+        assert isinstance(out[-1], dl.StreamEnd), out
+        assert "tool_args_violations" not in ctx.metadata
+        opens = [d for d in out if isinstance(d, dl.ToolCallOpen)]
+        assert opens and opens[0].name == "t"
+    finally:
+        await gw.aclose()
+
+
+@respx.mock
+async def test_stream_pump_undeclared_tool_not_validated():
+    """A tool call for a tool not in the request's tool list (or a request with
+    no tools at all) skips validation — there is no schema to check against."""
+    body = _tool_stream_body("mystery", '{"x": 1}')
+    gw = Gateway(Router(_gw_config()), CostEngine())
+    try:
+        respx.post("https://round20.example/v1/chat/completions").mock(
+            return_value=httpx.Response(200, content=body))
+        # no tools declared at all
+        ctx = RequestContext(surface="chat", ir_req=_gw_req(), group="gpt-x")
+        out = []
+        async for d in gw.stream(ctx):
+            out.append(d)
+        assert isinstance(out[-1], dl.StreamEnd), out
+        assert "tool_args_violations" not in ctx.metadata
+    finally:
+        await gw.aclose()
