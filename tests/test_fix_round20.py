@@ -405,3 +405,104 @@ async def test_concurrent_streams_do_not_corrupt_tool_state():
                 "another stream's tool call leaked in"
     finally:
         await gw.aclose()
+
+
+def _h2_config(max_resumes: int) -> WiwiConfig:
+    """Two providers in one model group plus a fallback group, with mid-stream
+    resume enabled so a failed pump can be superseded by a new one."""
+    return WiwiConfig(
+        providers=[ProviderDef(name="p1", provider="openai",
+                               base_url="https://round20-h2a.example/v1",
+                               keys=[KeyDef(label="k1", key="sk-1")]),
+                   ProviderDef(name="p2", provider="openai",
+                               base_url="https://round20-h2b.example/v1",
+                               keys=[KeyDef(label="k2", key="sk-2")])],
+        model_list=[ModelEntry(model_name="gpt-x",
+                               wiwi_params=DeploymentParams(provider="p1",
+                                                            model="gpt-x")),
+                    ModelEntry(model_name="gpt-x-fb",
+                               wiwi_params=DeploymentParams(provider="p2",
+                                                            model="gpt-x"))],
+        general_settings=GeneralSettings(master_key="sk-wiwi-master-test",
+                                         database_url="sqlite+aiosqlite:///:memory:"),
+        router_settings=RouterSettings(
+            num_retries=0, allowed_fails=1, cooldown_time=60.0,
+            stream_resume="enabled", stream_resume_max_retries=max_resumes,
+            stream_idle_timeout_s=0.2,
+            fallbacks={"gpt-x": ["gpt-x-fb", "gpt-x"]}),
+    )
+
+
+async def _h2_drain(hang_primary: bool, hang_fallback: bool) -> list:
+    """Drive one stream whose upstream hangs if *hang_primary*, resuming onto a
+    fallback that hangs if *hang_fallback*. Returns the emitted deltas."""
+    gw = Gateway(Router(_h2_config(max_resumes=2)), CostEngine())
+
+    async def hang_body():
+        # One content chunk, then never finish -> idle timeout -> StreamError.
+        yield _sse(_text_chunk("partial "))
+        await asyncio.sleep(30)
+
+    async def good_body():
+        yield _sse(_text_chunk("resumed"),
+                   orjson.dumps({"choices": [{"delta": {},
+                                              "finish_reason": "stop"}]}).decode(),
+                   "[DONE]")
+
+    primary = hang_body if hang_primary else good_body
+    fallback = hang_body if hang_fallback else good_body
+    try:
+        respx.post("https://round20-h2a.example/v1/chat/completions").mock(
+            side_effect=[httpx.Response(200, content=primary())
+                         for _ in range(4)])
+        respx.post("https://round20-h2b.example/v1/chat/completions").mock(
+            side_effect=[httpx.Response(200, content=fallback())
+                         for _ in range(4)])
+        ctx = RequestContext(surface="chat", ir_req=_gw_req(), group="gpt-x")
+        out = []
+        async for d in gw.stream(ctx):
+            out.append(d)
+        return out
+    finally:
+        await gw.aclose()
+
+
+def _assert_single_logical_stream(out: list, label: str) -> None:
+    """The IR contract allows exactly one StreamStart and exactly one terminal
+    (StreamEnd xor StreamError), no matter how many pumps ran."""
+    starts = [d for d in out if isinstance(d, dl.StreamStart)]
+    assert len(starts) == 1, \
+        f"{label}: expected exactly one StreamStart, got {len(starts)} " \
+        f"(two pumps emitted deltas for one logical stream)"
+    terminals = [d for d in out
+                 if isinstance(d, (dl.StreamEnd, dl.StreamError))]
+    assert len(terminals) == 1, \
+        f"{label}: expected exactly one terminal, got {len(terminals)}: " \
+        f"{[type(t).__name__ for t in terminals]}"
+    # A terminal must be the last delta — no deltas after it.
+    assert out[-1] is terminals[0], \
+        f"{label}: deltas emitted after the terminal: " \
+        f"{[type(d).__name__ for d in out]}"
+
+
+@respx.mock
+async def test_resume_onto_healthy_fallback_keeps_one_logical_stream():
+    """Primary dies mid-stream, resume connects to a healthy fallback. The
+    superseded pump must not contribute deltas: exactly one StreamStart and
+    one terminal, and the resumed text continues the original."""
+    out = await _h2_drain(hang_primary=True, hang_fallback=False)
+    _assert_single_logical_stream(out, "resume-succeeded")
+    assert not any(isinstance(d, dl.StreamError) for d in out), \
+        "a successful resume must not surface the superseded pump's error"
+    text = "".join(d.text for d in out if isinstance(d, dl.TextDelta))
+    assert text == "partial resumed", text
+
+
+@respx.mock
+async def test_exhausted_resumes_still_emit_one_terminal():
+    """Every deployment hangs, so resumes are exhausted. The stream must still
+    end with exactly ONE terminal (StreamError) and one StreamStart — repeated
+    pumps must not each contribute their own."""
+    out = await _h2_drain(hang_primary=True, hang_fallback=True)
+    _assert_single_logical_stream(out, "resumes-exhausted")
+    assert isinstance(out[-1], dl.StreamError)
