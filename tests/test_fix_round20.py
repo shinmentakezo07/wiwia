@@ -713,3 +713,87 @@ def test_nim_native_calls_closed_exactly_once_with_finish_reason():
     kinds = [type(d).__name__ for d in out]
     assert kinds == ["ToolCallOpen", "ToolCallArgsDelta", "ToolCallClose",
                      "UsageFinal", "Finish"], kinds
+
+
+# ---------------------------------------------------------------------------
+# Fix M8: a stream that ends with usage but no finish_reason is a failure
+# ---------------------------------------------------------------------------
+
+_M8_USAGE = '{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}'
+
+
+async def _m8_stream(last_frames: list[str]) -> tuple[list, object]:
+    """Drive one gateway stream whose body is a content chunk, a usage chunk,
+    then *last_frames*. Returns (deltas, the provider key used)."""
+    body = f"data: {_text_chunk('hello')}\n\n".encode()
+    body += f"data: {_M8_USAGE}\n\n".encode()
+    for f in last_frames:
+        body += f"data: {f}\n\n".encode()
+    gw = Gateway(Router(_gw_config()), CostEngine())
+    try:
+        respx.post("https://round20.example/v1/chat/completions").mock(
+            return_value=httpx.Response(200, content=body))
+        ctx = RequestContext(surface="chat", ir_req=_gw_req(), group="gpt-x")
+        out = []
+        async for d in gw.stream(ctx):
+            out.append(d)
+        acct = gw.router.providers["p1"]
+        key = next(k for k in acct.keys if k.label == ctx.provider_key.label)
+        return out, key
+    finally:
+        await gw.aclose()
+
+
+@respx.mock
+async def test_usage_without_finish_is_failure():
+    """Upstream sends content and usage, then closes the body with no
+    ``finish_reason`` and no ``[DONE]``. That is a truncated response, not a
+    clean completion — the client gets billed tokens but no finish_reason, and
+    the router never learns the key dropped the stream."""
+    out, _ = await _m8_stream([])
+    errs = [d for d in out if isinstance(d, dl.StreamError)]
+    assert errs, \
+        f"usage-with-no-finish was treated as a clean completion: " \
+        f"{[type(d).__name__ for d in out]}"
+    assert "without completion" in errs[0].message, errs[0].message
+    # The error terminates the stream — nothing follows it.
+    assert out[-1] is errs[0]
+    assert not any(isinstance(d, dl.Finish) for d in out), \
+        "a truncated stream must not synthesize a finish_reason"
+
+
+@respx.mock
+async def test_usage_without_finish_cools_the_key():
+    """The drop must be recorded against the key, so routing stops sending
+    traffic to a deployment that truncates streams."""
+    out, key = await _m8_stream([])
+    assert any(isinstance(d, dl.StreamError) for d in out)
+    assert key.status != "active", \
+        f"key left {key.status!r} after a truncated stream — retries will " \
+        "keep picking the deployment that drops mid-stream"
+
+
+@respx.mock
+async def test_done_terminated_usage_without_finish_is_clean():
+    """The round-15 DeepSeek path must survive: ``[DONE]`` after usage with no
+    ``finish_reason`` is an explicit, clean end-of-stream."""
+    out, key = await _m8_stream(["[DONE]"])
+    assert not any(isinstance(d, dl.StreamError) for d in out), \
+        f"[DONE]-terminated stream regressed to an error: {out}"
+    finishes = [d for d in out if isinstance(d, dl.Finish)]
+    assert len(finishes) == 1 and finishes[0].stop_reason == "stop"
+    assert isinstance(out[-1], dl.StreamEnd)
+    assert key.status == "active"
+
+
+@respx.mock
+async def test_finish_reason_after_usage_is_clean():
+    """The normal ordering — usage chunk, then a ``finish_reason`` chunk — is
+    untouched: one Finish, one StreamEnd, key stays active."""
+    out, key = await _m8_stream([
+        '{"choices":[{"delta":{},"finish_reason":"stop"}]}'])
+    assert not any(isinstance(d, dl.StreamError) for d in out), out
+    finishes = [d for d in out if isinstance(d, dl.Finish)]
+    assert len(finishes) == 1 and finishes[0].stop_reason == "stop"
+    assert isinstance(out[-1], dl.StreamEnd)
+    assert key.status == "active"

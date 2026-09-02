@@ -768,14 +768,18 @@ class Gateway:
             self._price_stream(ctx, dep, est_usage)
             if not client_gone:
                 await queue.put(est_usage)
-                if finish is None and usage_final is None:
-                    if not saw_terminal:
-                        # No [DONE] and no finish_reason: the upstream
-                        # connection dropped mid-stream — a real failure.
-                        await self._note_stream_failure(dep, real_key)
-                        await queue.put(dl.StreamError(
-                            "upstream stream ended without completion", "connection"))
-                        return
+                if finish is None and not saw_terminal:
+                    # Ended with no finish_reason and no [DONE]: the body just
+                    # stopped. That is a truncation whether or not usage
+                    # arrived — the client is billed for tokens it never got
+                    # a finish_reason for and the key still looks healthy.
+                    # [DONE] is the only clean end-of-stream marker that
+                    # legitimately replaces a finish_reason (DeepSeek/B.A.I).
+                    await self._note_stream_failure(dep, real_key)
+                    await queue.put(dl.StreamError(
+                        "upstream stream ended without completion", "connection"))
+                    return
+                if finish is None:
                     # DeepSeek/B.AI and other OpenAI-compatible servers signal
                     # completion purely with [DONE], omitting a trailing
                     # finish_reason/usage chunk. Treat a [DONE]-terminated
