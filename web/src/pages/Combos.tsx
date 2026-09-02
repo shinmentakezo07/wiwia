@@ -18,7 +18,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { Boxes, Layers, Pencil, Plus, RefreshCw, Unlink } from "lucide-react";
+import { Boxes, Layers, Pencil, Plus, RefreshCw, Search, Unlink, X } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
   addDeployment,
@@ -99,6 +99,37 @@ function ComboDialog(props: {
   const [catalogs, setCatalogs] = useState<Record<string, string[] | "loading" | "error">>({});
   const [selected, setSelected] = useState<Map<string, DeploymentPick>>(new Map());
   const [localError, setLocalError] = useState<string | null>(null);
+  // Case-insensitive filter across every provider's model id.
+  const [search, setSearch] = useState("");
+
+  // Which model ids to show per provider, filtered by `search` ("" shows all).
+  const visibleByProvider = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const out: Record<string, string[]> = {};
+    for (const [pname, status] of Object.entries(catalogs)) {
+      if (!Array.isArray(status)) continue;
+      out[pname] = q ? status.filter((m) => m.toLowerCase().includes(q)) : status;
+    }
+    return out;
+  }, [catalogs, search]);
+
+  // Toggle every visible model in a provider that has a loaded catalog.
+  const toggleProvider = (pname: string) => {
+    setSelected((s) => {
+      const n = new Map(s);
+      const visible = visibleByProvider[pname] ?? [];
+      const allOn = visible.length > 0 && visible.every((m) => n.has(depKey({ provider: pname, model_id: m })));
+      for (const m of visible) {
+        const k = depKey({ provider: pname, model_id: m });
+        if (allOn) {
+          n.delete(k);
+        } else {
+          n.set(k, { provider: pname, model_id: m });
+        }
+      }
+      return n;
+    });
+  };
 
   // Reset state whenever the dialog (re)opens for a given target.
   useEffect(() => {
@@ -114,6 +145,7 @@ function ComboDialog(props: {
       setName("");
       setSelected(new Map());
     }
+    setSearch("");
     const next: Record<string, string[] | "loading" | "error"> = {};
     for (const p of props.providerOptions) next[p.name] = "loading";
     setCatalogs(next);
@@ -187,26 +219,86 @@ function ComboDialog(props: {
         </Field>
 
         <div>
-          <div className="mb-1.5 text-[11px] uppercase tracking-wide text-[var(--admin-text-dim)]">
-            Models
+          <div className="mb-1.5 flex items-center justify-between">
+            <div className="text-[11px] uppercase tracking-wide text-[var(--admin-text-dim)]">
+              Models
+            </div>
+            <div className="text-[11px] text-[var(--admin-text-dim)]">
+              <span className="text-blue-300">{selected.size}</span> selected
+            </div>
           </div>
-          <div className="max-h-[46vh] space-y-3 overflow-y-auto rounded-lg border border-white/[0.04] p-3">
-            {props.providerOptions.length === 0 && (
-              <p className="px-2 py-4 text-[12px] text-[var(--admin-text-dim)]">
-                No providers configured yet.
-              </p>
+
+          {/* search — filters every provider's model id, with a clear button */}
+          <div className="relative mb-2">
+            <Search
+              size={13}
+              className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--admin-text-dim)]"
+            />
+            <Input
+              value={search}
+              placeholder="Search model ids… (e.g. gpt, glm, 5.2)"
+              aria-label="Search model ids"
+              onChange={(e) => setSearch(e.target.value)}
+              className="pl-7 pr-8"
+            />
+            {search && (
+              <button
+                type="button"
+                aria-label="Clear search"
+                onClick={() => setSearch("")}
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]"
+              >
+                <X size={13} />
+              </button>
             )}
+          </div>
+
+          <div className="max-h-[48vh] space-y-3 overflow-y-auto rounded-lg border border-white/[0.04] p-3">
+            {props.providerOptions.length === 0 && (
+              <div className="px-2 py-6 text-center">
+                <Boxes size={16} className="mx-auto mb-2 opacity-40" />
+                <p className="text-[12px] text-[var(--admin-text-dim)]">
+                  No providers configured yet. Add one first, then come back.
+                </p>
+              </div>
+            )}
+
             {props.providerOptions.map((p) => {
               const status = catalogStatus(p);
+              const visible = visibleByProvider[p.name] ?? [];
+              const loaded = Array.isArray(status);
+              const selectedHere = loaded ? visible.filter((m) => selected.has(depKey({ provider: p.name, model_id: m }))).length : 0;
+              const allOn = selectedHere > 0 && selectedHere === visible.length;
+              // A provider only matches the search if it has at least one visible model.
+              const hasMatch = loaded && visible.length > 0;
+
               return (
                 <div key={p.name}>
                   <div className="mb-1.5 flex items-center gap-2">
-                    <Boxes size={13} className="text-[var(--admin-text-dim)]" />
-                    <span className="text-[12px] font-semibold text-[var(--admin-text)]">
+                    <Boxes size={13} className="shrink-0 text-[var(--admin-text-dim)]" />
+                    <span className="truncate text-[12px] font-semibold text-[var(--admin-text)]">
                       {p.name}
                     </span>
-                    <Badge tone="gray">{p.type}</Badge>
+                    <span className="shrink-0">
+                      <Badge tone="gray">{p.type}</Badge>
+                    </span>
+                    {loaded && (
+                      <span className="ml-auto shrink-0 text-[10px] text-[var(--admin-text-dim)]">
+                        {hasMatch ? `${visible.filter((m) => selected.has(depKey({ provider: p.name, model_id: m }))).length}/${visible.length}` : ""}
+                      </span>
+                    )}
+                    {loaded && hasMatch && (
+                      <button
+                        type="button"
+                        aria-label={allOn ? `Deselect all ${p.name} models` : `Select all ${p.name} models`}
+                        onClick={() => toggleProvider(p.name)}
+                        className="shrink-0 rounded-md border border-white/[0.06] px-1.5 py-0.5 text-[10px] text-[var(--admin-text-dim)] transition-colors hover:border-blue-500/30 hover:text-blue-300"
+                      >
+                        {allOn ? "clear" : "all"}
+                      </button>
+                    )}
                   </div>
+
                   {status === "loading" && (
                     <div className="flex items-center gap-2 px-1 py-2 text-[11px] text-[var(--admin-text-dim)]">
                       <Spinner className="h-3 w-3" /> loading catalog…
@@ -218,14 +310,19 @@ function ComboDialog(props: {
                       tick it below instead.
                     </p>
                   )}
-                  {Array.isArray(status) && (
+                  {loaded && !hasMatch && status.length > 0 && (
+                    <p className="px-1 py-2 text-[11px] text-[var(--admin-text-dim)]">
+                      No match for “{search.trim()}”.
+                    </p>
+                  )}
+                  {loaded && status.length === 0 && (
+                    <p className="px-1 py-2 text-[11px] text-[var(--admin-text-dim)]">
+                      No models returned.
+                    </p>
+                  )}
+                  {loaded && hasMatch && (
                     <div className="space-y-0.5">
-                      {status.length === 0 && (
-                        <p className="px-1 py-2 text-[11px] text-[var(--admin-text-dim)]">
-                          No models returned.
-                        </p>
-                      )}
-                      {status.map((mid) => {
+                      {visible.map((mid) => {
                         const pick = { provider: p.name, model_id: mid };
                         const key = depKey(pick);
                         const on = selected.has(key);
