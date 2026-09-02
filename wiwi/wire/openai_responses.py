@@ -163,9 +163,12 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
                        "arguments": t.raw_args or json.dumps(t.args)})
         out_id += 1
     u = turn.usage
-    return {
+    # Truncated output surfaces as status "incomplete" + incomplete_details,
+    # mirroring the streaming path's response.incomplete terminal event.
+    status = "incomplete" if turn.stop_reason == "length" else "completed"
+    resp: dict[str, Any] = {
         "id": f"resp_{req_id}", "object": "response", "created_at": int(time.time()),
-        "status": "completed", "model": model, "output": output,
+        "status": status, "model": model, "output": output,
         "usage": {
             "input_tokens": u.prompt_tokens, "output_tokens": u.completion_tokens,
             "total_tokens": u.prompt_tokens + u.completion_tokens,
@@ -173,6 +176,9 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
             "output_tokens_details": {"reasoning_tokens": u.reasoning_tokens},
         },
     }
+    if status == "incomplete":
+        resp["incomplete_details"] = {"reason": "max_output_tokens"}
+    return resp
 
 
 class ResponsesStreamEncoder:
@@ -195,6 +201,10 @@ class ResponsesStreamEncoder:
         # corrupt each other's item ids / argument buffers.
         self._tools: dict[int, dict[str, Any]] = {}
         self._open_tool: int | None = None
+        # Closed item payloads (the dicts emitted by output_item.done), so the
+        # terminal response.completed/response.incomplete event can carry the
+        # full output array as the spec (and Codex CLI) require.
+        self._output: list[dict[str, Any]] = []
 
     def _next_output_index(self) -> int:
         self._open_out += 1
@@ -216,14 +226,16 @@ class ResponsesStreamEncoder:
         idx = t["output_index"]
         n = t["index"]
         item_id = f"fc_{self.req_id}_{n}"
+        item = {"type": "function_call", "id": item_id,
+                "call_id": t["call_id"], "name": t["name"],
+                "arguments": t["args"]}
+        self._output.append(item)
         return [self._evt("response.function_call_arguments.done", {
             "item_id": item_id, "output_index": idx,
             "arguments": t["args"]}),
             self._evt("response.output_item.done", {
-                "output_index": idx,
-                "item": {"type": "function_call", "id": item_id,
-                         "call_id": t["call_id"], "name": t["name"],
-                         "arguments": t["args"]}})]
+                "output_index": idx, "item": item})]
+
     def _close_item(self) -> list[bytes]:
         if self._item_open is None:
             return []
@@ -231,23 +243,32 @@ class ResponsesStreamEncoder:
         idx = self._open_out
         self._item_open = None
         if kind == "message":
-            return [self._evt("response.output_item.done", {
-                "output_index": idx,
-                "item": {"type": "message", "id": f"msg_{self.req_id}",
-                         "status": "completed", "role": "assistant",
-                         "content": [{"type": "output_text",
-                                      "text": "".join(self._text_buf),
-                                      "annotations": []}]}})]
+            text = "".join(self._text_buf)
+            item = {"type": "message", "id": f"msg_{self.req_id}",
+                    "status": "completed", "role": "assistant",
+                    "content": [{"type": "output_text", "text": text,
+                                 "annotations": []}]}
+            self._output.append(item)
+            return [self._evt("response.output_text.done", {
+                        "item_id": f"msg_{self.req_id}", "output_index": idx,
+                        "content_index": 0, "text": text}),
+                    self._evt("response.content_part.done", {
+                        "item_id": f"msg_{self.req_id}", "output_index": idx,
+                        "content_index": 0,
+                        "part": {"type": "output_text", "text": text,
+                                 "annotations": []}}),
+                    self._evt("response.output_item.done", {
+                        "output_index": idx, "item": item})]
         if kind == "thinking":
             think = "".join(self._think_buf)
-            return [self._evt("response.reasoning_text.done", {
-                "item_id": f"rs_{self.req_id}_{idx}", "output_index": idx,
-                "text": think}),
-                self._evt("response.output_item.done", {
-                    "output_index": idx,
-                    "item": {"type": "reasoning", "id": f"rs_{self.req_id}_{idx}",
-                             "summary": [{"type": "summary_text",
-                                          "text": think}]}})]
+            item = {"type": "reasoning", "id": f"rs_{self.req_id}_{idx}",
+                    "summary": [{"type": "summary_text", "text": think}]}
+            self._output.append(item)
+            return [self._evt("response.reasoning_summary_text.done", {
+                        "item_id": f"rs_{self.req_id}_{idx}", "output_index": idx,
+                        "text": think}),
+                    self._evt("response.output_item.done", {
+                        "output_index": idx, "item": item})]
         # kind == "tool"
         t = self._tools.get(self._open_tool) if self._open_tool is not None else None
         if t is None:
@@ -256,14 +277,15 @@ class ResponsesStreamEncoder:
         idx = t["output_index"]
         n = t["index"]
         item_id = f"fc_{self.req_id}_{n}"
+        item = {"type": "function_call", "id": item_id,
+                "call_id": t["call_id"], "name": t["name"],
+                "arguments": t["args"]}
+        self._output.append(item)
         return [self._evt("response.function_call_arguments.done", {
             "item_id": item_id, "output_index": idx,
             "arguments": t["args"]}),
             self._evt("response.output_item.done", {
-                "output_index": idx,
-                "item": {"type": "function_call", "id": item_id,
-                         "call_id": t["call_id"], "name": t["name"],
-                         "arguments": t["args"]}})]
+                "output_index": idx, "item": item})]
 
     def feed(self, d: dl.IRStreamDelta) -> bytes | None:
         if isinstance(d, dl.StreamStart):
@@ -306,7 +328,7 @@ class ResponsesStreamEncoder:
                 self._item_open = "thinking"
                 self._think_buf = []
             self._think_buf.append(d.text)
-            out.append(self._evt("response.reasoning_text.delta", {
+            out.append(self._evt("response.reasoning_summary_text.delta", {
                 "item_id": f"rs_{self.req_id}_{self._open_out}",
                 "output_index": self._open_out, "delta": d.text}))
             return b"".join(out)
@@ -329,9 +351,13 @@ class ResponsesStreamEncoder:
             self._item_open = "tool"
             return b"".join(out)
         if isinstance(d, dl.ToolCallArgsDelta):
-            t = self._tools.setdefault(d.index, {"index": d.index, "name": "",
-                                                 "call_id": "", "args": "",
-                                                 "output_index": self._open_out})
+            t = self._tools.get(d.index)
+            if t is None:
+                # No Open preceded this ArgsDelta: the IR contract forbids it,
+                # and synthesizing an entry would collide with the currently
+                # open item's output_index. Drop the fragment (mirrors the
+                # Anthropic encoder's defensive drop).
+                return None
             t["args"] += d.args_fragment
             self._open_tool = d.index
             return self._evt("response.function_call_arguments.delta", {
@@ -357,18 +383,25 @@ class ResponsesStreamEncoder:
 
     def _completed(self) -> bytes:
         # A legal stream always closes the currently open output item before
-        # response.completed, even when the last delta left one open.
+        # the terminal event, even when the last delta left one open.
         closing = b"".join(self._close_item())
         u = self._usage or dl.UsageFinal()
-        return closing + self._evt("response.completed", {
-            "response": {"id": f"resp_{self.req_id}", "object": "response",
-                         "status": "completed", "model": self.model,
-                         "usage": {
-                             "input_tokens": u.prompt, "output_tokens": u.output,
-                             "total_tokens": u.prompt + u.output,
-                             "input_tokens_details": {"cached_tokens": u.cached},
-                             "output_tokens_details": {"reasoning_tokens": u.reasoning}}},
-        })
+        # Truncation is a DISTINCT terminal event (response.incomplete) with
+        # status "incomplete" + incomplete_details — not a completed response.
+        incomplete = self._stop == "length"
+        etype = "response.incomplete" if incomplete else "response.completed"
+        status = "incomplete" if incomplete else "completed"
+        resp: dict[str, Any] = {"id": f"resp_{self.req_id}", "object": "response",
+                                "status": status, "model": self.model,
+                                "output": self._output,
+                                "usage": {
+                                    "input_tokens": u.prompt, "output_tokens": u.output,
+                                    "total_tokens": u.prompt + u.output,
+                                    "input_tokens_details": {"cached_tokens": u.cached},
+                                    "output_tokens_details": {"reasoning_tokens": u.reasoning}}}
+        if incomplete:
+            resp["incomplete_details"] = {"reason": "max_output_tokens"}
+        return closing + self._evt(etype, {"response": resp})
 
 
 def error_body(status: int, etype: str, message: str) -> dict[str, Any]:

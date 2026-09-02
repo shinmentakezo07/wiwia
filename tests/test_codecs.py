@@ -162,7 +162,7 @@ def test_anthropic_stream_encoder_sequence():
 
 def test_chat_stream_encoder_tool_args():
     from wiwi.streaming import deltas as dl
-    enc = oc.ChatStreamEncoder("gpt-4o", "abc")
+    enc = oc.ChatStreamEncoder("gpt-4o", "abc", include_usage=True)
     frames = []
     for d in [dl.StreamStart("gpt-4o"), dl.ToolCallOpen(0, "call_1", "f"),
               dl.ToolCallArgsDelta(0, '{"x":'), dl.ToolCallArgsDelta(0, "1}"),

@@ -236,6 +236,7 @@ class AssistantTurn:
     thinking: list[ThinkingPart] = field(default_factory=list)
     tool_calls: list[ToolUsePart] = field(default_factory=list)
     stop_reason: StopReason = "stop"
+    stop_sequence: str | None = None  # matched stop sequence (Anthropic surfaces it)
     usage: Usage = field(default_factory=Usage)
     raw: dict[str, Any] | None = None  # provider-native response for passthrough extras
 

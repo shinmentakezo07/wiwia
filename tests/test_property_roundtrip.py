@@ -206,7 +206,7 @@ legal_delta_sequence = st.lists(
 @settings(max_examples=100)
 def test_chat_stream_encoder_produces_valid_sse(content_deltas):
     """ChatStreamEncoder must produce well-formed SSE for any legal delta sequence."""
-    enc = oc.ChatStreamEncoder("test-model", "req-123")
+    enc = oc.ChatStreamEncoder("test-model", "req-123", include_usage=True)
     frames = []
 
     start = enc.feed(dl.StreamStart(model="test-model"))

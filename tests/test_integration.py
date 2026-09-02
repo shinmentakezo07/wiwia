@@ -104,6 +104,7 @@ async def test_streaming_chat(client):
         "data: [DONE]\n\n"))
     r = await client.post("/v1/chat/completions", json={
         "model": "gpt-4o", "stream": True,
+        "stream_options": {"include_usage": True},
         "messages": [{"role": "user", "content": "hi"}]},
         headers={"Authorization": "Bearer sk-wiwi-master-test"})
     assert r.status_code == 200
@@ -111,8 +112,11 @@ async def test_streaming_chat(client):
     assert "chat.completion.chunk" in body
     assert '"He"' in body and '"y"' in body
     assert "[DONE]" in body
-    # final usage frame relayed from upstream usage
-    assert "prompt_tokens" in body.split("[DONE]")[0][-800:]
+    # usage rides in a separate empty-choices chunk after the finish chunk
+    # (OpenAI semantics, only when stream_options.include_usage was sent)
+    tail = body.split("[DONE]")[0]
+    assert "prompt_tokens" in tail
+    assert '"choices":[]' in tail or '"choices": []' in tail
 
 
 @respx.mock

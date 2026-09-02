@@ -94,10 +94,18 @@ class AnthropicAdapter:
 
     def __init__(self) -> None:
         self._tool_indices: set[int] = set()
+        # Usage fields seen at message_start; consumed at message_delta. Held on
+        # the instance because the two SSE events arrive in separate calls.
+        self._pending_prompt = 0
+        self._pending_cached = 0
+        self._pending_cache_creation = 0
 
     def reset(self) -> None:
-        """Drop per-stream tool state so the adapter can serve another stream."""
+        """Drop per-stream state so the adapter can serve another stream."""
         self._tool_indices.clear()
+        self._pending_prompt = 0
+        self._pending_cached = 0
+        self._pending_cache_creation = 0
 
     def headers(self, key: ProviderKeyRef) -> dict[str, str]:
         return {"x-api-key": key.secret, "anthropic-version": "2023-06-01"}
@@ -117,6 +125,11 @@ class AnthropicAdapter:
             blocks: list[dict[str, Any]] = []
             for p in m.parts:
                 if isinstance(p, ir.TextPart):
+                    if not p.text:
+                        # Anthropic 400s on empty text blocks ("text content
+                        # blocks must be non-empty"); OpenAI-dialect assistant
+                        # turns echo content:"" alongside tool_calls.
+                        continue
                     b: dict[str, Any] = {"type": "text", "text": p.text}
                     if p.cache_control:
                         b["cache_control"] = p.cache_control
@@ -253,8 +266,9 @@ class AnthropicAdapter:
         sr = data.get("stop_reason", "end_turn")
         turn.stop_reason = {"end_turn": "stop", "stop_sequence": "stop",
                             "max_tokens": "length", "tool_use": "tool_call",
-                            "refusal": "content_filter",
-                            "pause_turn": "stop"}.get(sr, "stop")
+                            "refusal": "content_filter", "pause_turn": "stop",
+                            "compaction": "stop"}.get(sr, "stop")
+        turn.stop_sequence = data.get("stop_sequence")
         u = data.get("usage") or {}
         # output_tokens_details.thinking_tokens is where Anthropic reports
         # reasoning tokens (newer API); fall back to 0 when absent.
@@ -318,10 +332,12 @@ class AnthropicAdapter:
                 cache_creation=getattr(self, "_pending_cache_creation", 0),
                 reasoning=out_details.get("thinking_tokens", 0),
                 output=u.get("output_tokens", 0)))
-            out.append(dl.Finish({"end_turn": "stop", "stop_sequence": "stop",
-                                  "max_tokens": "length", "tool_use": "tool_call",
-                                  "refusal": "content_filter",
-                                  "pause_turn": "stop"}.get(sr, "stop")))
+            out.append(dl.Finish(
+                {"end_turn": "stop", "stop_sequence": "stop",
+                 "max_tokens": "length", "tool_use": "tool_call",
+                 "refusal": "content_filter", "pause_turn": "stop",
+                 "compaction": "stop"}.get(sr, "stop"),
+                stop_sequence=d.get("stop_sequence")))
         elif etype == "message_stop":
             out.append(dl.StreamEnd())
         elif etype == "error":

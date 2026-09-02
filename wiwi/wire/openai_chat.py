@@ -26,6 +26,10 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
     messages = []
     for m in body.get("messages") or []:
         role = m.get("role", "user")
+        if role == "developer":
+            # OpenAI's newer name for system-level instructions; unify so
+            # non-OpenAI upstreams fold it into the system prompt once.
+            role = "system"
         content = m.get("content")
         parts: list[ir.Part] = []
         tool_calls = m.get("tool_calls") or []
@@ -33,6 +37,8 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
             parts.append(ir.TextPart(content))
         elif isinstance(content, list):
             for c in content:
+                if not isinstance(c, dict):
+                    continue  # malformed item: skip rather than 500 on .get
                 if c.get("type") == "text":
                     parts.append(ir.TextPart(c.get("text", "")))
                 elif c.get("type") == "image_url":
@@ -120,7 +126,8 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
     g = ir.GenParams(
         temperature=body.get("temperature"),
         top_p=body.get("top_p"),
-        max_tokens=body.get("max_tokens") or body.get("max_completion_tokens"),
+        max_tokens=(body.get("max_tokens") if body.get("max_tokens") is not None
+                    else body.get("max_completion_tokens")),
         stop=[body["stop"]] if isinstance(body.get("stop"), str) else (body.get("stop") or []),
         seed=body.get("seed"),
         n=body.get("n") or 1,
@@ -188,9 +195,13 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
 class ChatStreamEncoder:
     """IR deltas -> chat.completion.chunk frames (docs/CORE.md §7.2 fsm_chat)."""
 
-    def __init__(self, model: str, req_id: str):
+    def __init__(self, model: str, req_id: str, include_usage: bool = False):
         self.model = model
         self.req_id = req_id
+        # OpenAI semantics: usage rides only in a final chunk with an EMPTY
+        # choices array, and only when the client asked for it via
+        # stream_options.include_usage (G4).
+        self._include_usage = include_usage
         self._started = False
         self._finished = False
         self._usage: dl.UsageFinal | None = None
@@ -205,14 +216,10 @@ class ChatStreamEncoder:
         }
         self._choice = self._chunk["choices"][0]
 
-    def _shell(self, delta: dict[str, Any], finish: str | None = None,
-               usage: dict[str, Any] | None = None) -> bytes:
+    def _shell(self, delta: dict[str, Any], finish: str | None = None) -> bytes:
         self._choice["delta"] = delta
         self._choice["finish_reason"] = finish
-        if usage is None:
-            self._chunk.pop("usage", None)
-        else:
-            self._chunk["usage"] = usage
+        self._chunk.pop("usage", None)
         return sse_frame("", orjson.dumps(self._chunk).decode())
 
     def feed(self, d: dl.IRStreamDelta) -> bytes | None:
@@ -255,15 +262,25 @@ class ChatStreamEncoder:
                     stop: str | None = None) -> bytes:
         u = usage or getattr(self, "_usage", None) or dl.UsageFinal()
         stop = stop or getattr(self, "_stop", "stop")
-        usage_obj = {
-            "prompt_tokens": u.prompt, "completion_tokens": u.output,
-            "total_tokens": u.prompt + u.output,
-            "prompt_tokens_details": {"cached_tokens": u.cached},
-            "completion_tokens_details": {"reasoning_tokens": u.reasoning},
-        }
         fr = {"stop": "stop", "length": "length", "tool_call": "tool_calls",
               "content_filter": "content_filter"}.get(stop, "stop")
-        return self._shell({}, finish=fr, usage=usage_obj)
+        out = self._shell({}, finish=fr)
+        if self._include_usage:
+            # OpenAI semantics: usage arrives in a final chunk carrying an
+            # EMPTY choices array (after the finish_reason chunk), not in the
+            # finish_reason chunk itself.
+            self._choice["delta"] = None
+            self._choice["finish_reason"] = None
+            self._chunk["choices"] = []
+            out += sse_frame("", orjson.dumps({
+                **self._chunk,
+                "usage": {
+                    "prompt_tokens": u.prompt, "completion_tokens": u.output,
+                    "total_tokens": u.prompt + u.output,
+                    "prompt_tokens_details": {"cached_tokens": u.cached},
+                    "completion_tokens_details": {"reasoning_tokens": u.reasoning},
+                }}).decode())
+        return out
 
 
 def error_body(status: int, etype: str, message: str) -> dict[str, Any]:

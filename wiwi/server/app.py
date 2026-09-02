@@ -504,6 +504,9 @@ class AppState:
         self.router = Router(config)
         self.cost = CostEngine()
         self.logs = LoggingSubsystem()
+        # Router emits gateway-op proxy events (upstream 5xx, key cooldown,
+        # retries, fallback switches) into the LoggingSubsystem proxy ring.
+        self.router.log_proxy = self.logs.log_proxy
         rs = config.router_settings
         self.limiter = RateLimiter(global_rpm=rs.global_rpm, global_tpm=rs.global_tpm)
         # Abuse throttles for unauthenticated endpoints (login/signup). These
@@ -989,7 +992,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
             ctx.metadata["request_body"] = body
         try:
             if ir_req.stream:
-                encoder_pair = _encoder_for(surface, resp_model, ctx.request_id)
+                encoder_pair = _encoder_for(surface, resp_model, ctx.request_id,
+                                            include_usage=ir_req.stream_options_include_usage)
                 # Pull the first delta before committing to a streaming
                 # response: if the upstream fails during connect (bad request,
                 # auth, rate limit...), execute_with_retries raises before any
@@ -1056,9 +1060,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
             state_.logs.log_request(build_log_event(ctx))
             return _err(500, "api_error", "internal gateway error", request, surface)
 
-    def _encoder_for(surface: str, model: str, req_id: str):
+    def _encoder_for(surface: str, model: str, req_id: str,
+                     include_usage: bool = False):
         if surface == "chat":
-            return oc.ChatStreamEncoder(model, req_id), "chat"
+            return oc.ChatStreamEncoder(model, req_id,
+                                        include_usage=include_usage), "chat"
         if surface == "messages":
             return am.AnthropicStreamEncoder(model, req_id), "anthropic"
         return orp.ResponsesStreamEncoder(model, req_id), "responses"

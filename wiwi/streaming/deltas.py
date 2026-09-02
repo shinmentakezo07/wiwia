@@ -67,6 +67,7 @@ class UsageFinal:
 @dataclass(frozen=True)
 class Finish:
     stop_reason: StopReason = "stop"
+    stop_sequence: str | None = None  # matched stop sequence (Anthropic surfaces it)
 
 
 @dataclass(frozen=True)

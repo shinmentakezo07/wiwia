@@ -34,6 +34,8 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
             parts.append(ir.TextPart(content))
         elif isinstance(content, list):
             for b in content:
+                if not isinstance(b, dict):
+                    continue  # malformed block: skip rather than 500 on .get
                 btype = b.get("type")
                 if btype == "text":
                     parts.append(ir.TextPart(b.get("text", ""),
@@ -48,7 +50,16 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                 elif btype == "tool_use":
                     parts.append(ir.ToolUsePart(id=b.get("id", ""), name=b.get("name", ""),
                                                 args=b.get("input") or {}))
-                elif btype == "tool_result":
+                elif btype == "server_tool_use":
+                    # Server-side tools (web_search, code_execution, mcp, ...):
+                    # treat as a plain tool use so echoed history keeps the
+                    # turn and its paired *_tool_result stays balanced.
+                    parts.append(ir.ToolUsePart(id=b.get("id", ""), name=b.get("name", ""),
+                                                args=b.get("input") or {}))
+                elif btype == "tool_result" or btype.endswith("_tool_result"):
+                    # Covers user tool_result AND the server-tool result
+                    # family (web_search_tool_result, code_execution_tool_result,
+                    # mcp_tool_result, computer_tool_result, browser_tool_result).
                     c = b.get("content")
                     if isinstance(c, str):
                         text = c
@@ -101,7 +112,9 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         elif tc_type == "none":
             tool_choice = ir.ToolChoiceNone()
 
-    thinking = body.get("thinking") or {}
+    thinking = body.get("thinking")
+    if not isinstance(thinking, dict):
+        thinking = {}  # malformed (e.g. a string): ignore rather than crash
     g = ir.GenParams(
         temperature=body.get("temperature"),
         top_p=body.get("top_p"),
@@ -137,7 +150,7 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
     return {
         "id": f"msg_{req_id}", "type": "message", "role": "assistant",
         "model": model, "content": content,
-        "stop_reason": sr, "stop_sequence": None,
+        "stop_reason": sr, "stop_sequence": turn.stop_sequence,
         "usage": {
             "input_tokens": u.prompt_tokens, "output_tokens": u.completion_tokens,
             "cache_read_input_tokens": u.cached_tokens,
@@ -164,8 +177,12 @@ class AnthropicStreamEncoder:
         # Signature seen while no thinking block is open (cross-provider quirk);
         # flushed into the next thinking block right before it closes.
         self._pending_sig: str | None = None
+        # Block index of the most recent thinking block, so a late pending
+        # signature stamps the RIGHT block — never a later thinking block.
+        self._last_think_idx: int | None = None
         self._usage: dl.UsageFinal | None = None
         self._stop = "end_turn"
+        self._stop_seq: str | None = None
         self._started = False
         # Per-delta skeleton, allocated once: only `index` and the delta body
         # change between consecutive deltas of the same kind.
@@ -207,14 +224,32 @@ class AnthropicStreamEncoder:
             self._open_tool = None
         self._open_block = None
         out: list[bytes] = []
-        if kind == "thinking" and self._pending_sig:
-            out.append(self._evt("content_block_delta", {
-                "type": "content_block_delta", "index": idx,
-                "delta": {"type": "signature_delta", "signature": self._pending_sig}}))
-            self._pending_sig = None
+        if kind == "thinking":
+            self._last_think_idx = idx
+            if self._pending_sig:
+                out.append(self._evt("content_block_delta", {
+                    "type": "content_block_delta", "index": idx,
+                    "delta": {"type": "signature_delta",
+                              "signature": self._pending_sig}}))
+                self._pending_sig = None
         out.append(self._evt("content_block_stop",
                              {"type": "content_block_stop", "index": idx}))
         return out
+
+    def _flush_pending_sig(self) -> list[bytes]:
+        """Emit a pending signature as a late delta against the last thinking
+        block. Fires when a NEW thinking block opens while one is pending (the
+        signature belongs to the earlier block) and at final_frame (otherwise it
+        would be dropped). A late delta on a stopped block is tolerated by the
+        Anthropic SDK and Claude Code — deltas dispatch by index — and beats
+        dropping the signature, which hard-400s the next turn's thinking replay."""
+        if not self._pending_sig or self._last_think_idx is None:
+            return []
+        sd = self._sig_delta
+        sd["index"] = self._last_think_idx
+        sd["delta"]["signature"] = self._pending_sig
+        self._pending_sig = None
+        return [self._evt("content_block_delta", sd)]
 
     def feed(self, d: dl.IRStreamDelta) -> bytes | None:
         if isinstance(d, dl.StreamStart):
@@ -267,6 +302,9 @@ class AnthropicStreamEncoder:
             out = []
             if self._open_block != "thinking":
                 out.extend(self._close_block())
+                # A signature pending from a PREVIOUS thinking block belongs to
+                # that block, not this new one.
+                out.extend(self._flush_pending_sig())
                 out.append(self._evt("content_block_start", {
                     "type": "content_block_start", "index": self._block_idx,
                     "content_block": {"type": "thinking", "thinking": ""}}))
@@ -320,6 +358,7 @@ class AnthropicStreamEncoder:
             self._stop = {"stop": "end_turn", "length": "max_tokens",
                           "tool_call": "tool_use",
                           "content_filter": "refusal"}.get(d.stop_reason, "end_turn")
+            self._stop_seq = d.stop_sequence
             return None
         if isinstance(d, dl.StreamEnd):
             return None  # caller emits message_delta (final_frame) then message_stop
@@ -333,10 +372,14 @@ class AnthropicStreamEncoder:
         # A legal stream always closes the currently open content block before
         # the terminating message_delta, even when the last delta left one open.
         out = b"".join(self._close_block())
+        # A signature still pending here has no later thinking block to ride on:
+        # flush it as a late delta against the last thinking block rather than
+        # dropping it (a dropped signature hard-400s the next turn's replay).
+        out += b"".join(self._flush_pending_sig())
         u = self._usage or dl.UsageFinal()
         return out + self._evt("message_delta", {
             "type": "message_delta",
-            "delta": {"stop_reason": self._stop, "stop_sequence": None},
+            "delta": {"stop_reason": self._stop, "stop_sequence": self._stop_seq},
             "usage": {"output_tokens": u.output,
                       "input_tokens": u.prompt,
                       "cache_read_input_tokens": u.cached,

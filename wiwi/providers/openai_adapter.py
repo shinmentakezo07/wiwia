@@ -218,7 +218,10 @@ class OpenAIAdapter:
         data = orjson.loads(body)
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message", {})
-        turn = ir.AssistantTurn(text=message.get("content") or "", raw=data)
+        # refusal carries the content-filter explanation when content is null;
+        # surface it as the turn text so it survives crossing to other dialects.
+        turn = ir.AssistantTurn(text=message.get("content")
+                                or message.get("refusal") or "", raw=data)
         # Reasoning models may return reasoning_content in the message body
         # (DeepSeek, OpenRouter, and other OpenAI-compatible providers).
         reasoning = message.get("reasoning_content") or message.get("reasoning")
@@ -240,6 +243,8 @@ class OpenAIAdapter:
                 args=args, raw_args=raw_args))
         fr = choice.get("finish_reason", "stop")
         turn.stop_reason = {"stop": "stop", "length": "length", "tool_calls": "tool_call",
+                            # legacy function_call API: same meaning as tool_calls
+                            "function_call": "tool_call",
                             "content_filter": "content_filter"}.get(fr, "stop")
         u = data.get("usage") or {}
         details_p = (u.get("prompt_tokens_details") or {})
@@ -388,6 +393,7 @@ class OpenAIAdapter:
             self._pending_opens.clear()
             out.append(dl.Finish({"stop": "stop", "length": "length",
                                   "tool_calls": "tool_call",
+                                  "function_call": "tool_call",
                                   "content_filter": "content_filter"}.get(fr, "stop")))
         return out
 
