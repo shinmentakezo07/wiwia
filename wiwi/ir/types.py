@@ -144,8 +144,13 @@ class GenParams:
     # Anthropic: disable_parallel_tool_use rides inside tool_choice, but the IR
     # keeps it separate so either dialect can set it independently.
     disable_parallel_tool_use: bool | None = None
-    reasoning_effort: str | None = None  # "low" | "medium" | "high"
+    reasoning_effort: str | None = None  # "none" | "minimal" | "low" … "max"
     thinking_budget: int | None = None
+    # Anthropic thinking modes: "enabled" (budget via thinking_budget), "adaptive"
+    # (model-driven budget, no budget_tokens), "disabled" (also sets
+    # reasoning_effort="none" so OpenAI upstreams disable reasoning).
+    thinking_type: str | None = None  # "enabled" | "adaptive" | "disabled"
+    top_k: int | None = None  # Anthropic (and Gemini) sampling param; ignored by OpenAI
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def effective_reasoning_effort(self) -> str | None:
@@ -175,12 +180,16 @@ class GenParams:
 # providers that natively support effort levels (OpenAI) use the string directly,
 # while providers that use token budgets (Anthropic) get the mapped value.
 # "none" means disable thinking entirely (supported by GPT-5.x reasoning models).
+# "minimal" (2026) shares the 1024 floor with "low"; "max" (2026) shares the
+# 64000 cap with "xhigh".
 _EFFORT_BUDGETS: dict[str, int | None] = {
     "none": None,
+    "minimal": 1024,
     "low": 1024,
     "medium": 8000,
     "high": 32000,
     "xhigh": 64000,
+    "max": 64000,
 }
 
 

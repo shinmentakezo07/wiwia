@@ -14,6 +14,14 @@ from wiwi.streaming import deltas as dl
 DEFAULT_MAX_TOKENS = 4096
 MIN_THINKING_BUDGET = 1024  # Anthropic API minimum for budget_tokens
 
+# Anthropic 2026 top-level params the wire codec captures into req.extras;
+# safe to forward verbatim to the Messages API (mirrors openai_adapter's
+# _STANDARD under drop_params=True).
+_ANTHROPIC_STANDARD = {
+    "service_tier", "speed", "metadata", "mcp_servers", "container",
+    "context_management", "fallbacks", "cache_control",
+}
+
 
 def _system_text(messages: list[ir.Message]) -> str:
     parts: list[str] = []
@@ -191,27 +199,42 @@ class AnthropicAdapter:
             body["temperature"] = g.temperature
         if g.top_p is not None:
             body["top_p"] = g.top_p
+        if g.top_k is not None:
+            body["top_k"] = g.top_k
         if g.stop:
             body["stop_sequences"] = g.stop
 
-        # Thinking configuration.  'none' effort explicitly disables thinking;
-        # a thinking_budget or any other effort level enables it.  The Anthropic
+        # Thinking configuration.  Explicit modes (2026): adaptive is
+        # model-driven with no budget_tokens; disabled omits thinking entirely.
+        # Otherwise 'none' effort explicitly disables thinking; a
+        # thinking_budget or any other effort level enables it.  The Anthropic
         # API requires budget_tokens >= 1024 and max_tokens > budget_tokens, so
         # we clamp the budget and raise max_tokens to satisfy that invariant.
-        thinking_enabled = (g.thinking_budget is not None
-                            or (g.reasoning_effort is not None
-                                and g.reasoning_effort != "none"))
+        if g.thinking_type == "adaptive":
+            body["thinking"] = {"type": "adaptive"}
+        elif g.thinking_type == "disabled":
+            pass  # no thinking key
+        else:
+            thinking_enabled = (g.thinking_budget is not None
+                                or (g.reasoning_effort is not None
+                                    and g.reasoning_effort != "none"))
+            if thinking_enabled:
+                budget = g.effective_thinking_budget()
+                if budget is None:
+                    budget = ir.effort_to_thinking_budget("medium")
+                # Clamp to the API minimum
+                budget = max(budget, MIN_THINKING_BUDGET)
+                # max_tokens must be strictly greater than budget_tokens
+                if body["max_tokens"] <= budget:
+                    body["max_tokens"] = budget + 1024
+                body["thinking"] = {"type": "enabled", "budget_tokens": budget}
 
-        if thinking_enabled:
-            budget = g.effective_thinking_budget()
-            if budget is None:
-                budget = ir.effort_to_thinking_budget("medium")
-            # Clamp to the API minimum
-            budget = max(budget, MIN_THINKING_BUDGET)
-            # max_tokens must be strictly greater than budget_tokens
-            if body["max_tokens"] <= budget:
-                body["max_tokens"] = budget + 1024
-            body["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        # Extras: keys the Anthropic codec recognized as this provider's own
+        # 2026 surface ride through; anything else only under drop_params=False
+        # (mirrors the OpenAI adapter's policy).
+        for k, v in req.extras.items():
+            if k in _ANTHROPIC_STANDARD or not deployment_params.get("drop_params", True):
+                body.setdefault(k, v)
 
         if req.tools:
             body["tools"] = [

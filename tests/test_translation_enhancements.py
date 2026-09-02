@@ -705,3 +705,207 @@ def test_openai_json_schema_to_anthropic_native():
     body = AnthropicAdapter().encode_request(req, "claude-sonnet-4-5", {})
     assert body["output_config"]["format"]["type"] == "json_schema"
     assert body["output_config"]["format"]["schema"] == {"type": "object"}
+
+
+# == C4: 2026 parameter surface ===============================================
+
+def test_anthropic_extras_captured_on_decode():
+    """Unmapped known-safe Anthropic top-level params must land in req.extras
+    instead of being silently dropped."""
+    req = am.decode_request({
+        "model": "claude-sonnet-4-5", "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hi"}],
+        "service_tier": "priority", "speed": "standard",
+        "metadata": {"user_id": "u1"},
+        "context_management": {"edits": [{"type": "clear_tool_uses_20250919"}]},
+        "mcp_servers": [{"type": "url", "url": "https://mcp.example/sse"}],
+        "container": {"type": "auto"},
+        "fallbacks": [{"model": "claude-haiku-4-5", "max_tokens": 64}],
+        "cache_control": {"type": "ephemeral"},
+    })
+    assert req.extras["service_tier"] == "priority"
+    assert req.extras["speed"] == "standard"
+    assert req.extras["metadata"] == {"user_id": "u1"}
+    assert req.extras["context_management"]["edits"][0]["type"] == "clear_tool_uses_20250919"
+    assert req.extras["mcp_servers"][0]["url"] == "https://mcp.example/sse"
+    assert req.extras["container"] == {"type": "auto"}
+    assert req.extras["fallbacks"][0]["model"] == "claude-haiku-4-5"
+    assert req.extras["cache_control"] == {"type": "ephemeral"}
+
+
+def test_anthropic_extras_forwarded_to_anthropic_upstream():
+    """Anthropic-inbound extras ride through to an Anthropic upstream."""
+    req = am.decode_request({
+        "model": "claude-sonnet-4-5", "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hi"}],
+        "service_tier": "priority",
+        "context_management": {"edits": [{"type": "clear_tool_uses_20250919"}]},
+    })
+    body = AnthropicAdapter().encode_request(req, "claude-sonnet-4-5", {})
+    assert body["service_tier"] == "priority"
+    assert body["context_management"] == {"edits": [{"type": "clear_tool_uses_20250919"}]}
+
+
+def test_anthropic_extras_dropped_when_drop_params_true():
+    """drop_params=True (default) on a non-Anthropic-shaped deployment must
+    not blindly forward extras — but known-safe standard params pass only
+    via the explicit allowlist. The anthropic adapter mirrors the OpenAI
+    behaviour: unknown extras are dropped unless drop_params=False."""
+    req = am.decode_request({
+        "model": "claude-sonnet-4-5", "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hi"}],
+        "service_tier": "priority",
+    })
+    body = AnthropicAdapter().encode_request(req, "claude-sonnet-4-5",
+                                             {"drop_params": True})
+    # service_tier is in the Anthropic known-safe set; default drop_params
+    # applies to *unknown* extras, not the recognized 2026 surface.
+    assert body["service_tier"] == "priority"
+
+
+def test_anthropic_extras_unknown_dropped_when_drop_params_true():
+    """A param outside the known-safe set is dropped under default
+    drop_params=True and forwarded when drop_params=False."""
+    req = am.decode_request({
+        "model": "claude-sonnet-4-5", "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    req.extras["totally_unknown_param"] = {"weird": True}
+    body = AnthropicAdapter().encode_request(req, "claude-sonnet-4-5", {})
+    assert "totally_unknown_param" not in body
+    body2 = AnthropicAdapter().encode_request(
+        req, "claude-sonnet-4-5", {"drop_params": False})
+    assert body2["totally_unknown_param"] == {"weird": True}
+
+
+def test_anthropic_top_k_roundtrip():
+    """top_k decodes from the Anthropic dialect and re-encodes natively."""
+    req = am.decode_request({
+        "model": "claude-sonnet-4-5", "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hi"}],
+        "top_k": 40,
+    })
+    assert req.gen_params.top_k == 40
+    body = AnthropicAdapter().encode_request(req, "claude-sonnet-4-5", {})
+    assert body["top_k"] == 40
+
+
+def test_anthropic_top_k_ignored_by_openai_adapter():
+    """top_k must NOT be sent to OpenAI-shaped upstreams (unknown param)."""
+    req = am.decode_request({
+        "model": "claude-sonnet-4-5", "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hi"}],
+        "top_k": 40,
+    })
+    body = OpenAIAdapter().encode_request(req, "gpt-4o", {})
+    assert "top_k" not in body
+
+
+def test_openai_standard_params_forwarded_under_default_drop_params():
+    """2026 OpenAI params land in extras (not in _KNOWN_KEYS) and must be
+    forwarded to native OpenAI even with drop_params=True (the default)."""
+    req = oc.decode_request({
+        "model": "gpt-5.2", "messages": [{"role": "user", "content": "hi"}],
+        "verbosity": "low",
+        "web_search_options": {"search_context_size": "low"},
+        "prediction": {"type": "content", "content": "four score"},
+        "store": False,
+        "metadata": {"session_id": "s1"},
+        "prompt_cache_key": "cache-me",
+        "safety_identifier": "user-123",
+        "modalities": ["text"],
+        "audio": {"voice": "alloy", "format": "wav"},
+        "logit_bias": {"1": -100},
+        "service_tier": "flex",
+    })
+    assert req.extras["verbosity"] == "low"
+    body = OpenAIAdapter().encode_request(req, "gpt-5.2", {})
+    assert body["verbosity"] == "low"
+    assert body["web_search_options"] == {"search_context_size": "low"}
+    assert body["prediction"]["content"] == "four score"
+    assert body["store"] is False
+    assert body["metadata"] == {"session_id": "s1"}
+    assert body["prompt_cache_key"] == "cache-me"
+    assert body["safety_identifier"] == "user-123"
+    assert body["modalities"] == ["text"]
+    assert body["audio"] == {"voice": "alloy", "format": "wav"}
+    assert body["logit_bias"] == {"1": -100}
+    assert body["service_tier"] == "flex"
+
+
+def test_minimal_and_max_effort_levels():
+    """2026 OpenAI reasoning_effort levels: minimal (shares the 1024 floor
+    with low) and max (shares the 64000 cap with xhigh) extend the forward
+    map; the inverse keeps its pre-existing boundaries for the collisions."""
+    from wiwi.ir.types import effort_to_thinking_budget, thinking_budget_to_effort
+    assert effort_to_thinking_budget("minimal") == 1024
+    assert effort_to_thinking_budget("max") == 64000
+    assert thinking_budget_to_effort(1024) == "low"
+    assert thinking_budget_to_effort(64000) == "xhigh"
+
+
+def test_minimal_effort_forwarded_to_native_openai():
+    req = ir.Request(
+        model="gpt-5.2",
+        messages=[ir.Message(role="user", parts=[ir.TextPart("hi")])],
+        gen_params=ir.GenParams(reasoning_effort="minimal"),
+    )
+    body = OpenAIAdapter().encode_request(req, "gpt-5.2", {})
+    assert body["reasoning_effort"] == "minimal"
+
+
+def test_anthropic_thinking_adaptive_decoded_and_encoded():
+    """thinking.type=adaptive (2026) decodes into thinking_type and
+    re-encodes natively as {"type": "adaptive"} with no budget."""
+    req = am.decode_request({
+        "model": "claude-opus-4-6", "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hi"}],
+        "thinking": {"type": "adaptive"},
+    })
+    assert req.gen_params.thinking_type == "adaptive"
+    body = AnthropicAdapter().encode_request(req, "claude-opus-4-6", {})
+    assert body["thinking"] == {"type": "adaptive"}
+
+
+def test_anthropic_thinking_adaptive_no_budget_tokens():
+    """Adaptive thinking must not carry budget_tokens (the API rejects the
+    combination)."""
+    req = am.decode_request({
+        "model": "claude-opus-4-6", "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hi"}],
+        "thinking": {"type": "adaptive", "budget_tokens": 8000},
+    })
+    body = AnthropicAdapter().encode_request(req, "claude-opus-4-6", {})
+    assert body["thinking"] == {"type": "adaptive"}
+    assert "budget_tokens" not in body["thinking"]
+
+
+def test_anthropic_thinking_disabled_sets_effort_none():
+    """thinking.type=disabled (2026) maps to reasoning_effort=none so an
+    OpenAI upstream disables reasoning, and an Anthropic upstream simply
+    omits the thinking key."""
+    req = am.decode_request({
+        "model": "claude-opus-4-6", "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hi"}],
+        "thinking": {"type": "disabled"},
+    })
+    assert req.gen_params.thinking_type == "disabled"
+    assert req.gen_params.reasoning_effort == "none"
+    body = AnthropicAdapter().encode_request(req, "claude-opus-4-6", {})
+    assert "thinking" not in body
+    # crossing to OpenAI: effort none forwarded
+    obody = OpenAIAdapter().encode_request(req, "gpt-5.2", {})
+    assert obody["reasoning_effort"] == "none"
+
+
+def test_anthropic_thinking_enabled_still_budgeted():
+    """Classic enabled thinking keeps its budget path (regression guard)."""
+    req = am.decode_request({
+        "model": "claude-opus-4-6", "max_tokens": 8192,
+        "messages": [{"role": "user", "content": "hi"}],
+        "thinking": {"type": "enabled", "budget_tokens": 4000},
+    })
+    assert req.gen_params.thinking_type == "enabled"
+    assert req.gen_params.thinking_budget == 4000
+    body = AnthropicAdapter().encode_request(req, "claude-opus-4-6", {})
+    assert body["thinking"] == {"type": "enabled", "budget_tokens": 4000}

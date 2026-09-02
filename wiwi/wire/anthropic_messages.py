@@ -115,6 +115,12 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
     thinking = body.get("thinking")
     if not isinstance(thinking, dict):
         thinking = {}  # malformed (e.g. a string): ignore rather than crash
+    # Thinking modes (2026): enabled carries budget_tokens; adaptive is
+    # model-driven (no budget); disabled turns thinking off and also maps to
+    # reasoning_effort="none" so OpenAI upstreams disable reasoning.
+    ttype = thinking.get("type")
+    thinking_type = ttype if ttype in ("enabled", "adaptive", "disabled") else None
+    reasoning_effort = "none" if thinking_type == "disabled" else None
     # Structured outputs GA: output_config.format is the native json_schema
     # carrier (analogous to OpenAI's response_format.json_schema).
     response_format: ir.ResponseFormat | None = None
@@ -130,13 +136,27 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         max_tokens=body.get("max_tokens"),
         stop=list(body.get("stop_sequences") or []),
         thinking_budget=(thinking.get("budget_tokens")
-                         if thinking.get("type") == "enabled" else None),
+                         if thinking_type == "enabled" else None),
+        thinking_type=thinking_type,
+        reasoning_effort=reasoning_effort,
+        top_k=body.get("top_k") if isinstance(body.get("top_k"), int) else None,
         disable_parallel_tool_use=disable_parallel,
         response_format=response_format,
     )
     return ir.Request(model=body["model"], messages=messages, tools=tools,
                       tool_choice=tool_choice, gen_params=g,
-                      stream=bool(body.get("stream")))
+                      stream=bool(body.get("stream")),
+                      extras={k: v for k, v in body.items()
+                              if k in _PASSTHROUGH_KEYS})
+
+
+# 2026 Anthropic top-level params the IR doesn't model as GenParams fields.
+# Known-safe to forward to an Anthropic upstream verbatim; other adapters
+# ignore extras they don't understand (subject to their drop_params policy).
+_PASSTHROUGH_KEYS = {
+    "service_tier", "speed", "metadata", "mcp_servers", "container",
+    "context_management", "fallbacks", "cache_control",
+}
 
 
 def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,

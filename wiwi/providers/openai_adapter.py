@@ -206,8 +206,14 @@ class OpenAIAdapter:
             body.setdefault(k, v)
         # Standard chat params clients send that the IR doesn't model; forward
         # to OpenAI-shaped upstreams. drop_params=False forwards the rest raw.
+        # The 2026 additions (verbosity, web_search_options, prediction, store,
+        # metadata, prompt_cache_key, safety_identifier, modalities, audio,
+        # logit_bias, service_tier) land here too.
         _STANDARD = {"frequency_penalty", "presence_penalty", "logprobs",
-                     "top_logprobs", "user"}
+                     "top_logprobs", "user", "verbosity", "web_search_options",
+                     "prediction", "store", "metadata", "prompt_cache_key",
+                     "safety_identifier", "modalities", "audio", "logit_bias",
+                     "service_tier"}
         for k, v in req.extras.items():
             if k in _STANDARD or not deployment_params.get("drop_params", True):
                 body.setdefault(k, v)
