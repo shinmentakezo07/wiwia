@@ -470,3 +470,17 @@ The create handler forwards `max_budget`, `rpm`, `tpm`, and `ttl_seconds` direct
 10. **#12** — /metrics auth gap. Security exposure.
 11. **#53 + #55 + #59 + #61** — reject malformed request/limit values, add authentication-attempt throttling, and redact provider credentials from errors.
 12. **#27 + #28** — UI: Models strategy dropdown crash + Settings routing 404. User-visible breakage.
+
+---
+
+## Addendum — Translation-layer 2026 alignment (2026-09-02)
+
+The 28-item translation-layer review (streaming/state, decode robustness, structured outputs, 2026 params, multimodal) is **fully fixed** as of 2026-09-02 — see `UPDATE.md` Round 6 and `tests/test_fix_round24.py` + `tests/test_translation_enhancements.py`. Commits: `381e5d4` (C1+C2), `608f9e1` (C3), `068330a` (C4), `a821230` (C5). Items 27–28 (message.refusal capture, compaction stop reason) landed in `381e5d4`.
+
+Known limitations carried forward (deliberate, not bugs):
+
+- Anthropic stream encoder's `message_start` carries zero usage; real usage only arrives at `UsageFinal` (stream end).
+- `cache_creation_tokens` has no OpenAI usage field; Anthropic-surface only.
+- `previous_response_id` is rejected on the Responses surface (MVP scope).
+
+The findings below predate this session and remain the live register.

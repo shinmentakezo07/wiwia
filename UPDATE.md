@@ -807,3 +807,62 @@ if t.cache_control is not None:
 | `tests/test_tool_translation_round2.py` | **NEW** — 37 tests covering all Round 5 fixes |
 
 **Total: 400 tests pass, ruff clean.**
+
+---
+
+# Round 6 — 2026 API Alignment (2026-09-02)
+
+> **Session date**: 2026-09-02
+> **Status**: All changes verified — 1104 tests pass, ruff clean
+> **Scope**: Streaming/state correctness, decode robustness, Anthropic structured-outputs GA, 2026 parameter surface, multimodal wiring
+
+Six groups of work aligning the OpenAI ↔ Anthropic translation layer with the 2026 API surfaces. Regression tests: `tests/test_fix_round24.py` (C1+C2 items). Capability tests: `tests/test_translation_enhancements.py` (C3–C6 items).
+
+## 6.1 Streaming/state correctness (commit 381e5d4)
+
+**OpenAI usage semantics** — `wire/openai_chat.py`, `server/app.py`: `ChatStreamEncoder` now takes `include_usage`; usage is only emitted when the client sent `stream_options.include_usage=true`, and then as a separate final chunk with an **empty `choices` array** after the finish_reason chunk (OpenAI spec shape). Previously usage rode the finish chunk unconditionally.
+
+**Pending thinking signature** — `wire/anthropic_messages.py`: `AnthropicStreamEncoder` tracks `_last_think_idx`; a pending `signature_delta` is flushed against that index when a new thinking block opens or at stream end, instead of being dropped (which would hard-400 the next turn's thinking replay) or landing in the wrong block.
+
+**Responses `response.completed` output array** — `wire/openai_responses.py`: the terminal event now carries the complete `output` array (closed item payloads accumulated through the stream). Codex CLI breaks without it.
+
+**`response.incomplete` on length** — `wire/openai_responses.py`: `Finish(stop_reason="length")` produces the terminal event `response.incomplete` with `status: "incomplete"` + `incomplete_details: {"reason": "max_output_tokens"}` (both stream and non-stream paths).
+
+**Responses event names** — `response.reasoning_summary_text.delta/done` (was `response.reasoning_text.*`); `response.output_text.done` + `response.content_part.done` emitted before `output_item.done`.
+
+**`stop_sequence` round-trip** — `ir/types.py` (`Finish.stop_sequence`, `AssistantTurn.stop_sequence`), `streaming/deltas.py`, both Anthropic decode/encode paths: the matched stop sequence is no longer hardcoded `None`.
+
+**`server_tool_use` history** — `wire/anthropic_messages.py`: echoed `server_tool_use` blocks decode to `ToolUsePart` and the `*_tool_result` family (web_search/code_execution/mcp/computer/browser) decodes to `ToolResultPart`, so server-tool history stays balanced instead of the whole turn being dropped.
+
+**Adapter reset contract** — `providers/anthropic_adapter.py`: `reset()` now clears the pending-usage fields too (`_pending_prompt`/`_pending_cached`/`_pending_cache_creation`).
+
+**Empty text blocks** — `providers/anthropic_adapter.py`: empty `TextPart`s are skipped (Anthropic 400s on `"text": ""`).
+
+## 6.2 Decode robustness (commit 381e5d4)
+
+Non-dict content items are skipped (no 500); string `thinking` values ignored; `max_tokens=0` no longer falls through to `max_completion_tokens`; `developer` role unified to `system` in the Chat codec; Responses args-without-open dropped instead of synthesizing a phantom item; legacy `function_call` finish reason → `tool_call`; `message.refusal` captured into `turn.text`; `compaction` stop reason mapped.
+
+## 6.3 Anthropic structured outputs GA (commit 608f9e1)
+
+`providers/anthropic_adapter.py` + `wire/anthropic_messages.py`: `ResponseFormat(type="json_schema")` now rides **natively** as `body["output_config"] = {"format": {"type": "json_schema", "schema": …, "name": …, "strict": …}}` (2026 GA shape, no beta header) instead of prompt-injecting a JSON-schema instruction into the system prompt. `json_object` keeps the instruction (no native equivalent). The Anthropic codec also decodes `output_config.format` back into IR `ResponseFormat`, so Anthropic-inbound clients get native `response_format` when routed to OpenAI upstreams.
+
+## 6.4 2026 parameter surface (commit 068330a)
+
+- `GenParams.top_k` — decoded from Anthropic, encoded natively by the Anthropic adapter, ignored by OpenAI.
+- `GenParams.thinking_type` — `adaptive` encodes as `{"type": "adaptive"}` (no budget_tokens); `disabled` omits thinking and sets `reasoning_effort="none"` (so OpenAI upstreams disable reasoning); `enabled` keeps the budget path.
+- Anthropic extras passthrough — the codec captures known-safe 2026 top-level params (`service_tier`, `speed`, `metadata`, `mcp_servers`, `container`, `context_management`, `fallbacks`, `cache_control`) into `req.extras`; the adapter forwards them through `_ANTHROPIC_STANDARD` honoring `drop_params`.
+- OpenAI `_STANDARD` grows the 2026 params: `verbosity`, `web_search_options`, `prediction`, `store`, `metadata`, `prompt_cache_key`, `safety_identifier`, `modalities`, `audio`, `logit_bias`, `service_tier`.
+- Effort map: `minimal` (1024 floor) and `max` (64000 cap) added; inverse keeps pre-existing boundaries for the collision values.
+
+## 6.5 Multimodal wiring (commit a821230)
+
+- Anthropic **document blocks** (base64/url sources, `title`, `context`) ↔ `ir.DocumentPart`, round-tripping through the Anthropic adapter; other adapters drop them safely.
+- OpenAI **`input_audio`** parts → `ir.AudioPart`.
+- Anthropic image **`source.type=file`** carries `file_id` on `ImagePart` (Anthropic→Anthropic passthrough).
+- **Multimodal tool results**: `ToolResultPart.images` — both codecs collect image blocks from tool-result content; the Anthropic adapter re-emits block-form `tool_result` content (text + image blocks), the OpenAI adapter emits content-parts form. Fixes Claude Code "tool result with screenshot" flows.
+
+## 6.6 Known limitations (unchanged, documented)
+
+- `message_start` usage zeros in the Anthropic stream encoder: real usage only arrives at `UsageFinal`.
+- `cache_creation_tokens` has no standard field in OpenAI usage; stays Anthropic-surface-only.
+- `previous_response_id` stays rejected (MVP scope).
