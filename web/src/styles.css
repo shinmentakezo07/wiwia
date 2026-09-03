@@ -987,6 +987,9 @@ select.admin-input option {
   grid-template-columns: 220px 1fr;
   gap: 2.5rem;
 }
+.docs-grid > * {
+  min-width: 0;
+}
 
 @media (max-width: 768px) {
   .docs-grid {
@@ -1010,10 +1013,17 @@ select.admin-input option {
   scroll-margin-top: 80px;
 }
 
-/* Hero banner */
-.docs-hero {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.015) 0%, transparent 100%);
+/* Code blocks scroll internally on narrow screens; contain the block so the
+   long-line pre never inflates the grid track (min-width:auto blowout). */
+.docs-codeblock {
+  min-width: 0;
+  max-width: 100%;
 }
+.docs-codeblock pre {
+  max-width: 100%;
+}
+
+/* Hero banner */
 
 .docs-hero-glow {
   position: absolute;
