@@ -54,7 +54,8 @@ Admin surface: `/admin/*` (master-key auth) and the SPA at `/admin/ui`.
 | `wiwi/ir/` | Internal Representation dataclasses (`types.py`) + `builtin_tools.py` registry. |
 | `wiwi/providers/` | `base.py` Protocol + WiwiError + per-provider adapters + `registry.py`. |
 | `wiwi/providers/registry.py` | `PROVIDER_TYPES` tuple; `get_adapter(type)` (shared), `fresh_adapter(type)` (private, used in hot path). |
-| `wiwi/streaming/` | `deltas.py` IRStreamDelta taxonomy, `sse.py` parse/encode, `resume.py` StreamTape, `partial_json.py`, `validation.py`, `coalesce.py`, `loopdetect.py`. |
+| `wiwi/streaming/` | `deltas.py` IRStreamDelta taxonomy, `sse.py` parse/encode, `resume.py` StreamTape, `tape_store.py` JournalStore (durable per-request JSONL journals), `partial_json.py`, `validation.py`, `coalesce.py`, `loopdetect.py`. |
+| `wiwi/cache/` | Opt-in exact-match response cache (`CacheSettings`, off by default): non-streaming requests only, keyed on normalized IR + group + surface + key id, bypassed per-call via `x-wiwi-no-cache` header. |
 | `wiwi/router/` | Router: build providers/groups, WRR, `execute_with_retries`. |
 | `wiwi/ratelimit/` | Sliding-window rpm/tpm: `memory.py` (default) + `redis.py`. |
 | `wiwi/auth/` | `service.py` AuthService, virtual keys, users, signed cookies. |
@@ -63,7 +64,7 @@ Admin surface: `/admin/*` (master-key auth) and the SPA at `/admin/ui`.
 | `wiwi/logging_core/` | Three-stream logger: request (DB+SSE), proxy (stdout+SSE), audit (sync DB). |
 | `wiwi/config.py` | Pydantic v2 config models + `load_config`/`load_env`/`PROVIDER_TYPES`. |
 | `wiwi/server/config_store.py` | DB-backed config (providers, keys, deployments, settings, model_prices). |
-| `tests/` | ~50 thematic files + numbered `test_fix_roundN.py` (see Testing & QA). |
+| `tests/` | 60+ thematic files + numbered `test_fix_roundN.py` (see Testing & QA). |
 | `web/` | React 19 + Vite 6 + Tailwind 4 SPA. `bun run build` outputs to `wiwi/server/static/`. |
 | `docs/` | `ARCHITECTURE.md`, `CORE.md`, `MVP.md`, `PLAN.md`, `ADMIN.md`, `TECHSTACK.md`, `STREAMING_PERFORMANCE_RECOVERY.md`, plus `docs/superpowers/{specs,plans}/`. |
 
@@ -73,7 +74,7 @@ The `.venv` symlink in this checkout points at an empty Python 3.14 venv with no
 
 ```bash
 # backend
-python3 -m pytest tests/ -q                          # full suite (~896 pass, ~52s)
+python3 -m pytest tests/ -q                          # full suite — keep green, don't trust pinned pass-counts
 python3 -m pytest tests/test_codecs.py -q            # single file
 python3 -m pytest tests/test_router.py -k cooldown   # single test by name
 ruff check wiwi/ tests/                              # line-length 100, target py311
@@ -126,6 +127,7 @@ Config precedence: `--config` flag > `WIWI_CONFIG` env > `wiwi.yaml`.
 - **Provider keys**: enter via `os.environ/NAME` interpolation in `wiwi.yaml`. Master key from `WIWI_MASTER_KEY` (admin auth). Virtual keys `sk-wiwi-…` are SHA-256-hashed at rest with constant-time compare; plaintext returned only once at mint.
 - **Error translation**: `WiwiError` is the unified error type. Each wire dialect owns its `error_body()` mapping (e.g., Anthropic `etype` strings).
 - **Cost**: `wiwi/cost/` resolves token → USD using per-model prices from `wiwi/server/config_store.py` (DB-backed).
+- **Two different cache-hit flags — do not conflate**: `cache_hit` = provider prompt-cache hit (feeds `wiwi_prompt_cache_hits_total`); `response_cache_hit` = served from wiwi's own exact-match cache (`wiwi/cache/`, `LogEvent.response_cache_hit`). A response-cache hit must leave `cache_hit=False` (`wiwi/server/app.py` response-cache branch) or prompt-cache metrics inflate. Response cache never stores streaming requests or requests with builtin tools.
 - **Frontend**: React 19, Vite 6, Tailwind 4, TanStack Query 5, Recharts. `web/src/pages/` mixes ~15 admin console pages with ~30 public marketing pages — never assume a page is admin-facing from directory alone.
 - **Naming**: tests `test_*.py`; new bugfix regressions always `test_fix_roundN.py` (next unused N — see current rounds under Testing & QA).
 - **Imports**: prefer existing module APIs over new ones; second convention beside existing is prohibited. Always run `lsp references` before editing an exported symbol.
@@ -161,6 +163,7 @@ Config precedence: `--config` flag > `WIWI_CONFIG` env > `wiwi.yaml`.
 - **Lint**: ruff only for Python (`wiwi/`, `tests/`). ESLint flat config for `web/`.
 - **Frontend**: bun (authoritative — `web/bun.lock` present). Stick to one package manager per session. `web/package-lock.json` is legacy.
 - **Database**: SQLite default (`sqlite+aiosqlite:///wiwi.db`); Postgres auto-normalized to `postgresql+asyncpg://`. `DATABASE_URL` env overrides config. Schema is created via inline `CREATE TABLE IF NOT EXISTS` at startup; **no Alembic**.
+- **Stream journals are ON by default** (`stream_journal_enabled: true`, dir `.wiwi/journals`, 600s TTL, 1 MiB/journal cap): encoded SSE frames persist per-request so a client reconnecting with `x-wiwi-stream-id` + `Last-Event-ID` replays even after a wiwi restart. `.wiwi/` is gitignored runtime scratch — never commit it.
 - **Env loading**: `load_env()` (python-dotenv, `override=False`) runs before config parse.
 - **Docker**: `WIWI_STATIC_DIR=/app/wiwi/server/static` is set; data lives in `/app/data` (mounted volume). Default healthcheck port 4000.
 - **No pre-commit framework**. Discipline is developer-driven via the documented `pytest + ruff` gate.
@@ -174,7 +177,7 @@ Config precedence: `--config` flag > `WIWI_CONFIG` env > `wiwi.yaml`.
 - **Upstream mocking**: `respx` (decorator form preferred; context-manager form broken in respx 0.23 + httpx 0.28). Patterns: `@respx.mock` + `respx.post(url).respond(...)`, `respx.post(...).mock(side_effect=[...])`.
 - **Property-based**: `hypothesis` ≥6.100. Persistent cache in `.hypothesis/`. Used in `tests/test_property_roundtrip.py`, `tests/test_translation_enhancements.py`, `tests/test_web_search_translation.py`, `tests/test_tool_translation_round2.py`.
 - **No pytest-cov / no coverage config**. No `--cov` invocations. Coverage is not enforced.
-- **Numbered bugfix regression files**: `tests/test_fix_roundN.py`. Existing rounds: 2, 3, 4, 5 (legacy filename `test_bugfix_round5.py`), 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25. Round 1 missing; no rounds ≥ 26 yet. New bugfix regressions MUST go into the next unused `test_fix_roundN.py` — never back into topic files like `test_codecs.py` or `test_router.py`.
+- **Numbered bugfix regression files**: `tests/test_fix_roundN.py`. Existing rounds: 2–26 plus legacy filename `test_bugfix_round5.py` (round 1 missing). New bugfix regressions MUST go into the next unused `test_fix_roundN.py` — confirm with `ls tests/test_fix_round*.py`, never assume the number — and never back into topic files like `test_codecs.py` or `test_router.py`.
 - **Fixtures**: both `@pytest.fixture` and `@pytest_asyncio.fixture` work; newer files (rounds 18+) prefer `@pytest_asyncio.fixture`.
 - **Pre-completion verification**: run the full pytest suite AND ruff — both must be green before claiming done. Smoke-test changed paths (launch server, hit endpoint, observe result) instead of adding tests by reflex; only add a test when it defends an observable contract or a plausible bug.
 
@@ -190,7 +193,7 @@ Config precedence: `--config` flag > `WIWI_CONFIG` env > `wiwi.yaml`.
 
 ## Guardrails
 
-- **Never commit** `wiwi.yaml`, `wiwi.db`, `key.md`, `.env`, anything under `.verify/`, or `opencode.json(c)` — all gitignored; they hold live provider/master keys and runtime state.
+- **Never commit** `wiwi.yaml`, `wiwi.db`, `key.md`, `.env`, anything under `.verify/` or `.wiwi/`, or `opencode.json(c)` — all gitignored; they hold live provider/master keys and runtime state.
 - **Trust the code over the docs** for `ARCHITECTURE.md` / `CORE.md` — they describe an aspirational handler pipeline, DeltaBus, Postgres/Redis backends, and a deeper DB schema not yet built.
 - **No dialect/provider branching** outside `wiwi/wire/` and `wiwi/providers/` — the registry's import-time assert will catch a forgotten branch, but the cost of leakage is silent wrong-language routing.
 - **Second convention beside existing is prohibited** — copy the surrounding pattern, don't invent a parallel one.
