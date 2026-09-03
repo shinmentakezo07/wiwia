@@ -137,6 +137,9 @@ class RequestIdMiddleware:
 from wiwi.auth.keys import mask_key
 from wiwi.auth.service import AuthService
 from wiwi.auth.users import SESSION_TTL, UserInfo, UserService, sign_session, verify_session
+from wiwi.cache.interface import CacheEntry
+from wiwi.cache.keygen import response_cache_key
+from wiwi.cache.response_cache import MemoryResponseCache
 from wiwi.config import (
     PROVIDER_TYPES,
     ConfigError,
@@ -167,6 +170,7 @@ from wiwi.router.router import (
 )
 from wiwi.server import stats as stats_mod
 from wiwi.server.config_store import ConfigStore
+from wiwi.streaming.tape_store import JournalStore
 from wiwi.wire import anthropic_messages as am
 from wiwi.wire import openai_chat as oc
 from wiwi.wire import openai_responses as orp
@@ -524,6 +528,16 @@ class AppState:
         self.cline_pending: dict[str, dict[str, Any]] = {}
         self.cline_refresh: Any = None
         self.workbuddy_refresh: Any = None
+        # Durable stream journal (restart-safe SSE replay). Created eagerly so
+        # handlers can reach it before init_db runs; sweep happens at startup.
+        rjs = config.router_settings
+        self.journals = JournalStore(rjs.stream_journal_dir, rjs.stream_journal_ttl_s,
+                                     rjs.stream_journal_max_bytes)
+        # Exact-match response cache (docs/CORE.md §6). Off by default.
+        cs = config.cache_settings
+        self.response_cache: MemoryResponseCache | None = (
+            MemoryResponseCache(ttl_s=cs.ttl_s, max_entries=cs.max_entries)
+            if cs.enabled else None)
         # Set during shutdown so long-lived SSE generators break out of their
         # event loop instead of blocking uvicorn's graceful-shutdown drain
         # (which otherwise hangs at "Waiting for connections to close").
@@ -728,6 +742,15 @@ async def lifespan(app: FastAPI):
     """Startup/shutdown: init DB, run logging workers."""
     state: AppState = app.state.wiwi
     await state.init_db()
+    # Journals left over from a previous process are either still within TTL
+    # (replayable — keep) or stale (sweep). Only meaningful at startup: the
+    # sweep is not run again while serving.
+    if state.journals is not None:
+        removed = state.journals.sweep()
+        if removed:
+            import structlog as _sl
+            _sl.get_logger("wiwi.startup").info("swept_stale_stream_journals",
+                                                removed=removed)
     await state.logs.start()
     # Background auto-refresh for Cline OAuth tokens (proactively rotates
     # expiring access tokens so requests don't fail mid-flight).
@@ -987,9 +1010,79 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return rl_err
         ctx = RequestContext(surface=surface, ir_req=ir_req, auth=info, group=group,
                              request_id=request_id)
+        # -- durable stream replay ------------------------------------------------
+        # A client whose stream died (process restart, dropped connection)
+        # re-POSTs the same request with `x-wiwi-stream-id: <original
+        # request id>` and `Last-Event-ID: <last chunk seq>`. When the
+        # journal has content past that offset we answer purely from it —
+        # no upstream call, no double billing. The `done` record proves the
+        # original stream terminated; without it we replay what exists and
+        # then keep tailing the file in case the original request is still
+        # streaming (same process) or the process died mid-flight.
+        replay_id = request.headers.get("x-wiwi-stream-id", "")
+        replay_after = 0
+        lei = request.headers.get("last-event-id", "")
+        if lei:
+            with contextlib.suppress(ValueError):
+                replay_after = int(lei)
+        if (config.router_settings.stream_journal_enabled
+                and replay_id and replay_after >= 0):
+            replay = state_.journals.read_after(replay_id, replay_after)
+            if replay or state_.journals.is_complete(replay_id):
+                ctx.metadata["stream_replayed"] = True
+
+                async def _replay_iter():
+                    for _seq, chunk in replay:
+                        yield chunk
+                    if state_.journals.is_complete(replay_id):
+                        return
+                    # Original stream may still be running (same process):
+                    # tail the journal file until the done record lands or
+                    # the stream expires.
+                    last = replay[-1][0] if replay else replay_after
+                    deadline = time.time() + config.router_settings.stream_journal_ttl_s
+                    while time.time() < deadline:
+                        await asyncio.sleep(0.05)
+                        for seq, chunk in state_.journals.read_after(replay_id, last):
+                            last = seq
+                            yield chunk
+                        if (state_.journals.is_complete(replay_id)
+                                or state_.journals.is_expired(replay_id)):
+                            return
+
+                return StreamingResponse(
+                    _replay_iter(),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache",
+                             "x-wiwi-request-id": ctx.request_id,
+                             "x-wiwi-stream-replay": replay_id})
         gateway = state_.gateways["chat"]
         if config.wiwi_settings.store_prompts_in_spend_logs:
             ctx.metadata["request_body"] = body
+        cache = state_.response_cache
+        cache_bypass = (cache is not None
+                        and request.headers.get(config.cache_settings.bypass_header)
+                        not in (None, "", "0", "false"))
+        cache_key = ""
+        if (cache is not None and not cache_bypass and not ir_req.stream
+                and not any(t.builtin for t in ir_req.tools)
+                and not (ir_req.gen_params.metadata or {}).get("stream")):
+            cache_key = response_cache_key(ir_req, group, surface,
+                                           getattr(info, "key_id", ""))
+            entry = await cache.get(cache_key)
+            if entry is not None:
+                ctx.status = 200
+                # cache_hit stays False: LogEvent.cache_hit means a provider
+                # prompt-cache hit; a gateway response-cache hit is not one
+                # and would inflate wiwi_prompt_cache_hits_total.
+                ctx.metadata["response_cache_hit"] = True
+                state_.logs.log_proxy("info", "response cache hit",
+                                      ctx.request_id)
+                state_.logs.log_request(build_log_event(ctx))
+                return ORJSONResponse(
+                    orjson.loads(entry.payload),
+                    headers={"x-wiwi-request-id": ctx.request_id,
+                             "x-wiwi-cache": "HIT"})
         try:
             if ir_req.stream:
                 encoder_pair = _encoder_for(surface, resp_model, ctx.request_id,
@@ -1029,6 +1122,17 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 ctx.metadata["response_body"] = _serialize_turn(turn, payload)
             state_.logs.log_request(build_log_event(ctx))
             await _record_tpm_usage(info, ctx)
+            if cache is not None and cache_key and ctx.status == 200 and not ctx.error:
+                await cache.set(
+                    cache_key,
+                    CacheEntry(
+                        payload=orjson.dumps(payload),
+                        media_headers={"content-type": "application/json"},
+                        stored_at=time.time(),
+                        request_id=ctx.request_id,
+                        model=resp_model,
+                    ))
+                ctx.metadata["response_cached"] = True
             if info and info.key_type != "master":
                 # A False return means the conditional UPDATE was rejected —
                 # the request would breach max_budget (or the key vanished).
@@ -1101,10 +1205,21 @@ def create_app(config: WiwiConfig) -> FastAPI:
         errored = False
         _seq = 0
         store_prompts = config.wiwi_settings.store_prompts_in_spend_logs
+        journaling = (config.router_settings.stream_journal_enabled
+                      and state_.journals is not None)
+        journal = (await state_.journals.open(ctx.request_id)) if journaling else None
         stream_text: list[str] = []
         stream_thinking: list[str] = []
         stream_tools: dict[int, dict[str, Any]] = {}
         try:
+            async def _emit(chunk: bytes) -> None:
+                nonlocal _seq
+                _seq += 1
+                tagged = _inject_id(chunk, _seq) if event_ids else chunk
+                if journal is not None:
+                    with contextlib.suppress(Exception):
+                        await journal.append(_seq, tagged)
+                yield tagged
             if first is not None:
                 if isinstance(first, dl.StreamError):
                     errored = True
@@ -1113,10 +1228,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 if store_prompts:
                     _capture_delta(first, ctx, stream_text, stream_thinking,
                                    stream_tools)
-                _seq += 1
                 chunk = encoder.feed(first)
                 if chunk:
-                    yield _inject_id(chunk, _seq) if event_ids else chunk
+                    async for t in _emit(chunk):
+                        yield t
             async for d in stream:
                 if isinstance(d, dl.StreamError) and not errored:
                     errored = True
@@ -1125,10 +1240,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 if store_prompts:
                     _capture_delta(d, ctx, stream_text, stream_thinking,
                                    stream_tools)
-                _seq += 1
                 chunk = encoder.feed(d)
                 if chunk:
-                    yield _inject_id(chunk, _seq) if event_ids else chunk
+                    async for t in _emit(chunk):
+                        yield t
             # terminal frames, correct order per dialect:
             if errored:
                 # The error frame was already emitted by the encoder's feed();
@@ -1137,19 +1252,29 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 # leaves Claude Code's SSE reader waiting for the stream to
                 # end. (OpenAI/Responses clients close on the error frame.)
                 if style == "anthropic":
-                    yield b"event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n"
+                    async for t in _emit(b"event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n"):
+                        yield t
             elif style == "chat":
                 chunk = encoder.final_frame()
-                yield _inject_id(chunk, _seq) if event_ids else chunk
-                yield b"data: [DONE]\n\n"
+                async for t in _emit(chunk):
+                    yield t
+                async for t in _emit(b"data: [DONE]\n\n"):
+                    yield t
             elif style == "anthropic":
                 chunk = encoder.final_frame()
-                yield _inject_id(chunk, _seq) if event_ids else chunk
-                yield b"event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n"
+                async for t in _emit(chunk):
+                    yield t
+                async for t in _emit(b"event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n"):
+                    yield t
             else:
                 chunk = encoder._completed()
-                yield _inject_id(chunk, _seq) if event_ids else chunk
+                async for t in _emit(chunk):
+                    yield t
         finally:
+            if journal is not None:
+                with contextlib.suppress(Exception):
+                    await journal.finish(_seq)
+                state_.journals.release(ctx.request_id)
             # Release the gateway pump's upstream connection no matter how we
             # leave this generator. The body (`encoder.feed(...)`) can raise, and
             # Starlette's StreamingResponse does NOT aclose our async iterator on

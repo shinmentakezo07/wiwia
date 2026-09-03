@@ -77,6 +77,7 @@ def overview(events: list[LogEvent], minutes: int,
         "requests_per_minute": round(requests / minutes_norm, 2),
         "tok_in": sum(e.tok_in for e in win),
         "tok_cached": sum(e.tok_cached for e in win),
+        "tok_cache_creation": sum(e.tok_cache_creation for e in win),
         "tok_reasoning": sum(e.tok_reasoning for e in win),
         "tok_out": sum(e.tok_out for e in win),
         "cache_hits": cache_hits,
@@ -107,7 +108,7 @@ def timeseries(events: list[LogEvent], bucket: str, metric: str, minutes: int,
     n_buckets = max(1, minutes)
     window_start = int(now // size) * size - (n_buckets - 1) * size
     win = window_events(events, minutes + 1, now)  # +1 covers partial first bucket
-    token_buckets = [[0, 0, 0, 0] for _ in range(n_buckets)]
+    token_buckets = [[0, 0, 0, 0, 0] for _ in range(n_buckets)]
     tps_buckets: list[list[float]] = [[] for _ in range(n_buckets)]
     for e in win:
         idx = int((e.ts - window_start) // size)
@@ -116,14 +117,15 @@ def timeseries(events: list[LogEvent], bucket: str, metric: str, minutes: int,
         b = token_buckets[idx]
         b[0] += e.tok_in
         b[1] += e.tok_cached
-        b[2] += e.tok_reasoning
-        b[3] += e.tok_out
+        b[2] += e.tok_cache_creation
+        b[3] += e.tok_reasoning
+        b[4] += e.tok_out
         if e.tps > 0:
             tps_buckets[idx].append(e.tps)
     if metric == "tokens":
         buckets = [
             {"t": window_start + i * size, "tok_in": b[0], "tok_cached": b[1],
-             "tok_reasoning": b[2], "tok_out": b[3]}
+             "tok_cache_creation": b[2], "tok_reasoning": b[3], "tok_out": b[4]}
             for i, b in enumerate(token_buckets)
         ]
     else:

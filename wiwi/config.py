@@ -190,8 +190,27 @@ class RouterSettings(BaseModel):
     # 429/5xx-only cooldown behaviour.
     failover_mode: Literal["any_error", "standard"] = "any_error"
     # Consecutive failures before a key is permanently retired.  Only
-    # relevant in "any_error" mode.  401/403 errors count twice.
+    # relevant in "any_error" mode.  401/403 count twice.
     key_max_consecutive_fails: int = 5
+    # Durable stream journal: encoded SSE frames are appended to a per-request
+    # JSONL file so a client that reconnects with ``x-wiwi-stream-id`` +
+    # ``Last-Event-ID`` can replay content even after a wiwi restart. Journals
+    # older than the TTL are swept at startup and opportunistically at finish.
+    stream_journal_enabled: bool = True
+    stream_journal_dir: str = ".wiwi/journals"
+    stream_journal_ttl_s: float = 600.0  # per docs: a few minutes per request id
+    stream_journal_max_bytes: int = 1_048_576  # per-journal byte cap
+
+
+class CacheSettings(BaseModel):
+    """Exact-match response cache (docs/CORE.md §6). Non-streaming requests
+    only; keyed on normalized IR so dialect differences that decode to the
+    same canonical request share entries. Off by default."""
+    enabled: bool = False
+    ttl_s: float = 3600.0
+    max_entries: int = 256
+    # Request header that forces a cache bypass for one call.
+    bypass_header: str = "x-wiwi-no-cache"
 
 class GeneralSettings(BaseModel):
     master_key: str = ""
@@ -247,6 +266,7 @@ class WiwiConfig(BaseModel):
     router_settings: RouterSettings = Field(default_factory=RouterSettings)
     general_settings: GeneralSettings = Field(default_factory=GeneralSettings)
     wiwi_settings: WiwiSettings = Field(default_factory=WiwiSettings)
+    cache_settings: CacheSettings = Field(default_factory=CacheSettings)
 
     @model_validator(mode="after")
     def _model_refs_exist(self) -> WiwiConfig:

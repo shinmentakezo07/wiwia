@@ -56,8 +56,11 @@ def render_metrics(events: list[LogEvent]) -> str:
     tok_in = sum(e.tok_in for e in events)
     tok_out = sum(e.tok_out for e in events)
     tok_cached = sum(e.tok_cached for e in events)
+    tok_cache_creation = sum(e.tok_cache_creation for e in events)
     tok_reasoning = sum(e.tok_reasoning for e in events)
     stream_errors = sum(1 for e in events if e.status >= 500 and e.was_stream)
+    cache_hits = sum(1 for e in events if e.cache_hit or e.tok_cached > 0)
+    response_cache_hits = sum(1 for e in events if e.response_cache_hit)
 
     # Count by status.
     status_counts = Counter(e.status for e in events)
@@ -71,7 +74,11 @@ def render_metrics(events: list[LogEvent]) -> str:
     lines.append(f"wiwi_tokens_total{{kind=\"input\"}} {tok_in}")
     lines.append(f"wiwi_tokens_total{{kind=\"output\"}} {tok_out}")
     lines.append(f"wiwi_tokens_total{{kind=\"cached\"}} {tok_cached}")
+    lines.append(f"wiwi_tokens_total{{kind=\"cache_creation\"}} {tok_cache_creation}")
     lines.append(f"wiwi_tokens_total{{kind=\"reasoning\"}} {tok_reasoning}")
+    lines.append(f"wiwi_prompt_cache_hits_total {cache_hits}")
+    lines.append(f"wiwi_prompt_cache_hit_rate {round(cache_hits / total, 4) if total else 0.0}")
+    lines.append(f"wiwi_response_cache_hits_total {response_cache_hits}")
     lines.append(f"wiwi_cost_total {sum(costs):.6f}")
     lines.append(f"wiwi_stream_errors_total {stream_errors}")
 
@@ -107,8 +114,14 @@ def render_metrics(events: list[LogEvent]) -> str:
 
 _HEADER = """# HELP wiwi_requests_total Total number of requests.
 # TYPE wiwi_requests_total counter
-# HELP wiwi_tokens_total Token usage by kind (input/output/cached/reasoning).
+# HELP wiwi_tokens_total Token usage by kind (input/output/cached/cache_creation/reasoning).
 # TYPE wiwi_tokens_total counter
+# HELP wiwi_prompt_cache_hits_total Requests served with a provider prompt-cache hit.
+# TYPE wiwi_prompt_cache_hits_total counter
+# HELP wiwi_prompt_cache_hit_rate Fraction of requests with a prompt-cache hit.
+# TYPE wiwi_prompt_cache_hit_rate gauge
+# HELP wiwi_response_cache_hits_total Requests served from wiwi's exact-match response cache.
+# TYPE wiwi_response_cache_hits_total counter
 # HELP wiwi_cost_total Total cost in USD.
 # TYPE wiwi_cost_total counter
 # HELP wiwi_stream_errors_total Mid-stream failures.

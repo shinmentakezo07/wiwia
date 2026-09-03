@@ -65,6 +65,21 @@ router_settings:
     claude-sonnet: ["gpt-4o"]
   model_group_alias:
     gpt-4: gpt-4o
+  # Durable stream journal: SSE chunks are journaled to disk per request so a
+  # client can reconnect with `x-wiwi-stream-id` + `Last-Event-ID` after a
+  # restart and replay what it missed.
+  stream_journal_enabled: true
+  # stream_journal_dir: .wiwi/journals
+  # stream_journal_ttl_s: 600
+  # stream_journal_max_bytes: 1048576
+
+# Exact-match response cache (docs/CORE.md §6): non-streaming requests keyed on
+# normalized IR + group + surface + key. Off by default; bypass one call with
+# the `x-wiwi-no-cache: true` header.
+cache_settings:
+  enabled: false
+  # ttl_s: 3600
+  # max_entries: 256
 
 general_settings:
   master_key: os.environ/WIWI_MASTER_KEY
