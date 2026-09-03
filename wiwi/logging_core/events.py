@@ -24,6 +24,7 @@ class LogEvent:
     error_code: str = ""
     tok_in: int = 0
     tok_cached: int = 0
+    tok_cache_creation: int = 0
     tok_reasoning: int = 0
     tok_out: int = 0
     tps: float = 0.0
@@ -33,6 +34,7 @@ class LogEvent:
     was_stream: bool = False
     cache_hit: bool = False
     cache_savings: float = 0.0
+    response_cache_hit: bool = False
     attempts: list[dict[str, Any]] = field(default_factory=list)
     # prompt/response content (only when store_prompts_in_spend_logs is enabled)
     request_body: dict[str, Any] | list[Any] | None = None

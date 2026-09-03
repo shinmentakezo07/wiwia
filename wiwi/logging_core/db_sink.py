@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
   error_code TEXT DEFAULT '',
   tok_in INTEGER DEFAULT 0,
   tok_cached INTEGER DEFAULT 0,
+  tok_cache_creation INTEGER DEFAULT 0,
   tok_reasoning INTEGER DEFAULT 0,
   tok_out INTEGER DEFAULT 0,
   tps REAL DEFAULT 0,
@@ -43,6 +44,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
   was_stream INTEGER DEFAULT 0,
   cache_hit INTEGER DEFAULT 0,
   cache_savings REAL DEFAULT 0,
+  response_cache_hit INTEGER DEFAULT 0,
   attempts TEXT DEFAULT '[]',
   request_body TEXT,
   response_body TEXT
@@ -64,6 +66,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
   error_code TEXT DEFAULT '',
   tok_in INTEGER DEFAULT 0,
   tok_cached INTEGER DEFAULT 0,
+  tok_cache_creation INTEGER DEFAULT 0,
   tok_reasoning INTEGER DEFAULT 0,
   tok_out INTEGER DEFAULT 0,
   tps DOUBLE PRECISION DEFAULT 0,
@@ -73,6 +76,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
   was_stream INTEGER DEFAULT 0,
   cache_hit INTEGER DEFAULT 0,
   cache_savings DOUBLE PRECISION DEFAULT 0,
+  response_cache_hit INTEGER DEFAULT 0,
   attempts TEXT DEFAULT '[]',
   request_body TEXT,
   response_body TEXT
@@ -103,9 +107,10 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 
 _COLS = ("ts", "request_id", "surface", "key_alias", "key_id", "model_group",
          "provider", "provider_key_label", "status", "error_code", "tok_in",
-         "tok_cached", "tok_reasoning", "tok_out", "tps", "ttft_ms", "latency_ms",
-         "cost", "was_stream", "cache_hit", "cache_savings", "attempts",
-         "request_body", "response_body")
+         "tok_cached", "tok_cache_creation", "tok_reasoning", "tok_out", "tps",
+         "ttft_ms", "latency_ms", "cost", "was_stream", "cache_hit",
+         "cache_savings", "response_cache_hit", "attempts", "request_body",
+         "response_body")
 
 
 class DBSink:
@@ -171,7 +176,9 @@ class DBSink:
             cols = {r[1] for r in (await conn.execute(
                 sa.text("PRAGMA table_info(request_logs)"))).all()}
         for col, decl in [("request_body", "TEXT"), ("response_body", "TEXT"),
-                          ("key_id", "TEXT DEFAULT ''")]:
+                          ("key_id", "TEXT DEFAULT ''"),
+                          ("tok_cache_creation", "INTEGER DEFAULT 0"),
+                          ("response_cache_hit", "INTEGER DEFAULT 0")]:
             if col not in cols:
                 await conn.execute(
                     sa.text(f"ALTER TABLE request_logs ADD COLUMN {col} {decl}"))
@@ -203,10 +210,12 @@ class DBSink:
             "provider": evt.provider, "provider_key_label": evt.provider_key_label,
             "status": evt.status, "error_code": evt.error_code,
             "tok_in": evt.tok_in, "tok_cached": evt.tok_cached,
+            "tok_cache_creation": evt.tok_cache_creation,
             "tok_reasoning": evt.tok_reasoning, "tok_out": evt.tok_out,
             "tps": evt.tps, "ttft_ms": evt.ttft_ms, "latency_ms": evt.latency_ms,
             "cost": evt.cost, "was_stream": int(evt.was_stream),
             "cache_hit": int(evt.cache_hit), "cache_savings": evt.cache_savings,
+            "response_cache_hit": int(evt.response_cache_hit),
             "attempts": orjson.dumps(evt.attempts).decode(),
             "request_body": (orjson.dumps(evt.request_body).decode()
                               if evt.request_body is not None else None),
@@ -325,6 +334,7 @@ class DBSink:
                 "requests_per_minute": 0.0,
                 "tok_in": 0,
                 "tok_cached": 0,
+                "tok_cache_creation": 0,
                 "tok_reasoning": 0,
                 "tok_out": 0,
                 "cache_hits": 0,
@@ -372,6 +382,7 @@ class DBSink:
                        SUM(CASE WHEN status >= 400 OR error_code != '' THEN 1 ELSE 0 END) AS errors,
                        COALESCE(SUM(tok_in), 0) AS tok_in,
                        COALESCE(SUM(tok_cached), 0) AS tok_cached,
+                       COALESCE(SUM(tok_cache_creation), 0) AS tok_cache_creation,
                        COALESCE(SUM(tok_reasoning), 0) AS tok_reasoning,
                        COALESCE(SUM(tok_out), 0) AS tok_out,
                        SUM(CASE WHEN cache_hit = 1 OR tok_cached > 0 THEN 1 ELSE 0 END) AS cache_hits,
@@ -422,6 +433,7 @@ class DBSink:
             "requests_per_minute": round(requests / minutes_norm, 2) if minutes > 0 else 0.0,
             "tok_in": row.tok_in or 0,
             "tok_cached": row.tok_cached or 0,
+            "tok_cache_creation": row.tok_cache_creation or 0,
             "tok_reasoning": row.tok_reasoning or 0,
             "tok_out": row.tok_out or 0,
             "cache_hits": cache_hits,
@@ -501,6 +513,7 @@ class DBSink:
                 SELECT FLOOR(ts / :bs) * :bs AS bucket_t,
                        SUM(tok_in) AS tok_in,
                        SUM(tok_cached) AS tok_cached,
+                       SUM(tok_cache_creation) AS tok_cache_creation,
                        SUM(tok_reasoning) AS tok_reasoning,
                        SUM(tok_out) AS tok_out,
                        SUM(CASE WHEN tps > 0 THEN tps ELSE 0 END) AS tps_sum,
@@ -539,6 +552,7 @@ class DBSink:
             buckets = [
                 {"t": t, "tok_in": getattr(r, "tok_in", 0) or 0,
                  "tok_cached": getattr(r, "tok_cached", 0) or 0,
+                 "tok_cache_creation": getattr(r, "tok_cache_creation", 0) or 0,
                  "tok_reasoning": getattr(r, "tok_reasoning", 0) or 0,
                  "tok_out": getattr(r, "tok_out", 0) or 0}
                 for t, r in sorted(by_t.items())

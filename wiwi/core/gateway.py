@@ -317,6 +317,7 @@ class Gateway:
                             completion_tokens=d.output,
                             cached_tokens=d.cached,
                             reasoning_tokens=d.reasoning,
+                            cache_creation_tokens=d.cache_creation,
                         )
                     elif isinstance(d, dl.Finish):
                         stop_reason = d.stop_reason
@@ -1030,11 +1031,13 @@ def build_log_event(ctx: RequestContext) -> LogEvent:
         status=ctx.status, error_code=(ctx.error.etype if ctx.error else ""),
         tok_in=u.prompt_tokens if u else 0,
         tok_cached=u.cached_tokens if u else 0,
+        tok_cache_creation=u.cache_creation_tokens if u else 0,
         tok_reasoning=u.reasoning_tokens if u else 0,
         tok_out=u.completion_tokens if u else 0,
         tps=round(tps, 2), ttft_ms=round(ttft, 1), latency_ms=round(latency_ms, 1),
         cost=ctx.cost, was_stream=ctx.ir_req.stream, cache_hit=ctx.cache_hit,
         cache_savings=ctx.metadata.get("cache_savings", 0.0),
+        response_cache_hit=bool(ctx.metadata.get("response_cache_hit")),
         attempts=[{"deployment": a.deployment, "provider": a.provider,
                    "key": a.provider_key_label, "status": a.status,
                    "latency_ms": a.latency_ms} for a in ctx.attempts],
