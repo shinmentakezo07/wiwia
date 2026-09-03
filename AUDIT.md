@@ -543,3 +543,78 @@ Anthropic's separate `web_search_requests` billing is unmodeled (pricing
 follow-up).
 
 **Baseline after this round:** 1170 tests pass, ruff clean.
+
+---
+
+## Addendum — cache layer + durable stream recovery, Round 9 (2026-09-03)
+
+Two audit findings implemented end to end (the "4. Cache layer" item and the
+stream-restart item from the external review), plus one real bug found by the
+exploration pass. Tests: `tests/test_cache_and_journal.py` (feature tests) +
+`tests/test_fix_round26.py` (bugfix regressions, per file convention).
+
+### Response cache (was: no response cache, no TTL store)
+
+New `wiwi/cache/` package implementing the docs/CORE.md §6 spec:
+
+| Module | Contents |
+|---|---|
+| `keygen.py` | `response_cache_key()` — SHA-256 over normalized IR (dataclass-aware projection) + group + surface + key_id. Dialects decoding to identical IR share entries; keys are scoped per virtual key. |
+| `interface.py` | `CacheBackend` protocol + frozen `CacheEntry` (payload, media_headers, stored_at, request_id, model). Redis/semantic backends plug in here. |
+| `response_cache.py` | `MemoryResponseCache` — OrderedDict LRU with lazy TTL eviction. |
+
+Wired in `run_chat_like` for **non-streaming** requests only, after
+rate-limit / before gateway dispatch; store happens after
+`codec_encode_response`. Bypass with `X-Wiwi-No-Cache: true`. Hit responses
+carry `x-wiwi-cache: HIT`. Off by default (`cache_settings.enabled: false`).
+
+**Semantic separation enforced:** a gateway response-cache hit sets
+`LogEvent.response_cache_hit`, NOT `cache_hit` — the latter means provider
+prompt-cache hit and feeds `wiwi_prompt_cache_hits_total`. Conflating them
+would silently inflate the prompt-cache metrics.
+
+### Prompt-cache observability (was: cache_creation never persisted, no hit-rate in Prometheus)
+
+The audit's claim was partly wrong — `tok_cached`/`cache_hit`/`cache_savings`
+were already persisted and `cache_hit_rate` existed in
+`/admin/stats/overview`. The real gaps, now closed:
+
+- `tok_cache_creation` flows LogEvent → `request_logs` column (idempotent
+  migration) → overview/timeseries sums (both DB and ring paths).
+- `/metrics` gains `wiwi_prompt_cache_hits_total`,
+  `wiwi_prompt_cache_hit_rate`, `wiwi_response_cache_hits_total`, and
+  `wiwi_tokens_total{kind="cache_creation"}`.
+
+### Bug fixed: `_complete_via_stream` dropped cache_creation_tokens
+
+`gateway.py`'s UsageFinal→`ir.Usage` fold (force_stream providers: Cline,
+WorkBuddy) omitted `cache_creation_tokens` — Anthropic cache-write tokens
+never reached pricing or logs for those providers. Fixed; pinned in
+`test_fix_round26.py`.
+
+### Durable stream recovery (was: StreamTape in-process only, replay unwired)
+
+Verified exploration also found the client-facing half of StreamTape's
+advertised resume was never built: `tape.replay()` had zero production
+callers, and `_stream_response`'s SSE ids used a separate seq counter from
+the tape. Rather than wiring the dead path, implemented the documented
+design (STREAMING_PERFORMANCE_RECOVERY.md #5) with a disk journal:
+
+- New `wiwi/streaming/tape_store.py`: `StreamJournal` (append-only JSONL per
+  request_id, per-journal byte cap, `asyncio.to_thread` writes) +
+  `JournalStore` (registry, `read_after`, `is_complete`, eager file touch,
+  TTL sweep at startup).
+- `_stream_response` journals every encoded SSE chunk post-id-injection with
+  one shared monotonic seq for both `id:` lines and journal records — the
+  id-space mismatch is structurally gone.
+- Reconnect protocol: re-POST the same request with
+  `x-wiwi-stream-id: <original request id>` + `Last-Event-ID: <chunk seq>`.
+  Replay serves purely from the journal (no upstream call, no double
+  billing), follows the file tail if the original stream is still running,
+  and works **across a wiwi restart** — the durability contract is pinned by
+  `test_stream_replay_survives_restart`.
+- Default ON (`stream_journal_enabled: true`, dir `.wiwi/journals`, TTL 600s,
+  1 MiB/journal cap); `stream_journal_dir` should be on persistent storage in
+  containers.
+
+**Baseline after this round:** 1185 tests pass, ruff clean.
