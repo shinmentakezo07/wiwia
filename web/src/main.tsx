@@ -29,6 +29,7 @@ import { ReliabilityPage } from "@/pages/Reliability";
 import { RankingsPage } from "@/pages/Rankings";
 import { IntegrationsPage } from "@/pages/Integrations";
 import { GuidesPage } from "@/pages/Guides";
+import { GuideDetailPage } from "@/pages/GuideDetail";
 import { MigrationPage } from "@/pages/Migration";
 import { OpenSourcePage } from "@/pages/OpenSource";
 import { CopilotCostCalculatorPage } from "@/pages/CopilotCostCalculator";
@@ -101,6 +102,7 @@ function AppRoutes() {
         <Route path="/rankings" element={<RankingsPage />} />
         <Route path="/integrations" element={<IntegrationsPage />} />
         <Route path="/guides" element={<GuidesPage />} />
+        <Route path="/guides/:slug" element={<GuideDetailPage />} />
         <Route path="/migration" element={<MigrationPage />} />
         <Route path="/open-source" element={<OpenSourcePage />} />
         <Route path="/copilot-cost-calculator" element={<CopilotCostCalculatorPage />} />
