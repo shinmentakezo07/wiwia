@@ -641,6 +641,30 @@ BUILTIN_PROVIDER_TYPES: list[dict[str, str | list[str]]] = [
         "context_window": "varies per model",
         "docs_url": "https://docs.nvidia.com/nim/large-language-models/latest/",
     },
+    {
+        "provider_type": "opencode",
+        "label": "OpenCode Zen",
+        "default_base_url": "https://opencode.ai/zen/v1",
+        "description": (
+            "OpenCode Zen gateway (opencode.ai/zen) — curated coding models "
+            "over four upstream protocols routed per model: Responses API "
+            "for GPT/Grok/Muse-Spark, Messages API for Claude/Qwen, Gemini "
+            "generateContent for Gemini, Chat Completions for the rest. "
+            "Authenticates with a Zen API key and sends a live "
+            "User-Agent: opencode/<version> (refreshed every 5 min) so "
+            "Cloudflare/version gates never restrict traffic."
+        ),
+        "latest_models": [
+            "gpt-5.5",
+            "claude-sonnet-5",
+            "gemini-3.1-pro",
+            "deepseek-v4-pro",
+            "glm-5.2",
+            "kimi-k2.6",
+        ],
+        "context_window": "varies per model",
+        "docs_url": "https://opencode.ai/docs/zen",
+    },
 ]
 
 

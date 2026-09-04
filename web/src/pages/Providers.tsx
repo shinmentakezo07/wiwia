@@ -63,6 +63,7 @@ const PROVIDER_ICON: Record<string, LucideIcon> = {
   bai: Globe,
   workbuddy: Briefcase,
   cline: Link2,
+  opencode: Layers,
 };
 
 const PROVIDER_TYPE_OPTIONS = [
@@ -75,6 +76,7 @@ const PROVIDER_TYPE_OPTIONS = [
   { value: "bai", label: "B.AI" },
   { value: "workbuddy", label: "WorkBuddy" },
   { value: "cline", label: "Cline" },
+  { value: "opencode", label: "OpenCode Zen" },
   { value: "openai-compatible", label: "OpenAI-compatible URL" },
 ];
 
@@ -452,7 +454,7 @@ export function ProvidersPage() {
               options={PROVIDER_TYPE_OPTIONS}
             />
           </Field>
-          <Field label="Base URL" hint="Optional for openai/anthropic/gemini/openrouter/gmicloud/bai/workbuddy/nvidia-nim. Required for compatible URLs.">
+          <Field label="Base URL" hint="Optional for openai/anthropic/gemini/openrouter/gmicloud/bai/workbuddy/nvidia-nim/cline/opencode. Required for compatible URLs.">
             <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://…" />
           </Field>
           <Field label="First key label">

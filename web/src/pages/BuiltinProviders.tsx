@@ -27,6 +27,7 @@ const PROVIDER_LOGO: Record<string, string> = {
   bai: "/logos/bai.png",
   workbuddy: "/logos/workbuddy.svg",
   "nvidia-nim": "/logos/nvidia-nim.png",
+  opencode: "/logos/opencode.svg",
 };
 
 function providerLogo(type: string): string | null {

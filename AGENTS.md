@@ -1,6 +1,6 @@
 # Repository Guidelines
 
-Self-hosted unified LLM gateway proxy. FastAPI backend + React (Vite) admin SPA. Three inbound dialects (OpenAI Chat Completions, OpenAI Responses, Anthropic Messages) flow through one canonical IR out to any of ten provider adapters and are re-encoded in the caller's dialect on the way back.
+Self-hosted unified LLM gateway proxy. FastAPI backend + React (Vite) admin SPA. Three inbound dialects (OpenAI Chat Completions, OpenAI Responses, Anthropic Messages) flow through one canonical IR out to any of eleven provider adapters and are re-encoded in the caller's dialect on the way back.
 
 ## Project Overview
 
@@ -18,7 +18,7 @@ Inbound surfaces (HTTP routes):
 - `POST /v1/messages` — Anthropic Messages dialect
 - `POST /v1/messages/count_tokens` — Anthropic token counting
 
-Outbound provider types (from `PROVIDER_TYPES` in `wiwi/config.py`): `openai`, `anthropic`, `gemini`, `openai-compatible`, `openrouter`, `gmicloud`, `bai`, `nvidia-nim`, `cline`, `workbuddy`.
+Outbound provider types (from `PROVIDER_TYPES` in `wiwi/config.py`): `openai`, `anthropic`, `gemini`, `openai-compatible`, `openrouter`, `gmicloud`, `bai`, `nvidia-nim`, `cline`, `workbuddy`, `opencode`.
 
 Admin surface: `/admin/*` (master-key auth) and the SPA at `/admin/ui`.
 
@@ -146,7 +146,7 @@ Config precedence: `--config` flag > `WIWI_CONFIG` env > `wiwi.yaml`.
 - `wiwi/auth/service.py` — AuthService, virtual keys DB schema.
 - `wiwi/ratelimit/{memory,redis}.py` — sliding-window rpm/tpm.
 - `wiwi/wire/{openai_chat,openai_responses,anthropic_messages}.py` — codec decode/encode + stream encoder + error body per dialect.
-- `wiwi/providers/{openai,anthropic,openrouter,gemini,nim,gmicloud,bai,cline,workbuddy}_adapter.py` — provider adapters. Quirks live here, never in core: NVIDIA NIM rejects JSON Schema boolean subschemas and params named `type` (`nim_tool_schema.py`); Cline is OAuth with on-demand refresh (`cline_oauth.py`, `cline_auto_refresh.py`).
+- `wiwi/providers/{openai,anthropic,openrouter,gemini,nim,gmicloud,bai,cline,workbuddy,opencode}_adapter.py` — provider adapters. Quirks live here, never in core: NVIDIA NIM rejects JSON Schema boolean subschemas and params named `type` (`nim_tool_schema.py`); Cline is OAuth with on-demand refresh (`cline_oauth.py`, `cline_auto_refresh.py`); OpenCode Zen routes per model across four upstream protocols and refreshes its `opencode/<version>` User-Agent live (`opencode_version.py`).
 - `wiwi/server/config_store.py` — DB-backed provider/key/deployment/settings/price tables.
 - `wiwi/server/static/` — built SPA, served at `/admin/ui` via `_SPAStaticFiles` subclass.
 - `wiwi.yaml` (gitignored) — runtime config. `wiwi.yaml.example` is the schema reference.

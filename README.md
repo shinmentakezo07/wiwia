@@ -21,7 +21,7 @@
   <img alt="License" src="https://img.shields.io/badge/license-MIT-22c55e?style=for-the-badge">
 </p>
 
-**3 inbound dialects × 10 outbound providers — no pairwise converters, one canonical IR.**
+**3 inbound dialects × 11 outbound providers — no pairwise converters, one canonical IR.**
 
 </div>
 
@@ -30,7 +30,7 @@
 ## The shape of it
 
 ```
-      INBOUND (3 dialects)                 CORE                   OUTBOUND (10 providers)
+      INBOUND (3 dialects)                 CORE                   OUTBOUND (11 providers)
   ┌────────────────────────┐                                ┌──────────────────────────────┐
   │ 🟢 OpenAI Chat         │──┐                          ┌──│ openai                       │
   │    /v1/chat/completions│  │                          │  │ anthropic                    │
@@ -39,10 +39,11 @@
   │    /v1/responses       │  │     (wiwi/ir)            │  │ nvidia-nim                   │
   │                        │  │          │               │  │ cline          (OAuth)       │
   │ 🟠 Anthropic Messages  │──┘          │               │  │ workbuddy      (OAuth)       │
-  │    /v1/messages        │             │               │  │ gmicloud                     │
-  └────────────────────────┘             │               │  │ bai                          │
-                                         │               └──│ openai-compatible            │
-      ▲                                  ▼                  └──────────────────────────────┘
+  │                        │             │               │  │ gmicloud                     │
+  │                        │             │               │  │ bai                          │
+  │                        │             │               │  │ opencode       (Zen)         │
+  │                        │             │               │  │ openai-compatible            │
+  └────────────────────────┘             │               └──────────────────────────────┘
       │                    ┌──────────────────────────┐
       │                    │ router   key pools · WRR │
       │                    │          retries · cooldown
@@ -92,7 +93,7 @@
 
 | 😩 Problem | 💡 wiwi's answer |
 |---|---|
-| One client dialect, many models behind it | **Hub-and-spoke translation.** Any of 3 inbound dialects ↔ any of 10 outbound providers. N×M coverage from N+M modules. |
+| One client dialect, many models behind it | **Hub-and-spoke translation.** Any of 3 inbound dialects ↔ any of 11 outbound providers. N×M coverage from N+M modules. |
 | Rate-limit pain across many keys | **Smooth weighted round-robin** key pools with per-key cooldowns, `failover_mode`, retries, and per-key cooldown reset. |
 | Reasoning parameters don't line up | Canonical IR collapses `reasoning_effort`, `thinking.budget_tokens`, and OpenRouter's `reasoning{}` into one form. Thinking blocks round-trip — multi-turn survives a mid-conversation model switch. |
 | Provider-hosted tools fragment per dialect | **Builtin tool registry** (`wiwi/ir/builtin_tools.py`): `web_search` renders as `web_search_20250305` (Anthropic), `web_search` (Responses), `google_search` (Gemini), `openrouter:web_search` — one canonical name in the IR. |
@@ -110,7 +111,7 @@
 <td width="50%" valign="top">
 
 ### 🔀 Translation
-- **3 inbound dialects × 10 outbound providers**, with `drop_params` and `extra_headers` for the awkward edges.
+- **3 inbound dialects × 11 outbound providers**, with `drop_params` and `extra_headers` for the awkward edges.
 - **Builtin tool translation** — `web_search` maps to each provider's native tool (`web_search_20250305` / `web_search` / `google_search` / `openrouter:web_search`), with a config subset (`max_uses`, `allowed_domains`, `blocked_domains`, `user_location`, `search_context_size`) rendered per surface.
 - OpenRouter unified `reasoning{}` translation for `low` / `medium` / `high` / explicit token budgets.
 - Anthropic `cache_control` blocks pass through untouched; cache hits and savings appear in stats.
@@ -237,7 +238,7 @@ Any inbound dialect works with any outbound provider. The IR handles translation
 
 ## 📤 Providers (outbound)
 
-All 10 types ship in `wiwi/config.py:PROVIDER_TYPES`, which is the single source of truth — the router catalog, admin validation, and the Pydantic schema all reference it, and import-time `assert`s in both `registry.py` and `router.py` fail loudly if a type is added without a matching adapter and catalog card.
+All 11 types ship in `wiwi/config.py:PROVIDER_TYPES`, which is the single source of truth — the router catalog, admin validation, and the Pydantic schema all reference it, and import-time `assert`s in both `registry.py` and `router.py` fail loudly if a type is added without a matching adapter and catalog card.
 
 | Type | Adapter | Default endpoint | Notes |
 |---|---|---|---|
@@ -250,6 +251,7 @@ All 10 types ship in `wiwi/config.py:PROVIDER_TYPES`, which is the single source
 | `workbuddy` | `workbuddy_adapter.py` | `https://copilot.tencent.com` | WorkBuddy / CodeBuddy (Tencent); nested-JSON auth, stream-only upstream, business errors ride HTTP 200 in `{code,msg,data}` envelopes |
 | `gmicloud` | *(openai wire)* | `https://api.gmi-serving.com/v1` | GMI Cloud serving endpoint |
 | `bai` | `bai_adapter.py` | `https://api.b.ai/v1` | B.AI unified gateway — one key across Chat / Responses / Messages protocols; replays `reasoning_content` on tool-call turns |
+| `opencode` | `opencode_adapter.py` | `https://opencode.ai/zen/v1` | OpenCode Zen — per-model protocol routing (Responses for GPT/Grok/Muse-Spark, Messages for Claude/Qwen, Gemini for Gemini, Chat otherwise) with a live `User-Agent: opencode/<version>` refreshed every 5 min (`opencode_version.py`) |
 | `openai-compatible` | *(openai wire)* | *(you supply it)* | any URL — Ollama, vLLM, LM Studio, Together, Groq, DeepSeek |
 
 > 🔐 Provider keys enter as `os.environ/NAME` in YAML. **Nothing is committed to the repo** — `wiwi.yaml`, `wiwi.db`, `.env`, and `key.md` are all gitignored.
@@ -402,12 +404,11 @@ curl http://localhost:4000/v1/messages \
 ## ⚙️ Configuration (`wiwi.yaml`)
 
 Single LiteLLM-shaped file. **Any string value may be `os.environ/NAME`.**
-
 ```yaml
 providers:              # named provider accounts, each with a pool of keyed entries
   - name: openai-main
     provider: openai    # openai | anthropic | gemini | openai-compatible | openrouter
-                        # | gmicloud | bai | nvidia-nim | cline | workbuddy
+                        # | gmicloud | bai | nvidia-nim | cline | workbuddy | opencode
     keys:
       - {label: main,   key: os.environ/OPENAI_API_KEY,   weight: 3}
       - {label: backup, key: os.environ/OPENAI_API_KEY_2, weight: 1}

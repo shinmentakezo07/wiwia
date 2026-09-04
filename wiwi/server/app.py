@@ -528,6 +528,7 @@ class AppState:
         self.cline_pending: dict[str, dict[str, Any]] = {}
         self.cline_refresh: Any = None
         self.workbuddy_refresh: Any = None
+        self.opencode_refresh: Any = None
         # Durable stream journal (restart-safe SSE replay). Created eagerly so
         # handlers can reach it before init_db runs; sweep happens at startup.
         rjs = config.router_settings
@@ -780,6 +781,12 @@ async def lifespan(app: FastAPI):
     workbuddy_refresh_hook = workbuddy_refresh_for_provider(state)
     for gw in state.gateways.values():
         gw._on_demand_refresh_hooks["workbuddy"] = workbuddy_refresh_hook  # type: ignore[attr-defined]
+    # OpenCode Zen live version: refresh the cached opencode/<version>
+    # User-Agent every 5 min so Zen/Cloudflare never restricts traffic.
+    # No restart or reload needed — the adapter reads the cache live.
+    from wiwi.providers.opencode_version import OpencodeVersionRefresh
+    state.opencode_refresh = OpencodeVersionRefresh()
+    state.opencode_refresh.start()
     # Reconcile persisted Cline default-model settings (one global model
     # id → one Deployment per Cline account under ``cline:<model_id>``).
     if state.config_store is not None:
@@ -794,6 +801,8 @@ async def lifespan(app: FastAPI):
                 "cline_default_apply_failed_at_startup", err=str(e),
             )
     yield
+    if state.opencode_refresh is not None:
+        await state.opencode_refresh.stop()
     if state.workbuddy_refresh is not None:
         await state.workbuddy_refresh.stop()
     await state.cline_refresh.stop()

@@ -43,6 +43,12 @@ providers:
     keys:
       - {label: main, key: os.environ/NVIDIA_NIM_API_KEY}
 
+  - name: opencode-zen
+    provider: opencode
+    base_url: https://opencode.ai/zen/v1
+    keys:
+      - {label: main, key: os.environ/OPENCODE_API_KEY}
+
 # Model groups: map a model_name clients request to one or more provider
 # deployments. Empty by default — add your own via the admin UI (/models) or
 # here. Each entry needs a model_name and wiwi_params with a provider (one of

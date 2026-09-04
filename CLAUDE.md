@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-**wiwi** is a self-hosted unified LLM gateway proxy (LiteLLM-shaped): three inbound API dialects — OpenAI Chat, OpenAI Responses (Codex CLI), Anthropic Messages — all route through one canonical internal representation (IR) to any of ten outbound provider types; responses are always re-encoded in the caller's inbound dialect (e.g. Claude Code backed by GPT). Adds virtual keys, budgets, rate limits, key pools with smooth weighted round-robin, retries/cooldowns/fallbacks, cost tracking, request logs, and an admin web UI.
+**wiwi** is a self-hosted unified LLM gateway proxy (LiteLLM-shaped): three inbound API dialects — OpenAI Chat, OpenAI Responses (Codex CLI), Anthropic Messages — all route through one canonical internal representation (IR) to any of eleven outbound provider types; responses are always re-encoded in the caller's inbound dialect (e.g. Claude Code backed by GPT). Adds virtual keys, budgets, rate limits, key pools with smooth weighted round-robin, retries/cooldowns/fallbacks, cost tracking, request logs, and an admin web UI.
 
 `.venv` is a symlink to an empty uv venv — it has no site-packages, so do **not** use `.venv/bin/python`. Use the ambient `python3` (3.12) / `pytest` (9.1.1) / `ruff` (0.16.4) on PATH (they have the project installed). The admin UI (`web/`) is a React 19 + Vite 6 SPA built with **bun** (not npm).
 

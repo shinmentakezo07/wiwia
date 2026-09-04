@@ -1,16 +1,26 @@
 #!/usr/bin/env bash
 # start.sh — install web deps, then run the wiwi backend AND the Vite dev
 # server together with interleaved, prefixed logs. Ctrl-C stops both.
+#
+# The backend ALWAYS runs this checkout's code: PYTHONPATH pins the repo
+# first, so a stale site-packages install or an editable install pointing
+# at a different checkout can never shadow it (that failure mode surfaced
+# as "unsupported provider type 'opencode'" with new code in the tree).
+# Frontend uses bun (authoritative, web/bun.lock), falling back to npm.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 cd "$SCRIPT_DIR"
 
 PROXY_PORT="${WIWI_PORT:-4000}"
 WEB_PORT="${WIWI_WEB_PORT:-5173}"
 WEB_DIR="$SCRIPT_DIR/web"
-VENV_BIN="$SCRIPT_DIR/.venv/bin"
-WIWI_BIN="${WIWI_BIN:-$VENV_BIN/wiwi}"
+# Ambient python3 has the runtime deps (never .venv/bin/python — see AGENTS.md).
+PYBIN="${WIWI_PYTHON:-python3}"
+# Explicit escape hatch only: path to a `wiwi` binary. Unset by default so
+# the repo-pinned `python3 -m wiwi.main` below is always used.
+WIWI_BIN="${WIWI_BIN:-}"
+export PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 RELOAD="${WIWI_RELOAD:-1}"          # set WIWI_RELOAD=0 to disable backend reload
 RELOAD_DIRS="${WIWI_RELOAD_DIRS:-wiwi}"  # comma-separated, e.g. "wiwi,tests"
 
@@ -73,12 +83,17 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# --- 1. install web deps -----------------------------------------------------
+# --- 1. install web deps (bun authoritative, npm fallback) --------------------
 
-echo "==> Installing web dependencies (npm) in $WEB_DIR ..."
-cd "$WEB_DIR"
-npm install
-cd "$SCRIPT_DIR"
+if command -v bun >/dev/null 2>&1; then
+    echo "==> Installing web dependencies (bun) in $WEB_DIR ..."
+    (cd "$WEB_DIR" && bun install)
+    DEV_CMD=(bun run dev --port "$WEB_PORT")
+else
+    echo "==> bun not found; falling back to npm in $WEB_DIR ..."
+    (cd "$WEB_DIR" && npm install)
+    DEV_CMD=(npm run dev -- --port "$WEB_PORT")
+fi
 
 # --- 2. free up the ports ----------------------------------------------------
 
@@ -88,7 +103,20 @@ kill_port "$PROXY_PORT"
 echo "==> Freeing port $WEB_PORT (web) ..."
 kill_port "$WEB_PORT"
 
-# --- 3. build backend command args -------------------------------------------
+# --- 3. verify backend resolves to THIS checkout -------------------------------
+
+echo "==> Verifying backend code ..."
+WIWI_SRC="$("$PYBIN" -c 'import wiwi, os; print(os.path.realpath(wiwi.__file__))')"
+WIWI_WANT="$(realpath "$SCRIPT_DIR/wiwi/__init__.py" 2>/dev/null || "$PYBIN" -c 'import os; print(os.path.realpath("wiwi/__init__.py"))')"
+if [ -z "$WIWI_SRC" ] || [ "$WIWI_SRC" != "$WIWI_WANT" ]; then
+    echo "ERROR: 'import wiwi' resolves to '${WIWI_SRC:-<failed>}' instead of this checkout:"
+    echo "       $WIWI_WANT"
+    echo "Install deps into ambient python3 (uv pip install -e '.[dev]') and retry."
+    exit 1
+fi
+echo "    backend code: $WIWI_SRC"
+
+# --- 4. build backend command args -------------------------------------------
 
 CMD_ARGS=(--config "$SCRIPT_DIR/wiwi.yaml" --port "$PROXY_PORT")
 if [ "$RELOAD" = "1" ]; then
@@ -99,27 +127,27 @@ if [ "$RELOAD" = "1" ]; then
     done
 fi
 
-# --- 4. launch backend -------------------------------------------------------
+# --- 5. launch backend -------------------------------------------------------
 # Use process substitution (> >(...)) for prefixing so $! captures the real
 # process PID, not the pipeline subshell. This makes liveness checks and
 # cleanup work on the actual server process.
 
 echo "==> Starting wiwi backend on :$PROXY_PORT (reload: ${RELOAD}) ..."
-if [ -x "$WIWI_BIN" ]; then
+if [ -n "$WIWI_BIN" ]; then
+    # Explicit override only — skips the repo pin above. Make sure it points
+    # at the code you intend to run.
+    echo "    (using WIWI_BIN override: $WIWI_BIN)"
     "$WIWI_BIN" "${CMD_ARGS[@]}" > >(prefixed "backend") 2>&1 &
-elif command -v wiwi >/dev/null 2>&1; then
-    wiwi "${CMD_ARGS[@]}" > >(prefixed "backend") 2>&1 &
 else
-    echo "ERROR: 'wiwi' not found. Run: uv pip install -e .[dev]"
-    exit 1
+    "$PYBIN" -m wiwi.main "${CMD_ARGS[@]}" > >(prefixed "backend") 2>&1 &
 fi
 BACKEND_PID=$!
 
-# --- 5. launch web dev server ------------------------------------------------
+# --- 6. launch web dev server ------------------------------------------------
 
 echo "==> Starting Vite dev server (web) on :$WEB_PORT ..."
 cd "$WEB_DIR"
-npm run dev -- --port "$WEB_PORT" > >(prefixed "web") 2>&1 &
+"${DEV_CMD[@]}" > >(prefixed "web") 2>&1 &
 WEB_PID=$!
 cd "$SCRIPT_DIR"
 
@@ -128,7 +156,7 @@ echo "==> Both running. Backend: http://localhost:$PROXY_PORT  Web: http://local
 echo "==> Press Ctrl-C to stop both."
 echo ""
 
-# --- 6. wait — if either dies, stop the other --------------------------------
+# --- 7. wait — if either dies, stop the other --------------------------------
 
 while true; do
     if ! kill -0 "$BACKEND_PID" 2>/dev/null; then

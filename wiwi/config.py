@@ -42,6 +42,7 @@ PROVIDER_TYPES: tuple[str, ...] = (
     "nvidia-nim",
     "cline",
     "workbuddy",
+    "opencode",
 )
 
 
