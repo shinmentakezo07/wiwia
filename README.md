@@ -5,9 +5,10 @@
 ### One gateway. Every dialect. Any provider.
 
 **Speak** OpenAI Chat · OpenAI Responses (Codex CLI) · Anthropic Messages (Claude Code) **on the inbound.**
-**Route to** OpenAI · Anthropic · Gemini · OpenRouter · NVIDIA NIM · Cline · WorkBuddy · GMI Cloud · B.AI · any OpenAI-compatible endpoint.
+**Route to** OpenAI · Anthropic · Gemini · OpenRouter · NVIDIA NIM · Cline · WorkBuddy · GMI Cloud · B.AI · OpenCode Zen · any OpenAI-compatible endpoint.
 
 <p>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-22c55e?style=for-the-badge"></a>
   <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white&style=for-the-badge">
   <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white&style=for-the-badge">
   <img alt="React 19" src="https://img.shields.io/badge/React-19-149eca?logo=react&logoColor=white&style=for-the-badge">
@@ -15,10 +16,10 @@
 </p>
 
 <p>
-  <img alt="Tests" src="https://img.shields.io/badge/tests-1170%20passing-34d399?style=for-the-badge">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-1225%20passing-34d399?style=for-the-badge">
   <img alt="Lint" src="https://img.shields.io/badge/lint-ruff%20clean-9CA3AF?logo=ruff&logoColor=white&style=for-the-badge">
-  <img alt="Test files" src="https://img.shields.io/badge/test%20files-59-7C3AED?style=for-the-badge">
-  <img alt="License" src="https://img.shields.io/badge/license-MIT-22c55e?style=for-the-badge">
+  <img alt="Test files" src="https://img.shields.io/badge/test%20files-62-7C3AED?style=for-the-badge">
+  <img alt="Self-hosted" src="https://img.shields.io/badge/self--hosted-one%20binary-F59E0B?style=for-the-badge">
 </p>
 
 **3 inbound dialects × 11 outbound providers — no pairwise converters, one canonical IR.**
@@ -73,7 +74,7 @@
 | [🚀 Features](#-features) | translation · routing · auth · observability · admin |
 | [🧠 How it works](#-how-it-works) | request lifecycle + streaming pipeline |
 | [📥 Surfaces](#-surfaces-inbound) | endpoints + translation matrix |
-| [📤 Providers](#-providers-outbound) | all 10, with default endpoints |
+| [📤 Providers](#-providers-outbound) | all 11, with default endpoints |
 | [⚡ Quickstart](#-quickstart) | run it in 60 seconds |
 | [🧰 Commands](#-commands) | install · run · benchmark |
 | [🔌 Connecting clients](#-connecting-clients) | Claude Code · Codex · SDK · curl |
@@ -84,6 +85,7 @@
 | [🧪 Tests & lint](#-tests--lint) | |
 | [📚 Docs](#-docs) | |
 | [🛡️ Guardrails](#-guardrails) | |
+| [📜 License](#-license) | MIT |
 
 ---
 
@@ -527,7 +529,7 @@ wiwi/                      15.5k lines of Python across 58 modules
                            stats.py (pure rollups) · metrics.py (Prometheus)
 
 web/                       31.7k lines of TS/TSX — 51 page components (97 .tsx total)
-tests/                     59 test files — unit (respx), ASGI e2e, Hypothesis
+tests/                     62 test files — unit (respx), ASGI e2e, Hypothesis
 ```
 
 | Path | Role |
@@ -664,7 +666,7 @@ curl -X DELETE localhost:4000/admin/keys/<id> -H "$MK"
 ### 🏢 Providers & key pools
 
 ```bash
-curl localhost:4000/admin/provider-catalog -H "$MK"     # 10 built-in cards + configured?
+curl localhost:4000/admin/provider-catalog -H "$MK"     # 11 built-in cards + configured?
 curl localhost:4000/admin/providers -H "$MK"            # pool status: health + cooldowns
 curl -X POST localhost:4000/admin/providers -H "$MK" \
   -d '{"name": "openai-backup", "provider_type": "openai",
@@ -763,7 +765,7 @@ curl -X POST localhost:4000/admin/workbuddy/refresh -H "$MK" -d '{"label": "main
 | `GET /admin/keys` · `PATCH /admin/keys/{id}` | list · update limits live (cache evicted immediately) |
 | `POST /admin/keys/{id}/disable` · `DELETE /admin/keys/{id}` | disable/enable · revoke |
 | **Providers** | |
-| `GET /admin/provider-catalog` | 10 built-in type cards, each flagged `configured` |
+| `GET /admin/provider-catalog` | 11 built-in type cards, each flagged `configured` |
 | `GET /admin/providers` | provider + key-pool status (health, cooldowns, req/err counts) |
 | `POST /admin/providers` · `PATCH /admin/providers/{name}` · `DELETE /admin/providers/{name}` | add · rename/re-type/re-URL · remove (409 if referenced) |
 | `POST /admin/providers/{name}/keys` · `PATCH …/{label}` · `DELETE …/{label}` | pool key CRUD, weight/enabled, cooldown reset |
@@ -799,8 +801,8 @@ curl -X POST localhost:4000/admin/workbuddy/refresh -H "$MK" -d '{"label": "main
 ## 🧪 Tests & lint
 
 ```bash
-python3 -m pytest tests/ -q                                 # 1170 tests, all green
-python3 -m pytest tests/test_fix_round25.py -q              # latest regression file
+python3 -m pytest tests/ -q                                 # 1225 tests, all green
+python3 -m pytest tests/test_fix_round27.py -q              # latest regression file
 python3 -m pytest tests/test_codecs.py -q                   # single file
 python3 -m pytest tests/test_router.py -k cooldown          # single test by name
 
@@ -808,9 +810,9 @@ ruff check wiwi/ tests/                                     # line-length 100, t
 cd web && bun run lint                                      # eslint (web/ is not ruff-covered)
 ```
 
-The suite is **59 test files** mixing **unit tests** (`respx` HTTP mocks), **ASGI end-to-end tests** through the full app, and **Hypothesis property-based round-trips** over the dialect ↔ IR codecs. `pytest-asyncio` runs in `asyncio_mode = "auto"`, so write bare `async def test_…` — no decorator needed.
+The suite is **62 test files** mixing **unit tests** (`respx` HTTP mocks), **ASGI end-to-end tests** through the full app, and **Hypothesis property-based round-trips** over the dialect ↔ IR codecs. `pytest-asyncio` runs in `asyncio_mode = "auto"`, so write bare `async def test_…` — no decorator needed.
 
-Bugfix regressions land in the next thematic `test_fix_roundN.py` file — **`test_fix_round25.py` is the current in-flight one**. Gaps in the numbering (e.g. no `round1`, no `round5`) are real: old numbers were collapsed into `test_bugfix_round5.py` and other thematic files. Find the next unused number with `ls tests/test_fix_round*.py`.
+Bugfix regressions land in the next thematic `test_fix_roundN.py` file — **`test_fix_round27.py` is the current in-flight one**. Gaps in the numbering (e.g. no `round1`, no `round5`) are real: old numbers were collapsed into `test_bugfix_round5.py` and other thematic files. Find the next unused number with `ls tests/test_fix_round*.py`.
 
 ---
 
@@ -842,6 +844,25 @@ Bugfix regressions land in the next thematic `test_fix_roundN.py` file — **`te
 - `X-Forwarded-For` is consulted **only** for rate-limiting buckets, never for authentication.
 - The gateway-wide `header_allowlist` controls which inbound headers are forwarded upstream.
 - **Never add dialect- or provider-specific branches in `core/`, `router/`, or `auth/`.** Dialect logic belongs in `wire/`; provider logic belongs in `providers/`.
+
+---
+
+## 📜 License
+
+Distributed under the **MIT License** — see [LICENSE](LICENSE) for the full text.
+
+```
+Copyright (c) 2026 wiwi
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software — as long as the copyright notice and this permission
+notice are included in all copies or substantial portions of the Software.
+```
+
+Use it, fork it, ship it commercially. No attribution required beyond the license text riding along.
 
 ---
 
