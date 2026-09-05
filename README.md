@@ -85,7 +85,7 @@
 | [🧪 Tests & lint](#-tests--lint) | |
 | [📚 Docs](#-docs) | |
 | [🛡️ Guardrails](#-guardrails) | |
-| [📜 License](#-license) | MIT |
+| [📜 License & terms](#-license--terms) | MIT · [TERMS.md](TERMS.md) |
 
 ---
 
@@ -847,9 +847,15 @@ Bugfix regressions land in the next thematic `test_fix_roundN.py` file — **`te
 
 ---
 
-## 📜 License
+## 📜 License & terms
 
-Distributed under the **MIT License** — see [LICENSE](LICENSE) for the full text.
+The code is distributed under the **MIT License** — see [LICENSE](LICENSE) for the full text.
+
+Operating a wiwi server is governed by the [Terms of Use](TERMS.md):
+
+- **Personal use — free.** No fee, no registration.
+- **Commercial use — allowed, with conditions.** If you charge money for a wiwi-based service, you accept the [terms](TERMS.md) by doing so (no impersonation, no fraud, honor upstream provider ToS, publish an abuse contact).
+- **No liability.** The author is not responsible for misuse of your deployment — including fraud — and the software ships with no warranty.
 
 ```
 Copyright (c) 2026 wiwi
@@ -862,12 +868,13 @@ copies of the Software — as long as the copyright notice and this permission
 notice are included in all copies or substantial portions of the Software.
 ```
 
-Use it, fork it, ship it commercially. No attribution required beyond the license text riding along.
+Use it, fork it, ship it commercially — the code carries no strings. If you
+*operate a server for paying customers*, the [Terms of Use](TERMS.md) apply.
 
 ---
 
 <div align="center">
 
-<sub>MIT licensed · built with Python 3.11+, FastAPI, React 19, and bun</sub>
+<sub>MIT licensed · server operation governed by <a href="TERMS.md">Terms of Use</a> · built with Python 3.11+, FastAPI, React 19, and bun</sub>
 
 </div>
