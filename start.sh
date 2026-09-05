@@ -6,7 +6,7 @@
 # first, so a stale site-packages install or an editable install pointing
 # at a different checkout can never shadow it (that failure mode surfaced
 # as "unsupported provider type 'opencode'" with new code in the tree).
-# Frontend uses bun (authoritative, web/bun.lock), falling back to npm.
+# Frontend uses npm (instead of bun).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -83,17 +83,11 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# --- 1. install web deps (bun authoritative, npm fallback) --------------------
+# --- 1. install web deps (npm) -------------------------------------------------
 
-if command -v bun >/dev/null 2>&1; then
-    echo "==> Installing web dependencies (bun) in $WEB_DIR ..."
-    (cd "$WEB_DIR" && bun install)
-    DEV_CMD=(bun run dev --port "$WEB_PORT")
-else
-    echo "==> bun not found; falling back to npm in $WEB_DIR ..."
-    (cd "$WEB_DIR" && npm install)
-    DEV_CMD=(npm run dev -- --port "$WEB_PORT")
-fi
+echo "==> Installing web dependencies (npm) in $WEB_DIR ..."
+(cd "$WEB_DIR" && npm install)
+DEV_CMD=(npm run dev -- --port "$WEB_PORT")
 
 # --- 2. free up the ports ----------------------------------------------------
 
