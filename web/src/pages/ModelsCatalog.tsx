@@ -1,26 +1,58 @@
 // ModelsCatalog — public, secret-free model catalog from /public/models.
-// No auth required. Inherits the site's dark console world (hairline borders,
-// admin-card surfaces, mono data, blue→violet accents) at the same hero
-// quality bar as Pricing: live stats from the real payload, search + provider
-// filter, alias chips rendered on the cards they target (no separate panel),
-// skeleton loading, and an always-visible "try in playground" affordance —
-// the previous hover-only reveal was unusable on touch and keyboard.
+// No auth required. Shares the Landing/Pricing hero vocabulary (animated beam
+// backdrop, shimmer CTA, live stats) and the Dra admin-card surface language.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { ArrowRight, Boxes, Check, Copy, Search, X } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { getPublicModels } from "@/api/client";
 import { aliasDisplayName, aliasTarget, type PublicModelGroup } from "@/api/types";
 import { Badge, Card, EmptyState, ErrorText } from "@/components/ui";
+import { HeroBeamBackdrop } from "@/components/HeroBeamBackdrop";
 
 const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
 
 const FOCUS_RING =
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50";
 
+/** Deterministic accent hue per provider — same idea as the colored letter
+ *  badges in ModelsSupported, but hue-only so it tints on dark surfaces. */
+const PROVIDER_HUES: Record<string, number> = {
+  openai: 152,
+  anthropic: 22,
+  google: 217,
+  openrouter: 76,
+  opencode: 262,
+  workbuddy: 190,
+};
+
+function providerHue(provider: string): number {
+  let h = 0;
+  for (let i = 0; i < provider.length; i++) h = (h * 31 + provider.charCodeAt(i)) % 360;
+  return PROVIDER_HUES[provider] ?? h;
+}
+
+/** Card-local accent CSS vars derived from the group's first provider. */
+function providerAccent(provider: string): CSSProperties {
+  const h = providerHue(provider);
+  return {
+    ["--p" as string]: `hsl(${h} 80% 68%)`,
+    ["--p-soft" as string]: `hsl(${h} 80% 68% / 0.12)`,
+    ["--p-border" as string]: `hsl(${h} 80% 68% / 0.22)`,
+    ["--p-glow" as string]: `hsl(${h} 80% 60% / 0.09)`,
+  } as CSSProperties;
+}
+
 // -- derived bits -------------------------------------------------------------
+/** Compact beam set — catalog hero is shorter than Landing's, so 4 beams. */
+const HERO_BEAMS_CATALOG = [
+  { d: "M 0,120 Q 300,60 600,140 T 1200,120", dur: 10, delay: 0, w: 1.5, c0: "#3b82f6", c1: "#8b5cf6" },
+  { d: "M 0,220 Q 250,160 500,240 T 1200,200", dur: 12, delay: 1.5, w: 1, c0: "#8b5cf6", c1: "#ec4899" },
+  { d: "M 0,320 Q 350,260 700,340 T 1200,300", dur: 14, delay: 0.8, w: 1.5, c0: "#22d3ee", c1: "#3b82f6" },
+  { d: "M 0,80 Q 400,20 800,100 T 1200,60", dur: 11, delay: 2, w: 1, c0: "#a78bfa", c1: "#22d3ee" },
+] as const;
 
 interface AliasChip {
   alias: string;
@@ -113,9 +145,16 @@ function SkeletonCard() {
 function GroupCard(props: { g: PublicModelGroup; aliases: AliasChip[] }) {
   const g = props.g;
   const provs = [...new Set(g.deployments.map((d) => d.provider))];
+  const accent = providerAccent(provs[0] ?? "");
   return (
-    <Card className="group flex h-full flex-col p-5">
-      <div className="flex items-start justify-between gap-3">
+    <div className="group h-full" style={accent}>
+      <Card className="flex h-full flex-col p-5 transition-[border-color,box-shadow] duration-300">
+      <div
+        className="pointer-events-none absolute inset-x-0 top-0 h-24 opacity-0 transition-opacity duration-500 group-hover:opacity-100"
+        style={{ background: "radial-gradient(120% 100% at 50% 0%, var(--p-glow) 0%, transparent 70%)" }}
+        aria-hidden
+      />
+      <div className="relative flex items-start justify-between gap-3">
         <h3
           className="break-words font-mono text-[15px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]"
           style={{ fontFamily: MONO }}
@@ -125,7 +164,7 @@ function GroupCard(props: { g: PublicModelGroup; aliases: AliasChip[] }) {
         <CopyModelButton text={g.name} label={`Copy model id ${g.name}`} />
       </div>
       {props.aliases.length > 0 && (
-        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+        <div className="relative mt-1.5 flex flex-wrap items-center gap-1.5">
           {props.aliases.map((a) => (
             <Badge
               key={a.alias}
@@ -137,34 +176,48 @@ function GroupCard(props: { g: PublicModelGroup; aliases: AliasChip[] }) {
           ))}
         </div>
       )}
-      <p className="mt-1.5 text-[11px] text-[var(--admin-text-dim)]">
+      <p className="relative mt-1.5 text-[11px] text-[var(--admin-text-dim)]">
         {g.deployments.length} deployment{g.deployments.length === 1 ? "" : "s"}
         {" · "}
         {provs.length} provider{provs.length === 1 ? "" : "s"}
       </p>
-      <div className="mt-3 space-y-1.5">
-        {g.deployments.map((d) => (
-          <div
-            key={`${d.provider}/${d.model_id}`}
-            className="flex items-center gap-2 rounded-lg border border-[var(--admin-border)] bg-white/[0.015] px-2.5 py-1.5 transition-colors hover:border-[var(--admin-border-hover)]"
-          >
-            <Badge tone="violet">{d.provider}</Badge>
-            <span className="truncate font-mono text-[12px] text-[var(--admin-text-muted)]" style={{ fontFamily: MONO }}>
-              {d.model_id}
-            </span>
-          </div>
-        ))}
+      <div className="relative mt-3 space-y-1.5">
+        {g.deployments.map((d) => {
+          const dot = `hsl(${providerHue(d.provider)} 80% 62%)`;
+          return (
+            <div
+              key={`${d.provider}/${d.model_id}`}
+              className="flex items-center gap-2 rounded-lg border border-[var(--admin-border)] bg-white/[0.015] px-2.5 py-1.5 transition-colors hover:border-[var(--admin-border-hover)]"
+            >
+              <span
+                className="size-1.5 shrink-0 rounded-full"
+                style={{ background: dot, boxShadow: `0 0 6px ${dot}` }}
+                aria-hidden
+              />
+              <span
+                className="shrink-0 text-[11px] font-medium uppercase tracking-[0.08em]"
+                style={{ color: dot }}
+              >
+                {d.provider}
+              </span>
+              <span className="min-w-0 truncate border-l border-[var(--admin-border)] pl-2 font-mono text-[12px] text-[var(--admin-text-muted)]" style={{ fontFamily: MONO }}>
+                {d.model_id}
+              </span>
+            </div>
+          );
+        })}
       </div>
-      <div className="mt-auto pt-4">
+      <div className="relative mt-auto pt-4">
         <Link
           to="/playground"
-          className={`inline-flex items-center gap-1.5 text-[12px] font-medium text-blue-300/90 transition-colors hover:text-blue-200 ${FOCUS_RING}`}
+          className={`inline-flex h-8 items-center gap-1.5 rounded-full border border-[var(--p-border)] bg-[var(--p-soft)] px-3 text-[12px] font-medium transition-colors duration-150 hover:bg-[var(--p-border)] ${FOCUS_RING}`}
         >
           Try in playground
           <ArrowRight size={12} className="transition-transform duration-150 group-hover:translate-x-0.5" />
         </Link>
       </div>
-    </Card>
+      </Card>
+    </div>
   );
 }
 
@@ -216,7 +269,8 @@ export function ModelsCatalogPage() {
   return (
     <div className="pb-20">
       {/* ════════ hero ════════ */}
-      <section className="relative overflow-hidden pb-2 pt-10 text-center">
+      <section className="full-bleed relative flex min-h-[420px] items-center justify-center overflow-hidden bg-[var(--admin-bg)] px-6 pb-10 pt-14 text-center sm:px-12">
+        <HeroBeamBackdrop beams={HERO_BEAMS_CATALOG} className="opacity-50" />
         {/* soft radial glow behind the headline */}
         <div
           className="pointer-events-none absolute left-1/2 top-6 h-64 w-[560px] max-w-full -translate-x-1/2 rounded-full"
@@ -224,7 +278,12 @@ export function ModelsCatalogPage() {
           aria-hidden
         />
         <div className="animate-hero-enter relative z-10 mx-auto max-w-3xl">
-          <h1 className="text-4xl font-bold tracking-[-0.02em] text-[var(--admin-text)] sm:text-5xl">
+          {/* live badge — data comes straight from the running router */}
+          <span className="admin-badge admin-badge-blue mb-5">
+            <span className="hero-live-dot text-emerald-400" aria-hidden />
+            Live from the router
+          </span>
+          <h1 className="text-4xl font-bold tracking-[-0.02em] text-[var(--admin-text)] sm:text-5xl md:text-6xl">
             Every model.{" "}
             <span className="bg-gradient-to-r from-blue-400 via-violet-400 to-fuchsia-400 bg-clip-text text-transparent">
               One endpoint.
@@ -235,13 +294,16 @@ export function ModelsCatalogPage() {
             to try them — straight from the live router config.
           </p>
           <div className="mt-7 flex flex-wrap items-center justify-center gap-2.5">
-            <Link
-              to="/playground"
-              className={`inline-flex h-11 items-center justify-center gap-2 rounded-[10px] bg-gradient-to-b from-brand-500 to-brand-700 px-5 text-[13px] font-medium text-white shadow-lg shadow-brand-600/25 transition-[filter] duration-150 hover:brightness-110 ${FOCUS_RING}`}
-            >
-              Open Playground
-              <ArrowRight size={14} />
-            </Link>
+            <div className="relative">
+              <div className="hero-cta-ring !rounded-[10px]" aria-hidden />
+              <Link
+                to="/playground"
+                className={`wiwi-shimmer inline-flex h-11 items-center justify-center gap-2 rounded-[10px] bg-gradient-to-b from-brand-500 to-brand-700 px-5 text-[13px] font-medium text-white shadow-lg shadow-brand-600/25 transition-[filter,transform] duration-150 hover:scale-[1.02] hover:brightness-110 active:scale-[0.98] ${FOCUS_RING}`}
+              >
+                Open Playground
+                <ArrowRight size={14} />
+              </Link>
+            </div>
             <Link
               to="/docs"
               className={`inline-flex h-11 items-center justify-center rounded-[10px] border border-white/[0.08] bg-white/[0.02] px-5 text-[13px] font-medium text-[var(--admin-text)] transition-colors duration-150 hover:border-white/[0.14] hover:bg-white/[0.04] ${FOCUS_RING}`}
@@ -251,7 +313,7 @@ export function ModelsCatalogPage() {
           </div>
         </div>
         {groups.length > 0 && (
-          <div className="relative z-10 mx-auto mt-12 grid max-w-3xl grid-cols-2 gap-4 sm:grid-cols-4">
+          <div className="relative z-10 mx-auto mt-12 grid w-full max-w-3xl grid-cols-2 gap-4 sm:grid-cols-4">
             <Stat value={groups.length} label="Model groups" />
             <Stat value={totals.deployments} label="Deployments" />
             <Stat value={totals.providers} label="Providers" />

@@ -3,7 +3,6 @@
 // design system shared with the admin console; reuses the animated beam
 // backdrop and ambient glow language from the Landing page.
 
-import { useId } from "react";
 import { Link } from "react-router-dom";
 import {
   ArrowRight,
@@ -16,6 +15,7 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Card } from "@/components/ui";
+import { HERO_BEAMS_COMPACT, HeroBeamBackdrop } from "@/components/HeroBeamBackdrop";
 
 const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
 
@@ -181,51 +181,6 @@ const FAQ_ITEMS: FaqItem[] = [
   },
 ];
 
-// ── hero beam backdrop (compact, local) ───────────────────────────────────
-
-const HERO_BEAMS = [
-  { d: "M 0,120 Q 300,60 600,140 T 1200,120", dur: 10, delay: 0, w: 1.5, c0: "#3b82f6", c1: "#8b5cf6" },
-  { d: "M 0,220 Q 250,160 500,240 T 1200,200", dur: 12, delay: 1.5, w: 1, c0: "#8b5cf6", c1: "#ec4899" },
-  { d: "M 0,320 Q 350,260 700,340 T 1200,300", dur: 14, delay: 0.8, w: 1.5, c0: "#22d3ee", c1: "#3b82f6" },
-  { d: "M 0,80 Q 400,20 800,100 T 1200,60", dur: 11, delay: 2, w: 1, c0: "#a78bfa", c1: "#22d3ee" },
-] as const;
-
-function HeroBeamBackdrop() {
-  const id = useId().replace(/[:]/g, "");
-  return (
-    <svg
-      className="pointer-events-none absolute inset-0 h-full w-full opacity-60"
-      viewBox="0 0 1200 400"
-      preserveAspectRatio="xMidYMid slice"
-      aria-hidden
-    >
-      <defs>
-        {HERO_BEAMS.map((b, i) => (
-          <linearGradient key={i} id={`pb-${id}-${i}`} gradientUnits="userSpaceOnUse">
-            <stop stopColor={b.c0} stopOpacity="0">
-              <animate attributeName="offset" values="-0.3;1" dur={`${b.dur}s`} begin={`${b.delay}s`} repeatCount="indefinite" />
-            </stop>
-            <stop stopColor={b.c0}>
-              <animate attributeName="offset" values="-0.1;1.1" dur={`${b.dur}s`} begin={`${b.delay}s`} repeatCount="indefinite" />
-            </stop>
-            <stop offset="0.3" stopColor={b.c1}>
-              <animate attributeName="offset" values="0;1.3" dur={`${b.dur}s`} begin={`${b.delay}s`} repeatCount="indefinite" />
-            </stop>
-            <stop offset="1" stopColor={b.c1} stopOpacity="0">
-              <animate attributeName="offset" values="0.3;1.6" dur={`${b.dur}s`} begin={`${b.delay}s`} repeatCount="indefinite" />
-            </stop>
-          </linearGradient>
-        ))}
-      </defs>
-      {HERO_BEAMS.map((b, i) => (
-        <g key={i}>
-          <path d={b.d} fill="none" stroke="rgba(255,255,255,0.03)" strokeWidth={b.w} />
-          <path d={b.d} fill="none" stroke={`url(#pb-${id}-${i})`} strokeWidth={b.w} strokeLinecap="round" />
-        </g>
-      ))}
-    </svg>
-  );
-}
 
 const TRUST_STATS = [
   { value: "40+", label: "Providers" },
@@ -241,7 +196,7 @@ export function PricingPage() {
     <div className="space-y-20 pb-20">
       {/* ════════ hero ════════ */}
       <section className="relative overflow-hidden pt-6 pb-2">
-        <HeroBeamBackdrop />
+        <HeroBeamBackdrop beams={HERO_BEAMS_COMPACT} className="opacity-60" />
         {/* soft radial glow behind the headline */}
         <div
           className="pointer-events-none absolute left-1/2 top-10 h-72 w-[640px] max-w-full -translate-x-1/2 rounded-full"
