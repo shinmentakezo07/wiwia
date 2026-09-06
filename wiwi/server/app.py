@@ -1990,6 +1990,343 @@ def create_app(config: WiwiConfig) -> FastAPI:
             "keys": [_key_view(k, mono, wall) for k in acct.keys],
         })
 
+    @app.get("/admin/providers/export")
+    async def admin_export_providers(request: Request):
+        """Export a full provider backup: accounts, keys, and deployments.
+
+        Every account is emitted with its plaintext key secrets plus the
+        deployments that reference it, so the file restores full routing
+        on import. Guarded by the master key like key reveals, and
+        audit-logged. Optionally scoped with ?provider=name.
+        """
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        provider_filter = request.query_params.get("provider", "").strip()
+        dep_index: dict[str, list[dict]] = {}
+        for gname, deps in state.router.groups.items():
+            for d in deps:
+                dep_index.setdefault(d.provider.name, []).append(
+                    {"group_name": gname, "model_id": d.model_id,
+                     "weight": d.weight})
+        for v in dep_index.values():
+            v.sort(key=lambda e: (e["group_name"], e["model_id"]))
+        out = []
+        for name in sorted(state.router.providers):
+            if provider_filter and name != provider_filter:
+                continue
+            acct = state.router.providers[name]
+            out.append({
+                "name": acct.name,
+                "provider_type": acct.provider_type,
+                "base_url": acct.base_url,
+                "timeout_s": acct.timeout_s,
+                "extra_headers": dict(acct.extra_headers),
+                "round_robin": acct.round_robin,
+                "alias_id": acct.alias_id,
+                "keys": [{"label": k.label, "secret": k.secret,
+                          "weight": k.weight, "enabled": k.enabled}
+                         for k in acct.keys],
+                "deployments": dep_index.get(name, []),
+            })
+        await state.logs.log_audit(actor="master", action="provider.export",
+                                   target=provider_filter,
+                                   diff={"providers": len(out)})
+        if provider_filter and not out:
+            return _err(404, "not_found_error",
+                        f"unknown provider '{provider_filter}'", request)
+        return ORJSONResponse({"version": 1, "exported_at": time.time(),
+                               "providers": out})
+
+    @app.post("/admin/providers/import")
+    async def admin_import_providers(request: Request):
+        """Import a provider backup produced by GET /admin/providers/export.
+
+        Upsert semantics: existing accounts/keys/deployments are updated in
+        place, missing ones are created. The whole batch is validated first
+        — any validation error rejects the import with nothing applied.
+        """
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        entries = body.get("providers")
+        if not isinstance(entries, list) or not entries:
+            return _err(400, "invalid_request_error",
+                        "'providers' must be a non-empty list", request)
+        # -- validate everything before touching live state ------------------
+        parsed: list[dict] = []
+        seen_names: set[str] = set()
+        for i, raw in enumerate(entries):
+            if not isinstance(raw, dict):
+                return _err(400, "invalid_request_error",
+                            f"providers[{i}] is not a JSON object", request)
+            name = str(raw.get("name") or "").strip()
+            if not name:
+                return _err(400, "invalid_request_error",
+                            f"providers[{i}].name is required", request)
+            if name in seen_names:
+                return _err(400, "invalid_request_error",
+                            f"duplicate provider '{name}' in import", request)
+            seen_names.add(name)
+            ptype = str(raw.get("provider_type") or "").strip()
+            if ptype not in PROVIDER_TYPES:
+                return _err(400, "invalid_request_error",
+                            f"providers[{i}]: unsupported provider type "
+                            f"'{ptype}'", request)
+            if "base_url" in raw or name not in state.router.providers:
+                raw_url = _interpolate(raw.get("base_url"))
+                if raw_url is not None and not isinstance(raw_url, str):
+                    return _err(400, "invalid_request_error",
+                                "'base_url' must be a string", request)
+                base_url = ((raw_url or "").strip()
+                            or _default_base_url(ptype))
+                if not base_url:
+                    return _err(400, "invalid_request_error",
+                                f"base_url is required for provider type "
+                                f"'{ptype}'", request)
+            else:
+                base_url = None
+            timeout_s = None
+            if "timeout_s" in raw and raw["timeout_s"] is not None:
+                try:
+                    timeout_s = float(raw["timeout_s"])
+                except (TypeError, ValueError):
+                    return _err(400, "invalid_request_error",
+                                "timeout_s must be a number", request)
+                if timeout_s <= 0:
+                    return _err(400, "invalid_request_error",
+                                "timeout_s must be positive", request)
+            extra_headers = None
+            if "extra_headers" in raw and raw["extra_headers"] is not None:
+                eh = raw["extra_headers"]
+                if not isinstance(eh, dict) or not all(
+                        isinstance(k, str) and isinstance(v, str)
+                        for k, v in eh.items()):
+                    return _err(400, "invalid_request_error",
+                                "extra_headers must map strings to strings",
+                                request)
+                extra_headers = dict(eh)
+            round_robin = None
+            if "round_robin" in raw and raw["round_robin"] is not None:
+                if not isinstance(raw["round_robin"], bool):
+                    return _err(400, "invalid_request_error",
+                                "round_robin must be a boolean", request)
+                round_robin = raw["round_robin"]
+            alias_id_set = "alias_id" in raw
+            alias_id = None
+            if alias_id_set:
+                alias_raw = raw.get("alias_id")
+                if alias_raw is not None and str(alias_raw).strip():
+                    alias_id = str(alias_raw).strip()
+                    if any(c.isspace() for c in alias_id):
+                        return _err(400, "invalid_request_error",
+                                    "alias_id must not contain whitespace",
+                                    request)
+            raw_keys = raw.get("keys")
+            if not isinstance(raw_keys, list) or not raw_keys:
+                return _err(400, "invalid_request_error",
+                            f"providers[{i}].keys must be a non-empty list",
+                            request)
+            keys = []
+            seen_labels: set[str] = set()
+            for j, rk in enumerate(raw_keys):
+                if not isinstance(rk, dict):
+                    return _err(400, "invalid_request_error",
+                                f"providers[{i}].keys[{j}] is not an object",
+                                request)
+                label = str(rk.get("label") or "").strip()
+                if not label:
+                    return _err(400, "invalid_request_error",
+                                f"providers[{i}].keys[{j}].label is required",
+                                request)
+                if label in seen_labels:
+                    return _err(400, "invalid_request_error",
+                                f"duplicate key label '{label}' on provider "
+                                f"'{name}'", request)
+                seen_labels.add(label)
+                secret = str(_interpolate(
+                    rk.get("secret", rk.get("key"))) or "")
+                if not secret:
+                    return _err(400, "invalid_request_error",
+                                f"providers[{i}].keys[{j}]: secret is "
+                                "required", request)
+                try:
+                    weight = max(1, int(rk.get("weight") or 1))
+                except (TypeError, ValueError):
+                    return _err(400, "invalid_request_error",
+                                "weight must be an integer", request)
+                if "enabled" in rk and not isinstance(rk["enabled"], bool):
+                    return _err(400, "invalid_request_error",
+                                "enabled must be a boolean", request)
+                keys.append({"label": label, "secret": secret,
+                             "weight": weight,
+                             "enabled": bool(rk.get("enabled", True))})
+            raw_deps = raw.get("deployments", [])
+            if raw_deps is None:
+                raw_deps = []
+            if not isinstance(raw_deps, list):
+                return _err(400, "invalid_request_error",
+                            f"providers[{i}].deployments must be a list",
+                            request)
+            deps = []
+            seen_deps: set[tuple[str, str]] = set()
+            for j, rd in enumerate(raw_deps):
+                if not isinstance(rd, dict):
+                    return _err(400, "invalid_request_error",
+                                f"providers[{i}].deployments[{j}] is not an "
+                                "object", request)
+                gname = str(rd.get("group_name") or rd.get("group")
+                            or "").strip()
+                model_id = str(rd.get("model_id") or "").strip()
+                if not gname or not model_id:
+                    return _err(400, "invalid_request_error",
+                                f"providers[{i}].deployments[{j}]: group_name "
+                                "and model_id are required", request)
+                if any(ch.isspace() for ch in model_id):
+                    return _err(400, "invalid_request_error",
+                                "model_id must not contain whitespace",
+                                request)
+                try:
+                    dweight = max(1, int(rd.get("weight") or 1))
+                except (TypeError, ValueError):
+                    return _err(400, "invalid_request_error",
+                                "weight must be an integer", request)
+                if (gname, model_id) in seen_deps:
+                    return _err(400, "invalid_request_error",
+                                f"duplicate deployment {gname}/{model_id} "
+                                f"on provider '{name}'", request)
+                seen_deps.add((gname, model_id))
+                deps.append({"group_name": gname, "model_id": model_id,
+                             "weight": dweight})
+            if alias_id_set:
+                eff_alias = alias_id
+            else:
+                cur = state.router.providers.get(name)
+                eff_alias = cur.alias_id if cur is not None else None
+            parsed.append({"name": name, "provider_type": ptype,
+                           "base_url": base_url, "timeout_s": timeout_s,
+                           "extra_headers": extra_headers,
+                           "round_robin": round_robin,
+                           "alias_id": alias_id, "alias_id_set": alias_id_set,
+                           "eff_alias": eff_alias, "keys": keys, "deps": deps})
+        # Alias claims are checked against the map as it will look after the
+        # import: mappings owned by imported providers are dropped first so
+        # aliases can move between imported accounts.
+        future_aliases = {a: n for a, n in
+                          state.router.alias_to_provider.items()
+                          if n not in seen_names}
+        seen_alias: dict[str, str] = {}
+        for p in parsed:
+            a = p["eff_alias"]
+            if a is None:
+                continue
+            if a in seen_alias:
+                return _err(400, "invalid_request_error",
+                            f"alias_id '{a}' is used by both provider "
+                            f"'{seen_alias[a]}' and '{p['name']}'", request)
+            seen_alias[a] = p["name"]
+            owner = future_aliases.get(a)
+            if owner is not None:
+                return _err(409, "invalid_request_error",
+                            f"alias_id '{a}' already used by provider "
+                            f"'{owner}'", request)
+        # -- apply (validation already passed) --------------------------------
+        n_keys = 0
+        n_deps = 0
+        for p in parsed:
+            name = p["name"]
+            acct = state.router.providers.get(name)
+            if acct is None:
+                acct = ProviderAccount(
+                    name=name, provider_type=p["provider_type"],
+                    base_url=p["base_url"]
+                    or _default_base_url(p["provider_type"]),
+                    timeout_s=p["timeout_s"] or 120.0,
+                    extra_headers=dict(p["extra_headers"] or {}),
+                    round_robin=(p["round_robin"]
+                                 if p["round_robin"] is not None else True),
+                    alias_id=p["alias_id"] if p["alias_id_set"] else None)
+                state.router.providers[name] = acct
+                if acct.alias_id is not None:
+                    state.router.alias_to_provider[acct.alias_id] = name
+                if state.config_store:
+                    await state.config_store.add_provider(
+                        name, p["provider_type"], acct.base_url,
+                        timeout_s=acct.timeout_s,
+                        extra_headers=dict(acct.extra_headers),
+                        round_robin=acct.round_robin,
+                        alias_id=acct.alias_id)
+            else:
+                acct.provider_type = p["provider_type"]
+                if p["base_url"] is not None:
+                    acct.base_url = p["base_url"]
+                if p["timeout_s"] is not None:
+                    acct.timeout_s = p["timeout_s"]
+                if p["extra_headers"] is not None:
+                    acct.extra_headers = dict(p["extra_headers"])
+                if p["round_robin"] is not None:
+                    acct.round_robin = p["round_robin"]
+                if p["alias_id_set"]:
+                    for k, v in list(state.router.alias_to_provider.items()):
+                        if v == acct.name:
+                            del state.router.alias_to_provider[k]
+                    if p["alias_id"] is not None:
+                        state.router.alias_to_provider[p["alias_id"]] = (
+                            acct.name)
+                    acct.alias_id = p["alias_id"]
+                if state.config_store:
+                    await state.config_store.update_provider(
+                        name, provider_type=p["provider_type"],
+                        base_url=p["base_url"], timeout_s=p["timeout_s"],
+                        extra_headers=p["extra_headers"],
+                        round_robin=p["round_robin"],
+                        alias_id=(p["alias_id"] if p["alias_id_set"]
+                                  else None),
+                        alias_id_set=p["alias_id_set"])
+            for k in p["keys"]:
+                n_keys += 1
+                ek = acct.get_key(k["label"])
+                if ek is None:
+                    acct.keys.append(ProviderKey(
+                        label=k["label"], secret=k["secret"],
+                        weight=k["weight"], enabled=k["enabled"]))
+                else:
+                    ek.secret = k["secret"]
+                    ek.weight = k["weight"]
+                    ek.enabled = k["enabled"]
+                if state.config_store:
+                    await state.config_store.add_key(
+                        name, k["label"], k["secret"], k["weight"],
+                        k["enabled"])
+            for d in p["deps"]:
+                n_deps += 1
+                bucket = state.router.groups.setdefault(d["group_name"], [])
+                match = next((x for x in bucket
+                              if x.provider.name == name
+                              and x.model_id == d["model_id"]), None)
+                if match is None:
+                    bucket.append(Deployment(
+                        group=d["group_name"], provider=acct,
+                        model_id=d["model_id"], weight=d["weight"]))
+                else:
+                    match.weight = d["weight"]
+                if state.config_store:
+                    await state.config_store.add_deployment(
+                        d["group_name"], name, d["model_id"], d["weight"])
+        state.router.rebuild_cross_provider_pools()
+        await state.logs.log_audit(actor="master", action="provider.import",
+                                   target="",
+                                   diff={"providers": len(parsed),
+                                         "keys": n_keys,
+                                         "deployments": n_deps})
+        return ORJSONResponse({"imported_providers": len(parsed),
+                               "imported_keys": n_keys,
+                               "imported_deployments": n_deps,
+                               "providers": [p["name"] for p in parsed]})
+
     @app.get("/admin/providers/{name}/models")
     async def admin_provider_models(name: str, request: Request):
         """Fetch model ids live from the upstream provider (first available key)."""

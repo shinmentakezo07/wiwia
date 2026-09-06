@@ -1,7 +1,7 @@
 // Providers page — bento box layout with provider-type icons, health
 // indicators, accent stat cells, error-rate bars, and stagger entrance.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -13,6 +13,7 @@ import {
   Cpu,
   Cloud,
   DollarSign,
+  Download,
   Globe,
   Layers,
   Link2,
@@ -22,16 +23,19 @@ import {
   Server,
   Sparkles,
   Trash2,
+  Upload,
   Zap,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
   addProvider,
   deleteProvider,
+  exportProviders,
   getProviders,
   getRequestLogs,
+  importProviders,
 } from "@/api/client";
-import type { PoolKey, Provider, RequestLogEntry } from "@/api/types";
+import type { PoolKey, Provider, ProviderBackup, RequestLogEntry } from "@/api/types";
 import {
   Badge,
   Button,
@@ -331,6 +335,7 @@ function ProviderCard(props: {
 export function ProvidersPage() {
   const qc = useQueryClient();
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [searchParams] = useSearchParams();
   const [addOpen, setAddOpen] = useState(false);
   const [name, setName] = useState("");
@@ -338,6 +343,8 @@ export function ProvidersPage() {
   const [baseUrl, setBaseUrl] = useState("");
   const [label, setLabel] = useState("default");
   const [secret, setSecret] = useState("");
+  const [importing, setImporting] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   // Allow deep-linking from the Built-in Providers catalog: ?type=openrouter
   // pre-selects the provider type and opens the Add dialog.
@@ -376,6 +383,48 @@ export function ProvidersPage() {
     onError: (e) => setError(e.message),
   });
 
+  const doExport = async () => {
+    try {
+      const data = await exportProviders();
+      const blob = new Blob([JSON.stringify(data, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `wiwi-providers-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const doImportFile = async (f: File) => {
+    setImporting(true);
+    setNotice(null);
+    try {
+      const parsed = JSON.parse(await f.text()) as
+        | { providers?: ProviderBackup[] }
+        | ProviderBackup[];
+      const providers = Array.isArray(parsed) ? parsed : (parsed.providers ?? []);
+      const res = await importProviders(providers);
+      await qc.invalidateQueries({ queryKey: ["providers"] });
+      setError(null);
+      setNotice(
+        `Imported ${res.imported_providers} provider${res.imported_providers === 1 ? "" : "s"}, ` +
+          `${res.imported_keys} key${res.imported_keys === 1 ? "" : "s"}, ` +
+          `${res.imported_deployments} deployment${res.imported_deployments === 1 ? "" : "s"}.`,
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setImporting(false);
+    }
+  };
+
   return (
     <div>
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
@@ -396,6 +445,27 @@ export function ProvidersPage() {
               <Layers size={14} /> Catalog
             </Button>
           </Link>
+          <Button variant="outline" onClick={() => void doExport()}>
+            <Download size={14} /> Export
+          </Button>
+          <Button
+            variant="outline"
+            disabled={importing}
+            onClick={() => fileRef.current?.click()}
+          >
+            <Upload size={14} /> {importing ? "Importing…" : "Import"}
+          </Button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void doImportFile(f);
+              e.target.value = "";
+            }}
+          />
           <Button variant="outline" onClick={() => void qc.invalidateQueries({ queryKey: ["providers"] })}>
             <RefreshCw size={14} /> Refresh
           </Button>
@@ -407,6 +477,13 @@ export function ProvidersPage() {
       {error && (
         <div className="mb-3">
           <ErrorText>{error}</ErrorText>
+        </div>
+      )}
+      {notice && (
+        <div className="mb-3">
+          <p className="rounded-[10px] border border-emerald-500/10 bg-emerald-500/[0.04] px-2.5 py-2 text-[12px] text-emerald-400">
+            {notice}
+          </p>
         </div>
       )}
       {query.isLoading && (

@@ -335,3 +335,43 @@ export interface WorkBuddyRefreshResponse {
   label: string;
   refreshed: boolean;
 }
+
+// -- Provider backup (export/import) -------------------------------------------
+
+export interface ProviderBackupKey {
+  label: string;
+  secret: string;
+  weight: number;
+  enabled: boolean;
+}
+
+export interface ProviderBackupDeployment {
+  group_name: string;
+  model_id: string;
+  weight: number;
+}
+
+export interface ProviderBackup {
+  name: string;
+  provider_type: string;
+  base_url?: string;
+  timeout_s?: number;
+  extra_headers?: Record<string, string>;
+  round_robin?: boolean;
+  alias_id?: string | null;
+  keys: ProviderBackupKey[];
+  deployments?: ProviderBackupDeployment[];
+}
+
+export interface ProviderExportResponse {
+  version: number;
+  exported_at: number;
+  providers: ProviderBackup[];
+}
+
+export interface ProviderImportResponse {
+  imported_providers: number;
+  imported_keys: number;
+  imported_deployments: number;
+  providers: string[];
+}

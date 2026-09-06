@@ -185,6 +185,8 @@ class ConfigStore:
 
     async def update_provider(self, name: str, *, provider_type: str | None = None,
                               base_url: str | None = None,
+                              timeout_s: float | None = None,
+                              extra_headers: dict | None = None,
                               round_robin: bool | None = None,
                               alias_id: str | None = None,
                               alias_id_set: bool = False,
@@ -197,6 +199,12 @@ class ConfigStore:
         if base_url is not None:
             sets.append("base_url = :bu")
             params["bu"] = base_url
+        if timeout_s is not None:
+            sets.append("timeout_s = :ts")
+            params["ts"] = timeout_s
+        if extra_headers is not None:
+            sets.append("extra_headers = :eh")
+            params["eh"] = orjson.dumps(extra_headers).decode()
         if round_robin is not None:
             sets.append("round_robin = :rr")
             params["rr"] = int(round_robin)

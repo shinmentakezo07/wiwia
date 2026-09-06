@@ -114,6 +114,9 @@ import type {
   WorkBuddyExportResponse,
   WorkBuddyImportResponse,
   WorkBuddyRefreshResponse,
+  ProviderBackup,
+  ProviderExportResponse,
+  ProviderImportResponse,
   User,
   VirtualKey,
 } from "./types";
@@ -456,4 +459,17 @@ export const workbuddyRefresh = (provider: string, label: string) =>
   api<WorkBuddyRefreshResponse>("/admin/workbuddy/refresh", {
     method: "POST",
     body: JSON.stringify({ provider, label }),
+  });
+
+// -- Provider backup (full export/import with secrets + deployments) -----------
+
+export const exportProviders = (provider?: string) => {
+  const q = provider ? `?provider=${encodeURIComponent(provider)}` : "";
+  return api<ProviderExportResponse>(`/admin/providers/export${q}`);
+};
+
+export const importProviders = (providers: ProviderBackup[]) =>
+  api<ProviderImportResponse>("/admin/providers/import", {
+    method: "POST",
+    body: JSON.stringify({ providers }),
   });
