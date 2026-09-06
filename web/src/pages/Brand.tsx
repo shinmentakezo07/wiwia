@@ -70,7 +70,7 @@ function LogoWithName({ variant }: { variant: "black" | "white" }) {
     <div className="flex items-center gap-3">
       <LogoMark variant={variant} />
       <span className="text-2xl font-bold tracking-tight" style={{ color }}>
-        LLM Gateway
+        WIWI Gateway
       </span>
     </div>
   );

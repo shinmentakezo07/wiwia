@@ -47,7 +47,7 @@ const FAQS: { question: string; answer: string }[] = [
       "You can run the gateway internally and in production for free. AGPLv3's source-availability requirement applies when you offer a modified version to others as a network service. For commercial terms outside AGPLv3, an enterprise license is available.",
   },
   {
-    question: "How do I self-host the LLM gateway?",
+    question: "How do I self-host the WIWI Gateway?",
     answer:
       "One Docker command runs the unified image with the gateway, dashboard, and worker. Point your OpenAI-compatible client at your own deployment and you are live — no managed account required.",
   },
@@ -64,7 +64,7 @@ const FAQS: { question: string; answer: string }[] = [
 ];
 
 const CLOSED_COMPARISON: { name: string; scope: string; selfHost: boolean | "Partial" }[] = [
-  { name: "LLM Gateway", scope: "Full platform (AGPLv3)", selfHost: true },
+  { name: "WIWI Gateway", scope: "Full platform (AGPLv3)", selfHost: true },
   { name: "OpenRouter", scope: "Closed source", selfHost: false },
   { name: "Vercel AI Gateway", scope: "Closed source", selfHost: false },
   { name: "Cloudflare AI Gateway", scope: "Closed source", selfHost: false },
@@ -88,7 +88,7 @@ export function OpenSourcePage() {
         <h1 className="mt-4 text-3xl font-semibold tracking-[-0.02em] text-[var(--admin-text)] sm:text-4xl">
           The Open Source{" "}
           <span className="bg-gradient-to-r from-violet-400 to-fuchsia-400 bg-clip-text text-transparent">
-            LLM Gateway
+            WIWI Gateway
           </span>
         </h1>
         <p className="mx-auto mt-4 max-w-2xl text-[15px] leading-relaxed text-[var(--admin-text-muted)]">

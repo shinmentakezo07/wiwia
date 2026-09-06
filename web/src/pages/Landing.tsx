@@ -451,7 +451,7 @@ const PRICING = [
 
 const FAQ = [
   {
-    q: "What makes LLM Gateway different from OpenRouter?",
+    q: "What makes WIWI Gateway different from OpenRouter?",
     a: "Unlike OpenRouter, we offer: Full self-hosting under an AGPLv3 license – run the gateway entirely on your infra. Deeper, real-time cost & latency analytics for every request. Bring Your Own Keys – use your own provider API keys for free. Flexible enterprise add-ons (dedicated shard, custom SLAs).",
   },
   {
@@ -757,7 +757,7 @@ export function LandingPage() {
               <span className="text-[var(--admin-text-muted)]">Even when your providers do.</span>
             </h2>
             <p className="mx-auto max-w-3xl text-lg leading-relaxed text-[var(--admin-text-muted)]">
-              LLM Gateway automatically routes requests to healthy providers in real-time. When one goes down,
+              WIWI Gateway automatically routes requests to healthy providers in real-time. When one goes down,
               your traffic seamlessly fails over—your users never notice.
             </p>
           </div>
@@ -804,7 +804,7 @@ export function LandingPage() {
             {/* Gateway combined bar */}
             <div className="flex items-center gap-2 sm:gap-4">
               <div className="w-20 shrink-0 text-right sm:w-28">
-                <span className="text-xs font-bold text-[var(--admin-text)] sm:text-sm">LLM Gateway</span>
+                <span className="text-xs font-bold text-[var(--admin-text)] sm:text-sm">WIWI Gateway</span>
               </div>
               <div className="relative h-5 flex-1 overflow-hidden rounded sm:h-7">
                 <div className="absolute inset-0 bg-white/[0.04]" />
@@ -820,7 +820,7 @@ export function LandingPage() {
           {/* Before/After comparison */}
           <div className="mt-8 grid gap-4 sm:mt-12 sm:grid-cols-2 sm:gap-6">
             <div className="rounded-xl border border-red-500/20 bg-red-500/[0.03] p-5 sm:p-6">
-              <div className="mb-3 font-mono text-xs tracking-wider text-red-400">WITHOUT LLM GATEWAY</div>
+              <div className="mb-3 font-mono text-xs tracking-wider text-red-400">WITHOUT WIWI GATEWAY</div>
               <div className="font-mono text-3xl font-bold sm:text-4xl text-[var(--admin-text)]">94%</div>
               <div className="mt-1 text-sm text-[var(--admin-text-muted)]">uptime per provider</div>
               <div className="mt-4 border-t border-red-500/10 pt-4">
@@ -829,7 +829,7 @@ export function LandingPage() {
               </div>
             </div>
             <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/[0.03] p-5 sm:p-6">
-              <div className="mb-3 font-mono text-xs tracking-wider text-emerald-400">WITH LLM GATEWAY</div>
+              <div className="mb-3 font-mono text-xs tracking-wider text-emerald-400">WITH WIWI GATEWAY</div>
               <div className="font-mono text-3xl font-bold text-emerald-400 sm:text-4xl">99.9999%</div>
               <div className="mt-1 text-sm text-[var(--admin-text-muted)]">combined uptime across providers</div>
               <div className="mt-4 border-t border-emerald-500/10 pt-4">
@@ -1086,7 +1086,7 @@ export function LandingPage() {
             <br />in 30 seconds
           </h2>
           <p className="mx-auto mt-6 max-w-xl text-lg text-[var(--admin-text-muted)]">
-            Join thousands of developers processing 100B+ tokens through LLM Gateway.
+            Join thousands of developers processing 100B+ tokens through WIWI Gateway.
             Free tier included, no credit card required.
           </p>
           <div className="mt-10 flex flex-col items-center justify-center gap-4 sm:flex-row">
@@ -1095,7 +1095,7 @@ export function LandingPage() {
               <ArrowRight size={18} className="transition-transform duration-150 group-hover:translate-x-0.5" />
             </Link>
             <a href="https://github.com/shinmentakezo07/wiwia" target="_blank" rel="noopener noreferrer" className="inline-flex h-12 items-center justify-center gap-2 rounded-[10px] border border-[var(--admin-border)] bg-transparent px-8 text-base font-medium text-[var(--admin-text)] transition-colors hover:bg-white/[0.04]">
-              Self-host LLM Gateway
+              Self-host WIWI Gateway
             </a>
           </div>
         </div>

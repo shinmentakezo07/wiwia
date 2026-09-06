@@ -367,7 +367,7 @@ export function LoginPage() {
                     className="font-mono text-[9px] font-semibold uppercase tracking-[0.18em]"
                     style={{ color: "rgba(59, 130, 246, 0.5)" }}
                   >
-                    Unified LLM Gateway
+                    Unified WIWI Gateway
                   </span>
                 </div>
               </div>

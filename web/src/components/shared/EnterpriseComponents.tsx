@@ -533,7 +533,7 @@ export function HeroEnterprise({ totalTokens = 100_000_000_000, totalRequests = 
           <Link to="/blog/soc2-type-ii" className="mb-6 inline-flex items-center gap-2 rounded-full border border-[var(--admin-border)] bg-white/[0.02] px-4 py-1.5 transition-colors hover:border-blue-500/50">
             <span className="font-mono text-xs text-blue-400">ENTERPRISE</span><span className="text-xs text-[var(--admin-text-muted)]">SOC 2 Type II certified</span>
           </Link>
-          <h1 className="mb-6 text-4xl font-bold tracking-tight sm:text-6xl lg:text-7xl">Enterprise LLM Gateway for mission-critical applications</h1>
+          <h1 className="mb-6 text-4xl font-bold tracking-tight sm:text-6xl lg:text-7xl">Enterprise WIWI Gateway for mission-critical applications</h1>
           <p className="mx-auto mb-10 max-w-3xl text-lg text-[var(--admin-text-muted)]">Deploy a fully-managed or self-hosted LLM gateway with enterprise SSO, white-labeling, and infrastructure-as-code support for your cloud or bare metal infrastructure.</p>
           <div className="flex flex-col items-center justify-center gap-4 sm:flex-row">
             <Link to="/enterprise#contact" className="admin-btn admin-btn-primary">Contact Us <ArrowRight className="ml-2 h-4 w-4" /></Link>
