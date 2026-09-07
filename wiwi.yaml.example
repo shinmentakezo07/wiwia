@@ -48,6 +48,11 @@ providers:
     base_url: https://opencode.ai/zen/v1
     keys:
       - {label: main, key: os.environ/OPENCODE_API_KEY}
+    # Free-tier models (`*-free`, `big-pickle`) also serve keyless traffic —
+    # for that use the literal sentinel `anonymous` as the key instead of a
+    # placeholder (a fake bearer is rejected as 401 Invalid API key):
+    #   keys:
+    #     - {label: anon, key: anonymous}
 
 # Model groups: map a model_name clients request to one or more provider
 # deployments. Empty by default — add your own via the admin UI (/models) or

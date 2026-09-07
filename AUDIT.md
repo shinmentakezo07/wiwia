@@ -618,3 +618,97 @@ design (STREAMING_PERFORMANCE_RECOVERY.md #5) with a disk journal:
   containers.
 
 **Baseline after this round:** 1185 tests pass, ruff clean.
+
+## Addendum — OpenCode Zen free-tier client gate, Round 10 (2026-09-07)
+
+**Symptom:** every Zen `-free` model request through wiwi failed with
+`400 {"type":"MissingSessionID","message":"Error from provider (Console): OpenCode's free tier can only be used in OpenCode"}`.
+
+**Root cause (verified by live probe matrix, 2026-09-07):** Zen's free-tier
+gate changed after the round-27 adapter shipped. It no longer keys on the
+`User-Agent` — it now requires the client **session header**
+(`x-opencode-session`), matching the real client
+(`packages/opencode/src/session/llm/request.ts` sends `x-opencode-session`
++ `x-opencode-client` on every opencode-provider request). Probe results
+against `POST /zen/v1/chat/completions`, anonymous, model `mimo-v2.5-free`:
+
+| headers sent | result |
+|---|---|
+| UA `opencode/1.18.18` only (what wiwi sent) | 400 MissingSessionID |
+| `x-opencode-session: ses_x` only, default python-httpx UA | **200** |
+| UA + `x-opencode-client: cli`, no session | 400 MissingSessionID |
+| UA `opencode/unknown` + session | 200 |
+| full client emulation | 200 (streaming too) |
+
+Gate order at the edge: session check (400) → bearer check (401) — a
+placeholder bearer with session headers gets `401 Invalid API key`.
+
+**Second issue found by the same probes:** free models serve keyless
+(anonymous) traffic, but `KeyDef` validation requires non-empty keys — a
+free-tier-only setup had no way to say "no key"; a placeholder bearer is
+401-rejected.
+
+**Fix (`wiwi/providers/opencode_adapter.py`):**
+
+- `is_free_model()` — `-free` suffix + unsuffixed stealth free models
+  (live catalog 2026-09-07: `big-pickle`; the only one).
+- `headers()` adds `x-opencode-session: ses_<hex>` (per-request, stable
+  across the 401-refresh retry rebuild) + `x-opencode-client: cli` **for
+  free models only**. Paid models never get them: they are not
+  session-gated, and session ids actively shard Zen's upstream routing
+  (kimi-k2.7-code: fresh session ids fail ~50% on a broken replica).
+- `ANONYMOUS_KEY_SENTINEL = "anonymous"` — a config key of the literal
+  `anonymous` omits `Authorization` entirely (keyless free tier).
+- `wiwi.yaml.example` documents the sentinel.
+
+**Live verification:** anonymous (no key) via the adapter on
+`mimo-v2.5-free`, `nemotron-3.5-lightning-free`, `big-pickle` (chat route)
+and `muse-spark-1.3-contributor-free` (responses route) — all 200 with
+decoded turns. Note `deepseek-v4-flash-free` is retired upstream (400
+"Model is unavailable" under all header variants) — replace it with a live
+free model.
+
+**Tests:** `tests/test_fix_round29.py` — classification, header gating
+(free vs paid, pre-encode fail-safe, stability, reset), anonymous sentinel,
+gateway e2e chat/stream upstream-header assertions.
+
+**Baseline after this round:** 1253 tests pass, ruff clean.
+
+## Addendum — Responses tool-call args duplication, Round 11 (2026-09-07)
+
+**Symptom:** client rejected a tool call with `Tool call run_commands emitted
+invalid JSON arguments: Tool call arguments could not be parsed as JSON`.
+
+**Root cause (verified by live SSE capture, 2026-09-07, muse-spark free):**
+the Responses upstream delivers the same arguments **three times** in three
+event types — incremental `response.function_call_arguments.delta` fragments,
+then the **cumulative** full-args string on
+`response.function_call_arguments.done`, then again on
+`response.output_item.done`. The round-27 decoder treated the `.done`
+payloads as *more fragments* and re-emitted them as `ToolCallArgsDelta`,
+so the client accumulated `{"a":1}{"a":1}...` — invalid JSON. wiwi's own
+advisory validator flagged the same concatenated buffers
+(`tool_args_invalid_json`, 148–406 bytes, and `bytes=0` single-shot items).
+
+**Fix (`wiwi/providers/opencode_adapter.py`, responses stream decoder):**
+
+- `.delta` events append to a per-entry buffer (fragments remain the only
+  emitted args stream).
+- `.done` marks entries closed instead of popping: `args.done` then
+  `item.done` for the same item no longer re-opens a duplicate tool call.
+- `.done`'s cumulative `arguments` is emitted **only** when it adds
+  information — the single-shot no-fragments case, or a suffix repair when
+  the streamed buffer is a strict prefix (truncated-delta repair). Equal
+  buffer: emit nothing. Non-prefix: trust the streamed fragments.
+- `response.completed`'s flush-close respects the closed flag (no double
+  close).
+
+**Live verification:** pre-fix, tool calls failed exactly as reported
+(reported error + validator warnings in the gateway log); post-fix
+(18:35 reload), the same pipeline executes tool calls cleanly — this
+documented session itself ran through it. Unit-pinned by
+`tests/test_fix_round29.py` (`test_responses_stream_done_is_cumulative_not_a_fragment`,
+`test_responses_stream_done_only_no_deltas`,
+`test_responses_stream_multi_fragment_reassembly`).
+
+**Baseline after this round:** 1256 tests pass, ruff clean.

@@ -17,11 +17,22 @@ as ``Authorization: Bearer`` plus a live ``User-Agent: opencode/<version>``
 — Cloudflare returns ``403 error code: 1010`` without a browser-like UA, so
 the version is read live from :mod:`wiwi.providers.opencode_version` (5-min
 TTL background refresh, no restart needed).
+
+Free-tier models (``-free`` suffix plus stealth free models like
+``big-pickle``; see :func:`is_free_model`) add another gate: the edge only
+serves anonymous free traffic to the official client, rejecting everything
+else with ``400 MissingSessionID`` ("OpenCode's free tier can only be used
+in OpenCode"). What the edge actually checks is the client session header
+(``x-opencode-session`` — verified live 2026-09-07: session header alone
+passes even with a non-opencode UA), so ``headers()`` adds the session +
+client headers for free models only. Paid models are not session-gated and
+session ids shard Zen's upstream routing, so they never get them.
 """
 
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any, Literal
 
 import orjson
@@ -44,6 +55,28 @@ Route = Literal["responses", "messages", "gemini", "chat"]
 _RESPONSES_PREFIXES = ("gpt-", "grok-", "muse-spark-")
 _MESSAGES_PREFIXES = ("claude-", "qwen")
 _GEMINI_PREFIXES = ("gemini-",)
+
+# Stealth free models: documented free on Zen but carrying no ``-free``
+# suffix. The live catalog (2026-09-07) has exactly one.
+_STEALTH_FREE_MODELS = frozenset({"big-pickle"})
+
+# Config keys are validated non-empty (KeyDef._key_required), so a keyless
+# free-tier setup declares itself with this literal sentinel and the
+# adapter omits Authorization entirely for it.
+ANONYMOUS_KEY_SENTINEL = "anonymous"
+
+
+def is_free_model(model_id: str) -> bool:
+    """True for Zen free-tier models — the ones behind the client gate.
+
+    Free models serve anonymous traffic, but only when the request carries
+    the official client's session header (``x-opencode-session``); anything
+    else gets ``400 MissingSessionID`` ("OpenCode's free tier can only be
+    used in OpenCode"). Classified by ``-free`` suffix plus the known
+    stealth free models.
+    """
+    m = (model_id or "").strip().lower()
+    return m.endswith("-free") or m in _STEALTH_FREE_MODELS
 
 
 def route_for_model(model_id: str) -> Route:
@@ -73,6 +106,12 @@ class OpencodeAdapter:
         self._msg = AnthropicAdapter()
         self._gem = GeminiAdapter()
         self._last_route: Route = "chat"
+        self._last_model_id: str | None = None
+        # Free-tier client-gate spoof: per-request session id, generated
+        # lazily so it stays stable across the 401-refresh retry path's
+        # header rebuilds (same adapter instance) while every request gets
+        # its own fresh one (fresh_adapter on the hot path).
+        self._spoof_session: str | None = None
         # Responses-upstream per-stream state (mirrors OpenAIAdapter's).
         self._resp_tools: dict[str, dict[str, Any]] = {}  # item_id -> entry
         self._resp_next_index = 0
@@ -84,6 +123,8 @@ class OpencodeAdapter:
         self._msg.reset()
         self._gem.reset()
         self._last_route = "chat"
+        self._last_model_id = None
+        self._spoof_session = None
         self._resp_tools.clear()
         self._resp_next_index = 0
         self._resp_started = False
@@ -91,17 +132,36 @@ class OpencodeAdapter:
 
     # -- auth / URL ------------------------------------------------------
     def headers(self, key: ProviderKeyRef) -> dict[str, str]:
-        return {
-            "Authorization": f"Bearer {key.secret.strip()}",
+        h: dict[str, str] = {
             "User-Agent": build_user_agent(),
             "HTTP-Referer": "https://opencode.ai/",
             "X-Title": "opencode",
             "anthropic-version": "2023-06-01",
         }
+        # Anonymous sentinel: free models serve keyless traffic, but the
+        # config schema requires non-empty keys — so a keyless setup
+        # declares itself with the literal `anonymous`. Omit Authorization
+        # entirely; a placeholder bearer would be 401 Invalid API key.
+        if key.secret.strip().lower() != ANONYMOUS_KEY_SENTINEL:
+            h["Authorization"] = f"Bearer {key.secret.strip()}"
+        # Free models ride the anonymous tier, which the edge only serves
+        # to the official client: it must see the client session header or
+        # it rejects with 400 MissingSessionID ("OpenCode's free tier can
+        # only be used in OpenCode"). Paid models get nothing extra — their
+        # traffic is not session-gated, and session ids actively shard
+        # Zen's upstream routing (kimi-k2.7-code: fresh session ids fail
+        # ~50% on a broken replica), so spoofing there is pure downside.
+        if self._last_model_id is not None and is_free_model(self._last_model_id):
+            if self._spoof_session is None:
+                self._spoof_session = f"ses_{uuid.uuid4().hex[:24]}"
+            h["x-opencode-session"] = self._spoof_session
+            h["x-opencode-client"] = "cli"
+        return h
 
     def build_url(self, base_url: str, model_id: str, stream: bool) -> str:
         route = route_for_model(model_id)
         self._last_route = route
+        self._last_model_id = model_id
         base = _base(base_url)
         if route == "responses":
             return f"{base}/responses"
@@ -118,6 +178,7 @@ class OpencodeAdapter:
                        deployment_params: dict[str, Any]) -> dict[str, Any]:
         route = route_for_model(model_id)
         self._last_route = route
+        self._last_model_id = model_id
         if route == "messages":
             return self._msg.encode_request(req, model_id, dict(deployment_params))
         if route == "gemini":
@@ -197,6 +258,7 @@ class OpencodeAdapter:
                     self._resp_tools[item_id] = {
                         "index": idx, "name": str(item.get("name") or ""),
                         "call_id": str(item.get("call_id") or item_id),
+                        "buf": "",  # accumulated .delta fragments
                     }
                     out.append(dl.ToolCallOpen(index=idx,
                                                id=self._resp_tools[item_id]["call_id"],
@@ -208,6 +270,7 @@ class OpencodeAdapter:
             entry = self._resp_tools.get(item_id)
             if entry is None or not isinstance(delta, str) or not delta:
                 return out
+            entry["buf"] += delta
             out.append(dl.ToolCallArgsDelta(index=entry["index"], args_fragment=delta))
             return out
         if etype in ("response.function_call_arguments.done",
@@ -224,22 +287,46 @@ class OpencodeAdapter:
                     idx = self._resp_next_index
                     self._resp_next_index += 1
                     args = item.get("arguments") or "{}"
-                    entry = {"index": idx, "name": str(item.get("name") or ""),
-                             "call_id": str(item.get("call_id") or item_id)}
-                    out.append(dl.ToolCallOpen(index=idx, id=entry["call_id"],
-                                               name=entry["name"]))
+                    out.append(dl.ToolCallOpen(index=idx,
+                                               id=str(item.get("call_id") or item_id),
+                                               name=str(item.get("name") or "")))
                     if isinstance(args, str) and args and args != "{}":
                         out.append(dl.ToolCallArgsDelta(index=idx, args_fragment=args))
                     out.append(dl.ToolCallClose(index=idx))
                     return out
-            entry = self._resp_tools.pop(item_id, None)
-            if entry is None:
+                if entry.get("closed"):
+                    # args.done already closed this item (the normal order is
+                    # added → deltas → args.done → item.done): the item is
+                    # fully delivered; emitting anything again would reopen a
+                    # duplicate tool call.
+                    return out
+                entry["closed"] = True
+                out.append(dl.ToolCallClose(index=entry["index"]))
                 return out
+            entry = self._resp_tools.get(item_id)
+            if entry is None or entry.get("closed"):
+                return out
+            entry["closed"] = True
             if etype == "response.function_call_arguments.done":
+                # ``arguments`` on .done is CUMULATIVE — the complete final
+                # string, not a fragment (verified live 2026-09-07). The
+                # incremental .delta events already delivered it; re-emitting
+                # the full string as another fragment duplicates the payload
+                # and the client's concatenated arguments stop parsing as
+                # JSON. Only emit when it adds information: the no-fragments
+                # single-shot case, or a suffix repairing a truncated delta
+                # stream.
                 args = payload.get("arguments")
                 if isinstance(args, str) and args and args != "{}":
-                    out.append(dl.ToolCallArgsDelta(index=entry["index"],
-                                                    args_fragment=args))
+                    buf = entry.get("buf") or ""
+                    if not buf:
+                        out.append(dl.ToolCallArgsDelta(index=entry["index"],
+                                                        args_fragment=args))
+                    elif args.startswith(buf) and len(args) > len(buf):
+                        out.append(dl.ToolCallArgsDelta(
+                            index=entry["index"], args_fragment=args[len(buf):]))
+                    # buf == args: fragments already complete — emit nothing.
+                    # buf not a prefix: trust the streamed fragments.
             out.append(dl.ToolCallClose(index=entry["index"]))
             return out
         if etype in ("response.completed", "response.incomplete"):
@@ -255,7 +342,8 @@ class OpencodeAdapter:
                 reasoning=int(out_det.get("reasoning_tokens", 0) or 0),
                 output=int(u.get("output_tokens", 0) or 0)))
             for entry in sorted(self._resp_tools.values(), key=lambda e: e["index"]):
-                out.append(dl.ToolCallClose(index=entry["index"]))
+                if not entry.get("closed"):
+                    out.append(dl.ToolCallClose(index=entry["index"]))
             self._resp_tools.clear()
             incomplete = etype == "response.incomplete" or resp.get("status") == "incomplete"
             if incomplete:
