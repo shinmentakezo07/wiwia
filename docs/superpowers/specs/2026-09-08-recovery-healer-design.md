@@ -46,7 +46,7 @@ new `tests/test_recovery.py`. `wiwi/providers/base.py` is read, not modified.
 |---|---|---|
 | `Backoff` | Exponential delay with jitter; honors upstream `retry_after` | frozen dataclass `Backoff(base_s, cap_s, jitter_s, clock)`; `.delay(attempt, retry_after=None) -> float` |
 | `CircuitBreaker` | Per-target failure streak → temporary block, escalating to permanent | `.trip(t)`, `.clear(t)`, `.blocked(t) -> bool`, `.dead(t) -> bool`, `.mark_dead(t)` |
-| `probe_verdict(status, msg) -> ProbeVerdict` | Pure classification of a probe HTTP outcome | `ProbeVerdict` enum: `HEALTHY`, `ALIVE_THROTTLED`, `CREDS_VALID_MODEL_BAD`, `CREDS_REJECTED`, `UNREACHABLE` |
+| `probe_verdict(status) -> ProbeVerdict` | Pure classification of a probe HTTP outcome (`None` status = transport failure) | `ProbeVerdict` enum: `HEALTHY`, `ALIVE_THROTTLED`, `CREDS_VALID_MODEL_BAD`, `CREDS_REJECTED`, `UNREACHABLE` |
 
 Import direction: `core/recovery.py` imports only `providers.base` (contracts
 seam — same as `core/gateway.py` today). No dialect/provider branching. No
@@ -59,7 +59,8 @@ introduces no cycle.
    uniform(0, 0.25)`) → `Backoff(base_s=0.5, cap_s=5.0, jitter_s=0.25)`.
 2. `cline_auto_refresh.py` / `workbuddy_auto_refresh.py`: the `_circuit` dict
    idiom (`streak`/`until`, `streak >= 99` = dead) → `CircuitBreaker(base_s=300,
-   cap_s=14400)`; the `refresh_for_provider` hooks read the same instance.
+   cap_s=14400, clock=time.time)` (wall clock, matching current behavior); the
+   `refresh_for_provider` hooks read the same instance.
    Module constants (`CIRCUIT_BASE_S`, `CIRCUIT_CAP_S`) keep their values.
 
 ## Part B — HealthHealer
