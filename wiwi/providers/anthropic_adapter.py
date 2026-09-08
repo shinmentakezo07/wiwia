@@ -264,6 +264,15 @@ class AnthropicAdapter:
             thinking_enabled = (g.thinking_budget is not None
                                 or (g.reasoning_effort is not None
                                     and g.reasoning_effort != "none"))
+            # A zero budget means "thinking disabled" (the inverse of
+            # effort_to_thinking_budget("none") is None, and
+            # thinking_budget_to_effort(0) == "none"). Before the zero guard
+            # this fell through to the clamp below, turning an explicit
+            # disable into thinking ON at the 1024 minimum — the opposite of
+            # what the caller asked for (Gemini already honors budget 0 as
+            # thinkingBudget: 0).
+            if g.thinking_budget == 0:
+                thinking_enabled = False
             if thinking_enabled:
                 budget = g.effective_thinking_budget()
                 if budget is None:

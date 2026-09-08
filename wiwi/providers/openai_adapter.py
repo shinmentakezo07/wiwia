@@ -70,6 +70,15 @@ def _role_parts_to_content(
                     content = ([{"type": "text", "text": content}] if content else [])
                 url = p.url or f"data:{p.mime};base64,{p.b64}"
                 content.append({"type": "image_url", "image_url": {"url": url}})
+            elif isinstance(p, ir.AudioPart):
+                # input_audio round-trip: the chat codec decodes it into an
+                # AudioPart, so re-emit it or an audio-only turn degrades to
+                # content "" and the model never hears the audio.
+                if content is None or isinstance(content, str):
+                    content = ([{"type": "text", "text": content}] if content else [])
+                fmt = (p.mime or "audio/wav").removeprefix("audio/")
+                content.append({"type": "input_audio",
+                                "input_audio": {"data": p.b64, "format": fmt}})
             elif isinstance(p, ir.ToolUsePart):
                 tool_calls.append({
                     "id": p.id, "type": "function",

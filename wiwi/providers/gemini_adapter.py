@@ -92,6 +92,9 @@ class GeminiAdapter:
             gen["temperature"] = g.temperature
         if g.top_p is not None:
             gen["topP"] = g.top_p
+        if g.top_k is not None:
+            # Gemini takes topK natively; the IR field documents this surface.
+            gen["topK"] = g.top_k
         if g.stop:
             gen["stopSequences"] = g.stop
         if g.response_format and g.response_format.type == "json_object":

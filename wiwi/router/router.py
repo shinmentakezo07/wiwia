@@ -6,22 +6,21 @@ from __future__ import annotations
 import asyncio
 import random
 import time
-
-import structlog
-
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
+import structlog
+
 from wiwi.config import PROVIDER_TYPES, ModelAliasEntry, RouterSettings, WiwiConfig
 from wiwi.core.context import RequestContext
+from wiwi.core.recovery import Backoff
 from wiwi.providers.base import (
     ProviderKeyRef,
     WiwiError,
     status_for_key_pool,
 )
 from wiwi.server.stats import percentile
-from wiwi.core.recovery import Backoff
 
 log = structlog.get_logger("wiwi.router")
 

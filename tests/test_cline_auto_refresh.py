@@ -7,7 +7,6 @@ ONLY when the access token is inside the 5-minute lead window before expiry.
 from __future__ import annotations
 
 import asyncio
-import time
 from datetime import UTC, datetime, timedelta
 
 import pytest

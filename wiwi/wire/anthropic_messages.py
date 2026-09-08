@@ -38,6 +38,13 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                 if not isinstance(b, dict):
                     continue  # malformed block: skip rather than 500 on .get
                 btype = b.get("type")
+                if not isinstance(btype, str):
+                    # Missing (or non-string) type: no branch below matches it,
+                    # and the `*_tool_result` arm calls .endswith on it — which
+                    # raised AttributeError and turned one junk block into a
+                    # gateway 500, since run_chat_like only catches
+                    # DialectError/ValueError. Skip like the dict guard above.
+                    continue
                 if btype == "text":
                     parts.append(ir.TextPart(b.get("text", ""),
                                              cache_control=b.get("cache_control")))

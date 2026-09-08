@@ -712,3 +712,61 @@ documented session itself ran through it. Unit-pinned by
 `test_responses_stream_multi_fragment_reassembly`).
 
 **Baseline after this round:** 1256 tests pass, ruff clean.
+
+## Addendum — Anthropic type-less block 500, and Responses error shape (2026-09-07)
+
+**Symptom 1:** `POST /v1/messages` with a content block that carries no `type`
+key returned **500 Internal Server Error** — `AttributeError: 'NoneType'
+object has no attribute 'endswith'` in the proxy log.
+
+**Root cause 1 (`wiwi/wire/anthropic_messages.py:73`):** the block dispatcher
+read `btype = b.get("type")` and matched every arm with `==`, except the
+server-tool-result arm, which needed suffix matching for the
+`web_search_tool_result` / `code_execution_tool_result` / `mcp_tool_result`
+family and so called `btype.endswith("_tool_result")`. A type-less (or
+non-string-typed) block made that dereference raise, and `run_chat_like`
+catches only `(DialectError, ValueError)` — so one junk block escaped as a
+gateway 500. The guard three lines above already skips non-dict blocks for
+exactly this reason ("skip rather than 500 on .get"); the `type` field simply
+never got the same treatment.
+
+**Fix 1:** hoist an `isinstance(btype, str)` check to the top of the loop body
+and `continue` on failure. No branch below can match a non-string type, so
+this preserves every legal decode path while closing the crash.
+
+**Symptom 2:** `POST /v1/responses` errors were returned in **Chat
+Completions** shape — `{"error":{message,type,code}}` — missing the `param`
+key the Responses API documents.
+
+**Root cause 2 (`wiwi/server/app.py`):** `_err` branched
+`if surface == "messages": am.error_body else: oc.error_body`, collapsing the
+Responses dialect onto Chat. Each route passed its own `error_body` into
+`run_chat_like` as `error_body_fn`, but `_err` ignored that parameter entirely
+— so `orp.error_body` had **zero callers** in the server. The same
+path-inference gap affected `json_body`, which runs before the codec and so
+guesses the dialect from the URL: `path.endswith("/messages")` misses both
+`/v1/responses` and `/v1/messages/count_tokens` (which does not *end* with
+`/messages`), meaning even the Anthropic `count_tokens` surface answered body
+errors in the wrong dialect.
+
+**Fix 2:** add `_error_body_for(surface)` — the error-path mirror of the
+existing `_encoder_for` — and have `_err` dispatch through it. Replace
+`json_body`'s `endswith` heuristic with `_surface_for_path`, which mirrors the
+route table with `startswith` (`/v1/messages*` → messages, `/v1/responses` →
+responses, else chat). Drop the now-redundant `error_body_fn` parameter from
+`run_chat_like` and its three callsites rather than leaving two parallel
+conventions for the same decision.
+
+**Live verification:** against a running server — `/v1/responses` 404 and 400
+now carry `"param": null`; `/v1/messages/count_tokens` 400 returns
+`{"type":"error",...}`; `/v1/chat/completions` is unchanged (no `param`); and
+the type-less block that previously 500'd now reaches the upstream (401 from a
+deliberately bogus key, i.e. the request decoded).
+
+**Tests:** `tests/test_fix_round30.py` — type-less / non-string-type blocks at
+the codec (user turn, assistant turn, sibling preservation), the
+`tool_result` and `*_tool_result` arms still decoding, the 500 gone
+end-to-end, and per-surface error shape across all three dialects plus
+`count_tokens`.
+
+**Baseline after this round:** 1270 tests pass, ruff clean.

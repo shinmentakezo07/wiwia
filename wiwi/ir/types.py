@@ -219,7 +219,18 @@ def effort_to_thinking_budget(effort: str) -> int | None:
 
 
 def thinking_budget_to_effort(budget: int) -> str:
-    """Map a thinking token budget to the nearest reasoning_effort level."""
+    """Map a thinking token budget to the nearest reasoning_effort level.
+
+    A budget of 0 means "thinking disabled" and maps to "none" — the inverse of
+    ``effort_to_thinking_budget("none") is None``. Previously 0 fell through to
+    "low", which turned thinking ON for a caller that had disabled it.
+
+    Note: "minimal" and "max" are intentionally NOT reachable from here. They
+    alias "low" (1024) and "xhigh" (64000) in the forward map, so the inverse
+    keeps its original boundaries for those collisions.
+    """
+    if budget <= 0:
+        return "none"
     if budget <= 2048:
         return "low"
     if budget <= 16000:
