@@ -18,6 +18,7 @@ from wiwi.providers.base import (
     status_for_key_pool,
 )
 from wiwi.server.stats import percentile
+from wiwi.core.recovery import Backoff
 
 
 @dataclass
@@ -679,6 +680,12 @@ assert _catalog_types == set(PROVIDER_TYPES), (
 )
 
 
+# Historical retry sleep between failover attempts, extracted verbatim:
+# min(5, max(retry_after, 0.5*2**attempt)) + uniform(0, 0.25).  Pinned by
+# tests/test_recovery.py::TestBackoff::test_matches_router_inline_math.
+_RETRY_BACKOFF = Backoff(base_s=0.5, cap_s=5.0, jitter_s=0.25)
+
+
 async def execute_with_retries(router: Router, ctx: RequestContext,
                                call_one) -> Any:
     """call_one(dep, key) -> result; raises WiwiError on failure.
@@ -833,9 +840,7 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                     raise
                 fresh = any(d.available and id(d) not in tried_dep_ids for d in deps)
                 if not fresh and attempt < router.settings.num_retries:
-                    ra = e.retry_after or 0.0
-                    await asyncio.sleep(min(5.0, max(ra, 0.5 * (2 ** attempt)))
-                                        + random.uniform(0.0, 0.25))
+                    await asyncio.sleep(_RETRY_BACKOFF.delay(attempt, e.retry_after))
         if first_error is None:
             first_error = group_first_err or last_err
         # enqueue fallbacks for this group
