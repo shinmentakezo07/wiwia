@@ -2,11 +2,10 @@
 
 Date: 2026-09-08
 Status: Approved design (in-chat), spec for implementation planning
-Scope: new `wiwi/core/recovery.py`, `wiwi/config.py` (`HealerSettings`, `RouterSettings`),
-`wiwi/router/router.py` (primitives refactor + probation hooks + transformation
-retries), `wiwi/providers/cline_auto_refresh.py` / `workbuddy_auto_refresh.py`
-(circuit refactor), `wiwi/server/app.py` (lifespan wiring), new
-`tests/test_recovery.py`. `wiwi/providers/base.py` is read, not modified.
+Scope: new `wiwi/core/recovery.py`, `wiwi/config.py` (`HealerSettings`), `wiwi/router/router.py`
+(primitives refactor + probation hooks), `wiwi/providers/cline_auto_refresh.py` /
+`workbuddy_auto_refresh.py` (circuit refactor), `wiwi/server/app.py` (lifespan wiring),
+new `tests/test_recovery.py`. `wiwi/providers/base.py` is read, not modified.
 
 ## Goals
 
@@ -18,17 +17,18 @@ retries), `wiwi/providers/cline_auto_refresh.py` / `workbuddy_auto_refresh.py`
    (cooling / invalid keys, cooled-down deployments) by probing them with a
    1-token completion, instead of waiting out passive timers. Closes the gap that
    `mark_invalid()` keys can never recover today.
-3. **Request-transformation retries**: one-shot self-healing of the request on
-   `context_window_exceeded` (trim oldest messages) and on
-   `invalid_request_error` (drop the offending param), reusing the existing
-   failover loop.
-4. Strict compatibility: all existing tests pass (except any that poke private
+3. Strict compatibility: all existing tests pass (except any that poke private
    `_circuit` dict internals, updated to the new API with identical external
-   contract); default config keeps current behavior except where a knob is
-   explicitly default-on; `wiwi.yaml` additions are optional.
+   contract); default config keeps current behavior; `wiwi.yaml` additions are
+   optional.
 
 ## Non-goals (explicitly dropped)
 
+- **Request-transformation retries** (context-window trimming, param dropping) —
+  explicitly rejected: they permanently modify the client's request and degrade
+  response quality. The gateway never rewrites a request; recovery targets
+  infrastructure health only. Retry behavior on unmodified requests stays
+  exactly as it is today.
 - Full `RetryPolicy` extraction owning the `execute_with_retries` loop — the loop
   is battle-tested; extraction is deferred.
 - Adaptive tick pacing / global probe-spend budget — fixed tick + per-sweep and
@@ -47,12 +47,6 @@ retries), `wiwi/providers/cline_auto_refresh.py` / `workbuddy_auto_refresh.py`
 | `Backoff` | Exponential delay with jitter; honors upstream `retry_after` | frozen dataclass `Backoff(base_s, cap_s, jitter_s, clock)`; `.delay(attempt, retry_after=None) -> float` |
 | `CircuitBreaker` | Per-target failure streak → temporary block, escalating to permanent | `.trip(t)`, `.clear(t)`, `.blocked(t) -> bool`, `.dead(t) -> bool`, `.mark_dead(t)` |
 | `probe_verdict(status, msg) -> ProbeVerdict` | Pure classification of a probe HTTP outcome | `ProbeVerdict` enum: `HEALTHY`, `ALIVE_THROTTLED`, `CREDS_VALID_MODEL_BAD`, `CREDS_REJECTED`, `UNREACHABLE` |
-| `trim_for_context(ir_req) -> Request` | Build a trimmed copy: retain system messages plus the most recent `ceil(n/2)` non-system messages (`n` = original non-system count); empty result keeps the newest message | pure function |
-| `droppable_param(msg) -> str \| None` | Extract a known droppable param name from a provider 400 message | pure function |
-| `drop_ir_param(ir_req, name) -> Request` | Copy of the IR request with the named field removed | pure function |
-
-Constants: `DROPPABLE_PARAMS = ("tools", "tool_choice", "temperature", "top_p",
-"response_format", "thinking", "reasoning", "max_tokens", "stop")`.
 
 Import direction: `core/recovery.py` imports only `providers.base` (contracts
 seam — same as `core/gateway.py` today). No dialect/provider branching. No
@@ -146,27 +140,6 @@ Probe `max_tokens` is a module constant (1).
   - Default `probation_weight: 0.5`; admin-set weights are untouched once
     graduated.
 
-## Part C — Request-transformation retries (in the router retry loop)
-
-Knobs on `RouterSettings`: `retry_context_trim: bool = True`,
-`retry_param_drop: bool = True` (default-on, mirroring the `drop_params=True`
-gateway default).
-
-1. **Context trim**: on `WiwiError` with `etype == "context_window_exceeded"`,
-   if `not ctx.metadata.get("wiwi_context_trimmed")` and the knob is on:
-   replace `ctx.ir_req` with `trim_for_context(ctx.ir_req)`, set the flag,
-   `continue` the attempt loop (counts as an attempt; system prompt preserved).
-   The existing `context_window_fallbacks` walk still happens if the trimmed
-   retry also fails.
-2. **Param drop**: on `etype == "invalid_request_error"` (non-retryable),
-   if `droppable_param(e.message)` matches, the knob is on, and the param was
-   not already dropped: replace `ctx.ir_req` with `drop_ir_param(...)`, set
-   `wiwi_dropped_params` flag/list, `continue`. If nothing droppable is
-   identified, behavior is unchanged (raise).
-
-Transformations are one-shot per request (metadata flags), never applied twice,
-and never mutate the original IR request (pure copies).
-
 ## Error handling
 
 - Healer loop swallows and logs per-target exceptions (pattern of
@@ -174,8 +147,8 @@ and never mutate the original IR request (pure copies).
 - Probe client never shares the gateway's httpx client or connection pool.
 - All restored state is in-memory; a restart cold-starts (existing router
   semantics).
-- Transformation retries can only reduce request content; both knobs disable
-  the behavior for callers needing bit-exact forwarding.
+- The gateway never mutates a client request: no trimming, no param dropping —
+  retries always forward the request exactly as received.
 
 ## Testing & verification (`tests/test_recovery.py`, new thematic file)
 
@@ -194,10 +167,8 @@ and never mutate the original IR request (pure copies).
    - `enabled=false` → no task started; start/stop lifecycle clean.
 5. Probation: half-weight WRR placement, graduation on success, demotion on
    failure, `pick_deployment` prefers non-probation.
-6. Transformations: trim fires once and preserves system messages; param drop
-   removes only the matched param and fires once; knobs off → unchanged
-   errors; trimming too small a request leaves it unchanged and re-raises.
-7. Regression: existing `test_router.py` / cline / workbuddy suites stay green.
+6. Regression: existing `test_router.py` / cline / workbuddy suites stay green;
+   request bodies forwarded by the retry loop are byte-identical to today's.
 
 ## Verification gate
 
