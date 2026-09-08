@@ -2,7 +2,7 @@
 
 import time
 
-from wiwi.config import HealerSettings, WiwiConfig
+from wiwi.config import DeploymentParams, HealerSettings, KeyDef, ModelEntry, ProviderDef, WiwiConfig
 from wiwi.core.recovery import Backoff, CircuitBreaker, ProbeVerdict, probe_verdict
 
 
@@ -132,3 +132,110 @@ def test_parse_retry_after():
     assert parse_retry_after(None) is None
     assert parse_retry_after("soon") is None
     assert parse_retry_after("") is None
+
+
+def _router_config(n_keys: int = 2) -> WiwiConfig:
+    return WiwiConfig(
+        providers=[
+            ProviderDef(name="p1", provider="openai",
+                        keys=[KeyDef(label=f"k{i}", key=f"secret{i}")
+                              for i in range(n_keys)]),
+            ProviderDef(name="p2", provider="openai",
+                        keys=[KeyDef(label="p2k", key="p2secret")]),
+        ],
+        model_list=[
+            ModelEntry(model_name="g",
+                       wiwi_params=DeploymentParams(provider="p1", model="m")),
+            ModelEntry(model_name="g",
+                       wiwi_params=DeploymentParams(provider="p2", model="m2")),
+        ],
+    )
+
+
+def _ctx(group: str = "g"):
+    from wiwi.core.context import RequestContext
+    from wiwi.ir.types import Message, Request, TextPart
+    ir_req = Request(model=group,
+                     messages=[Message(role="user", parts=[TextPart(text="hi")])])
+    return RequestContext(surface="chat", ir_req=ir_req, group=group)
+
+
+class TestProbation:
+    async def test_probation_key_available_and_half_weight(self):
+        from wiwi.router.router import Router
+        r = Router(_router_config())
+        acct = r.providers["p1"]
+        acct.keys[0].mark_recovered()
+        assert acct.keys[0].status == "probation"
+        assert acct.keys[0].available
+        picks = {"k0": 0, "k1": 0}
+        for _ in range(100):
+            k, _ = await acct.pick_key(probation_weight=0.5)
+            picks[k.label] += 1
+        # smooth WRR over effective weights (1.0 vs 0.5) is exactly 2:1 —
+        # the healthy key gets twice the traffic of the probation one
+        assert abs(picks["k1"] / picks["k0"] - 2.0) < 0.2
+
+    async def test_probation_key_graduates_on_success(self):
+        from wiwi.router.router import Router
+        r = Router(_router_config())
+        acct = r.providers["p1"]
+        k = acct.keys[0]
+        k.mark_recovered()
+        acct.on_result(k, 200, None)
+        assert k.status == "active"
+
+    async def test_probation_key_demotes_on_failure(self):
+        from wiwi.router.router import Router
+        r = Router(_router_config())
+        acct = r.providers["p1"]
+        k = acct.keys[0]
+        k.mark_recovered()
+        acct.on_result(k, 500, None, failover_mode="any_error")
+        assert k.status == "cooling"
+
+    async def test_active_key_stays_active_on_success(self):
+        from wiwi.router.router import Router
+        r = Router(_router_config())
+        acct = r.providers["p1"]
+        acct.on_result(acct.keys[0], 200, None)
+        assert acct.keys[0].status == "active"
+
+    async def test_pick_deployment_prefers_non_probation(self):
+        from wiwi.router.router import Router
+        r = Router(_router_config())
+        sick = r.groups["g"][0]
+        sick.probation = True
+        for _ in range(10):
+            assert r.pick_deployment(r.groups["g"], _ctx()) is not sick
+
+    async def test_pick_deployment_falls_back_to_probation_alone(self):
+        from wiwi.router.router import Router
+        r = Router(_router_config())
+        dep = r.groups["g"][0]
+        dep.probation = True
+        healthy = r.groups["g"][1]
+        assert r.pick_deployment(r.groups["g"], _ctx(),
+                                 exclude={id(healthy)}) is dep
+
+    async def test_deployment_graduates_via_execute_with_retries(self):
+        from wiwi.router.router import Router, execute_with_retries
+        r = Router(_router_config())
+        dep = r.groups["g"][0]
+        dep.probation = True
+        healthy = r.groups["g"][1]
+        healthy.cooldown_until = time.monotonic() + 999.0  # only the sick one can serve
+
+        async def call_one(d, key, c):
+            return "ok"
+
+        await execute_with_retries(r, _ctx(), call_one)
+        assert dep.probation is False
+
+    def test_record_fail_clears_probation(self):
+        from wiwi.router.router import Router
+        r = Router(_router_config())
+        dep = r.groups["g"][0]
+        dep.probation = True
+        dep.record_fail(allowed_fails=3, cooldown_time=30.0)
+        assert dep.probation is False

@@ -6,6 +6,9 @@ from __future__ import annotations
 import asyncio
 import random
 import time
+
+import structlog
+
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
@@ -20,6 +23,8 @@ from wiwi.providers.base import (
 from wiwi.server.stats import percentile
 from wiwi.core.recovery import Backoff
 
+log = structlog.get_logger("wiwi.router")
+
 
 @dataclass
 class ProviderKey:
@@ -27,7 +32,7 @@ class ProviderKey:
     secret: str
     weight: int = 1
     enabled: bool = True
-    status: str = "active"          # active | cooling | invalid | disabled
+    status: str = "active"          # active | cooling | invalid | disabled | probation
     cooldown_until: float = 0.0
     last_used: float = 0.0
     current_weight: float = 0.0     # smooth WRR state
@@ -36,8 +41,9 @@ class ProviderKey:
 
     @property
     def available(self) -> bool:
-        return (self.enabled and self.status in ("active", "cooling")
-                and not (self.status == "cooling" and time.monotonic() < self.cooldown_until))
+        return (self.enabled and self.status in ("active", "cooling", "probation")
+                and not (self.status == "cooling"
+                         and time.monotonic() < self.cooldown_until))
 
     def mark_cooling(self, seconds: float) -> None:
         self.status = "cooling"
@@ -52,6 +58,15 @@ class ProviderKey:
             # Reset WRR weight so the recovered key isn't starved by the
             # deficit it accumulated while cooling.
             self.current_weight = 0.0
+
+    def mark_recovered(self) -> None:
+        """Healer restore: enter probation with a fresh slate (cooldown cleared,
+        fail streak and WRR deficit reset). Graduates to active on the first
+        credited success; a failure demotes via the normal cooldown path."""
+        self.status = "probation"
+        self.cooldown_until = 0.0
+        self.err_count = 0
+        self.current_weight = 0.0
 
 @dataclass
 class ProviderAccount:
@@ -80,7 +95,8 @@ class ProviderAccount:
                 return k
         return None
 
-    async def pick_key(self, exclude_labels: set[str] | None = None) -> tuple[ProviderKey | None, float]:
+    async def pick_key(self, exclude_labels: set[str] | None = None,
+                       probation_weight: float = 1.0) -> tuple[ProviderKey | None, float]:
         """Pick the next key to use.
 
         When ``round_robin`` is True (default): smooth weighted round-robin
@@ -92,6 +108,8 @@ class ProviderAccount:
         ``exclude_labels`` lets cycle-3 / any-error failover skip a specific
         key (e.g. the one that just served N consecutive requests) without
         having to temporarily mark it unavailable.
+        ``probation_weight`` scales the effective WRR weight of keys in
+        ``probation`` status so a just-healed key earns back traffic gradually.
         """
         async with self._rr_lock:
             for k in self.keys:
@@ -123,10 +141,14 @@ class ProviderAccount:
                 k.last_used = time.monotonic()
                 return k, 0.0
 
-            # Smooth WRR (nginx algorithm) over the (possibly excluded) avail list
-            total = sum(k.weight for k in avail)
-            for k in avail:
-                k.current_weight += k.weight
+            # Smooth WRR (nginx algorithm) over the (possibly excluded) avail
+            # list.  Probation keys carry a reduced effective weight so a
+            # just-healed key earns back traffic gradually.
+            weights = [k.weight * (probation_weight if k.status == "probation" else 1.0)
+                       for k in avail]
+            total = sum(weights)
+            for k, w in zip(avail, weights):
+                k.current_weight += w
             best = max(avail, key=lambda k: k.current_weight)
             best.current_weight -= total
             best.last_used = time.monotonic()
@@ -158,6 +180,10 @@ class ProviderAccount:
             key.req_count += 1
             # any consecutive-fail streak is broken on success
             key.err_count = 0
+            if key.status == "probation":
+                key.status = "active"
+                log.info("healer_probation_graduated", kind="key",
+                         provider=self.name, key=key.label)
             return
         if failover_mode == "any_error":
             key.err_count += 2 if status in (401, 403) else 1
@@ -206,6 +232,10 @@ class Deployment:
     fails: list[float] = field(default_factory=list)
     cooldown_until: float = 0.0
     inflight: int = 0
+    # Probation: set by the HealthHealer on restore. pick_deployment prefers
+    # non-probation deployments; execute_with_retries graduates on success,
+    # record_fail demotes.
+    probation: bool = False
     latencies: deque = field(default_factory=lambda: deque(maxlen=50))
 
     @property
@@ -213,6 +243,7 @@ class Deployment:
         return self.provider.healthy and time.monotonic() >= self.cooldown_until
 
     def record_fail(self, allowed_fails: int, cooldown_time: float) -> None:
+        self.probation = False  # demoted: the cooldown path re-arms from here
         now = time.monotonic()
         self.fails.append(now)
         # The window must outlast the interval at which a chronically failing
@@ -233,6 +264,12 @@ class Deployment:
     def p95_latency(self) -> float:
         return percentile(self.latencies, 0.95)
 
+    def mark_recovered(self) -> None:
+        """Healer restore: clear the cooldown and enter probation."""
+        self.probation = True
+        self.cooldown_until = 0.0
+        self.fails.clear()
+
 
 def _alias_target(v: str | ModelAliasEntry) -> str:
     """Extract the next-hop group name from a ``model_group_alias`` value.
@@ -249,6 +286,8 @@ def _alias_target(v: str | ModelAliasEntry) -> str:
 class Router:
     def __init__(self, config: WiwiConfig):
         self.settings: RouterSettings = config.router_settings
+        # WRR multiplier for keys in probation status (from HealerSettings).
+        self.probation_weight = config.healer.probation_weight
         self.providers: dict[str, ProviderAccount] = {}
         self.groups: dict[str, list[Deployment]] = {}
         # Proxy-log emitter for gateway-op events (upstream 5xx, key cooldown,
@@ -336,6 +375,11 @@ class Router:
             avail = [d for d in deps if d.available]  # nothing fresh left: reuse allowed
         if not avail:
             return None
+        # Prefer fully-healthy deployments; probation ones only serve when no
+        # fresh sibling exists (the healer restored them on a trial basis).
+        fresh = [d for d in avail if not d.probation]
+        if fresh:
+            avail = fresh
         strategy = self.settings.routing_strategy
         if strategy == "least-busy":
             return min(avail, key=lambda d: d.inflight)
@@ -761,7 +805,8 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                                          retryable=True)
                     break
             key, retry_in = await dep.provider.pick_key(
-                exclude_labels={lbl for (pn, lbl) in tried_key_labels if pn == dep.provider.name}
+                exclude_labels={lbl for (pn, lbl) in tried_key_labels if pn == dep.provider.name},
+                probation_weight=getattr(router, "probation_weight", 1.0),
             )
             if key is None:
                 tried_dep_ids.add(id(dep))
@@ -798,6 +843,13 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                     await dep.provider.on_result_locked(key, 200, None,
                                                         failover_mode=failover_mode,
                                                         key_max_consecutive_fails=key_max_fails)
+                    if dep.probation:
+                        dep.probation = False
+                        _proxy("info",
+                               f"deployment '{dep.group}/{dep.model_id}'"
+                               f" graduated from probation")
+                        log.info("healer_probation_graduated", kind="deployment",
+                                 provider=dep.provider.name, group=dep.group)
                 # bump cycle counters
                 if cycle_n > 0:
                     provider_consec[dep.provider.name] = (
