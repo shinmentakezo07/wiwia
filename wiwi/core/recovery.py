@@ -13,6 +13,7 @@ import random
 import time
 from collections.abc import Callable, Hashable
 from dataclasses import dataclass
+from enum import Enum
 
 import structlog
 
@@ -84,3 +85,48 @@ class CircuitBreaker:
 
     def streak(self, target: Hashable) -> int:
         return self._streaks.get(target, 0)
+
+
+class ProbeVerdict(Enum):
+    """Classification of a HealthHealer probe outcome (see specs/
+    2026-09-08-recovery-healer-design.md, Part B verdict table)."""
+
+    HEALTHY = "healthy"
+    ALIVE_THROTTLED = "alive_throttled"
+    CREDS_VALID_MODEL_BAD = "creds_valid_model_bad"
+    CREDS_REJECTED = "creds_rejected"
+    UNREACHABLE = "unreachable"
+
+
+def probe_verdict(status: int | None) -> ProbeVerdict:
+    """Classify a probe HTTP outcome; ``status=None`` means transport failure."""
+    if status == 200:
+        return ProbeVerdict.HEALTHY
+    if status == 429:
+        return ProbeVerdict.ALIVE_THROTTLED
+    if status in (401, 403):
+        return ProbeVerdict.CREDS_REJECTED
+    if status in (400, 404):
+        return ProbeVerdict.CREDS_VALID_MODEL_BAD
+    return ProbeVerdict.UNREACHABLE
+
+
+def parse_retry_after(value: str | None) -> float | None:
+    """Parse an HTTP ``Retry-After`` header: delta-seconds or an HTTP-date
+    (RFC 7231). Returns seconds from now (>= 0), or None when absent/garbage."""
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    # RFC 7231 also allows an HTTP-date (e.g. "Wed, 21 Oct 2026 07:28:00 GMT").
+    # Parse it and compute seconds from now; clamp to >= 0.
+    from email.utils import parsedate_to_datetime
+    try:
+        dt = parsedate_to_datetime(value)
+        if dt is not None:
+            return max(0.0, dt.timestamp() - time.time())
+    except (TypeError, ValueError):
+        pass
+    return None

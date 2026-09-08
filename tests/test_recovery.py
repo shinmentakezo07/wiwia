@@ -3,7 +3,7 @@
 import time
 
 from wiwi.config import HealerSettings, WiwiConfig
-from wiwi.core.recovery import Backoff, CircuitBreaker
+from wiwi.core.recovery import Backoff, CircuitBreaker, ProbeVerdict, probe_verdict
 
 
 class TestBackoff:
@@ -111,3 +111,24 @@ def test_healer_settings_yaml_section():
     c = WiwiConfig.model_validate({"healer": {"enabled": True, "tick_s": 5}})
     assert c.healer.enabled is True
     assert c.healer.tick_s == 5.0
+
+
+class TestProbeVerdict:
+    def test_table(self):
+        assert probe_verdict(200) is ProbeVerdict.HEALTHY
+        assert probe_verdict(429) is ProbeVerdict.ALIVE_THROTTLED
+        assert probe_verdict(401) is ProbeVerdict.CREDS_REJECTED
+        assert probe_verdict(403) is ProbeVerdict.CREDS_REJECTED
+        assert probe_verdict(400) is ProbeVerdict.CREDS_VALID_MODEL_BAD
+        assert probe_verdict(404) is ProbeVerdict.CREDS_VALID_MODEL_BAD
+        for s in (None, 408, 500, 502, 503, 504, 529, 418):
+            assert probe_verdict(s) is ProbeVerdict.UNREACHABLE
+
+
+def test_parse_retry_after():
+    from wiwi.core.recovery import parse_retry_after
+    assert parse_retry_after("12") == 12.0
+    assert parse_retry_after("1.5") == 1.5
+    assert parse_retry_after(None) is None
+    assert parse_retry_after("soon") is None
+    assert parse_retry_after("") is None

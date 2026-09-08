@@ -14,6 +14,7 @@ import orjson
 import structlog
 
 from wiwi.core.context import RequestContext
+from wiwi.core.recovery import parse_retry_after
 from wiwi.cost.pricing import CostEngine, estimate_tokens_async
 from wiwi.ir import types as ir
 from wiwi.logging_core.events import LogEvent
@@ -1063,22 +1064,7 @@ def _build_url(adapter, dep: Deployment, key: ProviderKeyRef, stream: bool) -> s
 
 
 def _parse_retry_after(value: str | None) -> float | None:
-    if not value:
-        return None
-    try:
-        return float(value)
-    except ValueError:
-        pass
-    # RFC 7231 also allows an HTTP-date (e.g. "Wed, 21 Oct 2026 07:28:00 GMT").
-    # Parse it and compute seconds from now; clamp to >= 0.
-    from email.utils import parsedate_to_datetime
-    try:
-        dt = parsedate_to_datetime(value)
-        if dt is not None:
-            delta = dt.timestamp() - time.time()
-            return max(0.0, delta)
-    except (TypeError, ValueError):
-        pass
-    return None
+    """Delegate to the shared recovery primitive (delta-seconds + HTTP-date)."""
+    return parse_retry_after(value)
 
 
