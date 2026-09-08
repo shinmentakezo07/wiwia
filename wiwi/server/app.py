@@ -151,6 +151,7 @@ from wiwi.config import (
 )
 from wiwi.core.context import RequestContext
 from wiwi.core.gateway import Gateway, build_log_event
+from wiwi.core.recovery import HealthHealer
 from wiwi.cost.pricing import CostEngine
 from wiwi.ir import types as ir
 from wiwi.logging_core.events import LogEvent
@@ -529,6 +530,7 @@ class AppState:
         self.cline_refresh: Any = None
         self.workbuddy_refresh: Any = None
         self.opencode_refresh: Any = None
+        self.healer: Any = None
         # Durable stream journal (restart-safe SSE replay). Created eagerly so
         # handlers can reach it before init_db runs; sweep happens at startup.
         rjs = config.router_settings
@@ -787,6 +789,12 @@ async def lifespan(app: FastAPI):
     from wiwi.providers.opencode_version import OpencodeVersionRefresh
     state.opencode_refresh = OpencodeVersionRefresh()
     state.opencode_refresh.start()
+    # Health healer: probes cooling/invalid keys and cooled deployments and
+    # restores them early into probation. Opt-in via the ``healer:`` config
+    # section; start() is a no-op when disabled.
+    state.healer = HealthHealer(state.router, state.config.healer,
+                                log_proxy=state.router.log_proxy)
+    state.healer.start()
     # Reconcile persisted Cline default-model settings (one global model
     # id → one Deployment per Cline account under ``cline:<model_id>``).
     if state.config_store is not None:
@@ -801,6 +809,8 @@ async def lifespan(app: FastAPI):
                 "cline_default_apply_failed_at_startup", err=str(e),
             )
     yield
+    if state.healer is not None:
+        await state.healer.stop()
     if state.opencode_refresh is not None:
         await state.opencode_refresh.stop()
     if state.workbuddy_refresh is not None:
@@ -916,9 +926,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
     async def json_body(request: Request) -> tuple[Any, ORJSONResponse | None]:
         """Parse the request body; malformed JSON is a client error (400)."""
         # Errors raised here happen before the surface is known to the handler,
-        # so infer it from the path: the Anthropic dialect expects
-        # {"type":"error",...} while OpenAI expects {"error":{...}}.
-        surface = "messages" if request.url.path.endswith("/messages") else "chat"
+        # so infer it from the path: each inbound dialect wants its own error
+        # body shape (see _surface_for_path).
+        surface = _surface_for_path(request.url.path)
         limit = config.wiwi_settings.max_request_body_mb * 1024 * 1024
         try:
             raw = await request.body()
@@ -948,13 +958,32 @@ def create_app(config: WiwiConfig) -> FastAPI:
                               request, surface)
         return body, None
 
+    def _surface_for_path(path: str) -> str:
+        """Dialect to report errors in, when the codec has not run yet.
+
+        Mirrors the route table: `/v1/responses` speaks the Responses dialect,
+        and everything under `/v1/messages` (including `count_tokens`, which
+        does not *end* with `/messages`) speaks Anthropic's. Admin routes are
+        not a dialect surface and keep the OpenAI-shaped error.
+        """
+        if path.startswith("/v1/messages"):
+            return "messages"
+        if path.startswith("/v1/responses"):
+            return "responses"
+        return "chat"
+
+    def _error_body_for(surface: str):
+        """Per-dialect error body — the error-path mirror of `_encoder_for`."""
+        if surface == "messages":
+            return am.error_body
+        if surface == "responses":
+            return orp.error_body
+        return oc.error_body
+
     def _err(status: int, etype: str, message: str,
              request: Request, surface: str = "chat") -> ORJSONResponse:
         rid = getattr(request.state, "request_id", "")
-        if surface == "messages":
-            body = am.error_body(status, etype, message)
-        else:
-            body = oc.error_body(status, etype, message)
+        body = _error_body_for(surface)(status, etype, message)
         return ORJSONResponse(body, status_code=status,
                               headers={"x-wiwi-request-id": rid})
 
@@ -984,7 +1013,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         }
 
     async def run_chat_like(request: Request, surface: str, body: dict[str, Any],
-                            codec_decode, codec_encode_response, error_body_fn):
+                            codec_decode, codec_encode_response):
         state_ = app.state.wiwi
         try:
             ir_req = codec_decode(body)
@@ -1329,7 +1358,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if jerr:
             return jerr
         return await run_chat_like(request, "chat", body, oc.decode_request,
-                                   oc.encode_response, oc.error_body)
+                                   oc.encode_response)
 
     @app.post("/v1/responses")
     async def responses_api(request: Request):
@@ -1337,7 +1366,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if jerr:
             return jerr
         return await run_chat_like(request, "responses", body, orp.decode_request,
-                                   orp.encode_response, orp.error_body)
+                                   orp.encode_response)
 
     @app.post("/v1/messages")
     async def messages_api(request: Request):
@@ -1345,7 +1374,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if jerr:
             return jerr
         return await run_chat_like(request, "messages", body, am.decode_request,
-                                   am.encode_response, am.error_body)
+                                   am.encode_response)
 
     @app.post("/v1/messages/count_tokens")
     async def count_tokens(request: Request):
