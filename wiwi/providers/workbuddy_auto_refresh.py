@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from wiwi.core.recovery import CircuitBreaker
 from wiwi.providers.workbuddy_auth import (
     REFRESH_LEAD_S,
     WorkBuddyAuth,
@@ -51,7 +52,8 @@ class WorkBuddyAutoRefresh:
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
-        self._circuit: dict[tuple[str, str], dict[str, Any]] = {}
+        self._circuit = CircuitBreaker(base_s=CIRCUIT_BASE_S, cap_s=CIRCUIT_CAP_S,
+                                       clock=time.time)
 
     def start(self) -> None:
         if self._task is not None and not self._task.done():
@@ -103,8 +105,7 @@ class WorkBuddyAutoRefresh:
 
     async def _check_key(self, provider: str, label: str) -> None:
         ident = (provider, label)
-        cb = self._circuit.get(ident)
-        if cb and time.time() < cb.get("until", 0):
+        if self._circuit.blocked(ident):
             return
         acct = self._state.router.providers.get(provider)
         key = acct.get_key(label) if acct else None
@@ -140,7 +141,7 @@ class WorkBuddyAutoRefresh:
         outcome = await refresh_token(auth)
         if not outcome.ok:
             if outcome.unrecoverable:
-                self._circuit[ident] = {"streak": 99, "until": float("inf")}
+                self._circuit.mark_dead(ident)
                 log.error("workbuddy_auto_refresh_unrecoverable",
                           provider=provider, label=label, err=outcome.error)
             else:
@@ -149,7 +150,7 @@ class WorkBuddyAutoRefresh:
                             provider=provider, label=label, err=outcome.error)
             return
         await self._write_secret(provider, label, outcome.auth)
-        self._circuit.pop(ident, None)
+        self._circuit.clear(ident)
         log.info("workbuddy_auto_refreshed", provider=provider, label=label)
 
     async def _write_secret(self, provider: str, label: str,
@@ -167,11 +168,7 @@ class WorkBuddyAutoRefresh:
             await self._state.config_store.update_key_secret(provider, label, secret)
 
     def _trip_circuit(self, ident: tuple[str, str]) -> None:
-        cb = self._circuit.get(ident, {"streak": 0, "until": 0})
-        cb["streak"] = cb.get("streak", 0) + 1
-        backoff = min(CIRCUIT_BASE_S * 2 ** (cb["streak"] - 1), CIRCUIT_CAP_S)
-        cb["until"] = time.time() + backoff
-        self._circuit[ident] = cb
+        self._circuit.trip(ident)
 
 
 def refresh_for_provider(state: AppState) -> Any:
@@ -186,8 +183,7 @@ def refresh_for_provider(state: AppState) -> Any:
 
     async def hook(provider_name: str, key_label: str) -> bool:
         ident = (provider_name, key_label)
-        cb = worker._circuit.get(ident)
-        if cb and time.time() < cb.get("until", 0):
+        if worker._circuit.blocked(ident):
             return False
         acct = state.router.providers.get(provider_name)
         key = acct.get_key(key_label) if acct else None
@@ -202,12 +198,12 @@ def refresh_for_provider(state: AppState) -> Any:
         outcome = await refresh_token(auth)
         if not outcome.ok:
             if outcome.unrecoverable:
-                worker._circuit[ident] = {"streak": 99, "until": float("inf")}
+                worker._circuit.mark_dead(ident)
             else:
                 worker._trip_circuit(ident)
             return False
         await worker._write_secret(provider_name, key_label, outcome.auth)
-        worker._circuit.pop(ident, None)
+        worker._circuit.clear(ident)
         return True
 
     return hook
@@ -236,12 +232,12 @@ async def refresh_key_now(state: AppState, provider_name: str,
     outcome = await refresh_token(auth)
     if not outcome.ok:
         if outcome.unrecoverable:
-            worker._circuit[ident] = {"streak": 99, "until": float("inf")}
+            worker._circuit.mark_dead(ident)
         else:
             worker._trip_circuit(ident)
         return {"ok": False, "error": outcome.error}
     await worker._write_secret(provider_name, key_label, outcome.auth)
-    worker._circuit.pop(ident, None)
+    worker._circuit.clear(ident)
     return {"ok": True, "error": ""}
 
 

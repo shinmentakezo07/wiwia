@@ -120,8 +120,8 @@ async def test_unrecoverable_sets_circuit_breaker_forever(app_state):
         status_code=400, json={"error": "invalid_grant"})
     worker = ClineAutoRefresh(app_state)
     await worker._sweep()
-    assert "cline-prov" in worker._circuit
-    assert worker._circuit["cline-prov"]["until"] == float("inf")
+    assert worker._circuit.dead("cline-prov")
+    assert worker._circuit.blocked("cline-prov")
 
 
 # -- sweep: transient failure trips circuit breaker --------------------------
@@ -135,9 +135,8 @@ async def test_transient_failure_trips_backoff(app_state):
         status_code=502, text="bad gateway")
     worker = ClineAutoRefresh(app_state)
     await worker._sweep()
-    cb = worker._circuit["cline-prov"]
-    assert cb["streak"] == 1
-    assert cb["until"] > time.time()
+    assert worker._circuit.streak("cline-prov") == 1
+    assert worker._circuit.blocked("cline-prov")
 
 
 # -- circuit breaker skips refresh --------------------------------------------
@@ -148,8 +147,9 @@ async def test_circuit_breaker_skips_when_in_backoff(app_state):
         "cline_oauth:cline-prov",
         {"refresh_token": "ref-x", "expires_at": EXPIRY_SOON, "email": "u@x.io"})
     worker = ClineAutoRefresh(app_state)
-    # Pre-trip the circuit breaker
-    worker._circuit["cline-prov"] = {"streak": 2, "until": time.time() + 9999}
+    # Pre-trip the circuit breaker (streak 2 => ~10 min backoff window)
+    worker._circuit.trip("cline-prov")
+    worker._circuit.trip("cline-prov")
     route = respx.post(f"{CLINE_API_BASE}/auth/refresh")
     await worker._sweep()
     assert not route.called

@@ -233,6 +233,100 @@ class DBSink:
             await conn.execute(
                 sa.text(f"INSERT INTO request_logs ({cols}) VALUES ({vals})"), rows)
 
+    async def reprice_unpriced_history(self, match_tail: str, entry: dict) -> dict[str, float]:
+        """Retroactive pricing true-up.
+
+        When a model is priced only AFTER it served traffic, its logged rows
+        carry cost ≈ 0 (the cost engine prices unpriced models at $0). This
+        recomputes the cost of rows that were logged unpriced and returns the
+        per-key spend delta so the caller can true up virtual-key budgets.
+
+        Row matching uses the recorded attempts JSON: an attempt deployment is
+        ``"<group>/<model_id>"`` and the cost engine's lookup key is
+        ``"<provider_type>/<model_id>"``. *match_tail* (the bare model id) is
+        matched against the SERVING attempt's "/"-boundary suffix — the same
+        tail rule ``CostEngine._lookup`` applies, so "openai/retro-gpt" matches
+        "retro-gpt" but "gpt-4o-mini" never matches "gpt-4o". The serving
+        attempt is the last one with a 2xx status (the deployment whose
+        response produced the row's usage); earlier failed attempts on other
+        models are ignored, and rows with no successful attempt fall back to
+        their last attempt.
+
+        Only unpriced rows are repriced — rows with cost > 0 were logged at an
+        already-known rate and keep their historical value (a later rate EDIT
+        must not rewrite history or double-charge).
+
+        Returns ``{key_id: spend_delta}`` summed across the updated rows.
+        """
+        per_token_in = entry["input_cost_per_token"]
+        per_token_out = entry["output_cost_per_token"]
+        per_token_cached = entry.get("cache_read_input_cost_per_token",
+                                     per_token_in)
+        per_token_cache_creation = entry.get(
+            "cache_creation_input_cost_per_token", per_token_in)
+
+        key_deltas: dict[str, float] = {}
+        batch = 500
+        last_id = -1  # keyset pagination — immune to offset drift/loops
+        while True:
+            async with self.engine.connect() as conn:
+                rows = (await conn.execute(sa.text(
+                    "SELECT id, key_id, tok_in, tok_cached, tok_cache_creation,"
+                    " tok_out, cost, attempts FROM request_logs"
+                    " WHERE cost = 0 AND id > :last ORDER BY id LIMIT :b"),
+                    {"last": last_id, "b": batch})).all()
+            if not rows:
+                break
+            last_id = rows[-1][0]
+            updates: list[dict] = []
+            for rid, key_id, tok_in, tok_cached, tok_cc, tok_out, cost, attempts_json in rows:
+                if not self._row_matches(attempts_json, match_tail):
+                    continue
+                uncached_prompt = max(0, tok_in - tok_cached)
+                new_cost = round(
+                    uncached_prompt * per_token_in
+                    + tok_cached * per_token_cached
+                    + tok_cc * per_token_cache_creation
+                    + tok_out * per_token_out, 8)
+                if new_cost <= 0:
+                    continue
+                updates.append({"id": rid, "c": new_cost})
+                if key_id:
+                    key_deltas[key_id] = (key_deltas.get(key_id, 0.0)
+                                          + new_cost - cost)
+            if updates:
+                async with self.engine.begin() as conn:
+                    await conn.execute(sa.text(
+                        "UPDATE request_logs SET cost = :c WHERE id = :id"
+                        " AND cost = 0"), updates)
+        return key_deltas
+
+    @staticmethod
+    def _row_matches(attempts_json: str | None, match_tail: str) -> bool:
+        """True when the row's SERVING attempt used *match_tail*.
+
+        Attempts store ``"<group>/<model_id>"`` plus the HTTP ``status``; the
+        serving attempt is the last 2xx entry (the deployment whose response
+        produced the row's usage and cost). The pricing match must be a full
+        path segment (boundary "/"), never a bare string suffix. Rows with no
+        successful attempt (pure failures) fall back to the last attempt.
+        """
+        if not attempts_json:
+            return False
+        try:
+            attempts = orjson.loads(attempts_json)
+        except Exception:  # noqa: BLE001 — malformed rows just don't match
+            return False
+        if not isinstance(attempts, list) or not attempts:
+            return False
+        entries = [a if isinstance(a, dict) else {}
+                   for a in attempts]
+        serving = next((a for a in reversed(entries)
+                        if isinstance(a.get("status"), int)
+                        and 200 <= a["status"] < 300), entries[-1])
+        dep = serving.get("deployment", "")
+        return isinstance(dep, str) and dep.endswith(f"/{match_tail}")
+
     async def write_audit(self, evt: LogEvent) -> None:
         async with self.engine.begin() as conn:
             await conn.execute(

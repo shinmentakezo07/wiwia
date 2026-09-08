@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from wiwi.core.recovery import CircuitBreaker
 from wiwi.providers import cline_oauth
 
 if TYPE_CHECKING:
@@ -42,7 +43,8 @@ class ClineAutoRefresh:
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._locks: dict[str, asyncio.Lock] = {}
-        self._circuit: dict[str, dict[str, Any]] = {}
+        self._circuit = CircuitBreaker(base_s=CIRCUIT_BASE_S, cap_s=CIRCUIT_CAP_S,
+                                       clock=time.time)
 
     def start(self) -> None:
         if self._task is not None and not self._task.done():
@@ -100,8 +102,7 @@ class ClineAutoRefresh:
     async def _check_provider(self, name: str, record: dict[str, Any]) -> None:
         """Refresh one provider's token if it's about to expire."""
         # Circuit breaker: skip if in backoff window.
-        cb = self._circuit.get(name)
-        if cb and time.time() < cb.get("until", 0):
+        if self._circuit.blocked(name):
             return
 
         expires_epoch = cline_oauth.parse_expires_at(record.get("expires_at"))
@@ -128,7 +129,7 @@ class ClineAutoRefresh:
             return
         if result.get("error") == "unrecoverable_refresh_error":
             # Stop refreshing — the user must re-login.
-            self._circuit[name] = {"streak": 99, "until": float("inf")}
+            self._circuit.mark_dead(name)
             log.error("cline_auto_refresh_unrecoverable", provider=name,
                       code=result.get("code"))
             return
@@ -138,7 +139,7 @@ class ClineAutoRefresh:
         if result.get("expires_at"):
             record["expires_at"] = result["expires_at"]
         await self._state.config_store.set_setting(f"cline_oauth:{name}", record)
-        self._circuit.pop(name, None)
+        self._circuit.clear(name)
         log.info("cline_auto_refreshed", provider=name)
 
     async def _update_secret(self, provider: str, secret: str) -> None:
@@ -160,11 +161,7 @@ class ClineAutoRefresh:
             await self._state.config_store.update_key_secret(provider, k.label, secret)
 
     def _trip_circuit(self, name: str) -> None:
-        cb = self._circuit.get(name, {"streak": 0, "until": 0})
-        cb["streak"] = cb.get("streak", 0) + 1
-        backoff = min(CIRCUIT_BASE_S * 2 ** (cb["streak"] - 1), CIRCUIT_CAP_S)
-        cb["until"] = time.time() + backoff
-        self._circuit[name] = cb
+        self._circuit.trip(name)
 
 
 def refresh_for_provider(state) -> callable:
@@ -193,8 +190,7 @@ def refresh_for_provider(state) -> callable:
 
     async def hook(provider_name: str, key_label: str) -> bool:
         # Circuit breaker: skip if the last refresh attempt is in backoff.
-        cb = worker._circuit.get(provider_name)
-        if cb and time.time() < cb.get("until", 0):
+        if worker._circuit.blocked(provider_name):
             return False
 
         cs = state.config_store
@@ -209,7 +205,7 @@ def refresh_for_provider(state) -> callable:
             worker._trip_circuit(provider_name)
             return False
         if result.get("error") == "unrecoverable_refresh_error":
-            worker._circuit[provider_name] = {"streak": 99, "until": float("inf")}
+            worker._circuit.mark_dead(provider_name)
             return False
 
         # Success — persist new tokens and update the in-memory key.
@@ -218,7 +214,7 @@ def refresh_for_provider(state) -> callable:
         if result.get("expires_at"):
             record["expires_at"] = result["expires_at"]
         await cs.set_setting(f"cline_oauth:{provider_name}", record)
-        worker._circuit.pop(provider_name, None)
+        worker._circuit.clear(provider_name)
         return True
 
     return hook

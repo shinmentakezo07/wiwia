@@ -23,7 +23,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { Boxes, Layers, Pencil, Plus, RefreshCw, Search, Unlink, X } from "lucide-react";
+import { Activity, Boxes, Layers, Pencil, Plus, RefreshCw, Search, Shuffle, Unlink, X } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
   addDeployment,
@@ -37,13 +37,16 @@ import {
   Badge,
   Button,
   Card,
+  CopyButton,
   Dialog,
   EmptyState,
   ErrorText,
   Field,
   Input,
   PageHeader,
+  ProgressBar,
   Spinner,
+  StatCard,
   Table,
   TD,
 } from "@/components/ui";
@@ -264,7 +267,44 @@ function ComboDialog(props: {
             )}
           </div>
 
-          <div className="max-h-[48vh] space-y-3 overflow-y-auto rounded-lg border border-white/[0.04] p-3">
+          {/* selection tray — every ticked pick as a removable chip, so the
+              selection stays visible even when filtered out of the list */}
+          {selected.size > 0 && (
+            <div className="mb-2 rounded-lg border border-white/[0.04] bg-white/[0.015] p-2.5">
+              <div className="mb-1.5 flex items-center justify-between">
+                <span className="admin-label">Selection</span>
+                <button
+                  type="button"
+                  onClick={() => setSelected(new Map())}
+                  className="text-[10px] text-[var(--admin-text-dim)] transition-colors hover:text-red-300"
+                >
+                  clear all
+                </button>
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {Array.from(selected.values()).map((s) => (
+                  <span
+                    key={depKey(s)}
+                    className="inline-flex items-center gap-1 rounded-md border border-blue-500/20 bg-blue-500/10 py-0.5 pl-2 pr-1 font-mono text-[11px] text-blue-200"
+                  >
+                    <span className="max-w-[220px] truncate">
+                      {s.provider}/{s.model_id}
+                    </span>
+                    <button
+                      type="button"
+                      aria-label={`Remove ${s.model_id} from ${s.provider}`}
+                      onClick={() => toggle(s)}
+                      className="rounded p-0.5 text-blue-300/70 transition-colors hover:bg-blue-500/20 hover:text-blue-100"
+                    >
+                      <X size={11} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="admin-scroll max-h-[44vh] space-y-3 overflow-y-auto rounded-lg border border-white/[0.04] p-3">
             {props.providerOptions.length === 0 && (
               <div className="px-2 py-6 text-center">
                 <Boxes size={16} className="mx-auto mb-2 opacity-40" />
@@ -398,7 +438,8 @@ function ComboDialog(props: {
 // -- detail pane ---------------------------------------------------------------
 //
 // Read-only roster of a combo's deployments with weight editing + detach. All
-// add/remove is handled by the dialog (its "Edit" button).
+// add/remove is handled by the dialog (its "Edit" button). Health data
+// (available / inflight / p95) comes from the polled /admin/models query.
 
 function ComboDetail(props: {
   combo: ModelGroup;
@@ -425,6 +466,8 @@ function ComboDetail(props: {
   });
 
   const deployments = props.combo.deployments;
+  const readyCount = deployments.filter((d) => d.available).length;
+  const totalWeight = deployments.reduce((a, d) => a + d.weight, 0);
 
   return (
     <div className="space-y-4">
@@ -441,6 +484,7 @@ function ComboDetail(props: {
           {deployments.length} deployment{deployments.length === 1 ? "" : "s"}
         </Badge>
         <div className="ml-auto flex items-center gap-2">
+          <CopyButton text={props.combo.name} />
           <Button variant="outline" onClick={props.onEdit}>
             <Pencil size={13} /> Edit
           </Button>
@@ -450,62 +494,123 @@ function ComboDetail(props: {
         </div>
       </div>
 
+      {/* client-facing model string + live readiness */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <div
+          className="flex items-center gap-2 rounded-lg border border-white/[0.05] bg-white/[0.015] px-2.5 py-1.5"
+          title="The model string clients send to route onto this combo"
+        >
+          <span className="admin-label">model</span>
+          <code className="font-mono text-[12px] text-blue-200">{props.combo.name}</code>
+        </div>
+        {deployments.length > 0 && (
+          <div
+            className="ml-auto flex items-center gap-2"
+            title="Deployments currently out of cooldown"
+          >
+            <div className="w-24">
+              <ProgressBar
+                value={readyCount / deployments.length}
+                // Readiness semantics, inverted vs the default quota coloring:
+                // all ready = green, partial = amber, none = red.
+                tone={
+                  readyCount === deployments.length
+                    ? "bg-emerald-400"
+                    : readyCount > 0
+                      ? "bg-amber-400"
+                      : "bg-red-400"
+                }
+              />
+            </div>
+            <span className="font-mono text-[11px] tabular-nums text-[var(--admin-text-dim)]">
+              {readyCount}/{deployments.length} ready
+            </span>
+          </div>
+        )}
+      </div>
+
       {deployments.length === 0 ? (
         <Card className="p-4">
           <EmptyState>No deployments — use Edit to add some.</EmptyState>
         </Card>
       ) : (
         <Card>
-          <Table head={["Provider", "Model ID", "Weight", "Ready", ""]}>
+          <Table head={["Provider", "Model ID", "Weight", "Inflight", "p95", "Ready", ""]}>
             {deployments.map((d) => {
               const ident = `${d.provider}/${d.model_id}`;
               const editing = editingWeight === ident;
               return (
                 <tr key={ident}>
                   <TD className="font-medium">
-                    <span className="flex items-center gap-2">
+                    <Link
+                      to={`/console/providers/${encodeURIComponent(d.provider)}`}
+                      className="flex items-center gap-2 transition-colors hover:text-blue-300"
+                      title={`Open ${d.provider}`}
+                    >
                       <Boxes size={13} className="text-[var(--admin-text-dim)]" />
                       {d.provider}
-                    </span>
+                    </Link>
                   </TD>
                   <TD className="font-mono text-[12px]">{d.model_id}</TD>
                   <TD>
-                    {editing ? (
-                      <form
-                        className="flex items-center gap-1"
-                        onSubmit={(e) => {
-                          e.preventDefault();
-                          const w = parseInt(weightVal, 10);
-                          if (Number.isFinite(w) && w >= 1) setWeight.mutate({ ident, weight: w });
-                          setEditingWeight(null);
-                        }}
-                      >
-                        <Input
-                          className="h-auto w-16 text-[12px]"
-                          type="number"
-                          min={1}
-                          value={weightVal}
-                          autoFocus
-                          onChange={(e) => setWeightVal(e.target.value)}
-                          onBlur={() => setEditingWeight(null)}
-                        />
-                      </form>
-                    ) : (
-                      <button
-                        className="rounded px-1.5 py-0.5 font-mono tabular-nums text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]"
-                        title="Click to edit weight"
-                        onClick={() => {
-                          setEditingWeight(ident);
-                          setWeightVal(String(d.weight));
-                        }}
-                      >
-                        {d.weight}
-                      </button>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {editing ? (
+                        <form
+                          className="flex items-center gap-1"
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            const w = parseInt(weightVal, 10);
+                            if (Number.isFinite(w) && w >= 1) setWeight.mutate({ ident, weight: w });
+                            setEditingWeight(null);
+                          }}
+                        >
+                          <Input
+                            className="h-auto w-16 text-[12px]"
+                            type="number"
+                            min={1}
+                            value={weightVal}
+                            autoFocus
+                            onChange={(e) => setWeightVal(e.target.value)}
+                            onBlur={() => setEditingWeight(null)}
+                          />
+                        </form>
+                      ) : (
+                        <button
+                          className="rounded px-1.5 py-0.5 font-mono tabular-nums text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]"
+                          title="Click to edit weight"
+                          onClick={() => {
+                            setEditingWeight(ident);
+                            setWeightVal(String(d.weight));
+                          }}
+                        >
+                          {d.weight}
+                        </button>
+                      )}
+                      {deployments.length > 1 && totalWeight > 0 && !editing && (
+                        <div className="w-14" title={`${d.weight} of ${totalWeight} total weight`}>
+                          <ProgressBar value={d.weight / totalWeight} tone="bg-blue-400/60" />
+                        </div>
+                      )}
+                    </div>
+                  </TD>
+                  <TD className="font-mono text-[12px] tabular-nums text-[var(--admin-text-dim)]">
+                    {d.inflight}
+                  </TD>
+                  <TD className="font-mono text-[12px] tabular-nums text-[var(--admin-text-dim)]">
+                    {d.available ? `${Math.round(d.p95_latency_ms)}ms` : "—"}
                   </TD>
                   <TD>
-                    <Badge tone={d.available ? "green" : "amber"}>
-                      {d.available ? "yes" : "cooldown"}
+                    <Badge
+                      tone={d.available ? "green" : "amber"}
+                      title={
+                        d.available
+                          ? `inflight ${d.inflight}`
+                          : d.cooldown_remaining_s > 0
+                            ? `cooling ${Math.ceil(d.cooldown_remaining_s)}s remaining`
+                            : "unavailable"
+                      }
+                    >
+                      {d.available ? "ready" : "cooldown"}
                     </Badge>
                   </TD>
                   <TD>
@@ -539,14 +644,28 @@ export function CombosPage() {
   // `editing` is the model group being edited in the dialog, or null for create.
   const [editingGroup, setEditingGroup] = useState<ModelGroup | null>(null);
 
-  const modelsQ = useQuery({ queryKey: ["model-groups"], queryFn: getModels });
+  // Polled so health (available / inflight / p95) stays live, matching the
+  // Models page. The dialog edits a snapshot captured at open time, so
+  // background refetches never clobber in-dialog selections.
+  const modelsQ = useQuery({ queryKey: ["model-groups"], queryFn: getModels, refetchInterval: 10_000 });
   const providersQ = useQuery({ queryKey: ["providers"], queryFn: getProviders });
 
   const groups = useMemo(() => modelsQ.data?.groups ?? [], [modelsQ.data]);
+  // Alphabetical roster for the list rail; detail lookups stay by name.
+  const sortedGroups = useMemo(() => [...groups].sort((a, b) => a.name.localeCompare(b.name)), [groups]);
   const providerOptions = useMemo<ProviderOption[]>(
     () => (providersQ.data?.providers ?? []).map((p) => ({ name: p.name, type: p.provider_type })),
     [providersQ.data],
   );
+
+  // Summary tiles: composition + fleet health across every combo.
+  const stats = useMemo(() => {
+    const totalDeps = groups.reduce((a, g) => a + g.deployments.length, 0);
+    const readyDeps = groups.reduce((a, g) => a + g.deployments.filter((d) => d.available).length, 0);
+    const providersSpanned = new Set(groups.flatMap((g) => g.deployments.map((d) => d.provider))).size;
+    const crossCount = groups.filter((g) => new Set(g.deployments.map((d) => d.provider)).size >= 2).length;
+    return { totalDeps, readyDeps, providersSpanned, crossCount };
+  }, [groups]);
 
   // "Registered" model ids per provider = every model_id deployed in ANY model
   // group for that provider. This is the only catalog the dialog shows.
@@ -588,42 +707,88 @@ export function CombosPage() {
       />
       {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
 
+      {/* summary tiles */}
+      <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <StatCard icon={Layers} label="combos" value={String(groups.length)} sub="named model groups" />
+        <StatCard
+          icon={Boxes}
+          label="deployments"
+          value={String(stats.totalDeps)}
+          sub={`${stats.providersSpanned} providers spanned`}
+        />
+        <StatCard
+          icon={Activity}
+          label="ready"
+          tone="success"
+          value={stats.totalDeps > 0 ? `${stats.readyDeps}/${stats.totalDeps}` : "—"}
+          sub={stats.totalDeps > 0 ? `${Math.round((stats.readyDeps / stats.totalDeps) * 100)}% out of cooldown` : undefined}
+        />
+        <StatCard
+          icon={Shuffle}
+          label="cross-provider"
+          tone="brand"
+          value={String(stats.crossCount)}
+          sub="weighted RR active"
+        />
+      </div>
+
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[280px,1fr]">
         {/* left: combo list */}
         <Card className="p-3">
           <div className="mb-2 flex items-center gap-2 px-1">
             <COMBO_ICON size={15} className="text-[var(--admin-text-dim)]" />
             <span className="text-[12px] font-semibold text-[var(--admin-text)]">Combos</span>
+            <span className="ml-auto font-mono text-[10px] text-[var(--admin-text-dim)]">
+              {groups.length}
+            </span>
           </div>
           {groups.length === 0 ? (
-            <EmptyState>No combos yet.</EmptyState>
+            <EmptyState>
+              <div className="space-y-1 text-center">
+                <p>No combos yet.</p>
+                <p className="text-[11px]">
+                  Create one to start round-robining across providers.
+                </p>
+              </div>
+            </EmptyState>
           ) : (
             <div className="space-y-0.5">
-              {groups.map((g) => {
+              {sortedGroups.map((g) => {
                 const active = g.name === selectedName;
                 const providers = new Set(g.deployments.map((d) => d.provider)).size;
+                const allReady = g.deployments.length > 0 && g.deployments.every((d) => d.available);
+                const someReady = g.deployments.some((d) => d.available);
                 return (
                   <button
                     key={g.name}
                     type="button"
                     onClick={() => setSelectedName(g.name)}
-                    className={`flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors ${
+                    title={allReady ? "All deployments ready" : someReady ? "Some deployments cooling" : "No deployments"}
+                    className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors ${
                       active
-                        ? "bg-blue-500/[0.08] text-blue-200"
+                        ? "bg-blue-500/[0.08] text-blue-200 shadow-[inset_2px_0_0_0_rgba(59,130,246,0.55)]"
                         : "text-[var(--admin-text-muted)] hover:bg-white/[0.02] hover:text-[var(--admin-text)]"
                     }`}
                   >
-                    <span className="truncate font-medium">{g.name}</span>
-                    <span className="flex shrink-0 items-center gap-1">
-                      {providers >= 2 && (
+                    <span
+                      aria-hidden
+                      className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                        allReady ? "bg-emerald-400" : someReady ? "bg-amber-400" : "bg-zinc-600"
+                      }`}
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate font-medium">{g.name}</span>
+                      <span className="mt-0.5 block font-mono text-[10px] text-[var(--admin-text-dim)]">
+                        {g.deployments.length} deploys · {providers} provider{providers === 1 ? "" : "s"}
+                      </span>
+                    </span>
+                    {providers >= 2 && (
+                      <span className="shrink-0">
                         <Badge tone="blue" title="Cross-provider round-robin">
                           RR
                         </Badge>
-                      )}
-                      <span className="font-mono text-[10px] text-[var(--admin-text-dim)]">
-                        {g.deployments.length}
                       </span>
-                    </span>
+                    )}
                   </button>
                 );
               })}
@@ -642,8 +807,14 @@ export function CombosPage() {
             />
           ) : (
             <EmptyState>
-              <div className="space-y-2 text-center">
-                <p>Pick a combo on the left, or create a new one.</p>
+              <div className="space-y-3 text-center">
+                <Layers size={20} className="mx-auto opacity-40" />
+                <div className="space-y-1">
+                  <p>Pick a combo on the left, or create a new one.</p>
+                  <p className="text-[11px]">
+                    A combo name is the model string your clients send.
+                  </p>
+                </div>
                 <Button variant="outline" onClick={() => openDialog("create")}>
                   <Plus size={14} /> New combo
                 </Button>
@@ -656,7 +827,7 @@ export function CombosPage() {
       <div className="mt-4">
         <Link
           to="/console/models"
-          className="text-[12px] text-[var(--admin-text-dim)] hover:text-[var(--admin-text)]"
+          className="text-[12px] text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]"
         >
           See all model groups and their health →
         </Link>

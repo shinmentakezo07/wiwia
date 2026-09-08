@@ -322,10 +322,13 @@ export const upsertPricing = (
     mode?: string;
   },
 ) =>
-  api<ModelPrice>(`/admin/pricing/${encodeURIComponent(modelId)}`, {
-    method: "PUT",
-    body: JSON.stringify(body),
-  });
+  api<ModelPrice & { retroactive?: { applied: boolean; keys: number; total_delta: number } }>(
+    `/admin/pricing/${encodeURIComponent(modelId)}`,
+    {
+      method: "PUT",
+      body: JSON.stringify(body),
+    },
+  );
 
 export const deletePricing = (modelId: string) =>
   api<{ deleted: boolean; model_id: string }>(

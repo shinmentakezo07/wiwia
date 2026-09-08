@@ -361,6 +361,26 @@ class AuthService:
                 info.spend_to_date += add_cost
         return True
 
+    async def apply_spend_trueup(self, key_id: str, add_cost: float) -> None:
+        """Retroactive spend correction (pricing true-up).
+
+        Unlike :meth:`update_spend` this is UNCONDITIONAL: the spend being
+        applied already happened upstream, so a max_budget cap must not reject
+        it — an over-budget key stays over budget and is simply blocked from
+        FUTURE requests. No-op for master or non-positive deltas.
+        """
+        if key_id == "master" or add_cost <= 0:
+            return
+        async with self.engine.begin() as conn:
+            await conn.execute(
+                sa.text("UPDATE vkeys SET spend_to_date = spend_to_date + :c,"
+                        " updated_at = :now WHERE id = :id"),
+                {"c": add_cost, "id": key_id, "now": time.time()},
+            )
+        for info, _ts in self._cache.values():
+            if info is not None and info.key_id == key_id:
+                info.spend_to_date += add_cost
+
     async def list_keys(self) -> list[dict]:
         async with self.engine.connect() as conn:
             rows = (await conn.execute(
