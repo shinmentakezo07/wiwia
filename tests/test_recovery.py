@@ -2,6 +2,7 @@
 
 import time
 
+from wiwi.config import HealerSettings, WiwiConfig
 from wiwi.core.recovery import Backoff, CircuitBreaker
 
 
@@ -96,3 +97,17 @@ class TestCircuitBreaker:
         cb.mark_dead("a")
         assert cb.blocked("a")
         assert not cb.blocked("b")
+
+
+def test_healer_settings_defaults():
+    c = WiwiConfig()
+    assert c.healer.enabled is False
+    assert c.healer.tick_s == 30.0
+    assert c.healer.probes_to_restore == 2
+    assert c.healer.probation_weight == 0.5
+
+
+def test_healer_settings_yaml_section():
+    c = WiwiConfig.model_validate({"healer": {"enabled": True, "tick_s": 5}})
+    assert c.healer.enabled is True
+    assert c.healer.tick_s == 5.0

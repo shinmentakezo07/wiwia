@@ -213,6 +213,22 @@ class CacheSettings(BaseModel):
     # Request header that forces a cache bypass for one call.
     bypass_header: str = "x-wiwi-no-cache"
 
+
+class HealerSettings(BaseModel):
+    """HealthHealer (wiwi/core/recovery.py): background service that probes
+    cooling/invalid keys and cooled deployments with a 1-token completion and
+    restores them early into a probation state. Probes spend real provider
+    money, so this is off by default (same opt-in ethos as CacheSettings)."""
+    enabled: bool = False
+    tick_s: float = 30.0            # sweep cadence
+    probe_timeout_s: float = 10.0
+    max_probes_per_sweep: int = 8   # blast-radius cap per tick
+    min_probe_interval_s: float = 30.0  # earliest re-probe of the same target
+    probe_backoff_base_s: float = 60.0  # per-target circuit base on failed probes
+    probe_backoff_cap_s: float = 3600.0
+    probes_to_restore: int = 2      # consecutive healthy probes before restore
+    probation_weight: float = 0.5   # WRR weight multiplier while on probation
+
 class GeneralSettings(BaseModel):
     master_key: str = ""
     database_url: str = "sqlite+aiosqlite:///wiwi.db"
@@ -268,6 +284,7 @@ class WiwiConfig(BaseModel):
     general_settings: GeneralSettings = Field(default_factory=GeneralSettings)
     wiwi_settings: WiwiSettings = Field(default_factory=WiwiSettings)
     cache_settings: CacheSettings = Field(default_factory=CacheSettings)
+    healer: HealerSettings = Field(default_factory=HealerSettings)
 
     @model_validator(mode="after")
     def _model_refs_exist(self) -> WiwiConfig:
