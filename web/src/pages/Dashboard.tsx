@@ -1,5 +1,7 @@
-// Dashboard — live gateway overview: headline stats, an SSE-fed per-minute
-// sparkline, stacked token throughput, and requests/errors per minute.
+// Dashboard — live gateway overview: headline stats, an SSE-fed per-second
+// pulse meter, a per-minute sparkline, stacked token throughput, requests and
+// errors per minute, plus gauge/share/health breakdowns of where the traffic
+// and the money actually go.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -10,7 +12,10 @@ import {
   Brain,
   DollarSign,
   Gauge,
+  KeyRound,
   Percent,
+  PieChart,
+  Server,
   Timer,
   Zap,
 } from "lucide-react";
@@ -27,15 +32,30 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { getOverview, getRequestLogs, getTimeseries } from "@/api/client";
+import { getOverview, getProviders, getRequestLogs, getTimeseries } from "@/api/client";
 import { useAuth } from "@/api/auth";
 import { useAdminStream, useLiveInvalidation } from "@/api/stream";
 import type { RequestLogEntry, TokenBucket } from "@/api/types";
 import { Card, CardHeader, ErrorText, LiveBadge, PageHeader, Spinner, StatCard } from "@/components/ui";
-import { fmtInt, fmtPct, fmtTime, fmtTokens, fmtUsd } from "@/lib/format";
+import {
+  GaugeRing,
+  HealthGrid,
+  LivePulseMeter,
+  ShareBars,
+  StatusMix,
+  TokenRibbon,
+  LatencyRibbon,
+  VisualCard,
+  latencyProfile,
+  statusSlices,
+} from "@/components/console-visuals";
+import type { HealthItem, PulseEvent, ShareRow } from "@/components/console-visuals";
+import { fmtInt, fmtPct, fmtTime, fmtTokens, fmtUsd, groupBy, mean } from "@/lib/format";
 import { deltaVsPrevHour, hourlySeries } from "@/lib/dashboard-metrics";
 
 const LIVE_WINDOW = 30;
+/** Trailing window the per-second pulse meter keeps in memory. */
+const PULSE_KEEP_S = 180;
 const SPARK_W = 280;
 const SPARK_H = 56;
 
@@ -188,6 +208,22 @@ function mkPoints(logs: RequestLogEntry[], vOf: (l: RequestLogEntry) => number) 
   return logs.map((l) => ({ t: l.ts, v: vOf(l) }));
 }
 
+/**
+ * Rank request logs by a dimension into share-bar rows, valued by volume.
+ * `fmt` receives the rows in a group and returns the right-hand label.
+ */
+function groupOf(
+  logs: RequestLogEntry[],
+  keyOf: (l: RequestLogEntry) => string,
+  fmt: (rows: RequestLogEntry[]) => { display: string; sub?: string },
+): ShareRow[] {
+  const rows: ShareRow[] = [];
+  for (const [name, rs] of groupBy(logs, keyOf)) {
+    rows.push({ name, value: rs.length, ...fmt(rs) });
+  }
+  return rows.sort((a, b) => b.value - a.value);
+}
+
 function ChartTooltip(props: {
   active?: boolean;
   label?: string | number;
@@ -259,6 +295,11 @@ export function DashboardPage() {
     }
   }, [logsQuery.data]);
 
+  // Per-second ring for the pulse meter: every SSE event is appended with its
+  // own timestamp, and the ring is trimmed to the trailing PULSE_KEEP_S. Held
+  // in state (not a ref) so the memo below recomputes when the tail grows.
+  const [pulseLive, setPulseLive] = useState<PulseEvent[]>([]);
+
   const connected = useAdminStream("log.created", (data) => {
     const arr = liveRef.current;
     const nowMin = Math.floor(Date.now() / 60_000);
@@ -272,6 +313,11 @@ export function DashboardPage() {
       last.reqs += 1;
       if (eventStatus(data) >= 400) last.errs += 1;
     }
+    const nowSec = Math.floor(Date.now() / 1000);
+    setPulseLive((prev) => {
+      const next = [...prev, { ts: nowSec, failed: eventStatus(data) >= 400 }];
+      return next.length > 512 ? next.filter((e) => e.ts >= nowSec - PULSE_KEEP_S) : next;
+    });
     bumpLive((t) => t + 1);
   });
 
@@ -335,6 +381,113 @@ export function DashboardPage() {
     sumIn(mkPoints(logs, (l) => (l.status >= 400 ? 1 : 0)), hourPrevStart, hourCut),
   );
 
+  // ── Breakdowns for the visual panels ────────────────────────────────────
+  // All derived from the poll-backed log window already in memory; the SSE
+  // pulse ring covers the sub-minute view instead.
+
+  const tokIn = o?.tok_in ?? 0;
+  const tokCached = o?.tok_cached ?? 0;
+  const tokReasoning = o?.tok_reasoning ?? 0;
+  const tokOut = o?.tok_out ?? 0;
+  const totalTokens = tokIn + tokCached + tokReasoning + tokOut;
+
+  const tokenParts = useMemo(
+    () => [
+      { label: "input", value: tokIn, color: COLORS.tokIn },
+      { label: "cached", value: tokCached, color: COLORS.tokCached },
+      { label: "reasoning", value: tokReasoning, color: COLORS.tokReasoning },
+      { label: "output", value: tokOut, color: COLORS.tokOut },
+    ],
+    [tokIn, tokCached, tokReasoning, tokOut],
+  );
+
+  const statusMix = useMemo(
+    // Scope the strip to the trailing hour so the legend lines up with the
+    // `error rate` headline tile above (which reads from the DB-backed
+    // overview, not the entire request-log ring).
+    () => {
+      const cutoff = Math.floor(Date.now() / 1000) - 3600;
+      return statusSlices(logs.filter((l) => l.ts >= cutoff).map((l) => l.status));
+    },
+    [logs],
+  );
+
+  const modelRows = useMemo<ShareRow[]>(
+    () =>
+      groupOf(logs, (l) => l.model_group, (rs) => ({
+        display: `${fmtInt(rs.length)} req`,
+        sub: fmtUsd(rs.reduce((a, r) => a + r.cost, 0)),
+      })),
+    [logs],
+  );
+
+  const keyRows = useMemo<ShareRow[]>(
+    () =>
+      groupOf(logs, (l) => l.key_alias || "(none)", (rs) => ({
+        display: fmtUsd(rs.reduce((a, r) => a + r.cost, 0)),
+        sub: `${fmtInt(rs.length)} req`,
+      })),
+    [logs],
+  );
+
+  const providerRows = useMemo<ShareRow[]>(
+    () =>
+      groupOf(logs, (l) => l.provider, (rs) => ({
+        display: `${fmtInt(rs.length)} req`,
+        sub: `${fmtPct(rs.filter((r) => r.status >= 400).length / rs.length)} err`,
+      })),
+    [logs],
+  );
+
+  const ttftProfile = useMemo(
+    () => latencyProfile(logs.map((l) => l.ttft_ms)),
+    [logs],
+  );
+
+  const pulseEvents = useMemo(() => {
+    // Poll-seeded events make the meter readable right after a page load; SSE
+    // appends the live tail on top of these (deduped by second so a request
+    // counted by both the poll and the stream is not double-drawn).
+    const nowSec = Math.floor(Date.now() / 1000);
+    const seeded = logs
+      .filter((l) => l.ts >= nowSec - 60)
+      .map((l) => ({ ts: l.ts, failed: l.status >= 400 }));
+    const seen = new Set(seeded.map((e) => e.ts));
+    const live = pulseLive.filter((e) => e.ts >= nowSec - 60 && !seen.has(e.ts));
+    return [...seeded, ...live];
+  }, [logs, pulseLive]);
+
+  // Providers (admin-only endpoint): health grid + key/deployment counters.
+  const providersQuery = useQuery({
+    queryKey: ["providers"],
+    queryFn: getProviders,
+    refetchInterval: 30_000,
+    enabled: isAdmin,
+  });
+
+  const healthItems = useMemo<HealthItem[]>(
+    () =>
+      (providersQuery.data?.providers ?? []).map((p) => {
+        const keys = p.keys ?? [];
+        const cooling = keys.filter((k) => k.status === "cooling").length;
+        const enabled = keys.filter((k) => k.enabled).length;
+        return {
+          name: p.name,
+          ok: p.healthy,
+          warn: p.healthy && cooling > 0,
+          meta: `${enabled}/${keys.length} keys${cooling ? ` · ${cooling} cooling` : ""}`,
+          sub: p.provider_type,
+        };
+      }),
+    [providersQuery.data],
+  );
+
+  const avgTps = o?.tps_avg ?? mean(logs.filter((l) => l.tps > 0).map((l) => l.tps));
+  const streamingShare = logs.length
+    ? logs.filter((l) => l.was_stream).length / logs.length
+    : 0;
+  const cacheHitRate = o?.cache_hit_rate ?? 0;
+
   return (
     <div
       style={{
@@ -367,6 +520,8 @@ export function DashboardPage() {
           tone="brand"
           label="req / min"
           value={o ? o.requests_per_minute.toFixed(1) : "—"}
+          numeric={o?.requests_per_minute}
+          format={(v) => v.toFixed(1)}
           sub={o ? `${fmtInt(o.requests)} requests` : undefined}
           spark={reqSpark}
           delta={reqDelta}
@@ -378,6 +533,8 @@ export function DashboardPage() {
           icon={DollarSign}
           label="spend"
           value={o ? fmtUsd(o.cost) : "—"}
+          numeric={o?.cost}
+          format={fmtUsd}
           sub={o ? `saved ${fmtUsd(o.cache_savings)}` : undefined}
           spark={costSpark}
           delta={costDelta}
@@ -389,6 +546,8 @@ export function DashboardPage() {
           tone={o && o.error_rate > 0 ? "danger" : "success"}
           label="error rate"
           value={o ? fmtPct(o.error_rate) : "—"}
+          numeric={o?.error_rate}
+          format={fmtPct}
           sub={o ? `${fmtInt(o.errors)} errors` : undefined}
           spark={errSpark}
           delta={errDelta}
@@ -399,6 +558,8 @@ export function DashboardPage() {
           icon={Timer}
           label="p95 ttft"
           value={o ? `${Math.round(o.ttft_p95_ms)} ms` : "—"}
+          numeric={o?.ttft_p95_ms}
+          format={(v) => `${Math.round(v)} ms`}
           sub={o ? `p95 latency ${fmtInt(o.latency_p95_ms)} ms` : undefined}
           spark={ttftSpark}
           waiting={!hasTraffic}
@@ -406,22 +567,189 @@ export function DashboardPage() {
       </div>
 
       <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
-        <StatCard icon={ArrowDownToLine} label="tokens in" value={o ? fmtTokens(o.tok_in) : "—"} />
+        <StatCard
+          icon={ArrowDownToLine}
+          label="tokens in"
+          value={o ? fmtTokens(o.tok_in) : "—"}
+          numeric={o?.tok_in}
+          format={fmtTokens}
+        />
         <StatCard
           icon={Zap}
           label="cached"
           value={o ? fmtTokens(o.tok_cached) : "—"}
+          numeric={o?.tok_cached}
+          format={fmtTokens}
           sub={o ? `${fmtInt(o.cache_hits)} hits` : undefined}
         />
-        <StatCard icon={Brain} label="reasoning" value={o ? fmtTokens(o.tok_reasoning) : "—"} />
-        <StatCard icon={ArrowUpFromLine} label="out" value={o ? fmtTokens(o.tok_out) : "—"} />
-        <StatCard icon={Percent} label="cache-hit %" value={o ? fmtPct(o.cache_hit_rate) : "—"} />
+        <StatCard
+          icon={Brain}
+          label="reasoning"
+          value={o ? fmtTokens(o.tok_reasoning) : "—"}
+          numeric={o?.tok_reasoning}
+          format={fmtTokens}
+        />
+        <StatCard
+          icon={ArrowUpFromLine}
+          label="out"
+          value={o ? fmtTokens(o.tok_out) : "—"}
+          numeric={o?.tok_out}
+          format={fmtTokens}
+        />
+        <StatCard
+          icon={Percent}
+          label="cache-hit %"
+          value={o ? fmtPct(o.cache_hit_rate) : "—"}
+          numeric={o?.cache_hit_rate}
+          format={fmtPct}
+        />
         <StatCard
           icon={Gauge}
           label="avg tps"
           value={o ? o.tps_avg.toFixed(1) : "—"}
+          numeric={o?.tps_avg}
+          format={(v) => v.toFixed(1)}
           sub={o ? `p95 ${o.tps_p95.toFixed(1)}` : undefined}
         />
+      </div>
+
+      {/* Live pulse meter: one bar per 2s across the trailing minute. SSE
+          events land here directly, so the meter moves between polls. */}
+      <div className="mt-4 grid gap-4 xl:grid-cols-3">
+        <VisualCard
+          title="live pulse"
+          subtitle="requests per 2s · last 60s"
+          icon={Activity}
+          className="xl:col-span-2"
+          right={
+            <span className="admin-live-badge">
+              <span
+                className={
+                  connected ? "admin-pulse-dot" : "h-1.5 w-1.5 rounded-full bg-zinc-600"
+                }
+              />
+              {connected ? "streaming" : "offline"}
+            </span>
+          }
+        >
+          <LivePulseMeter
+            events={pulseEvents}
+            connected={connected}
+            seconds={60}
+            slotSeconds={2}
+          />
+        </VisualCard>
+
+        <VisualCard title="system gauges" subtitle="current window health" icon={Gauge}>
+          <div className="grid grid-cols-2 divide-x divide-[var(--admin-border)]">
+            <GaugeRing
+              value={cacheHitRate}
+              label="cache hit"
+              center={fmtPct(cacheHitRate)}
+              sub={`${fmtInt(o?.cache_hits ?? 0)} hits`}
+              color="var(--admin-success)"
+              icon={Zap}
+              size={124}
+            />
+            <GaugeRing
+              value={streamingShare}
+              label="streamed"
+              center={fmtPct(streamingShare)}
+              sub={`${fmtTokens(totalTokens)} tokens`}
+              color="var(--admin-accent-purple)"
+              icon={Percent}
+              size={124}
+            />
+          </div>
+        </VisualCard>
+      </div>
+
+      <div className="mt-4 grid gap-4 xl:grid-cols-3">
+        <VisualCard
+          title="token mix"
+          subtitle={o ? `last ${o.window_minutes} min` : "current window"}
+          icon={PieChart}
+        >
+          <TokenRibbon parts={tokenParts} total={totalTokens} />
+        </VisualCard>
+
+        <VisualCard title="status mix" subtitle="response class share" icon={AlertTriangle}>
+          <StatusMix slices={statusMix} total={logs.length} />
+        </VisualCard>
+
+        <VisualCard title="ttft profile" subtitle="time to first token" icon={Timer}>
+          <LatencyRibbon profile={ttftProfile} color={COLORS.tokReasoning} />
+        </VisualCard>
+      </div>
+
+      <div className="mt-4 grid gap-4 xl:grid-cols-3">
+        <VisualCard
+          title="top models"
+          subtitle="requests · spend"
+          icon={Server}
+          right={
+            <span className="font-mono text-[11px] text-[var(--admin-text-dim)]">
+              {fmtInt(modelRows.length)} groups
+            </span>
+          }
+        >
+          <ShareBars
+            rows={modelRows}
+            limit={6}
+            showRank
+            emptyLabel="No requests in this window."
+          />
+        </VisualCard>
+
+        <VisualCard
+          title="spend by key"
+          subtitle="cost per virtual key"
+          icon={KeyRound}
+        >
+          <ShareBars
+            rows={keyRows}
+            limit={6}
+            barColor="rgba(168,85,247,0.55)"
+            emptyLabel="No spend in this window."
+          />
+        </VisualCard>
+
+      </div>
+
+      <div className="mt-4 grid gap-4 xl:grid-cols-2">
+        <VisualCard
+          title="provider traffic"
+          subtitle="requests · error share"
+          icon={Server}
+          right={
+            <span className="font-mono text-[11px] text-[var(--admin-text-dim)]">
+              {fmtInt(providerRows.length)} upstreams
+            </span>
+          }
+        >
+          <ShareBars
+            rows={providerRows}
+            limit={6}
+            barColor="rgba(52,211,153,0.5)"
+            emptyLabel="No requests in this window."
+          />
+        </VisualCard>
+
+        <VisualCard
+          title="provider health"
+          subtitle="configured upstreams"
+          icon={Server}
+          right={
+            <span className="font-mono text-[11px] text-[var(--admin-text-dim)]">
+              avg {avgTps.toFixed(1)} tok/s
+            </span>
+          }
+        >
+          <HealthGrid
+            items={healthItems}
+            emptyLabel={isAdmin ? "No providers configured." : "Admin-only view."}
+          />
+        </VisualCard>
       </div>
 
       <div className="mt-4">

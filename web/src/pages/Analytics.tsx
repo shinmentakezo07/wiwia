@@ -26,9 +26,14 @@ import {
   Database,
   DollarSign,
   Download,
+  Gauge,
+  KeyRound,
   Search,
+  Server,
+  Timer,
   TrendingUp,
   Pencil,
+  PieChart as PieChartIcon,
   Plus,
   Trash2,
   X,
@@ -60,8 +65,18 @@ import {
   Table,
   TD,
 } from "@/components/ui";
-import { fmtInt, fmtTokens, fmtUsd, groupBy, mean } from "@/lib/format";
+import { fmtInt, fmtPct, fmtTokens, fmtUsd, groupBy, mean } from "@/lib/format";
 import { hourlySeries } from "@/lib/dashboard-metrics";
+import {
+  GaugeRing,
+  LivePulseMeter,
+  ShareBars,
+  StatusMix,
+  TokenRibbon,
+  VisualCard,
+  statusSlices,
+} from "@/components/console-visuals";
+import type { PulseEvent, ShareRow } from "@/components/console-visuals";
 
 // -- constants --------------------------------------------------------------
 
@@ -1091,6 +1106,74 @@ export function AnalyticsPage() {
     ...modelOptions.map((m) => ({ value: m, label: m })),
   ];
 
+  // ── Visual breakdowns ──────────────────────────────────────────────────
+  const tokenParts = useMemo(
+    () => [
+      { label: "input", value: efficiency.tokIn, color: COLORS.requests },
+      { label: "cached", value: efficiency.tokCached, color: COLORS.cached },
+      { label: "reasoning", value: efficiency.tokReasoning, color: COLORS.violet },
+      { label: "output", value: efficiency.tokOut, color: COLORS.tokens },
+    ],
+    [efficiency],
+  );
+
+  const statusMix = useMemo(
+    // Scope to the overview window so the strip matches the headline stat tiles
+    // above (which read from the DB-backed overview, not the request-log ring).
+    () => statusSlices(logsQuery.data?.logs?.map((l) => l.status) ?? []),
+    [logsQuery.data],
+  );
+
+  const modelRows = useMemo<ShareRow[]>(
+    () =>
+      Array.from(groupBy(logs, (l) => l.model_group))
+        .map(([name, rs]) => ({
+          name,
+          value: rs.length,
+          display: `${fmtInt(rs.length)} req`,
+          sub: fmtUsd(rs.reduce((a, r) => a + r.cost, 0)),
+        }))
+        .sort((a, b) => b.value - a.value),
+    [logs],
+  );
+
+  const keyRows = useMemo<ShareRow[]>(
+    () =>
+      Array.from(groupBy(logs, (l) => l.key_alias || "(none)"))
+        .map(([name, rs]) => ({
+          name,
+          value: rs.reduce((a, r) => a + r.cost, 0),
+          display: fmtUsd(rs.reduce((a, r) => a + r.cost, 0)),
+          sub: `${fmtInt(rs.length)} req`,
+        }))
+        .sort((a, b) => b.value - a.value),
+    [logs],
+  );
+
+  const providerRows = useMemo<ShareRow[]>(
+    () =>
+      Array.from(groupBy(logs, (l) => l.provider))
+        .map(([name, rs]) => ({
+          name,
+          value: rs.length,
+          display: `${fmtInt(rs.length)} req`,
+          sub: `${fmtPct(rs.filter((r) => r.status >= 400).length / rs.length)} err`,
+        }))
+        .sort((a, b) => b.value - a.value),
+    [logs],
+  );
+
+  const pulseEvents = useMemo<PulseEvent[]>(() => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    return logs
+      .filter((l) => l.ts >= nowSec - 60)
+      .map((l) => ({ ts: l.ts, failed: l.status >= 400 }));
+  }, [logs]);
+
+  const streamingShare = logs.length ? logs.filter((l) => l.was_stream).length / logs.length : 0;
+  const cacheSavingsRate =
+    stats.cost + stats.savings > 0 ? stats.savings / (stats.cost + stats.savings) : 0;
+
   return (
     <div>
       <PageHeader
@@ -1121,6 +1204,8 @@ export function AnalyticsPage() {
           tone="brand"
           label="requests"
           value={fmtInt(logs.length)}
+          numeric={logs.length}
+          format={fmtInt}
           sub={selectedModel === "all" ? "all models" : selectedModel}
           spark={reqSpark}
           waiting={logs.length === 0}
@@ -1131,6 +1216,8 @@ export function AnalyticsPage() {
           tone="brand"
           label="spend"
           value={fmtUsd(stats.cost)}
+          numeric={stats.cost}
+          format={fmtUsd}
           spark={costSpark}
           waiting={logs.length === 0}
         />
@@ -1140,6 +1227,8 @@ export function AnalyticsPage() {
           tone="warning"
           label="avg TPS"
           value={stats.avgTps.toFixed(1)}
+          numeric={stats.avgTps}
+          format={(v) => v.toFixed(1)}
           spark={tpsSpark}
           waiting={logs.length === 0}
         />
@@ -1149,10 +1238,111 @@ export function AnalyticsPage() {
           tone="success"
           label="cache savings"
           value={fmtUsd(stats.savings)}
+          numeric={stats.savings}
+          format={fmtUsd}
           sub="estimated vs uncached read"
           spark={savingsSpark}
           waiting={logs.length === 0}
         />
+      </div>
+
+      {/* ── Live pulse + gauges ────────────────────────────────────────── */}
+      <div className="mt-4 grid gap-4 xl:grid-cols-3">
+        <VisualCard
+          title="live pulse"
+          subtitle="requests per 2s · last 60s"
+          icon={Activity}
+          className="xl:col-span-2"
+          right={
+            <span className="admin-live-badge">
+              <span
+                className={
+                  connected ? "admin-pulse-dot" : "h-1.5 w-1.5 rounded-full bg-zinc-600"
+                }
+              />
+              {connected ? "streaming" : "offline"}
+            </span>
+          }
+        >
+          <LivePulseMeter
+            events={pulseEvents}
+            connected={connected}
+            seconds={60}
+            slotSeconds={2}
+          />
+        </VisualCard>
+
+        <VisualCard title="efficiency gauges" subtitle="share of spend & traffic" icon={Gauge}>
+          <div className="grid grid-cols-2 divide-x divide-[var(--admin-border)]">
+            <GaugeRing
+              value={cacheSavingsRate}
+              label="saved"
+              center={fmtPct(cacheSavingsRate)}
+              sub={`${fmtUsd(stats.savings)} saved`}
+              color="var(--admin-success)"
+              icon={Database}
+              size={124}
+            />
+            <GaugeRing
+              value={streamingShare}
+              label="streamed"
+              center={fmtPct(streamingShare)}
+              sub={`${fmtInt(logs.length)} requests`}
+              color="var(--admin-accent-purple)"
+              icon={Zap}
+              size={124}
+            />
+          </div>
+        </VisualCard>
+      </div>
+
+      {/* ── Mix + ranked breakdowns ────────────────────────────────────── */}
+      <div className="mt-4 grid gap-4 xl:grid-cols-3">
+        <VisualCard title="token mix" subtitle="share of total tokens" icon={PieChartIcon}>
+          <TokenRibbon parts={tokenParts} total={efficiency.totalTokens} />
+        </VisualCard>
+
+        <VisualCard title="status mix" subtitle="response class share" icon={Activity}>
+          <StatusMix slices={statusMix} total={logs.length} />
+        </VisualCard>
+
+        <VisualCard
+          title="top models"
+          subtitle="requests · spend"
+          icon={Server}
+          right={
+            <span className="font-mono text-[11px] text-[var(--admin-text-dim)]">
+              {fmtInt(modelRows.length)} groups
+            </span>
+          }
+        >
+          <ShareBars
+            rows={modelRows}
+            limit={6}
+            showRank
+            emptyLabel="No requests in this window."
+          />
+        </VisualCard>
+      </div>
+
+      <div className="mt-4 grid gap-4 xl:grid-cols-2">
+        <VisualCard title="spend by key" subtitle="cost per virtual key" icon={KeyRound}>
+          <ShareBars
+            rows={keyRows}
+            limit={7}
+            barColor="rgba(168,85,247,0.55)"
+            emptyLabel="No spend recorded."
+          />
+        </VisualCard>
+
+        <VisualCard title="provider load" subtitle="requests · error share" icon={Timer}>
+          <ShareBars
+            rows={providerRows}
+            limit={7}
+            barColor="rgba(52,211,153,0.5)"
+            emptyLabel="No requests in this window."
+          />
+        </VisualCard>
       </div>
 
       {/* ── Pricing + Token efficiency (only when a specific model is selected) ── */}

@@ -6,6 +6,7 @@ import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from "react
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, ChevronUp, Copy, X } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import { AnimatedNumber } from "@/components/animated";
 import type { Delta } from "@/lib/dashboard-metrics";
 
 // -- layout ------------------------------------------------------------------
@@ -274,11 +275,29 @@ export function StatCard(props: {
   deltaGoodDir?: "up" | "down";
   /** Zero-traffic state: pulse the value instead of flat zeros. */
   waiting?: boolean;
+  /**
+   * Underlying numeric value. When given (together with `format`), the tile
+   * counts up to it on change instead of snapping — the live-refresh cue.
+   */
+  numeric?: number;
+  /** Formatter for `numeric`; falls back to `value`. */
+  format?: (n: number) => string;
 }) {
   const accent = STAT_ACCENT[props.tone ?? "default"];
   const Icon = props.icon;
+  const animated =
+    props.numeric != null &&
+    Number.isFinite(props.numeric) &&
+    props.format != null;
   return (
     <Card className={`group relative p-5 ${props.featured ? "admin-stat-highlight" : ""}`}>
+      {/* Accent wash — a corner glow that warms on hover, matching the tile's
+          tone, so featured tiles read as "live surfaces" not just cards. */}
+      <span
+        aria-hidden
+        className="admin-stat-wash pointer-events-none absolute inset-0"
+        style={{ background: `radial-gradient(120% 90% at 100% 0%, ${accent}0F 0%, transparent 60%)` }}
+      />
       <div className="relative z-10">
         <div className="mb-3 flex items-center gap-2">
           {Icon && (
@@ -292,7 +311,11 @@ export function StatCard(props: {
               props.waiting ? "admin-waiting-pulse" : ""
             }`}
           >
-            {props.value}
+            {animated ? (
+              <AnimatedNumber value={props.numeric as number} format={props.format!} />
+            ) : (
+              props.value
+            )}
           </p>
           {props.spark && props.spark.some((v) => v > 0) && (
             <TileSparkline points={props.spark} accent={accent} />

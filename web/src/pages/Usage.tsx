@@ -1,5 +1,6 @@
-// Usage — range-filtered totals, TPS trend, token-share donut, group-by
-// summary, and a sortable per-request table with a totals footer.
+// Usage — range-filtered totals, TPS trend, token-share donut, live pulse
+// meter, latency profile, group-by summary, and a sortable per-request table
+// with a totals footer.
 
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -10,7 +11,11 @@ import {
   Brain,
   DollarSign,
   Gauge,
+  KeyRound,
   Percent,
+  PieChart as PieChartIcon,
+  Server,
+  Timer,
   X,
   Zap,
 } from "lucide-react";
@@ -55,6 +60,18 @@ import {
   mean,
 } from "@/lib/format";
 import { deltaVsPrevHour, hourlySeries } from "@/lib/dashboard-metrics";
+import {
+  GaugeRing,
+  LatencyRibbon,
+  LivePulseMeter,
+  ShareBars,
+  StatusMix,
+  TokenRibbon,
+  VisualCard,
+  latencyProfile,
+  statusSlices,
+} from "@/components/console-visuals";
+import type { PulseEvent, ShareRow } from "@/components/console-visuals";
 
 const PIE_COLORS = ["#3b82f6", "#199e70", "#a855f7", "#c98500"];
 
@@ -461,6 +478,73 @@ export function UsagePage() {
   const latColor = LATENCY_COLORS[latencyMetric];
   const hasLatency = latBuckets.some((b) => b.count > 0);
 
+  // ── Visual breakdowns (share bars, ribbons, gauges) ─────────────────────
+  const tokenParts = useMemo(
+    () => [
+      { label: "input", value: tokIn, color: PIE_COLORS[0] },
+      { label: "cached", value: tokCached, color: PIE_COLORS[1] },
+      { label: "reasoning", value: tokReasoning, color: PIE_COLORS[2] },
+      { label: "output", value: tokOut, color: PIE_COLORS[3] },
+    ],
+    [tokIn, tokCached, tokReasoning, tokOut],
+  );
+
+  // `logs` is already range-filtered, so the strip matches the headline stats
+  // (the overview values flow through `requests/errors/cache_hits` above).
+  const statusMix = useMemo(() => statusSlices(logs.map((l) => l.status)), [logs]);
+
+  const modelRows = useMemo<ShareRow[]>(
+    () =>
+      Array.from(groupBy(allLogs, (l) => l.model_group))
+        .map(([name, rs]) => ({
+          name,
+          value: rs.length,
+          display: `${fmtInt(rs.length)} req`,
+          sub: fmtUsd(rs.reduce((a, r) => a + r.cost, 0)),
+        }))
+        .sort((a, b) => b.value - a.value),
+    [allLogs],
+  );
+
+  const keyRows = useMemo<ShareRow[]>(
+    () =>
+      Array.from(groupBy(allLogs, (l) => l.key_alias || "(none)"))
+        .map(([name, rs]) => ({
+          name,
+          value: rs.reduce((a, r) => a + r.cost, 0),
+          display: fmtUsd(rs.reduce((a, r) => a + r.cost, 0)),
+          sub: `${fmtInt(rs.length)} req`,
+        }))
+        .sort((a, b) => b.value - a.value),
+    [allLogs],
+  );
+
+  const providerRows = useMemo<ShareRow[]>(
+    () =>
+      Array.from(groupBy(allLogs, (l) => l.provider))
+        .map(([name, rs]) => ({
+          name,
+          value: rs.length,
+          display: `${fmtInt(rs.length)} req`,
+          sub: `${fmtPct(rs.filter((r) => r.status >= 400).length / rs.length)} err`,
+        }))
+        .sort((a, b) => b.value - a.value),
+    [allLogs],
+  );
+
+  const ttftProfile = useMemo(() => latencyProfile(logs.map((l) => l.ttft_ms)), [logs]);
+  const streamingShare = logs.length ? logs.filter((l) => l.was_stream).length / logs.length : 0;
+
+  // Pulse meter: the trailing minute of the poll window. Live SSE events land
+  // on the Dashboard's ring; here the poll window (10–15s) is the freshest
+  // source, which is enough for minute-scale ranges.
+  const pulseEvents = useMemo<PulseEvent[]>(() => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    return logs
+      .filter((l) => l.ts >= nowSec - 60)
+      .map((l) => ({ ts: l.ts, failed: l.status >= 400 }));
+  }, [logs]);
+
   return (
     <div
       style={{
@@ -506,6 +590,8 @@ export function UsagePage() {
           tone="brand"
           label="requests"
           value={fmtInt(requests)}
+          numeric={requests}
+          format={fmtInt}
           sub={o ? `error rate ${fmtPct(o.error_rate)}` : `${fmtInt(errors)} errors`}
           spark={hourlySeries(reqPts, nowMs)}
           delta={reqDelta}
@@ -517,6 +603,8 @@ export function UsagePage() {
           icon={DollarSign}
           label="spend"
           value={fmtUsd(cost)}
+          numeric={cost}
+          format={fmtUsd}
           sub={`saved ${fmtUsd(cacheSavings)}`}
           spark={hourlySeries(costPts, nowMs)}
           delta={costDelta}
@@ -528,6 +616,8 @@ export function UsagePage() {
           tone={cacheHitRate > 0.1 ? "success" : "default"}
           label="cache hit rate"
           value={fmtPct(cacheHitRate)}
+          numeric={cacheHitRate}
+          format={fmtPct}
           sub={`${fmtInt(cacheHits)} of ${fmtInt(requests)}`}
           spark={hourlySeries(cachedPts, nowMs)}
           waiting={!hasTraffic}
@@ -537,6 +627,8 @@ export function UsagePage() {
           icon={Gauge}
           label="avg tps"
           value={avgTps.toFixed(1)}
+          numeric={avgTps}
+          format={(v) => v.toFixed(1)}
           sub={o ? `p95 ${o.tps_p95.toFixed(1)}` : undefined}
           spark={hourlySeries(tpsPts, nowMs)}
           waiting={!hasTraffic}
@@ -549,6 +641,8 @@ export function UsagePage() {
           icon={ArrowDownToLine}
           label="tokens in"
           value={fmtTokens(tokIn)}
+          numeric={tokIn}
+          format={fmtTokens}
           spark={hourlySeries(inPts, nowMs)}
           waiting={!hasTraffic}
         />
@@ -557,6 +651,8 @@ export function UsagePage() {
           tone={tokCached > 0 ? "success" : "default"}
           label="cached"
           value={fmtTokens(tokCached)}
+          numeric={tokCached}
+          format={fmtTokens}
           sub={`${fmtInt(cacheHits)} hits`}
           spark={hourlySeries(cachedPts, nowMs)}
           waiting={!hasTraffic}
@@ -565,6 +661,8 @@ export function UsagePage() {
           icon={Brain}
           label="reasoning"
           value={fmtTokens(tokReasoning)}
+          numeric={tokReasoning}
+          format={fmtTokens}
           spark={hourlySeries(reasonPts, nowMs)}
           waiting={!hasTraffic}
         />
@@ -572,6 +670,8 @@ export function UsagePage() {
           icon={ArrowUpFromLine}
           label="output"
           value={fmtTokens(tokOut)}
+          numeric={tokOut}
+          format={fmtTokens}
           spark={hourlySeries(outPts, nowMs)}
           waiting={!hasTraffic}
         />
@@ -580,6 +680,8 @@ export function UsagePage() {
           tone={errorRate > 0.05 ? "danger" : "success"}
           label="errors"
           value={fmtInt(errors)}
+          numeric={errors}
+          format={fmtInt}
           sub={fmtPct(errorRate)}
           spark={hourlySeries(errPts, nowMs)}
           delta={errDelta}
@@ -589,8 +691,123 @@ export function UsagePage() {
           icon={Gauge}
           label="total tokens"
           value={fmtTokens(totalTokens)}
+          numeric={totalTokens}
+          format={fmtTokens}
           waiting={!hasTraffic}
         />
+      </div>
+
+      {/* Live pulse + gauges */}
+      <div className="mt-4 grid gap-4 xl:grid-cols-3">
+        <VisualCard
+          title="live pulse"
+          subtitle="requests per 2s · last 60s"
+          icon={Activity}
+          className="xl:col-span-2"
+          right={
+            <span className="admin-live-badge">
+              <span
+                className={
+                  connected ? "admin-pulse-dot" : "h-1.5 w-1.5 rounded-full bg-zinc-600"
+                }
+              />
+              {connected ? "streaming" : "offline"}
+            </span>
+          }
+        >
+          <LivePulseMeter
+            events={pulseEvents}
+            connected={connected}
+            seconds={60}
+            slotSeconds={2}
+          />
+        </VisualCard>
+
+        <VisualCard title="window gauges" subtitle="share of traffic" icon={Gauge}>
+          <div className="grid grid-cols-2 divide-x divide-[var(--admin-border)]">
+            <GaugeRing
+              value={cacheHitRate}
+              label="cache hit"
+              center={fmtPct(cacheHitRate)}
+              sub={`${fmtInt(cacheHits)} hits`}
+              color="var(--admin-success)"
+              icon={Zap}
+              size={124}
+            />
+            <GaugeRing
+              value={streamingShare}
+              label="streamed"
+              center={fmtPct(streamingShare)}
+              sub={`${fmtInt(requests)} requests`}
+              color="var(--admin-accent-purple)"
+              icon={Percent}
+              size={124}
+            />
+          </div>
+        </VisualCard>
+      </div>
+
+      {/* Breakdowns: token mix, status mix, ttft profile */}
+      <div className="mt-4 grid gap-4 xl:grid-cols-3">
+        <VisualCard title="token mix" subtitle="share of total tokens" icon={PieChartIcon}>
+          <TokenRibbon parts={tokenParts} total={totalTokens} />
+        </VisualCard>
+
+        <VisualCard title="status mix" subtitle="response class share" icon={Activity}>
+          <StatusMix slices={statusMix} total={logs.length} />
+        </VisualCard>
+
+        <VisualCard title="ttft profile" subtitle="time to first token" icon={Timer}>
+          <LatencyRibbon profile={ttftProfile} color={LATENCY_COLORS.ttft} />
+        </VisualCard>
+      </div>
+
+      {/* Ranked breakdowns, click-through into the existing group filter */}
+      <div className="mt-4 grid gap-4 xl:grid-cols-3">
+        <VisualCard
+          title={groupDim === "model" ? "top models" : "by model"}
+          subtitle="requests · spend"
+          icon={Server}
+        >
+          <ShareBars
+            rows={modelRows}
+            limit={6}
+            showRank
+            activeName={filterGroup?.dim === "model" ? filterGroup.name : null}
+            onSelect={groupDim === "model" ? (name) => toggleGroupFilter(name) : undefined}
+            emptyLabel="No requests in this window."
+          />
+        </VisualCard>
+
+        <VisualCard
+          title={groupDim === "key" ? "spend by key" : "by key"}
+          subtitle="cost per virtual key"
+          icon={KeyRound}
+        >
+          <ShareBars
+            rows={keyRows}
+            limit={6}
+            barColor="rgba(168,85,247,0.55)"
+            activeName={filterGroup?.dim === "key" ? filterGroup.name : null}
+            onSelect={groupDim === "key" ? (name) => toggleGroupFilter(name) : undefined}
+            emptyLabel="No spend in this window."
+          />
+        </VisualCard>
+
+        <VisualCard
+          title={groupDim === "provider" ? "provider load" : "by provider"}
+          subtitle="requests · error share"
+          icon={Server}
+        >
+          <ShareBars
+            rows={providerRows}
+            limit={6}
+            barColor="rgba(52,211,153,0.5)"
+            activeName={filterGroup?.dim === "provider" ? filterGroup.name : null}
+            onSelect={groupDim === "provider" ? (name) => toggleGroupFilter(name) : undefined}
+            emptyLabel="No requests in this window."
+          />
+        </VisualCard>
       </div>
 
       {/* Charts: TPS area chart + token share donut */}

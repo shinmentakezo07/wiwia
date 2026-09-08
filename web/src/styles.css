@@ -569,6 +569,21 @@ select.admin-input option {
   border-color: rgba(59, 130, 246, 0.1);
 }
 
+/* Stat tile accent wash — a corner glow tinted by the tile's tone. Rises on
+   hover so featured tiles read as live surfaces rather than static cards. */
+.admin-stat-wash {
+  opacity: 0.7;
+  transition: opacity 0.4s ease;
+}
+.admin-card:hover .admin-stat-wash {
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .admin-stat-wash {
+    transition: none;
+  }
+}
+
 /* Live badge + pulse dot */
 .admin-live-badge {
   display: inline-flex;
