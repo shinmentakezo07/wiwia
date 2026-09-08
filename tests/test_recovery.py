@@ -2,8 +2,26 @@
 
 import time
 
-from wiwi.config import DeploymentParams, HealerSettings, KeyDef, ModelEntry, ProviderDef, WiwiConfig
-from wiwi.core.recovery import Backoff, CircuitBreaker, ProbeVerdict, probe_verdict
+import httpx
+import respx
+from asgi_lifespan import LifespanManager
+
+from wiwi.config import (
+    DeploymentParams,
+    GeneralSettings,
+    HealerSettings,
+    KeyDef,
+    ModelEntry,
+    ProviderDef,
+    WiwiConfig,
+)
+from wiwi.core.recovery import (
+    Backoff,
+    CircuitBreaker,
+    HealthHealer,
+    ProbeVerdict,
+    probe_verdict,
+)
 
 
 class TestBackoff:
@@ -239,3 +257,232 @@ class TestProbation:
         dep.probation = True
         dep.record_fail(allowed_fails=3, cooldown_time=30.0)
         assert dep.probation is False
+
+
+PROBE_OK_BODY = {
+    "id": "chatcmpl-probe", "object": "chat.completion", "model": "m",
+    "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
+                 "finish_reason": "stop"}],
+    "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+}
+
+OPENAI_URL = "https://api.openai.com/v1/chat/completions"
+
+
+def _sick_router():
+    """Router with key0 cooling and the p1 deployment cooled down."""
+    from wiwi.router.router import Router
+    r = Router(_router_config())
+    key = r.providers["p1"].keys[0]
+    key.mark_cooling(999.0)
+    dep = r.groups["g"][0]
+    dep.cooldown_until = time.monotonic() + 999.0
+    return r, key, dep
+
+
+def _sick_key_router():
+    """Router with ONLY key0 cooling; deployment healthy."""
+    from wiwi.router.router import Router
+    r = Router(_router_config())
+    key = r.providers["p1"].keys[0]
+    key.mark_cooling(999.0)
+    return r, key, r.groups["g"][0]
+
+
+def _sick_dep_router():
+    """Router with ONLY the p1 deployment cooled down; keys healthy."""
+    from wiwi.router.router import Router
+    r = Router(_router_config())
+    dep = r.groups["g"][0]
+    dep.cooldown_until = time.monotonic() + 999.0
+    return r, dep, r.providers["p1"].keys[1]
+
+
+def _healer(router, **overrides) -> HealthHealer:
+    s = HealerSettings(enabled=True, tick_s=0.05, min_probe_interval_s=0.0,
+                       **overrides)
+    return HealthHealer(router, s)
+
+
+class TestHealthHealer:
+    @respx.mock
+    async def test_restores_after_consecutive_probes(self):
+        from wiwi.router.router import Router
+        r, key, dep = _sick_key_router()
+        respx.post(OPENAI_URL).respond(json=PROBE_OK_BODY)
+        h = _healer(r, probes_to_restore=2)
+        assert await h._sweep() == 1
+        assert key.status == "cooling"          # 1 of 2 successes: no restore yet
+        await h._sweep()
+        assert key.status == "probation"
+        assert key.available
+        assert dep.cooldown_until <= time.monotonic()  # healthy dep untouched
+        await h.stop()
+
+    @respx.mock
+    async def test_restores_cooled_deployment_after_consecutive_probes(self):
+        from wiwi.router.router import Router
+        r, dep, key = _sick_dep_router()
+        respx.post(OPENAI_URL).respond(json=PROBE_OK_BODY)
+        h = _healer(r, probes_to_restore=2)
+        assert await h._sweep() == 1
+        assert dep.cooldown_until > time.monotonic()  # 1 of 2: no restore yet
+        await h._sweep()
+        assert dep.cooldown_until <= time.monotonic()
+        assert dep.probation is True
+        await h.stop()
+
+    @respx.mock
+    async def test_both_sick_restored_by_one_pair_each(self):
+        from wiwi.router.router import Router
+        r, key, dep = _sick_router()
+        respx.post(OPENAI_URL).respond(json=PROBE_OK_BODY)
+        h = _healer(r, probes_to_restore=2)
+        assert await h._sweep() == 2  # sick key (k0) + cooled dep (k1)
+        assert key.status == "cooling"
+        assert dep.cooldown_until > time.monotonic()
+        await h._sweep()
+        assert key.status == "probation"
+        assert dep.probation is True
+        await h.stop()
+
+    @respx.mock
+    async def test_429_extends_cooling_without_trip(self):
+        from wiwi.router.router import Router
+        r, key, dep = _sick_router()
+        key.mark_cooling(5.0)
+        respx.post(OPENAI_URL).respond(status_code=429,
+                                       headers={"retry-after": "120"})
+        h = _healer(r)
+        await h._sweep()
+        assert key.status == "cooling"
+        assert key.cooldown_until > time.monotonic() + 100.0
+        assert not h._circuits["key"].blocked(("p1", "k0"))
+        assert not h._circuits["dep"].blocked(("g", "p1", "m"))
+        await h.stop()
+
+    @respx.mock
+    async def test_401_trips_key_circuit_and_next_sweep_skips(self):
+        from wiwi.router.router import Router
+        r, key, _ = _sick_key_router()
+        key.status = "invalid"
+        route = respx.post(OPENAI_URL).respond(status_code=401, text="nope")
+        h = _healer(r)
+        await h._sweep()
+        assert key.status == "invalid"
+        assert h._circuits["key"].blocked(("p1", "k0"))
+        await h._sweep()
+        assert route.call_count == 1            # skipped while blocked
+        await h.stop()
+
+    @respx.mock
+    async def test_400_restores_key_and_escalates_dep_circuit(self):
+        from wiwi.router.router import Router
+        r, key, _ = _sick_key_router()
+        key.status = "invalid"
+        respx.post(OPENAI_URL).respond(
+            status_code=400, json={"error": {"message": "model not found"}})
+        # zero-base circuits keep the escalation deterministic in-test
+        h = _healer(r, probes_to_restore=1, probe_backoff_base_s=0.0)
+        await h._sweep()
+        assert key.status == "probation"        # creds proven -> restore-eligible
+        assert not h._circuits["key"].blocked(("p1", "k0"))
+        assert h._circuits["dep"].streak(("g", "p1", "m")) == 1
+        # keep probing the same (dep, key) pair: key now probation + dep cooled?
+        # No — dep is healthy here, so the dep circuit streak records but no
+        # deployment state changes; the escalation-to-dead path is covered by
+        # test_400_on_cooled_dep_marks_it_dead.
+        await h._sweep()
+        await h._sweep()
+        assert key.status == "probation"
+        await h.stop()
+
+    @respx.mock
+    async def test_400_on_cooled_dep_marks_it_dead(self):
+        from wiwi.router.router import Router
+        r, dep, key = _sick_dep_router()
+        respx.post(OPENAI_URL).respond(
+            status_code=400, json={"error": {"message": "model not found"}})
+        h = _healer(r, probe_backoff_base_s=0.0)
+        await h._sweep()
+        await h._sweep()
+        await h._sweep()
+        assert h._circuits["dep"].dead(("g", "p1", "m"))
+        assert dep.cooldown_until > time.monotonic()  # never restored
+        await h.stop()
+
+    @respx.mock
+    async def test_never_probes_disabled_keys(self):
+        from wiwi.router.router import Router
+        r = Router(_router_config())
+        key = r.providers["p1"].keys[0]
+        key.enabled = False
+        key.status = "cooling"
+        key.mark_cooling(999.0)
+        route = respx.post(OPENAI_URL).respond(json=PROBE_OK_BODY)
+        h = _healer(r)
+        assert await h._sweep() == 0
+        assert not route.called
+        await h.stop()
+
+    @respx.mock
+    async def test_respects_per_sweep_cap(self):
+        from wiwi.router.router import Router
+        r = Router(_router_config(n_keys=3))
+        for k in r.providers["p1"].keys:
+            k.mark_cooling(999.0)
+        respx.post(OPENAI_URL).respond(json=PROBE_OK_BODY)
+        h = _healer(r, max_probes_per_sweep=2)
+        assert await h._sweep() == 2
+        await h.stop()
+
+    @respx.mock
+    async def test_force_stream_probes_with_stream_true(self):
+        from wiwi.router.router import Router
+        cfg = WiwiConfig(
+            providers=[ProviderDef(name="cl", provider="cline",
+                                   keys=[KeyDef(label="a", key="tok")])],
+            model_list=[ModelEntry(model_name="g",
+                                   wiwi_params=DeploymentParams(provider="cl",
+                                                                model="m"))],
+        )
+        r = Router(cfg)
+        key = r.providers["cl"].keys[0]
+        key.mark_cooling(999.0)
+        route = respx.post("https://api.cline.bot/api/v1/chat/completions").respond(
+            status_code=200, text="data: [DONE]\n\n")
+        h = _healer(r, probes_to_restore=1)
+        await h._sweep()
+        assert key.status == "probation"
+        import orjson
+        body = orjson.loads(route.calls.last.request.content)
+        assert body["stream"] is True
+        await h.stop()
+
+    async def test_disabled_start_is_a_noop(self):
+        h = HealthHealer(_sick_router()[0], HealerSettings(enabled=False))
+        h.start()
+        assert h._task is None
+        await h.stop()
+
+
+class TestLifespanWiring:
+    async def test_healer_starts_and_stops_with_app(self):
+        from wiwi.server.app import create_app
+        cfg = WiwiConfig(
+            providers=[ProviderDef(name="p1", provider="openai",
+                                   keys=[KeyDef(label="a", key="k")])],
+            model_list=[ModelEntry(model_name="g",
+                                   wiwi_params=DeploymentParams(provider="p1",
+                                                                model="m"))],
+            general_settings=GeneralSettings(
+                master_key="sk-wiwi-master-test",
+                database_url="sqlite+aiosqlite:///:memory:"),
+            healer=HealerSettings(enabled=True, tick_s=0.05),
+        )
+        app = create_app(cfg)
+        async with LifespanManager(app):
+            state = app.state.wiwi
+            assert state.healer is not None
+            assert state.healer._task is not None and not state.healer._task.done()
+        assert state.healer._task is None

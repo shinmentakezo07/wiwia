@@ -26,14 +26,17 @@ import {
   Database,
   DollarSign,
   Download,
+  Search,
   TrendingUp,
   Pencil,
   Plus,
   Trash2,
+  X,
   Zap,
 } from "lucide-react";
 import {
   deletePricing,
+  getModels,
   getRequestLogs,
   getPricing,
   upsertPricing,
@@ -41,6 +44,7 @@ import {
 import { useLiveInvalidation } from "@/api/stream";
 import type { ModelPrice, RequestLogEntry } from "@/api/types";
 import {
+  Badge,
   Button,
   Card,
   CardHeader,
@@ -438,11 +442,50 @@ function PricingDialog(props: {
   const qc = useQueryClient();
   const [form, setForm] = useState<PriceForm>(emptyForm());
   const [error, setError] = useState<string | null>(null);
+  // Success note (e.g. retroactive true-up summary) shown briefly before close.
+  const [note, setNote] = useState<string | null>(null);
+  // Model-id picker: case-insensitive filter over the deployed catalog.
+  const [idSearch, setIdSearch] = useState("");
+
+  // Deployed model ids served by the gateway — the auto-populated catalog the
+  // picker lists instead of free-text entry. Same endpoint + query key as the
+  // Models/Combos pages, so all views share one cached fetch.
+  const modelsQ = useQuery({
+    queryKey: ["model-groups"],
+    queryFn: getModels,
+    enabled: props.open && props.isNew,
+  });
+
+  // Bare upstream model_id → set of providers serving it (a model deployed on
+  // two providers shows both badges; the pricing key stays the bare id).
+  const catalog = useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    for (const g of modelsQ.data?.groups ?? []) {
+      for (const d of g.deployments) {
+        if (!m.has(d.model_id)) m.set(d.model_id, new Set());
+        m.get(d.model_id)!.add(d.provider);
+      }
+    }
+    return m;
+  }, [modelsQ.data]);
+
+  // Picker options: every deployed id not already priced, filtered by search.
+  const idOptions = useMemo(() => {
+    const priced = new Set(props.existingIds);
+    const q = idSearch.trim().toLowerCase();
+    return Array.from(catalog.keys())
+      .filter((id) => !priced.has(id))
+      .filter((id) => !q || id.toLowerCase().includes(q))
+      .sort()
+      .map((id) => ({ id, providers: Array.from(catalog.get(id) ?? []).sort() }));
+  }, [catalog, props.existingIds, idSearch]);
 
   // Sync form whenever the dialog opens with new initial data.
   useEffect(() => {
     if (props.open) setForm(props.initial ?? emptyForm());
     setError(null);
+    setNote(null);
+    setIdSearch("");
   }, [props.open, props.initial]);
 
   const save = useMutation({
@@ -455,9 +498,23 @@ function PricingDialog(props: {
         max_output_tokens: tryNum(f.max_output_tokens),
         mode: f.mode.trim() || undefined,
       }),
-    onSuccess: () => {
+    onSuccess: (resp) => {
       void qc.invalidateQueries({ queryKey: ["pricing"] });
-      props.onSaved();
+      const retro = resp.retroactive;
+      if (retro?.applied) {
+        // First-time pricing repriced logged history: tell the admin what
+        // happened instead of closing silently.
+        setNote(
+          `Retroactively applied to logged usage: ${fmtUsd(retro.total_delta)} ` +
+          `trued up across ${retro.keys} key${retro.keys === 1 ? "" : "s"}.`,
+        );
+        setTimeout(() => {
+          setNote(null);
+          props.onSaved();
+        }, 2200);
+      } else {
+        props.onSaved();
+      }
     },
     onError: (e) => setError(e.message),
   });
@@ -481,13 +538,115 @@ function PricingDialog(props: {
     >
       <div className="space-y-4">
         {props.isNew && (
-          <Field label="Model ID" hint="The bare model id, no provider prefix.">
-            <Input
-              value={form.model_id}
-              onChange={(e) => set("model_id", e.target.value)}
-              placeholder="model-name"
-            />
-          </Field>
+          <div>
+            <div className="mb-1.5 flex items-center justify-between">
+              <span className="admin-label">Model ID</span>
+              {form.model_id && (
+                <button
+                  type="button"
+                  aria-label="Clear selected model"
+                  onClick={() => set("model_id", "")}
+                  className="inline-flex items-center gap-1 text-[11px] text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]"
+                >
+                  clear <X size={11} />
+                </button>
+              )}
+            </div>
+
+            {/* selected pick, shown as a chip so the choice stays visible while
+                the pricing fields below are filled in */}
+            {form.model_id && (
+              <div className="mb-2">
+                <span className="inline-flex items-center gap-1.5 rounded-md border border-blue-500/20 bg-blue-500/10 px-2 py-1 font-mono text-[12px] text-blue-200">
+                  {form.model_id}
+                  <button
+                    type="button"
+                    aria-label={`Deselect ${form.model_id}`}
+                    onClick={() => set("model_id", "")}
+                    className="rounded p-0.5 text-blue-300/70 transition-colors hover:bg-blue-500/20 hover:text-blue-100"
+                  >
+                    <X size={11} />
+                  </button>
+                </span>
+              </div>
+            )}
+
+            {/* search over the deployed catalog */}
+            <div className="relative mb-2">
+              <Search
+                size={13}
+                className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--admin-text-dim)]"
+              />
+              <Input
+                value={idSearch}
+                placeholder={
+                  modelsQ.isLoading
+                    ? "Loading deployed models…"
+                    : `Search ${idOptions.length} deployed model ids…`
+                }
+                aria-label="Search deployed model ids"
+                onChange={(e) => setIdSearch(e.target.value)}
+                className="pl-7 pr-8"
+              />
+              {idSearch && (
+                <button
+                  type="button"
+                  aria-label="Clear search"
+                  onClick={() => setIdSearch("")}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]"
+                >
+                  <X size={13} />
+                </button>
+              )}
+            </div>
+
+            {/* one-by-one pick list — deployed ids, already-priced ones hidden */}
+            <div className="admin-scroll max-h-44 space-y-0.5 overflow-y-auto rounded-lg border border-white/[0.04] p-1.5">
+              {modelsQ.error ? (
+                <p className="px-2 py-3 text-[11px] text-red-400">
+                  Could not load deployed models: {modelsQ.error.message}
+                </p>
+              ) : idOptions.length === 0 ? (
+                <p className="px-2 py-3 text-[11px] text-[var(--admin-text-dim)]">
+                  {modelsQ.isLoading
+                    ? "Loading…"
+                    : idSearch.trim()
+                      ? `No deployed model matches “${idSearch.trim()}”.`
+                      : "Every deployed model already has pricing."}
+                </p>
+              ) : (
+                idOptions.map((opt) => {
+                  const on = form.model_id === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => set("model_id", on ? "" : opt.id)}
+                      aria-pressed={on}
+                      className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 font-mono text-[12px] transition-colors ${
+                        on
+                          ? "bg-blue-500/15 text-blue-200"
+                          : "text-[var(--admin-text-dim)] hover:bg-white/[0.03] hover:text-[var(--admin-text)]"
+                      }`}
+                    >
+                      <span className="truncate">{opt.id}</span>
+                      <span className="ml-auto flex shrink-0 gap-1 pl-2">
+                        {opt.providers.map((p) => (
+                          <Badge key={p} tone={on ? "blue" : "gray"}>
+                            {p}
+                          </Badge>
+                        ))}
+                      </span>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+            <p className="mt-1 text-[11px] text-[var(--admin-text-dim)]">
+              Model ids come from your deployed models. Add one to
+              Models/Combos first to price it here.
+            </p>
+          </div>
         )}
         <div className="grid grid-cols-2 gap-3">
           <Field label="Input $ / 1M tokens">
@@ -545,6 +704,11 @@ function PricingDialog(props: {
         </Field>
 
         {error && <ErrorText>{error}</ErrorText>}
+        {note && (
+          <p className="rounded-[10px] border border-emerald-500/15 bg-emerald-500/[0.06] px-2.5 py-2 text-[12px] text-emerald-300">
+            {note}
+          </p>
+        )}
 
         <div className="flex justify-end gap-2 pt-1">
           <Button variant="ghost" onClick={props.onClose}>Cancel</Button>

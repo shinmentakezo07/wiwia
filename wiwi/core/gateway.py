@@ -14,7 +14,7 @@ import orjson
 import structlog
 
 from wiwi.core.context import RequestContext
-from wiwi.core.recovery import parse_retry_after
+from wiwi.core.recovery import build_url, parse_retry_after
 from wiwi.cost.pricing import CostEngine, estimate_tokens_async
 from wiwi.ir import types as ir
 from wiwi.logging_core.events import LogEvent
@@ -1050,17 +1050,9 @@ def build_log_event(ctx: RequestContext) -> LogEvent:
 
 
 def _build_url(adapter, dep: Deployment, key: ProviderKeyRef, stream: bool) -> str:
-    """Build the upstream URL, appending the API key for providers that require it
-    in the querystring (e.g. Gemini) rather than headers. Adapters may declare
-    ``build_url_for_key(base_url, model_id, stream, key)`` when the credential
-    itself routes the URL (e.g. WorkBuddy CN vs global account domains)."""
-    build = getattr(adapter, "build_url_for_key", None)
-    if build is not None:
-        return build(dep.provider.base_url, dep.model_id, stream, key)
-    url = adapter.build_url(dep.provider.base_url, dep.model_id, stream)
-    if dep.provider.provider_type == "gemini" and url.endswith(("?key=", "&key=")):
-        url += key.secret
-    return url
+    """Build the upstream URL — delegates to the shared recovery.build_url."""
+    return build_url(adapter, dep.provider.base_url, dep.model_id,
+                     dep.provider.provider_type, stream, key)
 
 
 def _parse_retry_after(value: str | None) -> float | None:

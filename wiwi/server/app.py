@@ -2917,6 +2917,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return _err(400, "invalid_request_error",
                         "'input_per_1m' and 'output_per_1m' are required numbers", request)
         # Convert per-1M-token rates to per-token for the cost engine.
+        was_unpriced = model_id not in state.cost.prices
         entry: dict[str, Any] = {
             "input_cost_per_token": round(ipt / 1_000_000, 12),
             "output_cost_per_token": round(opt / 1_000_000, 12),
@@ -2938,6 +2939,32 @@ def create_app(config: WiwiConfig) -> FastAPI:
         await state.logs.log_audit(actor="master", action="pricing.update",
                                    target=model_id,
                                    diff={"input_per_1m": ipt, "output_per_1m": opt})
+
+        # Retroactive true-up: when this is the FIRST pricing for a model, its
+        # historical requests were logged at cost 0 (unpriced) and the virtual
+        # keys that served them were never charged. Recompute those rows' cost
+        # and add the delta to each key's spend_to_date so budgets reflect the
+        # retroactive spend. Rate EDITS (model already priced) never rewrite
+        # history — rows keep their originally logged cost.
+        key_deltas: dict[str, float] = {}
+        if was_unpriced and state.logs.db_sink is not None:
+            try:
+                key_deltas = await state.logs.db_sink.reprice_unpriced_history(
+                    model_id.split("/")[-1], entry)
+            except Exception:  # noqa: BLE001 — pricing update must not 500
+                state.logs.log_proxy(
+                    "error", "retroactive pricing true-up failed",
+                    model_id=model_id, exc_info=True)
+            if key_deltas:
+                for key_id, delta in key_deltas.items():
+                    # add_cost path enforces max_budget; a true-up that would
+                    # push a key over budget is still applied (the spend
+                    # already happened upstream) via the unconditional branch.
+                    await state.auth.apply_spend_trueup(key_id, delta)
+                state.logs.log_proxy(
+                    "info", "retroactive pricing applied",
+                    model_id=model_id, keys=len(key_deltas),
+                    total_delta=round(sum(key_deltas.values()), 6))
         # Echo back the normalized per-1M entry the GET endpoint returns.
         result: dict[str, Any] = {
             "model_id": model_id,
@@ -2955,6 +2982,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
             result["max_output_tokens"] = entry["max_output_tokens"]
         if "mode" in entry:
             result["mode"] = entry["mode"]
+        # Retroactive true-up summary so the admin UI can show what happened.
+        result["retroactive"] = {
+            "applied": bool(key_deltas),
+            "keys": len(key_deltas),
+            "total_delta": round(sum(key_deltas.values()), 6),
+        }
         return ORJSONResponse(result)
 
     @app.delete("/admin/pricing/{model_id:path}")
