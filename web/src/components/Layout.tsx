@@ -7,7 +7,7 @@
 // but not Providers/Settings/Users). Master-key admins keep the bearer token so
 // /admin/stream SSE stays live.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   Activity,
@@ -29,6 +29,7 @@ import {
   ShieldCheck,
   Terminal,
   Users,
+  X,
 } from "lucide-react";
 import { useAuth } from "@/api/auth";
 import { useAdminStream } from "@/api/stream";
@@ -37,6 +38,27 @@ import { useClientPrefs } from "@/lib/settings";
 
 const SIDEBAR_WIDE = 260;
 const SIDEBAR_COLLAPSED = 72;
+// Topbar height and the matching content offset must stay in lockstep — they
+// were two hand-written numbers before, which left a 1px seam.
+const TOPBAR_H = 64;
+const DESKTOP_QUERY = "(min-width: 1024px)";
+
+// The sidebar is a persistent column on ≥lg and an overlay drawer below it.
+// `collapsed` is a desktop-only affordance: forcing it on a phone produced an
+// unreadable 72px icon rail inside the drawer.
+function useIsDesktop() {
+  const [isDesktop, setIsDesktop] = useState(
+    () => typeof window !== "undefined" && window.matchMedia(DESKTOP_QUERY).matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia(DESKTOP_QUERY);
+    const onChange = (e: MediaQueryListEvent) => setIsDesktop(e.matches);
+    setIsDesktop(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  return isDesktop;
+}
 
 interface NavItem {
   to: string;
@@ -149,7 +171,12 @@ export function AdminLayout() {
   const connected = useAdminStream("__noop__", () => undefined);
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const isDesktop = useIsDesktop();
   const sidebarWidth = collapsed ? SIDEBAR_COLLAPSED : SIDEBAR_WIDE;
+  const showCollapsed = collapsed && isDesktop;
+
+  const drawerRef = useRef<HTMLElement>(null);
+  const toggleRef = useRef<HTMLButtonElement>(null);
 
   const isAdmin = user?.role === "admin";
   // Fold the admin-only sections into their user counterparts by title so
@@ -192,6 +219,34 @@ export function AdminLayout() {
 
   // Close mobile sidebar on route change
   useEffect(() => setMobileOpen(false), [location.pathname]);
+
+  // Leaving the mobile breakpoint drops the overlay drawer entirely.
+  useEffect(() => {
+    if (isDesktop) setMobileOpen(false);
+  }, [isDesktop]);
+
+  // Drawer a11y + ergonomics: Escape closes, background scroll locks, focus
+  // moves into the panel and returns to the toggle afterwards.
+  const wasOpen = useRef(false);
+  useEffect(() => {
+    if (!mobileOpen) {
+      if (wasOpen.current) toggleRef.current?.focus();
+      wasOpen.current = false;
+      return;
+    }
+    wasOpen.current = true;
+    drawerRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMobileOpen(false);
+    };
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [mobileOpen]);
 
   const meta = PAGE_META[location.pathname] ?? { title: "wiwi", section: "Admin" };
   const maskedKey = (() => {
@@ -240,23 +295,34 @@ export function AdminLayout() {
         />
       </div>
 
-      {/* ── Sidebar ── */}
-      {/* Mobile backdrop */}
-      {mobileOpen && (
-        <div
-          className="fixed inset-0 z-30 bg-black/60 backdrop-blur-sm lg:hidden"
-          onClick={() => setMobileOpen(false)}
-          aria-hidden
-        />
-      )}
+      {/* ── Mobile backdrop ── */}
+      {/* Kept mounted so it can fade; z-40 puts it above the topbar (z-30)
+          so the whole screen dims, not just the content. */}
+      <div
+        className={`fixed inset-0 z-40 bg-black/70 backdrop-blur-sm transition-opacity duration-300 lg:hidden ${
+          mobileOpen ? "opacity-100" : "pointer-events-none opacity-0"
+        }`}
+        onClick={() => setMobileOpen(false)}
+        aria-hidden
+      />
 
       {/* ── Sidebar ── */}
       <aside
-        className={`fixed left-0 top-0 z-40 flex h-screen flex-col bg-[var(--admin-surface)] transition-all duration-300 ${
-          collapsed ? "w-[72px]" : "w-[260px]"
+        id="admin-sidebar"
+        ref={drawerRef}
+        tabIndex={-1}
+        {...(!isDesktop && mobileOpen
+          ? { role: "dialog", "aria-modal": true, "aria-label": "Navigation" }
+          : {})}
+        className={`fixed left-0 top-0 z-50 flex h-screen flex-col border-r border-[var(--admin-border)] bg-[var(--admin-surface)] transition-all duration-300 ease-out focus:outline-none ${
+          showCollapsed ? "w-[72px]" : "w-[272px] max-w-[85vw]"
         } ${
-          mobileOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
+          mobileOpen ? "translate-x-0 shadow-2xl" : "-translate-x-full lg:translate-x-0"
         }`}
+        style={{
+          paddingTop: "env(safe-area-inset-top, 0px)",
+          paddingBottom: "env(safe-area-inset-bottom, 0px)",
+        }}
       >
         {/* Ambient glow layers */}
         <div
@@ -275,32 +341,44 @@ export function AdminLayout() {
         />
 
         {/* Logo */}
-        <Link to="/" className="relative flex h-[72px] items-center px-5">
-          {collapsed ? (
-            <img src="/wiwi-logo.png" alt="wiwi" className="mx-auto h-9 w-9 rounded-[10px] object-cover ring-1 ring-white/[0.06] ring-inset" />
+        <div className="relative flex h-[72px] shrink-0 items-center gap-2 pr-3 pl-5">
+          {showCollapsed ? (
+            <Link to="/" className="mx-auto flex items-center">
+              <img src="/wiwi-logo.png" alt="wiwi" className="h-9 w-9 rounded-[10px] object-cover ring-1 ring-white/[0.06] ring-inset" />
+            </Link>
           ) : (
-            <div className="flex items-center gap-3.5">
-              <img src="/wiwi-logo.png" alt="wiwi" className="h-10 w-10 shrink-0 rounded-[12px] object-cover ring-1 ring-white/[0.06] ring-inset" />
-              <div>
-                <h1 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
-                  wiwi
-                </h1>
-                <span
-                  className="font-mono text-[9px] font-semibold uppercase tracking-[0.18em]"
-                  style={{ color: "rgba(59, 130, 246, 0.5)" }}
-                >
-                  Gateway
-                </span>
-              </div>
-            </div>
+            <>
+              <Link to="/" className="flex min-w-0 flex-1 items-center gap-3.5">
+                <img src="/wiwi-logo.png" alt="wiwi" className="h-10 w-10 shrink-0 rounded-[12px] object-cover ring-1 ring-white/[0.06] ring-inset" />
+                <div className="min-w-0">
+                  <h1 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
+                    wiwi
+                  </h1>
+                  <span
+                    className="font-mono text-[9px] font-semibold uppercase tracking-[0.18em]"
+                    style={{ color: "rgba(59, 130, 246, 0.5)" }}
+                  >
+                    Gateway
+                  </span>
+                </div>
+              </Link>
+              <button
+                type="button"
+                onClick={() => setMobileOpen(false)}
+                aria-label="Close sidebar"
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-white/[0.04] bg-white/[0.02] text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.05] hover:text-[var(--admin-text)] lg:hidden"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </>
           )}
-        </Link>
+        </div>
 
         {/* Navigation */}
         <nav className="admin-scroll flex-1 space-y-6 overflow-y-auto px-3 py-5">
           {navSections.map((section) => (
             <div key={section.title}>
-              {!collapsed && <p className="admin-label mb-2.5 px-2.5">{section.title}</p>}
+              {!showCollapsed && <p className="admin-label mb-2.5 px-2.5">{section.title}</p>}
               <div className="space-y-0.5">
                 {section.items.map((item) => {
                   const Icon = item.icon;
@@ -309,10 +387,10 @@ export function AdminLayout() {
                       key={item.to}
                       to={item.to}
                       end={item.end}
-                      title={collapsed ? item.label : undefined}
+                      title={showCollapsed ? item.label : undefined}
                       className={({ isActive }) =>
-                        `group relative flex items-center gap-3 rounded-[12px] px-3 py-[9px] text-[13px] transition-all duration-200 ${
-                          collapsed ? "justify-center px-2" : ""
+                        `group relative flex min-h-[42px] items-center gap-3 rounded-[12px] px-3 py-[9px] text-[13px] transition-all duration-200 lg:min-h-0 ${
+                          showCollapsed ? "justify-center px-2" : ""
                         } ${
                           isActive
                             ? "bg-blue-500/[0.06] text-blue-200"
@@ -332,7 +410,7 @@ export function AdminLayout() {
                                 : "text-white/20 group-hover:text-white/40"
                             }`}
                           />
-                          {!collapsed && (
+                          {!showCollapsed && (
                             <span className="truncate font-medium tracking-[-0.01em]">
                               {item.label}
                             </span>
@@ -353,7 +431,7 @@ export function AdminLayout() {
           <div className="mb-3 h-px bg-gradient-to-r from-transparent via-white/[0.06] to-transparent" />
 
           {/* ── identity card ── */}
-          {!collapsed ? (
+          {!showCollapsed ? (
             <div className="admin-identity group relative overflow-hidden rounded-[12px] border border-white/[0.05] bg-white/[0.02] transition-colors duration-300 hover:border-white/[0.09]">
               {/* top accent line */}
               <span className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-blue-500/30 to-transparent" />
@@ -414,14 +492,14 @@ export function AdminLayout() {
           {/* ── collapse button ── */}
           <button
             onClick={() => setCollapsed(!collapsed)}
-            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            className="admin-collapse-btn mt-2 flex w-full items-center justify-center gap-2 rounded-[10px] border border-white/[0.04] py-2.5 font-mono text-[11px] tracking-wider text-[var(--admin-text-dim)] transition-all duration-200 hover:border-white/[0.08] hover:bg-white/[0.02] hover:text-[var(--admin-text-muted)]"
+            aria-label={showCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            title={showCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            className="admin-collapse-btn mt-2 hidden w-full items-center justify-center gap-2 rounded-[10px] border border-white/[0.04] py-2.5 font-mono text-[11px] tracking-wider text-[var(--admin-text-dim)] transition-all duration-200 hover:border-white/[0.08] hover:bg-white/[0.02] hover:text-[var(--admin-text-muted)] lg:flex"
           >
             <ChevronLeft
-              className={`h-3.5 w-3.5 transition-transform duration-300 ${collapsed ? "rotate-180" : ""}`}
+              className={`h-3.5 w-3.5 transition-transform duration-300 ${showCollapsed ? "rotate-180" : ""}`}
             />
-            {!collapsed && (
+            {!showCollapsed && (
               <>
                 <span>Collapse</span>
                 <kbd className="admin-kbd ml-0.5">⌘B</kbd>
@@ -437,34 +515,48 @@ export function AdminLayout() {
         style={{ left: 0, right: 0 }}
       >
         <header className="admin-topbar relative">
-          <div className="flex h-[64px] items-center gap-3 px-4 sm:gap-4 sm:px-6">
+          <div
+            className="flex items-center gap-3 px-4 sm:gap-4 sm:px-6"
+            style={{ height: `${TOPBAR_H}px` }}
+          >
             {/* Mobile sidebar toggle */}
             <button
+              ref={toggleRef}
               onClick={() => setMobileOpen(true)}
               aria-label="Open sidebar"
-              className="-ml-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-white/[0.04] bg-white/[0.02] text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.05] hover:text-[var(--admin-text)] lg:hidden"
+              aria-expanded={mobileOpen}
+              aria-controls="admin-sidebar"
+              className="-ml-1 flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-white/[0.04] bg-white/[0.02] text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.05] hover:text-[var(--admin-text)] lg:hidden"
             >
-              <Menu className="h-4.5 w-4.5" />
+              <Menu className="h-5 w-5" />
             </button>
-            <div className="min-w-0 shrink-0">
+            <div className="min-w-0 flex-1 lg:flex-none">
               <span className="text-[9px] font-semibold uppercase tracking-[0.16em] text-[var(--admin-accent)] opacity-60">
                 {meta.section}
               </span>
-              <h1 className="mt-0.5 text-[17px] font-semibold leading-tight tracking-[-0.02em] text-[var(--admin-text)]">
+              <h1 className="mt-0.5 truncate text-[17px] font-semibold leading-tight tracking-[-0.02em] text-[var(--admin-text)]">
                 {meta.title}
               </h1>
             </div>
 
-            <div className="mx-auto hidden items-center gap-2 lg:flex">
-              <span className="admin-live-badge">
+            {/* Centered on desktop (absolute), trailing on mobile */}
+            <div className="flex shrink-0 items-center gap-2 lg:absolute lg:left-1/2 lg:-translate-x-1/2">
+              <span className="admin-live-badge hidden lg:inline-flex">
                 <span
                   className={connected ? "admin-pulse-dot" : "h-1.5 w-1.5 rounded-full bg-zinc-600"}
                 />
                 {connected ? "live" : "offline"}
               </span>
+              {/* Compact dot-only status on narrow screens */}
+              <span
+                className={`h-1.5 w-1.5 rounded-full lg:hidden ${
+                  connected ? "admin-pulse-dot" : "bg-zinc-600"
+                }`}
+                title={connected ? "live" : "offline"}
+              />
             </div>
 
-            <div className="flex shrink-0 items-center gap-2">
+            <div className="ml-auto flex shrink-0 items-center gap-2">
               <div className="hidden items-center gap-1.5 px-2 md:flex">
                 <LiveClock />
               </div>
@@ -487,8 +579,14 @@ export function AdminLayout() {
 
       {/* ── Scrollable content ── */}
       <div
-        className="relative h-screen pt-[65px] transition-all duration-300 lg:ml-[var(--sidebar-w)]"
-        style={{ "--sidebar-w": `${sidebarWidth}px`, zIndex: 1 } as React.CSSProperties}
+        className="relative h-screen transition-all duration-300 lg:ml-[var(--sidebar-w)]"
+        style={
+          {
+            "--sidebar-w": `${sidebarWidth}px`,
+            paddingTop: `${TOPBAR_H + 1}px`,
+            zIndex: 1,
+          } as React.CSSProperties
+        }
       >
         <main className="admin-scroll h-full overflow-y-auto">
           <div className="admin-stagger mx-auto max-w-[1400px] p-4 sm:p-6 lg:p-8">
