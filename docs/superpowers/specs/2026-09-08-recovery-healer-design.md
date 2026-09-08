@@ -48,10 +48,15 @@ new `tests/test_recovery.py`. `wiwi/providers/base.py` is read, not modified.
 | `CircuitBreaker` | Per-target failure streak → temporary block, escalating to permanent | `.trip(t)`, `.clear(t)`, `.blocked(t) -> bool`, `.dead(t) -> bool`, `.mark_dead(t)` |
 | `probe_verdict(status) -> ProbeVerdict` | Pure classification of a probe HTTP outcome (`None` status = transport failure) | `ProbeVerdict` enum: `HEALTHY`, `ALIVE_THROTTLED`, `CREDS_VALID_MODEL_BAD`, `CREDS_REJECTED`, `UNREACHABLE` |
 
-Import direction: `core/recovery.py` imports only `providers.base` (contracts
-seam — same as `core/gateway.py` today). No dialect/provider branching. No
-imports from `router` or `gateway`, so `router → core.recovery → providers.base`
-introduces no cycle.
+Import direction: `core/recovery.py` imports stdlib + structlog + httpx +
+`wiwi.config` / `wiwi.ir.types` / `wiwi.providers.base` / `wiwi.providers.registry`
+(contracts seam — same as `core/gateway.py` today). No dialect/provider
+branching. No imports from `router` or `gateway`, so
+`router → core.recovery → providers.base` introduces no cycle. Two small
+seams move INTO recovery and the gateway delegates to them (avoids a
+`recovery → gateway` cycle): `build_url(adapter, base_url, model_id,
+provider_type, stream, key)` (verbatim from `gateway._build_url`) and
+`parse_retry_after(value)`.
 
 ### Refactors (mechanical, behavior-preserving)
 
