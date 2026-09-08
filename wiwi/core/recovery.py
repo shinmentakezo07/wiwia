@@ -120,14 +120,6 @@ def probe_verdict(status: int | None) -> ProbeVerdict:
     return ProbeVerdict.UNREACHABLE
 
 
-    def _announce(self, message: str) -> None:
-        log.info("healer_restored", message=message)
-        try:
-            self._log_proxy("info", message)
-        except Exception:
-            pass
-
-
 def build_url(adapter, base_url: str, model_id: str, provider_type: str,
               stream: bool, key) -> str:
     """Resolve the upstream URL for a call, appending the credential for
@@ -460,5 +452,5 @@ class HealthHealer:
         log.info("healer_restored", message=message)
         try:
             self._log_proxy("info", message)
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001 — announce is best-effort
+            log.debug("healer_announce_failed", err=str(e))

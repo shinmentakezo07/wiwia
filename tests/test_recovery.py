@@ -2,7 +2,6 @@
 
 import time
 
-import httpx
 import respx
 from asgi_lifespan import LifespanManager
 
@@ -307,7 +306,6 @@ def _healer(router, **overrides) -> HealthHealer:
 class TestHealthHealer:
     @respx.mock
     async def test_restores_after_consecutive_probes(self):
-        from wiwi.router.router import Router
         r, key, dep = _sick_key_router()
         respx.post(OPENAI_URL).respond(json=PROBE_OK_BODY)
         h = _healer(r, probes_to_restore=2)
@@ -321,8 +319,7 @@ class TestHealthHealer:
 
     @respx.mock
     async def test_restores_cooled_deployment_after_consecutive_probes(self):
-        from wiwi.router.router import Router
-        r, dep, key = _sick_dep_router()
+        r, dep, _key = _sick_dep_router()
         respx.post(OPENAI_URL).respond(json=PROBE_OK_BODY)
         h = _healer(r, probes_to_restore=2)
         assert await h._sweep() == 1
@@ -334,7 +331,6 @@ class TestHealthHealer:
 
     @respx.mock
     async def test_both_sick_restored_by_one_pair_each(self):
-        from wiwi.router.router import Router
         r, key, dep = _sick_router()
         respx.post(OPENAI_URL).respond(json=PROBE_OK_BODY)
         h = _healer(r, probes_to_restore=2)
@@ -348,8 +344,7 @@ class TestHealthHealer:
 
     @respx.mock
     async def test_429_extends_cooling_without_trip(self):
-        from wiwi.router.router import Router
-        r, key, dep = _sick_router()
+        r, key, _dep = _sick_router()
         key.mark_cooling(5.0)
         respx.post(OPENAI_URL).respond(status_code=429,
                                        headers={"retry-after": "120"})
@@ -363,7 +358,6 @@ class TestHealthHealer:
 
     @respx.mock
     async def test_401_trips_key_circuit_and_next_sweep_skips(self):
-        from wiwi.router.router import Router
         r, key, _ = _sick_key_router()
         key.status = "invalid"
         route = respx.post(OPENAI_URL).respond(status_code=401, text="nope")
@@ -377,7 +371,6 @@ class TestHealthHealer:
 
     @respx.mock
     async def test_400_restores_key_and_escalates_dep_circuit(self):
-        from wiwi.router.router import Router
         r, key, _ = _sick_key_router()
         key.status = "invalid"
         respx.post(OPENAI_URL).respond(
@@ -399,8 +392,7 @@ class TestHealthHealer:
 
     @respx.mock
     async def test_400_on_cooled_dep_marks_it_dead(self):
-        from wiwi.router.router import Router
-        r, dep, key = _sick_dep_router()
+        r, dep, _key = _sick_dep_router()
         respx.post(OPENAI_URL).respond(
             status_code=400, json={"error": {"message": "model not found"}})
         h = _healer(r, probe_backoff_base_s=0.0)
