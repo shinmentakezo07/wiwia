@@ -347,6 +347,29 @@ export const putAlertRules = (rules: AlertRule[]) =>
     body: JSON.stringify({ rules }),
   });
 
+/** Response cache: exact-match reuse of prior completions. Off by default. */
+export interface CacheSettingsResponse {
+  enabled: boolean;
+  /** Which backend is live: "none" | "memory" | "redis". Reported from the
+   *  instance, so a Redis URL with the extra missing reads as "memory". */
+  backend: "none" | "memory" | "redis";
+  /** Whether a Redis URL is configured. The URL itself holds a password and
+   *  is never returned. */
+  redis_configured: boolean;
+  ttl_s: number;
+  max_entries: number;
+  bypass_header: string;
+}
+
+export const getCacheSettings = () =>
+  api<CacheSettingsResponse>("/admin/cache/settings");
+
+export const putCacheSettings = (enabled: boolean) =>
+  api<CacheSettingsResponse>("/admin/cache/settings", {
+    method: "PUT",
+    body: JSON.stringify({ enabled }),
+  });
+
 // -- session auth + user + public catalog helpers ----------------------------
 
 export const getMe = () => api<{ user: User | null }>("/auth/me");

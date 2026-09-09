@@ -15,6 +15,7 @@ import { LandingPage } from "@/pages/Landing";
 import { PlaygroundPage } from "@/pages/Playground";
 import { ModelsCatalogPage } from "@/pages/ModelsCatalog";
 import { DocsPage } from "@/pages/Docs";
+import { DocArticlePage } from "@/pages/DocArticle";
 import { PricingPage } from "@/pages/Pricing";
 import { AboutPage } from "@/pages/About";
 import { ContactPage } from "@/pages/Contact";
@@ -88,6 +89,12 @@ function AppRoutes() {
         <Route path="/" element={<LandingPage />} />
         <Route path="/models" element={<ModelsCatalogPage />} />
         <Route path="/docs" element={<DocsPage />} />
+        {/* Tool guides that live under /guides but were historically linked
+            as /docs/<tool> (Integrations page) — keep those links working. */}
+        <Route path="/docs/cursor" element={<Navigate to="/guides/cursor" replace />} />
+        <Route path="/docs/cline" element={<Navigate to="/guides/cline" replace />} />
+        <Route path="/docs/n8n" element={<Navigate to="/guides/n8n" replace />} />
+        <Route path="/docs/:slug" element={<DocArticlePage />} />
         <Route path="/pricing" element={<PricingPage />} />
         <Route path="/about" element={<AboutPage />} />
         <Route path="/contact" element={<ContactPage />} />

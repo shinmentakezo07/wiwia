@@ -137,7 +137,7 @@ class RequestIdMiddleware:
 from wiwi.auth.keys import mask_key
 from wiwi.auth.service import AuthService
 from wiwi.auth.users import SESSION_TTL, UserInfo, UserService, sign_session, verify_session
-from wiwi.cache import build_response_cache
+from wiwi.cache import RedisResponseCache, build_response_cache
 from wiwi.cache.interface import CacheBackend, CacheEntry
 from wiwi.cache.keygen import is_cacheable_request, response_cache_key
 from wiwi.config import (
@@ -546,14 +546,60 @@ class AppState:
         # (init_db below). Without this the shipped container — which boots on
         # wiwi.yaml.example — could only be given a Redis URL by mounting a
         # custom config file.
-        redis_url = os.environ.get("REDIS_URL") or config.general_settings.redis_url
+        self._redis_url = os.environ.get("REDIS_URL") or config.general_settings.redis_url
+        # Built here (mirroring _sync_cache_enabled's enable branch, which is
+        # async because the disable branch must await aclose) so the cache is
+        # available to handlers that run before init_db completes.
         self.response_cache: CacheBackend | None = (
-            build_response_cache(cs, redis_url)
-            if cs.enabled else None)
+            build_response_cache(cs, self._redis_url) if cs.enabled else None)
         # Set during shutdown so long-lived SSE generators break out of their
         # event loop instead of blocking uvicorn's graceful-shutdown drain
         # (which otherwise hangs at "Waiting for connections to close").
         self.shutdown_event: asyncio.Event | None = None
+
+    async def _sync_cache_enabled(self) -> None:
+        """Rebuild or close the response cache to match ``cache_settings``.
+
+        The backend is derived from config on demand rather than captured once
+        at construction, because the admin API can flip ``enabled`` at runtime.
+        Redis clients are built lazily by the backend, so this never opens a
+        socket — it only decides which class to instantiate.
+        """
+        cs = self.config.cache_settings
+        if cs.enabled:
+            # Idempotent: re-enabling must not rebuild, or a second PUT would
+            # silently flush every warm entry.
+            if self.response_cache is None:
+                self.response_cache = build_response_cache(cs, self._redis_url)
+            return
+        if self.response_cache is not None:
+            # Drop the reference first so no in-flight request can observe a
+            # backend that is mid-close.
+            cache, self.response_cache = self.response_cache, None
+            await cache.aclose()
+
+    def _cache_settings_view(self) -> dict[str, object]:
+        """Admin-facing view of the response cache.
+
+        The backend is reported from the live instance rather than from config
+        alone, so a Redis URL with the ``redis`` package missing correctly
+        reports ``memory`` (``build_response_cache`` falls back on ImportError).
+        """
+        cs = self.config.cache_settings
+        backend = "none"
+        if self.response_cache is not None:
+            backend = ("redis" if isinstance(self.response_cache, RedisResponseCache)
+                       else "memory")
+        return {
+            "enabled": cs.enabled,
+            "backend": backend,
+            # Whether a Redis URL is set — deliberately NOT the URL itself,
+            # which embeds a password.
+            "redis_configured": bool(self._redis_url),
+            "ttl_s": cs.ttl_s,
+            "max_entries": cs.max_entries,
+            "bypass_header": cs.bypass_header,
+        }
 
     async def init_db(self) -> None:
         import sqlalchemy.ext.asyncio as saa
@@ -711,6 +757,12 @@ class AppState:
         strategy = await self.config_store.get_setting("routing_strategy")
         if strategy is not None:
             self.router.settings.routing_strategy = strategy
+        # response cache: DB overrides YAML, so an admin toggled through the
+        # console survives a restart. Absent row (None) leaves YAML in charge.
+        cache_enabled = await self.config_store.get_setting("response_cache_enabled")
+        if isinstance(cache_enabled, bool):
+            self.config.cache_settings.enabled = cache_enabled
+            await self._sync_cache_enabled()
         # model_group_alias: DB overlay merges over the YAML map (per key;
         # null value = tombstone removing a YAML-defined alias).
         # `alias_yaml_base` is captured BEFORE the overlay so write-time
@@ -3056,6 +3108,40 @@ def create_app(config: WiwiConfig) -> FastAPI:
         await state.logs.log_audit(actor="master", action="pricing.delete",
                                    target=model_id)
         return ORJSONResponse({"deleted": existed, "model_id": model_id})
+
+    # -- admin: response cache settings ---------------------------------------
+    @app.get("/admin/cache/settings")
+    async def admin_get_cache_settings(request: Request):
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        return ORJSONResponse(state._cache_settings_view())
+
+    @app.put("/admin/cache/settings")
+    async def admin_put_cache_settings(request: Request):
+        """Flip the response cache on/off at runtime; persists across restarts.
+
+        Body: ``{"enabled": bool}``. The backend is built or closed to match,
+        so disabling drops cached bodies instead of leaving them resident.
+        """
+        resp = _require_admin(request)
+        if resp:
+            return resp
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        if "enabled" not in body or not isinstance(body["enabled"], bool):
+            return _err(400, "invalid_request_error",
+                        "'enabled' must be a boolean", request)
+        enabled = body["enabled"]
+        state.config.cache_settings.enabled = enabled
+        await state._sync_cache_enabled()
+        if state.config_store:
+            await state.config_store.set_setting("response_cache_enabled", enabled)
+        await state.logs.log_audit(actor="master", action="cache_settings.update",
+                                   target="response_cache",
+                                   diff={"enabled": enabled})
+        return ORJSONResponse(state._cache_settings_view())
 
     # -- admin: alert rules (storage only; evaluation engine is post-MVP) ----------
     @app.get("/admin/alert-rules")

@@ -10,7 +10,7 @@
 // Master key handling, health polling, and prefs all mirror the existing
 // Dra-style dark design system.
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   Activity,
@@ -27,6 +27,8 @@ import {
 } from "lucide-react";
 import { clearToken, getToken } from "@/api/client";
 import { api } from "@/api/client";
+import { getCacheSettings, putCacheSettings } from "@/api/client";
+import type { CacheSettingsResponse } from "@/api/client";
 import { useAuth } from "@/api/auth";
 import { useQueryClient } from "@tanstack/react-query";
 import { useClientPrefs } from "@/lib/settings";
@@ -62,6 +64,157 @@ interface HealthResp {
 function maskKey(key: string): string {
   if (!key) return "(not set)";
   return `${key.slice(0, 13)}…${key.slice(-4)}`;
+}
+
+// -- response cache ---------------------------------------------------------
+
+// Backend is derived from the live instance, so "memory" here means "no Redis
+// URL configured" — the honest label for the single-process default.
+const BACKEND_LABEL: Record<CacheSettingsResponse["backend"], string> = {
+  none: "off",
+  memory: "in-memory",
+  redis: "redis",
+};
+
+function CacheCard() {
+  const [settings, setSettings] = useState<CacheSettingsResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [justToggled, setJustToggled] = useState(false);
+
+  const load = useCallback(async () => {
+    setError(null);
+    try {
+      setSettings(await getCacheSettings());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "failed to load cache settings");
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function setEnabled(enabled: boolean) {
+    // Optimistic: the toggle should feel instant. Reverted by the reload on
+    // failure, which also restores the true server state.
+    const prev = settings;
+    setSaving(true);
+    setError(null);
+    if (prev) setSettings({ ...prev, enabled });
+    try {
+      setSettings(await putCacheSettings(enabled));
+      setJustToggled(true);
+      setTimeout(() => setJustToggled(false), 1500);
+    } catch (e) {
+      setSettings(prev);
+      setError(e instanceof Error ? e.message : "failed to update cache settings");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const enabled = settings?.enabled ?? false;
+  const redisMissing = settings ? settings.redis_configured && settings.backend === "memory" : false;
+
+  return (
+    <Card>
+      <CardHeader
+        title="Response cache"
+        subtitle="reuse identical completions instead of calling the provider"
+        right={
+          <Badge tone={enabled ? "green" : "gray"} title={settings?.backend}>
+            {settings ? BACKEND_LABEL[settings.backend] : "…"}
+          </Badge>
+        }
+      />
+      <div className="px-5 py-4">
+        {error && (
+          <div className="mb-3 rounded-[10px] border border-red-500/10 bg-red-500/[0.04] px-3 py-2.5 text-[12px] text-red-400">
+            {error}
+          </div>
+        )}
+        {!settings && !error ? (
+          <div className="flex justify-center py-6">
+            <Spinner />
+          </div>
+        ) : (
+          <>
+            <div className="admin-setting-row">
+              <div className="min-w-0">
+                <p className="admin-setting-row-title">Enable response cache</p>
+                <p className="admin-setting-row-desc">
+                  Caches exact-match non-streaming responses when{" "}
+                  <span className="font-mono">temperature</span> is 0 or unset.
+                  Streaming and sampled requests are never cached.
+                </p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                {justToggled && (
+                  <span className="text-[11px] text-[var(--admin-text-dim)]">saved</span>
+                )}
+                <Toggle
+                  checked={enabled}
+                  disabled={saving || !settings}
+                  onChange={(v) => void setEnabled(v)}
+                />
+              </div>
+            </div>
+
+            <dl className="admin-dl mt-1">
+              <dt>Backend</dt>
+              <dd className="font-mono text-[12px]">
+                {settings?.backend ?? "—"}
+                {settings?.backend === "memory" && (
+                  <span className="ml-2 text-[11px] text-[var(--admin-text-dim)]">
+                    per-process, cleared on restart
+                  </span>
+                )}
+                {settings?.backend === "redis" && (
+                  <span className="ml-2 text-[11px] text-[var(--admin-text-dim)]">
+                    shared across replicas
+                  </span>
+                )}
+              </dd>
+              <dt>Entry TTL</dt>
+              <dd className="font-mono tabular-nums text-[12px]">
+                {settings ? `${settings.ttl_s}s` : "—"}
+              </dd>
+              <dt>Max entries</dt>
+              <dd className="font-mono tabular-nums text-[12px]">
+                {settings?.max_entries ?? "—"}
+                {settings?.backend === "redis" && (
+                  <span className="ml-2 text-[11px] text-[var(--admin-text-dim)]">
+                    memory cap only; Redis bounds total size
+                  </span>
+                )}
+              </dd>
+              <dt>Bypass header</dt>
+              <dd className="font-mono text-[12px]">
+                {settings?.bypass_header ?? "—"}
+              </dd>
+            </dl>
+
+            {redisMissing && (
+              <p className="mt-3 rounded-[10px] border border-amber-500/10 bg-amber-500/[0.04] px-3 py-2.5 text-[11px] leading-relaxed text-amber-400/90">
+                A Redis URL is configured but the{" "}
+                <span className="font-mono">redis</span> package is not
+                installed, so the cache fell back to memory. Install the{" "}
+                <span className="font-mono">[redis]</span> extra to use it.
+              </p>
+            )}
+
+            <p className="mt-3 text-[11px] leading-relaxed text-[var(--admin-text-dim)]">
+              For a single gateway instance, memory is faster than Redis — a
+              dict lookup beats a network round-trip. Redis pays off when
+              several replicas share one cache, or when you want the cache to
+              survive a deploy.
+            </p>
+          </>
+        )}
+      </div>
+    </Card>
+  );
 }
 
 function GeneralTab() {
@@ -132,6 +285,8 @@ function GeneralTab() {
           )}
         </div>
       </Card>
+
+      <CacheCard />
 
       <Card>
         <CardHeader title="Connection" subtitle="how this browser reaches the gateway" />

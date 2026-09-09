@@ -9,7 +9,11 @@ import path from "node:path";
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
-    alias: { "@": path.resolve(__dirname, "src") },
+    alias: {
+      "@": path.resolve(__dirname, "src"),
+      // Real markdown sources from the repo's /docs, imported with ?raw.
+      "@docs": path.resolve(__dirname, "../docs"),
+    },
   },
   build: {
     outDir: "../wiwi/server/static",
