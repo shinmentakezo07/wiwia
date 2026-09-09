@@ -130,6 +130,11 @@ class ClineAdapter(OpenAIAdapter):
         # Streaming-only upstream: force SSE and never send stream_options.
         body["stream"] = True
         body.pop("stream_options", None)
+        # Cline upstream defaults to a low reasoning budget when nothing is
+        # specified.  Force xhigh unless the client sent an explicit thinking
+        # variable (reasoning_effort, thinking_budget, or thinking_type).
+        if not _client_sent_thinking(req):
+            body.setdefault("reasoning_effort", "xhigh")
         return body
 
     def decode_response(self, status: int, body: bytes) -> ir.AssistantTurn:
@@ -180,6 +185,23 @@ def _unwrap_stream_data(event: str, data: str) -> tuple[str, str] | None:
     if unwrapped is chunk:
         return None
     return event, orjson.dumps(unwrapped).decode()
+
+def _client_sent_thinking(req: ir.Request) -> bool:
+    """True when the client explicitly set a thinking-related variable.
+
+    Covers the three IR hooks for thinking configuration:
+    ``reasoning_effort`` (OpenAI dialect), ``thinking_budget`` (Anthropic
+    budget_tokens), and ``thinking_type`` (Anthropic enabled/adaptive/
+    disabled).  When any of these is set we leave Cline's upstream to its
+    own default; otherwise we force ``reasoning_effort: "xhigh"`` below.
+    """
+    gp = req.gen_params
+    return bool(
+        gp.reasoning_effort is not None
+        or gp.thinking_budget is not None
+        or gp.thinking_type is not None
+    )
+
 
 def _current_platform() -> str:
     import sys

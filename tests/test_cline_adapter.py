@@ -8,6 +8,10 @@ Cline (api.cline.bot) is an OpenAI-compatible gateway that requires:
 - Streaming-only upstream (non-streaming requests fail), so the adapter
   forces stream:True in the encoded body while the gateway re-assembles.
 """
+from __future__ import annotations
+
+from typing import Any
+
 import orjson
 import pytest
 import respx
@@ -121,6 +125,51 @@ def test_encode_drops_stream_options():
     req.stream_options_include_usage = True
     body = get_adapter("cline").encode_request(req, "z-ai/glm-5.2", {})
     assert "stream_options" not in body
+
+
+def test_encode_defaults_to_xhigh_when_no_thinking_sent():
+    """When the client sends no thinking variable at all, the encoded body must
+    carry ``reasoning_effort: "xhigh"`` so Cline's upstream uses a high
+    reasoning budget rather than its own low default."""
+    req = make_req()
+    body = get_adapter("cline").encode_request(req, "z-ai/glm-5.2", {})
+    assert body["reasoning_effort"] == "xhigh"
+
+
+def test_encode_respects_explicit_reasoning_effort():
+    """An explicit ``reasoning_effort`` from the client must not be overwritten
+    by the Cline default."""
+    req = make_req()
+    req.gen_params.reasoning_effort = "low"
+    body = get_adapter("cline").encode_request(req, "z-ai/glm-5.2", {})
+    assert body["reasoning_effort"] == "low"
+
+
+def test_encode_respects_explicit_thinking_budget():
+    """An explicit ``thinking_budget`` (Anthropic dialect) counts as a client
+    thinking variable and must suppress the xhigh default."""
+    req = make_req()
+    req.gen_params.thinking_budget = 8000
+    body = get_adapter("cline").encode_request(req, "z-ai/glm-5.2", {})
+    assert "reasoning_effort" not in body or body["reasoning_effort"] != "xhigh"
+
+
+def test_encode_respects_explicit_thinking_type():
+    """An explicit ``thinking_type`` (enabled/adaptive/disabled) counts as a
+    client thinking variable and must suppress the xhigh default."""
+    req = make_req()
+    req.gen_params.thinking_type = "disabled"
+    body = get_adapter("cline").encode_request(req, "z-ai/glm-5.2", {})
+    assert "reasoning_effort" not in body or body["reasoning_effort"] != "xhigh"
+
+
+def test_encode_does_not_override_reasoning_effort_none():
+    """``reasoning_effort: "none"`` is an explicit client choice (thinking
+    disabled) and must be preserved, not replaced with xhigh."""
+    req = make_req()
+    req.gen_params.reasoning_effort = "none"
+    body = get_adapter("cline").encode_request(req, "z-ai/glm-5.2", {})
+    assert body["reasoning_effort"] == "none"
 
 
 # -- decode: {success,data} envelope unwrap ----------------------------------
@@ -393,3 +442,136 @@ async def test_non_streaming_reassembles_tool_calls():
         assert turn.stop_reason == "tool_call"
     finally:
         await g.aclose()
+
+
+# -- E2E: inspect the upstream body the Cline adapter actually sends ----------
+# These use the same Gateway + respx pattern as the existing reassembly tests
+# above, but additionally capture and assert on the encoded body sent upstream.
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_e2e_default_thinking_xhigh_sent_upstream():
+    """End-to-end through the Gateway: a client Request with no thinking
+    variable must cause the Cline adapter to send ``reasoning_effort:
+    "xhigh"`` upstream.  The httpx call is intercepted by respx and the
+    encoded body is inspected directly."""
+    import httpx
+
+    from wiwi.core.context import RequestContext
+    from wiwi.core.gateway import Gateway
+    from wiwi.cost.pricing import CostEngine
+    from wiwi.ir import types as ir
+    from wiwi.router.router import Router
+
+    captured: dict[str, Any] = {}
+    def _capture(req: httpx.Request) -> httpx.Response:
+        captured["body"] = req.content
+        captured["headers"] = dict(req.headers)
+        return httpx.Response(200, content=_sse_chunks())
+
+    respx.post("https://api.cline.bot/api/v1/chat/completions").mock(
+        side_effect=_capture)
+    g = Gateway(Router(_cline_cfg()), CostEngine())
+    try:
+        req = ir.Request(
+            model="cline-model", stream=False,
+            messages=[ir.Message(role="user", parts=[ir.TextPart("hi")])],
+        )
+        ctx = RequestContext(surface="chat", ir_req=req, group="cline-model")
+        turn = await g.complete(ctx)
+        assert turn.text == "Hello world"
+        body = orjson.loads(captured["body"])
+        assert body["reasoning_effort"] == "xhigh"
+        assert body["stream"] is True
+        assert "stream_options" not in body
+        auth = captured["headers"].get("authorization", "")
+        assert auth.startswith("Bearer workos:")
+    finally:
+        await g.aclose()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_e2e_explicit_reasoning_effort_preserved_upstream():
+    """When the client sends ``reasoning_effort: "low"`` the adapter must
+    forward it to Cline and NOT inject the xhigh default."""
+    import httpx
+
+    from wiwi.core.context import RequestContext
+    from wiwi.core.gateway import Gateway
+    from wiwi.cost.pricing import CostEngine
+    from wiwi.ir import types as ir
+    from wiwi.router.router import Router
+
+    captured: dict[str, Any] = {}
+    def _capture(req: httpx.Request) -> httpx.Response:
+        captured["body"] = req.content
+        return httpx.Response(200, content=_sse_chunks())
+
+    respx.post("https://api.cline.bot/api/v1/chat/completions").mock(
+        side_effect=_capture)
+    g = Gateway(Router(_cline_cfg()), CostEngine())
+    try:
+        req = ir.Request(
+            model="cline-model", stream=False,
+            messages=[ir.Message(role="user", parts=[ir.TextPart("hi")])],
+            gen_params=ir.GenParams(reasoning_effort="low"),
+        )
+        ctx = RequestContext(surface="chat", ir_req=req, group="cline-model")
+        turn = await g.complete(ctx)
+        assert turn.text == "Hello world"
+        body = orjson.loads(captured["body"])
+        assert body["reasoning_effort"] == "low"
+    finally:
+        await g.aclose()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_e2e_reasoning_effort_none_preserved_upstream():
+    """``reasoning_effort: "none"`` (thinking disabled) is an explicit client
+    choice and must reach Cline unchanged — not be overridden to xhigh."""
+    import httpx
+
+    from wiwi.core.context import RequestContext
+    from wiwi.core.gateway import Gateway
+    from wiwi.cost.pricing import CostEngine
+    from wiwi.ir import types as ir
+    from wiwi.router.router import Router
+
+    captured: dict[str, Any] = {}
+    def _capture(req: httpx.Request) -> httpx.Response:
+        captured["body"] = req.content
+        return httpx.Response(200, content=_sse_chunks())
+
+    respx.post("https://api.cline.bot/api/v1/chat/completions").mock(
+        side_effect=_capture)
+    g = Gateway(Router(_cline_cfg()), CostEngine())
+    try:
+        req = ir.Request(
+            model="cline-model", stream=False,
+            messages=[ir.Message(role="user", parts=[ir.TextPart("hi")])],
+            gen_params=ir.GenParams(reasoning_effort="none"),
+        )
+        ctx = RequestContext(surface="chat", ir_req=req, group="cline-model")
+        turn = await g.complete(ctx)
+        assert turn.text == "Hello world"
+        body = orjson.loads(captured["body"])
+        assert body["reasoning_effort"] == "none"
+    finally:
+        await g.aclose()
+
+
+def _sse_chunks() -> bytes:
+    """Cline upstream always responds with SSE, even when the client asked
+    for a non-streaming response (stream:false on the wire, but the adapter
+    forces stream:true in the upstream body)."""
+    parts = [
+        b'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n',
+        b'data: {"choices":[{"delta":{"content":" world"}}]}\n\n',
+        (b'data: {"choices":[{"delta":{},"finish_reason":"stop"}],'
+         b'"usage":{"prompt_tokens":2,"completion_tokens":2}}\n\n'),
+        b'data: ' + bytes([91]) + b'DONE' + bytes([93]) + b'\n\n',
+    ]
+    return b"".join(parts)
