@@ -184,12 +184,26 @@ Config precedence: `--config` flag > `WIWI_CONFIG` env > `wiwi.yaml`.
 ## Bugfix Workflow (binding)
 
 1. Read `AUDIT.md` to avoid redoing a known fix.
-2. Read `UPDATE.md` for cross-provider translation context (reasoning/thinking params, tool_result, `content: null`, OpenRouter `reasoning`, `stream_options`, upstream error extraction).
+2. Read `UPDATE.md` — it is the **binding changelog** for all OpenAI ↔ Anthropic cross-provider translation fixes, the OpenRouter adapter, and multi-turn conversation fixes. Any agent touching `wiwi/wire/` codecs, the OpenAI/Anthropic/OpenRouter adapters, or any code handling `reasoning_effort`/`reasoning` mapping, `tool_result` messages, `content: null`, `stream_options`, or upstream error extraction **must read UPDATE.md first** and follow the invariants it records. When extending one of those areas, check UPDATE.md for the existing fix before writing new code; when a new fix lands in one of those areas, add an entry to UPDATE.md so a later agent does not rediscover and re-fix the same thing.
 3. Follow `systematic-debugging` — root cause before patching.
 4. Write the failing regression test FIRST into the next `test_fix_roundN.py`.
 5. Implement the fix; keep the change minimal and in-module (dialect changes → `wiwi/wire/`; provider changes → `wiwi/providers/` + registry branch).
 6. Self-review via `requesting-code-review` before claiming done.
 7. Verify: `python3 -m pytest tests/ -q && ruff check wiwi/ tests/` both green; for UI/server changes, exercise the live path.
+
+## Error Discovery & Fix-Reporting Rule (binding)
+
+When an agent discovers a bug, error, or suspicious behavior in this codebase:
+
+1. **Report it in `AUDIT.md` before or alongside fixing it.** Do not silently fix a bug and leave no trace. Any agent that finds a real defect must add an entry to `AUDIT.md` using the existing format: a severity badge (`🔴`/`🟠`/`🟡`/`⚪`), a short title, the exact file:line citations, a trigger description, and a one-line fix sketch. If the bug is already in `AUDIT.md`, skip to step 2.
+
+2. **When fixing a bug that is already in `AUDIT.md`, mark it as fixed in place.** Update the entry to record that it is resolved — add a `**Status: fixed**` line and the commit or description that fixed it, or move it into a `## ✅ Fixed` section at the top of the file with the original finding preserved. Never delete a finding without a trace. The goal is that a fresh agent opening `AUDIT.md` can tell at a glance which bugs are still live and which have already been resolved, so they do not waste time re-fixing or re-investigating something that is done.
+
+3. **Link the fix to its `AUDIT.md` entry.** When a fix lands for a bug that has an `AUDIT.md` entry, the commit message or PR description must reference the entry number or title so the connection is recoverable. If the fix introduces a new regression test in a `test_fix_roundN.py` file, mention that test in the `AUDIT.md` entry as well.
+
+4. **Do not re-report the same bug.** Before adding a new entry to `AUDIT.md`, search it for the same file:line or same symptom. Duplicate entries confuse future agents and inflate the "live bugs" count.
+
+5. **Read `AUDIT.md` at the start of every bugfix session.** If a previous session already discovered and reported the issue you are about to investigate, you should see it there. Starting from `AUDIT.md` avoids duplicate work and makes it obvious which fixes are still pending.
 
 ## Guardrails
 
@@ -198,3 +212,37 @@ Config precedence: `--config` flag > `WIWI_CONFIG` env > `wiwi.yaml`.
 - **No dialect/provider branching** outside `wiwi/wire/` and `wiwi/providers/` — the registry's import-time assert will catch a forgotten branch, but the cost of leakage is silent wrong-language routing.
 - **Second convention beside existing is prohibited** — copy the surrounding pattern, don't invent a parallel one.
 - **Always run `lsp references` before editing an exported symbol**; missed callsites are bugs.
+
+## Import Rules (binding)
+
+All agents editing this codebase MUST follow these import rules:
+
+1. **No dialect or provider imports outside `wiwi/wire/` and `wiwi/providers/`.** `core/`, `router/`, `auth/`, `streaming/`, `cache/`, `cost/`, `logging_core/`, and `ir/` must never import symbols from `wiwi.wire` or `wiwi.providers`. Violating this leaks dialect/provider branching into modules that must stay generic. The registry's import-time assert will not catch this — it catches missing branches, not out-of-place ones.
+
+2. **Import from the module that owns the symbol, not from a re-export layer.** If `wiwi.foo` re-exports `Bar` from `wiwi.foo.internal`, import `Bar` from `wiwi.foo`, not from `wiwi.foo.internal`. Re-export layers exist for a reason; bypassing them couples callers to internal layout.
+
+3. **Never add a new top-level entry without updating `registry.py`'s coverage assert.** Adding a provider type or an inbound wire dialect without the corresponding branch in `get_adapter()` or the matching wire module will be caught at import time — but only if the assert is kept honest. Any new entry in `PROVIDER_TYPES` or any new inbound route must have its branch.
+
+4. **Prefer existing module APIs over inventing new ones.** If a helper already exists in the owning module, use it. Do not create a parallel utility with the same job under a different name. "Second convention beside existing is prohibited."
+
+5. **Run `lsp references` on any exported symbol before editing or removing it.** An exported symbol (a public function, class, or constant reachable from outside its module) may have unknown callers. Editing it without checking references is how regressions ship.
+
+6. **Imports in `web/` follow TypeScript module resolution.** Do not mix relative paths arbitrarily — prefer path aliases configured in `tsconfig` / Vite config, consistent with the existing pattern in `web/src/`. Do not add bare `../../../../` chains; if the depth feels wrong, the module boundary probably is.
+
+7. **Never import `wiwi.server.app` at module level in a library module.** `app.py` is the FastAPI application factory and its import can trigger lifespan / startup side effects. Library code (`core/`, `router/`, `auth/`, etc.) must not import it; only the CLI (`wiwi/main.py`) and test fixtures do.
+
+## UI/UX Universal Compatibility Rule (binding)
+
+Every UI or UX change — in `web/` or in any admin-facing HTML/template surface — MUST be verified as usable on both **desktop (mouse/keyboard)** and **mobile (touch, narrow viewport)** before being marked done. Specifically:
+
+1. **Layout must not break below ~375 px viewport width.** Test at 375×812 (iPhone SE class) and at a wide desktop viewport. Sidebars, tables, and cards that assume a minimum width must reflow, stack, or collapse — not clip or overflow.
+
+2. **All interactive controls must be operable by touch.** Tap targets must be at least 44×44 px (Apple HIG) or 48×48 dp (Material). Controls that only respond to hover (CSS `:hover`-only reveals, hover-dependent dropdowns) must also respond to focus and touch. No information or action may be hover-only.
+
+3. **Keyboard and focus navigation must work.** Every focusable element must be reachable via Tab/Shift-Tab in a sensible order. Focus styles must be visible (do not suppress `outline` without providing an equivalent). Modal/dialog focus trapping and Escape-to-close must work on desktop.
+
+4. **Text must be legible and not rely on fixed sizes.** Use relative units (`rem`, `em`, `%`, `vw`) over fixed `px` for typography and spacing where appropriate. Text in containers must not truncate silently in a way that hides information on narrow screens.
+
+5. **Responsive is not optional for admin pages.** Admin pages in `web/src/pages/` are used on desktop but may be opened on a phone (e.g., a quick key rotation or budget check). Assume a mobile viewport is possible for every page; do not gate responsiveness behind a "this is an admin page" assumption.
+
+6. **Verify before claiming done.** For any UI/UX change, open the page in a mobile-sized viewport (browser devtools device mode or a real device) and a desktop viewport, and confirm the change works in both. Screenshots or a short description of the verification belong in the commit message or PR description.

@@ -4,7 +4,9 @@
 > **Status**: All changes verified — 213 tests pass, ruff clean
 > **Scope**: OpenAI ↔ Anthropic cross-provider translation fixes, OpenRouter dedicated adapter, multi-turn conversation bug fix
 
-This document is the changelog for all translation-layer work done in this session. Future agents encountering issues in these areas should read this first for quick context.
+**This document is binding reference material.** Any agent touching the translation layer — OpenAI↔Anthropic cross-provider translation, OpenRouter adapter, multi-turn conversation handling, `reasoning`/`reasoning_effort` mapping, tool_result / `content: null`, `stream_options`, or upstream error extraction — **MUST read this file first** before changing any wire codec (`wiwi/wire/`) or provider adapter (`wiwi/providers/`). The fixes recorded here are the reason the current code behaves correctly; changing those paths without reading this doc is the most common way to silently re-introduce a bug that was already fixed.
+
+Each entry below records the before→after state, the exact files and lines changed, and the tests that cover it. When extending or modifying any of those areas, check this file for existing invariants before writing new code. When a new fix lands in one of these areas, add an entry to this file so a later agent does not rediscover and re-fix the same thing.
 
 ---
 

@@ -1,5 +1,7 @@
 # wiwi — Build Plan
 
+> **Status (2026-09): historical — all 6 phases complete.** This was the original build plan from empty repo to MVP. The system as built additionally includes features planned later (see `docs/superpowers/{specs,plans}/`): admin UI, public front + user accounts, router health scoring, recovery/health healer, long-range usage stats, provider edit/delete, streaming performance recovery. Current docs: [ARCHITECTURE.md](ARCHITECTURE.md), [CORE.md](CORE.md), [DEVELOPMENT.md](DEVELOPMENT.md).
+
 How we get from empty repo to the MVP defined in `MVP.md`, using the architecture in `ARCHITECTURE.md`. Work is organized as 6 phases matching M1–M6. Each phase ends with a demo gate that must pass before the next begins.
 
 ---

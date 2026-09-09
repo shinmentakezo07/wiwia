@@ -1,5 +1,7 @@
 # wiwi — MVP Definition
 
+> **Status (2026-09): shipped and surpassed.** The original MVP scope below is fully implemented — plus much that was explicitly out of scope here: the full admin UI and public front (`web/`, see [ADMIN.md](ADMIN.md)), 11 provider types (see [PROVIDERS.md](PROVIDERS.md)), hosted-tool translation, response cache, stream journals/resume (see [STREAMING.md](STREAMING.md)), user accounts, and Prometheus metrics. Keep this page as the scope record; read [ARCHITECTURE.md](ARCHITECTURE.md) for the system as built.
+
 The MVP is a single-binary gateway exposing three native API surfaces — OpenAI Chat Completions (`/v1/chat/completions`), OpenAI Responses (`/v1/responses`, for Codex CLI), and Anthropic Messages (`/v1/messages`, for Claude Code / Anthropic SDK) — routing all of them to OpenAI/Anthropic/Gemini/any-OpenAI-compatible providers through one canonical internal format. It ships LiteLLM-style config, load balancing with retries and fallbacks, virtual keys, rate limits, budgets, spend tracking, and request logs. No web UI in the MVP; management happens through `wiwi.yaml` and a small admin REST API.
 
 ---
