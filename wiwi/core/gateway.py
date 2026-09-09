@@ -114,6 +114,8 @@ class Gateway:
         params: dict[str, Any] = {"max_tokens": dep.max_tokens,
                                   "extra_body": dict(dep.extra_body),
                                   "drop_params": self.drop_params,
+                                  "prompt_cache": dep.prompt_cache,
+                                  "prompt_cache_min_tokens": dep.prompt_cache_min_tokens,
                                   "provider_type": dep.provider.provider_type}
         url = _build_url(adapter, dep, key, False)
         body = adapter.encode_request(ctx.ir_req, dep.model_id, params)
@@ -207,6 +209,8 @@ class Gateway:
         params: dict[str, Any] = {"max_tokens": dep.max_tokens,
                                   "extra_body": dict(dep.extra_body),
                                   "drop_params": self.drop_params,
+                                  "prompt_cache": dep.prompt_cache,
+                                  "prompt_cache_min_tokens": dep.prompt_cache_min_tokens,
                                   "provider_type": dep.provider.provider_type}
         url = _build_url(adapter, dep, key, True)
         body = adapter.encode_request(ctx.ir_req, dep.model_id, params)
@@ -606,6 +610,8 @@ class Gateway:
         params: dict[str, Any] = {"max_tokens": dep.max_tokens,
                                   "extra_body": dict(dep.extra_body),
                                   "drop_params": self.drop_params,
+                                  "prompt_cache": dep.prompt_cache,
+                                  "prompt_cache_min_tokens": dep.prompt_cache_min_tokens,
                                   "provider_type": dep.provider.provider_type}
         url = _build_url(adapter, dep, key, True)
         try:

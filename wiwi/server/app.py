@@ -137,9 +137,9 @@ class RequestIdMiddleware:
 from wiwi.auth.keys import mask_key
 from wiwi.auth.service import AuthService
 from wiwi.auth.users import SESSION_TTL, UserInfo, UserService, sign_session, verify_session
-from wiwi.cache.interface import CacheEntry
-from wiwi.cache.keygen import response_cache_key
-from wiwi.cache.response_cache import MemoryResponseCache
+from wiwi.cache import build_response_cache
+from wiwi.cache.interface import CacheBackend, CacheEntry
+from wiwi.cache.keygen import is_cacheable_request, response_cache_key
 from wiwi.config import (
     PROVIDER_TYPES,
     ConfigError,
@@ -537,9 +537,17 @@ class AppState:
         self.journals = JournalStore(rjs.stream_journal_dir, rjs.stream_journal_ttl_s,
                                      rjs.stream_journal_max_bytes)
         # Exact-match response cache (docs/CORE.md §6). Off by default.
+        # Backend: memory LRU (default) or Redis when general_settings.redis_url
+        # is set — Redis survives restarts and is shared across replicas, but a
+        # dict lookup is faster, so memory stays the default for 1 process.
         cs = config.cache_settings
-        self.response_cache: MemoryResponseCache | None = (
-            MemoryResponseCache(ttl_s=cs.ttl_s, max_entries=cs.max_entries)
+        # REDIS_URL env var overrides config, mirroring how DATABASE_URL works
+        # (init_db below). Without this the shipped container — which boots on
+        # wiwi.yaml.example — could only be given a Redis URL by mounting a
+        # custom config file.
+        redis_url = os.environ.get("REDIS_URL") or config.general_settings.redis_url
+        self.response_cache: CacheBackend | None = (
+            build_response_cache(cs, redis_url)
             if cs.enabled else None)
         # Set during shutdown so long-lived SSE generators break out of their
         # event loop instead of blocking uvicorn's graceful-shutdown drain
@@ -735,6 +743,8 @@ class AppState:
             self.shutdown_event.set()
         for g in self.gateways.values():
             await g.aclose()
+        if self.response_cache is not None:
+            await self.response_cache.aclose()
         await self.logs.stop()
         if getattr(self, "_db_sink", None) is not None:
             await self._db_sink.engine.dispose()
@@ -1104,7 +1114,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
         cache_key = ""
         if (cache is not None and not cache_bypass and not ir_req.stream
                 and not any(t.builtin for t in ir_req.tools)
-                and not (ir_req.gen_params.metadata or {}).get("stream")):
+                and not (ir_req.gen_params.metadata or {}).get("stream")
+                # Sampling makes the output non-reproducible: an identical
+                # prompt legitimately yields different text, and caching it
+                # would pin the caller to the first completion for the whole
+                # TTL. Only deterministic requests are admitted.
+                and is_cacheable_request(ir_req)):
             cache_key = response_cache_key(ir_req, group, surface,
                                            getattr(info, "key_id", ""))
             entry = await cache.get(cache_key)

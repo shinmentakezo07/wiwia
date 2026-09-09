@@ -127,6 +127,18 @@ class DeploymentParams(BaseModel):
     # Used for provider-specific routing knobs, e.g. OpenRouter's ``provider``
     # object: ``extra_body: {provider: {only: ["gmicloud"]}}``.
     extra_body: dict[str, Any] = Field(default_factory=dict)
+    # Anthropic prompt caching: opt-in injection of ``cache_control``
+    # breakpoints on the STABLE prefix (last tool def + last system block).
+    # The trailing user turn is deliberately never marked — it varies per
+    # request, and a breakpoint on changing content writes a new cache entry
+    # every call and never reads one (you pay the 1.25x write premium forever).
+    # Only worth enabling when the prefix is genuinely reused across calls.
+    prompt_cache: bool = False
+    # Minimum estimated prefix tokens before a breakpoint is added. Anthropic
+    # silently skips caching below a model-specific minimum (512-4096), so
+    # marking a short prefix is a write that will never be read. None = the
+    # adapter default (1024).
+    prompt_cache_min_tokens: int | None = None
 
 
 class ModelEntry(BaseModel):

@@ -18,6 +18,16 @@ log = structlog.get_logger("wiwi.anthropic_adapter")
 DEFAULT_MAX_TOKENS = 4096
 MIN_THINKING_BUDGET = 1024  # Anthropic API minimum for budget_tokens
 
+# Prompt-cache breakpoint injection (opt-in via the ``prompt_cache``
+# deployment param). Anthropic's minimum cacheable prefix is model-dependent
+# (512 for the newest Opus/Fable/Mythos tiers, 1024 for Sonnet 4.x/4.5/4.6,
+# 4096 for Opus 4.5/4.6 and Haiku 4.5). Below the minimum the API silently
+# does NOT cache, so marking a short prefix is a write that will never be
+# read. 1024 is the conservative common denominator: it is the *lowest*
+# threshold that still covers most Sonnet/Opus deployments without marking
+# prefixes that cannot possibly be cached on Haiku or Opus 4.5/4.6.
+DEFAULT_PROMPT_CACHE_MIN_TOKENS = 1024
+
 # Anthropic 2026 top-level params the wire codec captures into req.extras;
 # safe to forward verbatim to the Messages API (mirrors openai_adapter's
 # _STANDARD under drop_params=True).
@@ -101,6 +111,48 @@ def _with_response_format_instruction(
     return list(system) + [{"type": "text", "text": instruction}]
 
 
+def _prefix_token_estimate(req: ir.Request) -> int:
+    """Rough token count of the *stable* prefix: tools + system only.
+
+    Deliberately excludes user/assistant turns. Those are the part that
+    varies per request, so they must not count toward the "is this worth
+    caching" decision — a long final user message does not make the tools
+    and system prompt any more cacheable.
+
+    Uses the same chars/4 heuristic as the rest of the codebase rather than
+    tiktoken: this runs synchronously inside ``encode_request`` on the hot
+    path, and it only needs to be right to within a factor of two.
+    """
+    chars = 0
+    for t in req.tools:
+        chars += len(t.name or "")
+        chars += len(t.description or "")
+        try:
+            chars += len(orjson.dumps(t.parameters_json_schema or {}))
+        except (TypeError, ValueError):
+            pass
+    for m in req.messages:
+        if m.role != "system":
+            continue
+        for p in m.parts:
+            if isinstance(p, ir.TextPart):
+                chars += len(p.text)
+    return max(1, chars // 4)
+
+
+def _count_breakpoints(req: ir.Request) -> int:
+    """Breakpoints the caller already placed, so we do not exceed 4."""
+    n = 0
+    for t in req.tools:
+        if t.cache_control:
+            n += 1
+    for m in req.messages:
+        for p in m.parts:
+            if getattr(p, "cache_control", None):
+                n += 1
+    return n
+
+
 class AnthropicAdapter:
     provider_type = "anthropic"
 
@@ -126,10 +178,82 @@ class AnthropicAdapter:
         base = base_url.rstrip("/")
         return f"{base}/messages"
 
+    def _should_inject(self, req: ir.Request, params: dict[str, Any],
+                       body: dict[str, Any] | None = None) -> bool:
+        """Whether breakpoint injection should run for this request."""
+        if not params.get("prompt_cache"):
+            return False
+        # Caller knows best: if it placed any breakpoints, don't second-guess.
+        # Bailing out entirely (rather than topping up to 4) keeps us from
+        # mixing our guesses with deliberate markers.
+        if _count_breakpoints(req) or (body and "cache_control" in body):
+            return False
+        min_tokens = params.get("prompt_cache_min_tokens")
+        if not isinstance(min_tokens, int) or min_tokens <= 0:
+            min_tokens = DEFAULT_PROMPT_CACHE_MIN_TOKENS
+        est = _prefix_token_estimate(req)
+        if est < min_tokens:
+            log.debug("prompt_cache_skipped_prefix_too_short",
+                      estimate=est, min_tokens=min_tokens)
+            return False
+        return True
+
+    def _inject_cache_breakpoints(self, req: ir.Request, body: dict[str, Any],
+                                  params: dict[str, Any]) -> None:
+        """Mark the stable prefix for Anthropic prompt caching (opt-in).
+
+        Why the prefix and not the whole prompt: a cache write happens ONLY
+        at the breakpoint, and a read walks back looking for entries *prior
+        requests wrote*. Marking the trailing user turn — which differs every
+        request — means every call writes a fresh entry and none ever reads
+        one, so you pay the 1.25x write premium forever. Anthropic's own
+        top-level "automatic caching" has the same flaw for a
+        static-system + varying-message prompt, because it places the
+        breakpoint on the last cacheable block.
+
+        So: mark the last tool definition and the last system block, never the
+        final user turn.
+
+        Opt-in (``prompt_cache``) because this trades a 1.25x write on the
+        first call for 0.1x reads afterwards — only worth it when the prefix
+        is genuinely reused.
+        """
+        if not self._should_inject(req, params, body):
+            return
+        system = body.get("system")
+        if system and isinstance(system, list):
+            # _with_response_format_instruction appends its instruction as a
+            # separate trailing block, so the last block here is either the
+            # caller's own system text (stable) or that instruction (which
+            # varies with response_format). Mark the last block that is not
+            # the instruction.
+            idx = len(system) - 1
+            if idx > 0 and _JSON_ONLY_INSTRUCTION in system[idx].get("text", ""):
+                # Last block is the appended JSON-output instruction, which
+                # varies with response_format — step back to the caller's own
+                # (stable) system text.
+                idx -= 1
+            if idx >= 0 and not system[idx].get("cache_control"):
+                system[idx]["cache_control"] = {"type": "ephemeral"}
+
+        tools = body.get("tools")
+        if tools and isinstance(tools, list):
+            last = tools[-1]
+            if not last.get("cache_control"):
+                last["cache_control"] = {"type": "ephemeral"}
+
     def encode_request(self, req: ir.Request, model_id: str,
                        deployment_params: dict[str, Any]) -> dict[str, Any]:
         g = req.gen_params
         system = _system_blocks_or_text(req.messages)
+        # When injecting cache breakpoints, force the block form up front so
+        # the JSON-output instruction (appended below) lands in its OWN
+        # trailing block. If it were concatenated into a single string and
+        # that string marked, the schema-derived instruction would become part
+        # of the cached prefix — and it varies with response_format, so the
+        # prefix would stop being stable.
+        if isinstance(system, str) and self._should_inject(req, deployment_params):
+            system = [{"type": "text", "text": system}]
         msgs: list[dict[str, Any]] = []
         for m in req.messages:
             if m.role == "system":
@@ -354,6 +478,8 @@ class AnthropicAdapter:
                                        "disable_parallel_tool_use": disable}
         if req.stream:
             body["stream"] = True
+        # Last: needs body["tools"] and body["system"] fully rendered.
+        self._inject_cache_breakpoints(req, body, deployment_params)
         return body
 
     def decode_response(self, status: int, body: bytes) -> ir.AssistantTurn:

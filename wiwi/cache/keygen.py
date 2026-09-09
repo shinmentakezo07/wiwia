@@ -31,6 +31,35 @@ def _encode(obj: Any) -> Any:
     return obj
 
 
+def is_cacheable_request(ir_req: ir.Request) -> bool:
+    """Whether *ir_req* is deterministic enough to cache an exact response.
+
+    ``response_cache_key`` is a hash of the request, so it can only ever match
+    a request that is *identical* — but "identical request" is not the same as
+    "same expected answer". With ``temperature > 0`` the provider samples, so
+    two identical prompts legitimately produce different text. Caching those
+    pins the caller to whichever completion came back first, for the whole
+    TTL: a "write me a haiku" endpoint would return one haiku forever.
+
+    So admission is gated on determinism rather than left to the key:
+
+    - ``temperature`` unset or ``0``  → cacheable (greedy decoding; a given
+      model+prompt is reproducible in practice).
+    - ``temperature > 0``             → not cacheable.
+    - ``n > 1``                       → not cacheable: the caller asked for
+      several sampled alternatives and caching would freeze all of them to
+      the first observed set.
+
+    ``seed`` is deliberately NOT a gate. A fixed seed makes sampling more
+    reproducible, but it is not a portability guarantee across providers or
+    model versions, and ``temperature=0`` is already admitted without one.
+    """
+    gp = ir_req.gen_params
+    if gp.temperature:  # truthy check: rejects >0, admits None and 0/0.0
+        return False
+    return not (gp.n or 1) > 1
+
+
 def response_cache_key(ir_req: ir.Request, group: str, surface: str,
                        key_id: str) -> str:
     """SHA-256 hex digest over the normalized IR request + routing scope."""

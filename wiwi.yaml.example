@@ -62,6 +62,16 @@ providers:
 # Example shape:
 #   - model_name: my-gpt
 #     wiwi_params: {provider: openai-main, model: gpt-4o, weight: 2}
+#
+# Anthropic prompt caching (opt-in, per deployment):
+#   prompt_cache: true   # mark the STABLE prefix (tools + system) so repeat
+#                        # calls read at 0.1x instead of paying full input.
+#                        # The trailing user turn is never marked — it varies
+#                        # per request, and a breakpoint on changing content
+#                        # writes a new entry every call and never reads one.
+#   prompt_cache_min_tokens: 1024   # skip when the prefix is shorter than
+#                        # this; Anthropic silently doesn't cache below a
+#                        # model-specific minimum (512-4096 tokens).
 model_list: []
 
 router_settings:
@@ -90,7 +100,11 @@ router_settings:
 cache_settings:
   enabled: false
   # ttl_s: 3600
-  # max_entries: 256
+  # max_entries: 256   # memory backend only; Redis is bounded by Redis itself
+  # Exact-match cache: only non-streaming, deterministic requests are stored.
+  # A request with temperature > 0 (or n > 1) is never cached — an identical
+  # prompt legitimately yields different text when sampling, and caching it
+  # would pin callers to whichever completion came back first.
 
 general_settings:
   master_key: os.environ/WIWI_MASTER_KEY
@@ -100,6 +114,11 @@ general_settings:
   # database_url: sqlite+aiosqlite:///wiwi.db          # SQLite (default)
   # database_url: postgresql+asyncpg://user:pass@host:5432/db?sslmode=require  # Postgres
   database_url: os.environ/DATABASE_URL
+  # Optional Redis. Requires the [redis] extra (uv pip install -e '.[redis]').
+  # When set, the exact-match response cache (see cache_settings) is stored in
+  # Redis: entries survive a restart and are shared across replicas.
+  # Unset (default) keeps the in-memory LRU, which is faster for one process.
+  # redis_url: redis://localhost:6379/0
 
 wiwi_settings:
   drop_params: true

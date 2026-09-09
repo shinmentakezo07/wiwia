@@ -227,6 +227,10 @@ class Deployment:
     max_tokens: int | None = None
     extra_headers: dict[str, str] = field(default_factory=dict)
     extra_body: dict[str, Any] = field(default_factory=dict)
+    # Anthropic prompt caching: opt-in injection of cache breakpoints on the
+    # stable prefix (tools + system). Off by default.
+    prompt_cache: bool = False
+    prompt_cache_min_tokens: int | None = None
     # cooldown / health
     fails: list[float] = field(default_factory=list)
     cooldown_until: float = 0.0
@@ -335,7 +339,9 @@ class Router:
                              weight=wp.weight, rpm=wp.rpm, tpm=wp.tpm,
                              timeout=wp.timeout, max_tokens=wp.max_tokens,
                              extra_headers=dict(wp.extra_headers),
-                             extra_body=dict(wp.extra_body))
+                             extra_body=dict(wp.extra_body),
+                             prompt_cache=wp.prompt_cache,
+                             prompt_cache_min_tokens=wp.prompt_cache_min_tokens)
             self.groups.setdefault(entry.model_name, []).append(dep)
         # Cross-provider WRR is only meaningful for groups whose deployments
         # span at least two distinct provider accounts.  Single-provider

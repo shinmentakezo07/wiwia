@@ -165,7 +165,7 @@
 - Master-key- or session-gated REST API at `/admin/*`.
 - Audit trail (`actor` / `action` / `target` / `diff`) for every mutation — *including credential reveals*.
 - SQLite by default; **PostgreSQL built in** (`asyncpg` ships as a core dependency — just set `DATABASE_URL`).
-- Optional Redis backend for rate limits via the `[redis]` extra.
+- Optional Redis backend for the response cache via the `[redis]` extra (`REDIS_URL`).
 - `--reload` dev mode, `start.sh` wrapper, multi-stage Docker build.
 
 </td>
@@ -308,6 +308,76 @@ The compose stack runs **Postgres 16 + wiwi** together (Postgres is a plain serv
 
 The image is a three-stage build: `uv` installs Python deps → `bun` builds the SPA → the runtime image runs as non-root `wiwi` (uid 10001).
 
+#### Enabling Redis
+
+The compose stack includes a `redis:7-alpine` service and passes `REDIS_URL` to `wiwi` automatically:
+
+```bash
+docker compose up --build          # redis + postgres + wiwi
+docker compose up --build wiwi     # already have infra running elsewhere
+```
+
+Redis backs the **response cache** and is off unless you opt in — see [Redis for the response cache](#-redis-for-the-response-cache).
+
+### 🚂 Deploying to Railway
+
+Railway gives you a URL you can't hardcode, so use **variables** rather than a baked-in `wiwi.yaml`.
+
+**1. Add a Redis service.** In your Railway project: *New → Database → Redis*. Railway exposes `REDIS_URL` (a `redis://default:PASSWORD@…:6379` string) to any service in the same project.
+
+**2. Set variables on the wiwi service:**
+
+| Variable | Value |
+|---|---|
+| `WIWI_MASTER_KEY` | a long random secret (`openssl rand -hex 32`) |
+| `REDIS_URL` | `${{Redis.REDIS_URL}}` (reference the service's variable) |
+| `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` if you add Postgres; omit for SQLite |
+| `WIWI_CONFIG` | the YAML below |
+
+**3. Use `WIWI_CONFIG`** — the shipped image boots on `wiwi.yaml.example`, so you cannot set `cache_settings` any other way. This is raw YAML in one env var:
+
+```yaml
+general_settings:
+  master_key: os.environ/WIWI_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+  redis_url: os.environ/REDIS_URL
+cache_settings:
+  enabled: true
+  ttl_s: 3600
+```
+
+Multi-line values are fine in Railway's variable editor. Quote anything containing a `:` (e.g. `database_url: "sqlite+aiosqlite:///:memory:"`) or YAML will fail to parse.
+
+**4. Verify.** Check the startup log for the backend, then send the same request twice and look for `x-wiwi-cache: HIT` on the second response.
+
+### 🟥 Redis for the response cache
+
+Redis is **optional and off by default**. It stores exact-match responses so they survive a restart and are shared across replicas.
+
+Two conditions must both hold — setting only one does nothing:
+
+1. `cache_settings.enabled: true` (default is `false`)
+2. `redis_url` set — via `REDIS_URL` env var (overrides config) or `general_settings.redis_url`
+
+```bash
+REDIS_URL=redis://localhost:6379/0     # env var wins; no config file edit needed
+```
+
+| | Memory (default) | Redis |
+|---|---|---|
+| Lookup cost | ~0.001 ms (dict) | ~0.3–1 ms (network) |
+| Survives restart | no | yes |
+| Shared across replicas | no | yes |
+| Capacity | `max_entries` (256) | bounded by Redis |
+
+**Read this before enabling it:** for a **single instance** Redis is *slower* — `main.py` runs one uvicorn worker, so a dict lookup already beats a network round-trip. Redis earns its keep when you run **2+ replicas**, or when you want a warm cache across deploys. It is not a latency optimisation for one process.
+
+Only **non-streaming, deterministic** requests are cached (`temperature` unset or `0`, `n == 1`). A request with `temperature > 0` is never cached — identical prompts legitimately produce different text, and caching them would pin callers to whichever completion arrived first. Bypass a single call with `X-Wiwi-No-Cache: true`.
+
+Redis is **advisory**: if it is unreachable every operation degrades to a miss and requests keep succeeding. Redis needing a password, TLS, or a database index? Put it in the URL — `rediss://` for TLS, e.g. `rediss://default:PASSWORD@host:6380/0`.
+
+> Note: `wiwi/ratelimit/redis.py` also exists but is **not wired up** — rate limiting still uses the in-memory limiter regardless of `redis_url`.
+
 ### 🔧 Config-loading precedence
 
 The CLI is explicit about where config comes from (order matters):
@@ -338,7 +408,7 @@ A `.env` in the cwd is loaded **before** any of the above, so `WIWI_MASTER_KEY`,
 ```bash
 uv venv && uv pip install -e .            # runtime only
 uv venv && uv pip install -e ".[dev]"     # + pytest, pytest-asyncio, respx, asgi-lifespan, ruff, hypothesis
-uv pip install -e ".[redis]"              # Redis rate-limit backend
+uv pip install -e ".[redis]"              # Redis response-cache backend
 ```
 
 > 📌 **Postgres needs no extra.** `asyncpg` is a core dependency — point `DATABASE_URL` at a Postgres instance and it just works. There is no `[pg]` extra.
@@ -474,7 +544,7 @@ router_settings:
 general_settings:
   master_key: os.environ/WIWI_MASTER_KEY
   database_url: os.environ/DATABASE_URL   # sqlite+aiosqlite:///wiwi.db (default) or postgres
-  # redis_url: redis://localhost:6379/0   # requires the [redis] extra
+  # redis_url: os.environ/REDIS_URL       # response cache backend; needs the [redis] extra
   max_keys_per_user: 50                   # caps live virtual keys per non-admin owner
 
 wiwi_settings:

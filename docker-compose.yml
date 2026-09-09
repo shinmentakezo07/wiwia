@@ -13,6 +13,20 @@ services:
       retries: 10
     restart: unless-stopped
 
+  redis:
+    image: redis:7-alpine
+    # No auth and no persistence by default: this backs a cache, so losing it
+    # must only mean a cold cache. Add `--requirepass` + a volume if you ever
+    # rely on it for anything durable.
+    command: ["redis-server", "--appendonly", "no", "--maxmemory", "256mb",
+              "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
   wiwi:
     build: .
     ports: ["4000:4000"]
@@ -20,6 +34,9 @@ services:
     environment:
       WIWI_MASTER_KEY: ${WIWI_MASTER_KEY:-sk-wiwi-master-change-me}
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://wiwi:wiwi@postgres:5432/wiwi}
+      # Optional: shared response cache. Leave empty to use the in-memory
+      # backend (faster for a single instance). Requires cache_settings.enabled.
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
@@ -36,6 +53,8 @@ services:
     command: ["--config", "/app/wiwi.yaml", "--host", "0.0.0.0", "--port", "4000"]
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     restart: unless-stopped
 

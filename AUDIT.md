@@ -770,3 +770,169 @@ end-to-end, and per-surface error shape across all three dialects plus
 `count_tokens`.
 
 **Baseline after this round:** 1270 tests pass, ruff clean.
+
+---
+
+## Addendum — response-cache determinism guard + Redis backend, Round 34 (2026-09-09)
+
+Two gaps in the Round 9 cache layer, both about *when* and *where* a response
+may be reused.
+
+### 34a. Sampled requests were cached (correctness)
+
+**Files:** `wiwi/cache/keygen.py`, `wiwi/server/app.py`
+
+`response_cache_key()` hashes the full normalized IR, so the key can only ever
+match an *identical* request — but "identical request" is not "same expected
+answer". With `cache_settings.enabled = true`, a client sending
+`temperature: 0.8` received the same completion for the whole TTL, because
+nothing gated admission on determinism. A "write me a poem" endpoint would
+have returned one poem forever.
+
+**Fix:** new `is_cacheable_request()` admission predicate (temperature unset or
+`0`; `n == 1`), applied at the cache branch in `run_chat_like`. `seed` is
+deliberately not a gate — it is not a portability guarantee across providers or
+model versions, and `temperature=0` is already admitted without one.
+
+Verified end-to-end: `temperature` 0.8 / 1.0 reach upstream twice (no
+`x-wiwi-cache`), while unset / `0` hit with one upstream call.
+
+### 34b. `redis_url` read but unused for caching (dormant config)
+
+**Files:** `wiwi/cache/redis_cache.py` (new), `wiwi/cache/__init__.py`,
+`wiwi/server/app.py`
+
+`CacheBackend` was declared in Round 9 for exactly this seam, but only the
+memory backend existed. `GeneralSettings.redis_url` was parsed and never used
+for caching (the dormant `RedisRateLimiter` is a separate issue, still unwired
+by design — rate limiting was out of scope here).
+
+**Fix:** `RedisResponseCache` over `GET`/`SETEX`/`DEL`, selected by
+`build_response_cache()` when `redis_url` is set; memory stays the default.
+Design constraints, both real:
+
+- `CacheEntry.payload` is `bytes` and **orjson refuses to serialize `bytes`**
+  (`TypeError: Type is not JSON serializable: bytes`), so the entry is a
+  base64-armored JSON document, and the client is `decode_responses=False`.
+- A cache must never fail a request: every Redis call degrades to a miss, and
+  `SETEX` TTL is clamped to `>= 1` because Redis rejects a non-positive expiry
+  (`int(0.9) == 0` would raise mid-request).
+
+The backend is closed in `AppState.shutdown()`.
+
+**Note on expected gain:** Redis is *not* a latency win for a single process —
+`main.py` runs one uvicorn worker and a dict lookup beats a network round-trip.
+It buys restart survival, a shared cache across replicas, and capacity beyond
+`max_entries: 256`. Not benchmarked: no Redis server in the dev environment,
+so correctness is covered by an injected fake client, not a live instance.
+
+**Tests:** `tests/test_fix_round34.py` (22 tests) — determinism predicate,
+byte/unicode round-trip, namespacing, TTL clamp, corrupt-entry tolerance,
+never-raise-on-unreachable, plus end-to-end temperature matrix and backend
+selection.
+
+**Baseline after this round:** 1387 tests pass, ruff clean.
+
+---
+
+## Addendum — Anthropic prompt-cache breakpoint injection, Round 35 (2026-09-09)
+
+### 35. No prompt caching unless the client sends `cache_control` — cost
+
+**Severity:** 🟡 Medium (silent overspend; no correctness impact)
+
+**Files:** `wiwi/providers/anthropic_adapter.py`,
+`wiwi/config.py` (`DeploymentParams`), `wiwi/router/router.py` (`Deployment`),
+`wiwi/core/gateway.py` (3 `params` sites)
+
+`cache_control` was pure pass-through. `wiwi` never *originated* a cache
+breakpoint, so a client that did not send one paid full input price on every
+request — even for the exact shape prompt caching exists for (large static
+system prompt + stable tool definitions + a short varying user turn).
+
+**Why the naive fix is a trap** (from the current Anthropic docs):
+
+- A cache write happens **only at the breakpoint**, and a read walks back
+  looking for entries *prior requests wrote*. Marking the trailing user turn
+  — which differs every request — means every call writes a fresh entry and
+  none ever reads one. You pay the **1.25x write premium forever**. The docs
+  call this the "common mistake".
+- Anthropic's top-level *automatic* caching (`cache_control` at request top
+  level) has the same flaw here: it places the breakpoint on the last
+  cacheable block, which for static-system + varying-message is the varying
+  one.
+- Below a model-specific minimum (512–4096 tokens, varies by model) the API
+  **silently does not cache**, so marking a short prefix is a write that will
+  never be read.
+
+**Fix:** opt-in `prompt_cache` deployment param. Marks the **stable prefix
+only** — last tool definition and last system block — never the trailing user
+turn. Estimates prefix tokens and skips below `prompt_cache_min_tokens`
+(default 1024). Caller-supplied `cache_control` always wins (no
+second-guessing, and never exceeds the 4-breakpoint budget). Off by default.
+
+Two ordering constraints discovered while implementing, both now covered by
+tests:
+
+- Injection must run at the **end** of `encode_request`; `body["tools"]` does
+  not exist until after the tool loop.
+- With `response_format` set, the JSON-output instruction is appended as its
+  own trailing block. It must stay **outside** the marked prefix — it varies
+  with the schema, so marking it would destabilise the cached prefix.
+
+**Tests:** `tests/test_fix_round35.py` (18) — off-by-default, prefix-only
+marking, never marking the user turn, threshold boundary, caller markers win,
+4-breakpoint budget, JSON-instruction placement.
+
+**Verified:** default path byte-unchanged (`system` stays a `str`, zero
+markers); with `prompt_cache: true` the system block is marked, the system
+text is identical across turns, and the user turn is never marked.
+
+**Baseline after this round:** 1405 tests pass, ruff clean.
+
+---
+
+## Addendum — Redis deployment ergonomics, Round 36 (2026-09-09)
+
+### 36. `redis_url` had no env-var override; `[redis]` extra not installed in the image
+
+**Severity:** 🟡 Medium (config silently inert in containers)
+
+**Files:** `wiwi/server/app.py` (`AppState.__init__`), `Dockerfile`,
+`docker-compose.yml`, `README.md`
+
+Two deployment blockers found while answering "how do I set REDIS_URL in
+Docker / Railway":
+
+1. `DATABASE_URL` is read from the environment at runtime
+   (`app.py` `init_db`), but `redis_url` was **config-file only**. The shipped
+   image boots on `wiwi.yaml.example`, whose `redis_url` is commented out — so
+   setting `REDIS_URL` in a container did **nothing**. The only workaround was
+   mounting a custom config file, which the compose stack does not do.
+
+   **Fix:** `AppState.__init__` now reads `os.environ.get("REDIS_URL") or
+   config.general_settings.redis_url`, mirroring the DATABASE_URL pattern. An
+   empty env var falls back to config, so platforms that inject empty values
+   (Railway/Render) do not shadow a configured URL.
+
+2. The Dockerfile ran `uv pip install -p … .` **without** the `[redis]`
+   extra. `build_response_cache()` catches `ImportError` and falls back to
+   memory, so a configured `redis_url` would have quietly kept using memory —
+   no error, no log.
+
+   **Fix:** install `.[redis]`; added a `redis:7-alpine` compose service with a
+   healthcheck and `REDIS_URL` wired to the `wiwi` service.
+
+Also documented: enabling Redis requires **both** `cache_settings.enabled: true`
+and a URL. Setting a URL alone is a no-op, which is an easy misconfiguration.
+
+**Verified against a real Redis 7 container** (previous round only had an
+injected fake): bytes/unicode round-trip, TTL enforced by Redis (`SETEX`),
+expiry observed live, delete, degrade-to-miss when unreachable, and a full
+HTTP end-to-end showing `x-wiwi-cache: HIT` on the second call with one
+upstream call.
+
+**Tests:** `tests/test_fix_round34.py` (+3) — REDIS_URL overrides config,
+env beats YAML, empty env falls back to config.
+
+**Baseline after this round:** 1409 tests pass, ruff clean.

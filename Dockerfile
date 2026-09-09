@@ -4,7 +4,10 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS py-builder
 WORKDIR /app
 COPY pyproject.toml ./
 COPY wiwi/ /app/wiwi/
-RUN uv venv /app/.venv && uv pip install -p /app/.venv/bin/python .
+# [redis] extra: the response cache falls back to the in-memory backend when
+# the package is missing, but then a configured redis_url silently does
+# nothing. Install it so REDIS_URL works in the shipped image.
+RUN uv venv /app/.venv && uv pip install -p /app/.venv/bin/python ".[redis]"
 
 # Stage 2: Build the admin web UI (React + TypeScript → static assets)
 FROM oven/bun:1 AS web-builder
