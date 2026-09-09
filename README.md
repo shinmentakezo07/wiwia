@@ -249,7 +249,7 @@ All 11 types ship in `wiwi/config.py:PROVIDER_TYPES`, which is the single source
 | `gemini` | `gemini_adapter.py` | `https://generativelanguage.googleapis.com/v1beta` | multimodal, structured output, function calling |
 | `openrouter` | `openrouter_adapter.py` | `https://openrouter.ai/api/v1` | unified `reasoning{}` translation, `reasoning_details` decoding |
 | `nvidia-nim` | `nim_adapter.py` | `https://integrate.api.nvidia.com/v1` | **vLLM-backed quirks**: `nim_tool_schema.py` strips boolean JSON-Schema subschemas and aliases parameters named `type` to `_nim_arg_<name>`, restoring agent-facing names on the way back |
-| `cline` | `cline_adapter.py` | `https://api.cline.bot/api/v1` | OAuth (WorkOS) with on-demand refresh, cross-account WRR, global default-model list |
+| `cline` | `cline_adapter.py` | `https://api.cline.bot/api/v1` | OAuth (WorkOS) with on-demand refresh, cross-account WRR, global default-model list, and live npm CLI/core version fingerprints |
 | `workbuddy` | `workbuddy_adapter.py` | `https://copilot.tencent.com` | WorkBuddy / CodeBuddy (Tencent); nested-JSON auth, stream-only upstream, business errors ride HTTP 200 in `{code,msg,data}` envelopes |
 | `gmicloud` | *(openai wire)* | `https://api.gmi-serving.com/v1` | GMI Cloud serving endpoint |
 | `bai` | `bai_adapter.py` | `https://api.b.ai/v1` | B.AI unified gateway — one key across Chat / Responses / Messages protocols; replays `reasoning_content` on tool-call turns |

@@ -936,3 +936,79 @@ upstream call.
 env beats YAML, empty env falls back to config.
 
 **Baseline after this round:** 1409 tests pass, ruff clean.
+
+## Addendum — runtime response-cache toggle, Round 37 (2026-09-09)
+
+`cache_settings.enabled` was config-file-only. There was no admin endpoint for
+it, so enabling or disabling the response cache meant editing `wiwi.yaml` and
+restarting the gateway — awkward generally, and self-defeating for the Redis
+backend specifically, since surviving a restart is the main reason to use it.
+
+Two findings made this more than "add a route":
+
+1. 🟠 **`AppState.__init__` captured the backend once.** The instance was built
+   at construction from the loaded config (`wiwi/server/app.py:548`) and
+   `run_chat_like` read `state.response_cache` from that single construction.
+   So an API that only flipped the config boolean would have had no effect on
+   the live backend without a restart. The instance must be (re)derived from
+   config on demand.
+
+2. 🟡 **Disabling would strand the backend.** `response_cache = None` alone
+   leaks: a memory backend keeps response bodies resident and a Redis client
+   stays open. The backend must be `aclose()`d on disable.
+
+**Fix:** `GET`/`PUT /admin/cache/settings` (`{"enabled": bool}`), plus
+`AppState._sync_cache_enabled()` which builds or closes the backend to match.
+Enabled is idempotent (a second PUT must not rebuild, or it silently flushes
+every warm entry). Persisted to the settings table as
+`response_cache_enabled` and applied at startup, so the DB overrides YAML in
+both directions.
+
+**Security:** the admin view reports `redis_configured` (a bool), never the
+URL — `redis://user:password@host` embeds a credential. `backend` is reported
+from the live instance rather than config, so a Redis URL with the `redis`
+package missing correctly reads as `memory` instead of claiming Redis.
+
+**UI:** new "Response cache" card on Settings → General, with backend badge,
+TTL, max entries, bypass header, and an explanatory note that memory is faster
+than Redis for a single instance.
+
+**Tests:** `tests/test_fix_round37.py` (15) — auth on both methods, disabled
+by default, Redis selected when URL set, no URL/password leakage, live toggle
+both directions, idempotent enable, disable closes backend, non-boolean
+rejected with state left untouched, persistence both directions across
+restarts, YAML honoured when no DB row.
+
+**Verified live** (real uvicorn + a stub upstream that counts calls): disabled
+→ 2 calls/2 upstream; enabled → 2 calls/1 upstream with `x-wiwi-cache: HIT`;
+disabled again → back to 1 call/1 upstream. Restart durability checked across
+three boots including a case where YAML says `true` and the DB overrides it to
+`false`.
+
+**Baseline after this round:** 1424 tests pass, ruff clean.
+
+---
+
+## ✅ Fixed — Cline live version fingerprint
+
+### Cline adapter announced wiwi and Python versions as Cline versions
+
+**Severity:** 🟡 Medium (upstream compatibility and misleading client fingerprint)
+
+**Files:** `wiwi/providers/cline_adapter.py` (pre-fix lines 104-114)
+
+**Trigger:** any request routed through the Cline provider before this fix.
+
+The adapter used wiwi's package version for `User-Agent`, `X-CLIENT-VERSION`, and
+`X-CORE-VERSION`, and Python's interpreter version for `X-PLATFORM-VERSION`. Cline expects the
+live CLI version in all client-version fields and its separately published core package version in
+`X-CORE-VERSION`, so the request fingerprint did not match a real Cline CLI.
+
+**Fix:** added `wiwi/providers/cline_version.py`, which independently refreshes `cline` and
+`@cline/core` from npm every five minutes on a background task and serves stale values after
+failure. `ClineAdapter.headers()` reads the synchronous cache with no request-path I/O, and the
+worker is started and stopped by the FastAPI lifespan. Covered by
+`tests/test_fix_round36.py`.
+
+**Status: fixed** — live CLI/core cache refresh, header mapping, lifecycle wiring, and regression
+coverage are implemented in this change.
