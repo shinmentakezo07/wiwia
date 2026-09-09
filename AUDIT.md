@@ -6,7 +6,26 @@
 Each finding verified against source by reading the cited lines. Severities: 🔴 critical · 🟠 high · 🟡 medium · ⚪ low.
 
 ---
+## ✅ Fixed
 
+### 37. `/docs` served Swagger instead of the built documentation UI
+
+**Severity:** 🟡 Low (routing/UI)
+**Files:** `wiwi/server/app.py:867` (pre-fix); `web/src/main.tsx:90`;
+`wiwi/server/app.py:3838-3844`
+**Trigger:** opening `/docs` in the browser.
+
+FastAPI's `docs_url="/docs"` claimed the path before the root-mounted SPA, so
+the browser saw the generated Swagger UI instead of the existing React
+documentation page.
+
+**Fix:** set `docs_url=None`; the root SPA fallback serves `/docs` to the React
+route. Covered by `tests/test_fix_round37.py`.
+
+**Status: fixed** — Swagger is disabled at `/docs` and the built SPA route is
+used instead.
+
+---
 ## 🔴 Critical
 
 ### 54. Default session secret permits forged admin cookies when `master_key` is unset

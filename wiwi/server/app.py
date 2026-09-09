@@ -864,7 +864,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             "WIWI_SESSION_SECRET). Refusing to start with a default secret, "
             "which would allow forged admin sessions.")
     state = AppState(config)
-    app = FastAPI(title="wiwi", version="0.1.0", docs_url="/docs",
+    app = FastAPI(title="wiwi", version="0.1.0", docs_url=None,
                   lifespan=lifespan)
     app.state.wiwi = state
 
