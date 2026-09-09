@@ -10,6 +10,7 @@ Cline (api.cline.bot) is an OpenAI-compatible gateway that requires:
 """
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import orjson
@@ -17,6 +18,7 @@ import pytest
 import respx
 
 from wiwi.config import PROVIDER_TYPES
+from wiwi.providers import cline_version as cv
 from wiwi.providers.base import ProviderKeyRef
 from wiwi.providers.registry import get_adapter
 from wiwi.streaming import deltas as dl
@@ -37,6 +39,13 @@ def make_req(**overrides):
 
 def key(secret="abc123token"):
     return ProviderKeyRef(label="default", secret=secret)
+
+
+@pytest.fixture(autouse=True)
+def _seed_versions():
+    cv._set_cached_for_tests("9.9.9", "8.8.8", time.monotonic())
+    yield
+    cv._set_cached_for_tests(None, None, 0.0)
 
 
 # -- registration ---------------------------------------------------------
@@ -69,10 +78,9 @@ def test_headers_include_client_fingerprint():
     assert h["HTTP-Referer"] == "https://cline.bot"
     assert h["X-Title"] == "Cline"
     assert h["X-CLIENT-TYPE"] == "wiwi"
-    assert h["X-CLIENT-VERSION"] == "0.1.0"
-    assert h["X-CORE-VERSION"] == "0.1.0"
-    assert "X-PLATFORM" in h
-    assert "X-PLATFORM-VERSION" in h
+    assert h["X-CLIENT-VERSION"] == "9.9.9"
+    assert h["X-CORE-VERSION"] == "8.8.8"
+    assert h["X-PLATFORM-VERSION"] == "9.9.9"
     assert h["X-IS-MULTIROOT"] == "false"
 
 

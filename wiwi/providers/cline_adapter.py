@@ -6,8 +6,8 @@ Cline is an OpenAI Chat Completions-compatible gateway with three quirks:
    — the ``workos:`` prefix is mandatory and auto-prepended when missing.
 2. Fingerprint: every request must carry a client-identification header set
    (``HTTP-Referer``, ``X-Title``, ``X-CLIENT-*``, ``X-PLATFORM*``); missing
-   headers are rejected upstream. Versions default to the running wiwi
-   version, read live at request-build time.
+   headers are rejected upstream. Versions come from the background-refreshed
+   Cline npm registry cache and are read without I/O at request-build time.
 3. Streaming-only upstream: the chat/completions endpoint only implements
    SSE. ``stream`` is always forced True in the encoded body regardless of
    what the client asked for (the gateway re-assembles deltas for
@@ -26,9 +26,9 @@ from typing import Any
 
 import orjson
 
-from wiwi import __version__
 from wiwi.ir import types as ir
 from wiwi.providers.base import ProviderKeyRef
+from wiwi.providers.cline_version import client_version, core_version
 from wiwi.providers.openai_adapter import OpenAIAdapter
 from wiwi.streaming import deltas as dl
 
@@ -101,17 +101,19 @@ class ClineAdapter(OpenAIAdapter):
         self._context = dict(context or {})
 
     def headers(self, key: ProviderKeyRef) -> dict[str, str]:
-        client_version = _clean(__version__) or "unknown"
+        cli_version = _clean(client_version()) or "unknown"
+        core = _clean(core_version()) or "unknown"
         platform = _clean(_current_platform()) or "unknown"
         h: dict[str, str] = {
             "HTTP-Referer": "https://cline.bot",
             "X-Title": "Cline",
-            "User-Agent": f"Cline/{client_version}",
+            "User-Agent": f"Cline/{cli_version}",
             "X-CLIENT-TYPE": "wiwi",
-            "X-CLIENT-VERSION": client_version,
-            "X-CORE-VERSION": client_version,
+            "X-CLIENT-VERSION": cli_version,
+            "X-CORE-VERSION": core,
             "X-PLATFORM": platform,
-            "X-PLATFORM-VERSION": _clean(_current_platform_version()) or "unknown",
+            # Cline's own client falls back to the CLI version for this field.
+            "X-PLATFORM-VERSION": cli_version,
             "X-IS-MULTIROOT": "false",
         }
         task_id = _clean(self._context.get("task_id"))
@@ -206,8 +208,3 @@ def _client_sent_thinking(req: ir.Request) -> bool:
 def _current_platform() -> str:
     import sys
     return sys.platform
-
-
-def _current_platform_version() -> str:
-    import sys
-    return sys.version.split()[0]

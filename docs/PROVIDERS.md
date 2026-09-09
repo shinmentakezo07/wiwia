@@ -16,7 +16,7 @@ Adding a provider = new adapter module + one branch in `get_adapter()` (`wiwi/pr
 | `gmicloud` | Chat Completions | Bearer key | OpenAI-format endpoint |
 | `bai` | Chat Completions | Bearer key | B.AI unified gateway; one key, three protocols — wiwi speaks Chat to it |
 | `nvidia-nim` | Chat Completions | Bearer key | vLLM-backed quirks: reasoning via `chat_template_kwargs`, tool-schema rewrite |
-| `cline` | Chat Completions | WorkOS OAuth bearer (`workos:` prefix) | OAuth + fingerprint header + auto-refresh |
+| `cline` | Chat Completions | WorkOS OAuth bearer (`workos:` prefix) | OAuth + live Cline CLI/core fingerprint + auto-refresh |
 | `workbuddy` | Chat Completions | Access token from auth JSON | Tencent CodeBuddy quirks + auto-refresh |
 | `opencode` | Per-model: 4 upstream protocols | Bearer key | Multi-protocol routing, live User-Agent refresh |
 
@@ -133,7 +133,11 @@ providers:
 Cline (`api.cline.bot`) — OpenAI Chat Completions-compatible with three quirks:
 
 1. **Auth**: WorkOS OAuth tokens sent as `Authorization: Bearer workos:<token>` — the `workos:` prefix is mandatory (auto-prepended when missing).
-2. **Fingerprint**: every request carries a client-identification header.
+2. **Fingerprint**: every request carries a client-identification header. A background worker
+   refreshes the live Cline CLI version from npm (`cline`) and the separate core version from npm
+   (`@cline/core`) every five minutes. The CLI version fills `User-Agent`, `X-CLIENT-VERSION`, and
+   `X-PLATFORM-VERSION`; `X-CORE-VERSION` uses the core version. Header construction reads only the
+   cache, so registry failures never block a request.
 3. **OAuth lifecycle**: tokens refresh on demand; auto-refresh runs as a background service.
 
 ```yaml
