@@ -1089,3 +1089,188 @@ dialect/provider branch). `server/app.py` `_capture_delta` records
 
 **Tests**: `tests/test_web_search_translation.py` (new, 51 tests) +
 `tests/test_property_roundtrip.py` (3 new properties).
+
+---
+
+# Round 39 — thinking/tool-call translation hardening (2026-09-09)
+
+> **Status:** all changes verified — 1457 tests pass, ruff clean
+> **Scope:** the thinking / tool-call / translation-helper chain. Every fix
+> was reproduced by direct execution before patching; regressions live in
+> `tests/test_fix_round38.py` (33) + `tests/test_streaming_improvements.py` (4).
+> AUDIT entries #63/#64/#65 marked fixed in place.
+
+## 39.1 Crash class: null/junk client values must not 500 the gateway
+
+`run_chat_like` catches only `(DialectError, ValueError)`; every `TypeError`
+/`AttributeError` below surfaced as a 500 with an `internal gateway error`
+body. All reproduced live pre-fix:
+
+- **`thinking: null` history blocks** (Anthropic streams them on
+  redacted-thinking turns) produced `ThinkingPart(text=None)`; the OpenAI
+  adapter's `reasoning += p.text` raised TypeError, the Anthropic adapter
+  re-emitted `{"thinking": null}`. Coerced to `""` at decode
+  (`wire/anthropic_messages.py`).
+- **`text: null` blocks** → `TextPart(text=None)`, same crash class. Coerced.
+- **Non-string `thinking.budget_tokens` / `max_tokens`** (e.g. `"1024"`)
+  flowed into `GenParams` raw; the Anthropic adapter's `<=`/`>` comparisons
+  raised TypeError. Numeric strings / whole floats coerced; garbage → None.
+- **Non-dict entries** in `messages`/`system` lists (string, number) crashed
+  `.get` in both wire codecs — now skipped, per the policy every sibling
+  loop already states.
+- **Tool-call `arguments` as a JSON object** (some OpenAI-compatible gateways)
+  raised `TypeError: the JSON object must be str...` in BOTH wire codecs AND
+  both OpenAI adapter decode paths — replayed history 500'd every surface.
+  Object args are now used directly (and re-serialized for `raw_args`);
+  the stream path serializes dict fragments to str before
+  `ToolCallArgsDelta` (a dict fragment previously crashed the Responses
+  encoder's `+=`).
+- **Chat codec junk shapes**: non-dict `tools[]` entries / `function`
+  sub-objects / `tool_choice.function` / `stream_options` — all now skipped
+  or ignored instead of AttributeError.
+- **Gemini null `text` parts** crashed `turn.text +=` / `TextDelta(None)`.
+- **String `stop_sequences`** (`"END"`) was iterated per character → three
+  single-char stops. Now one sequence.
+
+## 39.2 `redacted_thinking` blocks round-trip (Anthropic)
+
+`ThinkingPart` gains `block_type` + `data` (mirrors
+`ToolResultPart.block_type`). The wire codec decodes
+`{"type": "redacted_thinking", "data": …}` blocks (previously silently
+dropped — an empty replayed assistant turn, and a hard 400 on the next
+thinking-enabled turn since Anthropic requires the block back). The adapter
+re-emits `{"type": "redacted_thinking", "data": …}` verbatim on encode and
+decodes it in `decode_response`. Other adapters see empty text and skip it.
+
+## 39.3 Unknown reasoning effort must not silently enable thinking
+
+`effort_to_thinking_budget` mapped unknown strings to **medium (8000)** —
+the docstring said None, the code disagreed. A typo (`"hight"`) switched
+thinking ON with a large budget on Anthropic/Gemini, and was forwarded
+verbatim to OpenAI upstreams (instant 400). Now: unknown → `None`; the
+Anthropic adapter leaves thinking OFF when no budget resolves (no more
+medium fallback); the OpenAI adapter only forwards known effort levels;
+Gemini inherits the None via `effective_thinking_budget`.
+
+## 39.4 `thinking_budget=0` disables reasoning on OpenRouter
+
+The documented thinking-off value (honored by Anthropic/Gemini/OpenAI since
+round 31) was clamped to `max(g.thinking_budget, 1024)` — thinking ON at the
+minimum for an explicit disable. Now `{"enabled": False}`, matching
+`reasoning_effort: "none"`.
+
+## 39.5 Responses stream-encoder integrity (AUDIT #63 + #65)
+
+- **#65**: `TextDelta`/`ThinkingDelta` while `_item_open == "tool"` no
+  longer call `_close_item()` (which popped the tool, dropped its later args
+  fragments, and emitted a mid-stream `output_item.done`). The interleave is
+  suppressed — the same policy the Anthropic encoder has pinned since
+  round 25 — and the tool's args keep streaming on their own output_index.
+- **#63**: `ToolCallArgsDelta` for a builtin-tagged open accumulates into
+  the buffer (close-time `_builtin_query` needs it) but emits **no**
+  `function_call_arguments.delta` frame — the frame's `fc_<req>_<n>`
+  item_id never had an `output_item.added`, and Codex CLI accumulated
+  fragments against a nonexistent function item.
+
+## 39.6 `_repair_truncated_json` odd backslash runs (AUDIT #64)
+
+The endswith heuristic handled only a single trailing backslash; an odd run
+≥ 3 (escaped pair + dangling escape) produced invalid JSON → the whole
+args object silently fell to `{}`. Now: count the trailing run, strip the
+final backslash when odd; the `\uXXXX` strip is escape-aware (fires only
+when the backslash run before `u` is odd, so `"C:\\u0f"` — complete pair +
+literal `u0f` — is untouched, while pair + fresh `\u0f` strips only the
+fresh tail). Pinned with 3/5-run, pair+partial-escape, and
+complete-escape cases.
+
+**Files changed (this round):** `wiwi/ir/types.py`,
+`wiwi/wire/anthropic_messages.py`, `wiwi/wire/openai_chat.py`,
+`wiwi/wire/openai_responses.py`, `wiwi/providers/anthropic_adapter.py`,
+`wiwi/providers/openai_adapter.py`, `wiwi/providers/openrouter_adapter.py`,
+`wiwi/providers/gemini_adapter.py`, `wiwi/streaming/partial_json.py`,
+`AUDIT.md` (#63/#64/#65 marked fixed).
+
+**Verified live** (ASGITransport + respx, real `run_chat_like` pipeline):
+null-thinking history, object-args history, and junk message entries all
+return 200 with the upstream receiving correctly-encoded bodies (pre-fix:
+500 `internal gateway error`).
+
+---
+
+# Round 40 — journal replay integrity: #66, #67, #68 (2026-09-10)
+
+> **Status:** all changes verified — 1469 tests pass, ruff clean
+> **Scope:** the durable stream-replay layer (AUDIT #66/#67/#68, the last
+> live items from the 2026-09-09 streaming audit). Every other register
+> item from the audit's priority list (#52, #54–#62, #5–#13, #15, #24–#26,
+> #31–#39, #41–#50) was re-verified against current source as ALREADY FIXED
+> — earlier sessions fixed them without marking the register; do not re-fix.
+> `tests/test_fix_round39.py` (12) pins this round.
+
+## 40.1 #66 — reconnect to an active empty journal no longer re-dispatches
+
+`JournalStore.is_active(request_id)` exposes same-process liveness, and the
+replay gate in `run_chat_like` is now `replay or complete or ACTIVE`. A
+sub-second reconnect (the TTFT window where the journal file exists but has
+no chunks) now tails the same journal until the original stream finishes —
+previously it fell through to a fresh upstream dispatch, double-billing the
+logical request. The eager file-touch in `open()` always intended this; the
+gate's shape defeated it.
+
+## 40.2 #67 — journal replay is scoped to the originating key
+
+`JournalStore.open(request_id, key_id=...)` writes an internal ownership
+record (`{"seq": 0, "owner": "<key_id>"}`) as the journal's first line:
+invisible to `read_after` (which filters `seq > last_seq` with data records
+starting at seq 1) and `is_complete` (which checks only `done`). `owner_of()`
+reads it back and survives process restarts (it is in the file, not memory).
+The replay branch compares the journal's owner against the caller's
+`key_id`; a mismatched key gets no replay — it falls through to its own
+dispatch and never sees the other key's streamed content. Pre-scoping
+journals (no owner record) remain readable for back-compat.
+
+## 40.3 #68 — evicted tape head refuses resume
+
+`StreamTape.head_evicted(last_seq)` is true when the first surviving entry
+is not `last_seq + 1` — the continuation's head was evicted.
+`gateway._attempt_resume` checks it (with `tape.seq - 1`, the last delta
+the consumer emitted) and refuses the resume, so the caller falls back to a
+fresh attempt instead of silently building a partial continuation (the
+evicted-tool-Open case: `replay_tool_calls` returned `[]` while Args/Close
+survived, and the model re-invoked a tool the client already saw).
+
+**Files changed:** `wiwi/streaming/tape_store.py` (`is_active`, key-scoped
+`open`, `owner_of`, owner-aware `_read_records`), `wiwi/server/app.py`
+(replay gate + key scoping + `key_id` into `open()`), `wiwi/streaming/resume.py`
+(`head_evicted`), `wiwi/core/gateway.py` (resume guard), `AUDIT.md`
+(#66/#67/#68 marked fixed).
+
+**Verified live:** e2e reconnect-while-empty with a counting stub upstream
+(exactly ONE upstream call total); cross-key replay blocked with two minted
+virtual keys against a real app instance while same-key replay still works;
+ownership readable after a simulated restart.
+
+## 40.4 Runtime journal TTL sweep (AUDIT coverage gap)
+
+Journals were swept only at startup — the lifespan comment in
+`server/app.py` even said "the sweep is not run again while serving" — while
+`tape_store.py`'s docstring promised a periodic background timer. A
+long-lived gateway accumulated expired journals for the whole process
+lifetime; the TTL was never enforced after startup.
+
+`JournalStore.sweep_forever(interval_s)` is the sweeper body (sleep, sweep
+via `asyncio.to_thread`, log removals; exceptions are caught and logged —
+the sweeper must never die). `start()`/`stop()` follow the same
+worker-lifecycle convention as ClineAutoRefresh/HealthHealer: `start` is
+idempotent (reuses the live task), `stop` cancels and awaits, also
+idempotent. The lifespan starts it when `stream_journal_enabled` with
+interval `min(60, max(1, ttl/4))` s and stops it at shutdown, so expiry lags
+the configured TTL by at most one interval.
+
+**Files changed:** `wiwi/streaming/tape_store.py` (`sweep_forever`/`start`/
+`stop`), `wiwi/server/app.py` (lifespan start/stop + corrected comment).
+
+**Tests:** `tests/test_fix_round40.py` — sweeper removes an expired journal
+and keeps a fresh one; start/stop lifecycle (no double task, idempotent
+stop, no sweep after stop); lifespan integration (started when journaling
+on, absent when off).

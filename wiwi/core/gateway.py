@@ -515,6 +515,14 @@ class Gateway:
         consumer closes (the outer finally only cancels the original task).
         """
         from wiwi.ir import types as ir
+        # AUDIT #68: if eviction removed the tape's head, the continuation
+        # prefix would be silently partial (e.g. a tool call whose Open was
+        # evicted while its Args/Close survive — the model re-invokes a tool
+        # the client already saw). Refuse the resume; the caller retries as
+        # a fresh attempt. `tape.seq - 1` is the last delta the consumer
+        # emitted (every emitted delta was appended before yield).
+        if tape.head_evicted(tape.seq - 1):
+            return False, None
         text = tape.replay_text()
         if not text and self.router.settings.stream_resume == "content_only":
             return False, None

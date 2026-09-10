@@ -329,6 +329,12 @@ class AnthropicAdapter:
                         tr["content"] = content_blocks
                     blocks.append(tr)
                 elif isinstance(p, ir.ThinkingPart):
+                    if p.block_type == "redacted_thinking" and p.data is not None:
+                        # Encrypted thinking: replay verbatim. Anthropic
+                        # requires the block back on the next turn; dropping
+                        # it breaks tool-use continuity.
+                        blocks.append({"type": "redacted_thinking", "data": p.data})
+                        continue
                     tb: dict[str, Any] = {"type": "thinking", "thinking": p.text}
                     if p.signature:
                         tb["signature"] = p.signature
@@ -400,13 +406,19 @@ class AnthropicAdapter:
             if thinking_enabled:
                 budget = g.effective_thinking_budget()
                 if budget is None:
-                    budget = ir.effort_to_thinking_budget("medium")
-                # Clamp to the API minimum
-                budget = max(budget, MIN_THINKING_BUDGET)
-                # max_tokens must be strictly greater than budget_tokens
-                if body["max_tokens"] <= budget:
-                    body["max_tokens"] = budget + 1024
-                body["thinking"] = {"type": "enabled", "budget_tokens": budget}
+                    # No resolvable budget (unknown effort string, or effort
+                    # "none" racing a thinking_budget) — thinking cannot be
+                    # configured, so leave it OFF. Defaulting to "medium"
+                    # silently billed thinking tokens a caller never asked
+                    # for (and switched thinking on for a typo effort).
+                    thinking_enabled = False
+                else:
+                    # Clamp to the API minimum
+                    budget = max(budget, MIN_THINKING_BUDGET)
+                    # max_tokens must be strictly greater than budget_tokens
+                    if body["max_tokens"] <= budget:
+                        body["max_tokens"] = budget + 1024
+                    body["thinking"] = {"type": "enabled", "budget_tokens": budget}
 
         # Extras: keys the Anthropic codec recognized as this provider's own
         # 2026 surface ride through; anything else only under drop_params=False
@@ -488,10 +500,17 @@ class AnthropicAdapter:
         for block in data.get("content") or []:
             btype = block.get("type")
             if btype == "text":
-                turn.text += block.get("text", "")
+                raw = block.get("text", "")
+                turn.text += raw if isinstance(raw, str) else ""
             elif btype == "thinking":
-                turn.thinking.append(ir.ThinkingPart(block.get("thinking", ""),
-                                                     block.get("signature")))
+                rt = block.get("thinking", "")
+                turn.thinking.append(ir.ThinkingPart(
+                    rt if isinstance(rt, str) else "", block.get("signature")))
+            elif btype == "redacted_thinking":
+                rd = block.get("data", "")
+                turn.thinking.append(ir.ThinkingPart(
+                    text="", block_type="redacted_thinking",
+                    data=rd if isinstance(rd, str) else ""))
             elif btype == "tool_use":
                 turn.tool_calls.append(ir.ToolUsePart(
                     id=block.get("id", ""), name=block.get("name", ""),
@@ -554,9 +573,11 @@ class AnthropicAdapter:
             d = payload.get("delta", {})
             dtype = d.get("type")
             if dtype == "text_delta":
-                out.append(dl.TextDelta(d.get("text", "")))
+                raw = d.get("text", "")
+                out.append(dl.TextDelta(raw if isinstance(raw, str) else ""))
             elif dtype == "thinking_delta":
-                out.append(dl.ThinkingDelta(d.get("thinking", "")))
+                rt = d.get("thinking", "")
+                out.append(dl.ThinkingDelta(rt if isinstance(rt, str) else ""))
             elif dtype == "signature_delta":
                 out.append(dl.ThinkingDelta("", signature=d.get("signature")))
             elif dtype == "input_json_delta":

@@ -24,10 +24,13 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         messages.append(ir.Message(role="system", parts=[ir.TextPart(system_text)]))
     elif isinstance(system_text, list):
         parts = [ir.TextPart(b.get("text", ""), cache_control=b.get("cache_control"))
-                 for b in system_text if b.get("type") == "text"]
+                 for b in system_text
+                 if isinstance(b, dict) and b.get("type") == "text"]
         if parts:
             messages.append(ir.Message(role="system", parts=parts))
     for m in body.get("messages") or []:
+        if not isinstance(m, dict):
+            continue  # malformed entry: skip rather than 500 on .get
         role = m.get("role", "user")
         content = m.get("content")
         parts: list[ir.Part] = []
@@ -46,7 +49,8 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                     # DialectError/ValueError. Skip like the dict guard above.
                     continue
                 if btype == "text":
-                    parts.append(ir.TextPart(b.get("text", ""),
+                    raw_text = b.get("text", "")
+                    parts.append(ir.TextPart(raw_text if isinstance(raw_text, str) else "",
                                              cache_control=b.get("cache_control")))
                 elif btype == "image":
                     src = b.get("source") or {}
@@ -122,8 +126,26 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                                                    images=images,
                                                    block_type=btype))
                 elif btype == "thinking":
-                    parts.append(ir.ThinkingPart(b.get("thinking", ""),
-                                                 b.get("signature")))
+                    raw_think = b.get("thinking", "")
+                    sig = b.get("signature")
+                    # Anthropic streams a null thinking value on redacted-
+                    # thinking turns; ThinkingPart.text is typed str and every
+                    # downstream consumer concatenates it — coerce once here
+                    # rather than let None crash the adapters (TypeError) or
+                    # leak "thinking": null back upstream.
+                    parts.append(ir.ThinkingPart(
+                        raw_think if isinstance(raw_think, str) else "",
+                        sig if isinstance(sig, str) else None))
+                elif btype == "redacted_thinking":
+                    # Encrypted thinking block: preserve the blob verbatim so
+                    # an Anthropic upstream receives it back on replay.
+                    # Dropping it breaks tool-use continuity (the API
+                    # requires the prior assistant turn to carry it); other
+                    # adapters see empty text and skip it.
+                    raw_data = b.get("data", "")
+                    parts.append(ir.ThinkingPart(
+                        text="", block_type="redacted_thinking",
+                        data=raw_data if isinstance(raw_data, str) else ""))
         if parts:
             messages.append(ir.Message(role="assistant" if role == "assistant" else "user",
                                        parts=parts))
@@ -193,13 +215,48 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         response_format = ir.ResponseFormat(
             type="json_schema", json_schema=oc_fmt.get("schema"),
             name=oc_fmt.get("name"), strict=oc_fmt.get("strict"))
+    budget_raw = thinking.get("budget_tokens") if thinking_type == "enabled" else None
+    # Coerce numeric strings ("1024") and reject garbage: a str budget reaches
+    # the Anthropic adapter's `<=`/`>` comparisons and raises TypeError — a
+    # gateway 500 on a merely-odd client value.
+    thinking_budget: int | None = None
+    if isinstance(budget_raw, bool):
+        thinking_budget = None
+    elif isinstance(budget_raw, int):
+        thinking_budget = budget_raw
+    # Numeric strings ("1024") and whole floats (2048.0) are legal JSON
+    # clients send; coerce. Anything else is unusable — None, so the
+    # adapters never see a str/float where they expect int (TypeError 500).
+    elif ((isinstance(budget_raw, str) and budget_raw.strip().isdigit())
+            or (isinstance(budget_raw, float) and budget_raw.is_integer())):
+        thinking_budget = int(budget_raw)
+    else:
+        thinking_budget = None
+    mt_raw = body.get("max_tokens")
+    if isinstance(mt_raw, bool):
+        max_tokens = None
+    elif isinstance(mt_raw, int):
+        max_tokens = mt_raw
+    elif ((isinstance(mt_raw, str) and mt_raw.strip().isdigit())
+            or (isinstance(mt_raw, float) and mt_raw.is_integer())):
+        max_tokens = int(mt_raw)
+    else:
+        max_tokens = None
+    # stop_sequences: the spec says list[str], but a bare string is a common
+    # client mistake — treat it as ONE sequence, not one per character.
+    stop_raw = body.get("stop_sequences")
+    if isinstance(stop_raw, str):
+        stop_seqs: list[str] = [stop_raw]
+    elif isinstance(stop_raw, list):
+        stop_seqs = [s for s in stop_raw if isinstance(s, str)]
+    else:
+        stop_seqs = []
     g = ir.GenParams(
         temperature=body.get("temperature"),
         top_p=body.get("top_p"),
-        max_tokens=body.get("max_tokens"),
-        stop=list(body.get("stop_sequences") or []),
-        thinking_budget=(thinking.get("budget_tokens")
-                         if thinking_type == "enabled" else None),
+        max_tokens=max_tokens,
+        stop=stop_seqs,
+        thinking_budget=thinking_budget,
         thinking_type=thinking_type,
         reasoning_effort=reasoning_effort,
         top_k=body.get("top_k") if isinstance(body.get("top_k"), int) else None,

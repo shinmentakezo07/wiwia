@@ -70,6 +70,12 @@ class ToolResultPart:
 class ThinkingPart:
     text: str
     signature: str | None = None
+    # Anthropic redacted_thinking: the block is an opaque encrypted blob in
+    # ``data``; replay must re-emit the same block type or Anthropic rejects
+    # the history (mirror of ToolResultPart.block_type). Other adapters see
+    # an empty-text thinking part and drop it harmlessly.
+    block_type: str = "thinking"
+    data: str | None = None
 
 
 # Reserved multimodal kinds (field names stable now, translation later).
@@ -212,10 +218,12 @@ _EFFORT_BUDGETS: dict[str, int | None] = {
 def effort_to_thinking_budget(effort: str) -> int | None:
     """Map a reasoning_effort level to a thinking token budget.
 
-    Returns None for 'none' (thinking disabled) or unknown values; callers
+    Returns None for 'none' (thinking disabled) and for UNKNOWN values: a
+    typo ('hight') or a future level this map has not learned must leave
+    thinking OFF, never silently enable it at an arbitrary budget. Callers
     must check the return before setting a thinking config.
     """
-    return _EFFORT_BUDGETS.get(effort, _EFFORT_BUDGETS["medium"])
+    return _EFFORT_BUDGETS.get(effort)
 
 
 def thinking_budget_to_effort(budget: int) -> str:

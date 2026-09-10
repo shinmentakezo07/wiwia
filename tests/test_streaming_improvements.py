@@ -121,6 +121,41 @@ class TestRepairTruncatedJSON:
         assert json.loads(repaired) == {"path": "C:\\Win"}
 
 
+    def test_repair_odd_backslash_run_ge_3(self):
+        """AUDIT #64: a trailing run of 3 (5, ...) backslashes is a complete
+        escaped pair + one dangling escape — the old endswith heuristic let
+        the dangling one through, so appending `"` produced invalid JSON and
+        the whole tool-args object fell back to {}."""
+        for run in ("\\\\\\", "\\\\\\\\\\"):  # 3 and 5 actual backslashes
+            repaired = _repair_truncated_json('{"k": "a' + run)
+            parsed = json.loads(repaired)
+            # Decoded: the complete escaped pairs survive as pairs // 2
+            # backslashes, the dangling escape opener is dropped.
+            assert parsed == {"k": "a" + ("\\" * ((len(run) - 1) // 2))}
+
+    def test_repair_escaped_backslash_then_partial_unicode(self):
+        """AUDIT #64 sibling: `"C:\\\\u0f` — the `\\\\` is a complete escape,
+        `u0f` is literal text, and the `\\u`-strip must NOT fire on it (an
+        even backslash run before ``u`` is not an escape opener)."""
+        repaired = _repair_truncated_json('{"path": "C:\\\\u0f')
+        # Decoded: one literal backslash, then the literal text u0f.
+        assert json.loads(repaired) == {"path": "C:\\u0f"}
+
+    def test_repair_partial_unicode_after_odd_run(self):
+        """`"…\\u0f` preceded by an escaped pair (3 actual backslashes:
+        `\\\\` pair + fresh `\\u0f`) — strip ONLY the fresh backslash +
+        hex tail; the complete pair before it survives as one decoded
+        backslash."""
+        repaired = _repair_truncated_json('{"k": "a\\\\\\u0f')
+        assert json.loads(repaired) == {"k": "a\\"}
+
+    def test_repair_complete_unicode_escape_not_stripped(self):
+        """A fully-arrived `\\uXXXX` escape must never be stripped — it
+        decodes to its character."""
+        repaired = _repair_truncated_json('{"k": "v\\u4142')
+        assert json.loads(repaired) == {"k": "v䅂"}
+
+
 class TestPartialJSONParser:
     def test_streaming_accumulation(self):
         parser = PartialJSONParser()

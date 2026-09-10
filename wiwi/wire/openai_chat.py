@@ -26,6 +26,8 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         raise DialectError("'n' must be 1 (multiple choices unsupported)")
     messages = []
     for m in body.get("messages") or []:
+        if not isinstance(m, dict):
+            continue  # malformed entry: skip rather than 500 on .get
         role = m.get("role", "user")
         if role == "developer":
             # OpenAI's newer name for system-level instructions; unify so
@@ -33,7 +35,9 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
             role = "system"
         content = m.get("content")
         parts: list[ir.Part] = []
-        tool_calls = m.get("tool_calls") or []
+        raw_tool_calls = m.get("tool_calls")
+        tool_calls = [tc for tc in raw_tool_calls if isinstance(tc, dict)] \
+            if isinstance(raw_tool_calls, list) else []
         if isinstance(content, str):
             parts.append(ir.TextPart(content))
         elif isinstance(content, list):
@@ -41,20 +45,24 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                 if not isinstance(c, dict):
                     continue  # malformed item: skip rather than 500 on .get
                 if c.get("type") == "text":
-                    parts.append(ir.TextPart(c.get("text", "")))
+                    raw_text = c.get("text", "")
+                    parts.append(ir.TextPart(
+                        raw_text if isinstance(raw_text, str) else ""))
                 elif c.get("type") == "image_url":
-                    url = (c.get("image_url") or {}).get("url", "")
+                    ia_img = c.get("image_url")
+                    url = (ia_img.get("url", "") if isinstance(ia_img, dict) else "")
                     if url.startswith("data:"):
                         header, _, b64 = url.partition(",")
                         mime = header[5:].split(";")[0] or "image/png"
                         parts.append(ir.ImagePart(b64=b64, mime=mime))
-                    else:
+                    elif url:
                         parts.append(ir.ImagePart(url=url))
                 elif c.get("type") == "input_audio":
-                    ia = c.get("input_audio") or {}
-                    parts.append(ir.AudioPart(
-                        b64=ia.get("data"),
-                        mime=f"audio/{ia.get('format') or 'wav'}"))
+                    ia = c.get("input_audio")
+                    if isinstance(ia, dict):
+                        parts.append(ir.AudioPart(
+                            b64=ia.get("data"),
+                            mime=f"audio/{ia.get('format') or 'wav'}"))
         # Reasoning models (o1/o3, DeepSeek-R1, etc.) emit a separate
         # reasoning_content field on assistant messages. Lift it into a
         # ThinkingPart so the IR carries the thinking context forward —
@@ -74,15 +82,30 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                 # the final assistant turn to begin with a thinking block.
                 parts.insert(0, ir.ThinkingPart(text=rc))
         for tc in tool_calls:
-            fn = tc.get("function") or {}
-            raw_args = fn.get("arguments") or "{}"
-            try:
-                args = json.loads(raw_args)
-            except json.JSONDecodeError:
-                from wiwi.streaming.partial_json import _repair_truncated_json
+            fn = tc.get("function")
+            if not isinstance(fn, dict):
+                continue  # malformed tool_call: skip rather than 500 on .get
+            raw_args = fn.get("arguments")
+            if isinstance(raw_args, dict):
+                # Some OpenAI-compatible gateways emit the arguments as a
+                # JSON OBJECT, not the spec's string. json.loads would raise
+                # TypeError (not JSONDecodeError) — a gateway 500 on replayed
+                # history. Use it directly.
+                args = raw_args
+                raw_args = json.dumps(raw_args)
+            else:
+                raw_args = raw_args or "{}"
                 try:
-                    args = json.loads(_repair_truncated_json(raw_args))
+                    args = json.loads(raw_args)
                 except json.JSONDecodeError:
+                    from wiwi.streaming.partial_json import _repair_truncated_json
+                    try:
+                        args = json.loads(_repair_truncated_json(raw_args))
+                    except json.JSONDecodeError:
+                        args = {}
+                if not isinstance(args, dict):
+                    # arguments like `"foo"` or `[]` parse fine but are not
+                    # an object; ToolUsePart.args is typed dict.
                     args = {}
             parts.append(ir.ToolUsePart(id=tc.get("id", ""), name=fn.get("name", ""),
                                         args=args, raw_args=raw_args))
@@ -126,13 +149,18 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
             parts = [ir.TextPart("")]
         messages.append(ir.Message(role=role, parts=parts))  # type: ignore[arg-type]
 
-    tools = [
-        ir.Tool(name=(fn := t.get("function") or {}).get("name", ""),
-                description=fn.get("description", ""),
-                parameters_json_schema=fn.get("parameters") or {"type": "object"},
-                strict=fn.get("strict"))
-        for t in body.get("tools") or [] if t.get("type") == "function"
-    ]
+    tools: list[ir.Tool] = []
+    for t in body.get("tools") or []:
+        if not isinstance(t, dict) or t.get("type") != "function":
+            continue  # non-function (or malformed) entry: skip, don't crash
+        fn = t.get("function")
+        if not isinstance(fn, dict):
+            continue
+        tools.append(ir.Tool(
+            name=fn.get("name", ""),
+            description=fn.get("description", ""),
+            parameters_json_schema=fn.get("parameters") or {"type": "object"},
+            strict=fn.get("strict")))
     tc_raw = body.get("tool_choice")
     tool_choice: ir.ToolChoice | None = None
     if tc_raw == "auto":
@@ -142,7 +170,9 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
     elif tc_raw == "required":
         tool_choice = ir.ToolChoiceRequired()
     elif isinstance(tc_raw, dict) and tc_raw.get("type") == "function":
-        tool_choice = ir.ToolChoiceNamed((tc_raw.get("function") or {}).get("name", ""))
+        tc_fn = tc_raw.get("function")
+        tool_choice = (ir.ToolChoiceNamed(tc_fn.get("name", ""))
+                       if isinstance(tc_fn, dict) else None)
 
     g = ir.GenParams(
         temperature=body.get("temperature"),
@@ -165,7 +195,9 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                                               json_schema=js.get("schema"),
                                               name=js.get("name"),
                                               strict=js.get("strict"))
-    stream_opts = body.get("stream_options") or {}
+    stream_opts = body.get("stream_options")
+    if not isinstance(stream_opts, dict):
+        stream_opts = {}
     return ir.Request(
         model=body["model"], messages=messages, tools=tools, tool_choice=tool_choice,
         gen_params=g, stream=bool(body.get("stream")),

@@ -65,19 +65,26 @@ def _repair_truncated_json(text: str) -> str:
             stack.pop()
     suffix = ""
     if in_string:
-        # Unterminated string. If the last character was a single backslash
-        # (escape = True) it is a dangling escape sequence and the string
-        # cannot be closed cleanly with just a quote — appending `"` would
-        # produce invalid JSON like {"k": "v\\". Drop the trailing backslash
-        # first. Doubled backslashes (`\\\\`) are escaped backslashes and are
-        # safe to leave alone.
-        if escaped and text.endswith("\\") and not text.endswith("\\\\"):
+        # Unterminated string. Count the trailing backslash run: an ODD run
+        # means the last backslash is a dangling escape (1, 3, 5, ...), so
+        # the string cannot be closed cleanly with just a quote — strip that
+        # final backslash first. An even run is escaped backslashes and is
+        # safe to leave alone. (The old endswith heuristic only handled a
+        # single trailing backslash and its doubled exclusion; runs >= 3
+        # fell through and produced invalid JSON.)
+        n_bs = len(text) - len(text.rstrip("\\"))
+        if n_bs % 2 == 1:
             text = text[:-1]
         # An incomplete ``\uXXXX`` unicode escape (a backslash followed by
         # 0-3 hex digits) likewise cannot be closed cleanly: appending `"`
-        # turns the partial escape into invalid JSON. Strip the trailing
-        # incomplete escape (backslash + up to 3 hex digits) before closing.
-        if re.search(r'\\u[0-9a-fA-F]{0,3}$', text):
+        # turns the partial escape into invalid JSON. Escape-aware: only a
+        # backslash run of ODD length before the ``u`` means the final
+        # backslash opens a real ``\u`` escape; an even run is complete
+        # escaped-backslash pairs and the trailing ``u…`` is literal text
+        # (``"C:\\u0f`` must NOT be stripped). Strip only the one fresh
+        # backslash + hex tail, preserving the pairs before it.
+        m = re.search(r'(\\+)u[0-9a-fA-F]{0,3}$', text)
+        if m and len(m.group(1)) % 2 == 1:
             text = re.sub(r'\\u[0-9a-fA-F]{0,3}$', '', text)
         suffix += _QUOTE
     # Close open containers in reverse order.

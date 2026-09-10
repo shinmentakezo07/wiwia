@@ -24,21 +24,27 @@ from wiwi.wire.openai_chat import DialectError
 log = structlog.get_logger()
 
 
-def _load_args(raw_args: str) -> dict[str, Any]:
+def _load_args(raw_args: Any) -> dict[str, Any]:
     """Parse tool-call arguments, repairing a truncated JSON string.
 
     A client replaying history may send arguments the upstream stream never
-    closed; parse them rather than dropping the whole call.
+    closed; parse them rather than dropping the whole call. A JSON *object*
+    (which some gateways emit instead of the spec's string) is used directly —
+    json.loads would raise TypeError, not JSONDecodeError, and 500 the
+    gateway.
     """
+    if isinstance(raw_args, dict):
+        return raw_args
     try:
-        return json.loads(raw_args)
-    except json.JSONDecodeError:
+        parsed = json.loads(raw_args)
+        return parsed if isinstance(parsed, dict) else {}
+    except (json.JSONDecodeError, TypeError):
         pass
     try:
-        return json.loads(_repair_truncated_json(raw_args))
-    except json.JSONDecodeError:
+        parsed = json.loads(_repair_truncated_json(raw_args))
+        return parsed if isinstance(parsed, dict) else {}
+    except (json.JSONDecodeError, TypeError):
         return {}
-
 
 def _decode_image(url: Any) -> ir.ImagePart | None:
     """Parse an image reference, accepting a data URL or a remote URL.
@@ -239,7 +245,11 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                        else "assistant" if role == "assistant" else "user")
             messages.append(ir.Message(role=ir_role, parts=parts))
         elif itype == "function_call":
-            raw_args = item.get("arguments") or "{}"
+            raw_args = item.get("arguments")
+            if isinstance(raw_args, dict):
+                raw_args = json.dumps(raw_args)  # args-as-object gateways
+            else:
+                raw_args = raw_args or "{}"
             messages.append(ir.Message(role="assistant", parts=[
                 ir.ToolUsePart(id=item.get("call_id", ""), name=item.get("name", ""),
                                args=_load_args(raw_args), raw_args=raw_args)]))
@@ -509,6 +519,14 @@ class ResponsesStreamEncoder:
                              "status": "in_progress", "model": self.model,
                              "output": []}})
         if isinstance(d, dl.TextDelta):
+            # A text delta must never close an open tool item: _close_item
+            # POPS the tool, so its later args fragments would be dropped and
+            # output_item.done would fire mid-stream (Codex CLI counts a
+            # half-finished call). Interleaved text is suppressed — the same
+            # policy as the Anthropic encoder — and the tool's args keep
+            # streaming legally on their own output_index.
+            if self._item_open == "tool":
+                return None
             out = []
             if self._item_open != "message":
                 out.extend(self._close_item())
@@ -532,6 +550,11 @@ class ResponsesStreamEncoder:
         if isinstance(d, dl.ThinkingDelta):
             if not d.text:
                 return None  # signature-only delta: no Responses representation
+            # Same interleave policy as TextDelta: never close an open tool
+            # item from a thinking delta (round-25 proved this class of bug
+            # for text; thinking has the identical _close_item hazard).
+            if self._item_open == "tool":
+                return None
             out = []
             if self._item_open != "thinking":
                 out.extend(self._close_item())
@@ -582,7 +605,15 @@ class ResponsesStreamEncoder:
                 # open item's output_index. Drop the fragment (mirrors the
                 # Anthropic encoder's defensive drop).
                 return None
+            # Accumulate even for builtins — the close-time _builtin_query read
+            # needs the buffer — but emit no frame: the item opened as a
+            # self-contained web_search_call, so a function_call_arguments
+            # frame would reference a phantom fc_<req>_<n> id that never had
+            # an output_item.added (Codex CLI accumulates fragments against a
+            # nonexistent function item).
             t["args"] += d.args_fragment
+            if t.get("builtin"):
+                return None
             self._open_tool = d.index
             return self._evt("response.function_call_arguments.delta", {
                 "item_id": f"fc_{self.req_id}_{d.index}",

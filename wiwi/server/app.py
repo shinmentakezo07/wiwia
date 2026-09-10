@@ -757,14 +757,21 @@ async def lifespan(app: FastAPI):
     state: AppState = app.state.wiwi
     await state.init_db()
     # Journals left over from a previous process are either still within TTL
-    # (replayable — keep) or stale (sweep). Only meaningful at startup: the
-    # sweep is not run again while serving.
+    # (replayable — keep) or stale (sweep now). While serving, the background
+    # TTL sweeper keeps expiring them so a long-lived server does not
+    # accumulate journals until restart (the "lifespan sweep loop" the
+    # tape_store module docstring promises).
     if state.journals is not None:
         removed = state.journals.sweep()
         if removed:
             import structlog as _sl
             _sl.get_logger("wiwi.startup").info("swept_stale_stream_journals",
                                                 removed=removed)
+        if state.config.router_settings.stream_journal_enabled:
+            # Sweep at a fraction of the TTL so expiry lags the configured
+            # TTL by at most one interval (clamped: at least 1s, at most 60s).
+            ttl = state.config.router_settings.stream_journal_ttl_s
+            state.journals.start(interval_s=min(60.0, max(1.0, ttl / 4)))
     await state.logs.start()
     # Background auto-refresh for Cline OAuth tokens (proactively rotates
     # expiring access tokens so requests don't fail mid-flight).
@@ -825,6 +832,8 @@ async def lifespan(app: FastAPI):
                 "cline_default_apply_failed_at_startup", err=str(e),
             )
     yield
+    if state.journals is not None:
+        await state.journals.stop()
     if state.healer is not None:
         await state.healer.stop()
     if state.opencode_refresh is not None:
@@ -1083,14 +1092,30 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 replay_after = int(lei)
         if (config.router_settings.stream_journal_enabled
                 and replay_id and replay_after >= 0):
+            # Key scoping (AUDIT #67): a journal is readable only by the
+            # virtual key that created it. Master (key_id == "master")
+            # owns admin-originated streams; unscoped journals predate this
+            # fix and stay readable to preserve restart-replay compat.
+            jowner = state_.journals.owner_of(replay_id)
+            caller_kid = getattr(info, "key_id", None)
+            owner_ok = (jowner is None
+                        or caller_kid == jowner
+                        or (jowner == "master" and caller_kid == "master"))
             replay = state_.journals.read_after(replay_id, replay_after)
-            if replay or state_.journals.is_complete(replay_id):
+            complete = state_.journals.is_complete(replay_id)
+            active = state_.journals.is_active(replay_id)
+            # AUDIT #66: an ACTIVE journal with no replayable chunks yet
+            # still means the original stream is running in THIS process —
+            # falling through would dispatch and bill the request a second
+            # time. `active` is the gate half the eager-touch comment
+            # always intended but the gate's shape dropped.
+            if (owner_ok and (replay or complete or active)):
                 ctx.metadata["stream_replayed"] = True
 
                 async def _replay_iter():
                     for _seq, chunk in replay:
                         yield chunk
-                    if state_.journals.is_complete(replay_id):
+                    if complete:
                         return
                     # Original stream may still be running (same process):
                     # tail the journal file until the done record lands or
@@ -1268,7 +1293,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
         store_prompts = config.wiwi_settings.store_prompts_in_spend_logs
         journaling = (config.router_settings.stream_journal_enabled
                       and state_.journals is not None)
-        journal = (await state_.journals.open(ctx.request_id)) if journaling else None
+        journal = ((await state_.journals.open(
+            ctx.request_id, key_id=getattr(ctx.auth, "key_id", None)))
+            if journaling else None)
         stream_text: list[str] = []
         stream_thinking: list[str] = []
         stream_tools: dict[int, dict[str, Any]] = {}

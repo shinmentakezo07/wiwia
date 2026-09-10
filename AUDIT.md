@@ -26,6 +26,56 @@ route. Covered by `tests/test_fix_round37.py`.
 used instead.
 
 ---
+
+## 🔴 Critical — round 41 (new)
+
+### 69. A transient 5xx storm permanently retires a provider key with no recovery path
+**File:** `wiwi/router/router.py:186-194`, `54-59`, `41-45`; `wiwi/config.py:241`
+**Trigger:** default config (`failover_mode="any_error"`, `key_max_consecutive_fails=5`,
+`healer.enabled=False`). Five consecutive non-200 outcomes on the same key — e.g. a
+provider-side 500/502/503 storm lasting ~25 s (the any-error cooldown defaults to 5 s,
+`min(retry_after, 30.0)`), or as few as three `401`/`403` responses, which count double.
+
+`on_result` increments `err_count` and calls `key.mark_invalid()` at the threshold. That
+sets `status = "invalid"`, which `ProviderKey.available` excludes. **`recover()` only
+resurrects a key whose status is `"cooling"`** — nothing time-based ever restores an
+`invalid` key. The only recovery paths are the HealthHealer (off by default), an admin
+`reset_status`, or a Cline/WorkBuddy token refresh.
+
+**Consequence:** when a provider's only key is retired — `wiwi.yaml.example` declares a
+single key for `anthropic-main`, `local-ollama`, `openrouter`, `gmicloud`, `bai`,
+`nvidia-nim`, `opencode-zen` — `ProviderAccount.healthy` becomes permanently `False`,
+`Deployment.available` becomes permanently `False`, and every request to that group
+returns `503` forever. Reproduced by execution: after 5 errors `status="invalid"`; ten
+subsequent `recover()` calls with the cooldown expired leave it `invalid` and unavailable.
+
+**Fix:** make the retirement a timed cooldown, or reset `err_count`/status when
+`cooldown_until` elapses; alternatively require an explicit operator or healer action to
+leave `invalid`. Covered by `tests/test_fix_round41.py::test_transient_5xx_does_not_permanently_retire_key`.
+
+### 70. Failed requests leak their estimated TPM reservation — later unrelated requests get 429
+**File:** `wiwi/server/app.py:1073-1077`, `1237-1251`, `1168`; `wiwi/ratelimit/memory.py:75-141`
+**Trigger:** a virtual key with `tpm` set. Send a large-prompt request whose upstream then
+fails (5xx, 429, all-keys-cooling, any `WiwiError` from `execute_with_retries`).
+
+`enforce_rate_limit` reserves an *estimated* tpm event at admission. `_record_tpm_usage` —
+the only reconciler — is called on the success paths alone (`app.py:1210` non-streaming,
+`app.py:1389` streaming); **no `except` branch and no early return calls it**, including the
+response-cache-hit return at `app.py:1168`. `RateLimiter` exposes only `check` and
+`record_tokens`: there is no release/refund API, so the estimate cannot be reclaimed.
+
+**Consequence:** the phantom reservation survives the full 60 s window, so unrelated small
+requests are rejected with `429 rate_limit_error` even though the upstream consumed zero
+tokens. Reproduced by execution: after `check(key_tpm=1000, est_tokens=800)` with no
+reconciliation, a subsequent `est_tokens=300` request returns `(False, 60)`. The same root
+cause orphans the RPM event. This is distinct from #31/#32, which concern *which*
+reservation `record_tokens` replaces — here `record_tokens` is never called at all.
+
+**Fix:** add a `release(key_id, request_id)` to the limiter and call it (or reconcile via
+`record_tokens(key_id, 0, request_id)`) on every non-success exit in `run_chat_like`.
+Covered by `tests/test_fix_round41.py::test_failed_request_releases_tpm_reservation`.
+
+---
 ## 🔴 Critical
 
 ### 54. Default session secret permits forged admin cookies when `master_key` is unset
@@ -47,6 +97,62 @@ The configuration permits an empty master key, and startup then selects the publ
 
 ---
 
+## 🟠 High — round 41 (new)
+
+### 71. Last-admin guard is bypassed by any truthy non-boolean `disabled` — unrecoverable admin lockout
+**File:** `wiwi/server/app.py:3144`, `3140`; `wiwi/auth/users.py:199-201`
+**Trigger:** `PATCH /admin/users/<sole-admin-uid>` with `{"disabled": 1}` (or `"1"`, `1.0`).
+
+The guard that conserves at least one enabled admin is armed with an **identity** check —
+`if role == "user" or disabled is True:` (`app.py:3144`) — while the write path coerces
+anything `int()`-able: `params["d"] = int(disabled)` (`users.py:201`). The integer `1`
+skips the guard and stores `disabled=1`, disabling the only enabled DB admin. Reproduced:
+`1`, `"1"`, `1.0` all skip the guard and store `1`.
+
+**Consequence:** `count_admins()` returns 0 and `require_admin_dep` then 401s every session,
+so no session can re-enable the account. Recovery requires the bearer master key; if the app
+booted on `WIWI_SESSION_SECRET` alone, `is_admin()` returns `False` and there is no HTTP
+recovery path at all — the row must be edited directly.
+
+**Fix:** validate `disabled` is a real `bool` before the guard (reject otherwise with 400),
+and keep the guard's semantics identical to the write path's. Covered by
+`tests/test_fix_round41.py::test_last_admin_guard_cannot_be_bypassed_by_int`.
+
+### 72. Login brute-force throttle is keyed on a caller-controlled, un-normalized `username`
+**File:** `wiwi/server/app.py:3254`, `3267-3281`; `wiwi/auth/users.py:114-118`
+**Trigger:** repeated `POST /auth/login` while varying the `username` field — case variants
+of the target account (`alice` / `ALICE` / `Alice`), or master-key guessing with a fresh
+arbitrary `username` each attempt.
+
+The bucket is `f"{_client_ip(request)}:{body.get('username', '')}"`, but `username` is
+lower-cased before lookup (`_validate_username`), so every case variant authenticates the
+*same* account while landing in a *different* bucket. On the master-key branch the username
+is never consulted at all, so an attacker gets a fresh 10-failure budget per arbitrary
+string against a credential that grants full admin. AUDIT #55 specified a fix keyed by a
+*normalized account identifier* plus source IP; the shipped key is neither normalized nor an
+account identifier, so #55's fix is incomplete.
+
+**Fix:** key the throttle on `normalized_username` (and a separate IP-only bucket for the
+master-key path). Covered by `tests/test_fix_round41.py::test_login_throttle_keyed_on_normalized_username`.
+
+### 73. Both abuse throttles are keyed on the spoofable `X-Forwarded-For` header
+**File:** `wiwi/server/app.py:195-199`, `3177-3183`, `3254-3255`
+**Trigger:** any request to `POST /auth/signup` or `POST /auth/login` carrying a different
+`X-Forwarded-For` per request, sent directly to the gateway (the shipped Dockerfile/compose
+runs uvicorn with no proxy in front).
+
+`_client_ip` unconditionally trusts the left-most `X-Forwarded-For` entry, and both
+`signup_throttle` and `login_throttle` are keyed on its return value. Rotating the header
+gives every request its own bucket, so an attacker can create unlimited accounts and make
+unlimited password guesses. The docstring's reasoning ("a spoofed value can at worst make an
+attacker share a bucket", i.e. self-limiting) is wrong for these callers — it gives them a
+fresh bucket, not a shared one. This defeats AUDIT #58's signup cap and compounds #55.
+
+**Fix:** trust `X-Forwarded-For` only when a configured trusted-proxy list matches, as
+`_request_base` already does for `X-Forwarded-Host`. Covered by
+`tests/test_fix_round41.py::test_repeated_signup_with_rotating_xff_is_throttled`.
+
+---
 ## 🟠 High
 
 ### 2. Parallel tool calls corrupt `output_index` and emit premature `done` events (Responses surface)
@@ -137,6 +243,159 @@ The metrics handler has no `is_admin()` guard, unlike every `/admin/*` endpoint.
 
 ---
 
+## 🟡 Medium — round 41 (new)
+
+### 74. OpenRouter reuses a tool-call index without flushing the deferred `ToolCallOpen`
+**File:** `wiwi/providers/openrouter_adapter.py:301-308`; contrast `wiwi/providers/openai_adapter.py:398-412`
+**Trigger:** an OpenRouter stream where a tool call's `ToolCallOpen` was deferred (the common
+case: `id`+`name` in one chunk, args in the next) and a second chunk arrives with the *same*
+`index` carrying a real `id` — which OpenRouter does on re-issued calls.
+
+The reused-index branch emits `ToolCallClose(index=idx)` without first flushing the pending
+open, while the OpenAI base class it was copied from *does* flush. Both `ChatStreamEncoder`
+and `AnthropicStreamEncoder` silently drop a Close with no registered open, so the tool call
+that was opened by the following args delta has its close swallowed and never terminates
+correctly. The client sees a tool invocation with an empty name/id, or none at all.
+
+**Fix:** port the `_pending_opens` flush from `OpenAIAdapter` into the OpenRouter decoder
+before emitting the Close. Covered by `tests/test_fix_round41.py::test_openrouter_reused_index_flushes_deferred_open`.
+
+### 75. NIM native-markup tool calls steal index 0 from structured `tool_calls`
+**File:** `wiwi/providers/nim_native_tools.py:432-448`; `wiwi/providers/nim_adapter.py:302-322`
+**Trigger:** a NIM stream that emits a structured `tool_calls` delta on index 0 (deferred
+open) and then leaks a native MiniMax markup block on the same response.
+
+`parse_tool_block` numbers native calls from zero by construction (`NativeToolCall(index=len(calls))`)
+with no collision check against indices the structured path already holds open. The gateway's
+`_open_tools`/`_arg_bufs` maps key by index only, so the two calls' arguments interleave into
+one buffer: the client receives a single tool call whose args concatenate two different
+calls, and the second call is lost.
+
+**Fix:** allocate the native call's index from a namespace that cannot collide with the
+structured path's open indices. Covered by `tests/test_fix_round41.py::test_nim_native_markup_does_not_collide_with_structured_index`.
+
+### 76. Gemini emits no terminal delta when the final frame carries usage but no `finishReason`
+**File:** `wiwi/providers/gemini_adapter.py:216-232`; `wiwi/core/gateway.py:816-825`
+**Trigger:** a Gemini SSE response whose terminal candidate omits `finishReason` while
+including `usageMetadata` (Gemini omits it on some SAFETY-truncated and mid-stream-cut
+responses — the `elif u: pass` arm exists because this shape was observed).
+
+The decoder returns `[]` for that frame, so no `UsageFinal`, `Finish`, or `StreamEnd` is
+produced. The pump's clean-end detection then sees `finish is None and not saw_terminal` and
+reports `StreamError("upstream stream ended without completion", "connection")` *and* calls
+`_note_stream_failure`, which trips the deployment cooldown and the key's error streak. A
+fully delivered, successful Gemini response is therefore recorded as a mid-stream failure,
+cooling down a healthy deployment and penalising a healthy key — and it feeds directly into
+#69's retirement ladder.
+
+**Fix:** treat usage-bearing terminal frames as a clean completion (emit `UsageFinal` +
+`Finish` + `StreamEnd`). Covered by `tests/test_fix_round41.py::test_gemini_usage_without_finish_reason_completes_cleanly`.
+
+### 77. OpenCode responses decoder leaks `_resp_tools` state on `response.failed`
+**File:** `wiwi/providers/opencode_adapter.py:330-366`; `wiwi/providers/registry.py:121-131`
+**Trigger:** a Zen Responses-route stream that fails mid-stream after at least one
+`response.output_item.added`, followed by any caller reusing the adapter instance —
+`get_adapter("opencode")` (the documented synchronous acquisition).
+
+The `response.failed` branch sets `_resp_ended = True` but never clears `_resp_tools`, unlike
+the `response.completed`/`response.incomplete` branch immediately above it. Because
+`_resp_ended` also short-circuits every later event, the stale entries cannot be drained;
+`_resp_next_index` likewise survives, so tool indices are not stream-local across reuse.
+
+**Fix:** clear `_resp_tools` and reset `_resp_next_index` in the `response.failed` branch.
+Covered by `tests/test_fix_round41.py::test_opencode_failed_clears_resp_tools`.
+
+### 78. `cycle_every_n` rotation cadence is inert — its counters are per-request
+**File:** `wiwi/router/router.py:767-768`, `796-803`, `858-863`; `wiwi/core/context.py:54`; `wiwi/server/app.py:1076-1077`
+**Trigger:** any deployment with `cycle_every_n > 0` (the default, 3) serving a group whose
+providers have unequal weights.
+
+`provider_consec`/`key_consec` are stored in `ctx.metadata`, which is a `RequestContext` field
+constructed fresh per HTTP request; nothing seeds it from a process-wide store. The counters
+are also only *incremented* immediately before `return result`, so within a single request
+they can never reach `cycle_n` either. The `prefer_exclude` filter therefore always reads 0,
+and the documented "after N consecutive successes, exclude this key" behaviour never fires.
+Reproduced: with weights `a=10,b=1`, `cycle_every_n=1` yields the identical pick sequence to
+`cycle_every_n=0`. The existing test passes only because it asserts the weak property "no key
+appears 4× in a row", which equal-weight smooth-WRR satisfies anyway.
+
+**Fix:** move the counters to router-level state (keyed by provider/key) and increment on the
+success path in `execute_with_retries`. Covered by
+`tests/test_fix_round41.py::test_cycle_every_n_rotates_under_skewed_weights`.
+
+### 79. A streaming-only workload can never graduate a deployment out of probation
+**File:** `wiwi/router/router.py:847-856`, `385-387`; `wiwi/core/gateway.py:430`
+**Trigger:** `healer.enabled: true`, so the HealthHealer restores a previously-cooled
+deployment via `Deployment.mark_recovered()` (`probation=True`), and that deployment then
+receives only **streaming** requests.
+
+Deployment graduation is written in exactly one place — `dep.probation = False` at
+`router.py:852` — and that write sits inside `if not getattr(ctx, "_defer_key_credit", False)`.
+The streaming path unconditionally sets `ctx._defer_key_credit = True` (`gateway.py:430`) and
+the pump that credits the key on clean completion never graduates the deployment, so
+`pick_deployment`'s `fresh` filter demotes it relative to its siblings indefinitely. The
+comment at `router.py:239-240` ("execute_with_retries graduates on success") does not hold for
+streams.
+
+**Fix:** graduate the deployment in the pump's clean-completion path alongside the key credit.
+Covered by `tests/test_fix_round41.py::test_streaming_success_graduates_probation_deployment`.
+
+### 80. Non-string `username`/`password` on unauthenticated auth endpoints raise 500
+**File:** `wiwi/server/app.py:3191-3192`, `3284-3288`; `wiwi/auth/users.py:114-118`, `135-136`, `73`
+**Trigger:** `POST /auth/signup` with `{"username": 1, "password": "x"}` or a non-string
+password; `POST /auth/login` with `{"username": true, "password": "x"}`.
+
+`json_body` only guarantees a JSON object, so a nested scalar reaches `_validate_username`,
+where `(username or "").strip()` raises `AttributeError`; `create_user`/`hash_password` raise
+`TypeError`/`AttributeError` on non-string passwords. The handlers catch only `ValueError`, so
+these escape as 500 with a server traceback instead of the 400/401 the endpoint's contract
+promises. Same class as #53/#59/#62, on routes those rounds did not cover.
+
+**Fix:** validate `username`/`password` are strings at the handler boundary and return 400.
+Covered by `tests/test_fix_round41.py::test_signup_non_string_username_returns_400`.
+
+### 81. `PATCH /admin/users/{uid}` with a non-numeric `disabled` raises 500
+**File:** `wiwi/server/app.py:3140`, `3152-3155`; `wiwi/auth/users.py:199-201`
+**Trigger:** `PATCH /admin/users/<uid>` with `{"disabled": []}` or `{"disabled": {}}`.
+
+`UserService.patch` calls `int(disabled)` with no type check; a list/dict raises `TypeError`,
+which the handler does not catch (it catches only `ValueError`). Contract-bearing difference:
+`"false"` → 400, `[]` → 500, for the same malformed field.
+
+**Fix:** coerce/validate `disabled` to `bool` before `patch`, returning 400 on a non-bool.
+Covered by `tests/test_fix_round41.py::test_patch_user_non_numeric_disabled_returns_400`.
+
+### 82. `{"enabled": "false"}` silently leaves a provider key enabled
+**File:** `wiwi/server/app.py:1799-1801`, `2011-2013`; contrast `2240-2242`
+**Trigger:** `PATCH /admin/providers/{name}/keys/{label}` with `{"enabled": "false"}`, or
+`PATCH /admin/providers/{name}` with `{"round_robin": "false"}`.
+
+`bool("false")` is `True`, so the key the admin asked to disable is persisted as enabled and
+keeps serving traffic — and the response echoes `enabled: true`, so the UI shows the opposite
+of the request. The backup-import path for the same field *does* validate (`if "enabled" in
+rk and not isinstance(rk["enabled"], bool): return 400`), so the two writers to the same
+column disagree about what a legal value is.
+
+**Fix:** require a real `bool` on the PATCH paths, matching the import validator. Covered by
+`tests/test_fix_round41.py::test_provider_key_enabled_string_false_rejected`.
+
+### 83. GenParams numeric fields are forwarded upstream with no type validation
+**File:** `wiwi/wire/openai_responses.py:283-292`, `wiwi/wire/openai_chat.py:176-195`; `wiwi/providers/openai_adapter.py:161-166`; contrast `wiwi/wire/anthropic_messages.py:294-305`
+**Trigger:** `/v1/responses` with `max_output_tokens: {"a": 1}`, or `/v1/chat/completions`
+with `max_tokens: {"a": 1}`.
+
+The value is stored unvalidated and passed straight into the upstream body, so the upstream
+returns a 400 that the gateway reports as an upstream `invalid_request_error` instead of a
+dialect-correct local 400. The Anthropic codec defends this class explicitly
+(`max_tokens`/`thinking.budget_tokens` are coerced and non-numeric values dropped), so the
+same malformed value is rejected on `/v1/messages` and forwarded on the other two surfaces.
+Reproduced: responses stores `{"a": 1}`; chat forwards `max_tokens: {'a': 1}` into the
+upstream body.
+
+**Fix:** apply the Anthropic codec's numeric coercion in the Chat and Responses decoders.
+Covered by `tests/test_fix_round41.py::test_responses_non_numeric_max_output_tokens_rejected`.
+
+---
 ## 🟡 Medium
 
 ### 13. `_inject_id` stamps a single id across multi-frame SSE chunks, breaking Last-Event-ID resumption
@@ -178,12 +437,16 @@ On 429, the key cools but `record_fail` is NOT called on the deployment (429 ∉
 
 **Fix:** `record_fail` on the deployment when all keys are exhausted, or break early when `key is None` for the only available deployment.
 
-### 18. Loop detection misses oscillating loops (A-B-A-B)
-**File:** `wiwi/core/gateway.py:406-411`
+### 18. Loop detection misses oscillating loops (A-B-A-B) — **superseded by the O(1) LoopDetector**
+**File:** `wiwi/core/gateway.py:406-411` (original); now `wiwi/streaming/loopdetect.py`
 
-The counter only catches *exact consecutive* repetition. An oscillating model (`A`,`B`,`A`,`B`…) resets `loop_count` to 1 on every alternation and never reaches `loop_limit`.
-
-**Fix:** track a small window of recent chunks or detect periodicity.
+**Status: fixed** (register entry was stale) — the consecutive-repetition scan was
+replaced by the O(1) `LoopDetector`, which tracks repetition runs per candidate
+period 1–8 and **does** catch oscillating loops. Re-verified 2026-09-09 by direct
+execution: an A-B-A-B loop trips at token 9 (limit 10), A-B-C at token 11
+(limit 12). Only periods > 8 remain undetected — the documented, deliberate
+`MAX_LOOP_PERIOD` cap. The original fix sketch ("track a small window of recent
+chunks") is what shipped.
 
 ### 19. Chronic slow-fail deployments never cooldown (60s window < failure interval)
 **File:** `wiwi/router/router.py:158-164`
@@ -263,12 +526,91 @@ InfoTile renders `<a href={props.to}>` with absolute paths (`/models`, `/provide
 
 **Fix:** drop the `selectedModel.endsWith(p.model_id)` clause; the `p.model_id.endsWith(selectedModel)` clause already covers the provider-prefix case.
 
-### 30. OpenRouter streaming drops `reasoning.encrypted` details
-**File:** `wiwi/providers/openrouter_adapter.py:213-221`
+### 30. OpenRouter streaming drops `reasoning.encrypted` details — **fixed**
+**File:** `wiwi/providers/openrouter_adapter.py:213-221` (original lines)
 
-Streaming `decode_stream_event` handles `reasoning.text` and `reasoning.summary` but drops `reasoning.encrypted` (non-streaming `decode_response` handles all three). Encrypted reasoning is lost in streaming mode.
+Streaming `decode_stream_event` handled `reasoning.text` and `reasoning.summary` but dropped `reasoning.encrypted` (non-streaming `decode_response` handled all three).
 
-**Fix:** add `elif rd_type == 'reasoning.encrypted'` emitting `ThinkingDelta(rd.get('data',''), signature=rd.get('id'))`.
+**Status: fixed** (register entry was stale) — re-verified 2026-09-09: both the
+non-streaming (line 166) and streaming (line 269) decode paths now have an explicit
+`elif rtype == "reasoning.encrypted"` branch. The exact fix sketch from the original
+entry is what shipped.
+
+---
+
+## ⚪ Low — round 41 (new)
+
+### 84. StreamTape `head_evicted` is not membership-exact (`replay(last_seq)` silent partial)
+**File:** `wiwi/streaming/resume.py:72-88`, `68-70`; `wiwi/core/gateway.py:527-529`
+**Trigger:** `last_seq` below the tape's first surviving seq — exactly the case the head
+eviction creates. With a 60-byte tape retaining seqs 15..20, `head_evicted(0)` returns
+`True`, but `head_evicted(14)` returns **`False`** even though seqs 1..14 are gone.
+
+`head_evicted` tests `first > last_seq + 1`, which is only a valid contiguity check when
+`last_seq` is adjacent to the survivor set. `_attempt_resume` passes `tape.seq - 1`, which
+happens to be adjacent today, so the guard is correct for the current caller but is not the
+membership test its contract claims ("True when eviction removed entries the continuation
+needs"). Any future caller passing a smaller `last_seq` — the natural reading of the API —
+gets a silently partial continuation prefix.
+
+**Fix:** test membership directly (`all(s in survivor_seqs for s in range(last_seq + 1, first))`
+or compare `last_seq + 1 < first` against the surviving set) rather than the arithmetic
+shortcut. Covered by `tests/test_fix_round41.py::test_head_evicted_is_membership_exact`.
+
+### 85. Provider key `secret` from a non-string body value is silently `str()`-ified and persisted
+**File:** `wiwi/server/app.py:1835`, `1893`, `2229-2230`
+**Trigger:** `POST /admin/providers/{name}/keys` (or `POST /admin/providers`, or an import
+entry) with `{"label": "a", "key": {"nested": true}}`.
+
+`str({'nested': True})` is the truthy string `"{'nested': True}"`, which passes the non-empty
+check and is stored as the upstream credential in memory and in `provider_keys.secret`. Every
+request through that provider then fails upstream authentication with a misleading
+provider-side 401, and the corrupt value survives restarts. The neighbouring `base_url` field
+rejects the same shape (`app.py:1885-1890`, `1982-1986`) — the guard was never extended to
+`key`. Same class as #26.
+
+**Fix:** require `key` to be a string (or a provider-secret-bearing mapping with a string
+leaf) before persisting. Covered by `tests/test_fix_round41.py::test_provider_key_non_string_secret_rejected`.
+
+### 86. `read_timeseries` with `key_ids=[]` returns `[]` buckets while the zero-row path returns a full grid
+**File:** `wiwi/logging_core/db_sink.py:561-564`, `620-631`; `wiwi/server/app.py:2935-2948`
+**Trigger:** `GET /admin/stats/timeseries?minutes=60&metric=tokens` as a non-admin with no
+virtual keys, or an admin after their last key is deleted, with a DB sink configured.
+
+The early return is documented as "the same dict this method returns when no rows match", but
+that is false whenever `minutes > 0`: the no-rows path zero-fills `n_buckets` buckets
+(`n_fill = n_buckets`), so the same user sees the array go from `[]` to 60 entries on minting
+their first key. A client reading `buckets.length` or indexing the last bucket renders
+differently for the two "no traffic" cases. `read_overview` does not have this mismatch.
+
+**Fix:** zero-fill the early return identically to the no-rows path. Covered by
+`tests/test_fix_round41.py::test_timeseries_empty_key_ids_matches_no_rows_shape`.
+
+### 87. WorkBuddy business envelopes downgrade transient upstream failures to non-retryable
+**File:** `wiwi/providers/workbuddy_adapter.py:254-276`
+**Trigger:** the WorkBuddy upstream returns an HTTP-200 SSE chunk carrying a `{code, msg}`
+envelope whose code is not 12153 and not a credit-exhaustion marker (e.g. 11102).
+
+`_envelope_error` returns `WiwiError(502, "api_error", retryable=False)`. The retry loop only
+retries retryable errors and `status_for_key_pool` maps this to `None`, so the request fails
+the client immediately instead of failing over to the next deployment/key — the opposite of
+what the 12153 branch was written to enable.
+
+**Fix:** classify unknown envelope codes as retryable (or map them through
+`status_for_key_pool`). Covered by `tests/test_fix_round41.py::test_workbuddy_unknown_envelope_is_retryable`.
+
+### 88. NIM structured path lacks the synthesized-Open adoption logic the base class has
+**File:** `wiwi/providers/nim_adapter.py:277-285`; contrast `wiwi/providers/openai_adapter.py:398-412`
+**Trigger:** a NIM model that sends an `arguments` fragment on the first tool chunk with no
+`id`, then supplies the real `id` on a later chunk for the same index.
+
+`NimAdapter` overrides `decode_stream_event` entirely and never populates `_synthesized_opens`,
+so its `if tc.get("id")` branch takes the generic reused-index path and the args streamed under
+`name=""` are never reconciled with the real id. The client receives a tool call with an empty
+id, so its tool result cannot be correlated back (`tool_call_id` is empty).
+
+**Fix:** port the synthesized-open adoption half from `OpenAIAdapter`. Covered by
+`tests/test_fix_round41.py::test_nim_adopts_synthesized_open_id`.
 
 ---
 
@@ -1029,5 +1371,168 @@ failure. `ClineAdapter.headers()` reads the synchronous cache with no request-pa
 worker is started and stopped by the FastAPI lifespan. Covered by
 `tests/test_fix_round36.py`.
 
-**Status: fixed** — live CLI/core cache refresh, header mapping, lifecycle wiring, and regression
-coverage are implemented in this change.
+---
+
+## Addendum — streaming-layer audit (delta chunks, partial JSON, flow), 2026-09-09
+
+Full pass over `wiwi/streaming/` (deltas, partial_json, coalesce, sse, loopdetect,
+resume, tape_store, validation), the gateway pump/consumer, the three wire
+StreamEncoders, and `_stream_response`/journal wiring. Five new verified findings
+(#63–#67); two register entries marked fixed in place above (#18, #30 — both were
+stale). The already-fixed items from prior addenda (#1–#4, #13–#16 hardening, #20,
+#21, #51, round-11 args duplication, round-25/26/29 streaming pins) re-verified by
+source reading as still fixed — do not re-fix.
+
+### 63. `ResponsesStreamEncoder` leaks builtin-tool args as phantom `function_call_arguments.delta` frames
+**Severity:** 🟠 High (client-visible protocol corruption on a default-on path)
+**File:** `wiwi/wire/openai_responses.py:577-590` (`ToolCallArgsDelta` arm)
+
+**Status: fixed** — round 38 (2026-09-09). The `ToolCallArgsDelta` arm now
+accumulates into the tool's buffer and returns `None` for builtin-tagged
+entries, so no `fc_*` frame is emitted; `_close_tool`'s `_builtin_query`
+still reads the accumulated args. Pinned by
+`tests/test_fix_round38.py::test_responses_builtin_args_emit_no_phantom_function_frames`.
+*(Original finding preserved: the `ToolCallArgsDelta` arm emitted
+`function_call_arguments.delta` frames for builtin-tagged opens, whose
+`fc_<req>_<n>` item ids never had an `output_item.added` — Codex CLI
+accumulated fragments against a nonexistent function item. Verified by
+execution pre-fix.)*
+
+### 64. `_repair_truncated_json` produces invalid JSON on odd backslash runs ≥ 3
+**Severity:** 🟡 Medium (silent total loss of tool args — falls to `{}`)
+**File:** `wiwi/streaming/partial_json.py:74` (the escaped-state check)
+
+**Status: fixed** — round 38 (2026-09-09). The endswith heuristic is replaced
+by a trailing-backslash **run count**: an odd run strips its final (dangling)
+backslash, and the `\uXXXX` strip is now escape-aware — it only fires when the
+backslash run before the `u` is odd (a fresh escape opener), so `"C:\\u0f`
+(complete pair + literal `u0f`) is left intact while pair + fresh `\u0f` strips
+only the fresh tail. Pinned in `tests/test_streaming_improvements.py`
+(`test_repair_odd_backslash_run_ge_3`,
+`test_repair_escaped_backslash_then_partial_unicode`,
+`test_repair_partial_unicode_after_odd_run`,
+`test_repair_complete_unicode_escape_not_stripped`).
+
+*(Original finding preserved: the `endswith` guard handled only a single
+trailing backslash; odd runs ≥ 3 fell through and produced invalid JSON —
+the whole args object silently fell to `{}`. Verified by execution pre-fix,
+including the escaped-backslash + partial `\u` case that defeated the
+round-14 strip.)*
+
+### 65. Mid-tool-args TextDelta silently truncates the tool call (Responses surface)
+**Severity:** 🟠 High (args loss; wrong-but-valid-looking call delivered)
+**File:** `wiwi/wire/openai_responses.py:511-531` (`TextDelta` arm closing an open tool item)
+
+**Status: fixed** — round 38 (2026-09-09), by the clean-fix route the finding
+recommended: the `TextDelta` (and `ThinkingDelta`) arms now suppress the
+interleave while `_item_open == "tool"` — mirroring the Anthropic encoder —
+so the tool stays open, its args keep streaming on their own output_index,
+and no mid-stream `output_item.done` fires. Pinned by
+`tests/test_fix_round38.py::test_responses_interleave_preserves_tool_output_index_routing`
+(asserts full post-interleave args on the right index, one done per tool, no
+message item synthesized after the fact).
+
+*(Original finding preserved: `_close_item()` popped the tool on interleave,
+so later args fragments were dropped and the client received
+`{"city": "Tok` as the final call. Verified by execution pre-fix.)*
+
+
+### 66. Reconnect to an empty journal double-dispatches the request (double billing)
+**Severity:** 🟡 Medium (duplicate upstream call + spend for one logical request)
+**File:** `wiwi/server/app.py:1084-1087` (replay gate) + `wiwi/streaming/tape_store.py:120` (eager touch)
+
+**Status: fixed** — round 39 (2026-09-10). `JournalStore.is_active()` exposes
+same-process liveness; the replay gate is now `replay or complete or ACTIVE`,
+so a sub-second reconnect to an open-but-empty journal tails the same journal
+instead of dispatching and billing a second upstream call. Pinned by
+`tests/test_fix_round39.py::test_reconnect_to_active_journal_tails_not_redispatches`
+(e2e: reconnect while the journal file is empty; asserts exactly one upstream
+call total).
+*(Original finding preserved: the gate `if replay or is_complete(...)` missed
+the empty-but-active case — `read_after → []`, `is_complete → False` — so a
+reconnect in the sub-second TTFT window fell through to a fresh upstream
+dispatch. Verified by execution against the real `JournalStore` pre-fix.)*
+### 67. Stream journals are replayable by any authenticated caller (no per-key scoping)
+**Severity:** 🟡 Medium (cross-tenant content disclosure within one gateway)
+**File:** `wiwi/server/app.py:1078-1114` (replay branch); `wiwi/streaming/tape_store.py:105-107`
+
+**Status: fixed** — round 39 (2026-09-10), by the record-the-originating-key
+route the finding recommended: `JournalStore.open()` writes an internal
+ownership record (``seq: 0`` + ``owner: <key_id>``) as the journal's first
+line — invisible to `read_after`/`is_complete`, which filter or ignore it —
+and `owner_of()` reads it back (survives restarts, since it lives in the
+file). The replay branch compares `owner_of(replay_id)` against the caller's
+`key_id` before serving; mismatched callers get no replay (they fall through
+to their own dispatch, never see the other key's content). Journals written
+by pre-scoping versions have no owner record and stay readable (restart-
+replay back-compat). Pinned by
+`tests/test_fix_round39.py::test_cross_key_replay_blocked_same_key_allowed`
+plus the `owner_of`/`is_active` unit tests; verified live with two minted
+virtual keys against a real app instance.
+
+*(Original finding preserved: the replay branch looked the journal up by id
+alone, so any authenticated caller holding another user's stream id could
+replay the entire response body.)*
+
+### 68. Tape eviction can desynchronize resume replay (`replay(last_seq)` assumes contiguous availability)
+**Severity:** ⚪ Low (resume is off by default; bounded by 256 KiB tape)
+**File:** `wiwi/streaming/resume.py:68-70, 134-137`
+
+**Status: fixed** — round 39 (2026-09-10). `StreamTape.head_evicted(last_seq)`
+detects a non-contiguous replay head (first surviving seq > last_seq + 1) and
+`gateway._attempt_resume` refuses the resume in that case, so the caller
+falls back to a fresh attempt instead of silently building a partial
+continuation (the evicted-tool-Open case). Pinned by the `head_evicted` unit
+tests in `tests/test_fix_round39.py` (gap, contiguous, and empty-replay
+cases).
+
+*(Original finding preserved: `replay(last_seq)` filtered survivors only, so
+an evicted head produced continuation messages missing the tool call —
+verified: `replay_tool_calls` returned `[]` while Args/Close survived.)*
+
+### Coverage gaps found while auditing (no defect — missing pins)
+
+- **No production caller of `PartialJSONParser`/`parse_partial`.** The incremental
+  partial-JSON machinery exists (with its own tests) but every production fold
+  uses raw `_repair_truncated_json` + `json.loads` directly
+  (`core/gateway.py:313/360`, `resume.py:114`, `openai_adapter.py` non-streaming).
+  The "render tool arguments as they arrive" feature is unwired. Either wire it
+  (e.g. into an admin/SSE preview surface) or note it as deliberately dormant —
+  today it is dead code with maintenance cost. *(Disposition 2026-09-10:
+  deliberately kept — tested public API of the streaming layer; deleting
+  exported, test-pinned API is a product call, not a bugfix. Revisit only if a
+  linter/strict-dead-code policy is adopted.)*
+- **`iter_sse_events` (sse.py) has zero production callers** — gateway uses
+  `LineSSEParser` directly (with the flush fix). Dead convenience wrapper.
+  *(Disposition 2026-09-10: kept for the same reason — exported, tested, 8 lines;
+  it is a convenience wrapper, not a second convention in the hot path.)*
+- **`DeltaCoalescer` default `threshold=100` is unreachable in production** —
+  gateway.py wires `max_bytes`/`max_ms` from config but hardcodes the default
+  threshold (`DeltaCoalescer(max_bytes=…, max_ms=…)`), and `stream_coalesce`
+  defaults to `false` — the entire coalescing feature is off by default with an
+  unconfigurable trigger point. `stream_coalesce` has no threshold knob.
+- **No runtime journal sweep.** **Status: fixed** — round 40 (2026-09-10).
+  `JournalStore.sweep_forever()` / `start()` / `stop()` implement the periodic
+  background TTL sweeper; the lifespan in `server/app.py` starts it when
+  journaling is enabled (interval = `min(60, max(1, ttl/4))` s) and stops it at
+  shutdown. The tape_store docstring no longer overstates the mechanism. Pinned
+  by `tests/test_fix_round40.py` (sweeper expiry, start/stop lifecycle, lifespan
+  integration, disabled-journaling skip). *(Original gap preserved: `sweep()`
+  ran only at startup — `app.py:763` — so a gateway up for > TTL (600 s)
+  accumulated dead journals for the process lifetime.)*
+- **Two stale register entries** — #18 and #30 were live in the register but
+  fixed in code; both now marked fixed in place above. (Found per the
+  do-not-re-report rule: neither re-verified state was recorded.)
+
+### Verification method
+
+All five primary findings (#63–#67) reproduced by direct execution against the
+real classes (`python3 - <<'EOF'` harness driving the actual encoders, the real
+`JournalStore` on a temp dir, and `LoopDetector` runs); reachability confirmed by
+reading the producing adapters (`anthropic_adapter.py` `server_tool_use` tagging,
+`openai_adapter.py` same-chunk Text+Args emission) and the consuming paths.
+No code changes made — findings only, per the report-what-we-missed scope.
+Subsequent fix rounds verified the fixes end-to-end: round 38 pins #63–#65,
+round 39 pins #66–#68 (`tests/test_fix_round39.py`, 12/12), round 40 pins the
+journal-sweep gap (`tests/test_fix_round40.py`). Full suite 1473 passed +
+ruff clean after each round.

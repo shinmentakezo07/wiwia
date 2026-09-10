@@ -143,7 +143,10 @@ class GeminiAdapter:
         turn = ir.AssistantTurn(raw=data)
         for ti, part in enumerate(content.get("parts") or []):
             if "text" in part:
-                turn.text += part["text"]
+                # Gemini can hand back a null text part; ToolUsePart/turn.text
+                # are str-typed and += None raises TypeError (a 500 on an
+                # otherwise valid candidate).
+                turn.text += part["text"] or ""
             elif "functionCall" in part:
                 fc = part["functionCall"]
                 turn.tool_calls.append(ir.ToolUsePart(
@@ -190,7 +193,7 @@ class GeminiAdapter:
         cand = (payload.get("candidates") or [{}])[0]
         for part in (cand.get("content") or {}).get("parts") or []:
             if "text" in part:
-                out.append(dl.TextDelta(part["text"]))
+                out.append(dl.TextDelta(part["text"] or ""))
             elif "functionCall" in part:
                 fc = part["functionCall"]
                 self._saw_function_call = True

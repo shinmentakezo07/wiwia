@@ -189,11 +189,17 @@ class OpenAIAdapter:
         is_native_openai = ptype not in {
             "openai-compatible", "gmicloud", "nvidia-nim", "bai",
         }
+        _VALID_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
         if g.reasoning_effort:
-            if is_native_openai:
+            # Only forward a KNOWN effort: a typo or a future level this map
+            # has not learned must not reach the upstream (instant 400), and
+            # must not enable thinking on budget-based providers.
+            if is_native_openai and g.reasoning_effort in _VALID_EFFORTS:
                 body["reasoning_effort"] = g.reasoning_effort
         elif g.thinking_budget is not None:
-            # Client sent thinking_budget (Anthropic dialect) — map to OpenAI reasoning_effort
+            # Client sent thinking_budget (Anthropic dialect) — map to OpenAI
+            # reasoning_effort. thinking_budget_to_effort only yields known
+            # levels, so no unknown string can leak from this branch.
             effort = g.effective_reasoning_effort()
             if effort and is_native_openai:
                 body["reasoning_effort"] = effort
@@ -285,18 +291,28 @@ class OpenAIAdapter:
         if reasoning:
             turn.thinking.append(ir.ThinkingPart(reasoning))
         for tc in message.get("tool_calls") or []:
-            raw_args = tc.get("function", {}).get("arguments") or "{}"
-            try:
-                args = json.loads(raw_args)
-            except json.JSONDecodeError:
-                # Auto-repair truncated JSON instead of dropping to {}.
-                from wiwi.streaming.partial_json import _repair_truncated_json
+            fn_tc = tc.get("function") or {}
+            raw_args = fn_tc.get("arguments")
+            if isinstance(raw_args, dict):
+                # Args-as-object gateways: use the dict directly instead of
+                # json.loads(TypeError) — a 500 on every replayed history.
+                args = raw_args
+                raw_args = json.dumps(raw_args)
+            else:
+                raw_args = raw_args or "{}"
                 try:
-                    args = json.loads(_repair_truncated_json(raw_args))
+                    args = json.loads(raw_args)
                 except json.JSONDecodeError:
+                    # Auto-repair truncated JSON instead of dropping to {}.
+                    from wiwi.streaming.partial_json import _repair_truncated_json
+                    try:
+                        args = json.loads(_repair_truncated_json(raw_args))
+                    except json.JSONDecodeError:
+                        args = {}
+                if not isinstance(args, dict):
                     args = {}
             turn.tool_calls.append(ir.ToolUsePart(
-                id=tc.get("id", ""), name=tc.get("function", {}).get("name", ""),
+                id=tc.get("id", ""), name=fn_tc.get("name", ""),
                 args=args, raw_args=raw_args))
         fr = choice.get("finish_reason", "stop")
         turn.stop_reason = {"stop": "stop", "length": "length", "tool_calls": "tool_call",
@@ -435,7 +451,13 @@ class OpenAIAdapter:
                     self._tool_names[idx] = name_fragment or ""
                     self._synthesized_opens.add(idx)
                     out.append(dl.ToolCallOpen(index=idx, id="", name=""))
-                out.append(dl.ToolCallArgsDelta(index=idx, args_fragment=fn["arguments"]))
+                args_val = fn["arguments"]
+                if isinstance(args_val, dict):
+                    # Args-as-object gateway: ToolCallArgsDelta.args_fragment
+                    # is typed str — downstream encoders concatenate it, and
+                    # a dict fragment crashed the Responses encoder.
+                    args_val = json.dumps(args_val)
+                out.append(dl.ToolCallArgsDelta(index=idx, args_fragment=args_val))
         fr = c.get("finish_reason")
         if fr:
             # close ALL still-open tool calls before finishing (parallel tools)

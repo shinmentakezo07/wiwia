@@ -122,6 +122,12 @@ class OpenRouterAdapter(OpenAIAdapter):
             # OpenAI-style effort string -> OpenRouter reasoning.effort.
             # OpenRouter accepts: max, xhigh, high, medium, low, minimal, none.
             reasoning_obj = {"effort": g.reasoning_effort}
+        elif g.thinking_budget == 0:
+            # Zero budget is the documented thinking-off value; the sibling
+            # adapters (Anthropic/Gemini/OpenAI) honor it. Clamping to the
+            # 1024 minimum instead switched thinking ON for an explicit
+            # disable.
+            reasoning_obj = {"enabled": False}
         elif g.thinking_budget is not None:
             # Anthropic-style token budget -> OpenRouter reasoning.max_tokens.
             # OpenRouter enforces a minimum of 1024 for Anthropic models.

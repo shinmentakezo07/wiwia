@@ -4,7 +4,7 @@ Self-hosted unified LLM gateway proxy. FastAPI backend + React (Vite) admin SPA.
 
 ## Project Overview
 
-wiwi is a hub-and-spoke LLM gateway:
+wiwi is a hub-and-spoke LLM gateway — no pairwise converters, one canonical IR:
 
 ```
 wire codec (inbound) ──decode──► IR ──adapter.encode_request──► provider
@@ -17,70 +17,98 @@ Inbound surfaces (HTTP routes):
 - `POST /v1/responses` — OpenAI Responses dialect
 - `POST /v1/messages` — Anthropic Messages dialect
 - `POST /v1/messages/count_tokens` — Anthropic token counting
+- `GET /v1/models` — client-visible model catalog; `GET /public/models` unauthenticated
+- `GET /health` → `{"status":"ok","groups":N,"providers":N}`; `GET /metrics` Prometheus text, master-key gated, 8 `wiwi_*` metrics
 
-Outbound provider types (from `PROVIDER_TYPES` in `wiwi/config.py`): `openai`, `anthropic`, `gemini`, `openai-compatible`, `openrouter`, `gmicloud`, `bai`, `nvidia-nim`, `cline`, `workbuddy`, `opencode`.
+Outbound provider types (`PROVIDER_TYPES`, `wiwi/config.py:36-48` — the single source of truth): `openai`, `anthropic`, `gemini`, `openai-compatible`, `openrouter`, `gmicloud`, `bai`, `nvidia-nim`, `cline`, `workbuddy`, `opencode`.
 
-Admin surface: `/admin/*` (master-key auth) and the SPA at `/admin/ui`.
+Admin surface: `/admin/*` (master-key auth), `/auth/*` (cookie session), and the SPA at `/admin/ui`. Every response carries `x-wiwi-request-id` and `x-wiwi-latency-ms`; bodies over `max_request_body_mb` (default 50) get 413.
 
 ## Architecture & Data Flow
+
+`wiwi/server/app.py` is a ~3.9k-line FastAPI factory: `RequestIdMiddleware`, the `run_chat_like` pipeline, the three inbound surfaces plus `count_tokens`/`/v1/models`/`/health`/`/public/models`, ~45 `/admin/*` + `/auth/*` routes, lifespan, and the SPA static mount. Do not read it top to bottom — start at `run_chat_like`.
 
 ### Request pipeline (`wiwi/server/app.py:run_chat_like`)
 
 1. Parse JSON body (`app.json_body`).
 2. Wire decode → IR (`wiwi/wire/<dialect>.py:codec_decode`).
 3. Authenticate (`wiwi/auth/service.py:AuthService`) — master key for `/admin/*`, virtual key `sk-wiwi-…` for client traffic.
-4. Resolve group (`wiwi/router/router.py:Router.resolve_group` — alias chain + `alias_to_provider`).
+4. Resolve group (`wiwi/router/router.py:Router.resolve_group` — provider `alias_id` registry first, then a bounded 8-hop `model_group_alias` walk; `app.py` keeps a mirrored `_ALIAS_CHAIN_MAX_HOPS = 8`).
 5. Enforce rate limit (`wiwi/ratelimit/{memory,redis}.py`).
-6. Build `RequestContext` (`wiwi/core/context.py`).
-7. Dispatch: `ir_req.stream ? gateway.stream(ctx) : gateway.complete(ctx)`. Both wrapped by `router.execute_with_retries` for failover over deployments + fallback groups.
-8. Provider call: `wiwi/providers/registry.py:fresh_adapter(type)` → `adapter.encode_request / _call / decode_stream_event`.
-9. Stream pump: `wiwi/streaming/` (SSE parse/encode, StreamTape failover+resume, partial JSON, loop detection, coalesce, schema validation).
-10. Outbound encode: `_encoder_for(surface)` → `ChatStreamEncoder | ResponsesStreamEncoder | AnthropicStreamEncoder` (streaming) or `codec_encode_response` (non-streaming).
-11. Post: log request, record TPM, update spend (budget cap → 402), translate `WiwiError` → per-surface `error_body`.
+6. Cache lookup (`wiwi/cache/`, non-streaming only, off by default).
+7. Build `RequestContext` (`wiwi/core/context.py`).
+8. Dispatch: `ir_req.stream ? gateway.stream(ctx) : gateway.complete(ctx)`. Both wrapped by `router.execute_with_retries` for failover over deployments + fallback groups.
+9. Provider call: `wiwi/providers/registry.py:fresh_adapter(type)` → `adapter.encode_request / _call / decode_stream_event`.
+10. Stream pump: `wiwi/core/gateway.py:_pump_once` over `wiwi/streaming/` (SSE parse/encode, StreamTape failover+resume, partial JSON, loop detection, coalesce, schema validation).
+11. Outbound encode: `_encoder_for(surface)` → `ChatStreamEncoder | ResponsesStreamEncoder | AnthropicStreamEncoder` (streaming) or `codec_encode_response` (non-streaming).
+12. Post: log request, record TPM, update spend (budget cap → 402), translate `WiwiError` → per-surface `error_body`.
+
+`Gateway.complete/_pump_once` call `build_log_event` per attempt and `ctx.note_attempt(...)` per try (deployment, provider, key label, status, latency). `LogEvent` fans out to an SSE ring buffer, Prometheus, and the DB sink.
+
+### Startup / shutdown
+
+`create_app` fails closed without `WIWI_MASTER_KEY` and a session secret (`WIWI_SESSION_SECRET`, else master key) — this prevents forged admin cookies. `AppState.init_db` resolves the DB URL (`DATABASE_URL` env > `general_settings.database_url` > `sqlite+aiosqlite:///wiwi.db`), normalizes it (`sqlite:///`→`sqlite+aiosqlite:///`; `postgres://|postgresql://`→`postgresql+asyncpg://`; `sslmode`→`ssl`, `channel_binding` dropped), then starts AuthService/UserService/DBSink/ConfigStore, merges the DB config overlay onto the YAML-built router, and starts the gateway, the journal sweeper, the Cline/WorkBuddy/opencode version-refresh workers, and `HealthHealer` (reverse on shutdown).
 
 ### Hard invariants
 
-- All dialect/provider branching stays inside `wiwi/wire/` and `wiwi/providers/`. `core/`, `router/`, `auth/`, `streaming/` must not import dialect or provider symbols.
-- `wiwi/providers/registry.py` has an import-time `assert` that fails loudly when a `PROVIDER_TYPES` entry has no matching branch — adding a provider = new adapter + one branch in `get_adapter()`.
-- `RequestContext` is the single mutable object threaded through every stage.
+- All dialect/provider branching stays inside `wiwi/wire/` and `wiwi/providers/`. `core/`, `router/`, `auth/`, `streaming/`, `cache/`, `cost/`, `logging_core/`, `ir/` must not import dialect or provider symbols. `wiwi/core/recovery.py` states this in its module docstring and also must never import `wiwi.router` or `wiwi.core.gateway` (cycle avoidance); the `providers`→`server` edge is `TYPE_CHECKING`-only.
+- `wiwi/providers/registry.py:97` asserts at import time that every `PROVIDER_TYPES` entry has a matching `get_adapter()` branch; `wiwi/router/router.py:726` asserts the admin catalog matches. Adding a provider = new adapter + one branch + catalog entry. The asserts catch *missing* branches, not out-of-place ones.
+- `RequestContext` (`wiwi/core/context.py`) is the single mutable object threaded through every stage; `AttemptRecord` lives alongside it.
+- `fresh_adapter()` on the request hot path (private instance — adapters hold per-stream decode state across awaits); `get_adapter()` returns a shared instance that is `reset()` on hand-out and is only safe for synchronous/non-await use. Using the singleton in the hot path lets a concurrent request wipe an in-flight stream.
+- Streaming event ordering is a contract every adapter MUST obey; encoders never defend against malformed sequences:
+
+  ```
+  StreamStart  (exactly one, first)
+    TextDelta* | ThinkingDelta*
+    ToolCallOpen → ToolCallArgsDelta* → ToolCallClose   (strictly nested per index)
+  UsageFinal   (exactly one, after last content delta)
+  Finish       (exactly one)
+  StreamEnd xor StreamError
+  ```
+
+  Asymmetry: `StreamError` may terminate at ANY point with no preceding `Finish`.
+- All 10 `IRStreamDelta` variants in `wiwi/streaming/deltas.py` are `@dataclass(frozen=True)`. Adapters mutate per-stream state on the adapter instance, never on deltas.
+- Never `print` from library code — use `structlog`. Async throughout (`httpx.AsyncClient`, SQLAlchemy async, `orjson` in hot paths).
 
 ## Key Directories
 
 | Path | Purpose |
 |---|---|
-| `wiwi/main.py` | argparse CLI; `wiwi --config wiwi.yaml` → uvicorn. |
-| `wiwi/server/app.py` | FastAPI app, routes, `run_chat_like` pipeline, lifespan startup/shutdown, SPA static mount. |
+| `wiwi/main.py` | argparse CLI; config precedence `--config` > `WIWI_CONFIG` (inline YAML) > `wiwi.yaml`; uvicorn dispatch (factory string under `--reload`). |
+| `wiwi/config.py` | Pydantic v2 models + `PROVIDER_TYPES` (the single source of truth), `load_config`/`load_env`, `os.environ/NAME` interpolation, empty-key provider filtering, fail-fast validation. |
+| `wiwi/server/` | `app.py` FastAPI factory + routes + pipeline; `config_store.py` DB persistence for providers/keys/deployments/prices/settings; `stats.py` pure rollups; `metrics.py` Prometheus text. |
 | `wiwi/wire/` | Dialect codecs: `openai_chat.py`, `openai_responses.py`, `anthropic_messages.py`. Each owns `decode_request`, `encode_response`, a `StreamEncoder`, and `error_body`. |
-| `wiwi/ir/` | Internal Representation dataclasses (`types.py`) + `builtin_tools.py` registry. |
-| `wiwi/providers/` | `base.py` Protocol + WiwiError + per-provider adapters + `registry.py`. |
-| `wiwi/providers/registry.py` | `PROVIDER_TYPES` tuple; `get_adapter(type)` (shared), `fresh_adapter(type)` (private, used in hot path). |
-| `wiwi/streaming/` | `deltas.py` IRStreamDelta taxonomy, `sse.py` parse/encode, `resume.py` StreamTape, `tape_store.py` JournalStore (durable per-request JSONL journals), `partial_json.py`, `validation.py`, `coalesce.py`, `loopdetect.py`. |
-| `wiwi/cache/` | Opt-in exact-match response cache (`CacheSettings`, off by default): non-streaming requests only, keyed on normalized IR + group + surface + key id, bypassed per-call via `x-wiwi-no-cache` header. |
-| `wiwi/router/` | Router: build providers/groups, WRR, `execute_with_retries`. |
-| `wiwi/ratelimit/` | Sliding-window rpm/tpm: `memory.py` (default) + `redis.py`. |
-| `wiwi/auth/` | `service.py` AuthService, virtual keys, users, signed cookies. |
-| `wiwi/core/` | `gateway.py` (orchestration), `context.py` (RequestContext). |
-| `wiwi/cost/` | Token→USD cost engine. |
-| `wiwi/logging_core/` | Three-stream logger: request (DB+SSE), proxy (stdout+SSE), audit (sync DB). |
-| `wiwi/config.py` | Pydantic v2 config models + `load_config`/`load_env`/`PROVIDER_TYPES`. |
-| `wiwi/server/config_store.py` | DB-backed config (providers, keys, deployments, settings, model_prices). |
-| `tests/` | 60+ thematic files + numbered `test_fix_roundN.py` (see Testing & QA). |
-| `web/` | React 19 + Vite 6 + Tailwind 4 SPA. `bun run build` outputs to `wiwi/server/static/`. |
-| `docs/` | `ARCHITECTURE.md`, `CORE.md`, `MVP.md`, `PLAN.md`, `ADMIN.md`, `TECHSTACK.md`, `STREAMING_PERFORMANCE_RECOVERY.md`, plus `docs/superpowers/{specs,plans}/`. |
+| `wiwi/ir/` | Canonical IR dataclasses (`types.py`: 7 `Part` variants, `Message`, `Tool`, 4 `ToolChoice` variants, `ResponseFormat`, `GenParams`, `Request`, `Usage`, `AssistantTurn`, `Response`, plus `effort`↔`budget` maps) + `builtin_tools.py` registry (per-surface `web_search` wire types, decode-only aliases). |
+| `wiwi/providers/` | `base.py` (`ProviderAdapter` Protocol — 5 methods — `WiwiError`, `RETRYABLE_STATUS`, `error_from_provider_status`, `status_for_key_pool`, `ProviderKeyRef`) + per-provider adapters + `registry.py`. Quirks live here, never in core. |
+| `wiwi/router/router.py` | Groups/deployments, `ProviderAccount` smooth-WRR key pools, `resolve_group` alias walk, `pick_deployment` strategies, `_CrossProviderWRR`, `execute_with_retries`, `BUILTIN_PROVIDER_TYPES` catalog + sync assert. |
+| `wiwi/core/` | `gateway.py` (`complete`, `_complete_via_stream` for `force_stream` adapters, `stream`, `_pump_once`, `_attempt_resume`, `build_log_event`), `context.py` (`RequestContext`/`AttemptRecord`), `recovery.py` (`Backoff`, `CircuitBreaker`, `probe_verdict`, `parse_retry_after`, `HealthHealer`). |
+| `wiwi/streaming/` | `deltas.py` taxonomy + ordering contract; `sse.py` parser/encoder (CRLF-injection guard); `resume.py` StreamTape ring buffer + mid-stream failover continuation; `tape_store.py` durable per-request JSONL journals; `partial_json.py`; `validation.py` (advisory, never fails the stream, 1 MiB cap); `coalesce.py`; `loopdetect.py` (`MAX_LOOP_PERIOD=8`). |
+| `wiwi/auth/` | `keys.py` mint/hash/mask; `service.py` `AuthService` (SQLite/PG `vkeys`, 60s TTL cache, budget); `users.py` PBKDF2 + HKDF/HMAC signed session cookies. |
+| `wiwi/ratelimit/` | Sliding-window rpm/tpm: `memory.py` (default) + `redis.py` (sorted sets, estimate→actual reconciliation, memory fallback). |
+| `wiwi/cache/` | Opt-in exact-match response cache: `CacheBackend` Protocol, normalized-IR SHA-256 key, memory/Redis backends, `build_response_cache`. |
+| `wiwi/cost/` | `CostEngine` token→USD (8-dp, `unpriced` flag), slash-trimmed lookup, tiktoken-or-chars/4 estimation. |
+| `wiwi/logging_core/` | `LogEvent` (request/proxy/audit streams), `LoggingSubsystem` bounded queues + SSE broadcast sink, `DBSink` batched writes with 5s query TTL cache. |
+| `web/src/pages/` | React 19 + Vite 6 + Tailwind 4 SPA; mixes ~16 admin console pages with ~30 public marketing pages — never assume a page is admin-facing from directory alone. |
+| `tests/` | 83 flat `test_*.py` modules plus numbered `test_fix_roundN.py` regressions (see Testing & QA). |
+| `docs/` | 13 top-level docs + `docs/superpowers/{specs,plans}/` dated design records. |
 
 ## Development Commands
 
-The `.venv` symlink in this checkout points at an empty Python 3.14 venv with no site-packages. **Never use `.venv/bin/python`.** Use ambient `python3` (Python 3.12), `pytest` 9.1.1, `ruff` on `PATH`.
+The `.venv` symlink in this checkout points at an empty Python 3.14 venv with no site-packages. **Never use `.venv/bin/python`.** Use ambient `python3` (Python 3.12), `pytest` 9.1.1, `ruff` 0.16.5 on `PATH`.
 
 ```bash
 # backend
 python3 -m pytest tests/ -q                          # full suite — keep green, don't trust pinned pass-counts
 python3 -m pytest tests/test_codecs.py -q            # single file
 python3 -m pytest tests/test_router.py -k cooldown   # single test by name
-ruff check wiwi/ tests/                              # line-length 100, target py311
+python3 -m pytest tests/test_integration.py::test_chat_completion_happy_path -q
+ruff check wiwi/ tests/                              # line-length 100, target py311, ignore EXE002
 
 # pre-completion gate (both must be green before claiming done)
 python3 -m pytest tests/ -q && ruff check wiwi/ tests/
+
+# install (uv is the package manager; uv.lock is authoritative)
+uv pip install -e '.[redis]'                         # [redis] extra ships in the Docker image
 
 # run server
 wiwi --config wiwi.yaml                              # prod: load object → uvicorn
@@ -89,24 +117,24 @@ wiwi --config wiwi.yaml --port 4000 --host 0.0.0.0
 # or directly: uvicorn wiwi.server.app:create_app_from_config_path --factory
 
 # frontend (web/) — bun, not npm
-cd web && bun install && bun run dev                 # Vite dev server, proxies /admin /v1 /auth /public /health → :4000
+cd web && bun install && bun run dev                 # Vite dev server, proxies /admin /auth /public /v1 /health → :4000
 cd web && bun run build                              # tsc -b && vite build → ../wiwi/server/static/
 cd web && bun run lint                               # eslint src (web/ is NOT covered by ruff)
 
 # stress test
-python3 bench.py                                    # async httpx load tester; TTFT, p50/p95, TPS
+python3 bench.py -n 10 -c 1,4,16 --max-tokens 100    # async httpx load tester; TTFT p50/p95, latency, TPS, RPS
 
 # full stack with both servers
 ./start.sh                                           # npm-based, predates bun migration (stale but functional)
 ```
 
-Environment knobs honored by `start.sh`: `WIWI_PORT`, `WIWI_WEB_PORT`, `WIWI_RELOAD`, `WIWI_RELOAD_DIRS`, `WIWI_BIN`.
+Env knobs honored by `start.sh`: `WIWI_PORT`, `WIWI_WEB_PORT`, `WIWI_PYTHON`, `WIWI_BIN`, `WIWI_RELOAD`, `WIWI_RELOAD_DIRS`. `start.sh` pins `PYTHONPATH` to the checkout and hard-errors if `import wiwi` resolves elsewhere.
 
-Config precedence: `--config` flag > `WIWI_CONFIG` env > `wiwi.yaml`.
+Config precedence: `--config` flag > `WIWI_CONFIG` env > `wiwi.yaml`. `.env` is loaded with `override=False` (real env wins) before config parse, and again in the uvicorn reload factory path. `os.environ/NAME` strings are interpolated recursively; missing vars resolve to `""`, and validation drops providers whose keys all resolved empty (and the `model_list` entries referencing them), so `wiwi.yaml.example` boots in a fresh container.
 
 ## Code Conventions & Common Patterns
 
-- **Python**: `requires-python = ">=3.11"`, ruff `target-version = "py311"`, `line-length = 100`. Ruff-only lint (no black/isort); ignore `EXE002` only.
+- **Python**: `requires-python = ">=3.11"`, ruff `target-version = "py311"`, `line-length = 100`. Ruff-only lint (no black/isort); ignore `EXE002` only (the workspace mount marks files +x while git tracks 100644). `web/` is not ruff-covered.
 - **Async throughout**: `httpx.AsyncClient`, SQLAlchemy async, `orjson` in hot paths. Never `print` from library code — use `structlog`.
 - **Data shapes**: Pydantic v2 for config and admin schemas; plain `@dataclass(frozen=True)` for IR and streaming hot-path types.
 - **Dataclasses are frozen**: every `IRStreamDelta` variant in `wiwi/streaming/deltas.py` is `@dataclass(frozen=True)`. Adapters mutate per-stream state on the adapter instance, never on deltas.
@@ -122,14 +150,13 @@ Config precedence: `--config` flag > `WIWI_CONFIG` env > `wiwi.yaml`.
   ```
 
   `StreamError` may terminate at ANY point (no preceding `Finish` required). Encoders do NOT defend against malformed sequences — adapters guarantee legality.
-
 - **Adapter singletons**: `get_adapter(type)` returns a shared instance (reset on hand-out); `fresh_adapter(type)` returns a private instance for the request hot path because adapters hold per-stream decode state across awaits.
 - **Provider keys**: enter via `os.environ/NAME` interpolation in `wiwi.yaml`. Master key from `WIWI_MASTER_KEY` (admin auth). Virtual keys `sk-wiwi-…` are SHA-256-hashed at rest with constant-time compare; plaintext returned only once at mint.
 - **Error translation**: `WiwiError` is the unified error type. Each wire dialect owns its `error_body()` mapping (e.g., Anthropic `etype` strings).
 - **Cost**: `wiwi/cost/` resolves token → USD using per-model prices from `wiwi/server/config_store.py` (DB-backed).
 - **Two different cache-hit flags — do not conflate**: `cache_hit` = provider prompt-cache hit (feeds `wiwi_prompt_cache_hits_total`); `response_cache_hit` = served from wiwi's own exact-match cache (`wiwi/cache/`, `LogEvent.response_cache_hit`). A response-cache hit must leave `cache_hit=False` (`wiwi/server/app.py` response-cache branch) or prompt-cache metrics inflate. Response cache never stores streaming requests or requests with builtin tools.
-- **Frontend**: React 19, Vite 6, Tailwind 4, TanStack Query 5, Recharts. `web/src/pages/` mixes ~15 admin console pages with ~30 public marketing pages — never assume a page is admin-facing from directory alone.
-- **Naming**: tests `test_*.py`; new bugfix regressions always `test_fix_roundN.py` (next unused N — see current rounds under Testing & QA).
+- **Frontend**: React 19, Vite 6, Tailwind 4, TanStack Query 5, Recharts. `web/tsconfig.json` is `strict` + `noUnusedLocals/Parameters` + `verbatimModuleSyntax` + `erasableSyntaxOnly`; path alias `@/*` → `./src/*`, and `src/llmgateway-ref` is excluded.
+- **Naming**: tests `test_*.py`; new bugfix regressions always `test_fix_roundN.py` (next unused N — see Testing & QA).
 - **Imports**: prefer existing module APIs over new ones; second convention beside existing is prohibited. Always run `lsp references` before editing an exported symbol.
 
 ## Important Files
@@ -146,38 +173,41 @@ Config precedence: `--config` flag > `WIWI_CONFIG` env > `wiwi.yaml`.
 - `wiwi/auth/service.py` — AuthService, virtual keys DB schema.
 - `wiwi/ratelimit/{memory,redis}.py` — sliding-window rpm/tpm.
 - `wiwi/wire/{openai_chat,openai_responses,anthropic_messages}.py` — codec decode/encode + stream encoder + error body per dialect.
-- `wiwi/providers/{openai,anthropic,openrouter,gemini,nim,gmicloud,bai,cline,workbuddy,opencode}_adapter.py` — provider adapters. Quirks live here, never in core: NVIDIA NIM rejects JSON Schema boolean subschemas and params named `type` (`nim_tool_schema.py`); Cline is OAuth with on-demand refresh (`cline_oauth.py`, `cline_auto_refresh.py`); OpenCode Zen routes per model across four upstream protocols and refreshes its `opencode/<version>` User-Agent live (`opencode_version.py`).
+- `wiwi/providers/{openai,anthropic,openrouter,gemini,nim,gmicloud,bai,cline,workbuddy,opencode}_adapter.py` — provider adapters. Quirks live here, never in core: NVIDIA NIM rejects JSON Schema boolean subschemas and params named `type` (`nim_tool_schema.py`) and frames native MiniMax XML tool markup (`nim_native_tools.py`); Cline is `force_stream=True` with WorkOS OAuth and on-demand refresh (`cline_oauth.py`, `cline_auto_refresh.py`); WorkBuddy is `force_stream=True` with a `{code,msg,data}` envelope and per-key auth-JSON refresh; OpenCode Zen routes per model across four upstream protocols and refreshes its `opencode/<version>` User-Agent live (`opencode_version.py`).
 - `wiwi/server/config_store.py` — DB-backed provider/key/deployment/settings/price tables.
-- `wiwi/server/static/` — built SPA, served at `/admin/ui` via `_SPAStaticFiles` subclass.
+- `wiwi/server/static/` — built SPA, served at `/admin/ui` via `_SPAStaticFiles` subclass (index.html history fallback, mounted after all API routes).
 - `wiwi.yaml` (gitignored) — runtime config. `wiwi.yaml.example` is the schema reference.
+- `AUDIT.md` — live/fixed bug register; read at the start of every bugfix session.
+- `UPDATE.md` — binding translation-layer changelog; read before touching `wiwi/wire/` or the OpenAI/Anthropic/OpenRouter adapters.
 - `pyproject.toml` — hatchling build, `[project.scripts] wiwi = "wiwi.main:cli"`, `[tool.ruff]`, `[tool.pytest.ini_options]`.
-- `Dockerfile` (3-stage: uv builder → bun SPA build → python 3.12 slim runtime; non-root user `wiwi`; healthcheck `GET /health` every 30s).
-- `docker-compose.yml` — `postgres:16-alpine` + `wiwi` service, healthcheck-gated depends_on.
+- `Dockerfile` (3-stage: uv `python3.12-bookworm-slim` builder → `oven/bun:1` SPA build → `python:3.12-slim-bookworm` runtime; non-root user `wiwi` uid 10001; healthcheck `GET /health` every 30s; `WIWI_STATIC_DIR=/app/wiwi/server/static`; `/app/data` volume).
+- `docker-compose.yml` — `postgres:16-alpine` + `redis:7-alpine` + `wiwi`, healthcheck-gated `depends_on`, port 4000.
 - `start.sh` — bash wrapper launching backend + Vite dev server concurrently. Stale (uses npm, not bun) but functional.
-- `bench.py` — async httpx load tester (TTFT, p50/p95, TPS, concurrency sweep).
+- `bench.py` — async httpx load tester; edit the `TARGETS` dict to add endpoints.
 
 ## Runtime/Tooling Preferences
 
 - **Backend Python**: ambient `python3` 3.12. Never `.venv/bin/python` (broken symlink in this checkout).
-- **Package manager**: uv (lockfile present, `uv.lock`). Install: `uv pip install -e .[redis]` (optional `[redis]` extra for Redis rate limiter).
-- **Lint**: ruff only for Python (`wiwi/`, `tests/`). ESLint flat config for `web/`.
-- **Frontend**: bun (authoritative — `web/bun.lock` present). Stick to one package manager per session. `web/package-lock.json` is legacy.
-- **Database**: SQLite default (`sqlite+aiosqlite:///wiwi.db`); Postgres auto-normalized to `postgresql+asyncpg://`. `DATABASE_URL` env overrides config. Schema is created via inline `CREATE TABLE IF NOT EXISTS` at startup; **no Alembic**.
+- **Package manager**: uv (lockfile present, `uv.lock`). Install: `uv pip install -e '.[redis]'` (the optional `[redis]` extra drives Redis rate limiting and the Redis response cache; asyncpg is a core dep).
+- **Lint**: ruff only for Python (`wiwi/`, `tests/`). ESLint 9 flat config for `web/` (`react-refresh/only-export-components` warn, `@typescript-eslint/no-unused-vars` error with `^_` ignore).
+- **Frontend**: bun (authoritative — `web/bun.lock` present; `Dockerfile` and the docs use bun). `web/package-lock.json` is legacy npm and `start.sh` still uses npm by design. Stick to one package manager per session.
+- **Database**: SQLite default (`sqlite+aiosqlite:///wiwi.db`); Postgres normalized to `postgresql+asyncpg://`. `DATABASE_URL` env overrides config. Schema is created via inline `CREATE TABLE IF NOT EXISTS` at startup (auth, config_store, db_sink); **no Alembic, no migrations to write**.
 - **Stream journals are ON by default** (`stream_journal_enabled: true`, dir `.wiwi/journals`, 600s TTL, 1 MiB/journal cap): encoded SSE frames persist per-request so a client reconnecting with `x-wiwi-stream-id` + `Last-Event-ID` replays even after a wiwi restart. `.wiwi/` is gitignored runtime scratch — never commit it.
 - **Env loading**: `load_env()` (python-dotenv, `override=False`) runs before config parse.
-- **Docker**: `WIWI_STATIC_DIR=/app/wiwi/server/static` is set; data lives in `/app/data` (mounted volume). Default healthcheck port 4000.
+- **Docker**: `WIWI_STATIC_DIR=/app/wiwi/server/static` is set; data lives in `/app/data` (mounted volume); `DATABASE_URL` defaults to `sqlite+aiosqlite:////app/data/wiwi.db` in the image. Default healthcheck port 4000.
 - **No pre-commit framework**. Discipline is developer-driven via the documented `pytest + ruff` gate.
 - **Static typing**: Python is untyped (no mypy/pyright in pyproject). TypeScript `tsc -b` runs as part of `web/` build; web/tsconfig is `strict` + `verbatimModuleSyntax` + `noUnusedLocals/Parameters`.
+- **Trust the code over the docs.** Doc sections that disagree with the code are aspirational history (`docs/CORE.md` and `docs/ADMIN.md` carry explicit notes that earlier revisions described a handler pipeline/DeltaBus/Next.js UI that was never built). `detailed.md` is the ground-truth technical reference.
 
 ## Testing & QA
 
-- **Framework**: pytest 8 + pytest-asyncio 0.23, `asyncio_mode = "auto"` — write bare `async def test_*`, **no** `@pytest.mark.asyncio` decorator.
+- **Framework**: pytest 9.1.1 + pytest-asyncio 1.4.0, `asyncio_mode = "auto"` — write bare `async def test_*`, **no** `@pytest.mark.asyncio` decorator (a few legacy files still carry it).
 - **No `conftest.py`** anywhere; each test file builds its own `_config()` factory and its own `LifespanManager + httpx.ASGITransport` client fixture inline.
-- **Default master key for admin-auth'd tests**: `sk-wiwi-master-test` via `Authorization: Bearer …` (see `tests/test_integration.py`).
-- **Upstream mocking**: `respx` (decorator form preferred; context-manager form broken in respx 0.23 + httpx 0.28). Patterns: `@respx.mock` + `respx.post(url).respond(...)`, `respx.post(...).mock(side_effect=[...])`.
-- **Property-based**: `hypothesis` ≥6.100. Persistent cache in `.hypothesis/`. Used in `tests/test_property_roundtrip.py`, `tests/test_translation_enhancements.py`, `tests/test_web_search_translation.py`, `tests/test_tool_translation_round2.py`.
-- **No pytest-cov / no coverage config**. No `--cov` invocations. Coverage is not enforced.
-- **Numbered bugfix regression files**: `tests/test_fix_roundN.py`. Existing rounds: 2–26 plus legacy filename `test_bugfix_round5.py` (round 1 missing). New bugfix regressions MUST go into the next unused `test_fix_roundN.py` — confirm with `ls tests/test_fix_round*.py`, never assume the number — and never back into topic files like `test_codecs.py` or `test_router.py`.
+- **Default master key for admin-auth'd tests**: `sk-wiwi-master-test` via `Authorization: Bearer …` (see `tests/test_integration.py`; Anthropic-surface tests use `x-api-key` + `anthropic-version`).
+- **Upstream mocking**: `respx` 0.23.1 (decorator form preferred; context-manager form broken in respx 0.23 + httpx 0.28). Patterns: `@respx.mock` + `respx.post(url).respond(...)`, `respx.post(...).mock(side_effect=[...])`.
+- **Property-based**: `hypothesis` 6.167.0. Persistent cache in `.hypothesis/`. Used in exactly one file — `tests/test_property_roundtrip.py` (round-trip properties over generated `Request` IR).
+- **No pytest-cov / no coverage config**. No `--cov` invocations. Coverage is not enforced and its absence is intentional.
+- **Numbered bugfix regression files**: `tests/test_fix_roundN.py`. Existing rounds: 2–41 except 5, which lives at the legacy filename `test_bugfix_round5.py` (rounds 1 and 5 have no `test_fix_round` file). Next free number is **42**. New bugfix regressions MUST go into the next unused `test_fix_roundN.py` — confirm with `ls tests/test_fix_round*.py`, never assume the number — and never back into topic files like `test_codecs.py` or `test_router.py`.
 - **Fixtures**: both `@pytest.fixture` and `@pytest_asyncio.fixture` work; newer files (rounds 18+) prefer `@pytest_asyncio.fixture`.
 - **Pre-completion verification**: run the full pytest suite AND ruff — both must be green before claiming done. Smoke-test changed paths (launch server, hit endpoint, observe result) instead of adding tests by reflex; only add a test when it defends an observable contract or a plausible bug.
 
@@ -207,8 +237,8 @@ When an agent discovers a bug, error, or suspicious behavior in this codebase:
 
 ## Guardrails
 
-- **Never commit** `wiwi.yaml`, `wiwi.db`, `key.md`, `.env`, anything under `.verify/` or `.wiwi/`, or `opencode.json(c)` — all gitignored; they hold live provider/master keys and runtime state.
-- **Trust the code over the docs** for `ARCHITECTURE.md` / `CORE.md` — they describe an aspirational handler pipeline, DeltaBus, Postgres/Redis backends, and a deeper DB schema not yet built.
+- **Never commit** `wiwi.yaml`, `wiwi.db`, `key.md`, `.env`, anything under `.verify/` or `.wiwi/`, `opencode.json(c)`, `*.har`, or the built SPA assets (`wiwi/server/static/index.html`, `wiwi/server/static/assets/*.js|*.css`) — all gitignored; they hold live provider/master keys and runtime state.
+- **Trust the code over the docs** for `ARCHITECTURE.md` / `CORE.md` — doc sections that disagree with the code are aspirational history (handler pipeline, DeltaBus, Postgres/Redis-only backends, deeper DB schema) that was never built.
 - **No dialect/provider branching** outside `wiwi/wire/` and `wiwi/providers/` — the registry's import-time assert will catch a forgotten branch, but the cost of leakage is silent wrong-language routing.
 - **Second convention beside existing is prohibited** — copy the surrounding pattern, don't invent a parallel one.
 - **Always run `lsp references` before editing an exported symbol**; missed callsites are bugs.

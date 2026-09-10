@@ -69,6 +69,24 @@ class StreamTape:
         """Return all deltas with seq > *last_seq* in order."""
         return [e.delta for e in self._entries if e.seq > last_seq]
 
+    def head_evicted(self, last_seq: int) -> bool:
+        """True when eviction removed entries the continuation needs.
+
+        AUDIT #68: a continuation request replays ``last_seq``-plus-survivors
+        as the assistant prefix. If entries between ``last_seq`` and the
+        first survivor were evicted, the prefix is silently partial (e.g. a
+        tool call whose Open was evicted while its Args/Close survive — the
+        model would re-invoke a tool the client already saw). Only provable
+        when the first surviving seq is not exactly ``last_seq + 1`` AND
+        the tape still has a head below it; an empty replay is vacuously
+        fine (the client saw nothing it needs continued).
+        """
+        if not self._entries:
+            return False
+        first = self._entries[0].seq
+        # Contiguous when replay(last_seq) starts exactly at the successor.
+        return first > last_seq + 1
+
     def replay_text(self) -> str:
         """Concatenate all TextDelta text from the tape (for continuation)."""
         return "".join(
