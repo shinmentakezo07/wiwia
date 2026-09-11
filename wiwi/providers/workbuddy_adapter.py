@@ -40,6 +40,7 @@ from wiwi.ir import types as ir
 from wiwi.providers.base import ProviderKeyRef, WiwiError
 from wiwi.providers.openai_adapter import OpenAIAdapter
 from wiwi.providers.workbuddy_auth import CHAT_BASE_CN, chat_headers, parse_auth
+from wiwi.providers.workbuddy_version import client_user_agent
 from wiwi.streaming import deltas as dl
 
 log = structlog.get_logger("wiwi.workbuddy_adapter")
@@ -178,12 +179,17 @@ class WorkBuddyAdapter(OpenAIAdapter):
             log.debug("workbuddy_secret_not_auth_json", label=key.label)
             auth = None
         if auth is None:
-            # Paste-a-token UX: treat the secret as a raw access token.
+            # Paste-a-token UX: treat the secret as a raw access token. The
+            # headers mirror _common_headers (auth path) — omitting User-Agent
+            # and X-Requested-With here let httpx's own UA leak upstream
+            # (AUDIT #91).
             return {
                 "Content-Type": "application/json",
                 "Accept": "application/json, text/plain, */*",
+                "X-Requested-With": "XMLHttpRequest",
                 "Origin": "https://www.codebuddy.cn",
                 "Referer": "https://www.codebuddy.cn/",
+                "User-Agent": client_user_agent(),
                 "Authorization": f"Bearer {key.secret.strip()}",
                 "X-Product": "SaaS",
             }

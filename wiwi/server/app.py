@@ -551,6 +551,7 @@ class AppState:
         self.workbuddy_refresh: Any = None
         self.opencode_refresh: Any = None
         self.cline_version_refresh: Any = None
+        self.workbuddy_version_refresh: Any = None
         self.healer: Any = None
         # Durable stream journal (restart-safe SSE replay). Created eagerly so
         # handlers can reach it before init_db runs; sweep happens at startup.
@@ -832,6 +833,12 @@ async def lifespan(app: FastAPI):
     from wiwi.providers.cline_version import ClineVersionRefresh
     state.cline_version_refresh = ClineVersionRefresh()
     state.cline_version_refresh.start()
+    # WorkBuddy identifies as the CodeBuddy CLI (``CLI/<v> CodeBuddy/<v>``).
+    # Poll npm for the current release so the fingerprint tracks upstream
+    # instead of drifting from a pinned version.
+    from wiwi.providers.workbuddy_version import WorkBuddyVersionRefresh
+    state.workbuddy_version_refresh = WorkBuddyVersionRefresh()
+    state.workbuddy_version_refresh.start()
     # Health healer: probes cooling/invalid keys and cooled deployments and
     # restores them early into probation. Opt-in via the ``healer:`` config
     # section; start() is a no-op when disabled.
@@ -860,6 +867,8 @@ async def lifespan(app: FastAPI):
         await state.opencode_refresh.stop()
     if state.cline_version_refresh is not None:
         await state.cline_version_refresh.stop()
+    if state.workbuddy_version_refresh is not None:
+        await state.workbuddy_version_refresh.stop()
     if state.workbuddy_refresh is not None:
         await state.workbuddy_refresh.stop()
     await state.cline_refresh.stop()

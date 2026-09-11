@@ -137,6 +137,26 @@ All new round-42 tests were verified to fail against the pre-fix source.
 
 ---
 
+## ✅ Fixed — round 44
+
+The round-44 findings below were implemented and verified green (`1556 passed`,
+`ruff` clean). Each fix has a regression test in `tests/test_fix_round44.py`.
+
+| # | Fix | File(s) | Test |
+|---|---|---|---|
+| 111 | WorkBuddy `User-Agent` tracks the live CodeBuddy CLI version (npm-polled, 5-min TTL) | `wiwi/providers/workbuddy_version.py` (new), `wiwi/providers/workbuddy_auth.py`, `wiwi/server/app.py` (lifespan) | `test_headers_use_live_codebuddy_version`, `test_gateway_sends_live_user_agent_upstream` |
+| 112 | Bare-token WorkBuddy requests carry `User-Agent` + `X-Requested-With` instead of leaking httpx's own UA | `wiwi/providers/workbuddy_adapter.py` (`headers`) | `test_bare_token_path_carries_live_user_agent` |
+
+Both fixes descend from the same root: the WorkBuddy provider's client
+fingerprint was a hardcoded constant rather than a live value. #111 is the
+same bug class as the earlier Cline live-version fix (see "✅ Fixed — Cline
+live version fingerprint" below); #112 is a second, independent occurrence of
+the same omission on the paste-a-token path.
+
+All new round-44 tests were verified to fail against the pre-fix source.
+
+---
+
 ## 🔴 Critical — round 42 (new)
 
 ### 89. Public signup throttle counts nothing — unlimited account creation

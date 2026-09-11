@@ -28,13 +28,18 @@ import httpx
 import orjson
 import structlog
 
+from wiwi.providers.workbuddy_version import client_user_agent
+
 log = structlog.get_logger("wiwi.workbuddy_auth")
 
 CHAT_BASE_CN = "https://copilot.tencent.com"
 CHAT_BASE_GLOBAL = "https://www.workbuddy.ai"
 ORIGIN_CN = "https://www.codebuddy.cn"
 ORIGIN_GLOBAL = "https://www.workbuddy.ai"
-CLIENT_UA = "CLI/2.63.2 CodeBuddy/2.63.2"
+# The CLI fingerprint (``User-Agent: CLI/<v> CodeBuddy/<v>``) is built from the
+# live CodeBuddy CLI version — see :mod:`wiwi.providers.workbuddy_version`. It
+# was previously pinned to a hardcoded release, which drifts out of date with
+# every upstream CLI publish.
 
 # Refresh lead window (seconds): rotating refresh tokens make every refresh a
 # consumption event — only refresh inside this window before expiry.
@@ -180,7 +185,7 @@ def _common_headers(origin: str) -> dict[str, str]:
         "X-Requested-With": "XMLHttpRequest",
         "Origin": origin,
         "Referer": origin + "/",
-        "User-Agent": CLIENT_UA,
+        "User-Agent": client_user_agent(),
     }
 
 
