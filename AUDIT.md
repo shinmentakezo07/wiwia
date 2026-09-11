@@ -27,6 +27,469 @@ used instead.
 
 ---
 
+### 113. Unknown `/docs/*` paths bounced to the marketing landing page
+
+**Severity:** 🟡 Low (routing/UX)
+**Files:** `web/src/main.tsx` (route table, catch-all `*` → `/`)
+**Trigger:** visiting any undefined docs URL, e.g. a stale link (`/docs/api`),
+a typo (`/docs/quikstart`), or a trailing-slash variant (`/docs/`).
+
+The SPA route table had entries only for the eleven known doc paths. Anything
+else under `/docs/` fell through to the global `*` catch-all, which redirects
+to `/` — the marketing landing page. A reader following a stale or mistyped
+docs link was dumped out of the documentation set entirely instead of being
+taken back to the docs hub.
+
+**Fix:** add `<Route path="/docs/*" element={<Navigate to="/docs" replace />} />`
+after the explicit docs routes, so unknown docs paths stay inside the docs set.
+Unknown endpoint slugs (`/docs/endpoints/<unknown>`) remain handled in-context
+by `DocsEndpointDetailPage`'s own NotFound. No regression test — `web/` has no
+test runner; verified by build + browser exercise of `/docs/foo`, `/docs/`,
+and `/docs/endpoints/unknown`.
+
+**Status: fixed** — unknown docs paths redirect to the docs hub, not `/`.
+
+---
+
+## ✅ Fixed — round 41
+
+The round-41 findings below were implemented and verified green (`1503 passed`,
+`ruff` clean). Each fix has a regression test in `tests/test_fix_round41.py`.
+
+| # | Fix | File(s) | Test |
+|---|---|---|---|
+| 69 | Retired keys recover after a bounded cooldown instead of permanently | `wiwi/router/router.py` (`mark_invalid`, `recover`) | `test_transient_5xx_does_not_permanently_retire_key` |
+| 70 | Failed requests refund their estimated RPM/TPM reservation | `wiwi/ratelimit/memory.py` (`release`), `wiwi/server/app.py` | `test_failed_request_releases_tpm_reservation` |
+| 71 | Last-admin guard normalizes `disabled` before the guard and write | `wiwi/server/app.py` | `test_last_admin_guard_cannot_be_bypassed_by_truthy_value` |
+| 72 | Login throttle keyed on normalized account + IP (IP-only for master key) | `wiwi/server/app.py` | `test_login_throttle_keyed_on_normalized_username` |
+| 73 | `X-Forwarded-For` trusted only from configured proxies | `wiwi/server/app.py` (`_client_ip`), `wiwi/config.py` (`trusted_proxies`) | `test_repeated_signup_with_rotating_xff_is_throttled` |
+| 78 | `cycle_every_n` counters live on the router and drive key selection | `wiwi/router/router.py` | `test_cycle_every_n_rotates_under_skewed_weights` |
+| 80 | Non-string username/password on auth endpoints → 400/401 | `wiwi/auth/users.py`, `wiwi/server/app.py` | `test_non_string_username_is_a_client_error` |
+| 81 | `PATCH /admin/users` with a non-bool `disabled` → 400 | `wiwi/server/app.py` | `test_patch_user_non_numeric_disabled_is_a_client_error` |
+| 82 | `{"enabled": "false"}` rejected on provider/key PATCH | `wiwi/server/app.py` | `test_provider_key_enabled_string_false_rejected` |
+| 83 | Non-numeric `max_tokens`/`max_output_tokens` coerced/dropped on decode | `wiwi/ir/types.py` (`coerce_int`), `wiwi/wire/openai_chat.py`, `wiwi/wire/openai_responses.py` | `test_chat_non_numeric_max_tokens_rejected` |
+| 86 | `read_timeseries(key_ids=[])` returns the same bucket grid as the no-rows path | `wiwi/logging_core/db_sink.py` | `test_timeseries_empty_key_ids_matches_no_rows_shape` |
+
+The following round-41 entries are **verified false positives** after reading the
+source:
+
+- **#84** `head_evicted(last_seq)` — the arithmetic `first > last_seq + 1` *is* the
+  membership test for a contiguous integer seq space. Evicted entries at or below
+  `last_seq` are ones the client already received; only seqs in `(last_seq, first)`
+  matter, and those are exactly what `first > last_seq + 1` detects. The audit's
+  counterexample (`head_evicted(14)` with survivors 15..20 returning `False`) is
+  correct behavior, not a bug. `test_head_evicted_is_membership_exact` is retained
+  but does not discriminate the two formulations.
+
+Also fixed (round 41, continued):
+
+| # | Fix | File(s) | Test |
+|---|---|---|---|
+| 74 | OpenRouter flushes a deferred `ToolCallOpen` before closing a reused index | `wiwi/providers/openrouter_adapter.py` | `test_openrouter_reused_index_flushes_deferred_open` |
+| 75 | NIM native markup allocates a fresh index instead of stealing a structured one | `wiwi/providers/nim_native_tools.py` | `test_nim_native_markup_does_not_collide_with_structured_index` |
+| 76 | Gemini usage-without-finishReason completes cleanly (`UsageFinal`+`Finish`+`StreamEnd`) | `wiwi/providers/gemini_adapter.py` | `test_gemini_usage_without_finish_reason_completes_cleanly` |
+| 77 | OpenCode clears per-stream tool state on `response.failed` | `wiwi/providers/opencode_adapter.py` | `test_opencode_failed_clears_resp_tools` |
+| 79 | A cleanly completed stream graduates a probation deployment | `wiwi/core/gateway.py` | `test_streaming_success_graduates_probation_deployment` |
+| 85 | Non-string provider key secret rejected with 400 on all write paths | `wiwi/server/app.py` | `test_provider_key_non_string_secret_rejected` |
+| 87 | Unknown WorkBuddy business envelope is retryable (failover runs) | `wiwi/providers/workbuddy_adapter.py` | `test_workbuddy_unknown_envelope_is_retryable` |
+| 88 | NIM synthesizes an Open for args-before-id and adopts a later real id | `wiwi/providers/nim_adapter.py` | `test_nim_synthesized_open_adopts_later_real_id` |
+
+All 38 round-41 tests were verified to fail against the pre-fix source.
+
+---
+
+## ✅ Fixed — round 42
+
+The round-42 findings below were implemented and verified green (`1537 passed`,
+`ruff` clean). Each fix has a regression test in `tests/test_fix_round43.py`
+(the round-42 number was already taken by the pre-existing proxy-log file).
+
+| # | Fix | File(s) | Test |
+|---|---|---|---|
+| 89 | Signup throttle consumes a slot on each attempt | `wiwi/server/app.py` (`auth_signup`) | `test_signup_throttle_counts_attempts` |
+| 90 | Non-streaming over-budget 402 is logged exactly once | `wiwi/server/app.py` (`run_chat_like`) | `test_over_budget_response_logged_once` |
+| 91 | Streaming 401 runs the on-demand token refresh and retries | `wiwi/core/gateway.py` (`_pump_once`) | `test_streaming_401_is_refreshed_and_retried` |
+| 92 | An undecodable 200 becomes a retryable `WiwiError` (failover runs) | `wiwi/core/gateway.py` (`_decode_response_guarded`) | `test_undecodable_200_is_retryable_wiwi_error` |
+| 93 | A clean completion decays the deployment failure streak | `wiwi/router/router.py` (`record_success`), `wiwi/core/gateway.py` | `test_success_decays_deployment_failures` |
+| 94 | Gemini `thought: true` parts emit `ThinkingDelta`, not visible text | `wiwi/providers/gemini_adapter.py` | `test_gemini_thought_part_is_not_visible_text` |
+| 95 | OpenRouter dict-form tool arguments decode instead of crashing | `wiwi/providers/openrouter_adapter.py` | `test_openrouter_dict_form_tool_arguments_do_not_crash` |
+| 96 | A 200 probe body carrying an error envelope is not HEALTHY | `wiwi/core/recovery.py` (`probe_verdict`, `_probe`) | `test_healer_probe_treats_200_envelope_error_as_unhealthy` |
+| 97 | A model-error probe does not grow the key restore streak | `wiwi/core/recovery.py` (`_probe_pair`) | `test_healer_does_not_restore_key_on_model_error_probe` |
+| 98 | Resume no longer credits the key at connect time | `wiwi/core/gateway.py` (`_attempt_resume`) | `test_resume_does_not_credit_key_at_connect` |
+| 99 | Consumer cancel grace covers `stream_grace_drain_s` | `wiwi/core/gateway.py` (`pump_cancel_grace`) | `test_pump_cancel_grace_follows_configured_drain` |
+| 100 | Malformed `text.format` is ignored, not a 500 | `wiwi/wire/openai_responses.py` | `test_responses_malformed_text_format_is_not_a_500` |
+| 102 | Gemini request encoder preserves `ThinkingPart` | `wiwi/providers/gemini_adapter.py` | `test_gemini_encoder_preserves_thinking_part` |
+| 103 | `redacted_thinking` survives the Anthropic streaming path | `wiwi/providers/anthropic_adapter.py`, `wiwi/streaming/deltas.py`, `wiwi/wire/anthropic_messages.py` | `test_anthropic_stream_preserves_redacted_thinking` |
+| 104 | Tool-arg accumulation is list-append/join, not O(n²) | `wiwi/core/gateway.py` (`_apply_event`, pump, `_validate_closed_tool_args`) | `test_arg_buf_accumulation_reassembles_fragments` |
+| 106 | A resumed attempt's usage/cost folds into the originating request | `wiwi/core/gateway.py` (`merge_resume_context`) | `test_resume_merges_usage_into_originating_context` |
+| 107 | A resumed turn answers replayed `tool_use` with `tool_result`s | `wiwi/streaming/resume.py` (`build_continuation_messages`) | `test_resume_answers_replayed_tool_use` |
+| 108 | Loop detection no longer penalises key/deployment health | `wiwi/core/gateway.py` (`loop_abort_error`, pump loop branch) | `test_loop_detection_does_not_penalise_key_health` |
+| 109 | An alias cycle fails closed instead of resolving arbitrarily | `wiwi/router/router.py` (`resolve_group`) | `test_alias_cycle_resolves_to_nothing` |
+| 110 | Non-dict SSE frames/choices are skipped, never crash | `wiwi/providers/openai_adapter.py`, `wiwi/providers/openrouter_adapter.py` | `test_openrouter_non_dict_sse_frame_does_not_crash`, `test_openai_choice_non_dict_does_not_crash` |
+
+Two existing tests encoded the pre-fix behaviour these fixes correct and were
+updated: `tests/test_bugfix_round5.py::test_attempt_resume_calls_on_result`
+(now asserts the key is *not* credited at connect — #98) and
+`tests/test_recovery.py::test_400_does_not_restore_key_and_escalates_dep_circuit`
+(now asserts a 400 does *not* restore the key — #97).
+
+All new round-42 tests were verified to fail against the pre-fix source.
+
+---
+
+## 🔴 Critical — round 42 (new)
+
+### 89. Public signup throttle counts nothing — unlimited account creation
+**File:** `wiwi/server/app.py:3183` (call), `221-234` (`check`), `236-241`
+(`record_failure`), `520` (limit); `wiwi/auth/users.py:132-148`
+**Trigger:** any unauthenticated caller hits `POST /auth/signup` repeatedly from a
+fixed address (no header rotation needed).
+
+`auth_signup` consults `state.signup_throttle.check(scope)`, but `_AttemptThrottle.check`
+only *filters and re-stores* the existing event list — it never appends a hit. Only
+`record_failure` appends, and a repo-wide grep shows it is called solely on
+`login_throttle` (`app.py:3280/3287/3290`); nothing ever calls
+`signup_throttle.record_failure`. So `check` always sees `< limit` events and returns
+`True, 0`. The 5-per-hour cap at `app.py:520` is structurally inert.
+
+**Consequence:** unlimited account creation from one IP, each registration performing a
+200k-iteration PBKDF2 hash, writing a `users` row, and minting a playground key. Distinct
+from #58 ("no throttling") and #73 (XFF rotation): here the throttle exists but counts
+nothing, so even a spoof-proof IP bucket is unlimited.
+
+**Fix:** call `await state.signup_throttle.record_failure(scope)` after a successful
+registration, or make `check` consume a slot.
+
+### 90. Non-streaming over-budget response is logged twice — cost/tokens/requests double-counted
+**File:** `wiwi/server/app.py:1209` and `1233-1235`; sink `wiwi/logging_core/db_sink.py:226-234`;
+broadcast `wiwi/logging_core/subsystem.py:190`; rollups `wiwi/server/stats.py:78-89`
+**Trigger:** a virtual key with `max_budget` whose next request's actual `ctx.cost` crosses
+the cap, on any non-streaming surface.
+
+`run_chat_like` logs the successful 200 event first (`app.py:1209`). Then when
+`state_.auth.update_spend(...)` returns `False` (`app.py:1230-1233`) it sets `ctx.status = 402`
+and calls `state_.logs.log_request(build_log_event(ctx))` **a second time** (`app.py:1235`).
+Both events carry the same `request_id`, tokens, and cost; `request_logs` has no uniqueness
+on `request_id`, so both rows persist and the SSE ring publishes both. `/admin/stats/*` and
+`/metrics` then double-count that request. The streaming path logs once (`app.py:1388`, only
+annotating metadata on 402 at `1400-1402`) — asymmetric.
+
+**Fix:** move the `log_request` at `app.py:1209` below the budget check, or skip the second
+emission and annotate.
+
+### 91. Streaming request has no 401 on-demand token refresh — Cline/WorkBuddy streams fail on rotated tokens
+**File:** `wiwi/core/gateway.py:672-688` (`_pump_once` non-200) vs `146-181` (`_call_once`),
+`245-281` (`_complete_via_stream`); hooks at `70-78`
+**Trigger:** a live client streaming request (`ir_req.stream == True`) to a Cline or WorkBuddy
+deployment after the OAuth access token was rotated upstream — their normal steady state.
+
+`_call_once` and `_complete_via_stream` both call `_resolve_refresh_hook(dep)`, rotate the
+token, and retry once on 401. `_pump_once` — the path that actually serves every streaming
+Cline/WorkBuddy client request — does not: it converts the 401 straight to `err_box`, so a
+request that could have succeeded fails with an auth error and (in `any_error` mode) feeds
+`err_count += 2`, eventually retiring a healthy key. The `force_stream=True` providers are
+exactly the ones whose streaming path is primary, making the non-streaming refresh branch
+largely unreachable for them.
+
+**Fix:** mirror the `_call_once` 401 branch in `_pump_once`: refresh hook → rebuild headers
+from the live key → re-issue `self._client.stream(...)` once before setting `err_box`.
+
+### 92. A 200 whose body fails to decode bypasses retries, failover, and key/deployment penalties
+**File:** `wiwi/core/gateway.py:186` (and `178-181` retry branch); `wiwi/router/router.py:865`
+**Trigger:** a provider/proxy returns HTTP 200 with a non-JSON or wrong-shaped body (Cloudflare
+HTML interstitial, truncated body, JSON array where an object is expected) on a non-streaming request.
+
+`adapter.decode_response(resp.status_code, resp.content)` runs **outside any try/except** in
+`_call_once`. `orjson.loads` raises `JSONDecodeError` and a list body makes `.get()` raise
+`AttributeError`; neither is a `WiwiError`, and `execute_with_retries` only catches `WiwiError`
+(`router.py:865`). The exception propagates to `run_chat_like`'s `except Exception` → 500, with
+no retry, no fallback group, no key cooldown, no `record_fail`. OpenRouter's `decode_response`
+compounds this (see #95).
+
+**Fix:** wrap `decode_response` in `try/except Exception` inside `_call_once` and re-raise as a
+retryable `WiwiError(502, "api_error", ...)`.
+
+---
+
+## 🟠 High — round 42 (new)
+
+### 93. Deployment cooldown counts absolute failures with no success decay
+**File:** `wiwi/router/router.py:248-265` (`record_fail`), `wiwi/core/gateway.py:888`
+**Trigger:** a deployment serving steady traffic with a low but non-zero 5xx/408 rate.
+`allowed_fails=3`, window `max(300, min(6*cooldown, 3600))` (`router.py:260`).
+
+`record_fail` only appends timestamps and clears them when the cooldown trips (`router.py:265`).
+Nothing on the success path prunes or decays `self.fails`, so the test is "≥3 failures in 300 s",
+not "3 *consecutive* failures". A deployment at high request volume with a 0.1% error rate
+accumulates 3 failures roughly every 30 s and is cooled continuously.
+
+**Consequence:** a healthy deployment is repeatedly marked unavailable, pushing traffic to
+worse siblings or (in a single-deployment group) adding latency/503s. This is the opposite
+failure mode of #19 and is not registered.
+
+**Fix:** clear/decay `fails` on a successful `execute_with_retries` completion of that
+deployment, or track a failure *rate* over the window rather than an absolute count.
+
+### 94. Gemini `thought: true` parts leak as visible assistant text (CoT returned to the client)
+**File:** `wiwi/providers/gemini_adapter.py:144-149` (non-stream), `194-196` (stream)
+**Trigger:** Gemini 2.5 thinking models return `parts: [{"text": "...", "thought": true,
+"thoughtSignature": "..."}]`.
+
+Both loops match `if "text" in part` before checking `part.get("thought")`, so
+chain-of-thought is emitted as `TextDelta` / appended to `turn.text` and returned as the
+assistant's answer; the `thoughtSignature` is discarded. Non-stream cannot distinguish
+reasoning from content; streaming shows raw CoT as the reply.
+
+**Fix:** branch on `part.get("thought")` first → emit `ThinkingDelta` (or append
+`ThinkingPart`) and preserve `thoughtSignature` as `signature`; only non-thought `"text"`
+becomes visible text.
+
+### 95. OpenRouter `decode_response` crashes on dict-form tool arguments (500 on replayed history)
+**File:** `wiwi/providers/openrouter_adapter.py:180-183`; contrast `openai_adapter.py:296-300`
+**Trigger:** any OpenRouter response whose `tool_calls[].function.arguments` is a JSON **object**
+rather than a string — the args-as-object gateway case the base class explicitly guards
+(`openai_adapter.py:296-300`).
+
+`json.loads(raw_args)` on a dict raises `TypeError`, which the `except json.JSONDecodeError`
+at line 183 does not catch, so it escapes `decode_response` and surfaces as a 500 on every
+turn that replays such history.
+
+**Fix:** before `json.loads`, `if isinstance(raw_args, dict): args = raw_args;
+raw_args = json.dumps(raw_args)`.
+
+### 96. HealthHealer treats any HTTP 200 as healthy without decoding the body
+**File:** `wiwi/core/recovery.py:443-449` (`_probe`); contrast `wiwi/providers/workbuddy_adapter.py:242-251`
+**Trigger:** `healer.enabled: true`; a WorkBuddy (or any provider whose 200 SSE body carries an
+error envelope) key has a dead session/business error.
+
+`_probe` returns `HEALTHY` on `resp.status_code == 200` and never inspects the body (its own
+docstring says so). WorkBuddy signals a dead session (`code 12153`) or other envelope errors
+inside an HTTP-200 SSE frame. The healer classifies a broken target as healthy, increments the
+restore streak, and after `probes_to_restore` restores the key/deployment into probation —
+re-exposing a still-broken credential to live traffic.
+
+**Fix:** for `force_stream` providers, scan the SSE body (or reuse the adapter's
+`decode_stream_event`) and classify an error envelope as a failure before declaring HEALTHY.
+
+### 97. HealthHealer restores a retired key from a probe that failed for model reasons
+**File:** `wiwi/core/recovery.py:370-384`, `403-412`
+**Trigger:** a key with `status="invalid"` whose probe's 1-token request gets a `400`/`404`
+(e.g. `max_tokens=1` rejected by a reasoning model, or model temporarily unavailable).
+
+`probe_verdict` maps 400/404 → `CREDS_VALID_MODEL_BAD`. In `_probe_pair` that branch
+increments the **key's** restore streak (`recovery.py:383`) and calls `_maybe_restore_key`
+(`384`), restoring the key to probation once the streak reaches `probes_to_restore`. The probe
+never actually exercised the key successfully.
+
+**Fix:** only grow the key restore streak on a genuine HEALTHY probe; treat
+`CREDS_VALID_MODEL_BAD` as key-health-neutral.
+
+### 98. Resume re-introduces the AUDIT #6 connect-time key credit — plus doubled `req_count`
+**File:** `wiwi/core/gateway.py:573` vs `834-847` (`_defer_key_credit` set at `430`)
+**Trigger:** a mid-stream resume whose new connection succeeds.
+
+`_attempt_resume` calls `on_result_locked(key, 200, None)` immediately at connect (`gateway.py:573`).
+When that pump later completes cleanly it credits the same key again (`gateway.py:839`), so
+`req_count` is incremented twice. A resume provider that connects then dies mid-stream resets
+`err_count` to 0 and never accumulates a retirement streak — the exact defect #6 fixed for the
+primary path. (Distinct from #5, which was locked-vs-unlocked.)
+
+**Fix:** remove the connect-time credit at `gateway.py:573`; let the pump's clean-completion
+path be the only credit.
+
+### 99. `stream_grace_drain_s > 1 s` is silently truncated by the 1 s consumer cancel grace
+**File:** `wiwi/core/gateway.py:47` (`_PUMP_CANCEL_GRACE_S = 1.0`), `501-503`, `765-769`;
+`wiwi/config.py:191`
+**Trigger:** `stream_grace_drain_s` configured above 1.0 + a client disconnect mid-stream.
+
+The pump sets `grace_deadline = now + grace_drain_s` to keep reading upstream for billing
+accuracy, but the consumer's `finally` only waits `_PUMP_CANCEL_GRACE_S = 1.0 s` before
+cancelling the pump. Any configured drain longer than 1 s is cut off at 1 s with no error or
+log — the setting has no effect for `>1`.
+
+**Fix:** derive the consumer's cancel grace from `stream_grace_drain_s`
+(`max(_PUMP_CANCEL_GRACE_S, grace_drain_s + margin)`).
+
+### 100. A 200 with a malformed `text.format` 500s the Responses surface
+**File:** `wiwi/wire/openai_responses.py:172-175`
+**Trigger:** `POST /v1/responses` with `"text": {"format": "text"}` (or any non-dict `format`).
+
+`text_field.get("format") or {}` returns the truthy string `"text"`, then `fmt.get("type")`
+raises `AttributeError`. Only `DialectError`/`ValueError` are caught upstream, so a trivially
+malformed body returns an unhandled HTTP 500.
+
+**Fix:** `fmt = text_field.get("format"); if not isinstance(fmt, dict): return None`.
+
+---
+
+## 🟡 Medium — round 42 (new)
+
+### 101. Deployment `rpm`/`tpm` are parsed but never enforced
+**File:** `wiwi/router/router.py:339` (stored), `wiwi/config.py:122-123`; docs
+`README.md:507-509`, `detailed.md:92-93`, `:726-727`
+**Trigger:** a config with `wiwi_params: {..., tpm: 100000}` (shown in README and detailed.md as
+a per-deployment override).
+
+`Deployment.rpm`/`Deployment.tpm` are populated from config but never read anywhere; the only
+`.rpm`/`.tpm` uses are the virtual-key limiter in `app.py`. There is no per-deployment rate
+check in `pick_deployment`/`execute_with_retries`, so a documented per-deployment cap silently
+does nothing.
+
+**Fix:** enforce `dep.rpm`/`dep.tpm` at deployment selection, or reject the fields in config
+validation so the no-op is not silent.
+
+### 102. Gemini request encoder silently drops `ThinkingPart` (and Document/Audio)
+**File:** `wiwi/providers/gemini_adapter.py:59-78`
+**Trigger:** a request whose IR history contains a `ThinkingPart` (e.g. multi-turn
+Anthropic↔Gemini replaying a prior assistant thinking turn).
+
+The `for p in m.parts` loop handles only `TextPart`/`ImagePart`/`ToolUsePart`/`ToolResultPart`;
+`ThinkingPart` (`and DocumentPart`/`AudioPart`) fall through and disappear, breaking
+cross-dialect multi-turn continuity with no warning.
+
+**Fix:** add a `ThinkingPart` branch emitting `{"text": p.text, "thought": True}`, or at minimum
+`log.warning("dropping_thinking_part", ...)`.
+
+### 103. Anthropic streaming decoder drops `redacted_thinking` blocks
+**File:** `wiwi/providers/anthropic_adapter.py:558-571` (`content_block_start`), `586-592`
+(`content_block_stop`); contrast non-stream `509-513`
+**Trigger:** Anthropic streams a redacted-thinking block (`content_block_start` with
+`type: "redacted_thinking"`) — mandatory before tool use on some extended-thinking turns.
+
+`content_block_start` only recognizes `tool_use`/`server_tool_use`, so the block emits nothing
+and is not registered; `content_block_stop` is then a no-op. The encrypted blob is lost on the
+streaming path even though the non-streaming decoder preserves it, so a later replay omits the
+block and Anthropic rejects the history.
+
+**Fix:** add a `redacted_thinking` branch in `content_block_start` that emits a carrying delta
+and registers the block.
+
+### 104. Non-streaming resume/pump `_arg_bufs` accumulation is unbounded and O(n²)
+**File:** `wiwi/core/gateway.py:739-742` (`_apply_delta`), `304-306`; `wiwi/streaming/resume.py:125`
+**Trigger:** any upstream streaming a large tool-call argument payload (multi-MB JSON arg,
+hostile/misbehaving provider).
+
+`_arg_bufs[index] = buf + d.args_fragment` has no cap and allocates a new string of length
+`len(buf)` per fragment → `O(k·L)` copy work on the event loop. `MAX_TOOL_ARGS_BYTES`
+(`validation.py:22`) is consulted only at `ToolCallClose` (`gateway.py:933`), after the whole
+payload is already resident, so a single call can grow memory without limit.
+
+**Fix:** accumulate into a `list[str]` per index and `"".join` at Close; truncate/flag once
+the running total exceeds `MAX_TOOL_ARGS_BYTES`.
+
+### 105. Journal replay does blocking FS I/O on the event loop and re-reads the whole file per poll
+**File:** `wiwi/streaming/tape_store.py:147-149, 200-225, 227-240`;
+`wiwi/server/app.py:1099-1106, 1126-1131`
+**Trigger:** any create/reconnect while stream journaling is enabled (ON by default).
+
+`JournalStore.open` runs sync `mkdir`/`touch` under the async lock; `read_after`/`is_complete`/
+`owner_of` call sync `path.read_bytes()`; the replay gate invokes them on the request path; and
+the tail loop re-reads the full journal every 50 ms. Each call blocks the event loop for the
+whole file (up to 1 MiB), stalling all concurrent requests.
+
+**Fix:** route FS calls through `asyncio.to_thread` (as `append` already does) and tail
+incrementally by byte offset instead of re-reading.
+
+### 106. Resume discards the resumed attempt's usage and cost
+**File:** `wiwi/core/gateway.py:561-568` (`resume_ctx`), `811` → `983-999` (`_price_stream`);
+`wiwi/server/app.py:1389-1397`, `1283`
+**Trigger:** `stream_resume != "off"` and a mid-stream failure that triggers `_attempt_resume`.
+
+The resumed pump prices into the throwaway `resume_ctx`; the caller only swaps the `pump_task`
+reference and never folds `resume_ctx.usage`/`cost`/`attempts` back into the originating `ctx`.
+`_stream_response` bills the original `ctx`, and the resumed `UsageFinal` is recorded only into
+`ctx._stream_usage`. So resumed tokens are neither charged nor reconciled to TPM, and if the
+first attempt priced nothing, `update_spend` is skipped entirely.
+
+**Fix:** merge the resume context's usage/cost/attempts into the originating `ctx` on completion.
+
+### 107. Mid-stream resume can build an unanswered assistant `tool_use` turn → Anthropic 400
+**File:** `wiwi/streaming/resume.py:183-215` (`build_continuation_messages`); consumed at
+`wiwi/core/gateway.py:530-536`; encoded at `wiwi/providers/anthropic_adapter.py:295-302, 342-349`
+**Trigger:** `stream_resume != "off"` and an upstream dies mid-stream after a tool call was
+opened/closed.
+
+`replay_tool_calls()` appends `ToolUsePart`s to an assistant `Message`, followed by a user
+message containing only plain "Continue" text. Anthropic requires every `tool_use` to be
+answered by a `tool_result` in the next user turn, so the resumed request is rejected 400 — a
+recoverable mid-stream drop becomes a hard failure.
+
+**Fix:** when tool calls are present, emit a synthetic `ToolResultPart` (`is_error=True`) for
+each in the follow-up user message.
+
+### 108. Loop detection is charged to provider/key health, cooling healthy keys
+**File:** `wiwi/core/gateway.py:724-735`, `875-909` (`_note_stream_failure`)
+**Trigger:** a model degenerates into a repetition loop (`LoopDetector` trips).
+
+The loop branch calls `_note_stream_failure`, which does `dep.record_fail(...)` and
+`on_result_locked(real_key, 502, ...)`, incrementing `err_count` and eventually retiring the key
+(#69). A model-quality failure therefore cools the deployment and can permanently retire a
+healthy key; repeated traffic to a low-quality model can take down the provider. Distinct from
+#76 (a *successful* Gemini response misclassified).
+
+**Fix:** abort with `StreamError` on loop detection without calling `_note_stream_failure`; cap
+any health impact at a warning.
+
+### 109. Alias chains beyond 8 hops silently truncate; cycles resolve arbitrarily
+**File:** `wiwi/router/router.py:363-370`
+**Trigger:** an alias chain longer than 8 hops or a cycle.
+
+`resolve_group` walks `for _ in range(8)` then unconditionally returns `self.groups.get(name, [])`
+for whatever intermediate name it stopped at, with no truncation/cycle detection. Requests are
+silently routed to the 8th intermediate group (or an arbitrary cycle hop) rather than the
+intended target, or get a misleading `not_found_error`.
+
+**Fix:** track visited names; on a repeat or exhausted hop budget while a further alias exists,
+return `(None, [])` (or a config error) instead of the intermediate group.
+
+### 110. Loop/replay-adjacent nested alias params and non-dict SSE frames crash decoders
+**File:** `wiwi/providers/openrouter_adapter.py:164-165, 253`; `wiwi/providers/openai_adapter.py:367, 385`;
+`wiwi/providers/openai_responses.py:614`
+**Trigger:** (a) OpenRouter `reasoning_details` containing a non-dict element; (b) an SSE frame
+whose JSON is a non-dict (`null`/string/array) or whose `choices` contains a non-dict.
+
+`rd.get(...)` on a non-dict, `chunk.get(...)`, and `choices[0].get(...)` all raise
+`AttributeError`/`TypeError` outside the `except json.JSONDecodeError` handlers, terminating the
+stream with an unhandled exception instead of a clean `StreamError`.
+
+**Fix:** guard `if not isinstance(chunk, dict): return []` after parse and
+`if not isinstance(choices[0], dict): return out` after selecting a choice; skip non-dict
+`reasoning_details` items.
+
+### 111. Encoders close only one open tool block on terminal frames
+**File:** `wiwi/wire/anthropic_messages.py:545` (`final_frame`), `wiwi/wire/openai_responses.py:639-642`
+(`_completed`)
+**Trigger:** an adapter emits `Finish`/`StreamEnd` while more than one tool block remains open.
+
+`_close_item()`/`_close_block()` close only the single currently-open block; remaining open tool
+items never get their `output_item.done`/`content_block_stop`, so the client sees
+truncated/never-finished tool calls.
+
+**Fix:** iterate all still-registered tool indices (and any open text/thinking block) and close
+each in `_completed`/`final_frame`.
+
+### 112. Live proxy log never names the provider key on a successful attempt
+**Severity:** 🟡 Medium (observability gap — no way to see which round-robin key served a request)
+**File:** `wiwi/core/gateway.py` — `_call_once`, `_complete_via_stream`, `_pump_once`
+**Trigger:** any successful request. Watch `/admin/logs/proxy` (the proxy-log page's live tail)
+while a round-robin provider serves healthy traffic.
+
+Round 23 wired proxy events only for *failures* — upstream 5xx, fallback switches, mid-stream
+deaths. Every terminal path that produced proxy output ended in an error, so a healthy
+round-robin emitted nothing at all. The request log already carried `provider_key_label` plus a
+per-attempt `key` (and the admin request-log UI renders `provider · key`), but the *live* proxy
+stream — the surface an operator actually watches while traffic flows — stayed silent on
+success. WorkBuddy looked like the only provider exposing its account because its per-key
+refresh worker logs `label=` on every rotation; every other provider was invisible.
+
+**Fix:** `_log_attempt(router, ctx, dep, key, status, latency_ms)` emits one `info` proxy line
+naming `[provider/key]` at every terminal outcome (`ok`, `http_*`, transport error,
+`encode_error`, `ok_after_refresh`) in all three call paths, including the force_stream
+`_complete_via_stream` helper.
+**Regression test:** `tests/test_fix_round42.py` (3 tests; all fail with `_log_attempt` neutered).
+
+---
+
 ## 🔴 Critical — round 41 (new)
 
 ### 69. A transient 5xx storm permanently retires a provider key with no recovery path

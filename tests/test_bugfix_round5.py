@@ -392,10 +392,12 @@ def test_attempt_resume_calls_on_result():
     # We expect CancelledError, anything else is a test failure surfaced later.
     with contextlib.suppress(BaseException):
         asyncio.get_event_loop().run_until_complete(new_task)
-    # The fallback deployment's provider should have on_result called with 200
-    # Check the p2 provider keys
+    # The resume must NOT credit the key at connect time: `_pump_once` credits
+    # on clean completion, and crediting here would double-count `req_count`
+    # and reset `err_count` for a resume that connects then dies — the exact
+    # AUDIT #6 defect (AUDIT #98).
     p2 = router.providers["p2"]
-    assert p2.keys[0].req_count == 1  # on_result(200) increments req_count
+    assert p2.keys[0].req_count == 0  # connect must not credit the key
 
     gateway._pump = original_pump
 

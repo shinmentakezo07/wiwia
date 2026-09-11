@@ -277,10 +277,11 @@ async def test_error_clears_cycle_credit_for_key_and_provider():
     # rotation; with 2 keys WRR alternates a, b, a, b -> chosen = [(a), (b)]).
     await _run(r, ctx, ok)
     await _run(r, ctx, ok)
-    md = ctx.metadata
     pname, klabel = chosen[0]
-    # the FIRST (provider, key) entry was picked once -> counter == 1
-    assert md["wiwi_cycle_key"][(pname, klabel)] == 1
+    # the FIRST (provider, key) entry was picked once -> counter == 1.
+    # Counters live on the router, not ctx.metadata: a per-request dict reset
+    # before every pick and the cadence never fired (AUDIT #78).
+    assert r._key_consec[(pname, klabel)] == 1
 
     # now a 500 on the next call
     async def err(dep, key, ctx):
@@ -292,8 +293,8 @@ async def test_error_clears_cycle_credit_for_key_and_provider():
     except WiwiError:
         pass
     # that (provider, key) credit must be cleared
-    assert (chosen[2][0], chosen[2][1]) not in md["wiwi_cycle_key"], (
-        f"expected cycle credit cleared for {chosen[2]}, got {md['wiwi_cycle_key']}")
+    assert (chosen[2][0], chosen[2][1]) not in r._key_consec, (
+        f"expected cycle credit cleared for {chosen[2]}, got {r._key_consec}")
 
 
 # ---------- combined: same model, different keys ---------------------------

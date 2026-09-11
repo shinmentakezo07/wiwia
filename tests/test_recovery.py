@@ -370,7 +370,7 @@ class TestHealthHealer:
         await h.stop()
 
     @respx.mock
-    async def test_400_restores_key_and_escalates_dep_circuit(self):
+    async def test_400_does_not_restore_key_and_escalates_dep_circuit(self):
         r, key, _ = _sick_key_router()
         key.status = "invalid"
         respx.post(OPENAI_URL).respond(
@@ -378,16 +378,13 @@ class TestHealthHealer:
         # zero-base circuits keep the escalation deterministic in-test
         h = _healer(r, probes_to_restore=1, probe_backoff_base_s=0.0)
         await h._sweep()
-        assert key.status == "probation"        # creds proven -> restore-eligible
-        assert not h._circuits["key"].blocked(("p1", "k0"))
+        # A 400 (model/request bad) proves nothing about whether the key can
+        # serve traffic, so it must not be restored (AUDIT #97).
+        assert key.status == "invalid"
         assert h._circuits["dep"].streak(("g", "p1", "m")) == 1
-        # keep probing the same (dep, key) pair: key now probation + dep cooled?
-        # No — dep is healthy here, so the dep circuit streak records but no
-        # deployment state changes; the escalation-to-dead path is covered by
-        # test_400_on_cooled_dep_marks_it_dead.
         await h._sweep()
         await h._sweep()
-        assert key.status == "probation"
+        assert key.status == "invalid"
         await h.stop()
 
     @respx.mock
