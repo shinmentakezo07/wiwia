@@ -103,6 +103,11 @@ def _sanitize_messages(messages: list[Any]) -> None:
 
 _DEFAULT_SYSTEM = "You are a helpful assistant."
 
+# WorkBuddy reasoning default: when the caller sends no reasoning_effort (and
+# no thinking_budget), request the maximum effort level rather than the
+# upstream's implicit default.
+_DEFAULT_REASONING_EFFORT = "max"
+
 
 def _prepend_system_message(messages: list[Any]) -> None:
     """The upstream rejects a request whose ``messages[0]`` is not ``system``
@@ -210,6 +215,19 @@ class WorkBuddyAdapter(OpenAIAdapter):
         # Strict compatible-gateway path: history reasoning_content stripped.
         params["provider_type"] = "openai-compatible"
         body = super().encode_request(req, model_id, params)
+        # Reasoning effort: WorkBuddy defaults to maximum reasoning when the
+        # caller expressed no preference. The base encoder skips the field for
+        # openai-compatible types, so it is applied here regardless of the
+        # caller's dialect (a bare Chat request never carries reasoning_effort,
+        # and an Anthropic thinking_budget is mapped by the base encoder — which
+        # we also bypass — so both are normalized through the IR).
+        # A caller-supplied value is passed through unchanged.
+        g = req.gen_params
+        explicit = g.effective_reasoning_effort()
+        if explicit:
+            body["reasoning_effort"] = explicit
+        else:
+            body["reasoning_effort"] = _DEFAULT_REASONING_EFFORT
         # Streaming-only upstream: force SSE, never send stream_options.
         body["stream"] = True
         body.pop("stream_options", None)

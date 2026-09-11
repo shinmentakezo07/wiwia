@@ -201,6 +201,41 @@ def test_encode_history_reasoning_stripped():
     assert "reasoning_content" not in body["messages"][1]
 
 
+def test_encode_defaults_reasoning_effort_to_max():
+    """No caller effort -> WorkBuddy requests maximum reasoning."""
+    a = WorkBuddyAdapter()
+    body = a.encode_request(_req(), "glm-5.3",
+                            {"max_tokens": 10, "extra_body": {}, "drop_params": True})
+    assert body["reasoning_effort"] == "max"
+
+
+def test_encode_passes_through_caller_reasoning_effort():
+    """An explicit caller effort is forwarded unchanged."""
+    a = WorkBuddyAdapter()
+    body = a.encode_request(_req(gen_params=ir.GenParams(reasoning_effort="high")),
+                            "glm-5.3",
+                            {"max_tokens": 10, "extra_body": {}, "drop_params": True})
+    assert body["reasoning_effort"] == "high"
+
+
+def test_encode_maps_thinking_budget_to_effort():
+    """An Anthropic thinking_budget maps to the matching effort, not the default."""
+    a = WorkBuddyAdapter()
+    body = a.encode_request(_req(gen_params=ir.GenParams(thinking_budget=1024)),
+                            "glm-5.3",
+                            {"max_tokens": 10, "extra_body": {}, "drop_params": True})
+    assert body["reasoning_effort"] == "low"
+
+
+def test_encode_reasoning_effort_none_disables():
+    """An explicit 'none' must not be replaced by the default max."""
+    a = WorkBuddyAdapter()
+    body = a.encode_request(_req(gen_params=ir.GenParams(reasoning_effort="none")),
+                            "glm-5.3",
+                            {"max_tokens": 10, "extra_body": {}, "drop_params": True})
+    assert body["reasoning_effort"] == "none"
+
+
 def test_tool_choice_named_collapses_to_name_string():
     a = WorkBuddyAdapter()
     tool = ir.Tool(name="get_weather", description="d", parameters_json_schema={})

@@ -1274,3 +1274,44 @@ the configured TTL by at most one interval.
 and keeps a fresh one; start/stop lifecycle (no double task, idempotent
 stop, no sweep after stop); lifespan integration (started when journaling
 on, absent when off).
+
+## 41. WorkBuddy default reasoning_effort = "max"
+
+**File**: `wiwi/providers/workbuddy_adapter.py` (`encode_request`)
+
+**Issue**: The WorkBuddy adapter sets `provider_type="openai-compatible"` on
+its params so the base OpenAI encoder strips per-message `reasoning_content`
+(quirk 4). That same flag made the base encoder skip `reasoning_effort`
+entirely, so a client that sent no reasoning preference got the upstream's
+implicit default and no explicit effort — and a client that *did* send
+`reasoning_effort` (or an Anthropic `thinking_budget`) had it silently
+dropped too.
+
+**Before**:
+```python
+params["provider_type"] = "openai-compatible"
+body = super().encode_request(req, model_id, params)
+# reasoning_effort never applied
+```
+
+**After**:
+```python
+g = req.gen_params
+explicit = g.effective_reasoning_effort()   # reasoning_effort or mapped budget
+if explicit:
+    body["reasoning_effort"] = explicit     # caller wins
+else:
+    body["reasoning_effort"] = _DEFAULT_REASONING_EFFORT  # "max"
+```
+
+`effective_reasoning_effort()` normalizes both dialect shapes: a Chat/Responses
+`reasoning_effort` passes through unchanged, an Anthropic `thinking_budget` is
+mapped through the shared effort table, and an explicit `"none"` stays `"none"`
+(disables thinking) instead of being replaced by the default.
+
+**Tests:** `tests/test_workbuddy_adapter.py` —
+`test_encode_defaults_reasoning_effort_to_max`,
+`test_encode_passes_through_caller_reasoning_effort`,
+`test_encode_maps_thinking_budget_to_effort`,
+`test_encode_reasoning_effort_none_disables`. All fail against the pre-fix
+encoder.
