@@ -155,6 +155,32 @@ the same omission on the paste-a-token path.
 
 All new round-44 tests were verified to fail against the pre-fix source.
 
+**Upstream evidence for the fingerprint format** (recorded so this is not
+re-derived — read from the published `@tencent-ai/codebuddy-code` bundle,
+`dist-server/codebuddy.js`). The CLI's chat path *does* run
+`delete p.authorization, delete p["user-agent"]`, but that is not the end of
+the story — the delete is followed by two restores:
+
+1. `I2()` — resolved to module 26492's `runIdentityHeaders`, which returns
+   **identity headers only** (`X-User-Id`, `X-Enterprise-Id`, auth method, id
+   source, base64 userinfo) and never a `user-agent`.
+2. `UserAgentHttpInterceptor` (module 23994), registered on `restOperations` —
+   the exact object the chat path dispatches through
+   (`this.restOperations.request(e)`). It rebuilds the header as
+   `[productName/productVersion, platform/platformVersion, extension].join(" ")`,
+   with each field resolving concretely: `product.json` supplies
+   `productName: "CodeBuddy"`, `platform: "CLI"`, `deploymentType: "SaaS"`
+   (SaaS is *not* in the interceptor's `{Cloud-Hosted, Self-Hosted}` ASCII-safe
+   set, so the `productName/productVersion` branch is the live one), and
+   `dist-server/2828.codebuddy.js` supplies `platformVersion = productVersion =
+   package version` (`e?.productVersion || oK.version`). `bin/codebuddy` seeds
+   that from the npm package version.
+
+Net result: **`CLI/<npm version> CodeBuddy/<npm version>`** — byte-for-byte the
+string wiwi now sends, derived from the same npm package wiwi polls. The
+`CodeBuddy/` token does not appear anywhere in the bundle as a literal; it is
+composed at runtime from `product.json` + the package version.
+
 ---
 
 ## 🔴 Critical — round 42 (new)

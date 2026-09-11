@@ -182,7 +182,12 @@ class WorkBuddyAdapter(OpenAIAdapter):
             # Paste-a-token UX: treat the secret as a raw access token. The
             # headers mirror _common_headers (auth path) — omitting User-Agent
             # and X-Requested-With here let httpx's own UA leak upstream
-            # (AUDIT #91).
+            # (AUDIT #112). The CLI's own chat path does strip the UA
+            # (``delete p["user-agent"]``) but restores it before dispatch via
+            # its UserAgentHttpInterceptor, which rebuilds
+            # ``${platform}/${platformVersion} ${productName}/${productVersion}``
+            # from product.json (CLI / CodeBuddy) and the npm package version —
+            # i.e. the same ``CLI/<v> CodeBuddy/<v>`` this module sends.
             return {
                 "Content-Type": "application/json",
                 "Accept": "application/json, text/plain, */*",

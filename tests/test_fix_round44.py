@@ -74,7 +74,7 @@ def test_bare_token_path_carries_live_user_agent():
     """A non-auth-JSON secret takes the paste-a-token path.
 
     Pre-fix that path set no ``User-Agent`` at all, so httpx's default
-    ``python-httpx/…`` leaked upstream (AUDIT #91).
+    ``python-httpx/…`` leaked upstream (AUDIT #112).
     """
     h = WorkBuddyAdapter().headers(_key(secret="at-raw-pasted-token"))
     assert h["User-Agent"] == "CLI/9.9.9 CodeBuddy/9.9.9"
