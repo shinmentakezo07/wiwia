@@ -40,11 +40,111 @@ def _flag(ctx: RequestContext, msg: str) -> None:
     """Record an advisory tool-args violation on the request context."""
     ctx.metadata.setdefault("tool_args_violations", []).append(msg)
 
+
+def _log_attempt(router: Router, ctx: RequestContext, dep: Deployment,
+                 key: ProviderKeyRef, status: str, latency_ms: int) -> None:
+    """Emit a proxy-log line naming the provider and pool key that served an
+    attempt, success included.
+
+    The request log (and the admin UI reading it) already carries
+    ``provider_key_label`` plus the per-attempt ``key``, but the live proxy
+    stream only spoke up on failure — so a healthy round-robin gave no
+    visible evidence of which key served a request. Same reason the failing
+    paths already print ``[provider/key]``.
+    """
+    router.log_proxy(
+        "info",
+        f"{'ok' if status == 'ok' else status} on {dep.group}/{dep.model_id} "
+        f"[{dep.provider.name}/{key.label}] "
+        f"in {latency_ms}ms",
+        ctx.request_id,
+    )
+
+def _decode_response_guarded(adapter, status_code: int, content: bytes,
+                             provider_name: str):
+    """Decode a 200 body, converting any decode failure into a retryable 502.
+
+    ``adapter.decode_response`` runs outside the transport try/except: a
+    provider that returns 200 with a non-JSON body (Cloudflare HTML
+    interstitial, truncated payload) or a wrong-shaped one (array, ``null``)
+    raises ``JSONDecodeError``/``AttributeError``/``TypeError`` — none of which
+    are ``WiwiError``, so ``execute_with_retries`` (which only catches
+    ``WiwiError``) never retries, never fails over, and never cools the key
+    (AUDIT #92). Normalize it into a retryable ``WiwiError`` so the router's
+    existing failover machinery handles a bad body exactly like a bad status.
+    """
+    try:
+        return adapter.decode_response(status_code, content)
+    except WiwiError:
+        raise
+    except Exception as e:
+        raise WiwiError(
+            502, "api_error",
+            f"upstream {provider_name} returned an undecodable 200 response: "
+            f"{type(e).__name__}",
+            retryable=True,
+        ) from e
+
+
 # How long the consumer waits, after setting `ctx.cancel`, for the pump to
 # notice the flag and release the upstream connection itself before falling
 # back to cancelling it. Long enough to cover a socket teardown, short enough
-# that a client disconnect is not held up.
+# that a client disconnect is not held up. When the pump is configured to drain
+# remaining content for `stream_grace_drain_s`, the wait must cover that drain
+# or the configured grace is silently truncated (AUDIT #99).
 _PUMP_CANCEL_GRACE_S = 1.0
+
+
+def pump_cancel_grace(grace_drain_s: float) -> float:
+    """Cancel grace for the stream consumer: at least 1 s, and never shorter
+    than the configured grace drain."""
+    return max(_PUMP_CANCEL_GRACE_S, float(grace_drain_s or 0.0))
+
+
+def merge_resume_context(origin: RequestContext,
+                         resumed: RequestContext | None) -> None:
+    """Fold a resumed stream's usage/cost back into the originating context.
+
+    ``_attempt_resume`` runs the continuation on a fresh ``RequestContext``
+    (its ``ir_req`` differs), and the pump prices into that context. Without
+    this the resumed tokens are never charged and the originating request's
+    log reports only the pre-failure usage (AUDIT #106). Usage is summed
+    (the first attempt's tokens + the resumed attempt's tokens) and cost
+    accumulated, so a mid-stream failover is billed for everything the client
+    received.
+    """
+    if resumed is None:
+        return
+    ru = getattr(resumed, "usage", None)
+    if ru is not None:
+        ou = getattr(origin, "usage", None)
+        if ou is None:
+            origin.usage = ru
+        else:
+            ou.prompt_tokens += ru.prompt_tokens
+            ou.completion_tokens += ru.completion_tokens
+            ou.cached_tokens += ru.cached_tokens
+            ou.reasoning_tokens += ru.reasoning_tokens
+            ou.cache_creation_tokens += ru.cache_creation_tokens
+    origin.cost = float(getattr(origin, "cost", 0.0) or 0.0) + \
+        float(getattr(resumed, "cost", 0.0) or 0.0)
+    # The encoder reports the stream usage from `_stream_usage`; carry the
+    # resumed attempt's UsageFinal so the client's usage block is complete.
+    su = getattr(resumed, "_stream_usage", None)
+    if su is not None:
+        origin._stream_usage = su  # type: ignore[attr-defined]
+
+
+def loop_abort_error(message: str) -> WiwiError:
+    """Error for a detected model repetition loop.
+
+    A loop is a *model-quality* failure, not a provider/key fault: the key is
+    healthy and the provider served the request. Routing it through
+    ``_note_stream_failure`` incremented ``err_count`` and cooled the key,
+    eventually retiring a healthy credential (AUDIT #108). This error is
+    terminal for the request but side-effect-free for health accounting.
+    """
+    return WiwiError(502, "api_error", message, retryable=False)
 
 
 class Gateway:
@@ -130,6 +230,8 @@ class Gateway:
         except httpx.TransportError as e:
             ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
                              type(e).__name__, int((time.monotonic() - t0) * 1000))
+            _log_attempt(self.router, ctx, dep, key, type(e).__name__,
+                         int((time.monotonic() - t0) * 1000))
             raise WiwiError(504 if "Timeout" in type(e).__name__ else 502,
                             "timeout" if "Timeout" in type(e).__name__
                             else "api_connection_error",
@@ -138,6 +240,7 @@ class Gateway:
         if resp.status_code != 200:
             ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
                              f"http_{resp.status_code}", latency)
+            _log_attempt(self.router, ctx, dep, key, f"http_{resp.status_code}", latency)
             err = error_from_provider_status(resp.status_code, resp.text,
                                              dep.provider.name)
             ra = _parse_retry_after(resp.headers.get("retry-after"))
@@ -174,16 +277,21 @@ class Gateway:
                                          dep.provider.name, key.label,
                                          "ok_after_refresh",
                                          int((time.monotonic() - t0) * 1000))
+                        _log_attempt(self.router, ctx, dep, key, "ok_after_refresh",
+                                     int((time.monotonic() - t0) * 1000))
                         dep.latencies.append(int((time.monotonic() - t0) * 1000))
-                        turn = adapter.decode_response(retry_resp.status_code,
-                                                      retry_resp.content)
+                        turn = _decode_response_guarded(
+                            adapter, retry_resp.status_code,
+                            retry_resp.content, dep.provider.name)
                         self._price(ctx, dep, turn.usage)
                         return turn
             raise err
         ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
                          "ok", latency)
+        _log_attempt(self.router, ctx, dep, key, "ok", latency)
         dep.latencies.append(latency)
-        turn = adapter.decode_response(resp.status_code, resp.content)
+        turn = _decode_response_guarded(adapter, resp.status_code,
+                                        resp.content, dep.provider.name)
         self._price(ctx, dep, turn.usage)
         return turn
 
@@ -226,6 +334,8 @@ class Gateway:
         except httpx.TransportError as e:
             ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
                              type(e).__name__, int((time.monotonic() - t0) * 1000))
+            _log_attempt(self.router, ctx, dep, key, type(e).__name__,
+                         int((time.monotonic() - t0) * 1000))
             raise WiwiError(504 if "Timeout" in type(e).__name__ else 502,
                             "timeout" if "Timeout" in type(e).__name__
                             else "api_connection_error",
@@ -236,6 +346,8 @@ class Gateway:
             ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
                              f"http_{resp.status_code}",
                              int((time.monotonic() - t0) * 1000))
+            _log_attempt(self.router, ctx, dep, key, f"http_{resp.status_code}",
+                         int((time.monotonic() - t0) * 1000))
             err = error_from_provider_status(resp.status_code,
                                              raw.decode(errors="replace"),
                                              dep.provider.name)
@@ -286,7 +398,10 @@ class Gateway:
             thinking = ""
             tool_calls: list[ir.ToolUsePart] = []
             open_calls: dict[int, ir.ToolUsePart] = {}
-            arg_bufs: dict[int, str] = {}
+            # Accumulate arg fragments in a list and join once at Close:
+            # ``buf = buf + fragment`` is O(n^2) in total bytes and unbounded
+            # for a multi-MB argument payload (AUDIT #104).
+            arg_bufs: dict[int, list[str]] = {}
             usage = ir.Usage()
             stop_reason: ir.StopReason = "stop"
 
@@ -300,13 +415,13 @@ class Gateway:
                     elif isinstance(d, dl.ToolCallOpen):
                         open_calls[d.index] = ir.ToolUsePart(
                             id=d.id, name=d.name, args={}, raw_args="")
-                        arg_bufs[d.index] = ""
+                        arg_bufs[d.index] = []
                     elif isinstance(d, dl.ToolCallArgsDelta):
                         if d.index in arg_bufs:
-                            arg_bufs[d.index] += d.args_fragment
+                            arg_bufs[d.index].append(d.args_fragment)
                     elif isinstance(d, dl.ToolCallClose):
                         tc = open_calls.pop(d.index, None)
-                        raw = arg_bufs.pop(d.index, "")
+                        raw = "".join(arg_bufs.pop(d.index, []))
                         if tc is not None:
                             if raw:
                                 try:
@@ -354,7 +469,7 @@ class Gateway:
             # Flush still-open tool calls (stream ended mid-tool-call).
             for idx in sorted(open_calls):
                 tc = open_calls[idx]
-                raw = arg_bufs.get(idx, "")
+                raw = "".join(arg_bufs.get(idx, []))
                 if raw:
                     try:
                         tc.args = json.loads(_repair_truncated_json(raw))
@@ -368,6 +483,7 @@ class Gateway:
         latency = int((time.monotonic() - t0) * 1000)
         ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
                          "ok", latency)
+        _log_attempt(self.router, ctx, dep, key, "ok", latency)
         dep.latencies.append(latency)
         turn = ir.AssistantTurn(text=text, tool_calls=tool_calls,
                                 stop_reason=stop_reason, usage=usage)
@@ -499,10 +615,18 @@ class Gateway:
                 # observe the flag. Yield first, bounded, so the pump can run
                 # its own teardown; cancel only if it doesn't finish.
                 with contextlib.suppress(Exception):
-                    await asyncio.wait_for(asyncio.shield(pump_task),
-                                           timeout=_PUMP_CANCEL_GRACE_S)
+                    await asyncio.wait_for(
+                        asyncio.shield(pump_task),
+                        timeout=pump_cancel_grace(
+                            self.router.settings.stream_grace_drain_s))
             if pump_task and not pump_task.done():
                 pump_task.cancel()
+            # Fold any resumed attempt's usage/cost into this request so the
+            # tokens the client received after a mid-stream failover are
+            # charged and logged (AUDIT #106). Done after the pump settles so
+            # its final `_price_partial` has run.
+            for rctx in getattr(ctx, "_pending_resume_ctxs", []) or []:
+                merge_resume_context(ctx, rctx)
 
     async def _attempt_resume(self, ctx: RequestContext, tape: StreamTape,
                               queue: asyncio.Queue) -> tuple[bool, asyncio.Task | None]:
@@ -568,9 +692,18 @@ class Gateway:
                            resume_ctx, queue, ready, err_box))
             await ready.wait()
             if err_box[0] is None:
-                # Connection succeeded — report success so the key's
-                # req_count increments and any cooldown is cleared.
-                await dep.provider.on_result_locked(key, 200, None)
+                # Do NOT credit the key at connect time: `_pump_once` credits it
+                # on clean completion, so crediting here would double-count
+                # `req_count` and — worse — reset `err_count` for a resume that
+                # connects then dies, the exact AUDIT #6 defect (AUDIT #98).
+                # Remember the fresh context so the consumer can fold the
+                # resumed attempt's usage/cost back into the originating
+                # request once the pump finishes (AUDIT #106).
+                pending = getattr(ctx, "_pending_resume_ctxs", None)
+                if pending is None:
+                    pending = []
+                    ctx._pending_resume_ctxs = pending  # type: ignore[attr-defined]
+                pending.append(resume_ctx)
                 # Return the new pump task so the caller updates its outer
                 # reference — otherwise the resume pump leaks its connection
                 # when the consumer closes (the outer finally only cancels
@@ -631,6 +764,7 @@ class Gateway:
         except Exception as e:  # noqa: BLE001
             ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
                              key.label, "encode_error", 0)
+            _log_attempt(self.router, ctx, dep, key, "encode_error", 0)
             err_box[0] = WiwiError(400, "invalid_request_error",
                                    f"failed to encode request: {e}")
             ready.set()
@@ -651,7 +785,8 @@ class Gateway:
                          for t in (ctx.ir_req.tools or [])
                          if t.builtin is None}
         _open_tools: dict[int, str] = {}  # index -> tool name
-        _arg_bufs: dict[int, str] = {}  # index -> accumulated raw args
+        # index -> arg fragments; joined at Close (AUDIT #104).
+        _arg_bufs: dict[int, list[str]] = {}
         try:
             try:
                 resp_cm = self._client.stream("POST", url, json=body, headers=headers,
@@ -662,6 +797,8 @@ class Gateway:
                 ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
                                  key.label, type(e).__name__,
                                  int((time.monotonic() - t0) * 1000))
+                _log_attempt(self.router, ctx, dep, key, type(e).__name__,
+                             int((time.monotonic() - t0) * 1000))
                 err_box[0] = WiwiError(
                     504 if "Timeout" in type(e).__name__ else 502,
                     "timeout" if "Timeout" in type(e).__name__
@@ -677,15 +814,75 @@ class Gateway:
                 ra = _parse_retry_after(resp.headers.get("retry-after"))
                 if ra is not None:
                     err.retry_after = ra
-                # on_result is called by execute_with_retries' except handler —
-                # don't double-count key errors here.
-                ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
-                                 key.label, f"http_{resp.status_code}",
+                # On-demand token refresh: a 401 from an OAuth-backed provider
+                # (Cline, WorkBuddy) usually means the access token was
+                # rotated upstream. `_call_once` and `_complete_via_stream`
+                # already do this; without it the path that serves every
+                # streaming client request fails a recoverable auth error and
+                # (in any_error mode) piles err_count onto a healthy key
+                # (AUDIT #91). Refresh, rebuild headers from the live key, and
+                # re-issue the connect once before surfacing the error.
+                refresh_hook = self._resolve_refresh_hook(dep)
+                refreshed = False
+                if resp.status_code == 401 and refresh_hook is not None:
+                    await resp_cm.__aexit__(None, None, None)
+                    rotated = await refresh_hook(dep.provider.name, key.label)
+                    if rotated:
+                        live_key = dep.provider.get_key(key.label)
+                        retry_key = (ProviderKeyRef(label=key.label,
+                                                    secret=live_key.secret)
+                                     if live_key is not None else key)
+                        retry_headers = {**adapter.headers(retry_key),
+                                         **dep.provider.extra_headers,
+                                         **dep.extra_headers}
+                        try:
+                            resp_cm = self._client.stream(
+                                "POST", url, json=body, headers=retry_headers,
+                                timeout=dep.timeout or dep.provider.timeout_s)
+                            resp = await resp_cm.__aenter__()
+                        except httpx.TransportError as e:
+                            _log_attempt(self.router, ctx, dep, key,
+                                         type(e).__name__,
+                                         int((time.monotonic() - t0) * 1000))
+                            err_box[0] = WiwiError(
+                                502, "api_connection_error",
+                                f"upstream {type(e).__name__}", retryable=True)
+                            ready.set()
+                            return
+                        refreshed = True
+                        if resp.status_code == 200:
+                            ctx.note_attempt(f"{dep.group}/{dep.model_id}",
+                                             dep.provider.name, key.label,
+                                             "ok_after_refresh",
+                                             int((time.monotonic() - t0) * 1000))
+                            _log_attempt(self.router, ctx, dep, key,
+                                         "ok_after_refresh",
+                                         int((time.monotonic() - t0) * 1000))
+                        else:
+                            # Refresh happened but the retry also failed:
+                            # surface the *retry's* error, not the stale 401.
+                            raw = await resp.aread()
+                            err = error_from_provider_status(
+                                resp.status_code, raw.decode(errors="replace"),
+                                dep.provider.name)
+                            ra = _parse_retry_after(
+                                resp.headers.get("retry-after"))
+                            if ra is not None:
+                                err.retry_after = ra
+                if not refreshed or resp.status_code != 200:
+                    # on_result is called by execute_with_retries' except
+                    # handler — don't double-count key errors here.
+                    ctx.note_attempt(f"{dep.group}/{dep.model_id}",
+                                     dep.provider.name, key.label,
+                                     f"http_{resp.status_code}",
+                                     int((time.monotonic() - t0) * 1000))
+                    _log_attempt(self.router, ctx, dep, key,
+                                 f"http_{resp.status_code}",
                                  int((time.monotonic() - t0) * 1000))
-                err_box[0] = err
-                ready.set()
-                await resp_cm.__aexit__(None, None, None)
-                return
+                    err_box[0] = err
+                    ready.set()
+                    await resp_cm.__aexit__(None, None, None)
+                    return
             # Connection established — signal the caller to start consuming.
             started = True
             ready.set()
@@ -724,8 +921,10 @@ class Gateway:
                         if isinstance(d, dl.TextDelta):
                             text_len += len(d.text)
                             if loop_detector.feed(d.text):
-                                await self._note_stream_failure(
-                                    dep, real_key, ctx)
+                                # A repetition loop is a model-quality failure,
+                                # not a provider/key fault: do NOT feed the
+                                # deployment cooldown or the key's err_count, or
+                                # a healthy credential is retired (AUDIT #108).
                                 await self._price_partial(
                                     ctx, dep, usage_final, text_len)
                                 await queue.put(dl.StreamError(
@@ -735,11 +934,14 @@ class Gateway:
                                 return True
                         elif isinstance(d, dl.ToolCallOpen):
                             _open_tools[d.index] = d.name
-                            _arg_bufs[d.index] = ""
+                            _arg_bufs[d.index] = []
                         elif isinstance(d, dl.ToolCallArgsDelta):
                             buf = _arg_bufs.get(d.index)
                             if buf is not None:
-                                _arg_bufs[d.index] = buf + d.args_fragment
+                                # Append, join at Close: string concatenation
+                                # per fragment is O(n^2) and unbounded for a
+                                # large argument payload (AUDIT #104).
+                                buf.append(d.args_fragment)
                         elif isinstance(d, dl.ToolCallClose):
                             self._validate_closed_tool_args(
                                 ctx, _tool_schemas, _open_tools, _arg_bufs, d.index)
@@ -796,6 +998,8 @@ class Gateway:
             if not client_gone:
                 ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
                                  key.label, "ok", int((time.monotonic() - t0) * 1000))
+                _log_attempt(self.router, ctx, dep, key, "ok",
+                             int((time.monotonic() - t0) * 1000))
                 dep.latencies.append(int((time.monotonic() - t0) * 1000))
             real_usage = usage_final or dl.UsageFinal()
             est_usage = real_usage
@@ -841,6 +1045,17 @@ class Gateway:
                     failover_mode=self.router.settings.failover_mode,
                     key_max_consecutive_fails=(
                         self.router.settings.key_max_consecutive_fails))
+                # AUDIT #79: execute_with_retries' graduation write is skipped
+                # for streams (`ctx._defer_key_credit` is True), so graduate the
+                # deployment here — otherwise a streaming-only deployment that
+                # the healer restored stays in probation (and demoted by the
+                # fresh filter) forever.
+                if getattr(dep, "probation", False):
+                    dep.probation = False
+                # AUDIT #93: a cleanly completed stream also decays the
+                # deployment's failure streak (the non-streaming path does this
+                # in execute_with_retries).
+                dep.record_success()
         except asyncio.CancelledError:
             # client went away mid-stream: still release the upstream response,
             # or the pooled socket stays checked out until GC.  Price the
@@ -858,6 +1073,9 @@ class Gateway:
                 ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
                                  key.label, f"error:{type(e).__name__}",
                                  int((time.monotonic() - t0) * 1000))
+                _log_attempt(self.router, ctx, dep, key,
+                             f"error:{type(e).__name__}",
+                             int((time.monotonic() - t0) * 1000))
                 err_box[0] = WiwiError(502, "api_connection_error",
                                        f"stream pump error: {type(e).__name__}: {e}",
                                        retryable=True)
@@ -913,7 +1131,7 @@ class Gateway:
         ctx: RequestContext,
         tool_schemas: dict[str, dict[str, Any]],
         open_tools: dict[int, str],
-        arg_bufs: dict[int, str],
+        arg_bufs: dict[int, list[str]],
         index: int,
     ) -> None:
         """Validate one closed tool call's args against the request's schema.
@@ -924,7 +1142,7 @@ class Gateway:
         Oversize args skip validation and get flagged without parsing.
         """
         name = open_tools.pop(index, None)
-        raw = arg_bufs.pop(index, "")
+        raw = "".join(arg_bufs.pop(index, []))
         if name is None:
             return  # never opened (or already handled): nothing to validate
         schema = tool_schemas.get(name)

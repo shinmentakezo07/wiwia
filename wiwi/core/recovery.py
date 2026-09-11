@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import random
 import time
 from collections.abc import Callable, Hashable
@@ -107,9 +108,17 @@ class ProbeVerdict(Enum):
     UNREACHABLE = "unreachable"
 
 
-def probe_verdict(status: int | None) -> ProbeVerdict:
-    """Classify a probe HTTP outcome; ``status=None`` means transport failure."""
+def probe_verdict(status: int | None, body: bytes | str | None = None) -> ProbeVerdict:
+    """Classify a probe HTTP outcome; ``status=None`` means transport failure.
+
+    A 200 is only HEALTHY when its body is a real completion. Some providers
+    (WorkBuddy) ride business errors on HTTP 200 as a ``{"code": N, "msg": …}``
+    envelope — a dead session would otherwise be declared healthy and restored
+    into rotation (AUDIT #96).
+    """
     if status == 200:
+        if _body_is_error_envelope(body):
+            return ProbeVerdict.UNREACHABLE
         return ProbeVerdict.HEALTHY
     if status == 429:
         return ProbeVerdict.ALIVE_THROTTLED
@@ -118,6 +127,26 @@ def probe_verdict(status: int | None) -> ProbeVerdict:
     if status in (400, 404):
         return ProbeVerdict.CREDS_VALID_MODEL_BAD
     return ProbeVerdict.UNREACHABLE
+
+
+def _body_is_error_envelope(body: bytes | str | None) -> bool:
+    """True when a 200 probe body is a business-error envelope, not content.
+
+    Recognizes the ``{"code": <non-zero>, "msg": …}`` shape some providers
+    (WorkBuddy) use for dead sessions / exhausted credit on an HTTP 200.
+    """
+    if body is None:
+        return False
+    try:
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    code = data.get("code")
+    if isinstance(code, bool) or not isinstance(code, int):
+        return False
+    return code != 0
 
 
 def build_url(adapter, base_url: str, model_id: str, provider_type: str,
@@ -379,10 +408,12 @@ class HealthHealer:
                         provider=dep.provider.name, key=key.label,
                         detail=detail)
         elif verdict is ProbeVerdict.CREDS_VALID_MODEL_BAD:
-            # Creds proven: the key's restore streak still grows...
-            kst.streak += 1
-            self._maybe_restore_key(dep, key, kst)
-            # ...but the deployment won't self-heal: escalate toward dead.
+            # Creds were *not rejected*, but the probe never completed a
+            # generation, so it proves nothing about whether the key can serve
+            # traffic. Growing the key's restore streak here restored keys that
+            # were never exercised (AUDIT #97); reset it instead. The
+            # deployment still escalates toward dead.
+            kst.streak = 0
             if credit_dep:
                 self._circuits["dep"].trip(did)
                 if self._circuits["dep"].streak(did) >= MODEL_BAD_DEAD_STREAK:
@@ -441,12 +472,17 @@ class HealthHealer:
         except httpx.TransportError as e:
             return ProbeVerdict.UNREACHABLE, type(e).__name__, None
         if resp.status_code == 200:
-            return ProbeVerdict.HEALTHY, "", None
+            verdict = probe_verdict(resp.status_code, resp.content)
+            if verdict is ProbeVerdict.HEALTHY:
+                return ProbeVerdict.HEALTHY, "", None
+            # A 200 whose body is a business-error envelope (dead session):
+            # surface it as unreachable rather than healthy (AUDIT #96).
+            return verdict, "error envelope in 200 body", None
         err = error_from_provider_status(resp.status_code, resp.text,
                                          dep.provider.name)
         ra = parse_retry_after(resp.headers.get("retry-after"))
         detail = f"retry_after={ra}" if ra is not None else err.message
-        return probe_verdict(resp.status_code), detail, ra
+        return probe_verdict(resp.status_code, resp.content), detail, ra
 
     def _announce(self, message: str) -> None:
         log.info("healer_restored", message=message)

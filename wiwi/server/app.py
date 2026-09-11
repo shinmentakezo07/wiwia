@@ -183,21 +183,41 @@ _PLAYGROUND_KEY_TTL_S = 24 * 3600.0
 _MAX_PLAYGROUND_KEYS_PER_USER = 5
 
 
-def _client_ip(request: Request) -> str:
+def _client_ip(request: Request, trusted_proxies: list[str] | None = None) -> str:
     """Best-effort client IP for throttling.
 
-    X-Forwarded-For is only consulted for *rate limiting*, never for authn or
-    for building URLs — a spoofed value can at worst make an attacker share a
-    bucket with someone else (self-limiting), and never grant access. The
-    left-most entry is used because that is the original client under a
-    well-behaved proxy chain.
+    ``X-Forwarded-For`` is trusted only when the direct peer is in
+    *trusted_proxies* (CIDRs from ``general_settings.trusted_proxies``). By
+    default the peer address is used, because an unconditionally-trusted XFF
+    lets an attacker mint a fresh throttle bucket per request simply by
+    rotating the header — which defeated the signup cap and the login
+    brute-force limit (AUDIT #73). XFF is never used for authn or URL building.
     """
+    peer = request.client.host if request.client else "unknown"
     fwd = request.headers.get("x-forwarded-for", "")
-    if fwd:
+    if fwd and trusted_proxies and _peer_is_trusted(peer, trusted_proxies):
+        # Left-most entry is the original client under a well-behaved chain of
+        # trusted proxies.
         first = fwd.split(",")[0].strip()
         if first:
             return first
-    return request.client.host if request.client else "unknown"
+    return peer
+
+
+def _peer_is_trusted(peer: str, trusted_proxies: list[str]) -> bool:
+    """True when *peer* falls inside any trusted-proxy CIDR / address."""
+    import ipaddress
+    try:
+        addr = ipaddress.ip_address(peer)
+    except ValueError:
+        return False
+    for entry in trusted_proxies:
+        try:
+            if addr in ipaddress.ip_network(entry, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 class _AttemptThrottle:
@@ -950,6 +970,26 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 info.key_id, u.prompt_tokens + u.completion_tokens,
                 request_id=ctx.request_id)
 
+    async def _release_tpm_reservation(info, ctx) -> None:
+        """Refund the estimated RPM/TPM slot a request reserved at admission.
+
+        Called on every non-success exit so a request whose upstream never
+        consumed tokens (5xx, 429, all-keys-cooling, any WiwiError before
+        usage is known) does not throttle unrelated later requests for the
+        rest of the rate-limit window (AUDIT #70). Safe to call after
+        ``_record_tpm_usage`` too: :meth:`RateLimiter.release` only removes
+        still-estimated reservations, never confirmed usage.
+        """
+        if info is None:
+            return
+        u = ctx.usage
+        if u is not None:
+            # Usage is known: the success path reconciles it, so there is
+            # nothing to refund.
+            return
+        with contextlib.suppress(Exception):
+            await state.limiter.release(info.key_id, request_id=ctx.request_id)
+
     async def json_body(request: Request) -> tuple[Any, ORJSONResponse | None]:
         """Parse the request body; malformed JSON is a client error (400)."""
         # Errors raised here happen before the surface is known to the handler,
@@ -1165,6 +1205,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 state_.logs.log_proxy("info", "response cache hit",
                                       ctx.request_id)
                 state_.logs.log_request(build_log_event(ctx))
+                # Served locally: the upstream consumed zero tokens, so the
+                # estimated reservation taken at admission must be refunded.
+                await _release_tpm_reservation(info, ctx)
                 return ORJSONResponse(
                     orjson.loads(entry.payload),
                     headers={"x-wiwi-request-id": ctx.request_id,
@@ -1187,6 +1230,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     ctx.error = e
                     state_.logs.log_request(build_log_event(ctx))
                     await stream.aclose()  # release pump resources, if any
+                    await _release_tpm_reservation(info, ctx)
                     return _err(e.status, e.etype, e.message, request, surface)
                 except BaseException:
                     # Non-WiwiError failure: release the pump's upstream
@@ -1206,7 +1250,6 @@ def create_app(config: WiwiConfig) -> FastAPI:
             payload = codec_encode_response(ctx, turn, resp_model, ctx.request_id)
             if config.wiwi_settings.store_prompts_in_spend_logs:
                 ctx.metadata["response_body"] = _serialize_turn(turn, payload)
-            state_.logs.log_request(build_log_event(ctx))
             await _record_tpm_usage(info, ctx)
             if cache is not None and cache_key and ctx.status == 200 and not ctx.error:
                 await cache.set(
@@ -1232,15 +1275,23 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     recorded = True
                 if not recorded:
                     ctx.status = 402
+                    # Log exactly once: the over-budget status replaces the
+                    # success event, so the request is not double-counted in
+                    # stats/rollups (AUDIT #90).
                     state_.logs.log_request(build_log_event(ctx))
                     return _err(402, "budget_exceeded",
                                 "virtual key budget exhausted", request, surface)
+            state_.logs.log_request(build_log_event(ctx))
             return ORJSONResponse(payload, headers={"x-wiwi-request-id": ctx.request_id})
         except Exception as e:  # noqa: BLE001
             if isinstance(e, WiwiError):
                 ctx.status = e.status
                 ctx.error = e
                 state_.logs.log_request(build_log_event(ctx))
+                # The upstream failed before delivering usage: refund the
+                # admission-time reservation so it cannot throttle later
+                # requests (AUDIT #70).
+                await _release_tpm_reservation(info, ctx)
                 resp = _err(e.status, e.etype, e.message, request, surface)
                 if e.retry_after:
                     resp.headers["Retry-After"] = str(int(max(1.0, e.retry_after)))
@@ -1248,6 +1299,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             ctx.status = 500
             state_.logs.log_proxy("error", f"internal error: {e}", ctx.request_id)
             state_.logs.log_request(build_log_event(ctx))
+            await _release_tpm_reservation(info, ctx)
             return _err(500, "api_error", "internal gateway error", request, surface)
 
     def _encoder_for(surface: str, model: str, req_id: str,
@@ -1797,7 +1849,13 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return jerr
         diff: dict[str, Any] = {}
         if "enabled" in body:
-            key.enabled = bool(body["enabled"])
+            # Require a real bool: bool("false") is True, so a string here
+            # silently persisted the opposite of the request (AUDIT #82). This
+            # matches the backup-import validator for the same column.
+            if not isinstance(body["enabled"], bool):
+                return _err(400, "invalid_request_error",
+                            "enabled must be a boolean", request)
+            key.enabled = body["enabled"]
             diff["enabled"] = key.enabled
         if "weight" in body:
             try:
@@ -1832,7 +1890,16 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if jerr:
             return jerr
         label = str(body.get("label") or "").strip()
-        secret = str(_interpolate(body.get("key")) or "")
+        raw_secret = _interpolate(body.get("key"))
+        # A non-string (dict/list/number) previously passed through `str()`
+        # and was persisted as a literal like "{'nested': True}", so every
+        # request upstream failed auth with a misleading 401 and the corrupt
+        # value survived restarts (AUDIT #85). `base_url` already rejects this
+        # shape; apply the same guard to the credential.
+        if raw_secret is not None and not isinstance(raw_secret, str):
+            return _err(400, "invalid_request_error",
+                        "key must be a string", request)
+        secret = str(raw_secret or "")
         if not label or not secret:
             return _err(400, "invalid_request_error", "label and key are required",
                         request)
@@ -1890,7 +1957,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         "'base_url' must be a string", request)
         base_url = (raw_url or "").strip() or _default_base_url(ptype)
         label = str(body.get("label") or "default")
-        secret = str(_interpolate(body.get("key")) or "")
+        raw_secret = _interpolate(body.get("key"))
+        # Same non-string guard as the key-add path (AUDIT #85).
+        if raw_secret is not None and not isinstance(raw_secret, str):
+            return _err(400, "invalid_request_error",
+                        "key must be a string", request)
+        secret = str(raw_secret or "")
         alias_raw = body.get("alias_id")
         alias_id = (str(alias_raw).strip() if alias_raw is not None else None) or None
         if alias_id is not None and any(c.isspace() for c in alias_id):
@@ -2009,7 +2081,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
             acct.base_url = base_url
             diff["base_url"] = base_url
         if "round_robin" in body:
-            acct.round_robin = bool(body["round_robin"])
+            # Same real-bool requirement as the key path (AUDIT #82):
+            # bool("false") is True and would store the opposite.
+            if not isinstance(body["round_robin"], bool):
+                return _err(400, "invalid_request_error",
+                            "round_robin must be a boolean", request)
+            acct.round_robin = body["round_robin"]
             diff["round_robin"] = acct.round_robin
         alias_change: tuple[str | None, bool] | None = None
         if "alias_id" in body:
@@ -2226,8 +2303,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
                                 f"duplicate key label '{label}' on provider "
                                 f"'{name}'", request)
                 seen_labels.add(label)
-                secret = str(_interpolate(
-                    rk.get("secret", rk.get("key"))) or "")
+                raw_secret = _interpolate(rk.get("secret", rk.get("key")))
+                if raw_secret is not None and not isinstance(raw_secret, str):
+                    return _err(400, "invalid_request_error",
+                                f"providers[{i}].keys[{j}]: secret must be a"
+                                " string", request)
+                secret = str(raw_secret or "")
                 if not secret:
                     return _err(400, "invalid_request_error",
                                 f"providers[{i}].keys[{j}]: secret is "
@@ -3138,6 +3219,15 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return jerr
         role = body.get("role")
         disabled = body.get("disabled")
+        # `disabled` must be a real boolean. The guard used an identity check
+        # (`disabled is True`) while UserService.patch coerced with `int()`, so
+        # `1` / `"1"` / `1.0` skipped the guard and still disabled the account —
+        # locking out the last admin (AUDIT #71). Non-bool shapes that int()
+        # could not coerce raised TypeError and returned 500 (AUDIT #81). Both
+        # are now a clean 400; only a genuine bool is accepted.
+        if disabled is not None and not isinstance(disabled, bool):
+            return _err(400, "invalid_request_error",
+                        "disabled must be a boolean", request)
         # Last-admin guard: if demoting or disabling an admin would leave zero
         # active admins, reject. The master-key admin (id="master") is synthetic
         # and not in the users table, so count_admins() only counts DB admins.
@@ -3176,10 +3266,17 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return jerr
         if state.users is None:
             return _err(500, "api_error", "user service not initialized", request)
+        # The decoders assume strings; a non-string username/password used to
+        # raise TypeError/AttributeError and surface as a 500 on an endpoint
+        # that promises 400/401 (AUDIT #80). Reject at the boundary.
+        if not isinstance(body.get("username"), str) or not isinstance(
+                body.get("password"), str):
+            return _err(400, "invalid_request_error",
+                        "username and password must be strings", request)
         # Registration is unauthenticated, so it needs its own throttle:
         # otherwise one host can create unlimited accounts (each of which mints
         # a playground key) and exhaust the user table or disk.
-        scope = _client_ip(request)
+        scope = _client_ip(request, config.general_settings.trusted_proxies)
         allowed, retry_after = await state.signup_throttle.check(scope)
         if not allowed:
             resp = _err(429, "rate_limit_error",
@@ -3189,12 +3286,16 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return resp
         try:
             u = await state.users.create_user(
-                body.get("username", ""), body.get("password", ""))
+                body["username"], body["password"])
         except ValueError as e:
             # distinguish duplicate (409) from validation (400)
             if "already taken" in str(e):
                 return _err(409, "conflict", str(e), request)
             return _err(400, "invalid_request_error", str(e), request)
+        # A successful signup consumes a throttle slot; without this the
+        # _AttemptThrottle only ever counts login failures, so the signup cap
+        # never fires and one IP can mint unlimited accounts (AUDIT #89).
+        await state.signup_throttle.record_failure(scope)
         # Mint a fresh playground key when the new user is being logged in so
         # the Playground can use it immediately without a separate call.
         pg_key = ""
@@ -3249,9 +3350,22 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return jerr
         if state.users is None:
             return _err(500, "api_error", "user service not initialized", request)
-        # Throttle by client IP *and* attempted username, so neither a single
-        # account nor one host can be brute-forced without limit.
-        scope = f"{_client_ip(request)}:{body.get('username', '')}"
+        # Normalize the account identifier before it becomes a throttle bucket:
+        # `username` is lower-cased before lookup, so case variants of one
+        # account must share a bucket or each spelling gets a fresh failure
+        # budget (AUDIT #72). A non-string is rejected as invalid credentials.
+        raw_user = body.get("username", "")
+        if not isinstance(raw_user, str):
+            return _err(401, "authentication_error", "invalid credentials", request)
+        norm_user = raw_user.strip().lower()
+        # Throttle by client IP *and* normalized account, so neither a single
+        # account nor one host can be brute-forced without limit. The
+        # master-key branch is keyed on the IP alone: the username is not
+        # consulted there, so including it would hand an attacker a fresh
+        # budget per arbitrary string against a full-admin credential.
+        ip = _client_ip(request, config.general_settings.trusted_proxies)
+        mk = body.get("master_key")
+        scope = f"{ip}:master" if mk else f"{ip}:{norm_user}"
         allowed, retry_after = await state.login_throttle.check(scope)
         if not allowed:
             resp = _err(429, "rate_limit_error",
@@ -3260,7 +3374,6 @@ def create_app(config: WiwiConfig) -> FastAPI:
             resp.headers["Retry-After"] = str(retry_after)
             return resp
         # master-key login → synthetic master admin
-        mk = body.get("master_key")
         if mk:
             if hmac.compare_digest(str(mk).encode(),
                                    (config.general_settings.master_key or "").encode()):
@@ -3280,8 +3393,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
             await state.login_throttle.record_failure(scope)
             return _err(401, "authentication_error", "invalid master key", request)
         # username/password login
+        password = body.get("password", "")
+        if not isinstance(password, str):
+            await state.login_throttle.record_failure(scope)
+            return _err(401, "authentication_error", "invalid credentials", request)
         try:
-            u = await state.users.verify(body.get("username", ""), body.get("password", ""))
+            u = await state.users.verify(norm_user, password)
         except ValueError:
             # malformed username charset/length — treat as invalid credentials
             await state.login_throttle.record_failure(scope)
