@@ -367,6 +367,10 @@ class OpenAIAdapter:
             chunk = orjson.loads(data)
         except json.JSONDecodeError:
             return []
+        if not isinstance(chunk, dict):
+            # Non-dict frame: ignore rather than crash on ``chunk.get``
+            # (AUDIT #110).
+            return []
         out: list[dl.IRStreamDelta] = []
         choices = chunk.get("choices") or []
         # usage may ride in ANY chunk — OpenAI/OpenRouter put it in the same
@@ -383,6 +387,10 @@ class OpenAIAdapter:
         if not choices:
             return out
         c = choices[0]
+        if not isinstance(c, dict):
+            # Non-dict choice must be skipped, not crash on ``c.get``
+            # (AUDIT #110).
+            return out
         delta = c.get("delta") or {}
         if delta.get("content"):
             out.append(dl.TextDelta(delta["content"]))

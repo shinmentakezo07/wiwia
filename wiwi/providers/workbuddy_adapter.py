@@ -272,5 +272,9 @@ def _envelope_error(env: dict[str, Any]) -> WiwiError:
             "积分不足", "额度不足", "余额不足", "积分用完", "额度用尽", "没有积分")):
         return WiwiError(402, "budget_exceeded",
                          f"workbuddy credit exhausted (code {code}): {msg}")
+    # Unknown business code: treat as a transient upstream fault. Marking it
+    # non-retryable made the request fail to the client immediately instead of
+    # failing over to another deployment/key (AUDIT #87) — and retryability is
+    # what the neighboring 12153 branch exists to grant.
     return WiwiError(502, "api_error", f"workbuddy error code {code}: {msg}",
-                     retryable=False)
+                     retryable=True)

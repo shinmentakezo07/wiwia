@@ -177,8 +177,9 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
     g = ir.GenParams(
         temperature=body.get("temperature"),
         top_p=body.get("top_p"),
-        max_tokens=(body.get("max_tokens") if body.get("max_tokens") is not None
-                    else body.get("max_completion_tokens")),
+        max_tokens=(ir.coerce_int(body.get("max_tokens"))
+                    if body.get("max_tokens") is not None
+                    else ir.coerce_int(body.get("max_completion_tokens"))),
         stop=[body["stop"]] if isinstance(body.get("stop"), str) else (body.get("stop") or []),
         seed=body.get("seed"),
         n=body.get("n") or 1,

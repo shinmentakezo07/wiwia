@@ -195,6 +195,10 @@ class NimAdapter(OpenAIAdapter):
         # Args fragments for tools with aliased params are buffered per
         # index and emitted once (un-aliased) when the call closes.
         self._buffered_args: dict[int, str] = {}
+        # Indices whose ToolCallOpen was synthesized because `arguments`
+        # arrived before (or without) an `id`, so a later real `id` can adopt
+        # the open instead of closing/reopening it (AUDIT #88).
+        self._synthesized_opens: set[int] = set()
 
     def reset(self) -> None:
         """Drop per-request framer/tool state, then the base-class state."""
@@ -204,6 +208,7 @@ class NimAdapter(OpenAIAdapter):
         self._tool_schemas = {}
         self._tool_aliases = {}
         self._buffered_args = {}
+        self._synthesized_opens = set()
 
     def set_tool_context(self, body: dict[str, Any]) -> None:
         """Capture tool schemas and aliases from the encoded request body.
@@ -275,6 +280,21 @@ class NimAdapter(OpenAIAdapter):
             fn = tc.get("function") or {}
             name_fragment = fn.get("name", "")
             if tc.get("id"):
+                if idx in self._synthesized_opens:
+                    # Args arrived first and we synthesized an Open; the real
+                    # id has now shown up. Adopt it — closing and reopening
+                    # would emit two Opens for one index and break the stream
+                    # contract (AUDIT #88, mirroring OpenAIAdapter).
+                    self._synthesized_opens.discard(idx)
+                    self._tool_names[idx] = name_fragment or ""
+                    if fn.get("arguments"):
+                        if self._tool_aliases.get(self._tool_names.get(idx, "")):
+                            self._buffered_args[idx] = (
+                                self._buffered_args.get(idx, "") + fn["arguments"])
+                        else:
+                            out.append(dl.ToolCallArgsDelta(
+                                index=idx, args_fragment=fn["arguments"]))
+                    continue
                 if idx in self._open_tool_indices:
                     self._flush_buffered_args(idx, out)
                     out.append(dl.ToolCallClose(index=idx))
@@ -294,6 +314,15 @@ class NimAdapter(OpenAIAdapter):
                 if idx in self._pending_opens:
                     cid, cname = self._pending_opens.pop(idx)
                     out.append(dl.ToolCallOpen(index=idx, id=cid, name=cname))
+                elif idx not in self._open_tool_indices:
+                    # Args on the first tool chunk with no id (it may arrive
+                    # later, or never). Emitting args with no Open violates the
+                    # nested contract, so synthesize one; a later real id adopts
+                    # it (AUDIT #88, mirroring OpenAIAdapter).
+                    self._open_tool_indices.add(idx)
+                    self._tool_names[idx] = name_fragment or ""
+                    self._synthesized_opens.add(idx)
+                    out.append(dl.ToolCallOpen(index=idx, id="", name=""))
                 if self._tool_aliases.get(self._tool_names.get(idx, "")):
                     # Aliased tool: buffer fragments so the completed JSON
                     # can be un-aliased before the client sees it.
@@ -319,6 +348,7 @@ class NimAdapter(OpenAIAdapter):
             self._tool_names.clear()
             self._pending_opens.clear()
             self._buffered_args.clear()
+            self._synthesized_opens.clear()
             out.append(dl.Finish({"stop": "stop", "length": "length",
                                  "tool_calls": "tool_call",
                                  "content_filter": "content_filter"}.get(fr, "stop")))

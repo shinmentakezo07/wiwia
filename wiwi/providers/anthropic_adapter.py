@@ -158,6 +158,10 @@ class AnthropicAdapter:
 
     def __init__(self) -> None:
         self._tool_indices: set[int] = set()
+        # Block indices carrying a non-tool content block we started emitting
+        # (currently only redacted_thinking); tracked so the matching
+        # content_block_stop is a no-op rather than a phantom tool close.
+        self._think_indices: set[int] = set()
         # Usage fields seen at message_start; consumed at message_delta. Held on
         # the instance because the two SSE events arrive in separate calls.
         self._pending_prompt = 0
@@ -167,6 +171,7 @@ class AnthropicAdapter:
     def reset(self) -> None:
         """Drop per-stream state so the adapter can serve another stream."""
         self._tool_indices.clear()
+        self._think_indices.clear()
         self._pending_prompt = 0
         self._pending_cached = 0
         self._pending_cache_creation = 0
@@ -558,7 +563,18 @@ class AnthropicAdapter:
         elif etype == "content_block_start":
             cb = payload.get("content_block", {})
             idx = payload.get("index", 0)
-            if cb.get("type") in ("tool_use", "server_tool_use"):
+            if cb.get("type") == "redacted_thinking":
+                # Anthropic's extended-thinking redaction: an opaque encrypted
+                # blob that MUST be replayed verbatim on the next turn or the
+                # provider rejects the history. The non-streaming decoder
+                # already preserves it; the streaming path dropped it because
+                # only tool blocks were recognized (AUDIT #103). Carry it as a
+                # redacted ThinkingDelta so the encoder re-emits the block.
+                out.append(dl.ThinkingDelta(
+                    text="", block_type="redacted_thinking",
+                    data=cb.get("data", "")))
+                self._think_indices.add(idx)
+            elif cb.get("type") in ("tool_use", "server_tool_use"):
                 self._tool_indices.add(idx)
                 # server_tool_use = provider-hosted builtin call (web_search,
                 # code_execution, ...): tag the delta so downstream encoders
@@ -590,6 +606,10 @@ class AnthropicAdapter:
             if idx in self._tool_indices:
                 self._tool_indices.discard(idx)
                 out.append(dl.ToolCallClose(index=idx))
+            else:
+                # A redacted_thinking block also needs its index reclaimed;
+                # it never closes a tool call.
+                self._think_indices.discard(idx)
         elif etype == "message_delta":
             d = payload.get("delta", {})
             u = payload.get("usage") or {}

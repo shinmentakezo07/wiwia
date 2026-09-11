@@ -445,6 +445,22 @@ class AnthropicStreamEncoder:
             out.append(self._evt("content_block_delta", td))
             return b"".join(out)
         if isinstance(d, dl.ThinkingDelta):
+            if d.block_type == "redacted_thinking":
+                # Anthropic redacted thinking: emit the opaque block verbatim so
+                # the client can replay it on the next turn. The blob must not
+                # be merged into a thinking/text block (AUDIT #103).
+                out = []
+                if self._open_block is not None:
+                    out.extend(self._close_block())
+                out.append(self._evt("content_block_start", {
+                    "type": "content_block_start", "index": self._block_idx,
+                    "content_block": {"type": "redacted_thinking",
+                                      "data": d.data or ""}}))
+                self._block_idx += 1
+                out.append(self._evt("content_block_stop",
+                                     {"type": "content_block_stop",
+                                      "index": self._block_idx - 1}))
+                return b"".join(out)
             if not d.text and d.signature:
                 if self._open_block == "thinking":
                     sd = self._sig_delta

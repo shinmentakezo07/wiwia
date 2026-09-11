@@ -362,6 +362,12 @@ class OpencodeAdapter:
             err_obj = resp.get("error") if isinstance(resp.get("error"), dict) else {}
             msg = str(err_obj.get("message") or payload.get("message")
                       or "opencode responses stream failed")
+            # Clear per-stream tool state before short-circuiting: `_resp_ended`
+            # makes every later event a no-op, so stale entries could never be
+            # drained and would leak into the next use of a shared adapter
+            # (AUDIT #77). Mirrors the completed/incomplete branch above.
+            self._resp_tools.clear()
+            self._resp_next_index = 0
             self._resp_ended = True
             return out + [dl.StreamError(message=msg, kind="status")]
         return out

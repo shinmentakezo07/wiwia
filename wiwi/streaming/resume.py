@@ -164,7 +164,7 @@ def _delta_size(delta: dl.IRStreamDelta) -> int:
     if isinstance(delta, dl.TextDelta):
         return len(delta.text)
     if isinstance(delta, dl.ThinkingDelta):
-        return len(delta.text) + len(delta.signature or "")
+        return len(delta.text) + len(delta.signature or "") + len(delta.data or "")
     if isinstance(delta, dl.ToolCallOpen):
         return len(delta.id) + len(delta.name) + 8
     if isinstance(delta, dl.ToolCallArgsDelta):
@@ -210,6 +210,17 @@ def build_continuation_messages(
     parts.extend(tool_calls)
     if parts:
         msgs.append(ir.Message(role="assistant", parts=parts))
-        # Add a minimal user message asking the model to continue.
-        msgs.append(ir.Message(role="user", parts=[ir.TextPart("Continue from where you left off.")]))
+        # A continuation user turn must answer any tool_use in the partial
+        # assistant message: Anthropic rejects an assistant turn whose tool_use
+        # blocks have no matching tool_result in the following user turn
+        # (AUDIT #107). Synthesize a placeholder result — the real execution
+        # happens client-side, but the resume only needs a well-formed history
+        # so the model can continue.
+        follow_up: list[ir.Part] = []
+        for tc in tool_calls:
+            follow_up.append(ir.ToolResultPart(
+                tool_use_id=tc.id, content="(continuing)",
+                block_type="tool_result"))
+        follow_up.append(ir.TextPart("Continue from where you left off."))
+        msgs.append(ir.Message(role="user", parts=follow_up))
     return msgs

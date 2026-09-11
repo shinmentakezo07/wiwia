@@ -171,7 +171,12 @@ def _decode_response_format(text_field: Any) -> ir.ResponseFormat | None:
     """Responses nests structured-output config under ``text.format``."""
     if not isinstance(text_field, dict):
         return None
-    fmt = text_field.get("format") or {}
+    fmt = text_field.get("format")
+    if not isinstance(fmt, dict):
+        # A non-dict ``format`` (e.g. "text") previously reached ``fmt.get``
+        # and raised AttributeError, surfacing a trivially malformed body as
+        # an unhandled 500 (AUDIT #100). Treat it as unset.
+        return None
     if fmt.get("type") == "json_schema":
         return ir.ResponseFormat(type="json_schema", json_schema=fmt.get("schema"),
                                  name=fmt.get("name"), strict=fmt.get("strict"))
@@ -279,7 +284,7 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
     g = ir.GenParams(
         temperature=body.get("temperature"),
         top_p=body.get("top_p"),
-        max_tokens=(body.get("max_output_tokens")),
+        max_tokens=ir.coerce_int(body.get("max_output_tokens")),
         # stop is not a documented Responses param, but clients that send it
         # mean the same thing; accept a bare string or a list.
         stop=[stop_raw] if isinstance(stop_raw, str) else (stop_raw or []),

@@ -162,6 +162,10 @@ class OpenRouterAdapter(OpenAIAdapter):
             turn.thinking.append(ir.ThinkingPart(reasoning_str))
 
         for rd in message.get("reasoning_details") or []:
+            if not isinstance(rd, dict):
+                # A malformed reasoning_details entry must be skipped, not
+                # crash the decode (AUDIT #110).
+                continue
             rtype = rd.get("type", "")
             if rtype == "reasoning.text":
                 turn.thinking.append(ir.ThinkingPart(
@@ -177,15 +181,26 @@ class OpenRouterAdapter(OpenAIAdapter):
                     signature=rd.get("id")))
 
         for tc in message.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue  # malformed entry (AUDIT #110)
             raw_args = tc.get("function", {}).get("arguments") or "{}"
-            try:
-                args = json.loads(raw_args)
-            except json.JSONDecodeError:
-                from wiwi.streaming.partial_json import _repair_truncated_json
+            if isinstance(raw_args, dict):
+                # Args-as-object gateway: some OpenRouter routes return the
+                # arguments as a JSON object. ``json.loads`` on a dict raises
+                # TypeError, which the ``except json.JSONDecodeError`` did not
+                # catch, 500ing every turn that replayed such history
+                # (AUDIT #95). Accept the dict directly.
+                args = raw_args
+                raw_args = json.dumps(raw_args)
+            else:
                 try:
-                    args = json.loads(_repair_truncated_json(raw_args))
-                except json.JSONDecodeError:
-                    args = {}
+                    args = json.loads(raw_args)
+                except (json.JSONDecodeError, TypeError):
+                    from wiwi.streaming.partial_json import _repair_truncated_json
+                    try:
+                        args = json.loads(_repair_truncated_json(raw_args))
+                    except (json.JSONDecodeError, TypeError):
+                        args = {}
             turn.tool_calls.append(ir.ToolUsePart(
                 id=tc.get("id", ""), name=tc.get("function", {}).get("name", ""),
                 args=args, raw_args=raw_args))
@@ -215,16 +230,21 @@ class OpenRouterAdapter(OpenAIAdapter):
             chunk = orjson.loads(data)
         except json.JSONDecodeError:
             return []
+        if not isinstance(chunk, dict):
+            # A non-dict frame (null/string/array) must be ignored, not crash
+            # on ``chunk.get`` (AUDIT #110).
+            return []
 
         # OpenRouter mid-stream error: top-level ``error`` with
         # finish_reason: "error" in choices.  Emit a StreamError so the
         # gateway surfaces it to the client.
-        top_error = chunk.get("error")
+        top_error = chunk.get("error") if isinstance(chunk.get("error"), dict) else None
         choices = chunk.get("choices") or []
         if top_error:
             msg = top_error.get("message", "OpenRouter stream error")
             out: list[dl.IRStreamDelta] = [dl.StreamError(message=msg, kind="status")]
-            if choices and choices[0].get("finish_reason") == "error":
+            if choices and isinstance(choices[0], dict) \
+                    and choices[0].get("finish_reason") == "error":
                 # Close any open tool calls before the error
                 for open_idx in sorted(self._open_tool_indices):
                     if open_idx in self._pending_opens:
@@ -251,6 +271,10 @@ class OpenRouterAdapter(OpenAIAdapter):
         if not choices:
             return out
         c = choices[0]
+        if not isinstance(c, dict):
+            # Non-dict choice must be skipped, not crash on ``c.get``
+            # (AUDIT #110).
+            return out
         delta = c.get("delta") or {}
 
         if delta.get("content"):
@@ -262,6 +286,8 @@ class OpenRouterAdapter(OpenAIAdapter):
             out.append(dl.ThinkingDelta(reasoning_text))
 
         for rd in delta.get("reasoning_details") or []:
+            if not isinstance(rd, dict):
+                continue  # malformed entry (AUDIT #110)
             rtype = rd.get("type", "")
             if rtype == "reasoning.text":
                 text = rd.get("text", "")
@@ -286,6 +312,13 @@ class OpenRouterAdapter(OpenAIAdapter):
             name_fragment = fn.get("name", "")
             if tc.get("id"):
                 if idx in self._open_tool_indices:
+                    # The superseded call's Open may still be deferred (id
+                    # seen, args not yet). Flush it before closing, or the
+                    # stream carries a Close for an index that never opened
+                    # and the encoder silently drops it (AUDIT #74).
+                    if idx in self._pending_opens:
+                        cid, cname = self._pending_opens.pop(idx)
+                        out.append(dl.ToolCallOpen(index=idx, id=cid, name=cname))
                     out.append(dl.ToolCallClose(index=idx))
                 self._open_tool_indices.add(idx)
                 self._tool_names[idx] = name_fragment or ""

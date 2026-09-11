@@ -429,11 +429,18 @@ def native_calls_to_deltas(
     ``[DONE]`` with no ``finish_reason`` never runs the close-all sweep.
     """
     out: list[dl.IRStreamDelta] = []
+    # Native calls are numbered from zero by the parser, so a call can collide
+    # with an index the structured path already holds open. Reusing that index
+    # would close the structured call early and concatenate both calls' args
+    # into one buffer (AUDIT #75). Allocate each native call a fresh index above
+    # every index currently in play.
+    next_free = max(open_indices | set(tool_names), default=-1) + 1
     for call in calls:
         idx = call.index
+        if idx in open_indices or idx in tool_names:
+            idx = next_free
+            next_free += 1
         call_id = f"call_nim_{uuid.uuid4().hex}"
-        if idx in open_indices:
-            out.append(dl.ToolCallClose(index=idx))
         tool_names[idx] = call.name
         out.append(dl.ToolCallOpen(index=idx, id=call_id, name=call.name))
         args_json = json.dumps(call.arguments, ensure_ascii=False,

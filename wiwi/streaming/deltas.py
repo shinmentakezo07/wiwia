@@ -33,6 +33,12 @@ class TextDelta:
 class ThinkingDelta:
     text: str
     signature: str | None = None
+    # Anthropic can emit a ``redacted_thinking`` block — an opaque encrypted
+    # blob replayed verbatim on the next turn. ``block_type`` marks the delta
+    # as such and ``data`` carries the blob, so the streaming encoder can
+    # re-emit a redacted_thinking block instead of dropping it (AUDIT #103).
+    block_type: str | None = None
+    data: str | None = None
 
 
 @dataclass(frozen=True)

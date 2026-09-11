@@ -57,7 +57,16 @@ class GeminiAdapter:
             role = "model" if m.role == "assistant" else "user"
             parts: list[dict[str, Any]] = []
             for p in m.parts:
-                if isinstance(p, ir.TextPart):
+                if isinstance(p, ir.ThinkingPart):
+                    # Preserve prior reasoning across turns. Without this the
+                    # part silently vanished, breaking cross-dialect multi-turn
+                    # continuity (AUDIT #102). Gemini expects it back as a
+                    # thought-flagged text part, signature included.
+                    entry: dict[str, Any] = {"text": p.text, "thought": True}
+                    if p.signature:
+                        entry["thoughtSignature"] = p.signature
+                    parts.append(entry)
+                elif isinstance(p, ir.TextPart):
                     parts.append({"text": p.text})
                 elif isinstance(p, ir.ImagePart):
                     if p.b64:
@@ -142,7 +151,15 @@ class GeminiAdapter:
         content = cand.get("content") or {}
         turn = ir.AssistantTurn(raw=data)
         for ti, part in enumerate(content.get("parts") or []):
-            if "text" in part:
+            if part.get("thought") and "text" in part:
+                # Gemini 2.5 thinking models return CoT as a text part flagged
+                # ``thought: true``. Emitting it as visible text leaked the
+                # model's reasoning to the client (AUDIT #94); route it to
+                # ``thinking`` and preserve the signature for replay.
+                turn.thinking.append(ir.ThinkingPart(
+                    text=part["text"] or "",
+                    signature=part.get("thoughtSignature")))
+            elif "text" in part:
                 # Gemini can hand back a null text part; ToolUsePart/turn.text
                 # are str-typed and += None raises TypeError (a 500 on an
                 # otherwise valid candidate).
@@ -192,7 +209,12 @@ class GeminiAdapter:
             self._tool_seq = 0
         cand = (payload.get("candidates") or [{}])[0]
         for part in (cand.get("content") or {}).get("parts") or []:
-            if "text" in part:
+            if part.get("thought") and "text" in part:
+                # Thought parts are reasoning, not the answer: emit them as
+                # ThinkingDelta so the client does not render CoT as the reply
+                # (AUDIT #94).
+                out.append(dl.ThinkingDelta(part["text"] or ""))
+            elif "text" in part:
                 out.append(dl.TextDelta(part["text"] or ""))
             elif "functionCall" in part:
                 fc = part["functionCall"]
@@ -228,6 +250,21 @@ class GeminiAdapter:
                                       }.get(finish, "stop")))
             out.append(dl.StreamEnd())
         elif u:
-            pass  # usage without finishReason: nothing to do; pump estimates later
+            # Usage without finishReason: emitted on some SAFETY-truncated and
+            # mid-stream-cut responses. Treat it as a clean completion — the
+            # pump otherwise reports `upstream stream ended without completion`
+            # and cools a healthy deployment / penalises a healthy key
+            # (AUDIT #76).
+            out.append(dl.UsageFinal(
+                prompt=u.get("promptTokenCount", 0),
+                cached=u.get("cachedContentTokenCount", 0),
+                reasoning=u.get("thoughtsTokenCount", 0),
+                output=(u.get("candidatesTokenCount", 0)
+                        + u.get("thoughtsTokenCount", 0))))
+            if self._saw_function_call:
+                out.append(dl.Finish("tool_call"))
+            else:
+                out.append(dl.Finish("stop"))
+            out.append(dl.StreamEnd())
         return out
 
