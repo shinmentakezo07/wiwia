@@ -41,19 +41,38 @@ class ProviderKey:
     @property
     def available(self) -> bool:
         return (self.enabled and self.status in ("active", "cooling", "probation")
-                and not (self.status == "cooling"
+                and not ((self.status in ("cooling", "invalid"))
                          and time.monotonic() < self.cooldown_until))
 
     def mark_cooling(self, seconds: float) -> None:
         self.status = "cooling"
         self.cooldown_until = time.monotonic() + seconds
 
-    def mark_invalid(self) -> None:
+    def mark_invalid(self, seconds: float | None = None) -> None:
+        """Retire a key after a failure streak.
+
+        ``invalid`` used to be terminal: ``recover()`` only revived ``cooling``
+        keys, so a transient provider-side 5xx storm permanently removed a key
+        from rotation with no recovery path (AUDIT #69). The retirement is now
+        a timed cooldown — when *seconds* is given the key revives itself once
+        the window elapses, exactly like a cooling key. Passing ``None`` keeps
+        the historical terminal behaviour for genuinely dead credentials (the
+        healer / admin reset paths still handle those).
+        """
         self.status = "invalid"
+        if seconds is not None and seconds > 0:
+            self.cooldown_until = time.monotonic() + seconds
+        else:
+            self.cooldown_until = 0.0
 
     def recover(self) -> None:
-        if self.status == "cooling" and time.monotonic() >= self.cooldown_until:
+        if (self.status in ("cooling", "invalid")
+                and time.monotonic() >= self.cooldown_until):
             self.status = "active"
+            # Reset the streak so a recovered key isn't immediately retired
+            # again by the failure count that put it here.
+            if self.err_count:
+                self.err_count = 0
             # Reset WRR weight so the recovered key isn't starved by the
             # deficit it accumulated while cooling.
             self.current_weight = 0.0
@@ -187,7 +206,13 @@ class ProviderAccount:
         if failover_mode == "any_error":
             key.err_count += 2 if status in (401, 403) else 1
             if key.err_count >= key_max_consecutive_fails:
-                key.mark_invalid()
+                # Retire for a bounded window rather than forever: a transient
+                # 5xx storm must not permanently remove a provider's only key
+                # from rotation (AUDIT #69). Auth errors keep a longer window
+                # because a bad credential is less likely to self-heal, but
+                # still recover so a rotated/repaired key returns to service.
+                key.mark_invalid(min(60.0 * (2 if status in (401, 403) else 1),
+                                     600.0))
             else:
                 # short cooldown so the next request rotates to a different key
                 # (5xx retry-after honored when present, else a default).
@@ -200,7 +225,7 @@ class ProviderAccount:
             key.mark_cooling(retry_after if retry_after and retry_after > 0 else 30.0)
         elif status in (401, 403):
             key.err_count += 1
-            key.mark_invalid()
+            key.mark_invalid(600.0)
 
     async def on_result_locked(self, key: ProviderKey | None, status: int | None,
                                retry_after: float | None,
@@ -264,6 +289,21 @@ class Deployment:
             self.cooldown_until = now + cooldown_time
             self.fails.clear()
 
+    def record_success(self) -> None:
+        """Decay the failure streak after a clean completion.
+
+        Without this, ``fails`` only ever grows: a high-volume deployment with
+        a tiny error rate accumulates ``allowed_fails`` timestamps over its
+        window and is cooled continuously even though the overwhelming
+        majority of requests succeed (AUDIT #93). A success prunes the oldest
+        failure so the streak reflects the *recent* failure rate. One prune per
+        success (rather than a full clear) means a genuinely flapping
+        deployment still crosses the threshold, while a healthy one decays
+        back to zero.
+        """
+        if self.fails:
+            self.fails.pop(0)
+
     def p95_latency(self) -> float:
         return percentile(self.latencies, 0.95)
 
@@ -306,6 +346,13 @@ class Router:
         # Only populated for groups whose deployments span 2+ providers;
         # single-provider groups keep their original shuffle semantics.
         self._group_provider_rr: dict[str, _CrossProviderWRR] = {}
+        # Consecutive-success counters for ``cycle_every_n``. These MUST live on
+        # the router, not in ``ctx.metadata``: the context is per-request, so
+        # counters kept there reset to 0 before every pick and the cadence
+        # could never fire (AUDIT #78). Keyed by provider name and by
+        # (provider name, key label).
+        self._provider_consec: dict[str, int] = {}
+        self._key_consec: dict[tuple[str, str], int] = {}
         self._build(config)
 
     def _noop_log_proxy(self, level: str, message: str, request_id: str = "",
@@ -361,10 +408,19 @@ class Router:
                     if d.provider.name == pname]
             return (requested, deps) if deps else (None, [])
         name = requested
+        seen: set[str] = {name}
         for _ in range(8):  # bounded walk: aliases may chain, never cycle
             nxt = _alias_target(self.settings.model_group_alias.get(name))
             if nxt is None or nxt == name:
                 break
+            if nxt in seen:
+                # Alias cycle (a -> b -> a): fail closed instead of resolving
+                # arbitrarily to whichever intermediate group the hop budget
+                # happened to land on (AUDIT #109).
+                log.warning("model_group_alias_cycle", requested=requested,
+                            group=nxt, chain=sorted(seen))
+                return None, []
+            seen.add(nxt)
             name = nxt
         deps = self.groups.get(name, [])
         return (name, deps) if deps else (None, [])
@@ -753,19 +809,16 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
     cycle_n = max(0, router.settings.cycle_every_n)
     failover_mode = router.settings.failover_mode
     key_max_fails = router.settings.key_max_consecutive_fails
-    # per-request cycle counters.  Use ``getattr`` so legacy test fakes
-    # (plain classes with a ``group`` attribute) keep working.
-    md = getattr(ctx, "metadata", None)
-    if not isinstance(md, dict):
-        md = {}
-        try:
-            ctx.metadata = md  # type: ignore[attr-defined]
-        except AttributeError:
-            # legacy read-only fake — fall back to a local dict (cycle
-            # credit won't survive past this request, which is fine)
-            pass
-    provider_consec: dict[str, int] = md.setdefault("wiwi_cycle_provider", {})
-    key_consec: dict[tuple[str, str], int] = md.setdefault("wiwi_cycle_key", {})
+    # Consecutive-success counters for the cycle cadence. They live on the
+    # router so they survive across requests; a per-request dict made the
+    # cadence unreachable (AUDIT #78). ``getattr`` guards legacy test fakes
+    # (plain classes with only a ``group`` attribute). Note: don't use
+    # ``getattr(...) or {}`` here — an empty dict is falsy, so the first
+    # increment would land on a throwaway local.
+    provider_consec: dict[str, int] = getattr(router, "_provider_consec", None)
+    key_consec: dict[tuple[str, str], int] = getattr(router, "_key_consec", None)
+    if provider_consec is None or key_consec is None:
+        provider_consec, key_consec = {}, {}
     first_error: WiwiError | None = None
     queue: list[str] = []
     if ctx.group:
@@ -809,8 +862,19 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                                          f"no healthy deployment for '{group_name}'",
                                          retryable=True)
                     break
+            key_exclude = {lbl for (pn, lbl) in tried_key_labels
+                           if pn == dep.provider.name}
+            if cycle_n > 0:
+                # Key-level cadence: after a key has served cycle_n consecutive
+                # successful requests, skip it for this pick so traffic rotates
+                # even when weights are lopsided (AUDIT #78). ``pick_key``
+                # falls back to the full set when this excludes every key.
+                key_exclude |= {
+                    lbl for (pn, lbl), n in key_consec.items()
+                    if pn == dep.provider.name and n >= cycle_n
+                }
             key, retry_in = await dep.provider.pick_key(
-                exclude_labels={lbl for (pn, lbl) in tried_key_labels if pn == dep.provider.name},
+                exclude_labels=key_exclude,
                 probation_weight=getattr(router, "probation_weight", 1.0),
             )
             if key is None:
@@ -848,6 +912,10 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                     await dep.provider.on_result_locked(key, 200, None,
                                                         failover_mode=failover_mode,
                                                         key_max_consecutive_fails=key_max_fails)
+                    # A clean completion decays the deployment's failure streak
+                    # so a healthy high-volume deployment is not cooled from
+                    # stale timestamps (AUDIT #93).
+                    dep.record_success()
                     if dep.probation:
                         dep.probation = False
                         _proxy("info",

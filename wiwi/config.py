@@ -249,6 +249,12 @@ class GeneralSettings(BaseModel):
     # mint unbounded keys and rotate around any per-key budget or rate limit,
     # making those controls advisory. Admins are exempt.
     max_keys_per_user: int = 50
+    # Reverse-proxy peers whose ``X-Forwarded-For`` may be trusted for
+    # rate-limit keying (e.g. ["127.0.0.1/32", "10.0.0.0/8"]). Empty (default)
+    # means XFF is never trusted and the abuse throttles key on the direct peer
+    # address, so an attacker cannot mint a fresh bucket per request by
+    # rotating the header (AUDIT #73).
+    trusted_proxies: list[str] = Field(default_factory=list)
 
     @field_validator("max_keys_per_user")
     @classmethod

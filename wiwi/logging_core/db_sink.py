@@ -559,9 +559,12 @@ class DBSink:
         if metric not in VALID_METRICS:
             raise ValueError(f"unsupported metric {metric!r}")
         if key_ids is not None and not key_ids:
-            # Zero-row timeseries: same shape the bucket loop below returns
-            # when no rows match (by_t empty → no zero-fill → [] buckets).
-            return {"bucket_seconds": bucket_seconds, "metric": metric, "buckets": []}
+            # Zero-row timeseries: match the bucket loop below exactly. A
+            # bounded window (minutes > 0) always zero-fills the fixed grid,
+            # so it must do so here too — returning [] while the no-rows path
+            # returns n_buckets broke the shape contract for the first-visit
+            # state (AUDIT #86).
+            return self._read_timeseries_empty(bucket_seconds, metric, minutes)
         ckey = ("read_timeseries", int(bucket_seconds), metric, int(minutes),
                 tuple(key_ids) if key_ids else None)
         cached = self._cache_get(ckey)
@@ -572,6 +575,34 @@ class DBSink:
         if result.get("buckets"):
             self._cache_put(ckey, result)
         return result
+
+    @staticmethod
+    def _read_timeseries_empty(bucket_seconds: int, metric: str,
+                               minutes: int) -> dict:
+        """Zero-row timeseries with the same bucket grid as the DB path.
+
+        Mirrors the zero-fill logic in :meth:`_read_timeseries_uncached` so a
+        caller with no key scope (``key_ids=[]``) sees the same bucket count as
+        the all-admin path with no matching rows (AUDIT #86).
+        """
+        n_fill = max(1, minutes * 60 // bucket_seconds) if minutes > 0 else 0
+        bucket_start = int(time.time() // bucket_seconds) * bucket_seconds
+        if minutes > 0:
+            bucket_start = bucket_start - (n_fill - 1) * bucket_seconds
+        if metric == "tokens":
+            buckets = [
+                {"t": bucket_start + i * bucket_seconds, "tok_in": 0,
+                 "tok_cached": 0, "tok_cache_creation": 0,
+                 "tok_reasoning": 0, "tok_out": 0}
+                for i in range(n_fill)
+            ]
+        else:
+            buckets = [
+                {"t": bucket_start + i * bucket_seconds,
+                 "tps_avg": 0.0, "tps_p95": 0.0}
+                for i in range(n_fill)
+            ]
+        return {"bucket_seconds": bucket_seconds, "metric": metric, "buckets": buckets}
 
     async def _read_timeseries_uncached(self, bucket_seconds: int, metric: str,
                                         minutes: int,

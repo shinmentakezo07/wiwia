@@ -56,12 +56,18 @@ def _now() -> float:
 # -- password hashing ---------------------------------------------------------
 
 def hash_password(password: str) -> str:
+    if not isinstance(password, str):
+        # ValueError, not TypeError: the auth handlers translate ValueError
+        # into a client error; TypeError would escape as a 500 (AUDIT #80).
+        raise ValueError("password must be a string")  # noqa: TRY004
     salt = os.urandom(16)
     h = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ITERS)
     return f"pbkdf2_sha256${PBKDF2_ITERS}${salt.hex()}${h.hex()}"
 
 
 def verify_password(password: str, stored: str) -> bool:
+    if not isinstance(password, str) or not isinstance(stored, str):
+        return False
     try:
         algo, iters, salt_hex, hash_hex = stored.split("$")
         if algo != "pbkdf2_sha256":
@@ -112,7 +118,12 @@ def verify_session(secret: str, token: str) -> tuple[str, str, float] | None:
 # -- service ------------------------------------------------------------------
 
 def _validate_username(username: str) -> str:
-    u = (username or "").strip().lower()
+    # json_body only guarantees a JSON object, so a nested scalar can reach
+    # here. `(non_str or "").strip()` raised AttributeError previously and
+    # surfaced as a 500; reject it as a client error instead (AUDIT #80).
+    if not isinstance(username, str):
+        raise ValueError("username must be a string")  # noqa: TRY004
+    u = username.strip().lower()
     if not (3 <= len(u) <= 32) or not USERNAME_RE.match(u):
         raise ValueError("username must be 3-32 chars [a-zA-Z0-9_-]")
     return u
@@ -133,6 +144,8 @@ class UserService:
 
     async def create_user(self, username: str, password: str) -> UserInfo:
         uname = _validate_username(username)
+        if not isinstance(password, str):
+            raise ValueError("password must be a string")  # noqa: TRY004
         if len(password) < 8:
             raise ValueError("password must be at least 8 characters")
         # The upper bound matters as much as the lower one: PBKDF2 cost scales

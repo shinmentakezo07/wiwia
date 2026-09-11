@@ -226,6 +226,24 @@ def effort_to_thinking_budget(effort: str) -> int | None:
     return _EFFORT_BUDGETS.get(effort)
 
 
+def coerce_int(value: Any) -> int | None:
+    """Coerce a JSON numeric to ``int``, or return None when it is not one.
+
+    Wire decoders must not forward a malformed ``max_tokens`` (object, list,
+    string, bool) upstream verbatim: the provider would reject it with a
+    confusing error far from its origin, or silently ignore it (AUDIT #83).
+    A genuine ``bool`` is rejected even though ``isinstance(True, int)`` is
+    True — ``max_tokens=true`` is a client bug, not "1".
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
 def thinking_budget_to_effort(budget: int) -> str:
     """Map a thinking token budget to the nearest reasoning_effort level.
 

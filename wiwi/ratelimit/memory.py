@@ -146,17 +146,7 @@ class RateLimiter:
                 # Match by request_id first so concurrent same-key requests
                 # each reconcile their own reservation. Fall back to the
                 # newest estimated reservation for backward compatibility.
-                target = None
-                if request_id:
-                    for e in reversed(w.events):
-                        if e.estimated and e.request_id == request_id:
-                            target = e
-                            break
-                if target is None:
-                    for e in reversed(w.events):
-                        if e.estimated:
-                            target = e
-                            break
+                target = self._find_reservation(w, request_id)
                 if target is not None:
                     w.total += max(0, tokens) - target.tokens
                     target.tokens = max(0, tokens)
@@ -164,3 +154,47 @@ class RateLimiter:
                 else:
                     w.events.append(_Event(ts=now, tokens=max(0, tokens)))
                     w.total += max(0, tokens)
+
+    async def release(self, key_id: str, request_id: str = "") -> None:
+        """Refund a reservation whose upstream call never consumed tokens.
+
+        A failed request (5xx, 429, all-keys-cooling, any WiwiError) reserves
+        an *estimated* TPM/RPM slot at admission but never calls
+        :meth:`record_tokens`. Without a refund that phantom reservation
+        throttles unrelated requests for the rest of the window (AUDIT #70).
+
+        The reservation tagged with *request_id* is removed from both the
+        key's token window and the global token window, and its RPM event is
+        removed too. When no id matches, the newest estimated reservation is
+        removed (backward-compatible with callers that predate request ids).
+        """
+        async with self._lock:
+            now = time.monotonic()
+            for scope in ("global:tpm", f"{key_id}:tpm"):
+                w = self._windows.get(scope)
+                if w is None or not w.is_token:
+                    continue
+                self._prune(w, now)
+                target = self._find_reservation(w, request_id)
+                if target is not None:
+                    w.events.remove(target)
+                    w.total = max(0, w.total - target.tokens)
+            # RPM reservations carry no request id: drop the newest one so the
+            # failed request does not permanently consume an rpm slot.
+            w = self._windows.get(f"{key_id}:rpm")
+            if w is not None and w.events:
+                self._prune(w, now)
+                if w.events:
+                    w.total = max(0, w.total - w.events.pop().tokens)
+
+    @staticmethod
+    def _find_reservation(w: _Window, request_id: str) -> _Event | None:
+        """Newest estimated reservation, preferring an exact request-id match."""
+        if request_id:
+            for e in reversed(w.events):
+                if e.estimated and e.request_id == request_id:
+                    return e
+        for e in reversed(w.events):
+            if e.estimated:
+                return e
+        return None
