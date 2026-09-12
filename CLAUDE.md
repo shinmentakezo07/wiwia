@@ -155,6 +155,7 @@ Error bodies are dialect-correct per surface (OpenAI `{"error":{…}}` vs Anthro
 - Never add dialect- or provider-specific branches in `core/`, `router/`, `auth/`, or `streaming/` — dialect logic belongs in `wire/`, provider logic in `providers/`.
 - Admin API endpoints (`/admin/*`) require the master key.
 - Commits: imperative present tense, capitalized, no prefix tags (e.g. `Add auth keys and service`). One logical change per commit.
+- **Never create a branch.** Do all work directly on `main` and push to `origin/main`. No feature branches, no PR branches, no worktrees for isolation — this is a single-developer repo and branching adds coordination overhead with no reviewer to benefit from it.
 
 ## Import Rules (binding)
 
