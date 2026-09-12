@@ -26,6 +26,7 @@ from wiwi.config import HealerSettings
 from wiwi.ir import types as ir
 from wiwi.providers.base import ProviderKeyRef, error_from_provider_status
 from wiwi.providers.registry import fresh_adapter
+from wiwi.streaming.sse import LineSSEParser
 
 log = structlog.get_logger("wiwi.recovery")
 
@@ -133,20 +134,46 @@ def _body_is_error_envelope(body: bytes | str | None) -> bool:
     """True when a 200 probe body is a business-error envelope, not content.
 
     Recognizes the ``{"code": <non-zero>, "msg": …}`` shape some providers
-    (WorkBuddy) use for dead sessions / exhausted credit on an HTTP 200.
+    (WorkBuddy) use for dead sessions / exhausted credit on an HTTP 200. A
+    force-stream probe receives that envelope inside an SSE ``data:`` frame,
+    so parse SSE payloads when the body is not a bare JSON object.
     """
     if body is None:
         return False
+
+    def is_error(data: object) -> bool:
+        if not isinstance(data, dict):
+            return False
+        code = data.get("code")
+        if isinstance(code, bool) or not isinstance(code, int):
+            return False
+        return code != 0
+
+    def is_error_payload(payload: str) -> bool:
+        try:
+            data = json.loads(payload)
+        except (ValueError, TypeError):
+            return False
+        return is_error(data)
+
     try:
         data = json.loads(body)
     except (ValueError, TypeError):
-        return False
-    if not isinstance(data, dict):
-        return False
-    code = data.get("code")
-    if isinstance(code, bool) or not isinstance(code, int):
-        return False
-    return code != 0
+        data = None
+    if is_error(data):
+        return True
+
+    # force_stream providers return SSE even for HTTP 200 business errors.
+    # Parse complete frames (including multiline data and a final frame without
+    # a trailing blank line) before classifying the response as healthy.
+    parser = LineSSEParser()
+    text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else body
+    for line in text.splitlines():
+        event = parser.feed_line(line)
+        if event is not None and is_error_payload(event.data):
+            return True
+    event = parser.flush()
+    return event is not None and is_error_payload(event.data)
 
 
 def build_url(adapter, base_url: str, model_id: str, provider_type: str,
