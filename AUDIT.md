@@ -307,15 +307,36 @@ entry now reflects both sites.
 
 ---
 
+## ✅ Fixed — round 46
+
+The round-46 fix was implemented and verified green. RED/GREEN was verified by
+stashing the fixed module: the primary regression fails against the pre-fix
+source (the dead key was restored to `probation`) while the healthy-SSE control
+keeps passing, so the fix cannot overcorrect into never restoring force_stream
+keys.
+
+| # | Fix | File(s) | Test |
+|---|---|---|---|
+| 119 | A force_stream probe body carrying a business-error envelope inside an SSE `data:` frame is no longer HEALTHY | `wiwi/core/recovery.py` (`_body_is_error_envelope`) | `test_healer_does_not_restore_key_from_sse_error_envelope` (plus control `test_healer_restores_key_from_healthy_sse_probe`) |
+
+**#119 details.** `_probe` sends force_stream (WorkBuddy/Cline) probes with
+`stream=True`, so a business error on an HTTP 200 arrives as an SSE body with
+the envelope inside a `data:` frame. The #96 fix only `json.loads`-ed the bare
+body, so the wrapped envelope raised `ValueError` → "not an envelope" →
+HEALTHY, and a still-dead key was restored into probation. `_body_is_error_envelope`
+now also parses SSE frames via the shared `LineSSEParser` (multiline `data:`
+payloads included; a final frame without a trailing blank line is covered by
+`flush()`) and applies the same `{"code": N≠0}` test to each frame's payload.
+Bare-JSON 200 bodies keep the original path; `{"code": 0}` success envelopes
+and healthy SSE completions remain HEALTHY.
+
+---
+
 ## 🟡 Medium — round 45 (new)
 
 Findings from the same audit pass, verified against source but not yet fixed.
-None are covered by existing tests.
-
-### 119. HealthHealer restores a dead force_stream key from an SSE error envelope it cannot parse
-**File:** `wiwi/core/recovery.py:132-149` (`_body_is_error_envelope`), `:459-477` (`_probe`)
-**Trigger:** `healer.enabled: true`; a WorkBuddy (or any `force_stream` provider) key with a dead session (`code 12153`).
-`_probe` builds the probe with `stream = bool(getattr(adapter, "force_stream", False))`, so the upstream answers with an SSE body carrying the business envelope inside a `data:` frame — exactly how production decodes it (`workbuddy_adapter.decode_stream_event` matches `{"code": N}` chunks). But the #96 fix only `json.loads` a bare body: `json.loads(b'data: {"code": 12153, ...}\n\n...')` raises → returns False → probe verdict HEALTHY → with `probes_to_restore=1` the still-dead key is restored into probation. Reproduced end-to-end with a fake SSE upstream and the real `_probe`/`_probe_pair`. The regression test (`tests/test_fix_round43.py:400`) only feeds the non-SSE shape. Fix: for force_stream probes, scan SSE `data:` frames (or run the adapter's `decode_stream_event`) before declaring HEALTHY.
+None are covered by existing tests. (#119 above was fixed in round 46; the
+remaining entries are still live.)
 
 ### 120. Journal-replay path never reconciles the admission-time TPM reservation and is invisible to request logs
 **File:** `wiwi/server/app.py:1122` (reserve), `:1161-1188` (replay return)

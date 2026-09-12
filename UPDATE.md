@@ -1315,3 +1315,56 @@ mapped through the shared effort table, and an explicit `"none"` stays `"none"`
 `test_encode_maps_thinking_budget_to_effort`,
 `test_encode_reasoning_effort_none_disables`. All fail against the pre-fix
 encoder.
+
+---
+
+# Round 46 — HealthHealer SSE probe classification: #119 (2026-09-12)
+
+> **Status:** verified — regression + control green against the fix, primary
+> RED against the pre-fix source (module stashed), full pytest + ruff clean.
+> **Scope:** the HealthHealer probe body classifier. AUDIT #96's fix only
+> `json.loads`-ed a bare 200 body; a force_stream probe's answer is SSE, so a
+> WorkBuddy dead-session envelope inside a `data:` frame was classified
+> HEALTHY and the still-dead key was restored into probation. Pinned by
+> `tests/test_fix_round46.py`.
+
+## 46.1 #119 — SSE-wrapped error envelopes are unhealthy
+
+**File**: `wiwi/core/recovery.py` (`_body_is_error_envelope`)
+
+**Issue**: `_probe` sends force_stream probes (WorkBuddy, Cline) with
+`stream=True`, so the upstream answers with an SSE body — including business
+errors on HTTP 200, where the envelope rides inside a `data:` frame (e.g.
+`data: {"code": 12153, "msg": "Offline user session"}`). The #96 fix tested
+only the bare-JSON body shape, so `json.loads(b'data: {...}\n\n')` raised,
+`_body_is_error_envelope` returned False, the probe verdict was HEALTHY, and
+with `probes_to_restore=1` the still-dead key was restored into probation —
+re-exposing a dead credential to live traffic.
+
+**After**:
+```python
+data = json.loads(body)              # bare 200 body (original #96 path)
+if is_error(data): return True
+parser = LineSSEParser()             # force_stream answers arrive as SSE
+for line in text.splitlines():
+    event = parser.feed_line(line)
+    if event is not None and is_error_payload(event.data):
+        return True
+event = parser.flush()               # final frame without trailing blank line
+return event is not None and is_error_payload(event.data)
+```
+
+The same `{"code": N≠0}` test (with the bool/int guard) is applied to each
+parsed SSE frame's payload; multiline `data:` payloads are joined by the
+parser; a final frame without a trailing blank line is covered by `flush()`
+(the DeepSeek/B.A.I trailing-`[DONE]` case). `{"code": 0}` success envelopes
+and healthy SSE completions remain HEALTHY — pinned by the control test.
+
+**Files changed (this round):** `wiwi/core/recovery.py` (`_body_is_error_envelope`
++ `LineSSEParser` import), `tests/test_fix_round46.py`, `AUDIT.md`
+(#119 moved from the round-45 open register to ✅ Fixed — round 46).
+
+**Verified live** (respx fake upstream through the real `HealthHealer._sweep`
+and WorkBuddy adapter): the SSE error envelope leaves the terminally-retired
+key `invalid` (pre-fix: restored to `probation`), while the healthy SSE body
+still restores it to `probation`.
