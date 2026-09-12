@@ -20,6 +20,8 @@ Covered here (the ones reproducible without a live upstream):
 
 from __future__ import annotations
 
+import time
+
 import orjson
 import pytest
 
@@ -39,7 +41,8 @@ def _on_result_any_error(key: ProviderKey, status: int, *,
     """Mirror of ProviderAccount.on_result for failover_mode='any_error'."""
     key.err_count += 2 if status in (401, 403) else 1
     if key.err_count >= max_fails:
-        key.mark_invalid()
+        # mirror of the production bounded window (router.py mark_invalid)
+        key.mark_invalid(min(60.0 * (2 if status in (401, 403) else 1), 600.0))
     else:
         ra = retry_after if (retry_after and retry_after > 0) else 5.0
         key.mark_cooling(min(ra, 30.0))
@@ -68,9 +71,11 @@ async def test_transient_5xx_does_not_permanently_retire_key():
 
 
 def _expire_cooldowns(key: ProviderKey) -> None:
-    """Simulate the passage of time for a cooling key, then let it recover."""
+    """Simulate the passage of time for a bounded-retirement key, then let
+    it recover. The window must be a positive elapsed timestamp: recover()
+    deliberately never revives a terminal invalid (cooldown_until == 0.0)."""
     for _ in range(10):
-        key.cooldown_until = 0.0
+        key.cooldown_until = time.monotonic() - 1.0
         key.recover()
 
 

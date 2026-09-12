@@ -999,6 +999,21 @@ def create_app(config: WiwiConfig) -> FastAPI:
         with contextlib.suppress(Exception):
             await state.limiter.release(info.key_id, request_id=ctx.request_id)
 
+    async def _abandon_journal(state_, journal, journal_id) -> None:
+        """Close and drop a journal opened for an attempt that failed before
+        streaming its first chunk.
+
+        The client never received a byte under this stream id, so nothing may
+        tail it — and an adopted reconnect id must not linger in the active
+        set, or later reconnects would tail a dead journal until TTL (AUDIT
+        #117). No ``done`` record is written: the logical stream never
+        produced client-visible content here.
+        """
+        if journal is not None:
+            with contextlib.suppress(Exception):
+                await journal.aclose()
+            state_.journals.release(journal_id)
+
     async def json_body(request: Request) -> tuple[Any, ORJSONResponse | None]:
         """Parse the request body; malformed JSON is a client error (400)."""
         # Errors raised here happen before the surface is known to the handler,
@@ -1135,6 +1150,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         # streaming (same process) or the process died mid-flight.
         replay_id = request.headers.get("x-wiwi-stream-id", "")
         replay_after = 0
+        journal_id = ctx.request_id
         lei = request.headers.get("last-event-id", "")
         if lei:
             with contextlib.suppress(ValueError):
@@ -1186,6 +1202,17 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     headers={"Cache-Control": "no-cache",
                              "x-wiwi-request-id": ctx.request_id,
                              "x-wiwi-stream-replay": replay_id})
+            if owner_ok:
+                # Gate missed (AUDIT #117): nothing replayable, no done
+                # record, no active journal under this id. This attempt is
+                # about to dispatch upstream for the logical stream the
+                # client identifies by *replay_id*, so it must journal under
+                # that id — not this attempt's own request id. Otherwise the
+                # re-dispatch is invisible to later reconnects, which will
+                # dispatch again while it is still running (double upstream
+                # call, double billing): the residual window of the #66 fix,
+                # one phase earlier in the timeline.
+                journal_id = replay_id
         gateway = state_.gateways["chat"]
         if config.wiwi_settings.store_prompts_in_spend_logs:
             ctx.metadata["request_body"] = body
@@ -1225,6 +1252,15 @@ def create_app(config: WiwiConfig) -> FastAPI:
             if ir_req.stream:
                 encoder_pair = _encoder_for(surface, resp_model, ctx.request_id,
                                             include_usage=ir_req.stream_options_include_usage)
+                # Open the journal BEFORE dispatch (AUDIT #117): a reconnect
+                # arriving while this attempt waits for its first token must
+                # find the journal active and tail it, never re-dispatch.
+                journal = None
+                if (config.router_settings.stream_journal_enabled
+                        and state_.journals is not None):
+                    journal = await state_.journals.open(
+                        journal_id,
+                        key_id=getattr(info, "key_id", None))
                 # Pull the first delta before committing to a streaming
                 # response: if the upstream fails during connect (bad request,
                 # auth, rate limit...), execute_with_retries raises before any
@@ -1239,15 +1275,18 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     ctx.error = e
                     state_.logs.log_request(build_log_event(ctx))
                     await stream.aclose()  # release pump resources, if any
+                    await _abandon_journal(state_, journal, journal_id)
                     await _release_tpm_reservation(info, ctx)
                     return _err(e.status, e.etype, e.message, request, surface)
                 except BaseException:
                     # Non-WiwiError failure: release the pump's upstream
                     # connection before letting the outer handler deal with it.
                     await stream.aclose()
+                    await _abandon_journal(state_, journal, journal_id)
                     raise
                 it = _stream_response(state_, ctx, encoder_pair, surface,
-                                      stream, first,
+                                      stream, first, journal=journal,
+                                      journal_id=journal_id,
                                       event_ids=config.router_settings.stream_event_ids)
                 return StreamingResponse(
                     it,
@@ -1260,17 +1299,6 @@ def create_app(config: WiwiConfig) -> FastAPI:
             if config.wiwi_settings.store_prompts_in_spend_logs:
                 ctx.metadata["response_body"] = _serialize_turn(turn, payload)
             await _record_tpm_usage(info, ctx)
-            if cache is not None and cache_key and ctx.status == 200 and not ctx.error:
-                await cache.set(
-                    cache_key,
-                    CacheEntry(
-                        payload=orjson.dumps(payload),
-                        media_headers={"content-type": "application/json"},
-                        stored_at=time.time(),
-                        request_id=ctx.request_id,
-                        model=resp_model,
-                    ))
-                ctx.metadata["response_cached"] = True
             if info and info.key_type != "master":
                 # A False return means the conditional UPDATE was rejected —
                 # the request would breach max_budget (or the key vanished).
@@ -1290,6 +1318,21 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     state_.logs.log_request(build_log_event(ctx))
                     return _err(402, "budget_exceeded",
                                 "virtual key budget exhausted", request, surface)
+            # Cache only AFTER the budget decision (AUDIT #116): caching above
+            # this point stored the payload of a request that is about to be
+            # refused with 402, and the hit path serves it as a free 200 with
+            # zero spend recorded for the whole TTL.
+            if cache is not None and cache_key and ctx.status == 200 and not ctx.error:
+                await cache.set(
+                    cache_key,
+                    CacheEntry(
+                        payload=orjson.dumps(payload),
+                        media_headers={"content-type": "application/json"},
+                        stored_at=time.time(),
+                        request_id=ctx.request_id,
+                        model=resp_model,
+                    ))
+                ctx.metadata["response_cached"] = True
             state_.logs.log_request(build_log_event(ctx))
             return ORJSONResponse(payload, headers={"x-wiwi-request-id": ctx.request_id})
         except Exception as e:  # noqa: BLE001
@@ -1346,17 +1389,22 @@ def create_app(config: WiwiConfig) -> FastAPI:
             ctx.stop_reason = d.stop_reason
 
     async def _stream_response(state_, ctx, encoder_pair, surface,
-                               stream, first=None, event_ids=False):
+                               stream, first=None, event_ids=False,
+                               journal=None, journal_id=None):
         from wiwi.streaming import deltas as dl
         encoder, style = encoder_pair
         errored = False
         _seq = 0
         store_prompts = config.wiwi_settings.store_prompts_in_spend_logs
-        journaling = (config.router_settings.stream_journal_enabled
-                      and state_.journals is not None)
-        journal = ((await state_.journals.open(
-            ctx.request_id, key_id=getattr(ctx.auth, "key_id", None)))
-            if journaling else None)
+        if journal_id is None:
+            journal_id = ctx.request_id
+        if (journal is None and config.router_settings.stream_journal_enabled
+                and state_.journals is not None):
+            # Fallback path: the caller did not pre-open a journal. Prefer the
+            # caller-opened one — it is open before the first upstream call,
+            # which is what makes the reconnect gate correct (AUDIT #117).
+            journal = await state_.journals.open(
+                journal_id, key_id=getattr(ctx.auth, "key_id", None))
         stream_text: list[str] = []
         stream_thinking: list[str] = []
         stream_tools: dict[int, dict[str, Any]] = {}
@@ -1423,7 +1471,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             if journal is not None:
                 with contextlib.suppress(Exception):
                     await journal.finish(_seq)
-                state_.journals.release(ctx.request_id)
+                state_.journals.release(journal_id)
             # Release the gateway pump's upstream connection no matter how we
             # leave this generator. The body (`encoder.feed(...)`) can raise, and
             # Starlette's StreamingResponse does NOT aclose our async iterator on

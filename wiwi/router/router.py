@@ -40,9 +40,20 @@ class ProviderKey:
 
     @property
     def available(self) -> bool:
-        return (self.enabled and self.status in ("active", "cooling", "probation")
-                and not ((self.status in ("cooling", "invalid"))
-                         and time.monotonic() < self.cooldown_until))
+        if not self.enabled or self.status not in (
+                "active", "cooling", "invalid", "probation"):
+            return False
+        if self.status in ("cooling", "invalid"):
+            # A timed cooldown (bounded retirement, AUDIT #69) revives itself
+            # once the window elapses. A terminal ``invalid`` —
+            # ``mark_invalid(None)`` — has ``cooldown_until == 0.0`` and stays
+            # out of rotation until the healer or an admin resets it. The
+            # pre-#115 shape excluded ``invalid`` unconditionally, so an
+            # expired bounded retirement was never available and
+            # ``pick_key``/``recover()`` was unreachable: the revival the #69
+            # fix documented could not fire on the live path.
+            return self.cooldown_until > 0.0 and time.monotonic() >= self.cooldown_until
+        return True
 
     def mark_cooling(self, seconds: float) -> None:
         self.status = "cooling"
@@ -66,16 +77,27 @@ class ProviderKey:
             self.cooldown_until = 0.0
 
     def recover(self) -> None:
-        if (self.status in ("cooling", "invalid")
-                and time.monotonic() >= self.cooldown_until):
-            self.status = "active"
-            # Reset the streak so a recovered key isn't immediately retired
-            # again by the failure count that put it here.
-            if self.err_count:
-                self.err_count = 0
-            # Reset WRR weight so the recovered key isn't starved by the
-            # deficit it accumulated while cooling.
-            self.current_weight = 0.0
+        """Revive a key whose timed cooldown window has elapsed.
+
+        A terminal ``invalid`` — ``mark_invalid(None)``, ``cooldown_until ==
+        0.0`` — is deliberately NOT revived here: genuinely dead credentials
+        return to service only through the healer or an admin reset, per
+        :meth:`mark_invalid`'s contract (AUDIT #115: pick_key's sweep used to
+        resurrect them unconditionally).
+        """
+        expired = time.monotonic() >= self.cooldown_until
+        timed = (self.status == "cooling"
+                 or (self.status == "invalid" and self.cooldown_until > 0.0))
+        if not (timed and expired):
+            return
+        self.status = "active"
+        # Reset the streak so a recovered key isn't immediately retired
+        # again by the failure count that put it here.
+        if self.err_count:
+            self.err_count = 0
+        # Reset WRR weight so the recovered key isn't starved by the
+        # deficit it accumulated while cooling.
+        self.current_weight = 0.0
 
     def mark_recovered(self) -> None:
         """Healer restore: enter probation with a fresh slate (cooldown cleared,
@@ -139,7 +161,9 @@ class ProviderAccount:
                 avail = [k for k in self.keys if k.available]
                 if not avail:
                     soonest = min((k.cooldown_until for k in self.keys
-                                   if k.status == "cooling"), default=None)
+                                   if k.status in ("cooling", "invalid")
+                                   and k.cooldown_until > time.monotonic()),
+                                  default=None)
                     return None, (soonest - time.monotonic() if soonest else 5.0)
 
             if not self.round_robin:

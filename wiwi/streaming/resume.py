@@ -100,6 +100,53 @@ class StreamTape:
             if isinstance(e.delta, dl.ThinkingDelta) and e.delta.text
         )
 
+    def replay_thinking_parts(self) -> list:
+        """Reconstruct structured ThinkingParts from taped ThinkingDeltas.
+
+        Continuation requests replay the partial assistant turn upstream, so
+        the thinking blocks must survive with the fidelity the wire carried
+        (AUDIT #118): consecutive thinking deltas are folded into one block
+        whose ``signature`` is the last signature seen in the run (Anthropic
+        sends ``signature_delta`` at block end), and ``redacted_thinking``
+        deltas re-emerge as their own opaque block. A bare-text part drops
+        both, and the resumed request is rejected upstream — a signed
+        thinking block without its signature 400s, and a redacted block is
+        mandatory before tool use on some turns.
+        """
+        from wiwi.ir import types as ir
+
+        parts: list[ir.ThinkingPart] = []
+        text_bits: list[str] = []
+        signature: str | None = None
+
+        def _flush() -> None:
+            nonlocal text_bits, signature
+            joined = "".join(text_bits)
+            if joined:
+                parts.append(ir.ThinkingPart(joined, signature=signature))
+            text_bits = []
+            signature = None
+
+        for e in self._entries:
+            d = e.delta
+            if not isinstance(d, dl.ThinkingDelta):
+                # A content delta ends the thinking run: the next thinking
+                # delta opens a NEW block whose signature must not be glued
+                # onto the previous run's text.
+                _flush()
+                continue
+            if d.block_type == "redacted_thinking":
+                _flush()
+                parts.append(ir.ThinkingPart("", block_type="redacted_thinking",
+                                             data=d.data))
+                continue
+            if d.text:
+                text_bits.append(d.text)
+            if d.signature:
+                signature = d.signature
+        _flush()
+        return parts
+
     def replay_tool_calls(self) -> list:
         """Reconstruct partial ToolUseParts from taped tool-call deltas.
 
@@ -114,18 +161,20 @@ class StreamTape:
         from wiwi.streaming.partial_json import _repair_truncated_json
         out: list[ir.ToolUsePart] = []
         open_calls: dict[int, ir.ToolUsePart] = {}
-        arg_bufs: dict[int, str] = {}
+        # List buffers joined once per close (AUDIT #104: repeated string
+        # concatenation is O(n^2) on long argument streams).
+        arg_bufs: dict[int, list[str]] = {}
         for e in self._entries:
             d = e.delta
             if isinstance(d, dl.ToolCallOpen):
                 open_calls[d.index] = ir.ToolUsePart(id=d.id, name=d.name, args={})
-                arg_bufs[d.index] = ""
+                arg_bufs[d.index] = []
             elif isinstance(d, dl.ToolCallArgsDelta):
                 if d.index in arg_bufs:
-                    arg_bufs[d.index] += d.args_fragment
+                    arg_bufs[d.index].append(d.args_fragment)
             elif isinstance(d, dl.ToolCallClose):
                 tc = open_calls.pop(d.index, None)
-                raw = arg_bufs.pop(d.index, "")
+                raw = "".join(arg_bufs.pop(d.index, []))
                 if tc is not None:
                     if raw:
                         try:
@@ -138,7 +187,7 @@ class StreamTape:
         # Flush any still-open tool calls (stream died mid-tool-call).
         for idx in sorted(open_calls):
             tc = open_calls[idx]
-            raw = arg_bufs.get(idx, "")
+            raw = "".join(arg_bufs.get(idx, []))
             if raw:
                 try:
                     tc.args = json.loads(_repair_truncated_json(raw))
@@ -198,13 +247,12 @@ def build_continuation_messages(
     from wiwi.ir import types as ir
 
     text = tape.replay_text()
-    thinking = tape.replay_thinking()
+    thinking_parts = tape.replay_thinking_parts()
     # Reconstruct partial tool calls from the tape deltas.
     tool_calls = tape.replay_tool_calls()
     msgs = list(original_messages)
     parts: list[ir.Part] = []
-    if thinking:
-        parts.append(ir.ThinkingPart(thinking))
+    parts.extend(thinking_parts)
     if text:
         parts.append(ir.TextPart(text))
     parts.extend(tool_calls)
