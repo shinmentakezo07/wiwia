@@ -48,7 +48,7 @@ Admin-facing pages (under the guarded area; the sidebar is role-aware):
 | **Virtual Keys** | Mint (name, models, budget, rpm/tpm, expiry — plaintext shown once), patch, disable, delete |
 | **Usage** | Token analytics with 1h/24h/7d/30d/all-time ranges (short ranges from the in-memory ring, long ranges from DB aggregates; bucket size scales 1 min → 1 day) |
 | **Analytics** | Deep-dive charts + CSV exports; per-key/per-model/per-deployment latency and token breakdowns |
-| **Request Logs** | Paginated request log with key/model/status/time filters; per-request detail (attempts, TPS, TTFT, cost, stop reason) |
+| **Request Logs** | Paginated request log with key/model/status/time filters — time range defaults to the **last 30 minutes**, switchable to 5m/15m/30m/1h/6h/24h/7d/All time; per-request detail (attempts, TPS, TTFT, cost, stop reason) |
 | **Proxy Logs** | Upstream request/response metadata stream |
 | **Pricing** | DB-backed `model_prices`: per-model token prices, overrides, delete-to-fallback |
 | **Alert Rules** | Spend/alert thresholds (`/admin/alert-rules`) |

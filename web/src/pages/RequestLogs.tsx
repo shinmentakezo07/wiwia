@@ -30,6 +30,7 @@ import { useAdminStream } from "@/api/stream";
 import type { Attempt, RequestLogEntry } from "@/api/types";
 import {
   Badge,
+  Button,
   Card,
   Drawer,
   EmptyState,
@@ -57,13 +58,39 @@ import {
 } from "./logs-shared";
 
 type StatusFilter = "all" | "2xx" | "4xx" | "5xx";
-type RangeFilter = "all" | "5m" | "15m" | "1h";
+type RangeFilter = "5m" | "15m" | "30m" | "1h" | "6h" | "24h" | "7d" | "all";
+
+/** Lookback window per range. Defaults to 30 minutes — recent traffic is what
+ *  this page is opened for, and a bounded default keeps the client-side filter
+ *  (and the summary chips) meaningful on a busy gateway. */
+const DEFAULT_RANGE: RangeFilter = "30m";
 
 const RANGE_SECS: Record<Exclude<RangeFilter, "all">, number> = {
   "5m": 300,
   "15m": 900,
+  "30m": 1800,
   "1h": 3600,
+  "6h": 21600,
+  "24h": 86400,
+  "7d": 604800,
 };
+
+const RANGE_OPTIONS: { value: RangeFilter; label: string }[] = [
+  { value: "5m", label: "Last 5 minutes" },
+  { value: "15m", label: "Last 15 minutes" },
+  { value: "30m", label: "Last 30 minutes" },
+  { value: "1h", label: "Last hour" },
+  { value: "6h", label: "Last 6 hours" },
+  { value: "24h", label: "Last 24 hours" },
+  { value: "7d", label: "Last 7 days" },
+  { value: "all", label: "All time" },
+];
+
+/** Range label for prose — "Last 30 minutes" → "last 30 minutes". */
+function rangeLabel(range: RangeFilter): string {
+  const label = RANGE_OPTIONS.find((o) => o.value === range)?.label ?? "selected range";
+  return label.charAt(0).toLowerCase() + label.slice(1);
+}
 
 const CANONICAL_SURFACES = ["chat", "messages", "responses", "embeddings"];
 
@@ -466,7 +493,7 @@ export function RequestLogsPage() {
   const [providerSel, setProviderSel] = useState("all");
   const [status, setStatus] = useState<StatusFilter>("all");
   const [surface, setSurface] = useState("all");
-  const [range, setRange] = useState<RangeFilter>("all");
+  const [range, setRange] = useState<RangeFilter>(DEFAULT_RANGE);
   const [selected, setSelected] = useState<RequestLogEntry | null>(null);
   const now = useNow(15_000);
 
@@ -493,7 +520,10 @@ export function RequestLogsPage() {
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    const minTs = range === "all" ? 0 : Date.now() / 1000 - RANGE_SECS[range];
+    // `now` (not Date.now()) keeps the window sliding with the 15s clock tick,
+    // so rows age out of the view even when the poll returns identical data
+    // and react-query's structural sharing leaves `all` referentially stable.
+    const minTs = range === "all" ? 0 : now / 1000 - RANGE_SECS[range];
     return all.filter((l) => {
       if (l.ts < minTs) return false;
       if (model !== "all" && l.model_group !== model) return false;
@@ -507,7 +537,16 @@ export function RequestLogsPage() {
       }
       return true;
     });
-  }, [all, q, model, providerSel, status, surface, range]);
+  }, [all, q, model, providerSel, status, surface, range, now]);
+
+  // Rows inside the time window but before the other filters — lets the empty
+  // state tell "nothing happened in this window" apart from "your filters hide
+  // everything", which need different advice.
+  const inRange = useMemo(() => {
+    if (range === "all") return all.length;
+    const minTs = now / 1000 - RANGE_SECS[range];
+    return all.filter((l) => l.ts >= minTs).length;
+  }, [all, range, now]);
 
   const modelOpts = useMemo(() => distinctOptions(all, (l) => l.model_group, "All models"), [all]);
   const providerOpts = useMemo(() => distinctOptions(all, (l) => l.provider, "All providers"), [all]);
@@ -568,12 +607,7 @@ export function RequestLogsPage() {
         <Select
           value={range}
           onChange={(v) => setRange(v as RangeFilter)}
-          options={[
-            { value: "all", label: "All time" },
-            { value: "5m", label: "Last 5 minutes" },
-            { value: "15m", label: "Last 15 minutes" },
-            { value: "1h", label: "Last hour" },
-          ]}
+          options={RANGE_OPTIONS}
           className="h-8 w-[155px] text-[12px]"
         />
       </LogsToolbar>
@@ -624,7 +658,24 @@ export function RequestLogsPage() {
             <span className="mb-2 flex justify-center text-[var(--admin-text-dim)] opacity-50">
               <Inbox size={20} aria-hidden />
             </span>
-            {all.length === 0 ? "No requests logged yet." : "No events match the current filters."}
+            {all.length === 0 ? (
+              "No requests logged yet."
+            ) : inRange === 0 ? (
+              <>
+                No requests in the {rangeLabel(range)}.
+                <div className="mt-3 flex flex-wrap justify-center gap-2">
+                  <Button
+                    variant="ghost"
+                    onClick={() => setRange("all")}
+                    className="min-h-[44px] px-3 text-[12px]"
+                  >
+                    Show all time
+                  </Button>
+                </div>
+              </>
+            ) : (
+              "No events match the current filters."
+            )}
           </EmptyState>
         </Card>
       )}
