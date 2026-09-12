@@ -8,6 +8,54 @@ Each finding verified against source by reading the cited lines. Severities: �
 ---
 ## ✅ Fixed
 
+### 114. Request-log rows older than the poll interval never aged out of the view
+
+**Severity:** ⚪ Low (UI staleness)
+**Files:** `web/src/pages/RequestLogs.tsx:496` (pre-fix cutoff), `:510` (pre-fix dependency array)
+
+**Trigger:** open `/console/request-logs`, select any bounded range (5m/15m/1h),
+then leave the page open. Rows that fall outside the window stay visible
+indefinitely.
+
+The `filtered` memo computed its cutoff as `Date.now() / 1000 - RANGE_SECS[range]`
+but listed only `[all, q, model, providerSel, status, surface, range]` as
+dependencies. `Date.now()` is not a dependency, so the memo re-ran only when one
+of those changed. The 15 s poll *usually* masked this by handing the memo a new
+`all` array — except TanStack Query's structural sharing returns the
+*referentially identical* array when the fetched payload is unchanged, which is
+exactly the steady-state case (no new requests). So the window froze at whatever
+moment the last filter change or data change happened: a row from 20 minutes ago
+remained on a page claiming "Last 5 minutes".
+
+**Fix:** drive the cutoff off the existing `useNow(15_000)` clock (`now / 1000`)
+and add `now` to the dependency array, so the window slides on every tick
+independently of whether the query returned new data. No extra timer — `now`
+already existed for the `TimeAgo` cells.
+
+**Status: fixed** — same change also lands the range selector work (30m default
+plus 5m/15m/30m/1h/6h/24h/7d/all).
+
+**Proof (RED/GREEN).** `web/` has no test runner (see #113), so the regression is
+demonstrated with a Playwright harness rather than a pytest file. The
+discriminating case is a row sitting just inside the boundary with a payload that
+is **byte-identical on every poll**: react-query's structural sharing then hands
+the memo the *same* `all` reference, so under the bug the memo never recomputes
+at all. One synthetic row aged 285 s against a 5 m window, then 40 s of real time:
+
+| Build | Row at t0 (285 s old) | Row at t+40 s (325 s old) | Verdict |
+|---|---|---|---|
+| pre-fix (`Date.now()`, no `now` dep) | visible (1 row) | **still visible (1 row)** | 🔴 RED — window frozen |
+| fixed (`now / 1000`, `now` in deps) | visible (1 row) | **aged out (0 rows)** | ✅ GREEN |
+
+The fixed bundle is byte-reproducible: rebuilding it yields `index-CI0nFjP2.js`,
+the same hash as the original build. Live-data checks against 1837 real rows
+(newest 23 h old): 5m/15m/30m/1h/6h → 0 rows, 24h → 17, 7d → 416, all → 1837;
+24h+5xx → 10; search `minimax` → 10 of 17 (discriminating), an unmatched needle →
+0 with the filter-mismatch empty state. Mobile 375×812: no horizontal overflow,
+range control fully in viewport. 0 console errors.
+
+---
+
 ### 37. `/docs` served Swagger instead of the built documentation UI
 
 **Severity:** 🟡 Low (routing/UI)
