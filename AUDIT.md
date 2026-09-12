@@ -231,6 +231,128 @@ composed at runtime from `product.json` + the package version.
 
 ---
 
+## ✅ Fixed — round 45
+
+The round-45 findings were implemented and verified green (`1570 passed`,
+`ruff` clean). Each fix has a regression test in `tests/test_fix_round45.py`,
+and every new test was verified to fail against the pre-fix source (RED/GREEN
+via targeted `git stash` of the fixed module). These four share a root cause
+worth naming: **each is a shipped fix whose revival/refund/replay path is
+unreachable or lossy in a state its regression test never exercised.**
+
+| # | Fix | File(s) | Test |
+|---|---|---|---|
+| 115 | Expired bounded retirement revives on the live path; terminal invalid stays retired; `recover()` honors the distinction; `pick_key`'s soonest-window hint covers invalid keys | `wiwi/router/router.py` (`ProviderKey.available`, `recover`, `pick_key`) | `test_expired_bounded_retirement_is_available_again`, `test_expired_retired_key_revives_through_pick_key`, `test_terminal_invalid_stays_out_of_rotation`, `test_pick_key_soonest_covers_invalid_windows`, `test_expired_retired_key_reaches_pick_deployment` |
+| 116 | Non-streaming responses are cached only AFTER the virtual-key budget decision, so a 402'd completion can never be replayed as a free 200 cache hit | `wiwi/server/app.py` (`run_chat_like` non-streaming tail) | `test_cache_never_serves_over_budget_payload`, `test_cache_still_serves_funded_keys` |
+| 117 | A reconnect whose replay gate misses adopts the client's stream id and opens its journal BEFORE dispatch; failures before the first chunk release the journal | `wiwi/server/app.py` (replay gate, streaming branch, `_stream_response`, `_abandon_journal`) | `test_reconnect_during_redispatch_ttft_tails_not_double_dispatch`, `test_pre_dispatch_failure_releases_adopted_journal` |
+| 118 | Resume continuation preserves thinking fidelity: signatures travel with their block, `redacted_thinking` blobs keep their block type, text-interleaved runs split into separate blocks; `_arg_bufs` also joins once per close (#104 residual) | `wiwi/streaming/resume.py` (`replay_thinking_parts`, `build_continuation_messages`, `replay_tool_calls`) | `test_continuation_keeps_signature_and_redacted_blocks`, `test_continuation_thinking_encodes_to_valid_anthropic_blocks`, `test_continuation_splits_thinking_runs_on_interleaved_text`, `test_replay_thinking_still_returns_joined_text`, `test_tool_args_join_survives_many_fragments` |
+
+**#115 details.** `ProviderKey.available` excluded `"invalid"` unconditionally,
+so once a key was retired (5 consecutive non-200s under `any_error`), an
+elapsed cooldown window changed nothing: `ProviderAccount.healthy` stayed
+False, `pick_deployment` filtered the deployment out, and `pick_key` — the
+only production caller of `recover()` — was never reached. The #69 docstring
+promised "the key revives itself once the window elapses"; verified by
+execution that it did not (single-key providers 503 forever). The round-41
+test passed only because it called `key.recover()` manually. Two adjacent
+defects fixed in the same pass: (a) `recover()` unconditionally resurrected
+*terminal* invalid keys (`mark_invalid(None)`, `cooldown_until == 0.0`),
+contradicting the "genuinely dead credentials" contract in `mark_invalid`'s
+docstring — now only keys with a timed window revive; (b) `pick_key`'s
+`soonest` retry hint ignored invalid windows entirely, so a retried request
+could be told 5s when the nearest revival was 5s away *or* be told 30s when
+an invalid key's window ended sooner. The stale mirror helper in
+`tests/test_fix_round41.py` (which used the pre-#69 terminal
+`mark_invalid()`) was updated to mirror production's bounded window.
+
+**#116 details.** The non-streaming tail cached the payload while `ctx.status`
+was still 200, *then* ran `update_spend` and flipped to 402. The cache-hit
+path returns before dispatch with no `update_spend` anywhere, so every
+identical request for the TTL got the full completion as a 200 with zero
+spend recorded — a hard budget cap converted into unlimited free replay. The
+streaming path never had the bug (it 402s after the fact via
+`ctx.metadata["budget_exceeded"]`, with nothing cached). The reorder keeps
+402-logging exactly once (#90) and caching exactly once for funded keys.
+
+**#117 details.** The #66 gate is `replay or complete or active`, but all
+three halves describe the ORIGINAL stream id — and the re-dispatched attempt
+journaled under its own NEW `ctx.request_id`, which the reconnecting client
+never saw. Worse, the journal only opened when the response generator first
+ran (after the first upstream delta), so a reconnect arriving during TTFT
+(slow upstream, multi-deployment failover — easily seconds) found no journal
+at all and dispatched a second upstream call while the first was still
+running: double call, double billing. The fix opens the journal before
+`gateway.stream(ctx)` dispatches, and when the gate misses for a request
+carrying `x-wiwi-stream-id` (owner-checked), adopts that id for the attempt's
+journal so later reconnects see it active and tail it. Attempts that fail
+before the first chunk release the journal (`_abandon_journal`) so nothing
+tails a stream that never produced content.
+
+**#118 details.** `build_continuation_messages` used `replay_thinking()` — a
+bare-text concatenation that dropped `signature` and `block_type`/`data` —
+so a resumed request's final assistant turn carried an unsigned `thinking`
+block (Anthropic validates and 400s) and any `redacted_thinking` block
+(mandatory before tool use on some turns) vanished. The tape already stored
+full fidelity (#103); the continuation builder was the lossy link; the
+Anthropic adapter's encoder was verified correct given structured parts. The
+new `replay_thinking_parts()` folds consecutive thinking deltas into one
+block carrying the last signature seen in the run, keeps redacted deltas as
+their own blocks, and starts a new block whenever a text delta interleaves.
+
+**Register correction (#104).** The #104 entry claimed the unbounded
+`_arg_bufs` string concatenation was fixed, but the fix landed only in
+`gateway.py`'s pump; `resume.py:125` still did `arg_bufs[d.index] += ...`.
+Corrected this round (list buffers joined once per close) and the register
+entry now reflects both sites.
+
+---
+
+## 🟡 Medium — round 45 (new)
+
+Findings from the same audit pass, verified against source but not yet fixed.
+None are covered by existing tests.
+
+### 119. HealthHealer restores a dead force_stream key from an SSE error envelope it cannot parse
+**File:** `wiwi/core/recovery.py:132-149` (`_body_is_error_envelope`), `:459-477` (`_probe`)
+**Trigger:** `healer.enabled: true`; a WorkBuddy (or any `force_stream` provider) key with a dead session (`code 12153`).
+`_probe` builds the probe with `stream = bool(getattr(adapter, "force_stream", False))`, so the upstream answers with an SSE body carrying the business envelope inside a `data:` frame — exactly how production decodes it (`workbuddy_adapter.decode_stream_event` matches `{"code": N}` chunks). But the #96 fix only `json.loads` a bare body: `json.loads(b'data: {"code": 12153, ...}\n\n...')` raises → returns False → probe verdict HEALTHY → with `probes_to_restore=1` the still-dead key is restored into probation. Reproduced end-to-end with a fake SSE upstream and the real `_probe`/`_probe_pair`. The regression test (`tests/test_fix_round43.py:400`) only feeds the non-SSE shape. Fix: for force_stream probes, scan SSE `data:` frames (or run the adapter's `decode_stream_event`) before declaring HEALTHY.
+
+### 120. Journal-replay path never reconciles the admission-time TPM reservation and is invisible to request logs
+**File:** `wiwi/server/app.py:1122` (reserve), `:1161-1188` (replay return)
+**Trigger:** reconnect served from the journal, virtual key with `tpm` set.
+`enforce_rate_limit` reserves an estimated TPM slot for every request; a replay serves zero upstream tokens but the replay branch returns without `_release_tpm_reservation` or `log_request` — the cache-hit path states the exact rule ("served locally: the upstream consumed zero tokens, so the estimated reservation taken at admission must be refunded") and follows it. Each reconnect permanently consumes `len(body)/4` estimated TPM for the 60s window and an RPM slot, and replays never appear in `/admin/stats`. Fix: refund (and log) on the replay branch, mirroring the cache-hit path.
+
+### 121. `release()` refunds the key's RPM reservation but leaks the global RPM reservation
+**File:** `wiwi/ratelimit/memory.py:171-188`; caller `wiwi/server/app.py:1000`
+**Trigger:** `global_rpm` configured; any request failing upstream after admission.
+`check()` reserves one event in both `global:rpm` and `{key_id}:rpm`; `release()` pops only `f"{key_id}:rpm"`. Verified: `RateLimiter(global_rpm=2)`, one admitted-then-released request leaves a phantom event; the next real request at the cap 429s. Each failed request burns one global-RPM slot for the window. Residual of the #70 fix. Fix: drop the newest RPM event from `"global:rpm"` too.
+
+### 122. System-list `text` blocks are never coerced — `system: [{"type":"text","text":null}]` 500s every adapter's encode
+**File:** `wiwi/wire/anthropic_messages.py:26`
+The message-block path coerces (`raw_text if isinstance(raw_text, str) else ""`, line 53 — UPDATE.md §39.1) but the system branch stores the raw scalar. Verified: decode yields `TextPart(text=None)`; `OpenAIAdapter.encode_request` and `AnthropicAdapter.encode_request` both raise `TypeError` in `" ".join(...)`. `run_chat_like` catches only `(DialectError, ValueError)` at decode, so the sync path is an unhandled 500. Fix: same coercion as line 53.
+
+### 123. Non-string `text` scalars inside list-form content crash decode — one root cause, four sites, all three surfaces 500 on replayed history
+**Files:** `wiwi/wire/anthropic_messages.py:93-95` (tool_result content list), `wiwi/wire/openai_chat.py:127-129` (tool message content), `wiwi/wire/openai_responses.py:88-92` (`_item_text`), `:270` (reasoning summary)
+Each builds a text list via `b.get("text", "")` without an isinstance filter and joins it; `{"type":"text","text":5}` (or a dict) → `TypeError` out of `decode_request` → 500. Every sibling text scalar in these files is guarded; these four were missed. Fix: filter to `isinstance(t, str)` at each site (mirror of anthropic_messages.py:53).
+
+### 124. Chat codec: scalar-truthy `tool_calls[].function.arguments` (`true`, `5`) → TypeError → 500
+**File:** `wiwi/wire/openai_chat.py:96-99`
+UPDATE.md §39.1 fixed the dict case (`isinstance(raw_args, dict)`); a truthy scalar falls through `raw_args or "{}"` and `json.loads(True)` raises `TypeError`, which `except json.JSONDecodeError` does not catch. The Responses surface already defends this exact case (`_load_args` catches `TypeError` with a docstring explaining the 500). Fix: `isinstance(raw_args, str)` check or add `TypeError` to the except clause. Same unguarded pattern exists in the provider decoders (`openai_adapter.py:302-304`, `openrouter_adapter.py:186+`) where #92's wrapper downgrades it to a retryable failure; the wire path has no such wrapper.
+
+### 125. Sync `/v1/messages` encode drops `redacted_thinking` data
+**File:** `wiwi/wire/anthropic_messages.py:285-289` (`encode_response`)
+Verified output for an upstream turn containing a redacted block: `[{'type': 'thinking', 'thinking': ''}, ...]` — the encrypted blob is silently dropped and the emitted thinking block has no signature, i.e. the next turn's history replay is 400-bait. The streaming encoder got a redacted branch in the #103 fix (feed(), lines 448-463) and the upstream direction honors it (`anthropic_adapter.py:337-341`); the client-facing sync encode never got the mirror branch. Fix: add a `t.block_type == "redacted_thinking"` branch emitting `{"type": "redacted_thinking", "data": t.data}`.
+
+### 126. ⚪ Tools loop lacks the `isinstance(ttype, str)` guard — non-string `type` crashes in `builtin_tools.canonical_for`
+**File:** `wiwi/wire/anthropic_messages.py:157` (crash at `wiwi/ir/builtin_tools.py:92`)
+`{"type": 5}` (or any non-str truthy type) in a tool entry passes `if not wire_type: return None`, misses both reverse maps, reaches the Anthropic family-prefix loop, and `5.startswith(...)` raises `AttributeError` → 500. The message-block loop got exactly this guard in the round-30 fix (line 44, with a comment explaining the 500 it prevents); the tools loop never did. Fix: skip non-string `ttype` like the block loop, or make `canonical_for` return None for non-str input.
+
+### 127. ⚪ Non-string `stop` items forwarded upstream (Anthropic codec filters; Chat/Responses don't)
+**Files:** `wiwi/wire/openai_chat.py:183`, `wiwi/wire/openai_responses.py:290`
+`"stop": [1]` (or a truthy dict) lands verbatim in `GenParams.stop` (typed `list[str]`) and is forwarded to the upstream, which 400s with an error the gateway reports as upstream `invalid_request_error` far from its origin. The exact shape AUDIT #83 fixed for numeric fields; the Anthropic codec already filters (`stop_seqs = [s for s in stop_raw if isinstance(s, str)]`, anthropic_messages.py:251). Fix: mirror that filter in both codecs.
+
+---
+
 ## 🔴 Critical — round 42 (new)
 
 ### 89. Public signup throttle counts nothing — unlimited account creation
