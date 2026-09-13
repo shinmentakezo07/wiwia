@@ -1381,9 +1381,25 @@ id, so its tool result cannot be correlated back (`tool_call_id` is empty).
 ## ⚪ Low
 
 ### 31. Redis TPM limiter uses `zcard` (count) instead of token sum — dormant (Redis not wired)
-**File:** `wiwi/ratelimit/redis.py:108-131`
+**File:** `wiwi/ratelimit/redis.py:108-131` (original lines)
 
 `zcard` returns member count, not sum of token values. A TPM limit of 10000 is enforced as "10000 requests". `record_tokens` never updates Redis sorted sets (only memory fallback). `zadd` member collisions silently lose reservations. *Currently dormant* — `app.py:170` always uses the memory limiter; `redis_url` is read but unused.
+
+**Status: fixed** (register entry was stale) — re-verified 2026-09-12 against round 48.
+The counting half is already fixed: the limiter encodes each reservation's cost in the
+sorted-set member string (`"{ts}:{cost}:{uid}"`) and sums it rather than counting members
+— `redis.py:127` reads `total = sum(int(m.split(":")[1]) for m in live)` over
+`zrange(scope, 0, -1)`, and the uid suffix means `zadd` collisions no longer lose
+reservations. Pinned by
+`tests/test_fix_round17.py::test_redis_tpm_enforces_token_sum_not_request_count`.
+
+The *dormant* half still holds and is the reason no code changed here:
+`wiwi/server/app.py` constructs the memory `RateLimiter`, so `RedisRateLimiter` has no
+production caller. Two real gaps remain if it is ever wired — it has **no `release()`**
+(the memory limiter's refund path added by #70/#121 has no Redis counterpart, so a failed
+request would leak its reservation) and no `record_tokens()` reconciliation. Left as-is
+deliberately: writing an untested Redis path against a dormant backend trades a
+documented gap for an unverified one. Whoever wires Redis must port both.
 
 ### 32. Memory `record_tokens` misattributes actual usage under concurrent same-key requests
 **File:** `wiwi/ratelimit/memory.py:90-108`

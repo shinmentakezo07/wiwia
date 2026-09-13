@@ -936,7 +936,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return None, _err(401, "authentication_error", "key disabled or expired",
                               request, surface)
         if info.over_budget:
-            return None, _err(429, "budget_exceeded",
+            # 402, not 429 (AUDIT #142): the post-hoc check below refuses the
+            # same condition with 402, and docs/API_REFERENCE.md, docs/ADMIN.md
+            # and docs/ARCHITECTURE.md all pin "budget cap exceeded" to 402
+            # while reserving 429 for rate limits. 429 also tells an SDK to
+            # back off and retry — wrong advice for a cap that never clears.
+            return None, _err(402, "budget_exceeded",
                               f"budget exhausted ({info.spend_to_date:.4f}"
                               f"/{info.max_budget})", request, surface)
         # "" / "*" = endpoint is not model-scoped (e.g. GET /v1/models):
