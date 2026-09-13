@@ -645,6 +645,15 @@ class ResponsesStreamEncoder:
         # A legal stream always closes the currently open output item before
         # the terminal event, even when the last delta left one open.
         closing = b"".join(self._close_item())
+        # Parallel tool calls are siblings, not sequential: an adapter may end
+        # the stream with several function_call items still open.
+        # _close_item()/_close_tool() only close the *current* one, and
+        # _close_tool POPS its entry from self._tools — so every remaining
+        # index needs an explicit close or the client never sees that call's
+        # output_item.done and it is missing from the terminal payload
+        # (AUDIT #111).
+        for idx in sorted(self._tools):
+            closing += b"".join(self._close_tool(idx))
         u = self._usage or dl.UsageFinal()
         # Truncation is a DISTINCT terminal event (response.incomplete) with
         # status "incomplete" + incomplete_details — not a completed response.

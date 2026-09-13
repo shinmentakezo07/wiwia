@@ -478,6 +478,11 @@ class OpenAIAdapter:
             self._open_tool_indices.clear()
             self._tool_names.clear()
             self._pending_opens.clear()
+            # Clear the synthesized-open markers too: they are per-call, and a
+            # stale index makes a *later* tool call that reuses it take the
+            # "adopt the real id" branch — emitting ToolCallArgsDelta with no
+            # preceding ToolCallOpen, which the encoders drop (AUDIT #129).
+            self._synthesized_opens.clear()
             out.append(dl.Finish({"stop": "stop", "length": "length",
                                   "tool_calls": "tool_call",
                                   "function_call": "tool_call",

@@ -562,6 +562,13 @@ class AnthropicStreamEncoder:
         # A legal stream always closes the currently open content block before
         # the terminating message_delta, even when the last delta left one open.
         out = b"".join(self._close_block())
+        # Parallel tool calls are siblings: an adapter may end the message with
+        # several tool_use blocks still open (the Anthropic upstream omits their
+        # content_block_stop). _close_block() only closes the *current* one, so
+        # every remaining registered index needs its own stop or the client is
+        # left with a tool_use block that never finishes (AUDIT #111).
+        for idx in sorted(self._tool_blocks):
+            out += b"".join(self._close_block(tool_index=idx))
         # A signature still pending here has no later thinking block to ride on:
         # flush it as a late delta against the last thinking block rather than
         # dropping it (a dropped signature hard-400s the next turn's replay).

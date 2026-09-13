@@ -705,6 +705,26 @@ truncated/never-finished tool calls.
 **Fix:** iterate all still-registered tool indices (and any open text/thinking block) and close
 each in `_completed`/`final_frame`.
 
+**Status: fixed** — round 47 (2026-09-12). `final_frame` now sweeps
+`sorted(self._tool_blocks)` (`anthropic_messages.py:570-571`) and `_completed` sweeps
+`sorted(self._tools)` (`openai_responses.py:655-656`) after the single current-block close,
+emitting one stop per remaining index. Pinned by
+`tests/test_fix_round47.py::test_anthropic_encoder_closes_every_open_tool_block`
+and `::test_responses_encoder_closes_every_open_tool_item`.
+
+*Reachability (verified by execution, not by reading):* the OpenAI adapter's `[DONE]`
+early return leaves every tool call open, so this is the live path — two parallel tool
+calls plus `[DONE]` yielded `content_block_start ×2 / content_block_stop ×1` pre-fix.
+The no-arg close runs first and clears `_open_tool`, and `_close_block(tool_index=idx)`
+returns `[]` for an index already popped, so the sweep cannot double-close or raise —
+confirmed against the worst case (index 0 opened *last*, so it is both the currently-open
+block and a sweep target): exactly one stop per index.
+
+> **Register hygiene:** this entry shares the number `111` with the WorkBuddy
+> `User-Agent` row in the "✅ Fixed — round 44" table above. Two distinct findings
+> were assigned `111` independently; both are now fixed, but the collision means
+> "fix #111" is ambiguous in this file.
+
 ### 112. Live proxy log never names the provider key on a successful attempt
 **Severity:** 🟡 Medium (observability gap — no way to see which round-robin key served a request)
 **File:** `wiwi/core/gateway.py` — `_call_once`, `_complete_via_stream`, `_pump_once`
