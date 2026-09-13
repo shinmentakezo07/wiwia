@@ -1193,17 +1193,26 @@ class Gateway:
         includes_cached = dep.provider.provider_type != "anthropic"
         state = self.cost.cost_with_status(
             model_key, u.prompt_tokens, u.completion_tokens, u.cached_tokens,
-            u.cache_creation_tokens, includes_cached)
+            u.cache_creation_tokens, includes_cached,
+            provider_type=dep.provider.provider_type,
+            provider_name=dep.provider.name)
         ctx.cost = state.cost
         ctx.cache_hit = u.cached_tokens > 0
-        ctx.metadata["cache_savings"] = self._cache_savings(model_key, u)
+        ctx.metadata["cache_savings"] = self._cache_savings(dep, model_key, u)
         if state.unpriced:
             ctx.metadata["unpriced_model"] = True
             ctx.metadata["unpriced_model_id"] = model_key
 
-    def _cache_savings(self, model_key: str, u: ir.Usage) -> float:
-        """Dollars saved by provider-side prompt caching at this model's rates."""
-        p = self.cost._lookup(model_key)
+    def _cache_savings(self, dep: Deployment, model_key: str,
+                       u: ir.Usage) -> float:
+        """Dollars saved by provider-side prompt caching at this model's rates.
+
+        Resolves through the deployment's provider so the savings use the same
+        scoped rate as the cost — otherwise the logged savings contradict the
+        logged cost, and can exceed the input cost actually charged.
+        """
+        p = self.cost._lookup(model_key, dep.provider.provider_type,
+                              dep.provider.name)
         if not p or u.cached_tokens <= 0:
             return 0.0
         input_rate = p["input_cost_per_token"]
@@ -1220,10 +1229,13 @@ class Gateway:
         includes_cached = dep.provider.provider_type != "anthropic"
         state = self.cost.cost_with_status(
             model_key, u.prompt, u.output, u.cached, u.cache_creation,
-            includes_cached)
+            includes_cached,
+            provider_type=dep.provider.provider_type,
+            provider_name=dep.provider.name)
         ctx.cost = state.cost
         ctx.cache_hit = u.cached > 0
-        ctx.metadata["cache_savings"] = self._cache_savings(model_key, ctx.usage)
+        ctx.metadata["cache_savings"] = self._cache_savings(dep, model_key,
+                                                            ctx.usage)
         if state.unpriced:
             ctx.metadata["unpriced_model"] = True
             ctx.metadata["unpriced_model_id"] = model_key

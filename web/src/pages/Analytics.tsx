@@ -407,6 +407,9 @@ function Brain(props: { size?: number; className?: string; style?: CSSProperties
 
 interface PriceForm {
   model_id: string;
+  /** "" = every provider (the base rate); otherwise a provider account name
+   *  or a provider type. */
+  provider: string;
   input_per_1m: string;
   output_per_1m: string;
   cache_read_per_1m: string;
@@ -418,6 +421,7 @@ interface PriceForm {
 function emptyForm(): PriceForm {
   return {
     model_id: "",
+    provider: "",
     input_per_1m: "",
     output_per_1m: "",
     cache_read_per_1m: "",
@@ -427,9 +431,50 @@ function emptyForm(): PriceForm {
   };
 }
 
-function formFromPrice(p: ModelPrice): PriceForm {
+/** A row in the pricing table: a model's base entry, or one of its scopes. */
+interface PriceRow {
+  price: ModelPrice;
+  /** "" for the base (all-providers) entry. */
+  provider: string;
+}
+
+/** Composite identity for a (model, scope) pair. A model can have one price
+ *  per provider, so the model id alone is no longer unique. */
+function scopeKey(modelId: string, provider: string): string {
+  return `${modelId} ${provider}`;
+}
+
+/** Stable identity for a pricing row. */
+function rowKey(r: PriceRow): string {
+  return scopeKey(r.price.model_id, r.provider);
+}
+
+/** Flatten a model's base entry plus its per-provider overrides into rows. */
+function priceRows(models: ModelPrice[]): PriceRow[] {
+  const out: PriceRow[] = [];
+  for (const p of models) {
+    out.push({ price: p, provider: "" });
+    for (const s of p.scopes ?? []) {
+      out.push({
+        price: {
+          model_id: p.model_id,
+          input_per_1m: s.input_per_1m,
+          output_per_1m: s.output_per_1m,
+          cache_read_per_1m: s.cache_read_per_1m,
+          cache_creation_per_1m: s.cache_creation_per_1m,
+          mode: p.mode,
+        },
+        provider: s.provider,
+      });
+    }
+  }
+  return out;
+}
+
+function formFromPrice(p: ModelPrice, provider = ""): PriceForm {
   return {
     model_id: p.model_id,
+    provider,
     input_per_1m: String(p.input_per_1m),
     output_per_1m: String(p.output_per_1m),
     cache_read_per_1m: p.cache_read_per_1m != null ? String(p.cache_read_per_1m) : "",
@@ -484,16 +529,30 @@ function PricingDialog(props: {
     return m;
   }, [modelsQ.data]);
 
-  // Picker options: every deployed id not already priced, filtered by search.
+  // Picker options: every deployed id not already priced AT THIS SCOPE,
+  // filtered by search. Scope-aware so a model that already has an
+  // all-providers rate can still be given a per-provider one — switch
+  // "Applies to" to a provider and the model reappears here.
   const idOptions = useMemo(() => {
-    const priced = new Set(props.existingIds);
+    const priced = new Set(props.existingIds.map((k) => scopeKey(k, form.provider)));
     const q = idSearch.trim().toLowerCase();
     return Array.from(catalog.keys())
-      .filter((id) => !priced.has(id))
+      .filter((id) => !priced.has(scopeKey(id, form.provider)))
       .filter((id) => !q || id.toLowerCase().includes(q))
       .sort()
       .map((id) => ({ id, providers: Array.from(catalog.get(id) ?? []).sort() }));
-  }, [catalog, props.existingIds, idSearch]);
+  }, [catalog, props.existingIds, idSearch, form.provider]);
+
+  // Provider choices for the scope selector: the accounts that actually serve
+  // the chosen model, so a price can only be scoped to something reachable.
+  const providerOptions = useMemo(() => {
+    const mid = form.model_id.trim();
+    const accounts = mid ? Array.from(catalog.get(mid) ?? []).sort() : [];
+    return [
+      { value: "", label: "All providers" },
+      ...accounts.map((a) => ({ value: a, label: a })),
+    ];
+  }, [catalog, form.model_id]);
 
   // Sync form whenever the dialog opens with new initial data.
   useEffect(() => {
@@ -505,14 +564,18 @@ function PricingDialog(props: {
 
   const save = useMutation({
     mutationFn: (f: PriceForm) =>
-      upsertPricing(f.model_id.trim(), {
-        input_per_1m: Number(f.input_per_1m) || 0,
-        output_per_1m: Number(f.output_per_1m) || 0,
-        cache_read_per_1m: tryNum(f.cache_read_per_1m),
-        max_input_tokens: tryNum(f.max_input_tokens),
-        max_output_tokens: tryNum(f.max_output_tokens),
-        mode: f.mode.trim() || undefined,
-      }),
+      upsertPricing(
+        f.model_id.trim(),
+        {
+          input_per_1m: Number(f.input_per_1m) || 0,
+          output_per_1m: Number(f.output_per_1m) || 0,
+          cache_read_per_1m: tryNum(f.cache_read_per_1m),
+          max_input_tokens: tryNum(f.max_input_tokens),
+          max_output_tokens: tryNum(f.max_output_tokens),
+          mode: f.mode.trim() || undefined,
+        },
+        f.provider || undefined,
+      ),
     onSuccess: (resp) => {
       void qc.invalidateQueries({ queryKey: ["pricing"] });
       const retro = resp.retroactive;
@@ -536,7 +599,7 @@ function PricingDialog(props: {
 
   const modelId = form.model_id.trim();
   const idValid = props.isNew
-    ? modelId.length > 0 && !props.existingIds.includes(modelId)
+    ? modelId.length > 0 && !props.existingIds.includes(scopeKey(modelId, form.provider))
     : modelId.length > 0;
   const inputValid = tryNum(form.input_per_1m) != null;
   const outputValid = tryNum(form.output_per_1m) != null;
@@ -663,6 +726,16 @@ function PricingDialog(props: {
             </p>
           </div>
         )}
+        <Field
+          label="Applies to"
+          hint="“All providers” sets one rate for every upstream. Pick a provider to override it for that account only."
+        >
+          <Select
+            value={form.provider}
+            onChange={(v) => set("provider", v)}
+            options={providerOptions}
+          />
+        </Field>
         <div className="grid grid-cols-2 gap-3">
           <Field label="Input $ / 1M tokens">
             <Input
@@ -743,15 +816,18 @@ function PricingDialog(props: {
 
 function PricingManager(props: {
   models: ModelPrice[];
-  onEdit: (p: ModelPrice) => void;
+  onEdit: (p: ModelPrice, provider: string) => void;
   onAdd: () => void;
 }) {
   const qc = useQueryClient();
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
+  const rows = useMemo(() => priceRows(props.models), [props.models]);
+
   const del = useMutation({
-    mutationFn: (modelId: string) => deletePricing(modelId),
+    mutationFn: (r: PriceRow) =>
+      deletePricing(r.price.model_id, r.provider || undefined),
     onSuccess: () => {
       setConfirmId(null);
       void qc.invalidateQueries({ queryKey: ["pricing"] });
@@ -766,7 +842,7 @@ function PricingManager(props: {
     <Card className="mt-4">
       <CardHeader
         title="Model pricing"
-        subtitle="Input, output, and cache-read costs per 1M tokens — editable, persisted in the database"
+        subtitle="Input, output, and cache-read costs per 1M tokens — set one rate for all providers, or override it per provider"
         right={
           <Button onClick={props.onAdd} className="!py-1.5 text-[12px]">
             <Plus size={14} /> Add model
@@ -781,10 +857,20 @@ function PricingManager(props: {
       {props.models.length === 0 ? (
         <EmptyState>No pricing entries yet. Click “Add model” to define one.</EmptyState>
       ) : (
-        <Table head={["Model", "Input $/1M", "Output $/1M", "Cache read $/1M", "Context", "Mode", ""]}>
-          {props.models.map((p) => (
-            <tr key={p.model_id}>
+        <Table head={["Model", "Provider", "Input $/1M", "Output $/1M", "Cache read $/1M", "Context", "Mode", ""]}>
+          {rows.map((r) => {
+            const p = r.price;
+            const key = rowKey(r);
+            return (
+            <tr key={key}>
               <TD className="font-medium text-[var(--admin-text)]">{p.model_id}</TD>
+              <TD>
+                {r.provider ? (
+                  <Badge>{r.provider}</Badge>
+                ) : (
+                  <span className="text-[var(--admin-text-dim)]">All providers</span>
+                )}
+              </TD>
               <TD className="font-mono tabular-nums">{fmtPerMm(p.input_per_1m)}</TD>
               <TD className="font-mono tabular-nums">{fmtPerMm(p.output_per_1m)}</TD>
               <TD className="font-mono tabular-nums">
@@ -795,13 +881,13 @@ function PricingManager(props: {
               </TD>
               <TD className="text-[var(--admin-text-dim)]">{p.mode ?? "—"}</TD>
               <TD>
-                {confirmId === p.model_id ? (
+                {confirmId === key ? (
                   <div className="flex items-center justify-end gap-2">
                     <span className="text-[11px] text-red-400">Delete?</span>
                     <Button
                       variant="danger"
                       className="!px-2 !py-1 text-[11px]"
-                      onClick={() => del.mutate(p.model_id)}
+                      onClick={() => del.mutate(r)}
                     >
                       Confirm
                     </Button>
@@ -815,25 +901,31 @@ function PricingManager(props: {
                   </div>
                 ) : (
                   <div className="flex items-center justify-end gap-1.5">
+                    {/* 44px min touch target, and an aria-label so the icon
+                        button has an accessible name (a title alone is not
+                        announced reliably). */}
                     <button
-                      title="Edit"
-                      onClick={() => props.onEdit(p)}
-                      className="rounded p-1.5 text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)]"
+                      type="button"
+                      aria-label={`Edit price for ${p.model_id}${r.provider ? ` on ${r.provider}` : ""}`}
+                      onClick={() => props.onEdit(p, r.provider)}
+                      className="flex h-11 w-11 items-center justify-center rounded text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)]"
                     >
-                      <Pencil size={13} />
+                      <Pencil size={15} />
                     </button>
                     <button
-                      title="Delete"
-                      onClick={() => setConfirmId(p.model_id)}
-                      className="rounded p-1.5 text-[var(--admin-text-dim)] transition-colors hover:bg-red-500/10 hover:text-red-400"
+                      type="button"
+                      aria-label={`Delete price for ${p.model_id}${r.provider ? ` on ${r.provider}` : ""}`}
+                      onClick={() => setConfirmId(key)}
+                      className="flex h-11 w-11 items-center justify-center rounded text-[var(--admin-text-dim)] transition-colors hover:bg-red-500/10 hover:text-red-400"
                     >
-                      <Trash2 size={13} />
+                      <Trash2 size={15} />
                     </button>
                   </div>
                 )}
               </TD>
             </tr>
-          ))}
+            );
+          })}
         </Table>
       )}
     </Card>
@@ -882,8 +974,8 @@ export function AnalyticsPage() {
     setPricingIsNew(true);
     setPricingOpen(true);
   }
-  function openEditPricing(p: ModelPrice) {
-    setPricingInitial(formFromPrice(p));
+  function openEditPricing(p: ModelPrice, provider = "") {
+    setPricingInitial(formFromPrice(p, provider));
     setPricingIsNew(false);
     setPricingOpen(true);
   }
@@ -1370,7 +1462,10 @@ export function AnalyticsPage() {
         open={pricingOpen}
         initial={pricingInitial}
         isNew={pricingIsNew}
-        existingIds={allPricing.map((p) => p.model_id)}
+        existingIds={allPricing.flatMap((p) => [
+          scopeKey(p.model_id, ""),
+          ...(p.scopes ?? []).map((s) => scopeKey(p.model_id, s.provider)),
+        ])}
         onClose={closePricing}
         onSaved={closePricing}
       />

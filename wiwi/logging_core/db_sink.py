@@ -238,7 +238,8 @@ class DBSink:
             await conn.execute(
                 sa.text(f"INSERT INTO request_logs ({cols}) VALUES ({vals})"), rows)
 
-    async def reprice_unpriced_history(self, match_tail: str, entry: dict) -> dict[str, float]:
+    async def reprice_unpriced_history(self, match_tail: str,
+                                       rate_for) -> dict[str, float]:
         """Retroactive pricing true-up.
 
         When a model is priced only AFTER it served traffic, its logged rows
@@ -257,19 +258,19 @@ class DBSink:
         models are ignored, and rows with no successful attempt fall back to
         their last attempt.
 
+        *rate_for* is called with the serving attempt's provider name (the
+        account, e.g. ``"openai-main"``) and returns that provider's effective
+        rate dict, or None to skip the row. Passing a callable rather than one
+        fixed entry is what lets a row be priced at ITS OWN provider's scoped
+        rate: two rows on the same model served by two accounts get two prices.
+        This module stays free of any cost/router import that way.
+
         Only unpriced rows are repriced — rows with cost > 0 were logged at an
         already-known rate and keep their historical value (a later rate EDIT
         must not rewrite history or double-charge).
 
         Returns ``{key_id: spend_delta}`` summed across the updated rows.
         """
-        per_token_in = entry["input_cost_per_token"]
-        per_token_out = entry["output_cost_per_token"]
-        per_token_cached = entry.get("cache_read_input_cost_per_token",
-                                     per_token_in)
-        per_token_cache_creation = entry.get(
-            "cache_creation_input_cost_per_token", per_token_in)
-
         key_deltas: dict[str, float] = {}
         batch = 500
         last_id = -1  # keyset pagination — immune to offset drift/loops
@@ -285,8 +286,20 @@ class DBSink:
             last_id = rows[-1][0]
             updates: list[dict] = []
             for rid, key_id, tok_in, tok_cached, tok_cc, tok_out, cost, attempts_json in rows:
-                if not self._row_matches(attempts_json, match_tail):
+                serving = self._serving_attempt(attempts_json, match_tail)
+                if serving is None:
                     continue
+                # Price the row at the rate of the provider that actually
+                # served it, so a scoped price applies to its own rows only.
+                entry = rate_for(serving.get("provider") or "")
+                if not entry:
+                    continue
+                per_token_in = entry["input_cost_per_token"]
+                per_token_out = entry["output_cost_per_token"]
+                per_token_cached = entry.get("cache_read_input_cost_per_token",
+                                             per_token_in)
+                per_token_cache_creation = entry.get(
+                    "cache_creation_input_cost_per_token", per_token_in)
                 uncached_prompt = max(0, tok_in - tok_cached)
                 new_cost = round(
                     uncached_prompt * per_token_in
@@ -307,30 +320,50 @@ class DBSink:
         return key_deltas
 
     @staticmethod
-    def _row_matches(attempts_json: str | None, match_tail: str) -> bool:
-        """True when the row's SERVING attempt used *match_tail*.
+    def _is_2xx(status) -> bool:
+        """True when an attempt's recorded status means the upstream answered.
 
-        Attempts store ``"<group>/<model_id>"`` plus the HTTP ``status``; the
-        serving attempt is the last 2xx entry (the deployment whose response
-        produced the row's usage and cost). The pricing match must be a full
-        path segment (boundary "/"), never a bare string suffix. Rows with no
-        successful attempt (pure failures) fall back to the last attempt.
+        The gateway records ``AttemptRecord.status`` as a *string* — "ok",
+        "ok_after_refresh", "http_429", "TimeoutException", "encode_error" —
+        and serializes it verbatim. Only the integer form (used by hand-built
+        fixtures) was recognised before, so the 2xx rule never fired on real
+        data. ``bool`` is an ``int`` subclass, so it is excluded explicitly.
+        """
+        if isinstance(status, bool):
+            return False
+        if isinstance(status, int):
+            return 200 <= status < 300
+        return status in ("ok", "ok_after_refresh")
+
+    @staticmethod
+    def _serving_attempt(attempts_json: str | None,
+                         match_tail: str) -> dict | None:
+        """The attempt whose response produced the row's usage, or None.
+
+        Attempts store ``"<group>/<model_id>"`` plus the status; the serving
+        attempt is the LAST 2xx entry (the deployment whose response produced
+        the row's usage and cost). Last, not first: a 200 whose body fails to
+        decode is recorded "ok" and then retried, so a later attempt is the one
+        that actually delivered. The model match must be a full path segment
+        (boundary "/"), never a bare string suffix. Rows with no successful
+        attempt (pure failures) fall back to the last attempt.
         """
         if not attempts_json:
-            return False
+            return None
         try:
             attempts = orjson.loads(attempts_json)
         except Exception:  # noqa: BLE001 — malformed rows just don't match
-            return False
+            return None
         if not isinstance(attempts, list) or not attempts:
-            return False
+            return None
         entries = [a if isinstance(a, dict) else {}
                    for a in attempts]
         serving = next((a for a in reversed(entries)
-                        if isinstance(a.get("status"), int)
-                        and 200 <= a["status"] < 300), entries[-1])
+                        if DBSink._is_2xx(a.get("status"))), entries[-1])
         dep = serving.get("deployment", "")
-        return isinstance(dep, str) and dep.endswith(f"/{match_tail}")
+        if not (isinstance(dep, str) and dep.endswith(f"/{match_tail}")):
+            return None
+        return serving
 
     async def write_audit(self, evt: LogEvent) -> None:
         async with self.engine.begin() as conn:

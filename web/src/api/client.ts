@@ -311,30 +311,40 @@ export const getRequestLogsWithLimit = (limit: number) =>
 export const getPricing = () =>
   api<{ models: ModelPrice[] }>("/admin/pricing");
 
+/** `provider` scopes the price to one provider (an account name or a provider
+ *  type). Omit it to write the base rate that covers every provider. */
 export const upsertPricing = (
   modelId: string,
   body: {
     input_per_1m: number;
     output_per_1m: number;
     cache_read_per_1m?: number;
+    cache_creation_per_1m?: number;
     max_input_tokens?: number;
     max_output_tokens?: number;
     mode?: string;
   },
+  provider?: string,
 ) =>
   api<ModelPrice & { retroactive?: { applied: boolean; keys: number; total_delta: number } }>(
-    `/admin/pricing/${encodeURIComponent(modelId)}`,
+    `/admin/pricing/${encodeURIComponent(modelId)}${providerQuery(provider)}`,
     {
       method: "PUT",
       body: JSON.stringify(body),
     },
   );
 
-export const deletePricing = (modelId: string) =>
+export const deletePricing = (modelId: string, provider?: string) =>
   api<{ deleted: boolean; model_id: string }>(
-    `/admin/pricing/${encodeURIComponent(modelId)}`,
+    `/admin/pricing/${encodeURIComponent(modelId)}${providerQuery(provider)}`,
     { method: "DELETE" },
   );
+
+/** Scope travels as a query param, not a path segment: model ids contain
+ *  slashes and the route is already `{model_id:path}`. */
+function providerQuery(provider?: string): string {
+  return provider ? `?provider=${encodeURIComponent(provider)}` : "";
+}
 
 export const getProxyLogs = () =>
   api<{ logs: ProxyLogEntry[] }>("/admin/logs/proxy");

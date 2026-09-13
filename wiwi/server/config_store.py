@@ -92,9 +92,27 @@ CREATE TABLE IF NOT EXISTS model_prices (
   input_cost_per_token REAL NOT NULL DEFAULT 0,
   output_cost_per_token REAL NOT NULL DEFAULT 0,
   cache_read_input_cost_per_token REAL,
+  cache_creation_input_cost_per_token REAL,
   max_input_tokens INTEGER,
   max_output_tokens INTEGER,
   mode TEXT
+);
+"""
+
+# Per-provider price overrides. A separate table rather than a `scope` column
+# on model_prices: that table's PRIMARY KEY is model_id, and SQLite cannot drop
+# or widen a primary key with ALTER TABLE, so a scoped column there would need
+# a full table rebuild on every existing database. A new table arrives by
+# CREATE TABLE IF NOT EXISTS on old and new databases alike.
+MODEL_PRICE_SCOPES_DDL = """
+CREATE TABLE IF NOT EXISTS model_price_scopes (
+  model_id TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  input_cost_per_token REAL NOT NULL DEFAULT 0,
+  output_cost_per_token REAL NOT NULL DEFAULT 0,
+  cache_read_input_cost_per_token REAL,
+  cache_creation_input_cost_per_token REAL,
+  PRIMARY KEY (model_id, scope)
 );
 """
 
@@ -120,17 +138,26 @@ class ConfigStore:
             await conn.execute(sa.text(dep_ddl))
             await conn.execute(sa.text(SETTINGS_DDL))
             await conn.execute(sa.text(MODEL_PRICES_DDL))
+            await conn.execute(sa.text(MODEL_PRICE_SCOPES_DDL))
             await self._migrate(conn)
 
-    async def _migrate(self, conn) -> None:
-        """Add extra_headers column and indexes if missing (idempotent)."""
+    async def _table_columns(self, conn, table: str) -> set[str]:
+        """Column names of *table*, per dialect (empty when it does not exist)."""
         if self._is_pg:
-            cols = {r[0] for r in (await conn.execute(sa.text(
+            return {r[0] for r in (await conn.execute(sa.text(
                 "SELECT column_name FROM information_schema.columns"
-                " WHERE table_name = 'providers'"))).all()}
-        else:
-            cols = {r[1] for r in (await conn.execute(
-                sa.text("PRAGMA table_info(providers)"))).all()}
+                " WHERE table_name = :t"), {"t": table})).all()}
+        return {r[1] for r in (await conn.execute(
+            sa.text(f"PRAGMA table_info({table})"))).all()}
+
+    async def _migrate(self, conn) -> None:
+        """Add columns and indexes introduced after the initial schema.
+
+        ``CREATE TABLE IF NOT EXISTS`` is a no-op on a database that already has
+        the table, so every column added to a DDL constant after release must
+        also be added here or existing installs silently keep the old shape.
+        """
+        cols = await self._table_columns(conn, "providers")
         if "extra_headers" not in cols:
             await conn.execute(sa.text(
                 "ALTER TABLE providers ADD COLUMN extra_headers TEXT NOT NULL DEFAULT '{}'"))
@@ -140,6 +167,14 @@ class ConfigStore:
         if "alias_id" not in cols:
             await conn.execute(sa.text(
                 "ALTER TABLE providers ADD COLUMN alias_id TEXT"))
+        # cache_creation_input_cost_per_token: the admin PUT accepted and the
+        # GET echoed this rate, but there was no column for it, so it lived in
+        # memory only and was lost on restart.
+        price_cols = await self._table_columns(conn, "model_prices")
+        if price_cols and "cache_creation_input_cost_per_token" not in price_cols:
+            await conn.execute(sa.text(
+                "ALTER TABLE model_prices ADD COLUMN"
+                " cache_creation_input_cost_per_token REAL"))
         # Indexes on FK columns for cascade-delete performance and lookups:
         # - provider_keys.provider_name: FK join + cascade delete
         # - deployments.provider_name: cascade delete when provider is removed
@@ -343,18 +378,21 @@ class ConfigStore:
             "ipt": entry.get("input_cost_per_token", 0),
             "opt": entry.get("output_cost_per_token", 0),
             "cr": entry.get("cache_read_input_cost_per_token"),
+            "cc": entry.get("cache_creation_input_cost_per_token"),
             "mi": entry.get("max_input_tokens"),
             "mo": entry.get("max_output_tokens"),
             "mode": entry.get("mode"),
         }
         cols = ("model_id, input_cost_per_token, output_cost_per_token,"
-                " cache_read_input_cost_per_token, max_input_tokens,"
+                " cache_read_input_cost_per_token,"
+                " cache_creation_input_cost_per_token, max_input_tokens,"
                 " max_output_tokens, mode")
-        ph = ":m,:ipt,:opt,:cr,:mi,:mo,:mode"
+        ph = ":m,:ipt,:opt,:cr,:cc,:mi,:mo,:mode"
         if self._is_pg:
             updates = ("input_cost_per_token=EXCLUDED.input_cost_per_token,"
                        "output_cost_per_token=EXCLUDED.output_cost_per_token,"
                        "cache_read_input_cost_per_token=EXCLUDED.cache_read_input_cost_per_token,"
+                       "cache_creation_input_cost_per_token=EXCLUDED.cache_creation_input_cost_per_token,"
                        "max_input_tokens=EXCLUDED.max_input_tokens,"
                        "max_output_tokens=EXCLUDED.max_output_tokens,"
                        "mode=EXCLUDED.mode")
@@ -370,13 +408,17 @@ class ConfigStore:
             await conn.execute(
                 sa.text("DELETE FROM model_prices WHERE model_id = :m"),
                 {"m": model_id})
+            await conn.execute(
+                sa.text("DELETE FROM model_price_scopes WHERE model_id = :m"),
+                {"m": model_id})
 
     async def load_prices(self) -> list[dict]:
         """Return all DB-stored custom pricing entries."""
         async with self.engine.connect() as conn:
             rows = (await conn.execute(sa.text(
                 "SELECT model_id, input_cost_per_token, output_cost_per_token,"
-                " cache_read_input_cost_per_token, max_input_tokens,"
+                " cache_read_input_cost_per_token,"
+                " cache_creation_input_cost_per_token, max_input_tokens,"
                 " max_output_tokens, mode FROM model_prices ORDER BY model_id"))).all()
         out: list[dict] = []
         for r in rows:
@@ -387,12 +429,76 @@ class ConfigStore:
             if r[3] is not None:
                 e["cache_read_input_cost_per_token"] = r[3]
             if r[4] is not None:
-                e["max_input_tokens"] = r[4]
+                e["cache_creation_input_cost_per_token"] = r[4]
             if r[5] is not None:
-                e["max_output_tokens"] = r[5]
+                e["max_input_tokens"] = r[5]
             if r[6] is not None:
-                e["mode"] = r[6]
+                e["max_output_tokens"] = r[6]
+            if r[7] is not None:
+                e["mode"] = r[7]
             out.append({"model_id": r[0], **e})
+        return out
+
+    # -- per-provider price scopes ---------------------------------------------
+
+    async def upsert_price_scope(self, model_id: str, scope: str,
+                                 entry: dict) -> None:
+        """Insert or update one provider's override for *model_id*.
+
+        *scope* is a provider account name or a provider type; the two share
+        one namespace, resolved account-first by the cost engine.
+        """
+        params = {
+            "m": model_id,
+            "s": scope,
+            "ipt": entry.get("input_cost_per_token", 0),
+            "opt": entry.get("output_cost_per_token", 0),
+            "cr": entry.get("cache_read_input_cost_per_token"),
+            "cc": entry.get("cache_creation_input_cost_per_token"),
+        }
+        cols = ("model_id, scope, input_cost_per_token, output_cost_per_token,"
+                " cache_read_input_cost_per_token,"
+                " cache_creation_input_cost_per_token")
+        ph = ":m,:s,:ipt,:opt,:cr,:cc"
+        if self._is_pg:
+            updates = ("input_cost_per_token=EXCLUDED.input_cost_per_token,"
+                       "output_cost_per_token=EXCLUDED.output_cost_per_token,"
+                       "cache_read_input_cost_per_token=EXCLUDED.cache_read_input_cost_per_token,"
+                       "cache_creation_input_cost_per_token=EXCLUDED.cache_creation_input_cost_per_token")
+            sql = (f"INSERT INTO model_price_scopes ({cols}) VALUES ({ph})"
+                   f" ON CONFLICT (model_id, scope) DO UPDATE SET {updates}")
+        else:
+            sql = (f"INSERT OR REPLACE INTO model_price_scopes ({cols})"
+                   f" VALUES ({ph})")
+        async with self.engine.begin() as conn:
+            await conn.execute(sa.text(sql), params)
+
+    async def delete_price_scope(self, model_id: str, scope: str) -> None:
+        async with self.engine.begin() as conn:
+            await conn.execute(
+                sa.text("DELETE FROM model_price_scopes"
+                        " WHERE model_id = :m AND scope = :s"),
+                {"m": model_id, "s": scope})
+
+    async def load_price_scopes(self) -> list[dict]:
+        """Return all DB-stored per-provider price overrides."""
+        async with self.engine.connect() as conn:
+            rows = (await conn.execute(sa.text(
+                "SELECT model_id, scope, input_cost_per_token,"
+                " output_cost_per_token, cache_read_input_cost_per_token,"
+                " cache_creation_input_cost_per_token FROM model_price_scopes"
+                " ORDER BY model_id, scope"))).all()
+        out: list[dict] = []
+        for r in rows:
+            e: dict = {
+                "input_cost_per_token": r[2],
+                "output_cost_per_token": r[3],
+            }
+            if r[4] is not None:
+                e["cache_read_input_cost_per_token"] = r[4]
+            if r[5] is not None:
+                e["cache_creation_input_cost_per_token"] = r[5]
+            out.append({"model_id": r[0], "scope": r[1], **e})
         return out
 
     # -- settings (alert rules, routing strategy) -------------------------------

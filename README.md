@@ -774,6 +774,12 @@ curl localhost:4000/admin/pricing -H "$MK"
 curl -X PUT    localhost:4000/admin/pricing/<model_id> -H "$MK" -d '{...}'
 curl -X DELETE localhost:4000/admin/pricing/<model_id> -H "$MK"
 
+# Per-provider prices: add ?provider=<account-or-type> to scope one provider.
+# Without it the PUT sets the base rate that covers every provider.
+curl -X PUT "localhost:4000/admin/pricing/<model_id>?provider=openai-main" -H "$MK" \
+  -d '{"input_per_1m": 1.0, "output_per_1m": 2.0}'
+curl -X DELETE "localhost:4000/admin/pricing/<model_id>?provider=openai-main" -H "$MK"
+
 curl localhost:4000/admin/logs/requests -H "$MK"     # DB-backed
 curl localhost:4000/admin/logs/proxy -H "$MK"        # ring buffer
 curl localhost:4000/admin/stats/overview -H "$MK"    # p50/p95/p99, cost, tokens
@@ -845,7 +851,7 @@ curl -X POST localhost:4000/admin/workbuddy/refresh -H "$MK" -d '{"label": "main
 | `GET /admin/models` · `PATCH /admin/model-groups/{name}` | inspect · edit routing/weights live |
 | `POST /admin/model-groups/{name}/deployments` · `DELETE …` | attach/detach deployments (POST creates the group) |
 | `POST /admin/aliases` | batch `set` / `unset` model group aliases |
-| `GET /admin/pricing` · `PUT /admin/pricing/{id}` · `DELETE /admin/pricing/{id}` | price overrides |
+| `GET /admin/pricing` · `PUT /admin/pricing/{id}` · `DELETE /admin/pricing/{id}` | price overrides (add `?provider=<account-or-type>` to scope one provider; omit for all providers) |
 | **Logs & stats** | |
 | `GET /admin/logs/requests` · `GET /admin/logs/proxy` | DB request logs · ring-buffer proxy logs |
 | `GET /admin/stream` | SSE live tail (`Last-Event-ID` replay, keepalives) |

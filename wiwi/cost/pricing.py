@@ -20,28 +20,60 @@ class CostEngine:
 
     No built-in prices ship — every entry must be added via the admin API
     (``/admin/pricing``) or passed as ``overrides``. Unpriced models cost 0.
+
+    A model's entry may carry a ``providers`` sub-map of scoped overrides, so
+    the same model id can cost different amounts on different upstreams::
+
+        "gpt-4o": {
+            "input_cost_per_token": 3e-6,     # base = all providers
+            "output_cost_per_token": 15e-6,
+            "providers": {
+                "openai":      {"input_cost_per_token": 2.5e-6},  # provider type
+                "openai-main": {"input_cost_per_token": 2e-6},    # account
+            },
+        }
+
+    Account and type share one namespace, so an account named exactly like its
+    type (the shipped example config has ``name: openrouter`` /
+    ``provider: openrouter``) resolves to the account — deterministic, with
+    account precedence, rather than an ambiguous key.
     """
 
     def __init__(self, overrides: dict[str, dict] | None = None):
         self.prices = dict(overrides or {})
 
     def register(self, model_id: str, input_per_token: float, output_per_token: float) -> None:
-        self.prices[model_id] = {
+        """Seed a model's base rates, preserving any scoped overrides.
+
+        The scopes are kept deliberately: ``register()`` is the documented way
+        to seed a price, and re-registering a model must not silently drop the
+        per-provider prices configured for it.
+        """
+        existing = self.prices.get(model_id) or {}
+        entry: dict = {
             "input_cost_per_token": input_per_token,
             "output_cost_per_token": output_per_token,
         }
+        if existing.get("providers"):
+            entry["providers"] = existing["providers"]
+        self.prices[model_id] = entry
 
     def cost(self, model_id: str, prompt_tokens: int, completion_tokens: int,
              cached_tokens: int = 0, cache_creation_tokens: int = 0,
-             prompt_includes_cached: bool = True) -> float:
+             prompt_includes_cached: bool = True,
+             provider_type: str | None = None,
+             provider_name: str | None = None) -> float:
         return self.cost_with_status(
             model_id, prompt_tokens, completion_tokens, cached_tokens,
-            cache_creation_tokens, prompt_includes_cached).cost
+            cache_creation_tokens, prompt_includes_cached,
+            provider_type, provider_name).cost
 
     def cost_with_status(self, model_id: str, prompt_tokens: int,
                          completion_tokens: int, cached_tokens: int = 0,
                          cache_creation_tokens: int = 0,
-                         prompt_includes_cached: bool = True) -> CostState:
+                         prompt_includes_cached: bool = True,
+                         provider_type: str | None = None,
+                         provider_name: str | None = None) -> CostState:
         """Like :meth:`cost` but also returns whether the model is priced.
 
         Unpriced models report cost=0.0 (back-compat) and unpriced=True so
@@ -51,8 +83,11 @@ class CostEngine:
         ``prompt_includes_cached``: True for providers whose ``prompt_tokens``
         is the TOTAL prompt (OpenAI, Gemini, NIM, OpenRouter); False for
         Anthropic, whose ``input_tokens`` already excludes cached tokens.
+
+        ``provider_type``/``provider_name`` select a scoped rate (see
+        :meth:`resolve`); omitted, the all-providers base rate applies.
         """
-        p = self._lookup(model_id)
+        p = self._lookup(model_id, provider_type, provider_name)
         if not p:
             return CostState(cost=0.0, unpriced=True)
         if prompt_includes_cached:
@@ -70,7 +105,8 @@ class CostEngine:
         )
         return CostState(cost=round(total, 8), unpriced=False)
 
-    def _lookup(self, model_id: str) -> dict | None:
+    def _lookup(self, model_id: str, provider_type: str | None = None,
+                provider_name: str | None = None) -> dict | None:
         """Try multiple lookup strategies for a model's pricing entry.
 
         The gateway calls cost() with ``f"{provider_type}/{model_id}"`` (e.g.
@@ -78,20 +114,62 @@ class CostEngine:
         table keys on the bare model id (e.g. ``"claude-sonnet-4-20250514"``).
         Try in order: the full key, the key without the provider-type prefix,
         then each successive slash-trimmed tail.
+
+        Each candidate key is resolved through :meth:`resolve`, so a scoped
+        override applies wherever the entry is found — including on a
+        slash-trimmed tail, which would otherwise silently bill the base rate.
         """
-        p = self.prices.get(model_id)
-        if p:
-            return p
-        # Try progressively shorter slash-trimmed tails. For
+        candidates = [model_id]
+        # Progressively shorter slash-trimmed tails. For
         # "openrouter/anthropic/claude-sonnet-4-20250514" this tries:
         #   "anthropic/claude-sonnet-4-20250514", then "claude-sonnet-4-20250514".
         parts = model_id.split("/")
         for i in range(1, len(parts)):
-            tail = "/".join(parts[i:])
-            p = self.prices.get(tail)
-            if p:
-                return p
+            candidates.append("/".join(parts[i:]))
+        for key in candidates:
+            entry = self.prices.get(key)
+            if entry is None:
+                continue
+            merged = self._merge_scoped(entry, provider_type, provider_name)
+            # An entry with no usable rates (a scope-only entry whose scope did
+            # not match) is not a price — keep walking rather than returning a
+            # truthy dict that the caller would treat as priced.
+            if merged is not None:
+                return merged
         return None
+
+    def resolve(self, model_id: str, provider_type: str | None = None,
+                provider_name: str | None = None) -> dict | None:
+        """The effective rate dict for *model_id* on this provider, or None.
+
+        Precedence is most-specific-first: provider account, then provider
+        type, then the model's base (all-providers) rates. A scoped override
+        may set only some rates — the rest inherit from the base.
+        """
+        return self._lookup(model_id, provider_type, provider_name)
+
+    @staticmethod
+    def _merge_scoped(entry: dict, provider_type: str | None,
+                      provider_name: str | None) -> dict | None:
+        """Overlay the winning scope onto an entry's base rates.
+
+        Returns None when the result carries no rates at all, so callers can
+        treat it as unpriced instead of raising on a missing key.
+        """
+        scopes = entry.get("providers") or {}
+        scoped = None
+        # Account beats type. They share one namespace, so an account named
+        # exactly like its type resolves to the account.
+        if provider_name and provider_name in scopes:
+            scoped = scopes[provider_name]
+        elif provider_type and provider_type in scopes:
+            scoped = scopes[provider_type]
+        base = {k: v for k, v in entry.items() if k != "providers"}
+        if scoped:
+            base = {**base, **scoped}
+        if "input_cost_per_token" not in base or "output_cost_per_token" not in base:
+            return None
+        return base
 
 
 def estimate_tokens(text: str, model: str | None = None) -> int:

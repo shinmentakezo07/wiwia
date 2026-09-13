@@ -199,14 +199,27 @@ export interface TimeseriesResponse {
   buckets: TokenBucket[] | TpsBucket[];
 }
 
+/** A price bound to one provider — an account name or a provider type.
+ *  `provider` is omitted on a model's base (all-providers) entry. */
+export interface ModelPriceScope {
+  provider: string;
+  input_per_1m: number;
+  output_per_1m: number;
+  cache_read_per_1m?: number;
+  cache_creation_per_1m?: number;
+}
+
 export interface ModelPrice {
   model_id: string;
   input_per_1m: number;
   output_per_1m: number;
   cache_read_per_1m?: number;
+  cache_creation_per_1m?: number;
   max_input_tokens?: number;
   max_output_tokens?: number;
   mode?: string;
+  /** Per-provider overrides. Absent when the model has only a base rate. */
+  scopes?: ModelPriceScope[];
 }
 
 export interface AlertRule {

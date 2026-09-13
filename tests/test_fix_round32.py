@@ -280,7 +280,8 @@ async def test_match_uses_serving_attempt_not_failed_attempts(client):
     await sink.write_requests(evts)
 
     entry = {"input_cost_per_token": 3e-6, "output_cost_per_token": 15e-6}
-    deltas = await sink.reprice_unpriced_history("priced-model", entry)
+    deltas = await sink.reprice_unpriced_history("priced-model",
+                                                 lambda _provider: entry)
 
     rows = {r["request_id"]: r["cost"] for r in await _fetch_rows(client)}
     assert rows["rowA"] == 0.0, "served by other-model: must NOT reprice"
@@ -314,7 +315,8 @@ async def test_scan_terminates_on_large_unmatched_history(client):
     await sink.write_requests(evts)
 
     entry = {"input_cost_per_token": 3e-6, "output_cost_per_token": 15e-6}
-    deltas = await sink.reprice_unpriced_history("priced-model", entry)
+    deltas = await sink.reprice_unpriced_history("priced-model",
+                                                 lambda _provider: entry)
     assert deltas == {}  # master traffic rows have no key_id
 
     rows = {r["request_id"]: r["cost"] for r in await _fetch_rows(client)}

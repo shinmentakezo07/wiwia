@@ -3124,3 +3124,123 @@ a name).
 a synthesized Open (`_synthesized_opens` was never populated at all); this is
 what the synthesized Open itself carries. Both live in the same arm; #88's fix
 populated the set, this one fixes the payload.
+
+## Addendum — round 52: scoped pricing, and two defects it uncovered (2026-09-13)
+
+### 144. The retroactive repricer's serving-attempt rule never fired on real data
+
+**Severity: 🟠** — historical rows were repriced against the wrong provider's
+rate (or not at all), silently, and the test suite was green throughout.
+
+`wiwi/logging_core/db_sink.py:330` (pre-fix), in `_row_matches`:
+
+```python
+serving = next((a for a in reversed(entries)
+                if isinstance(a.get("status"), int)
+                and 200 <= a["status"] < 300), entries[-1])
+```
+
+`AttemptRecord.status` (`wiwi/core/context.py:18-24`) is a **string** — `"ok"`,
+`"ok_after_refresh"`, `"http_429"`, `"TimeoutException"`, `"encode_error"` —
+set at `wiwi/core/gateway.py:235,245,293,339,350,488,777,809` and serialized
+verbatim into the log row at `:1312`. `isinstance("ok", int)` is False, so the
+2xx predicate matched **nothing** in production and `next(...)` always fell
+through to its `entries[-1]` default: the *last* attempt, not the serving one.
+Whenever a success was followed by a failed retry or a fallback, the row was
+matched against the wrong deployment — repricing it at another model's rate, or
+skipping it.
+
+Every fixture in `tests/test_fix_round32.py:256-279` hand-builds `"status": 200`
+as an **int**, so the dead branch was the only one the suite ever exercised.
+
+**Fix:** replaced `_row_matches` with `_serving_attempt`, which classifies
+through `_is_2xx` — accepting both the string form the gateway actually writes
+and the int form the fixtures use, and excluding `bool` (an `int` subclass).
+Still last-2xx, never first: a 200 whose body fails to decode is recorded `"ok"`
+at `gateway.py:488` *before* `_decode_response_guarded` runs and is then
+retried, so a later attempt is the one that delivered.
+
+**Status: fixed** — with scoped pricing (below), a wrong serving attempt no
+longer just misprices a row; it picks the wrong provider's rate entirely.
+
+**Proof (RED/GREEN).** `tests/test_fix_round52.py::test_repricer_matches_string_status_attempts`
+feeds an `attempts` payload shaped exactly as `gateway.py:1312` writes it —
+`"status": "ok"` on the serving attempt, then a later `"http_500"` on a
+different deployment. Pre-fix the matcher selects the failed attempt and the
+row stays at $0; post-fix it selects the serving one and reprices at $3.00.
+
+---
+
+### 145. `cache_creation_per_1m` was accepted, echoed, and never stored
+
+**Severity: 🟡** — an admin-set cache-creation rate silently reverted on the
+next restart, while the API kept reporting it.
+
+`wiwi/server/app.py:3152-3154` parsed `cache_creation_per_1m` into the pricing
+entry and `:3116-3118` echoed it back on GET, but neither `ConfigStore.upsert_price`
+(`wiwi/server/config_store.py:339-366`) nor `load_prices` (`:374-396`) had a
+column for it — the value lived in `CostEngine.prices` only. A restart
+rehydrates from the DB (`app.py:757-761`), so the rate vanished while every
+in-process read still showed it.
+
+The same class of gap hid the schema-evolution hazard: `_migrate`
+(`config_store.py:125-152`) only ever migrated the `providers` table, and
+`CREATE TABLE IF NOT EXISTS` is a no-op on an existing table — so any column
+added to `MODEL_PRICES_DDL` after release would never reach an existing
+database.
+
+**Fix:** added `cache_creation_input_cost_per_token` to `MODEL_PRICES_DDL`,
+`upsert_price`, and `load_prices`; added `_migrate` coverage for `model_prices`
+so pre-existing databases gain the column via `ALTER TABLE ADD COLUMN` (safe on
+both SQLite and Postgres, no table rebuild).
+
+**Status: fixed** — `tests/test_fix_round52.py::test_cache_creation_rate_survives_a_db_round_trip`
+(DB round-trip) and `::test_migrate_adds_cache_creation_column_to_existing_table`
+(builds the old-shaped table, then migrates).
+
+---
+
+### Scoped pricing — per-model-per-provider rates
+
+Not a defect, but recorded here because it changed the cost engine's contract
+and is the reason the two bugs above became load-bearing.
+
+`CostEngine` priced a model with exactly one rate pair regardless of which
+upstream served the request. A model's entry may now carry a `providers`
+sub-map of scoped overrides, resolved most-specific-first: **provider account →
+provider type → all-providers base**, applied at every step of the legacy
+slash-trim tail walk (`wiwi/cost/pricing.py:_lookup`). Scoped overrides merge
+over the base, so one rate can be overridden alone.
+
+Three hazards found while implementing, all closed:
+
+- A base-rate PUT **replaced** the whole entry (`app.py:3161`), so editing the
+  all-providers rate would have deleted every per-provider price. It now merges.
+- A scope-only entry (no base rates) made `cost_with_status` raise `KeyError` on
+  `p["input_cost_per_token"]` for any request falling through to the base. The
+  merge now returns None for a rate-less result, which reads as unpriced.
+- The retroactive gate `was_unpriced` was per-**model**, so a scope-only first
+  price marked the model priced and permanently stranded other accounts at $0.
+  It is now per-(model, scope).
+
+**Storage:** a separate `model_price_scopes` table, not a `scope` column on
+`model_prices` — that table's primary key is `model_id` and SQLite cannot widen
+a primary key with `ALTER TABLE`, so a rebuild would have been required on every
+existing database.
+
+**Tests:** `tests/test_fix_round52.py` (24 tests) covers precedence, partial
+override inheritance, tail-walk scoping, the namespace collision (the shipped
+`wiwi.yaml.example` names an account `openrouter` with type `openrouter`),
+`register()` preserving scopes, live-traffic pricing per account,
+cache-savings using the scoped rate, the admin API (including 400 on an unknown
+scope and scope-preserving base edits), restart rehydration, and both bugs
+above. `tests/test_fix_round32.py`'s two direct `reprice_unpriced_history` calls
+were updated for the new `rate_for` callable signature; all its assertions are
+unchanged.
+
+**UI:** verified in a real browser at 375×812 and 1440×900 via
+`.verify/scoped_pricing_ui.py` (gitignored) — both rows render, no horizontal
+page overflow, ≥44 px touch targets with `aria-label`s, and the scope selector
+lists the accounts that serve the chosen model.
+
+---

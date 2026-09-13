@@ -142,9 +142,9 @@ Stream journals are ON by default (`.wiwi/journals/`, 600 s TTL, 1 MiB cap): a c
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/admin/pricing` | GET | Per-model token prices (DB-backed `model_prices`). |
-| `/admin/pricing/{model_id}` | PUT | Set/override price for a model. |
-| `/admin/pricing/{model_id}` | DELETE | Remove override (fall back to bundled table). |
+| `/admin/pricing` | GET | Per-model token prices (DB-backed `model_prices`), each with its per-provider `scopes`. |
+| `/admin/pricing/{model_id}` | PUT | Set/override price for a model. Add `?provider=<account-or-type>` to scope it to one provider; omit for the all-providers base rate. |
+| `/admin/pricing/{model_id}` | DELETE | Remove override (fall back to bundled table). With `?provider=` removes only that scope. |
 | `/admin/alert-rules` | GET / PUT | Spend/alert rule configuration. |
 
 ### Logs, stats, realtime
