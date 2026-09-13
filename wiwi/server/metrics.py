@@ -61,6 +61,7 @@ def render_metrics(events: list[LogEvent]) -> str:
     stream_errors = sum(1 for e in events if e.status >= 500 and e.was_stream)
     cache_hits = sum(1 for e in events if e.cache_hit or e.tok_cached > 0)
     response_cache_hits = sum(1 for e in events if e.response_cache_hit)
+    usage_estimated = sum(1 for e in events if e.usage_estimated)
 
     # Count by status.
     status_counts = Counter(e.status for e in events)
@@ -79,6 +80,7 @@ def render_metrics(events: list[LogEvent]) -> str:
     lines.append(f"wiwi_prompt_cache_hits_total {cache_hits}")
     lines.append(f"wiwi_prompt_cache_hit_rate {round(cache_hits / total, 4) if total else 0.0}")
     lines.append(f"wiwi_response_cache_hits_total {response_cache_hits}")
+    lines.append(f"wiwi_usage_estimated_requests_total {usage_estimated}")
     lines.append(f"wiwi_cost_total {sum(costs):.6f}")
     lines.append(f"wiwi_stream_errors_total {stream_errors}")
 
@@ -122,6 +124,8 @@ _HEADER = """# HELP wiwi_requests_total Total number of requests.
 # TYPE wiwi_prompt_cache_hit_rate gauge
 # HELP wiwi_response_cache_hits_total Requests served from wiwi's exact-match response cache.
 # TYPE wiwi_response_cache_hits_total counter
+# HELP wiwi_usage_estimated_requests_total Requests whose token counts were estimated locally because upstream omitted usage.
+# TYPE wiwi_usage_estimated_requests_total counter
 # HELP wiwi_cost_total Total cost in USD.
 # TYPE wiwi_cost_total counter
 # HELP wiwi_stream_errors_total Mid-stream failures.

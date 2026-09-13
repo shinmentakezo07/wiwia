@@ -8,7 +8,7 @@ Covers:
 - Fix #5: _capture_delta uses dict keyed by tool index (not positional list)
 - Fix #6: Double __aexit__ guarded by closed flag
 - Fix #7: line_iter cleanup / _close_upstream helper
-- Fix #8: _flatten includes ToolResult, Thinking, ToolUse parts
+- Fix #8: flatten_request_text includes ToolResult, Thinking, ToolUse parts
 - Fix #9: _parse_retry_after handles HTTP-date format (RFC 7231)
 - Fix #10: context_window_fallbacks wired into execute_with_retries
 """
@@ -23,7 +23,7 @@ from datetime import UTC
 import pytest
 
 from wiwi.core.context import RequestContext
-from wiwi.core.gateway import Gateway, _flatten, _parse_retry_after
+from wiwi.core.gateway import Gateway, _parse_retry_after, flatten_request_text
 from wiwi.ir import types as ir
 from wiwi.streaming import deltas as dl
 from wiwi.wire.openai_responses import ResponsesStreamEncoder
@@ -107,10 +107,10 @@ def test_capture_delta_sets_stop_reason_on_finish():
     assert b"tool_calls" in final  # stop_reason "tool_call" maps to "tool_calls"
 
 
-# -- Fix #8: _flatten includes non-text parts -----------------------------------
+# -- Fix #8: flatten_request_text includes non-text parts -----------------------------------
 
 def test_flatten_includes_tool_result():
-    """_flatten must include ToolResultPart.content in the estimate."""
+    """flatten_request_text must include ToolResultPart.content in the estimate."""
     ctx = RequestContext(
         surface="chat",
         ir_req=ir.Request(model="m", messages=[
@@ -121,7 +121,7 @@ def test_flatten_includes_tool_result():
             ir.Message(role="tool", parts=[
                 ir.ToolResultPart(tool_use_id="c1", content="sunny 20C")]),
         ]))
-    result = _flatten(ctx)
+    result = flatten_request_text(ctx)
     assert "hello" in result
     assert "sunny 20C" in result
     assert "get_weather" in result
@@ -129,14 +129,14 @@ def test_flatten_includes_tool_result():
 
 
 def test_flatten_includes_thinking():
-    """_flatten must include ThinkingPart.text in the estimate."""
+    """flatten_request_text must include ThinkingPart.text in the estimate."""
     ctx = RequestContext(
         surface="chat",
         ir_req=ir.Request(model="m", messages=[
             ir.Message(role="assistant", parts=[
                 ir.ThinkingPart("I should check the weather")]),
         ]))
-    result = _flatten(ctx)
+    result = flatten_request_text(ctx)
     assert "I should check the weather" in result
 
 
@@ -144,7 +144,7 @@ def test_flatten_empty_messages():
     ctx = RequestContext(
         surface="chat",
         ir_req=ir.Request(model="m", messages=[]))
-    assert _flatten(ctx) == ""
+    assert flatten_request_text(ctx) == ""
 
 
 # -- Fix #9: _parse_retry_after handles HTTP-date -------------------------------

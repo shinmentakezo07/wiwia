@@ -126,6 +126,10 @@ def merge_resume_context(origin: RequestContext,
             ou.cached_tokens += ru.cached_tokens
             ou.reasoning_tokens += ru.reasoning_tokens
             ou.cache_creation_tokens += ru.cache_creation_tokens
+            # A merged total that includes ANY estimated tokens is itself an
+            # estimate — leaving the flag off would present the sum as
+            # provider-reported (AUDIT #131).
+            ou.estimated = ou.estimated or ru.estimated
     origin.cost = float(getattr(origin, "cost", 0.0) or 0.0) + \
         float(getattr(resumed, "cost", 0.0) or 0.0)
     # The encoder reports the stream usage from `_stream_usage`; carry the
@@ -1006,7 +1010,7 @@ class Gateway:
             if real_usage.prompt == 0:
                 # Provider sent no usable usage: estimate, keeping any real
                 # output / cache counts it did report.
-                est_prompt = await estimate_tokens_async(_flatten(ctx), dep.model_id)
+                est_prompt = await estimate_tokens_async(flatten_request_text(ctx), dep.model_id)
                 est_usage = dl.UsageFinal(
                     prompt=est_prompt,
                     cached=real_usage.cached, reasoning=real_usage.reasoning,
@@ -1169,7 +1173,7 @@ class Gateway:
         u = usage_final or dl.UsageFinal()
         if u.prompt == 0:
             u = dl.UsageFinal(
-                prompt=await estimate_tokens_async(_flatten(ctx), dep.model_id),
+                prompt=await estimate_tokens_async(flatten_request_text(ctx), dep.model_id),
                 cached=u.cached, reasoning=u.reasoning,
                 output=u.output or max(1, text_len // 4),
                 cache_creation=u.cache_creation, estimated=True)
@@ -1203,7 +1207,7 @@ class Gateway:
         model_key = f"{dep.provider.provider_type}/{dep.model_id}"
         ctx.usage = ir.Usage(prompt_tokens=u.prompt, completion_tokens=u.output,
                              cached_tokens=u.cached, reasoning_tokens=u.reasoning,
-                             reasoning_estimated=u.estimated,
+                             estimated=u.estimated,
                              cache_creation_tokens=u.cache_creation)
         includes_cached = dep.provider.provider_type != "anthropic"
         state = self.cost.cost_with_status(
@@ -1217,7 +1221,15 @@ class Gateway:
             ctx.metadata["unpriced_model_id"] = model_key
 
 
-def _flatten(ctx: RequestContext) -> str:
+def flatten_request_text(ctx: RequestContext) -> str:
+    """All request text that costs prompt tokens, as one string.
+
+    Used by the streaming fallback estimator (when upstream omits usage) and
+    by ``/v1/messages/count_tokens``, so both agree on what a prompt "costs".
+    Tool *schemas* are included: they are serialized into every request and
+    are a large share of a real agent prompt — omitting them undercounted
+    Claude Code-style traffic by thousands of tokens (AUDIT #130).
+    """
     out = []
     for m in ctx.ir_req.messages:
         for p in m.parts:
@@ -1225,6 +1237,10 @@ def _flatten(ctx: RequestContext) -> str:
                 out.append(p.text)
             elif isinstance(p, ir.ToolResultPart):
                 out.append(p.content)
+                # Multimodal tool results (screenshots etc.) carry no text of
+                # their own; account for the payload so they are not free.
+                for img in p.images:
+                    out.append(img.url or img.file_id or "")
             elif isinstance(p, ir.ThinkingPart):
                 out.append(p.text)
             elif isinstance(p, ir.ToolUsePart):
@@ -1232,6 +1248,16 @@ def _flatten(ctx: RequestContext) -> str:
                 # turns contribute to the prompt-token estimate.
                 out.append(p.name)
                 out.append(p.raw_args or orjson.dumps(p.args).decode())
+            elif isinstance(p, ir.ImagePart):
+                out.append(p.url or p.file_id or "")
+            elif isinstance(p, ir.DocumentPart):
+                out.append(p.url or p.name or "")
+                out.append(p.context or "")
+    for t in ctx.ir_req.tools:
+        out.append(t.name)
+        out.append(t.description or "")
+        if t.parameters_json_schema:
+            out.append(orjson.dumps(t.parameters_json_schema).decode())
     return " ".join(out)
 
 
@@ -1267,6 +1293,10 @@ def build_log_event(ctx: RequestContext) -> LogEvent:
         tok_cache_creation=u.cache_creation_tokens if u else 0,
         tok_reasoning=u.reasoning_tokens if u else 0,
         tok_out=u.completion_tokens if u else 0,
+        # True when the counts above came from wiwi's local estimator rather
+        # than the provider (AUDIT #131) — a spend report must not present an
+        # estimate as provider-reported fact.
+        usage_estimated=bool(u.estimated) if u else False,
         tps=round(tps, 2), ttft_ms=round(ttft, 1), latency_ms=round(latency_ms, 1),
         cost=ctx.cost, was_stream=ctx.ir_req.stream, cache_hit=ctx.cache_hit,
         cache_savings=ctx.metadata.get("cache_savings", 0.0),

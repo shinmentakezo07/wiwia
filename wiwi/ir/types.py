@@ -285,7 +285,12 @@ class Usage:
     completion_tokens: int = 0
     cached_tokens: int = 0
     reasoning_tokens: int = 0
-    reasoning_estimated: bool = False
+    # True when these counts did NOT come from the provider and were estimated
+    # locally (the streaming fallback when upstream omitted usage). Replaces
+    # ``reasoning_estimated``, which the fallback set from a *whole-usage*
+    # estimate and so mislabelled a prompt estimate as a reasoning one
+    # (AUDIT #131).
+    estimated: bool = False
     # Anthropic cache bookkeeping (G8-adjacent accounting)
     cache_creation_tokens: int = 0
 

@@ -80,6 +80,10 @@ def overview(events: list[LogEvent], minutes: int,
         "tok_cache_creation": sum(e.tok_cache_creation for e in win),
         "tok_reasoning": sum(e.tok_reasoning for e in win),
         "tok_out": sum(e.tok_out for e in win),
+        # How many of the rows above carry *estimated* rather than
+        # provider-reported token counts (AUDIT #131) — without it a spend
+        # dashboard cannot tell measured traffic from guessed traffic.
+        "estimated_requests": sum(1 for e in win if e.usage_estimated),
         "cache_hits": cache_hits,
         "cache_hit_rate": round(cache_hits / requests, 4) if requests else 0.0,
         "tps_avg": round(sum(tps_values) / len(tps_values), 2) if tps_values else 0.0,

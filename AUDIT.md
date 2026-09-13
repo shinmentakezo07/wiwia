@@ -348,6 +348,50 @@ remaining entries are still live.)
 **Trigger:** `global_rpm` configured; any request failing upstream after admission.
 `check()` reserves one event in both `global:rpm` and `{key_id}:rpm`; `release()` pops only `f"{key_id}:rpm"`. Verified: `RateLimiter(global_rpm=2)`, one admitted-then-released request leaves a phantom event; the next real request at the cap 429s. Each failed request burns one global-RPM slot for the window. Residual of the #70 fix. Fix: drop the newest RPM event from `"global:rpm"` too.
 
+**Status: fixed** — round 48 (2026-09-12). `release()` now refunds both RPM scopes:
+
+```python
+# RPM reservations carry no request id: drop the newest one so the
+# failed request does not permanently consume an rpm slot. Admission
+# takes a slot in *both* the key window and the global one, so both
+# must be refunded (AUDIT #121, residual of the #70 fix).
+for scope in (f"{key_id}:rpm", "global:rpm"):
+    w = self._windows.get(scope)
+    if w is None:
+        continue
+    self._prune(w, now)
+    if w.events:
+        w.total = max(0, w.total - w.events.pop().tokens)
+```
+
+Two preconditions were verified before widening the refund. (a) Every path that reaches
+`release()` is strictly post-admission. The wrapper `_release_tpm_reservation`
+(`app.py:982`) is its only caller, from four sites (`app.py:1246, 1279, 1346, 1354`) —
+all of them error/cache-hit exits that run after `enforce_rate_limit` returned, and
+`enforce_rate_limit`'s denial arm returns at `app.py:1137-1138` *before* a
+`RequestContext` exists, so a rejected request cannot reach any of them. (b) `key_id` is
+`"k" + secrets.token_hex()` (`auth/service.py:225`) or the literal `"master"`
+(`auth/service.py:163`), so no real key can produce a `f"{key_id}:rpm"` equal to
+`"global:rpm"` — the loop cannot refund the same window twice.
+
+The pop is deliberately identity-blind (RPM events carry no `request_id`), so under
+concurrency it may remove a *different* admitted request's event. That is safe because
+attribution is irrelevant to the invariant that matters: admission takes exactly one
+event per RPM scope and a failed admitted request refunds exactly one, so the window
+tracks the number of *failed* requests and errs permissive — never leaky. Verified
+directly: two admissions then two releases leave `global:rpm` at 0 events.
+
+Pinned by `tests/test_fix_round48.py` (`test_release_refunds_global_rpm_reservation`),
+with two controls: `test_release_still_refunds_the_key_rpm_reservation` (the #70 refund
+must survive) and `test_release_does_not_refund_confirmed_usage` (release must still
+never remove reconciled `record_tokens` usage — it refunds estimates only).
+
+> **Register hygiene:** this finding was independently rediscovered during round 48 and
+> filed here instead of under a new number, per the do-not-re-report rule. It was briefly
+> referred to as "#132" while being worked; **no entry numbered 132 exists**, and the two
+> citations that used it (`wiwi/ratelimit/memory.py`, `tests/test_fix_round48.py`) were
+> repointed to #121 rather than left as dangling references.
+
 ### 122. System-list `text` blocks are never coerced — `system: [{"type":"text","text":null}]` 500s every adapter's encode
 **File:** `wiwi/wire/anthropic_messages.py:26`
 The message-block path coerces (`raw_text if isinstance(raw_text, str) else ""`, line 53 — UPDATE.md §39.1) but the system branch stores the raw scalar. Verified: decode yields `TextPart(text=None)`; `OpenAIAdapter.encode_request` and `AnthropicAdapter.encode_request` both raise `TypeError` in `" ".join(...)`. `run_chat_like` catches only `(DialectError, ValueError)` at decode, so the sync path is an unhandled 500. Fix: same coercion as line 53.

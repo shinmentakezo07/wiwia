@@ -150,9 +150,9 @@ from wiwi.config import (
     load_env,
 )
 from wiwi.core.context import RequestContext
-from wiwi.core.gateway import Gateway, build_log_event
+from wiwi.core.gateway import Gateway, build_log_event, flatten_request_text
 from wiwi.core.recovery import HealthHealer
-from wiwi.cost.pricing import CostEngine
+from wiwi.cost.pricing import CostEngine, estimate_tokens_async
 from wiwi.ir import types as ir
 from wiwi.logging_core.events import LogEvent
 from wiwi.logging_core.subsystem import LoggingSubsystem, encode_sse, public_dict
@@ -1548,12 +1548,15 @@ def create_app(config: WiwiConfig) -> FastAPI:
                                           reserve=False)
         if err_resp:
             return err_resp
-        from wiwi.ir import types as _ir
-        total = 0
-        for m in ir_req.messages:
-            for p in m.parts:
-                if isinstance(p, _ir.TextPart):
-                    total += len(p.text) // 4 + 1
+        # Count through the same estimator the gateway's streaming fallback
+        # uses, so the number reported to the client agrees with the number
+        # wiwi itself bills against when upstream omits usage. Walking only
+        # TextPart ignored tool schemas, tool_use/tool_result and thinking
+        # blocks — the bulk of an agentic prompt — and the private
+        # ``len(text) // 4 + 1`` heuristic disagreed with ``estimate_tokens``
+        # (tiktoken where available) for identical text (AUDIT #130).
+        ctx = RequestContext(surface="messages", ir_req=ir_req)
+        total = await estimate_tokens_async(flatten_request_text(ctx), ir_req.model)
         return ORJSONResponse({"input_tokens": max(1, total)})
 
     @app.get("/v1/models")

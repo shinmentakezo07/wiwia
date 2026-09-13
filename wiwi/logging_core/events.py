@@ -27,6 +27,10 @@ class LogEvent:
     tok_cache_creation: int = 0
     tok_reasoning: int = 0
     tok_out: int = 0
+    # True when the token counts were estimated locally (upstream omitted
+    # usage) rather than reported by the provider. Without this the logs,
+    # stats, metrics and DB all present estimates as fact (AUDIT #131).
+    usage_estimated: bool = False
     tps: float = 0.0
     ttft_ms: float = 0.0
     latency_ms: float = 0.0

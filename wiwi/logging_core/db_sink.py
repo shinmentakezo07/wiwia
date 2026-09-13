@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
   tok_cache_creation INTEGER DEFAULT 0,
   tok_reasoning INTEGER DEFAULT 0,
   tok_out INTEGER DEFAULT 0,
+  usage_estimated INTEGER DEFAULT 0,
   tps REAL DEFAULT 0,
   ttft_ms REAL DEFAULT 0,
   latency_ms REAL DEFAULT 0,
@@ -69,6 +70,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
   tok_cache_creation INTEGER DEFAULT 0,
   tok_reasoning INTEGER DEFAULT 0,
   tok_out INTEGER DEFAULT 0,
+  usage_estimated INTEGER DEFAULT 0,
   tps DOUBLE PRECISION DEFAULT 0,
   ttft_ms DOUBLE PRECISION DEFAULT 0,
   latency_ms DOUBLE PRECISION DEFAULT 0,
@@ -107,7 +109,8 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 
 _COLS = ("ts", "request_id", "surface", "key_alias", "key_id", "model_group",
          "provider", "provider_key_label", "status", "error_code", "tok_in",
-         "tok_cached", "tok_cache_creation", "tok_reasoning", "tok_out", "tps",
+         "tok_cached", "tok_cache_creation", "tok_reasoning", "tok_out",
+         "usage_estimated", "tps",
          "ttft_ms", "latency_ms", "cost", "was_stream", "cache_hit",
          "cache_savings", "response_cache_hit", "attempts", "request_body",
          "response_body")
@@ -178,7 +181,8 @@ class DBSink:
         for col, decl in [("request_body", "TEXT"), ("response_body", "TEXT"),
                           ("key_id", "TEXT DEFAULT ''"),
                           ("tok_cache_creation", "INTEGER DEFAULT 0"),
-                          ("response_cache_hit", "INTEGER DEFAULT 0")]:
+                          ("response_cache_hit", "INTEGER DEFAULT 0"),
+                          ("usage_estimated", "INTEGER DEFAULT 0")]:
             if col not in cols:
                 await conn.execute(
                     sa.text(f"ALTER TABLE request_logs ADD COLUMN {col} {decl}"))
@@ -212,6 +216,7 @@ class DBSink:
             "tok_in": evt.tok_in, "tok_cached": evt.tok_cached,
             "tok_cache_creation": evt.tok_cache_creation,
             "tok_reasoning": evt.tok_reasoning, "tok_out": evt.tok_out,
+            "usage_estimated": int(evt.usage_estimated),
             "tps": evt.tps, "ttft_ms": evt.ttft_ms, "latency_ms": evt.latency_ms,
             "cost": evt.cost, "was_stream": int(evt.was_stream),
             "cache_hit": int(evt.cache_hit), "cache_savings": evt.cache_savings,
@@ -431,6 +436,7 @@ class DBSink:
                 "tok_cache_creation": 0,
                 "tok_reasoning": 0,
                 "tok_out": 0,
+                "estimated_requests": 0,
                 "cache_hits": 0,
                 "cache_hit_rate": 0.0,
                 "tps_avg": 0.0,
@@ -479,6 +485,7 @@ class DBSink:
                        COALESCE(SUM(tok_cache_creation), 0) AS tok_cache_creation,
                        COALESCE(SUM(tok_reasoning), 0) AS tok_reasoning,
                        COALESCE(SUM(tok_out), 0) AS tok_out,
+                       SUM(CASE WHEN usage_estimated = 1 THEN 1 ELSE 0 END) AS estimated_requests,
                        SUM(CASE WHEN cache_hit = 1 OR tok_cached > 0 THEN 1 ELSE 0 END) AS cache_hits,
                        COALESCE(SUM(cost), 0) AS cost,
                        COALESCE(SUM(cache_savings), 0) AS cache_savings
@@ -530,6 +537,7 @@ class DBSink:
             "tok_cache_creation": row.tok_cache_creation or 0,
             "tok_reasoning": row.tok_reasoning or 0,
             "tok_out": row.tok_out or 0,
+            "estimated_requests": row.estimated_requests or 0,
             "cache_hits": cache_hits,
             "cache_hit_rate": round(cache_hits / requests, 4) if requests else 0.0,
             "tps_avg": round(sum(tps_values) / len(tps_values), 2) if tps_values else 0.0,

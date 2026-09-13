@@ -165,8 +165,9 @@ class RateLimiter:
 
         The reservation tagged with *request_id* is removed from both the
         key's token window and the global token window, and its RPM event is
-        removed too. When no id matches, the newest estimated reservation is
-        removed (backward-compatible with callers that predate request ids).
+        removed from both the key's window and the global one. When no id
+        matches, the newest estimated reservation is removed
+        (backward-compatible with callers that predate request ids).
         """
         async with self._lock:
             now = time.monotonic()
@@ -180,9 +181,16 @@ class RateLimiter:
                     w.events.remove(target)
                     w.total = max(0, w.total - target.tokens)
             # RPM reservations carry no request id: drop the newest one so the
-            # failed request does not permanently consume an rpm slot.
-            w = self._windows.get(f"{key_id}:rpm")
-            if w is not None and w.events:
+            # failed request does not permanently consume an rpm slot. Admission
+            # takes a slot in *both* the key window and the global one, so both
+            # must be refunded — leaking the global slot burned one of every
+            # `global_rpm` slots for the rest of the window, throttling
+            # unrelated keys on the strength of requests that never ran
+            # (AUDIT #121, residual of the #70 fix).
+            for scope in (f"{key_id}:rpm", "global:rpm"):
+                w = self._windows.get(scope)
+                if w is None:
+                    continue
                 self._prune(w, now)
                 if w.events:
                     w.total = max(0, w.total - w.events.pop().tokens)
