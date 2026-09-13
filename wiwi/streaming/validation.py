@@ -84,7 +84,13 @@ def validate_tool_args(
             if not isinstance(spec, dict):
                 continue
             want = spec.get("type")
-            if not want or not _check_type(value, want):
+            # A property with no `type` is unconstrained, not "must be null":
+            # JSON Schema treats an absent keyword as always-satisfied, and
+            # `description`/`enum`/`anyOf`/`$ref`/`const`-only properties are
+            # common in real tool definitions. `_check_type(value, None)`
+            # already returns True for an unknown type, so the old `not want`
+            # short-circuit only served to reject them first (AUDIT #141).
+            if not _check_type(value, want):
                 msg = (f"tool '{tool_name}': property '{prop}' expected "
                        f"{want}, got {_type_name(value)}")
                 log.warning("tool_args_property_type_mismatch", tool=tool_name,
@@ -113,8 +119,21 @@ def _type_name(value: Any) -> str:
     return type(value).__name__
 
 
-def _check_type(value: Any, expected: str) -> bool:
-    """Check that *value* matches the JSON schema *expected* type string."""
+def _check_type(value: Any, expected: Any) -> bool:
+    """Check that *value* matches the JSON schema *expected* type.
+
+    *expected* is normally a type string, but may also be the **array** form
+    ``["string", "null"]`` — the canonical nullable encoding emitted by OpenAI
+    structured outputs, Pydantic v2, and Claude Code's own tool definitions.
+    A list is a union: the value is valid when it matches any member. The old
+    code passed the list straight to ``type_map.get()``, and hashing an
+    unhashable list raised ``TypeError`` out of the stream pump, killing the
+    response mid-flight (AUDIT #138).
+    """
+    if isinstance(expected, list):
+        return any(_check_type(value, member) for member in expected)
+    if not isinstance(expected, str):
+        return True  # no type / unsupported type form: unconstrained
     type_map = {
         "string": str,
         "integer": int,

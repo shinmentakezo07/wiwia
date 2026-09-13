@@ -225,7 +225,17 @@ class OpenRouterAdapter(OpenAIAdapter):
 
     def decode_stream_event(self, event: str, data: str) -> list[dl.IRStreamDelta]:
         if data == "[DONE]":
-            return [dl.StreamEnd()]
+            # A [DONE]-terminated stream may still hold open tool calls: some
+            # providers end with the sentinel instead of a finish_reason
+            # chunk. Emitting a bare StreamEnd left them open, so the gateway
+            # saw no Finish and synthesized `stop` for a turn that produced
+            # tool calls, and the client was left with an unterminated
+            # tool_use block (AUDIT #133). Flush first — a stream with nothing
+            # open still yields exactly `[StreamEnd()]`, preserving the
+            # gateway's round-15 synthesis for plain text streams.
+            out = self._flush_open_tools()
+            out.append(dl.StreamEnd())
+            return out
         try:
             chunk = orjson.loads(data)
         except json.JSONDecodeError:
@@ -311,6 +321,19 @@ class OpenRouterAdapter(OpenAIAdapter):
             fn = tc.get("function") or {}
             name_fragment = fn.get("name", "")
             if tc.get("id"):
+                if idx in self._synthesized_opens:
+                    # The id was missing on the first chunk, so an Open was
+                    # synthesized for this index; the real id has now arrived.
+                    # Adopt it instead of closing and re-opening — two Opens
+                    # for one index breaks the strict nesting contract and the
+                    # encoder emits two tool_use blocks for one call. Mirrors
+                    # OpenAIAdapter (AUDIT #135).
+                    self._synthesized_opens.discard(idx)
+                    self._tool_names[idx] = name_fragment or ""
+                    if fn.get("arguments"):
+                        out.append(dl.ToolCallArgsDelta(
+                            index=idx, args_fragment=fn["arguments"]))
+                    continue
                 if idx in self._open_tool_indices:
                     # The superseded call's Open may still be deferred (id
                     # seen, args not yet). Flush it before closing, or the
@@ -336,6 +359,24 @@ class OpenRouterAdapter(OpenAIAdapter):
                 if idx in self._pending_opens:
                     cid, cname = self._pending_opens.pop(idx)
                     out.append(dl.ToolCallOpen(index=idx, id=cid, name=cname))
+                elif idx not in self._open_tool_indices:
+                    # Some OpenAI-compatible providers send `arguments` on the
+                    # very first tool chunk with no `id` (it may arrive on a
+                    # later chunk, or never). Emitting args with no preceding
+                    # Open violates the strictly nested
+                    # Open -> ArgsDelta* -> Close contract, so every encoder
+                    # silently drops them and the tool call vanishes. The base
+                    # OpenAIAdapter synthesizes the Open here; OpenRouter
+                    # overrode the whole method without this branch, so the
+                    # two adapters diverged on identical input (AUDIT #135).
+                    self._open_tool_indices.add(idx)
+                    self._tool_names[idx] = name_fragment or ""
+                    self._synthesized_opens.add(idx)
+                    # Carry the name fragment we just stored — an empty name
+                    # leaves the client with a tool_use block it cannot
+                    # dispatch (AUDIT #135).
+                    out.append(dl.ToolCallOpen(index=idx, id="",
+                                               name=self._tool_names[idx]))
                 out.append(dl.ToolCallArgsDelta(index=idx, args_fragment=fn["arguments"]))
 
         fr = c.get("finish_reason")

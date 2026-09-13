@@ -86,6 +86,28 @@ def _repair_truncated_json(text: str) -> str:
         m = re.search(r'(\\+)u[0-9a-fA-F]{0,3}$', text)
         if m and len(m.group(1)) % 2 == 1:
             text = re.sub(r'\\u[0-9a-fA-F]{0,3}$', '', text)
+        # A *complete* \uXXXX escape at the tail may still be half of a
+        # surrogate pair whose low half never arrived (the model was cut
+        # mid-emoji by a token limit). Closing the string there yields a lone
+        # surrogate: `json.loads` accepts it, but `orjson.dumps` and httpx
+        # reject it with `TypeError: str is not valid UTF-8`, so the repaired
+        # args killed the user's turn with a 500. Strip the dangling escape
+        # instead — a partial pair is unusable either way, and dropping it
+        # leaves valid, encodable JSON (AUDIT #139).
+        m = re.search(r'\\u([0-9a-fA-F]{4})$', text)
+        if m:
+            code = int(m.group(1), 16)
+            if 0xD800 <= code <= 0xDBFF:
+                # High surrogate: its low half would follow it, so a high
+                # surrogate at the tail is always dangling.
+                text = text[:m.start()]
+            elif 0xDC00 <= code <= 0xDFFF:
+                # Low surrogate: only valid when a high surrogate escape
+                # immediately precedes it. A bare low surrogate is as
+                # unencodable as a bare high one.
+                prev = re.search(r'\\u([0-9a-fA-F]{4})$', text[:m.start()])
+                if not (prev and 0xD800 <= int(prev.group(1), 16) <= 0xDBFF):
+                    text = text[:m.start()]
         suffix += _QUOTE
     # Close open containers in reverse order.
     suffix += "".join(reversed(stack))

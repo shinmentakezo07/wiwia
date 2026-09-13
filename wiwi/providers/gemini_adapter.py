@@ -195,6 +195,13 @@ class GeminiAdapter:
             payload = orjson.loads(data)
         except json.JSONDecodeError:
             return []
+        if not isinstance(payload, dict):
+            # A non-dict frame (null/number/string/array) must be ignored, not
+            # crash on ``payload.get``. The AttributeError escaped into the
+            # pump's generic handler, which cooled a healthy deployment and
+            # fed the key's retirement ladder for a frame carrying no semantic
+            # content (AUDIT #136).
+            return []
         # Gemini sends errors as {"error": {"code": ..., "message": ..., "status": ...}}
         err = payload.get("error")
         if isinstance(err, dict):
@@ -249,12 +256,19 @@ class GeminiAdapter:
                                       "SPII": "content_filter",
                                       }.get(finish, "stop")))
             out.append(dl.StreamEnd())
-        elif u:
+        elif u and not (cand.get("content") or {}).get("parts"):
             # Usage without finishReason: emitted on some SAFETY-truncated and
             # mid-stream-cut responses. Treat it as a clean completion — the
             # pump otherwise reports `upstream stream ended without completion`
             # and cools a healthy deployment / penalises a healthy key
             # (AUDIT #76).
+            #
+            # But usage rides on *intermediate* chunks too (Gemini 2.5 and
+            # Vertex attach usageMetadata to every chunk). Terminating on any
+            # usage-bearing frame ended the stream at the first chunk, so the
+            # consumer broke on StreamEnd and the rest of the answer was
+            # silently truncated at HTTP 200 (AUDIT #134). A genuine terminal
+            # frame carries no content parts, so require that as well.
             out.append(dl.UsageFinal(
                 prompt=u.get("promptTokenCount", 0),
                 cached=u.get("cachedContentTokenCount", 0),

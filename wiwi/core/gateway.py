@@ -647,9 +647,17 @@ class Gateway:
         # prefix would be silently partial (e.g. a tool call whose Open was
         # evicted while its Args/Close survive — the model re-invokes a tool
         # the client already saw). Refuse the resume; the caller retries as
-        # a fresh attempt. `tape.seq - 1` is the last delta the consumer
-        # emitted (every emitted delta was appended before yield).
-        if tape.head_evicted(tape.seq - 1):
+        # a fresh attempt.
+        #
+        # `tape.seq` is the *next* sequence number to assign, so `seq - 1` is
+        # the last delta ever appended — which is by construction >= the first
+        # surviving seq, making `first > last_seq + 1` structurally False. The
+        # guard was dead at this, its only call site (AUDIT #140). The question
+        # the guard asks is whether anything *before* the first survivor was
+        # dropped, so the argument must be a sequence number strictly below it
+        # — 0 means "replay from the very beginning", and the tape's own first
+        # surviving seq is then the thing that must be contiguous with it.
+        if tape.head_evicted(0):
             return False, None
         text = tape.replay_text()
         if not text and self.router.settings.stream_resume == "content_only":

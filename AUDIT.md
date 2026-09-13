@@ -2300,3 +2300,811 @@ Subsequent fix rounds verified the fixes end-to-end: round 38 pins #63–#65,
 round 39 pins #66–#68 (`tests/test_fix_round39.py`, 12/12), round 40 pins the
 journal-sweep gap (`tests/test_fix_round40.py`). Full suite 1473 passed +
 ruff clean after each round.
+
+---
+
+## Addendum — round 47: terminal-frame tool state and adapter flush paths (2026-09-12)
+
+Second pass over the delta/chunk flow, the pump, and the translation layer, with
+every claim below **reproduced by execution against the real classes** — not by
+reading. Covers the adapter→encoder handoff at end-of-stream and the `[DONE]`
+early-return family.
+
+Fixed this round: **#111** (marked fixed in place above; it was already in the
+register under that number — see the hygiene note there). The round-47
+regression file is `tests/test_fix_round47.py`.
+
+**All nine remaining findings below (#133–#141) were fixed in round 49 (2026-09-13)**,
+each marked fixed in place with its fix route and the tests that pin it. Round-49
+regression file: `tests/test_fix_round49.py` (46 tests). Two of the nine departed from
+the original fix sketch, and both departures are recorded in the entry: #133 needed a
+content-derived `Finish` the sketch omitted, and #139 was fixed by stripping the dangling
+escape rather than re-encoding through `surrogatepass`.
+
+### 133. `[DONE]`-terminated streams leave every tool call open and report the wrong stop reason
+
+**Severity:** 🟠 High (client-visible corruption on the DeepSeek/B.A.I path round 15 added)
+**File:** `wiwi/providers/openai_adapter.py:364-365` (the `[DONE]` early return),
+`wiwi/core/gateway.py:1029-1035` (the synthesized `Finish`)
+
+**Trigger:** an OpenAI-compatible upstream that closes with a bare `[DONE]` — no trailing
+`finish_reason` chunk — *and* delivered tool calls. That is the exact provider class
+round 15 added `saw_terminal` handling for (DeepSeek, B.A.I, and other OpenAI-compatible
+servers).
+
+`decode_stream_event` returns `[dl.StreamEnd()]` on `[DONE]` without flushing
+`_open_tool_indices`/`_pending_opens`, so the stream ends with tool calls still open. The
+gateway then takes the round-15 branch (`finish is None` → `dl.Finish("stop")`) and
+synthesizes a **`stop`** stop reason for a turn that actually produced tool calls.
+
+Reproduced — two parallel tool calls then `[DONE]`, driven through the real adapter:
+
+```
+adapter deltas:    ToolCallOpen, ToolCallArgsDelta, ToolCallOpen, ToolCallArgsDelta, StreamEnd
+open at StreamEnd: {0, 1}
+```
+
+Client-visible consequence per surface:
+
+| Surface | Result |
+|---|---|
+| Anthropic (Claude Code) | `message_delta` carries `stop_reason: "end_turn"` while two `tool_use` blocks were delivered — Claude Code concludes the turn ended **without** tool use and stops the agent loop |
+| Chat | `finish_reason: "stop"` on a chunk set containing `tool_calls` |
+| Responses (Codex CLI) | terminal payload carries the `function_call` items while the stop reason disagrees |
+
+This is the **root cause #111's encoder fix only masked**: the encoders now close the blocks
+the adapter left open, but the stop reason is still wrong, and the encoder's A1 guard
+(`anthropic_messages.py:549-551`) cannot help — it only downgrades `tool_use` → `end_turn`,
+never the reverse.
+
+**Fix sketch:** in the `[DONE]` arm, flush open tool state before `StreamEnd` exactly as the
+`finish_reason` arm already does (`openai_adapter.py:470-486`) — emit deferred
+`ToolCallOpen`s, then a `ToolCallClose` per open index, then `StreamEnd`. The gateway then
+receives a content-derived `Finish` and the synthesized `"stop"` branch is not taken.
+The same early return exists at `openrouter_adapter.py:228` and `opencode_adapter.py:208`;
+OpenRouter overrides `decode_stream_event` and needs the same treatment — its
+`error`-finish arm at `:249-254` already performs this flush and is the pattern to copy.
+
+**Status: fixed** — round 49 (2026-09-13). `OpenAIAdapter` gained a private
+`_flush_open_tools()` helper (`openai_adapter.py:359-379`) that emits deferred `ToolCallOpen`s
+and then one `ToolCallClose` per open index, clearing all four per-stream state dicts. The
+`[DONE]` arm (`:382-395`) now calls it and appends `Finish("tool_call")` when it returned
+anything, then `StreamEnd`. The `[DONE]`-after-`finish_reason` shape is unaffected: the finish
+sweep at `:504-519` already cleared the state, so the flush returns `[]` and the arm degrades
+to a bare `StreamEnd` — no duplicate `Finish`, no orphan `Close`. `OpenRouterAdapter`'s own
+`[DONE]` arm (`openrouter_adapter.py:227-237`) calls the same inherited helper.
+`OpencodeAdapter` needed no change: its `[DONE]` arm delegates to `self._sub()` for the chat
+and messages routes (`opencode_adapter.py:203-209`), so it inherits the fix.
+Pinned by `tests/test_fix_round49.py::test_openai_done_flushes_open_tool_calls`,
+`::test_openai_done_emits_finish_tool_call_when_tools_were_delivered`,
+`::test_openrouter_done_flushes_open_tool_calls`,
+`::test_opencode_done_flushes_open_tool_calls_on_chat_route`, with controls
+`::test_openai_done_without_tools_still_emits_bare_stream_end` (the plain-text path must stay
+byte-identical so the gateway's round-15 synthesis still owns it) and
+`::test_openai_done_after_finish_reason_does_not_double_close`.
+
+Note on scope: the finding's fix sketch said to emit `StreamEnd` only and let the gateway
+derive the `Finish`. That is insufficient — the gateway's `finish is None` branch synthesizes
+`"stop"`, which is exactly the wrong stop reason this finding is about. The flush must be
+accompanied by a content-derived `Finish("tool_call")`, which is why the arm emits it directly.
+
+### 134. Gemini: a `usageMetadata`-bearing non-terminal chunk emits a full terminal tail, truncating the stream
+
+**Severity:** 🔴 Critical (silent truncation, HTTP 200, no error signal)
+**File:** `wiwi/providers/gemini_adapter.py:229-268` (the `elif u:` arm at `:252`, tail at `:267-268`)
+
+**Trigger:** any Gemini stream whose **non-terminal** chunk carries `usageMetadata`. The
+`elif u:` arm emits `UsageFinal` + `Finish("stop")` + `StreamEnd` for *any* frame carrying
+usage, not just the terminal one.
+
+Reproduced against the real adapter:
+
+```
+chunk0  {"candidates":[{"content":{"parts":[{"text":"Hel"}]}}],
+         "usageMetadata":{"promptTokenCount":5,"totalTokenCount":5}}   (no finishReason)
+     -> ['StreamStart','TextDelta','UsageFinal','Finish','StreamEnd']   <-- terminal!
+chunk1  {"candidates":[{"content":{"parts":[{"text":"lo!"}]}}]}        -> ['TextDelta']
+chunk2  {"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}],
+         "usageMetadata":{...}}                                        -> ['UsageFinal','Finish','StreamEnd']
+```
+
+The consumer breaks on the first `StreamEnd` (`wiwi/core/gateway.py:601-602`), so chunks 1
+and 2 are never read: the client gets `"Hel"` with `finish_reason: "stop"` and `[DONE]` on
+an HTTP 200. A full-length answer is silently cut to its first chunk, with no error and no
+truncation signal.
+
+This is the #76 fix firing on the wrong frame — #76's entry scopes it to "a Gemini SSE
+response whose **terminal** candidate omits `finishReason`", and both
+`tests/test_fix_round41.py:627` and `tests/test_providers.py:80` place usage on the *last*
+frame, so no test covers the intermediate case. `usageMetadata` on intermediate chunks is
+observed behaviour for Gemini 2.5 / Vertex: googleapis/go-genai#15 reports it on the first
+chunk (empty values) and again on the last; google-gemini-php#72 reports it on every chunk
+with only the final one fully populated.
+
+**Fix sketch:** gate the arm on the frame carrying no content parts —
+`elif u and not (cand.get("content") or {}).get("parts"):` — or, more robustly, buffer the
+`UsageFinal` and emit the tail only at true upstream EOF.
+
+**Status: fixed** — round 49 (2026-09-13), by the first of the two sketched routes:
+`gemini_adapter.py:259` is now `elif u and not (cand.get("content") or {}).get("parts"):`, so
+only a usage-bearing frame that carries **no content parts** terminates. A genuine terminal
+frame (usage, empty `parts`, no `finishReason`) still emits the full tail, preserving #76.
+Pinned by `tests/test_fix_round49.py::test_gemini_intermediate_usage_does_not_terminate_the_stream`,
+with controls `::test_gemini_terminal_usage_still_completes_cleanly` (pins #76),
+`::test_gemini_finish_reason_with_usage_still_completes`, and
+`::test_gemini_usage_without_parts_but_with_candidate_text_still_continues`.
+
+### 135. OpenRouter: `ToolCallArgsDelta` with no preceding `ToolCallOpen` when a tool chunk carries args but no `id`
+
+**Severity:** 🟠 High (the tool call disappears entirely from every dialect)
+**File:** `wiwi/providers/openrouter_adapter.py:333-339` (the `if fn.get("arguments")` arm);
+the finish sweep at `:341-350` iterates only `_open_tool_indices`
+
+Unlike `openai_adapter.py:450-461` and `nim_adapter.py:317-325`, the OpenRouter adapter has
+no `elif idx not in self._open_tool_indices:` synthesize branch, so args arriving for an
+index that was never opened are emitted bare.
+
+Reproduced — same three chunks through both adapters:
+
+```
+openai      ['ToolCallOpen','ToolCallArgsDelta','ToolCallArgsDelta','ToolCallClose','Finish']
+openrouter  ['ToolCallArgsDelta','ToolCallArgsDelta','Finish']
+```
+
+Traced through both encoders: `ChatStreamEncoder` emits **0 frames** (it drops args whose
+index is not registered) and `AnthropicStreamEncoder` emits **0 frames**, with
+`final_frame` reporting `stop_reason: "end_turn"` and no `tool_use` block. The tool call
+vanishes from every dialect while the upstream still bills for it, and
+`finish_reason: "tool_calls"` is downgraded to `stop`.
+
+**De-duplication:** #74 covers only the reused-index flush (fixed); #88 covers NIM's
+adoption path; #129 covers the *OpenAI* adapter's stale `_synthesized_opens` after finish.
+None covers this. Git history confirms the gap: the branch was added to
+`openai_adapter.py` by `f1b7cc0` and ported to `nim_adapter.py`, while
+`openrouter_adapter.py`'s `if fn.get("arguments")` block dates from `2cf107a` and never
+received it. `tests/test_openrouter_adapter.py` has no tool-call streaming test at all.
+
+**Fix sketch:** port the `elif idx not in self._open_tool_indices:` synthesize branch from
+`openai_adapter.py:450-461`, including `_synthesized_opens` and its `.clear()` in the
+finish sweep at `:348-350`.
+
+**Status: fixed** — round 49 (2026-09-13). `OpenRouterAdapter`'s args arm
+(`openrouter_adapter.py:362-380`) gained the synthesize branch the base adapter has
+(`openai_adapter.py:479-495`), and the id-first arm gained the matching adopt branch
+(`openrouter_adapter.py:324-334`) so a real id arriving after a synthesized `Open` is adopted
+rather than closing and re-opening the same index. Both adapters now produce identical delta
+kind sequences for the same three frames. Pinned by
+`tests/test_fix_round49.py::test_openrouter_args_without_id_synthesizes_open`,
+`::test_openrouter_args_without_id_matches_openai_adapter` (drives both adapters with one
+frame list and asserts equal kind sequences), and
+`::test_openrouter_late_id_after_synthesized_open_is_adopted`, with control
+`::test_openrouter_id_first_then_args_unchanged`.
+
+**Second defect found while fixing this one, same entry:** the synthesize branch stored the
+name fragment in `_tool_names[idx]` but emitted the Open with `name=""`. The first write-up
+said "in *both* adapters" — that was a claim about the search, not about the codebase: a third
+copy-derived site existed at `nim_adapter.py:332` and was missed because the write-up scoped
+itself to the two adapters that had been opened. See **#143** (fixed round 51). The three
+synthesize branches are copy-derived, so "fixed one" is a prompt to check the others. The unit tests passed anyway (they
+asserted the Open existed and was correctly nested, not what it carried); the real-TCP harness
+caught it, because `AnthropicStreamEncoder` renders the Open as a `tool_use` block and a block
+with `name: ""` cannot be dispatched by the client. Fixed to emit
+`name=self._tool_names[idx]` (`openai_adapter.py:487-495`, `openrouter_adapter.py:370-378`),
+the emit sites being `openai_adapter.py:494-495` and `openrouter_adapter.py:378-379`,
+and the unit tests tightened to assert the name
+(`::test_openrouter_args_without_id_synthesizes_open`,
+`::test_openai_synthesized_open_carries_the_tool_name`). Verified over TCP by
+`.verify/e2e/run_e2e.py` → "args-without-id synthesizes the tool_use block (#135)".
+
+**Why the unit test missed it, and why "add an encoder assertion" is the wrong lesson:** the
+round-49 unit tests assert *delta shape* (which kinds, in what order, correctly nested) and
+that is what the finding was about. The tempting conclusion is "assert on the encoded output
+instead" — but the e2e file **already had** exactly that assertion
+(`run_e2e.py` "tools: tool_use block opens with the upstream tool name" decodes the Anthropic
+SSE and checks the rendered `tool_use` block's name), and it still passed against the broken
+code. Verified by reverting the fix: the `fake-tools` assertion stays green while the
+`fake-argsnoid` one goes red.
+
+The reason is that `fake-tools` sends a real `id` on its first chunk, so it takes the
+*id-first* arm and never enters the synthesize branch at all. So the discriminating question is
+not "how strong the assertion is" but **"does any fixture drive the specific branch"**. An
+encoder-and-back assertion is only as good as the arm its fixture reaches; assertion strength
+and branch coverage are independent axes, and it is the second one that failed here.
+
+The cheapest technique of the three, and the one that would have caught the #143 site in the
+same breath: **grep for the shape of the bug you just fixed.** `grep -n 'name=""'
+wiwi/providers/*.py` returns every copy-derived instance at once, at no cost, where both
+running tests and strengthening assertions depend on a fixture reaching the arm. Worth running
+over the `synthesize` / `adopt` / `_synthesized_opens` families whenever one of them changes.
+
+Applying that to this file: `fake-tools` covers the id-first arm and `fake-argsnoid` the
+synthesize arm, so the pair is complete — but any *third* tools fixture must pick its arm
+deliberately rather than assuming the "tools" path is covered by the one that exists.
+
+### 136. Gemini and NIM: a non-dict SSE frame raises `AttributeError` out of the decoder
+
+**Severity:** 🟡 Medium (junk frame cools a healthy key and feeds the retirement ladder)
+**File:** `wiwi/providers/gemini_adapter.py:199` (`payload.get("error")`, parsed at `:194-197`
+with only a `JSONDecodeError` guard) and `wiwi/providers/nim_adapter.py:237` (`chunk.get("usage")`,
+parsed at `:229-232`)
+
+**Trigger:** any non-dict JSON frame — `null`, a number, a string, an array.
+
+Reproduced — `decode_stream_event("", junk)` for each:
+
+```
+GeminiAdapter   null / 42 / "hi" / [1,2,3]  -> RAISED AttributeError
+NimAdapter      null / 42 / "hi" / [1,2,3]  -> RAISED AttributeError
+OpenRouterAdapter, OpenAIAdapter            -> []          (control: #110 guard)
+```
+
+The exception lands in `_pump_once`'s generic handler (`gateway.py:1071-1089`) →
+`_note_stream_failure` (deployment cooldown + key `err_count`, feeding the #69 retirement
+ladder) plus a `StreamError` to the client — for a frame carrying no semantic content.
+Reachable for Gemini directly and via `OpencodeAdapter`'s gemini route
+(`opencode_adapter.py:211` → `GeminiAdapter`), which raises identically.
+
+**De-duplication:** #110's file list names only `openai_adapter.py`,
+`openrouter_adapter.py`, and `openai_responses.py`; `tests/test_fix_round43.py:825-839`
+covers only openrouter and openai. No gemini or nim junk-frame test exists.
+
+**Fix sketch:** `if not isinstance(payload, dict): return []` after the parse at
+`gemini_adapter.py:197`; `if not isinstance(chunk, dict): return []` after the parse at
+`nim_adapter.py:232`.
+
+**Status: fixed** — round 49 (2026-09-13). Both decoders gained the `isinstance(x, dict)`
+guard their `OpenAIAdapter` counterpart already had (`openai_adapter.py:400-403`):
+`gemini_adapter.py:198-203` and `nim_adapter.py:233-238`. A non-dict frame now yields `[]`
+instead of raising `AttributeError` into the pump's generic handler. `OpencodeAdapter`'s
+gemini route inherits the fix through `self._gem`. Pinned by
+`tests/test_fix_round49.py::test_gemini_non_dict_frame_is_ignored`,
+`::test_nim_non_dict_frame_is_ignored`, and
+`::test_opencode_gemini_route_non_dict_frame_is_ignored`, each parametrized over
+`null` / `42` / `"hi"` / `[1,2,3]`.
+
+### 137. `OpenAIAdapter._emitted_opens` is write-only state that no code reads
+
+**Severity:** ⚪ Low (dead state plus a comment that misdirects a future fixer)
+**File:** `wiwi/providers/openai_adapter.py:348` (init), `:361` (reset), `:416` (write),
+`:486` (clear)
+
+The dict is written once, in the "adopt the real id" branch, under a comment stating the id
+is recorded "for later frames (tool_result correlation)". Nothing ever reads it:
+`grep -rn "_emitted_opens"` returns only the four sites above — one write and two clears
+(the fourth is the init). The `ToolCallOpen` that branch suppresses was already emitted with
+`id=""`, so the real id never reaches any encoder by this path; the chat encoder emits
+`"id":""` to the client (verified by execution).
+
+Either the correlation feature is genuinely wanted — in which case the id has to be
+surfaced, since the plumbing is missing, not just the reader — or the field should be
+deleted and the comment corrected so a later agent does not trust it. Same disposition class
+as the `partial_json` / `iter_sse_events` items at the end of the streaming addendum:
+deliberately kept, or removed, but not left as an unmarked write-only field.
+
+**Status: fixed** — round 49 (2026-09-13), by the **delete** route. The field was removed
+outright (`openai_adapter.py` — dropped from `__init__`, `reset`, the adopt-the-real-id branch,
+and the finish sweep). It was never read anywhere in the tree (`grep -rn _emitted_opens`
+returns only its own four references), so "surface the id" would have meant inventing a
+consumer, not restoring one: the correlation the comment described is already served by
+`_tool_names` plus the emitted `ToolCallOpen` deltas the caller sees. Deleting is the smaller
+change and leaves no unmarked dead state. Pinned by
+`tests/test_fix_round49.py::test_emitted_opens_is_not_write_only_dead_state`, which parses the
+module AST and fails if any `Load`-context reference to the name reappears.
+
+### Sweep coverage — checked, no defect found
+
+- **`bai_adapter.py`** — overrides only `encode_request`; `decode_stream_event` is inherited
+  from `OpenAIAdapter` with its #110 guards intact.
+- **`cline_adapter.py`**, **`workbuddy_adapter.py`** — the `{success,data}` unwrap and
+  `{"error":{...}}` branches `isinstance`-guard; `null`/`42`/`"hi"`/`[1,2,3]` all return
+  `[]` without raising. (A suspected `_HDR_RE` corruption was chased and **ruled out** — a
+  byte dump confirmed the regex is correct and it behaves on multi-line/code-block input.)
+- **`opencode_adapter.py`** — its own Responses route guards with `isinstance`; no new
+  defect.
+- **Reasoning/CoT leakage** — clean on all routes; no path emits reasoning as `TextDelta`.
+- **Usage field mapping** — consistent across gemini/nim/openrouter/openai.
+- **Terminating with a tool open** — every terminal path closes open indices *except* the
+  `[DONE]` family in #133.
+
+### Verification method
+
+Every finding above was reproduced by direct execution against the real adapter and encoder
+classes, with the checkout pinned (`.verify/` scripts put their own directory on
+`sys.path[0]`, and the editable install resolves `wiwi` to a *different* checkout — a probe
+run that way silently tests the wrong tree; see the note below). The round-47 fixes are
+pinned by `tests/test_fix_round47.py` (3 tests, RED against pre-fix source, GREEN after).
+
+**Harness hazard worth recording:** `python3 path/to/script.py` sets `sys.path[0]` to the
+*script's* directory, not the cwd. With the ambient editable install resolving `wiwi` to
+another checkout, a probe under `.verify/` imports the wrong tree and its output is
+meaningless — this produced a false "the fix doesn't work" reading during round 47. Run
+scratch probes as `PYTHONPATH=<repo> python3 -B script.py`, or via stdin (`python3 - <<PY`),
+which puts the cwd on `sys.path[0]`.
+
+### 138. A legal JSON Schema `type` array crashes the stream pump mid-response
+
+**Severity:** 🟠 High (client-visible truncation + raw Python exception text; a healthy key
+accumulates failures because of a client-controlled schema shape)
+**File:** `wiwi/streaming/validation.py:127` (`_check_type`, `python_type = type_map.get(expected)`),
+reached from `:63` (top-level type) and `:87` (per-property type); called at
+`wiwi/core/gateway.py:1159` inside `_validate_closed_tool_args`, invoked from `_apply_delta`
+at `gateway.py:950-951`
+
+**Trigger:** a request whose tool schema uses the union/nullable form — `{"type":
+["object","null"], ...}`, or any property `{"type": ["string","null"]}`. That is the
+canonical nullable encoding emitted by OpenAI structured outputs, Pydantic v2, and Claude
+Code's own tool definitions. Upstream returns a tool call; at `ToolCallClose` the `list` is
+hashed by the `type_map.get(...)` lookup.
+
+Reproduced against the real validator:
+
+```
+union prop      -> RAISED TypeError: unhashable type: 'list'
+top-level union -> RAISED TypeError: unhashable type: 'list'
+```
+
+Reached end-to-end through the real app with a respx-mocked upstream: HTTP 200 plus three
+SSE frames, then `data: {"error":{"message":"unhashable type: 'list'","type":"api_error"}}`
+— no `finish_reason`, no `[DONE]`, and the tool-call `arguments` truncated mid-string. The
+non-streaming path raises the same `TypeError` → 500.
+
+The enclosing `except Exception` at `gateway.py:1071-1082` classifies it as a mid-stream
+*provider* failure: `_note_stream_failure` runs `dep.record_fail(...)` and
+`on_result_locked(key, 502, ...)`, so a healthy deployment and provider key accumulate
+failure counts and can be retired — because of a shape in the caller's own schema.
+`_price_partial` bills the partial delivery. The schema is entirely caller-controlled, so
+any authenticated caller can force this at will.
+
+**Fix sketch:** in `_check_type`, treat a non-str `expected` as a union —
+`if not isinstance(expected, str): return True`, or
+`any(_check_type(value, e) for e in expected)`.
+
+**Status: fixed** — round 49 (2026-09-13). `_check_type` (`validation.py:122-152`) now
+branches on the expected type's *shape* before hashing it: a `list` is treated as a union
+(`return any(_check_type(value, member) for member in expected)`), a non-`str` is
+unconstrained, and only a `str` reaches the `type_map` lookup. This also covers the
+top-level `type` (`validation.py:63`), which had the same crash for
+`{"type": ["object","null"]}`. Pinned
+by `tests/test_fix_round49.py::test_union_type_array_in_property_does_not_crash`,
+`::test_union_type_array_at_top_level_does_not_crash`,
+`::test_union_type_array_accepts_null_for_nullable_property`, with control
+`::test_union_type_array_still_rejects_a_real_mismatch` (treating a list as a union must not
+disable checking).
+
+### 139. `_repair_truncated_json` emits a lone surrogate, producing args that cannot be serialized
+
+**Severity:** 🟡 Medium (dialect-incorrect 500; the user's turn is lost)
+**File:** `wiwi/streaming/partial_json.py:89` (`suffix += _QUOTE`), in `_repair_truncated_json` (`:37`)
+**Consumers:** `gateway.py:428`, `:475`, `streaming/resume.py:181,193`,
+`providers/openai_adapter.py:309`, `providers/openrouter_adapter.py:201`,
+`wire/openai_chat.py:103`, `wire/openai_responses.py:44`
+
+**Trigger A (live):** the upstream truncates a tool-args fragment mid-surrogate-pair —
+`{"emoji": "\ud83d` — the exact shape a token-limit cut of a non-ASCII string produces. The
+repair closes the string and `json.loads` accepts it, but the value is a lone surrogate.
+Reproduced for a high-surrogate cut, a mid-low-surrogate cut, and a bare low surrogate:
+
+```
+'{"emoji": "\ud83d'      -> '{"emoji": "\ud83d"}'      -> orjson TypeError
+'{"emoji": "\ud83d\ude'  -> '{"emoji": "\ud83d"}'      -> orjson TypeError
+'{"emoji": "\ude00'      -> '{"emoji": "\ude00"}'      -> orjson TypeError
+```
+
+**Trigger B (fully reproducible today, no upstream cooperation needed):** a client replays
+that same truncated `arguments` string in its next-turn history — which is exactly what a
+client that received the truncated call does. `wire/openai_chat.py:103` repairs it to a lone
+surrogate, the IR keeps it in `ToolUsePart.args`, and on an Anthropic-routed model
+`providers/anthropic_adapter.py:307` puts `p.args` into the outbound body where httpx
+`encode_json` (`ensure_ascii=False`) raises before the request is sent. Verified end-to-end:
+`/v1/chat/completions` → HTTP 500 `{"error":{"message":"internal gateway error",...}}`, with
+the traceback through `httpx/_content.py:179 encode_json`. The openai/openrouter adapters
+survive only because they prefer `raw_args`; the Anthropic path does not, and neither would
+the resume/continuation path. A surrogate reaching `_serialize_turn` (`app.py:1088-1104`)
+would also break the response-cache write (`orjson.dumps`, `app.py:1323`).
+
+**Fix sketch:** normalize in the block that already strips a partial `\uXXXX` tail
+(`partial_json.py:86-88`) — drop a trailing high/low-surrogate escape, or
+`text.encode("utf-8","surrogatepass").decode("utf-8","replace")`.
+
+**Status: fixed** — round 49 (2026-09-13), by the **strip** route rather than the sketched
+`surrogatepass` re-encode. `_repair_truncated_json` (`partial_json.py:89-110`) now inspects a
+*complete* `\uXXXX` escape at the tail: a high surrogate (`U+D800`–`U+DBFF`) is always dangling
+and is removed, and a low surrogate (`U+DC00`–`U+DFFF`) is removed unless a high surrogate
+escape immediately precedes it. The `surrogatepass` re-encode would have replaced the lone
+half with `U+FFFD` *inside* the value; stripping removes the unusable partial pair entirely,
+which is what a truncated escape deserves — the emoji never arrived, so no replacement
+character is owed. Complete pairs and escaped backslashes are untouched. Pinned by
+`tests/test_fix_round49.py::test_repaired_truncated_json_is_serializable` (parametrized over
+the high-half, mid-low-half, and bare-low-half cuts, asserting `json.loads` then
+`orjson.dumps` both succeed), `::test_lone_surrogate_is_actually_removed_not_merely_escaped`,
+with control `::test_valid_escapes_are_not_mangled_by_the_surrogate_fix`.
+
+### 140. The #68 eviction guard is dead at its only call site
+
+**Severity:** 🟡 Medium (silent resume-prefix corruption; latent — `stream_resume` defaults to `"off"`)
+**File:** `wiwi/core/gateway.py:652` (`if tape.head_evicted(tape.seq - 1):`);
+`wiwi/streaming/resume.py:48-51` (`seq`), `:88` (`head_evicted`)
+
+`tape.seq` is the **next** sequence number to assign, and the tape only evicts from the head,
+so `_entries[0].seq <= tape.seq` always holds. `head_evicted(last_seq)` returns
+`first > last_seq + 1`, i.e. the call site tests `first > tape.seq` — **structurally always
+False**. Reproduced: a 60-byte tape fed 20 deltas keeps entries `[13..20]`, so
+`head_evicted(0)` is `True` while the call site's `head_evicted(tape.seq - 1)` is `False`,
+and `replay_text()` returns 56 of 140 chars. Brute-forced across 995 evicting tapes
+(1–199 deltas × 5 byte caps): **0 fires**.
+
+**Trigger:** `stream_resume != "off"` (default `"off"`, so latent today), a mid-stream
+upstream failure after output exceeds the 256 KiB tape, and a tool call opened before the
+evicted range. `build_continuation_messages` then produces a text-only continuation with
+`replay_tool_calls() == []` — the tool call is dropped from the assistant prefix, so the
+resumed model is asked to continue without a call the client already saw and executed
+(duplicate side effects, or a continuation disjoint from the delivered prefix). No billing
+effect.
+
+**Fix sketch:** track the last seq the consumer actually yielded and pass that (or pass `0`);
+`head_evicted(last_consumed)` is the check the function's own comment describes.
+
+**De-duplication:** #68 is marked fixed (round 39) and #84 is a declared false positive
+(`AUDIT.md:124-129`, `1243-1258`) — both address the *function*; neither records that its
+sole caller passes an argument that can never trip it. `tests/test_fix_round39.py:139-190`
+and `tests/test_fix_round41.py:506-528` call the function directly and never exercise
+`_attempt_resume`'s argument.
+
+**Status: fixed** — round 49 (2026-09-13). `gateway.py:660` now passes `0` — "replay from the
+very beginning" — which is the question the guard actually asks: whether anything *before* the
+first surviving seq was dropped. `tape.seq` is the **next** number to assign, so the old
+`tape.seq - 1` was by construction `>=` the first surviving seq and the predicate could never
+be true. Verified discriminating: reverting the argument alone turns
+`tests/test_fix_round49.py::test_attempt_resume_refuses_when_the_tape_head_was_evicted` red
+(`assert True is False`). Pinned alongside
+`::test_head_evicted_guard_fires_for_the_last_consumed_seq` and control
+`::test_attempt_resume_still_proceeds_when_the_tape_is_intact` (the guard must not refuse every
+resume).
+
+### 141. Typeless properties are always rejected (validation false positives)
+
+**Severity:** ⚪ Low (advisory only today; becomes client-visible if the check is promoted)
+**File:** `wiwi/streaming/validation.py:87` (`if not want or not _check_type(value, want):`)
+
+**Trigger:** any property schema with no top-level `type` — description-only, enum-only,
+anyOf-only, `$ref`-only, or const-only. Reproduced for all five shapes:
+
+```
+validate_tool_args('t', '{"a": "x"}',
+    {"type":"object","properties":{"a":{"description":"a path"}}})
+-> (False, "tool 't': property 'a' expected None, got string")
+```
+
+Absent `type` means *unconstrained*, not "must be null" — `_check_type(value, None)` returns
+`True`, but the `not want` short-circuit rejects before that is ever consulted.
+
+**Impact today:** advisory only. The message goes to `ctx.metadata["tool_args_violations"]`
+via `_flag` (`gateway.py:39-41`) and never reaches `build_log_event`
+(`gateway.py:1276-1310`) or any DB/SSE/metric surface — so it is one misleading
+`tool_args_property_type_mismatch` proxy-log line per call, plus a flag nothing reads. It
+becomes client-visible the moment that metadata is surfaced or the check is promoted to a
+hard failure, and `validation.py:78-80` records that the per-property check was itself added
+as a correctness fix — so promotion is a plausible next step.
+
+**Fix sketch:** `if want and not _check_type(value, want):` — absent `type` is unconstrained.
+
+**Status: fixed** — round 49 (2026-09-13), by dropping the short-circuit entirely rather than
+adding `want and`: `validation.py:94` is now `if not _check_type(value, want):`. The sketch
+would have fixed typeless properties but still mis-handled a union, which `_check_type` now
+resolves (#138) — and `_check_type(value, None)` already returns `True` for an unknown type,
+so the `not want` clause only ever served to reject first. A declared-type mismatch is still
+rejected. Pinned by `tests/test_fix_round49.py::test_typeless_property_is_not_rejected`,
+`::test_all_typeless_property_shapes_pass` (parametrized over description-only, enum-only,
+anyOf-only, `$ref`-only, and const-only specs), with control
+`::test_declared_property_type_is_still_enforced`.
+
+### Support-module sweep coverage — verified clean
+
+- **`streaming/tape_store.py`** — seq numbering (`_last_seq` advances only for non-`done`
+  records), `_read_records`'s `seq <= last_seq` filter, `is_complete` (uses `0`, correct since
+  data starts at seq 1), `_overflow` byte-cap semantics, torn-line tolerance, sweep lifecycle.
+  (Blocking FS I/O on the request path is already #105.)
+- **`streaming/coalesce.py`** — no drop and no reorder is possible: buffered text is emitted
+  only when a later delta arrives, and both the fast path (`:52-56`) and the non-mergeable
+  branch (`:69-73`) call `_flush()` *before* appending the control delta; `drain()` runs in
+  the generator's post-loop (`gateway.py:603-606`) before any terminal frame.
+- **`streaming/loopdetect.py`** — fires at exactly `limit` chunks for periods 1–8; the
+  period-9+ misses are the documented deliberate cap. No false positive on repeated
+  whitespace/newlines/markdown-table/code-indentation text at the shipped limit of 100.
+- **`server/app.py` streaming plumbing** — terminal-frame logic at `_stream_response`
+  (`:1444-1469`) is correct on every path: error path emits only `message_stop` for the
+  Anthropic style (no `final_frame()`, no `[DONE]`); chat emits `final_frame()` then `[DONE]`;
+  responses emits `_completed()`. No double terminal frame, no `[DONE]` after an error, and
+  `final_frame()` is reached on every success path.
+- **`_apply_delta` forwarding** (`gateway.py:909-953`) — forwards every non-control delta;
+  no delta type is dropped or reordered.
+
+---
+
+## Addendum — round 48: token-accounting honesty (2026-09-12)
+
+Two new findings, both fixed this round and pinned by `tests/test_fix_round48.py`.
+Both are the same failure mode in different places: **wiwi presented a guess as a
+measurement.** The register entry that round 48 also resolved is **#121** (above,
+marked fixed in place — it had been rediscovered as a duplicate "#132").
+
+### 130. `/v1/messages/count_tokens` counted only `TextPart` — tool schemas and replayed agentic history were free
+
+**Severity:** 🟠 High (client-visible undercount; a client sizing its context is lied to)
+**File:** `wiwi/server/app.py:1538-1560` (pre-fix body)
+
+**Trigger:** any request to the Anthropic `count_tokens` surface whose prompt is not pure
+text — i.e. every agentic client. The pre-fix body walked `ir_req.messages` and summed
+`len(p.text) // 4 + 1` over `TextPart` instances only, so four part kinds contributed
+**zero**: `ToolUsePart`, `ToolResultPart`, `ThinkingPart`, and — the largest omission —
+`ir_req.tools`, the tool *schemas*, which are serialized into every upstream request and
+are a dominant share of a real Claude Code prompt.
+
+Two defects in one endpoint: an incomplete walk, and a private estimator. `len//4 + 1`
+is not `estimate_tokens` (tiktoken where available), so the number the client was told
+disagreed with the number wiwi itself uses internally for identical text.
+
+Measured end-to-end on a Claude-Code-shaped payload (3 tool schemas × 15 params, a
+`thinking` block, a `tool_use`, a `tool_result`):
+
+| | `input_tokens` |
+|---|---|
+| pre-fix (TextPart only) | **7** |
+| post-fix (shared estimator, all parts) | **2270** |
+
+A 324× undercount. The endpoint and the gateway's own streaming-fallback estimator now
+report the identical figure for the same request, which is the property that matters:
+the number shown to the client equals the number wiwi bills against when upstream omits
+usage.
+
+**Fix:** the endpoint builds a `RequestContext` and counts
+`await estimate_tokens_async(flatten_request_text(ctx), ir_req.model)` — the same helper
+the streaming fallback uses. `flatten_request_text` (formerly the private `_flatten`) was
+promoted to a public name because it now has a consumer outside `core/gateway.py`;
+importing a private symbol across a module boundary would have violated Import Rule 4.
+Its coverage was extended in the same pass to include tool schemas and the
+`raw_args`/`name` of `ToolUsePart`, plus non-text payload references
+(`ImagePart.url`, `DocumentPart.context`) so multimodal content is not free either.
+
+Pinned by `tests/test_fix_round48.py`: `test_count_tokens_includes_tool_schemas`,
+`test_count_tokens_includes_tool_result_and_thinking`,
+`test_count_tokens_uses_the_shared_estimator`, and the
+`test_count_tokens_empty_is_at_least_one` control. `tests/test_bugfix_round5.py` was
+mechanically updated for the rename (import line plus three call sites).
+
+### 131. The `estimated` flag was write-only — logs, stats, metrics and the DB presented estimated token counts as provider-reported fact
+
+**Severity:** 🟠 High (a spend report cannot distinguish measured traffic from guessed traffic)
+**File:** `wiwi/ir/types.py:288-293`, `wiwi/core/gateway.py:1299`,
+`wiwi/logging_core/events.py:30-33`, `wiwi/logging_core/db_sink.py`,
+`wiwi/server/stats.py`, `wiwi/server/metrics.py`
+
+**Trigger:** any stream where upstream omits usage, so the fallback estimator fills it in.
+`UsageFinal.estimated` was set by the estimator and carried into `ir.Usage` — as
+`reasoning_estimated`, a name that was itself wrong, since the fallback estimates the
+*whole* usage (prompt included), not just reasoning. Then nothing read it. `LogEvent` had
+no estimated field at all, so from the DB onward the two were indistinguishable: an
+estimated `tok_in`/`tok_out` looked exactly like a provider-reported one in
+`/admin/logs/requests`, `/admin/stats/overview`, `/metrics`, and the `requests` table.
+
+**Fix:** four layers, each mirroring the existing `response_cache_hit` plumbing.
+
+1. `ir.Usage.reasoning_estimated` → **`estimated`**, with the comment corrected. Safe
+   because `grep` showed **zero read sites** — one definition, one writer, no readers —
+   and `cache/keygen.py` walks `__dataclass_fields__` only over
+   `messages/tools/tool_choice/gen_params` (`:66-76`), never `Usage`, so no cache key
+   changes.
+2. `merge_resume_context` propagates the flag: `ou.estimated = ou.estimated or ru.estimated`.
+   Without it a merged total containing estimated tokens was reported as provider-reported
+   — in exactly the mid-stream-failover path where upstream has already misbehaved.
+3. `LogEvent.usage_estimated` (default `False`), set in `build_log_event`.
+4. The field is plumbed to every surface: both DDLs plus the `_migrate()` ALTER list and
+   `_COLS` in `db_sink.py`, `overview["estimated_requests"]` in `stats.py`, and
+   `wiwi_usage_estimated_requests_total` in `metrics.py`.
+
+Verified through the real app: `overview.estimated_requests=1`, `usage_estimated=1` on the
+estimated row and `0` on the reported one, and
+`wiwi_usage_estimated_requests_total 1` — the flag survives
+`LogEvent → DB → admin API → stats → Prometheus`.
+
+Pinned by `tests/test_fix_round48.py`: `test_ir_usage_has_a_general_estimated_flag`,
+`test_log_event_records_estimated_usage`, `test_metrics_expose_estimated_requests`,
+`test_merged_resume_usage_stays_estimated` (with a clean-halves control),
+`test_db_round_trips_the_estimated_flag`.
+
+### Verification method
+
+Both fixes were verified by execution against the real app, not by reading — see the
+measured 7 → 2270 `count_tokens` table under #130 and the four-surface `usage_estimated`
+trace under #131. RED/GREEN was established by running `tests/test_fix_round48.py`
+against the pre-fix source (12 tests; every new assertion fails pre-fix, and the three
+controls pass in both trees, so no fix overcorrects). Full gate after the round:
+`1587 passed`, `ruff check wiwi/ tests/` clean.
+
+**Harness hazard worth repeating** (same one recorded under round 47): `python3
+path/to/script.py` sets `sys.path[0]` to the *script's* directory, not the cwd, and the
+ambient editable install resolves `wiwi` to another checkout — so a scratch probe run
+that way tests the wrong tree. Run probes via stdin (`python3 - <<PY`) or with an
+explicit `PYTHONPATH=/teamspace/studios/this_studio/wiwia`.
+
+## Addendum — round 50: budget refusals answered with the wrong status (2026-09-13)
+
+Found by running the gateway end to end against a fake upstream over real TCP
+(`.verify/e2e/`), not through the ASGI test client — every unit test in the
+suite drives `httpx.ASGITransport`, which never exercises the wire the way a
+real client does, and this defect is invisible from inside it.
+
+### 142. A key at its budget cap is refused with `429 budget_exceeded`, while the post-hoc path refuses the same condition with `402`
+
+**Severity: 🟠** — wrong status code on a client-visible error path; drives
+incorrect SDK retry behaviour.
+
+`wiwi/server/app.py:938-941` (pre-fix), in `authenticate`:
+
+```python
+        if info.over_budget:
+            return None, _err(429, "budget_exceeded",
+                              f"budget exhausted ({info.spend_to_date:.4f}"
+                              f"/{info.max_budget})", request, surface)
+```
+
+`wiwi/server/app.py:1313-1320`, the post-hoc path in `run_chat_like`:
+
+```python
+                if not recorded:
+                    ctx.status = 402
+                    state_.logs.log_request(build_log_event(ctx))
+                    return _err(402, "budget_exceeded",
+                                "virtual key budget exhausted", request, surface)
+```
+
+`info.over_budget` is `max_budget is not None and spend_to_date >= max_budget`
+(`wiwi/auth/service.py:81-82`) — the *same* condition the post-hoc branch
+enforces via `update_spend` returning `False`. One condition, two status codes,
+decided by which check happens to see it first.
+
+**Trigger:** any key already at or over its cap at admission time. Two ordinary
+routes reach it: a key minted with `max_budget=0` (refused on its very first
+request), and — the common production case — any key whose *previous* request
+pushed `spend_to_date` past `max_budget`, so every subsequent request is refused
+by the pre-flight check for the rest of the key's life.
+
+**Why 429 is wrong here, not merely inconsistent:**
+
+1. Three documents pin the contract. `docs/API_REFERENCE.md:203` — "`401` (bad
+   key), `402` (budget cap exceeded), `404` (unknown model/group), `413` (body
+   too large), `429` (rate limit)". `docs/ADMIN.md:98` — "exceeding a cap yields
+   `402` on subsequent requests". `docs/ARCHITECTURE.md:58` — "update spend
+   (budget cap → 402)". All three describe exactly this pre-flight case and all
+   three say 402.
+2. 429 means *rate limit* to every SDK and proxy in the ecosystem. It is the one
+   status that carries `Retry-After` and that clients back off on. A budget cap
+   never clears on its own — telling a caller to retry is telling them to spin.
+3. `docs/MVP.md:104` keeps the two conditions deliberately distinct in the
+   user-facing spec: "the 61st request in a minute gets a clean `429`, and
+   further requests get `budget_exceeded` after $10."
+
+**Fix:** return 402 from the pre-flight branch. The `type` stays
+`budget_exceeded` and the message is unchanged, so only the status moves.
+
+```python
+        if info.over_budget:
+            # 402, not 429 (AUDIT #142): the post-hoc check below refuses the
+            # same condition with 402, and docs/API_REFERENCE.md, docs/ADMIN.md
+            # and docs/ARCHITECTURE.md all pin "budget cap exceeded" to 402
+            # while reserving 429 for rate limits. 429 also tells an SDK to
+            # back off and retry — wrong advice for a cap that never clears.
+            return None, _err(402, "budget_exceeded",
+                              f"budget exhausted ({info.spend_to_date:.4f}"
+                              f"/{info.max_budget})", request, surface)
+```
+
+**Why the existing suite could not see it.** The only budget assertion in the
+tree is `tests/test_fix_round45.py:234-238`, which mints the key at
+`max_budget=1e-9`. On the first request `spend_to_date` is `0.0`, and
+`0.0 >= 1e-9` is `False` — so the pre-flight check *passes* and the request is
+caught by the post-hoc 402 instead. The test therefore pins the post-hoc branch
+while the pre-flight branch (the one that fires on every subsequent request) was
+never exercised. `grep -rn 'max_budget=0' tests/` returns only that same
+`1e-9`-valued test.
+
+**Pinned by** `tests/test_fix_round50.py`:
+`test_preflight_over_budget_is_402_not_429` (RED pre-fix: got 429, expected 402),
+`test_posthoc_over_budget_still_402` (control — the other branch must not be
+"fixed" in the opposite direction; note it needs pricing set, or the unpriced
+model costs 0 and `update_spend` succeeds with a plain 200), and
+`test_rate_limit_is_still_429` (control — a genuine rate limit keeps 429 *and*
+`Retry-After`).
+
+**Not filed as a new number for the neighbouring entries.** #90 (over-budget 402
+logged exactly once) and #116 (a 402'd response must never be cached) both touch
+the post-hoc branch and both remain correct; this is the *other* branch.
+
+### Verification method
+
+End-to-end, over real TCP against a fake OpenAI-compatible upstream
+(`.verify/e2e/`, gitignored): `PYTHONPATH=/teamspace/studios/this_studio/wiwia
+timeout 300 python3 -B .verify/e2e/run_e2e.py`. The budget assertion in that
+harness now reads `status=402 body={"error":{"message":"budget exhausted
+(0.0000/0.0)","type":"budget_exceeded",...}}` where it previously read 429.
+
+Two other failures in that run were harness faults, not product defects, and are
+recorded here so the next agent does not re-diagnose them:
+
+- **Rate-limit assertion measured the cache.** `cache_settings.enabled: true` is
+  global, and the harness sent five byte-identical bodies, so all five were
+  served from wiwi's response cache and never reached the limiter. Fixed by
+  giving each request unique content; the section now reports
+  `codes=[200, 200, 429, 429, 429]`.
+- **`fake-slow` had no deployment.** The model was never added to `model_list`
+  (404), and separately the `fake-fail` test cooled the *only* provider account
+  — with `num_retries: 0` nothing revives it, so the disconnect test was
+  answering `503 no healthy deployment` (`wiwi/router/router.py:885`). Fixed by
+  adding `fake-slow` to `model_list`, giving `fake-fail` its own provider
+  account, and asserting the slow request actually reached upstream before
+  checking the gateway still serves.
+
+## Addendum — round 51: the third site of the synthesized-Open name defect (2026-09-13)
+
+### 143. `NimAdapter`'s args-before-id synthesize branch emits `ToolCallOpen(name="")` — the third adapter carrying the #135 second defect
+
+**Severity: 🟠** — the tool call reaches the client undispatchable, while the
+upstream bills for it.
+
+`wiwi/providers/nim_adapter.py:332` (pre-fix), in the `elif idx not in
+self._open_tool_indices:` arm:
+
+```python
+                    self._open_tool_indices.add(idx)
+                    self._tool_names[idx] = name_fragment or ""
+                    self._synthesized_opens.add(idx)
+                    out.append(dl.ToolCallOpen(index=idx, id="", name=""))
+```
+
+The name fragment is captured on the line above and then discarded: the Open is
+emitted with a literal empty name. `wiwi/wire/anthropic_messages.py`'s
+`StreamEncoder` renders that Open as a `tool_use` content block, and a block
+with `name: ""` cannot be dispatched by any client — the call is lost while the
+provider still charges for it. Same defect, same shape, as the second defect
+recorded under **#135** (`openai_adapter.py` and `openrouter_adapter.py`, both
+fixed in round 49); NIM is the third site and was missed because that entry
+scoped itself to "both adapters".
+
+**Measured**, one identical frame (name + args, no id) through both adapters:
+
+```
+NimAdapter     -> [('', '')]
+OpenAIAdapter  -> [('', 'get_weather')]
+```
+
+**How it was found — worth recording, because no test run found it.** After the
+round-49 fix landed, `grep -n 'name=""' wiwi/providers/*.py` was run to confirm
+the fix had removed every instance. It returned one hit: this line. The defect
+was located by grepping for the *shape* of a just-fixed bug rather than by
+exercising anything — the sibling branches in three adapters are copy-derived,
+so a fix in one is a prompt to check the others. The same grep over the
+`synthesize`/`adopt`/`_synthesized_opens` families is the cheap check to run
+whenever one of them changes.
+
+**Fix:** emit `name=self._tool_names[idx]`, matching `openai_adapter.py:495` and
+`openrouter_adapter.py:379`.
+
+**Reachability:** the branch fires when a tool chunk carries `arguments` but no
+`id` — the AUDIT #88 shape, for which the synthesize branch exists precisely
+because NIM's vLLM backend can emit args before (or entirely without) an id. A
+nameless chunk (args, no name either) still correctly synthesizes `name=""`;
+the fix stops *discarding* a name that was sent, it does not invent one.
+
+**Pinned by** `tests/test_fix_round51.py`:
+`test_nim_synthesized_open_carries_the_tool_name` (RED pre-fix),
+`test_nim_synthesized_open_matches_openai_adapter` (control-by-parity — drives
+both adapters with one frame and asserts equal Opens, which is the assertion
+that catches this class of divergence without knowing which side moved), and
+`test_nim_nameless_synthesized_open_stays_empty` (control — a genuinely
+nameless chunk must still open, so the fix does not overcorrect into inventing
+a name).
+
+**Not a duplicate of #88.** #88 covers NIM's *adoption* of a later real id after
+a synthesized Open (`_synthesized_opens` was never populated at all); this is
+what the synthesized Open itself carries. Both live in the same arm; #88's fix
+populated the set, this one fixes the payload.

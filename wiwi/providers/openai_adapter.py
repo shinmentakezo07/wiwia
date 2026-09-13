@@ -343,9 +343,6 @@ class OpenAIAdapter:
         # with no id (see decode_stream_event). A real id arriving later must
         # be adopted, not open a second tool call on the same index.
         self._synthesized_opens: set[int] = set()
-        # (id, name) of Opens already emitted, so a late id can be re-read by
-        # callers that correlate tool_result frames back to the open call.
-        self._emitted_opens: dict[int, tuple[str, str]] = {}
 
     def reset(self) -> None:
         """Drop all per-stream state so the adapter can serve another stream.
@@ -358,11 +355,44 @@ class OpenAIAdapter:
         self._tool_names.clear()
         self._pending_opens.clear()
         self._synthesized_opens.clear()
-        self._emitted_opens.clear()
+
+    def _flush_open_tools(self) -> list[dl.IRStreamDelta]:
+        """Close every still-open tool call, flushing deferred Opens first.
+
+        Used by the ``[DONE]`` arms: a stream that ends on the sentinel
+        instead of a ``finish_reason`` chunk would otherwise leave its tool
+        calls open, so the gateway synthesized ``stop`` for a turn that
+        produced tool calls and the wire encoder emitted a ``tool_use`` block
+        that never stopped (AUDIT #133). Returns ``[]`` when nothing is open,
+        which keeps the plain-text ``[DONE]`` path byte-identical to before.
+        """
+        out: list[dl.IRStreamDelta] = []
+        for open_idx in sorted(self._open_tool_indices):
+            if open_idx in self._pending_opens:
+                cid, cname = self._pending_opens.pop(open_idx)
+                out.append(dl.ToolCallOpen(index=open_idx, id=cid, name=cname))
+            out.append(dl.ToolCallClose(index=open_idx))
+        self._open_tool_indices.clear()
+        self._tool_names.clear()
+        self._pending_opens.clear()
+        self._synthesized_opens.clear()
+        return out
 
     def decode_stream_event(self, event: str, data: str) -> list[dl.IRStreamDelta]:
         if data == "[DONE]":
-            return [dl.StreamEnd()]
+            # Flush before terminating: see _flush_open_tools (AUDIT #133).
+            # A stream with no open tools still yields exactly [StreamEnd()],
+            # so the gateway's round-15 synthesis for plain text is unchanged.
+            out = self._flush_open_tools()
+            if out:
+                # Tool calls were delivered, so the stop reason is content-
+                # derived, not "stop". Without this the gateway's
+                # `finish is None` branch synthesized Finish("stop") and the
+                # client's stop_reason disagreed with the tool_use blocks it
+                # received.
+                out.append(dl.Finish("tool_call"))
+            out.append(dl.StreamEnd())
+            return out
         try:
             chunk = orjson.loads(data)
         except json.JSONDecodeError:
@@ -413,7 +443,6 @@ class OpenAIAdapter:
                     # (tool_result correlation) and keep the call open.
                     self._synthesized_opens.discard(idx)
                     self._tool_names[idx] = name_fragment or ""
-                    self._emitted_opens[idx] = (tc["id"], self._tool_names[idx])
                     if fn.get("arguments"):
                         out.append(dl.ToolCallArgsDelta(
                             index=idx, args_fragment=fn["arguments"]))
@@ -458,7 +487,12 @@ class OpenAIAdapter:
                     self._open_tool_indices.add(idx)
                     self._tool_names[idx] = name_fragment or ""
                     self._synthesized_opens.add(idx)
-                    out.append(dl.ToolCallOpen(index=idx, id="", name=""))
+                    # Carry the name fragment we just stored: emitting an
+                    # empty name left the client with a tool_use block whose
+                    # name is "", so it could not dispatch the call at all
+                    # (AUDIT #135).
+                    out.append(dl.ToolCallOpen(index=idx, id="",
+                                               name=self._tool_names[idx]))
                 args_val = fn["arguments"]
                 if isinstance(args_val, dict):
                     # Args-as-object gateway: ToolCallArgsDelta.args_fragment

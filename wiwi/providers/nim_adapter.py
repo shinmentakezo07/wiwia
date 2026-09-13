@@ -230,6 +230,13 @@ class NimAdapter(OpenAIAdapter):
             chunk = orjson.loads(data)
         except json.JSONDecodeError:
             return []
+        if not isinstance(chunk, dict):
+            # A non-dict frame (null/number/string/array) must be ignored, not
+            # crash on ``chunk.get``. The AttributeError escaped into the
+            # pump's generic handler, which cooled a healthy deployment and
+            # fed the key's retirement ladder for a frame carrying no semantic
+            # content (AUDIT #136).
+            return []
 
         out: list[dl.IRStreamDelta] = []
 
