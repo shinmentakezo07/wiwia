@@ -329,7 +329,14 @@ class NimAdapter(OpenAIAdapter):
                     self._open_tool_indices.add(idx)
                     self._tool_names[idx] = name_fragment or ""
                     self._synthesized_opens.add(idx)
-                    out.append(dl.ToolCallOpen(index=idx, id="", name=""))
+                    # Carry the name we were given, not a literal empty string
+                    # (AUDIT #143). The fragment is already stored one line
+                    # above; discarding it here made the Anthropic encoder
+                    # render a `tool_use` block with name:"" that no client
+                    # can dispatch. Same defect as #135 in the OpenAI and
+                    # OpenRouter adapters, fixed there in round 49.
+                    out.append(dl.ToolCallOpen(index=idx, id="",
+                                               name=self._tool_names[idx]))
                 if self._tool_aliases.get(self._tool_names.get(idx, "")):
                     # Aliased tool: buffer fragments so the completed JSON
                     # can be un-aliased before the client sees it.

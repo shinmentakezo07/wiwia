@@ -1368,3 +1368,273 @@ and healthy SSE completions remain HEALTHY — pinned by the control test.
 and WorkBuddy adapter): the SSE error envelope leaves the terminally-retired
 key `invalid` (pre-fix: restored to `probation`), while the healthy SSE body
 still restores it to `probation`.
+
+---
+
+## 47.1 Terminal frames must close *every* open tool block (AUDIT #111)
+
+**Affects:** `wiwi/wire/anthropic_messages.py` (`final_frame`),
+`wiwi/wire/openai_responses.py` (`_completed`) — the Anthropic and Responses
+surfaces, i.e. Claude Code and Codex CLI.
+
+Parallel tool calls are **siblings, not sequential**: both encoders already
+avoid closing an open tool item when a new `ToolCallOpen` arrives (that is the
+round-7 fix). But the *terminal* frame closed only the single currently-open
+block, so any adapter that ends the message with more than one tool call still
+open left the others unfinished forever.
+
+**Before** (`final_frame`, after the single current-block close):
+
+```python
+out = b"".join(self._close_block())
+```
+
+**After:**
+
+```python
+out = b"".join(self._close_block())
+# Parallel tool calls are siblings: an adapter may end the message with
+# several tool_use blocks still open (the Anthropic upstream omits their
+# content_block_stop). _close_block() only closes the *current* one, so
+# every remaining registered index needs its own stop or the client is
+# left with a tool_use block that never finishes (AUDIT #111).
+for idx in sorted(self._tool_blocks):
+    out += b"".join(self._close_block(tool_index=idx))
+```
+
+`_completed` gets the mirror change (`for idx in sorted(self._tools):
+closing += b"".join(self._close_tool(idx))`). Note `_close_tool` **pops** its
+entry from `self._tools`, so the sweep is also what makes the terminal
+`response.completed` payload carry the missing `function_call` items at all.
+
+**Idempotence:** the no-arg `_close_block()` runs first and clears
+`_open_tool`; `_close_block(tool_index=idx)` returns `[]` for an index already
+popped (`anthropic_messages.py:371-373`). Verified against the worst case —
+index 0 opened *last*, so it is simultaneously the currently-open block and a
+sweep target — giving exactly one stop per index and no `KeyError`.
+
+**Live trigger (why this is not theoretical):** the OpenAI adapter's `[DONE]`
+early return (`openai_adapter.py:364-365`) does not flush open tool state, so
+every `[DONE]`-terminated stream with tool calls reaches the encoder with
+tools still open. Two parallel calls + `[DONE]` gave
+`content_block_start ×2 / content_block_stop ×1` pre-fix. (The stop *reason* on
+that same path is still wrong — that is AUDIT #133, filed open.)
+
+**Files changed:** `wiwi/wire/anthropic_messages.py`,
+`wiwi/wire/openai_responses.py`, `tests/test_fix_round47.py`, `AUDIT.md`
+(#111 marked fixed in place).
+
+## 47.2 The OpenAI adapter's synthesized-open markers must not survive `finish_reason` (AUDIT #129)
+
+**Affects:** `wiwi/providers/openai_adapter.py` — the "adopt the real id" branch
+(`:407-420`), which is shared with every adapter that inherits
+`decode_stream_event` from `OpenAIAdapter` (`cline`, `bai`, `workbuddy`).
+
+When a provider sends `arguments` with no `id`, the adapter synthesizes
+`ToolCallOpen(index, id="", name="")` and records the index in
+`_synthesized_opens`. If the real id arrives later, the branch at `:407` adopts
+it and `continue`s past the open-emitting code — correct, because an Open was
+already emitted.
+
+The `finish_reason` sweep cleared `_open_tool_indices`, `_tool_names`, and
+`_pending_opens` — but **not** `_synthesized_opens`. A later tool call reusing
+that index then took the adopt branch and emitted `ToolCallArgsDelta` with no
+preceding `ToolCallOpen`; the encoders drop args for an unregistered index
+(`openai_chat.py:319-322`), so the call vanished silently.
+
+**Fix:** clear `_synthesized_opens` (and the write-only `_emitted_opens`) in the
+same sweep. `reset()` already cleared both; only the per-finish path missed them.
+
+**Files changed:** `wiwi/providers/openai_adapter.py`,
+`tests/test_fix_round47.py`
+(`test_openai_adapter_reopen_after_finish_emits_open_before_args`), `AUDIT.md`
+(#129).
+
+**Scope note:** `NimAdapter` overrides `decode_stream_event` and carries the
+adoption half only (AUDIT #88, fixed in round 41) — it does not share this
+defect. `OpenRouterAdapter` also overrides it and lacks the *synthesize* branch
+entirely, which is a separate open finding (AUDIT #135).
+
+### Known-open follow-ups from this round — **all fixed in round 49**
+
+Both follow-ups below were fixed on 2026-09-13; see §49.1 and §49.2. The
+entries are kept here because the *diagnosis* is what a later agent needs, and
+`AUDIT.md` now carries the fix record.
+
+- **#133** `[DONE]`-terminated streams: tools left open **and** `stop_reason`
+  synthesized as `stop`/`end_turn` while tool calls were delivered. Same
+  `[DONE]` early return as 47.1's trigger; the fix is to flush open tool state
+  in that arm exactly as the `finish_reason` arm does. Also present at
+  `openrouter_adapter.py:228` and `opencode_adapter.py:208`.
+- **#135** OpenRouter has no `elif idx not in self._open_tool_indices:`
+  synthesize branch, so a tool chunk carrying args but no `id` emits a bare
+  `ToolCallArgsDelta` — the call disappears from every dialect.
+
+## 49.1 `[DONE]` must flush open tool state *and* derive the stop reason (AUDIT #133)
+
+**Affects:** `wiwi/providers/openai_adapter.py` (the `[DONE]` arm, and every
+adapter that inherits or mirrors it), `wiwi/providers/openrouter_adapter.py`.
+Reaches the Chat, Anthropic, and Responses surfaces through whichever encoder
+the caller used.
+
+Round 47 fixed the *encoder* side of this (§47.1: the terminal frame now closes
+every open block), which masked the client-visible half of the defect. What
+remained is that a `[DONE]`-terminated stream never produced a `Finish` at all,
+so the gateway's `finish is None` branch (`gateway.py:1022-1040`) synthesized
+`Finish("stop")` for a turn that had delivered tool calls. Claude Code reads
+`stop_reason: "end_turn"` and concludes the turn ended without tool use — it
+stops the agent loop. The tools were delivered and never acted on.
+
+**Before:**
+
+```python
+def decode_stream_event(self, event: str, data: str) -> list[dl.IRStreamDelta]:
+    if data == "[DONE]":
+        return [dl.StreamEnd()]
+```
+
+**After** — a shared helper on the base adapter, so the OpenRouter subclass
+that overrides `decode_stream_event` gets the same behaviour:
+
+```python
+def _flush_open_tools(self) -> list[dl.IRStreamDelta]:
+    out: list[dl.IRStreamDelta] = []
+    for open_idx in sorted(self._open_tool_indices):
+        if open_idx in self._pending_opens:
+            cid, cname = self._pending_opens.pop(open_idx)
+            out.append(dl.ToolCallOpen(index=open_idx, id=cid, name=cname))
+        out.append(dl.ToolCallClose(index=open_idx))
+    self._open_tool_indices.clear()
+    self._tool_names.clear()
+    self._pending_opens.clear()
+    self._synthesized_opens.clear()
+    return out
+
+def decode_stream_event(self, event: str, data: str) -> list[dl.IRStreamDelta]:
+    if data == "[DONE]":
+        out = self._flush_open_tools()
+        if out:
+            out.append(dl.Finish("tool_call"))
+        out.append(dl.StreamEnd())
+        return out
+```
+
+**Why `Finish("tool_call")` and not the bare `StreamEnd` the round-47 sketch
+proposed.** The sketch said to flush and terminate, letting the gateway derive
+the stop reason. It cannot: the gateway's synthesis branch fires precisely when
+`finish is None`, and its fallback is `"stop"` — the wrong answer, and the one
+this finding is about. The flush must carry the content-derived reason with it.
+
+**The three-way branch this preserves** (each pinned by a control in
+`tests/test_fix_round49.py`):
+
+| Stream shape | Emitted tail | Why |
+|---|---|---|
+| text, then `[DONE]` | `[StreamEnd()]` | `_flush_open_tools()` returns `[]`, so the gateway's round-15 synthesis still owns this path unchanged |
+| tools, then `[DONE]` | `Close`s + `Finish("tool_call")` + `StreamEnd` | the fix |
+| tools, `finish_reason`, then `[DONE]` | `[StreamEnd()]` | the finish sweep at `openai_adapter.py:501-514` already cleared the state, so the flush is empty — no duplicate `Finish`, no orphan `Close` |
+
+**OpenCode needs no change.** Its `[DONE]` arm delegates to `self._sub()` for
+the chat and messages routes (`opencode_adapter.py:203-209`), so the inherited
+fix applies; the responses route has its own `_resp_ended` guard and never had
+the defect.
+
+**Files changed:** `wiwi/providers/openai_adapter.py`,
+`wiwi/providers/openrouter_adapter.py`,
+`tests/test_fix_round49.py` (6 tests), `AUDIT.md` (#133).
+
+## 49.2 OpenRouter must synthesize *and* adopt tool opens like the base adapter (AUDIT #135)
+
+**Affects:** `wiwi/providers/openrouter_adapter.py` — the OpenRouter provider
+type on every surface.
+
+`OpenRouterAdapter` overrides `decode_stream_event` wholesale, and its copy had
+drifted from `OpenAIAdapter`'s in two places. The missing *synthesize* branch
+was the filed finding; the missing *adopt* branch was latent behind it.
+
+**Before** (the args arm — no `elif`):
+
+```python
+if fn.get("arguments"):
+    if idx in self._pending_opens:
+        cid, cname = self._pending_opens.pop(idx)
+        out.append(dl.ToolCallOpen(index=idx, id=cid, name=cname))
+    out.append(dl.ToolCallArgsDelta(index=idx, args_fragment=fn["arguments"]))
+```
+
+**After:**
+
+```python
+if fn.get("arguments"):
+    if idx in self._pending_opens:
+        cid, cname = self._pending_opens.pop(idx)
+        out.append(dl.ToolCallOpen(index=idx, id=cid, name=cname))
+    elif idx not in self._open_tool_indices:
+        self._open_tool_indices.add(idx)
+        self._tool_names[idx] = name_fragment or ""
+        self._synthesized_opens.add(idx)
+        out.append(dl.ToolCallOpen(index=idx, id="",
+                                   name=self._tool_names[idx]))
+    out.append(dl.ToolCallArgsDelta(index=idx, args_fragment=fn["arguments"]))
+```
+
+Adding the synthesize branch **requires** the matching adopt branch in the
+id-first arm, or the synthesized open becomes a second `ToolCallOpen` for the
+same index when the real id finally arrives:
+
+```python
+if tc.get("id"):
+    if idx in self._synthesized_opens:
+        self._synthesized_opens.discard(idx)
+        self._tool_names[idx] = name_fragment or ""
+        if fn.get("arguments"):
+            out.append(dl.ToolCallArgsDelta(index=idx, args_fragment=fn["arguments"]))
+        continue
+    if idx in self._open_tool_indices:
+        ...
+```
+
+**The synthesized Open must carry the name.** The first cut of this fix emitted
+`ToolCallOpen(index=idx, id="", name="")` — the branch *stores* `name_fragment`
+in `_tool_names[idx]` on the line above, and then dropped it. Unit tests passed
+(the Open existed, was correctly nested, and the args reassembled), but
+`AnthropicStreamEncoder` renders the Open as a `tool_use` block, and a block
+with `name: ""` cannot be dispatched by the client: the call arrives and the
+agent loop has nothing to invoke. Caught by the real-TCP harness, not the unit
+tests. Emit `name=self._tool_names[idx]`.
+
+The lesson generalizes past this fix, but **not** as "assert on the encoded
+output" — the e2e file already did that and still passed against the broken
+code. The existing `tools: tool_use block opens with the upstream tool name`
+check decodes the Anthropic SSE and asserts the rendered `tool_use` block's
+name; it stayed green because its fixture (`fake-tools`) sends a real `id` on
+its first chunk, so it takes the *id-first* arm and never reaches the
+synthesize branch. Verified by reverting the fix: the `fake-tools` assertion
+passes, the `fake-argsnoid` one fails.
+
+So the discriminating question is not how strong the assertion is but **which
+branch the fixture drives**. Assertion strength and branch coverage are
+independent axes; only the second one failed here. `fake-tools` covers id-first
+and `fake-argsnoid` covers synthesize, which completes the pair — but a third
+tools fixture must choose its arm deliberately rather than inheriting "the
+tools path is covered" from the one that exists.
+
+**The same bug existed a third time, at `nim_adapter.py:332`** (AUDIT #143,
+fixed round 51). This entry originally said "in *both* adapters" — but the
+three synthesize branches are copy-derived, and "both" described which files
+had been opened, not which files had the defect. The cheap check that finds
+all of them at once is a grep for the *shape* of the just-fixed bug
+(`grep -n 'name=""' wiwi/providers/*.py`), which costs nothing and does not
+depend on a fixture reaching the arm. Run it over the
+`synthesize` / `adopt` / `_synthesized_opens` families whenever one changes.
+
+`_synthesized_opens` already exists on `OpenRouterAdapter` — it defines no
+`__init__` and inherits `OpenAIAdapter`'s — so no state plumbing was needed.
+The invariant to preserve: **one `ToolCallOpen` per index per call**, whether
+the id arrives first, last, or never. The regression test
+`test_openrouter_args_without_id_matches_openai_adapter` drives both adapters
+with one frame list and asserts identical delta-kind sequences — the divergence
+between the two was the bug, so pinning them equal is the durable check.
+
+**Files changed:** `wiwi/providers/openrouter_adapter.py`,
+`tests/test_fix_round49.py` (4 tests), `AUDIT.md` (#135).
