@@ -1,108 +1,47 @@
-# wiwi — OpenCode Repository Guide
+# Repository Guidelines
 
-For OpenCode work, treat this file as canonical; `CLAUDE.md` duplicates parts of it and can lag.
+## Project Structure & Module Organization
 
-## System shape and entrypoints
+wiwi is a self-hosted unified LLM gateway (FastAPI, Python 3.12): three inbound API dialects route through one internal representation to eleven outbound provider types, then respond in the caller's dialect.
 
-wiwi is a self-hosted FastAPI gateway. OpenAI Chat, OpenAI Responses, and Anthropic Messages enter as three wire dialects, become one canonical IR, route through a provider adapter, then return in the caller's dialect:
+- `wiwi/wire/` — inbound codecs (`openai_chat.py`, `openai_responses.py`, `anthropic_messages.py`): decode/encode/error bodies per dialect.
+- `wiwi/providers/` — outbound adapters (`<provider>_adapter.py`) plus `registry.py`, which dispatches on provider type.
+- `wiwi/core/`, `wiwi/ir/`, `wiwi/streaming/`, `wiwi/router/`, `wiwi/auth/`, `wiwi/ratelimit/`, `wiwi/cache/`, `wiwi/cost/`, `wiwi/logging_core/` — dialect- and provider-agnostic engine code. Never import `wire`/`providers` symbols here.
+- `wiwi/server/` — FastAPI app factory, admin API, metrics.
+- `web/` — admin UI and public site (React 19 + TypeScript strict + Vite 6 + Tailwind 4); builds to `wiwi/server/static/`.
+- `tests/` — pytest suite; `docs/` — design specs.
 
-```text
-inbound wire -> canonical IR -> provider adapter -> canonical IR -> caller wire
-```
-
-`wiwi/config.py:PROVIDER_TYPES` is the outbound-type source of truth. The main HTTP surfaces are `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages`, `POST /v1/messages/count_tokens`, `GET /v1/models`, `GET /public/models`, and `GET /health`; `/admin/*` is API access and `/auth/*` is user-session access.
-
-For request behavior, start at `wiwi/server/app.py:create_app`, `AppState`, and `run_chat_like`, then follow `RequestContext` through `wiwi/core/gateway.py`, `wiwi/router/router.py`, `wiwi/providers/registry.py`, and the surface encoder. Do not read the ~4k-line app factory top to bottom. For streaming, read `wiwi/streaming/deltas.py` first.
-
-The built SPA mounts at `/` after API routes and has history fallback. The current admin console is `/console`; `/app/*` is a legacy redirect. Older references to `/admin/ui` are stale.
-
-## Ownership and hard contracts
-
-- `wiwi/wire/` owns inbound dialect decode/encode/error translation. `wiwi/providers/` owns outbound adapters and provider quirks.
-- `core/`, `router/`, `auth/`, `streaming/`, `cache/`, `cost/`, `logging_core/`, and `ir/` stay dialect- and provider-agnostic. Never import wire/provider symbols there.
-- Adding a provider requires an adapter, a `registry.get_adapter()` branch (or documented OpenAI-wire fallback), and catalog/assert coverage. The registry assert catches missing branches, not misplaced branching.
-- Use `fresh_adapter(type)` on request hot paths. `get_adapter(type)` returns a resettable singleton safe only for synchronous, non-await-held use; adapters retain stream-decoding state across awaits.
-- `RequestContext` is the single mutable object threaded through a request. Keep request-specific mutation there or on the request-owned adapter, not on frozen IR/stream deltas.
-- Adapters must emit this stream order; encoders assume it is legal:
-
-```text
-StreamStart (once, first)
-  TextDelta* | ThinkingDelta*
-  ToolCallOpen -> ToolCallArgsDelta* -> ToolCallClose (nested per index)
-UsageFinal (once, after the last content delta)
-Finish (once)
-StreamEnd xor StreamError
-```
-
-`StreamError` may terminate at any point without `Finish`. All ten delta variants are frozen dataclasses; mutate adapter state, never a delta.
-
-## Configuration and runtime
-
-- Config precedence is `--config`/`-c` > `WIWI_CONFIG` inline YAML > `wiwi.yaml`. `.env` loads with `override=False`; real environment variables win.
-- `os.environ/NAME` values interpolate recursively. Missing values become `""`, and validation drops providers whose resolved keys are empty.
-- Startup fails closed unless `WIWI_SESSION_SECRET` or `general_settings.master_key` is set. The session secret otherwise derives from the master key.
-- `DATABASE_URL` > configured database URL > `sqlite+aiosqlite:///wiwi.db`. Postgres URLs are normalized for `asyncpg`; schema uses startup `CREATE TABLE IF NOT EXISTS`, with no Alembic or migrations.
-- YAML config loads first; DB-stored providers, keys, deployments, aliases, and settings layer over it, skipping YAML entries with the same names.
-- Production rate limiting uses `wiwi/ratelimit/memory.py`. `RedisRateLimiter` exists but is not wired into `AppState`; Redis currently selects the optional response-cache backend.
-- Exact-match response cache is off by default. Keep `cache_hit` (provider prompt cache) distinct from `response_cache_hit` (wiwi cache); a response-cache hit must leave `cache_hit=False`.
-- Durable stream journals are on by default in `.wiwi/journals` with a 600-second TTL and 1 MiB cap. Never commit `.wiwi/`.
-
-## Commands and toolchain
-
-Use ambient `python3` (Python 3.12 here). The checkout's `.venv` is an empty symlink and must not be used.
+## Build, Test, and Development Commands
 
 ```bash
-# Fresh Python setup; uv.lock is authoritative.
-uv pip install -e '.[dev]'
-uv pip install -e '.[redis]'       # optional Redis response-cache backend
-
-# Backend verification.
-ruff check wiwi/ tests/
-python3 -m pytest tests/ -q
-
-# Focused tests.
-python3 -m pytest tests/test_codecs.py -q
-python3 -m pytest tests/test_router.py -k cooldown
-python3 -m pytest tests/test_integration.py::test_chat_completion_happy_path -q
-
-# Backend server.
-wiwi --config wiwi.yaml
-wiwi --reload --reload-dir wiwi
-uvicorn wiwi.server.app:create_app_from_config_path --factory
-
-# Frontend; bun is authoritative, not npm.
-cd web && bun install
-cd web && bun run dev
-cd web && bun run build              # tsc -b, then Vite -> ../wiwi/server/static/
-cd web && bun run lint
-
-# Full stack and load testing.
-docker compose up --build
-python3 bench.py -n 10 -c 1,4,16 --max-tokens 100
+python3 -m pytest tests/ -q        # full test suite (must be green)
+ruff check wiwi/ tests/            # lint (must be green)
+wiwi --config wiwi.yaml            # run server on :4000
+cd web && bun run dev              # dev server for the web UI
+cd web && bun run build            # tsc -b && vite build
+cd web && bun run lint             # eslint web/src
 ```
 
-`web/package-lock.json` and `start.sh` are legacy npm paths; do not mix package managers in one session. There is no CI or pre-commit configuration, so the manual full pytest + ruff gate is binding.
+Use the ambient `python3`; there is no usable `.venv`. **Bun, not npm**, is authoritative for `web/`. There is no CI or pre-commit hook — run the full `pytest` + `ruff` gate before committing.
 
-## Testing and bugfix workflow
+## Coding Style & Naming Conventions
 
-- pytest uses `asyncio_mode = "auto"` and there is no `conftest.py`; new async tests are bare `async def` tests. Prefer decorator-form `@respx.mock` for upstream mocking.
-- Admin-auth tests normally use bearer key `sk-wiwi-master-test`.
-- Put new bug regressions in the next unused `tests/test_fix_roundN.py`; find it with `ls tests/test_fix_round*.py`. Round 5 remains the legacy `test_bugfix_round5.py`.
-- Read `AUDIT.md` before every bugfix. If a real defect is found, add or update its entry before/alongside the fix; mark resolved entries fixed and preserve their history.
-- Read `UPDATE.md` before changing any wire codec, the OpenAI/Anthropic/OpenRouter adapters, or handling `reasoning_effort`/`reasoning`, `tool_result`, `content: null`, `stream_options`, or upstream error extraction. Add a changelog entry for new fixes in those areas.
-- Diagnose root cause first, write the failing regression first, keep the implementation in the owning module, self-review, then run the full pytest + ruff gate and smoke-test changed live paths.
-- Use imperative present-tense commit subjects without prefix tags, with one logical change per commit.
+- Ruff only: line length 100, target py311. No mypy.
+- Async throughout; Pydantic v2 for config/admin schemas, frozen dataclasses for IR/streaming types. Use `structlog`, never `print`, in library code.
+- Wire modules named after the dialect; adapters as `<provider>_adapter.py`; core code must not branch on dialect or provider names.
 
-## Frontend rules
+## Testing Guidelines
 
-- `web/` is React 19 + Vite 6 + Tailwind 4. TypeScript is strict with `noUnusedLocals`, `noUnusedParameters`, `verbatimModuleSyntax`, and `erasableSyntaxOnly`; use the `@/*` alias.
-- `web/src/pages/` mixes public marketing pages, user pages, and guarded console pages; determine ownership from `web/src/main.tsx`, not the directory name.
-- Every UI change must work at a 375×812 viewport and a wide desktop viewport. Verify touch targets, keyboard order and visible focus, modal Escape behavior, non-hover-only controls, and readable/reflowing text.
+- pytest with `asyncio_mode = "auto"`: write bare `async def test_…`, no decorators. Mock upstreams with decorator-form `@respx.mock`.
+- No `conftest.py`; each test file builds its own config/app fixtures.
+- New bug regressions go in the next unused `tests/test_fix_roundN.py` (check with `ls tests/test_fix_round*.py`).
 
-## Imports, style, and guardrails
+## Commit & Pull Request Guidelines
 
-- Import a symbol from the module that owns it, not through an internal re-export. Prefer an existing helper/API; do not invent a parallel convention.
-- Never import `wiwi.server.app` at module level from library code. Before changing or removing an exported symbol, inspect all references (repository convention: `lsp references`).
-- Backend code is async; use Pydantic v2 for config/admin schemas and frozen dataclasses for IR/stream hot paths. Use `structlog`, not `print`, in library code. Ruff targets Python 3.11 with line length 100 and ignores only `EXE002`.
-- Never commit `wiwi.yaml`, `wiwi.db`, `.env`, `key.md`, `opencode.json(c)`, `*.har`, `.verify/`, `.wiwi/`, or built SPA assets. Use `wiwi.yaml.example` as the config reference.
-- Trust executable code over prose. `detailed.md` is the code-derived technical reference; sections of `docs/ARCHITECTURE.md`, `docs/CORE.md`, and `docs/ADMIN.md` are aspirational history when they disagree with the implementation.
+- Commits: imperative present tense, capitalized, no prefix tags (`Add auth keys and service`). One logical change per commit.
+- Work directly on `main` — no feature branches or PRs in this single-developer repo.
+- Bugfixes: read `AUDIT.md` first; report found bugs there and link fixes to entries. Read `UPDATE.md` before touching translation-layer code.
+
+## Security & Configuration Tips
+
+Never commit `wiwi.yaml`, `wiwi.db`, `.env`, `key.md`, `opencode.jsonc`, `*.har`, or anything under `.wiwi/` or `.verify/` — they hold live keys and runtime state. Provider keys enter via `os.environ/NAME` interpolation in config; admin endpoints require the master key (`WIWI_MASTER_KEY`).
