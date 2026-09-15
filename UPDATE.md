@@ -1638,3 +1638,94 @@ between the two was the bug, so pinning them equal is the durable check.
 
 **Files changed:** `wiwi/providers/openrouter_adapter.py`,
 `tests/test_fix_round49.py` (4 tests), `AUDIT.md` (#135).
+
+---
+
+## 54. WorkBuddy forwards the caller's reasoning effort verbatim, uncapped
+
+**File**: `wiwi/providers/workbuddy_adapter.py` (`encode_request`)
+
+**Invariant**: whatever reasoning level the caller's agent client expresses
+reaches the WorkBuddy upstream as the same `reasoning_effort` value — no
+cap, no whitelist, no silent re-enable:
+
+- `reasoning_effort` (OpenAI Chat) and `reasoning.effort` (Responses /
+  Codex CLI) pass through **verbatim**, including levels the IR's own effort
+  table does not know — WorkBuddy owns validation of its field.
+- An Anthropic `thinking.budget_tokens` (Claude Code) is **translated** to the
+  nearest effort level by `wiwi.ir.types.thinking_budget_to_effort` — that is
+  a translation, not a clamp. A huge budget (e.g. 999999) maps to `"xhigh"`;
+  it is never capped down or rejected.
+- An explicit disable (`"none"` effort, budget 0, `thinking: disabled`)
+  becomes `"none"` upstream — never replaced by the default.
+- Only a caller that expressed **no** preference gets
+  `_DEFAULT_REASONING_EFFORT` (`"max"`), per entry 41. Anthropic
+  `thinking: {"type": "adaptive"}` carries no level of its own, so it also
+  gets the default.
+
+The stale comment claiming "a bare Chat request never carries
+reasoning_effort" was corrected — Chat requests do carry it and it is
+respected; no code change was needed.
+
+**Tests:** `tests/test_fix_round53.py` — end-to-end (real agent payloads
+through the wire codecs into `WorkBuddyAdapter.encode_request`):
+`test_responses_effort_levels_pass_through_verbatim`,
+`test_chat_effort_levels_pass_through_verbatim`,
+`test_chat_unknown_effort_not_filtered`,
+`test_anthropic_budget_maps_to_nearest_level`,
+`test_anthropic_budget_is_never_capped`,
+`test_anthropic_disabled_and_zero_stay_disabled`,
+`test_anthropic_adaptive_defaults_to_max`,
+`test_no_client_preference_defaults_to_max`.
+
+---
+
+## 55. Scalar tool-args fragments corrupt the stream; sync Anthropic encode drops redacted_thinking
+
+Two AUDIT entries (#124, #125), fixed together in round 54 because both are
+"a value reached a typed slot unchecked" defects on the translation boundary.
+
+### #124 — `arguments` as a truthy scalar
+
+**Files**: `wiwi/wire/openai_chat.py` (`decode_request`),
+`wiwi/providers/base.py` (`coerce_args_fragment`),
+`wiwi/providers/openai_adapter.py`, `wiwi/providers/openrouter_adapter.py`,
+`wiwi/providers/nim_adapter.py`
+
+`json.loads` raises `TypeError` — not `JSONDecodeError` — for a non-string,
+so `arguments: true` (or `5`, `1.5`, `["a"]`) escaped the Chat codec's
+`except` clause and 500'd the request. The Responses codec already defended
+this (`_load_args`); the Chat codec was the only surface that did not.
+
+The same shape in the provider decoders was worse on the streaming path than
+the register assumed. `ToolCallArgsDelta.args_fragment` is typed `str`, the
+scalar was placed on the delta unchecked, and the client encoder's frame
+serialization raised **after** the response had started:
+
+```
+HTTP 200
+data: {…"tool_calls":[{"index":0,…,"function":{"name":"f","arguments":""}}]…}
+data: {…"tool_calls":[{"index":0,"function":{"arguments":true}}]…}
+data: {"error":{"message":"sequence item 0: expected str instance, bool found",…}}
+```
+
+A valid upstream response became a corrupt stream. Fixed at the boundary with
+one shared helper, `coerce_args_fragment` (str passes through, dict is
+re-serialized, anything else becomes `""`), applied at every live site —
+including NIM's aliased-tool buffer, where `str + bool` raised on concatenation.
+
+### #125 — sync `/v1/messages` dropped `redacted_thinking`
+
+**File**: `wiwi/wire/anthropic_messages.py` (`encode_response`)
+
+The streaming encoder has emitted `redacted_thinking` verbatim since #103 and
+`AnthropicAdapter.encode_request` replays it, but the client-facing **sync**
+encode had no redacted branch: an opaque blob rendered as
+`{"type": "thinking", "thinking": ""}` — data dropped, block unsigned, so the
+client's next-turn history was 400-bait. The mirror branch now emits
+`{"type": "redacted_thinking", "data": t.data}`.
+
+**Tests:** `tests/test_fix_round54.py` (15) — codec-level guards for every
+scalar shape, controls for the string/dict/ordinary-thinking paths, provider
+decoder coverage for the three adapters, and two end-to-end app tests (the
+replayed-scalar 500 and the corrupt-stream case) driven through `create_app`.
