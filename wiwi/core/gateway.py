@@ -132,23 +132,68 @@ def merge_resume_context(origin: RequestContext,
             ou.estimated = ou.estimated or ru.estimated
     origin.cost = float(getattr(origin, "cost", 0.0) or 0.0) + \
         float(getattr(resumed, "cost", 0.0) or 0.0)
-    # The encoder reports the stream usage from `_stream_usage`; carry the
-    # resumed attempt's UsageFinal so the client's usage block is complete.
+    # The encoder reports the stream usage from `_stream_usage`; sum the
+    # resumed attempt's UsageFinal into it. Assigning it wholesale showed the
+    # client only the last attempt's tokens while `cost`/`usage` above billed
+    # every attempt, so with `stream_resume_max_retries > 1` the usage block
+    # and the spend disagreed (AUDIT_REPORT M5).
     su = getattr(resumed, "_stream_usage", None)
     if su is not None:
-        origin._stream_usage = su  # type: ignore[attr-defined]
+        ou_su = getattr(origin, "_stream_usage", None)
+        if ou_su is None:
+            origin._stream_usage = su  # type: ignore[attr-defined]
+        else:
+            origin._stream_usage = dl.UsageFinal(  # type: ignore[attr-defined]
+                prompt=ou_su.prompt + su.prompt,
+                cached=ou_su.cached + su.cached,
+                reasoning=ou_su.reasoning + su.reasoning,
+                output=ou_su.output + su.output,
+                cache_creation=ou_su.cache_creation + su.cache_creation,
+                # Same OR-ing as `origin.usage` above: a sum containing any
+                # estimated tokens is itself an estimate (AUDIT #131).
+                estimated=ou_su.estimated or su.estimated,
+                cost=ou_su.cost + su.cost,
+            )
 
 
-def loop_abort_error(message: str) -> WiwiError:
-    """Error for a detected model repetition loop.
+def accumulated_stream_usage(ctx: RequestContext) -> dl.UsageFinal | None:
+    """The usage block the client should be sent for *ctx*, resumed attempts
+    included — or ``None`` when nothing has been priced yet.
 
-    A loop is a *model-quality* failure, not a provider/key fault: the key is
-    healthy and the provider served the request. Routing it through
-    ``_note_stream_failure`` incremented ``err_count`` and cooled the key,
-    eventually retiring a healthy credential (AUDIT #108). This error is
-    terminal for the request but side-effect-free for health accounting.
+    The client-visible half of AUDIT #106. ``merge_resume_context`` reconciles
+    the resume *after* the pump finished, which is too late for the usage frame
+    already yielded to the encoder: the client was told the last attempt's
+    tokens while the spend log billed every attempt. Reconstructing the total
+    from the context instead — the originating attempt priced into ``ctx.usage``
+    and each resumed attempt into its own ``usage`` — lets ``stream`` emit one
+    correct ``UsageFinal`` in place of the raw per-attempt one.
+
+    ``ctx.usage`` is set by ``_price_stream`` from the same ``UsageFinal`` the
+    encoder was handed, so it is the right source for the originating attempt;
+    the sum is the same arithmetic ``merge_resume_context`` applies.
     """
-    return WiwiError(502, "api_error", message, retryable=False)
+    total: dl.UsageFinal | None = None
+    pending = getattr(ctx, "_pending_resume_ctxs", None) or []
+    for source in (ctx, *pending):
+        u = getattr(source, "usage", None)
+        if u is None:
+            continue
+        if total is None:
+            total = dl.UsageFinal(
+                prompt=u.prompt_tokens, cached=u.cached_tokens,
+                reasoning=u.reasoning_tokens, output=u.completion_tokens,
+                cache_creation=u.cache_creation_tokens, estimated=u.estimated)
+        else:
+            total = dl.UsageFinal(
+                prompt=total.prompt + u.prompt_tokens,
+                cached=total.cached + u.cached_tokens,
+                reasoning=total.reasoning + u.reasoning_tokens,
+                output=total.output + u.completion_tokens,
+                cache_creation=total.cache_creation + u.cache_creation_tokens,
+                # Same rule as `merge_resume_context`: a total containing any
+                # estimated tokens is itself an estimate (AUDIT #131).
+                estimated=total.estimated or u.estimated)
+    return total
 
 
 class Gateway:
@@ -461,6 +506,25 @@ class Gateway:
                                     retryable=True)
                 except StopAsyncIteration:
                     break
+                except httpx.TransportError as e:
+                    # A peer that closes mid-body without its terminal chunk
+                    # raises ``httpx.ReadError`` here. Letting it escape meant
+                    # the retry loop — which catches only ``WiwiError`` — never
+                    # retried, never failed over and never cooled the key, on
+                    # the path Cline and WorkBuddy always take for
+                    # non-streaming callers (AUDIT_REPORT H2). Same shape as
+                    # the connect-time wrap above and as ``_pump_once``: the
+                    # error surfaces, the accounting stays with
+                    # ``execute_with_retries``' except handler.
+                    latency = int((time.monotonic() - t0) * 1000)
+                    ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
+                                     key.label, type(e).__name__, latency)
+                    _log_attempt(self.router, ctx, dep, key, type(e).__name__, latency)
+                    raise WiwiError(504 if "Timeout" in type(e).__name__ else 502,
+                                    "timeout" if "Timeout" in type(e).__name__
+                                    else "api_connection_error",
+                                    f"upstream {type(e).__name__}",
+                                    retryable=True) from e
                 evt = parser.feed_line(line)
                 if evt is not None:
                     _apply_event(evt)
@@ -493,6 +557,23 @@ class Gateway:
                                 stop_reason=stop_reason, usage=usage)
         if thinking:
             turn.thinking.append(ir.ThinkingPart(text=thinking))
+        # Cline and WorkBuddy pop `stream_options`, so the upstream never sends
+        # usage on the path their non-streaming callers take: a zero prompt is
+        # the NORMAL case, not an anomaly. Pricing those zeros billed $0.00 and
+        # reported `estimated=False`, presenting the gap as provider-reported
+        # fact (AUDIT_REPORT H3, the AUDIT #131 mislabelling class). Mirror the
+        # stream pump's fallback, keeping any real output/cache counts the
+        # provider did report.
+        if turn.usage.prompt_tokens == 0:
+            turn.usage = ir.Usage(
+                prompt_tokens=await estimate_tokens_async(
+                    flatten_request_text(ctx), dep.model_id),
+                completion_tokens=(turn.usage.completion_tokens
+                                   or max(1, len(text) // 4)),
+                cached_tokens=turn.usage.cached_tokens,
+                reasoning_tokens=turn.usage.reasoning_tokens,
+                cache_creation_tokens=turn.usage.cache_creation_tokens,
+                estimated=True)
         self._price(ctx, dep, turn.usage)
         return turn
 
@@ -593,6 +674,17 @@ class Gateway:
                         pump_task = new_pump
                         max_resumes -= 1
                         continue  # keep consuming the queue from the new pump
+                if isinstance(d, dl.UsageFinal) and getattr(
+                        ctx, "_pending_resume_ctxs", None):
+                    # A mid-stream failover happened, so this UsageFinal covers
+                    # only the attempt that just ended — the client was about
+                    # to be told the last attempt's tokens while the spend log
+                    # bills every attempt (AUDIT_REPORT M5). Emit the total
+                    # instead. Computed here, before the `finally` merges, so
+                    # the pending contexts are still the resumed attempts'.
+                    merged = accumulated_stream_usage(ctx)
+                    if merged is not None:
+                        d = merged
                 if coalescer is not None:
                     for cd in coalescer.feed(d, queue.qsize()):
                         yield cd
@@ -799,12 +891,32 @@ class Gateway:
         _open_tools: dict[int, str] = {}  # index -> tool name
         # index -> arg fragments; joined at Close (AUDIT #104).
         _arg_bufs: dict[int, list[str]] = {}
+        # The upstream stream context (bound only once ENTERED) and its release
+        # helper are defined *before* the connect attempt because the `except`
+        # handlers below release the connection on every failure path —
+        # including a failure raised while opening it. Defining them after the
+        # status block left those handlers referencing unbound names, so the
+        # cleanup itself raised `UnboundLocalError` and destroyed the exception
+        # that caused it: the real cause vanished from the traceback and the
+        # client got a generic 502.
+        resp_cm = None
+        closed = False  # True once resp_cm.__aexit__ has been called
+
+        async def _close_upstream() -> None:
+            nonlocal closed
+            if not closed:
+                closed = True
+                if resp_cm is not None:
+                    with contextlib.suppress(Exception):
+                        await resp_cm.__aexit__(None, None, None)
+
         try:
             try:
-                resp_cm = self._client.stream("POST", url, json=body, headers=headers,
-                                             timeout=dep.timeout
-                                             or dep.provider.timeout_s)
-                resp = await resp_cm.__aenter__()
+                cm = self._client.stream("POST", url, json=body, headers=headers,
+                                         timeout=dep.timeout
+                                         or dep.provider.timeout_s)
+                resp = await cm.__aenter__()
+                resp_cm = cm
             except httpx.TransportError as e:
                 ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
                                  key.label, type(e).__name__,
@@ -848,10 +960,11 @@ class Gateway:
                                          **dep.provider.extra_headers,
                                          **dep.extra_headers}
                         try:
-                            resp_cm = self._client.stream(
+                            cm = self._client.stream(
                                 "POST", url, json=body, headers=retry_headers,
                                 timeout=dep.timeout or dep.provider.timeout_s)
-                            resp = await resp_cm.__aenter__()
+                            resp = await cm.__aenter__()
+                            resp_cm = cm
                         except httpx.TransportError as e:
                             _log_attempt(self.router, ctx, dep, key,
                                          type(e).__name__,
@@ -909,14 +1022,6 @@ class Gateway:
             # rather than rescanning the whole window every token.
             loop_detector = LoopDetector(loop_limit)
             line_iter = resp.aiter_lines().__aiter__()
-            closed = False  # True once resp_cm.__aexit__ has been called
-
-            async def _close_upstream() -> None:
-                nonlocal closed
-                if not closed:
-                    closed = True
-                    with contextlib.suppress(Exception):
-                        await resp_cm.__aexit__(None, None, None)
 
             async def _apply_delta(deltas: list[dl.IRStreamDelta]) -> bool:
                 """Route one decoded event's deltas; returns True = abort pump."""

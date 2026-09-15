@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from wiwi.ir.types import Request, Usage
-from wiwi.logging_core.events import LogEvent
 
 Surface = Literal["chat", "responses", "messages"]
 
@@ -33,7 +32,6 @@ class RequestContext:
     started: float = field(default_factory=time.monotonic)
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex[:16])
     auth: Any = None  # AuthInfo from auth service
-    raw_body_bytes: int = 0
     # routing
     group: str | None = None
     deployment: Any = None  # Deployment
@@ -50,7 +48,6 @@ class RequestContext:
     stop_reason: str | None = None
     status: int = 200
     error: Any = None  # WiwiError
-    log_buffer: list[LogEvent] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
     # Set by the streaming path: `execute_with_retries` must NOT credit the key
