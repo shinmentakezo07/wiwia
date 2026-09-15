@@ -229,10 +229,11 @@ class WorkBuddyAdapter(OpenAIAdapter):
         # Reasoning effort: WorkBuddy defaults to maximum reasoning when the
         # caller expressed no preference. The base encoder skips the field for
         # openai-compatible types, so it is applied here regardless of the
-        # caller's dialect (a bare Chat request never carries reasoning_effort,
-        # and an Anthropic thinking_budget is mapped by the base encoder — which
-        # we also bypass — so both are normalized through the IR).
-        # A caller-supplied value is passed through unchanged.
+        # caller's dialect. A caller-supplied value is passed through
+        # unchanged — the exact level the agent sent reaches the upstream, and
+        # an Anthropic thinking_budget is translated to the nearest level (the
+        # budget→effort map in wiwi.ir.types), never clamped. No cap is added
+        # anywhere on this path.
         g = req.gen_params
         explicit = g.effective_reasoning_effort()
         if explicit:
