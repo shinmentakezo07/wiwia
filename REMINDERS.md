@@ -46,9 +46,6 @@ throwaway harnesses the fixers wrote are not.
 
 Each fixer was scoped to code only, so these doc lines still describe the old behaviour:
 
-- [ ] `README.md:553` — `log_requests: true` is documented but has no effect (see §5).
-- [ ] `README.md:921` — claims `header_allowlist` "controls which inbound headers are
-      forwarded upstream"; no inbound header is ever forwarded.
 - [ ] `docs/API_REFERENCE.md:79` — lists `wiwi_provider_cooldowns`, which is rendered
       nowhere, and documents the three quantile metrics as histograms.
 - [ ] `docs/API_REFERENCE.md:203` / `docs/ADMIN.md:98` / `docs/ARCHITECTURE.md:58` — pin
@@ -156,6 +153,34 @@ and discarding 99%. Adding `minutes` / `offset` parameters to
 `/admin/logs/requests` (the sink already takes `limit`) would cut the payload from
 5.46 MB to a few KB and remove the client-side window filter entirely. That touches
 the endpoint, `read_requests`, and six call sites; it is a separate change.
+
+## 9. Request-log storage cap (implemented)
+
+`request_logs` is now bounded by row count as well as age, with the removed rows
+preserved as aggregates:
+
+- `log_max_rows: 10000` (default) — keep at most N raw rows
+- `log_retention_days: 30` — age limit, unchanged
+- `log_prune_interval_s: 3600` — sweep interval (0 = startup only; it used to be
+  startup-only always, so a long-running server never pruned at all)
+
+Both paths aggregate into the new `request_rollups` table (hourly, grouped by
+`key_id`/`model_group`/`provider`) inside the SAME transaction as the delete, so
+a crash cannot lose rows or double-count them. Every read that consumes
+`request_logs` — overview, timeseries, per-key scoping — unions the rollups back
+in, so totals, token counts, cost, cache stats and percentiles are unchanged by
+pruning. Verified live: 120 requests, cap 50 → 50 raw rows, `requests=120` and
+`tok_in=1320` still reported.
+
+**Known approximation:** percentiles. p95 cannot be summed, so each rollup row
+stores its own bucket's p95 and reads combine it with raw samples by weighting
+each side by sample count. Exact when a window is entirely raw or entirely
+rolled up (the common cases); approximate in the mixed band. The alternative was
+keeping every sample forever, which is the growth this exists to stop.
+
+**Not done:** the rollup only records `tps`/`ttft_ms`/`latency_ms` percentiles —
+the same three the dashboard shows. If a new percentile metric is added, it needs
+a column in `request_rollups` and a pass in `rollup_and_prune`.
 
 ## 8. New regressions added this round
 

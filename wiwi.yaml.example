@@ -126,4 +126,9 @@ wiwi_settings:
   drop_params: true
   port: 4000
   # store_prompts_in_spend_logs: true   # log full request/response content (off by default)
-  log_retention_days: 30                 # prune request_logs older than this (0 = keep forever)
+  # Retention and storage cap for request_logs. Both roll the rows they remove
+  # into request_rollups first, so the dashboard's totals, token counts, cost
+  # and percentiles stay complete — only per-request detail is dropped.
+  log_retention_days: 30                 # drop raw rows older than this (0 = keep forever)
+  log_max_rows: 10000                    # keep at most N raw rows (0 = unlimited)
+  log_prune_interval_s: 3600             # seconds between sweeps (0 = startup only)

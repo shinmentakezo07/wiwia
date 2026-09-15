@@ -550,15 +550,19 @@ general_settings:
 wiwi_settings:
   drop_params: true            # silently drop params the target provider doesn't support
   max_request_body_mb: 50
-  log_requests: true
   store_prompts_in_spend_logs: false
-  log_retention_days: 30       # prune request_logs at startup; 0 = keep forever
+  log_retention_days: 30       # drop raw rows older than this; 0 = keep forever
+  log_max_rows: 10000          # keep at most N raw rows; 0 = unlimited
+  log_prune_interval_s: 3600   # seconds between sweeps; 0 = startup only
   host: 0.0.0.0
   port: 4000
   # public_url: https://wiwi.example.com   # pin OAuth callbacks; ignores X-Forwarded-*
-  header_allowlist: [anthropic-version, anthropic-beta,
-                     openai-organization, openai-project, openai-beta]
 ```
+
+Both log limits roll the rows they remove into `request_rollups` first, so the
+dashboard's totals, token counts, cost and percentiles stay complete — only the
+per-request detail is dropped. `log_max_rows` is what actually bounds storage on a
+busy gateway: a day-based window can still leave millions of rows inside one day.
 
 ### 🧩 Extensibility escape hatch
 
@@ -615,6 +619,7 @@ tests/                     62 test files — unit (respx), ASGI e2e, Hypothesis
 | Table | Owner | Contents |
 |---|---|---|
 | `request_logs` | `logging_core/db_sink.py` | per-request tokens, TTFT, latency, TPS, cost, cache, retry chain |
+| `request_rollups` | `logging_core/db_sink.py` | hourly aggregates (`key_id`/`model_group`/`provider`) kept permanently for rows pruned from `request_logs` |
 | `audit_logs` | `logging_core/db_sink.py` | `actor` / `action` / `target` / `diff` for every admin mutation |
 | `vkeys` | `auth/service.py` | hashed virtual keys + budgets + spend |
 | `users` | `auth/users.py` | user accounts and roles |
@@ -918,7 +923,6 @@ Bugfix regressions land in the next thematic `test_fix_roundN.py` file — **`te
 - Virtual keys are **SHA-256-hashed at rest** with constant-time compare; plaintext is returned only once, at generation time.
 - `public_url` pins OAuth callback origins — `X-Forwarded-Host` is never trusted for URL building, so an attacker can't point an OAuth callback at their own origin.
 - `X-Forwarded-For` is consulted **only** for rate-limiting buckets, never for authentication.
-- The gateway-wide `header_allowlist` controls which inbound headers are forwarded upstream.
 - **Never add dialect- or provider-specific branches in `core/`, `router/`, or `auth/`.** Dialect logic belongs in `wire/`; provider logic belongs in `providers/`.
 
 ---
