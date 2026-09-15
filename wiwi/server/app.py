@@ -2128,6 +2128,13 @@ def create_app(config: WiwiConfig) -> FastAPI:
         for k, v in list(state.router.alias_to_provider.items()):
             if v == name:
                 del state.router.alias_to_provider[k]
+        # Drop the provider's price scopes from the in-memory cost map as well
+        # as the DB (ConfigStore.delete_provider handles the latter). The cost
+        # engine resolves a scope by name, so a stale entry would keep billing
+        # at a deleted account's rate — and would be silently adopted by any
+        # provider later created under the freed name (AUDIT #149).
+        for _entry in state.cost.prices.values():
+            (_entry.get("providers") or {}).pop(name, None)
         del state.router.providers[name]
         if state.config_store:
             await state.config_store.delete_provider(name)
@@ -2220,6 +2227,18 @@ def create_app(config: WiwiConfig) -> FastAPI:
             for k, v in list(state.router.alias_to_provider.items()):
                 if v == name:
                     state.router.alias_to_provider[k] = new_name
+            # Same reason, one layer down: a price scope is keyed by provider
+            # name too. ConfigStore rewrites the persisted rows, but the cost
+            # engine reads its own in-memory map, so without this the running
+            # server keeps billing at the renamed account's scoped rate (and
+            # /admin/pricing keeps echoing the stale scope) until a restart
+            # (AUDIT #149). Assigning over an existing key is the same
+            # collision rule ConfigStore applies: the renamed (live) account's
+            # rates win.
+            for _entry in state.cost.prices.values():
+                _scopes = _entry.get("providers") or {}
+                if name in _scopes:
+                    _scopes[new_name] = _scopes.pop(name)
         else:
             target = name
         if alias_change is not None:
@@ -3438,9 +3457,20 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return _err(400, "invalid_request_error", str(e), request)
         if updated is None:
             return _err(404, "not_found_error", "user not found", request)
+        # Disabling an account must revoke the keys it owns (AUDIT #148).
+        # Without this a shut-off user keeps full API access through every
+        # key they minted: the request path authenticates against `vkeys`
+        # alone, and there is no delete-user endpoint, so disabling is the
+        # only lever an operator has. Expire rather than delete — the audit
+        # trail survives, and expire_keys evicts each credential from the
+        # auth cache so it stops working immediately rather than at TTL.
+        revoked = 0
+        if disabled is True:
+            revoked = await state.auth.expire_keys(owner_id=uid)  # type: ignore[union-attr]
         await state.logs.log_audit(actor="master", action="user.update", target=uid,
-                                   diff={"role": role, "disabled": disabled})
-        return ORJSONResponse(updated)
+                                   diff={"role": role, "disabled": disabled,
+                                         "revoked_keys": revoked})
+        return ORJSONResponse({**updated, "revoked_keys": revoked})
 
     # -- public auth surface (signup / login / logout / me) --------------------
     def _set_session_cookie(resp: ORJSONResponse, uid: str, role: str,

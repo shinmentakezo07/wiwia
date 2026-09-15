@@ -266,6 +266,30 @@ class ConfigStore:
                     sa.text("UPDATE deployments SET provider_name = :nn"
                             " WHERE provider_name = :name"),
                     {"nn": new_name, "name": name})
+                # model_price_scopes.scope holds a provider account NAME (or a
+                # provider type, which shares the namespace). Leaving it
+                # behind on a rename strands the override on a name no
+                # provider has, and a later provider reusing the freed name
+                # silently inherits those rates (AUDIT #149). Scopes naming a
+                # *type* are not touched — only the renamed account's own rows
+                # match, since the account name is what this rewrites.
+                #
+                # A plain UPDATE would raise IntegrityError (-> HTTP 500) when
+                # the target name already has a scope for the same model — e.g.
+                # renaming an account onto its own provider type, which is a
+                # legal name. Delete the rows the rename would collide with
+                # first: the renamed account is the live one, so its rates win
+                # and the superseded override goes away.
+                await conn.execute(
+                    sa.text("DELETE FROM model_price_scopes WHERE scope = :nn"
+                            " AND model_id IN (SELECT model_id"
+                            "                   FROM model_price_scopes"
+                            "                   WHERE scope = :name)"),
+                    {"nn": new_name, "name": name})
+                await conn.execute(
+                    sa.text("UPDATE model_price_scopes SET scope = :nn"
+                            " WHERE scope = :name"),
+                    {"nn": new_name, "name": name})
             await conn.execute(
                 sa.text(f"UPDATE providers SET {', '.join(sets)} WHERE name = :name"),
                 params)
@@ -275,6 +299,14 @@ class ConfigStore:
             await conn.execute(sa.text("DELETE FROM deployments WHERE provider_name = :n"),
                                {"n": name})
             await conn.execute(sa.text("DELETE FROM provider_keys WHERE provider_name = :n"),
+                               {"n": name})
+            # Scoped prices bound to this account must go with it: the scope
+            # string is the provider name, so a provider later created under
+            # the freed name would inherit rates negotiated with a different
+            # upstream (AUDIT #149). Same leak class the alias_to_provider
+            # cleanup and the Cline OAuth setting delete already guard in the
+            # admin handler.
+            await conn.execute(sa.text("DELETE FROM model_price_scopes WHERE scope = :n"),
                                {"n": name})
             await conn.execute(sa.text("DELETE FROM providers WHERE name = :n"),
                                {"n": name})

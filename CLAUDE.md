@@ -156,6 +156,7 @@ Error bodies are dialect-correct per surface (OpenAI `{"error":{…}}` vs Anthro
 - Admin API endpoints (`/admin/*`) require the master key.
 - Commits: imperative present tense, capitalized, no prefix tags (e.g. `Add auth keys and service`). One logical change per commit.
 - **Never create a branch.** Do all work directly on `main` and push to `origin/main`. No feature branches, no PR branches, no worktrees for isolation — this is a single-developer repo and branching adds coordination overhead with no reviewer to benefit from it.
+- **Never commit or push unless explicitly told to.** Do the work, run the gate (`pytest` + `ruff`, both green), report, and stop. Staging, committing and pushing are separate actions that require a direct instruction in that turn; approval for one commit does not extend to the next, and "fix this" is not an instruction to commit. Leave the tree dirty and let the user decide when history is written.
 
 ## Import Rules (binding)
 

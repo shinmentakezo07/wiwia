@@ -702,19 +702,29 @@ async def test_expire_keys_evicts_the_auth_cache(tmp_path):
     """``expire_keys`` updated the DB but not the cache, so a rotated
     credential kept authenticating for the 60 s TTL. Playground keys are minted
     with ``ttl_seconds`` and no budget, so they take exactly that cache branch
-    (AUDIT_REPORT H9)."""
+    (AUDIT_REPORT H9).
+
+    The owner is a real ``users`` row: ``owner_id`` is only ever set from an
+    authenticated user's id, and ``_lookup_db`` rejects a key whose owner row
+    is missing (AUDIT #148, fail-closed). A synthetic owner string would make
+    the warm-up ``authenticate`` below fail for that unrelated reason instead
+    of exercising the cache branch this test guards.
+    """
     from sqlalchemy.ext.asyncio import create_async_engine
+
+    from wiwi.auth.users import UserService
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/h9.db")
     try:
         svc = AuthService(engine, "mk", 50)
         await svc.startup()
+        owner = await UserService(engine, "mk").create_user("owner1", "password1")
         plaintext, _kid = await svc.create_key("playground", ttl_seconds=3600,
-                                               owner_id="u1")
-        await svc.create_key("playground", ttl_seconds=3600, owner_id="u1")
+                                               owner_id=owner.id)
+        await svc.create_key("playground", ttl_seconds=3600, owner_id=owner.id)
 
         assert await svc.authenticate(plaintext) is not None  # warm the cache
-        expired = await svc.expire_keys(owner_id="u1", alias="playground",
+        expired = await svc.expire_keys(owner_id=owner.id, alias="playground",
                                         keep_newest=1)
         assert expired == 1
 

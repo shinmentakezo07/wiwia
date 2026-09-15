@@ -207,11 +207,14 @@ _ROLLUP_MIGRATE_COLUMNS = (
 
 
 class _BucketSum:
-    """Additive view over a raw bucket row plus its rolled-up counterpart.
+    """Merged view over a raw bucket row plus its rolled-up counterpart.
 
     Duck-types the column attributes the timeseries reader touches
     (``tok_*``, ``tps_sum``, ``tps_count``, ``tps_max``), so merging two
     sources needs no change at the read site.
+
+    Every member is a sum except ``tps_max``, which is a maximum on both
+    sides and so is maxed rather than added (AUDIT #150).
     """
 
     __slots__ = ("tok_cache_creation", "tok_cached", "tok_in", "tok_out",
@@ -219,7 +222,17 @@ class _BucketSum:
 
     def __init__(self, a, b) -> None:
         for f in self.__slots__:
+            if f == "tps_max":
+                continue
             setattr(self, f, (getattr(a, f, 0) or 0) + (getattr(b, f, 0) or 0))
+        # tps_max is the one non-additive member: both sides already reduced
+        # their rows to a peak (MAX(CASE WHEN tps > 0 ...) over the raw rows,
+        # MAX(tps_p95) over the rolled-up hour) and the timeseries reader
+        # publishes it as the bucket's tps_p95. Summing two maxima reports a
+        # throughput that never occurred — take the larger, as _merge_p95
+        # already does for the percentiles.
+        self.tps_max = max(getattr(a, "tps_max", 0) or 0,
+                           getattr(b, "tps_max", 0) or 0)
 
 
 def _merge_p95(samples: list[float], pairs: list[tuple[float, int]]) -> float:
@@ -267,6 +280,11 @@ class DBSink:
     # just made. Only non-empty results are cached, so a clear cannot be
     # followed by a re-cache of a stale empty page.
     _CACHE_TTL = 5.0
+    # Bound on cached query results. Every distinct (limit, key_ids) tuple a
+    # caller presents is its own entry, so without a cap the dict grew with
+    # the number of distinct queries ever served. Matches the ceiling
+    # AuthService puts on its own auth-info cache.
+    _CACHE_MAX_ENTRIES = 4096
 
     def __init__(self, engine) -> None:
         self.engine = engine
@@ -286,7 +304,32 @@ class DBSink:
         return None
 
     def _cache_put(self, key: tuple, value) -> None:
+        self._sweep_cache()
         self._query_cache[key] = (value, time.monotonic())
+
+    def _sweep_cache(self) -> None:
+        """Drop expired entries once the cache grows past a bound.
+
+        ``_cache_get`` evicts only the key being read, so a key that is
+        written once and never re-read would otherwise live forever — the
+        cache grew with the number of *distinct* queries ever served, not
+        with the live data, and the key space is multiplied by each caller's
+        key_ids tuple. Same two-phase shape as AuthService._sweep_cache:
+        expired entries first, then the oldest half if everything is fresh,
+        so the dict is bounded even under sustained distinct-key traffic.
+        """
+        if len(self._query_cache) < self._CACHE_MAX_ENTRIES:
+            return
+        now = time.monotonic()
+        for k, (_value, ts) in list(self._query_cache.items()):
+            if now - ts >= self._CACHE_TTL:
+                del self._query_cache[k]
+        if len(self._query_cache) < self._CACHE_MAX_ENTRIES:
+            return
+        # Still full and everything is fresh: evict by insertion age. dicts
+        # preserve insertion order, so the front is the least recently written.
+        for k in list(self._query_cache)[:len(self._query_cache) // 2]:
+            del self._query_cache[k]
 
     def invalidate_cache(self) -> None:
         """Drop all cached query results.

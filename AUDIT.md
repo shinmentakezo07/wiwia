@@ -3347,3 +3347,223 @@ with the helper it covered.
 
 ---
 
+
+---
+
+## ✅ Fixed — DB-layer audit (2026-09-15)
+
+Four gaps found by reading the DB layer (`logging_core/db_sink.py`,
+`auth/`, `server/config_store.py`) against its own documented invariants.
+**All four are fixed** (#148–#151, below); each entry records what the fix
+was, what covers it, and how it was verified. One residual is called out in
+#149 (Cline OAuth settings rows across a rename) and left open on purpose.
+
+Every fix was verified three ways: a regression test in
+`tests/test_fix_round59.py` that fails on the pre-fix code, a **mutation
+check** (re-introducing each bug must fail its test), and a **live
+end-to-end run** against a server on an isolated port and a throwaway
+database — including a restart, to prove the state is durable and not just
+in-memory.
+
+### 148. Disabling a user does not revoke the virtual keys they own
+
+**Severity: 🟠 High** — a disabled account keeps full API access through every
+key it ever minted.
+
+**Files:** `wiwi/auth/users.py:203` (`UserService.patch` writes only
+`users.disabled`), `wiwi/server/app.py:3436` (the sole caller),
+`wiwi/auth/service.py:170` (`AuthService.authenticate`), `wiwi/server/app.py:929`
+(`authenticate` on the request path).
+
+**Trigger:** a user mints a key (`POST /admin/keys`, `owner_id` = their user
+id), then an admin disables the account via `PATCH /admin/users/{uid}`
+with `{"disabled": true}`. The user row flips to `disabled = 1`, and
+`current_user` (`app.py:1836`) correctly refuses to mint them a *session* —
+but the request path never consults `users` at all. `AuthService.authenticate`
+reads only `vkeys.disabled` / `vkeys.expires_at`, and `_lookup_db`
+(`auth/service.py:198`) does not join `users`. Every key the account owns
+still authenticates, still bills, and still counts against nothing.
+
+Reproduced directly: create a user, mint an owner-scoped key, `patch(uid,
+disabled=True)`, then `authenticate(plaintext)` — it returns a live `AuthInfo`
+(`owner_id='uc2654cd5f0c3103a'`) rather than `None`. There is no delete-user
+endpoint either (`grep '@app.delete'` → 7 routes, none for users), so
+disabling is the only revocation lever an operator has, and it does not reach
+keys.
+
+This is the DB-side half of AUDIT #57 (unbounded playground keys): #57 capped
+how many keys a user can mint, but nothing revokes the ones already issued
+when the account is shut off.
+
+**Fix sketch:** in the same transaction that sets `users.disabled = 1`, expire
+that owner's keys — `AuthService.expire_keys(owner_id=uid)` already exists and
+evicts the auth cache per row (`auth/service.py:457`), so wiring it into
+`UserService.patch` (or the handler) is the whole change. Alternatively add an
+`owner_id` join to `_lookup_db`; expiring is cheaper and preserves the audit
+trail the way `expire_keys` already does.
+
+**Status: fixed** — fixed in both places, because each covers the other's gap:
+
+1. *Enforcement (authoritative).* `AuthService._lookup_db` now refuses a key
+   whose owning account is disabled, via a correlated `EXISTS` over `users`
+   rather than an outer join — so it fails **closed**: a key with no owner
+   (`owner_id IS NULL`, the admin-minted ones) still authenticates, but a key
+   whose owner row is *missing* does not. This is what makes the invariant
+   hold even when the handler is bypassed (a direct DB edit, or a partial
+   failure mid-revocation). `AuthService.startup()` now also creates the
+   `users` table from `UserService`'s own `USERS_DDL` constant, so a
+   standalone `AuthService` (tests, tools) cannot break on the join.
+2. *Immediate effect.* `PATCH /admin/users/{uid}` with `disabled: true` calls
+   `expire_keys(owner_id=uid)`, which expires the rows in place (audit trail
+   survives) and evicts each credential from the auth cache. The response and
+   the audit diff both carry `revoked_keys: <n>`, so an operator sees the
+   blast radius.
+
+Deliberately **not** changed: the cached-auth fast path in `authenticate()`
+still serves owner-bound keys. Forcing a DB round-trip there would work, but
+it would also make H9's regression test
+(`test_fix_round55.py::test_expire_keys_evicts_the_auth_cache`) pass
+vacuously — the DB re-read alone would reject an expired key, so the test
+would no longer prove that `expire_keys` evicts the cache. Verified by
+mutation: removing the eviction loop still fails that test.
+
+Covered by `tests/test_fix_round59.py::test_disabled_owner_key_is_rejected_by_the_db_check`,
+`::test_disabling_one_owner_leaves_other_owners_keys_alone`,
+`::test_key_whose_owner_row_is_missing_fails_closed`,
+`::test_reenabling_user_does_not_resurrect_revoked_keys`,
+`::test_admin_disable_reports_revoked_key_count`,
+`::test_admin_disable_leaves_unowned_keys_alone`. Live-verified end to end:
+key returns 200 → `PATCH {"disabled":true}` → `revoked_keys: 3` → key returns
+401, and still 401 after a server restart. `tests/test_fix_round55.py`'s
+fixture was updated to use a real `users` row, since a synthetic `owner_id`
+is unreachable in production (`owner_id` is only ever `actor.id`) and would
+now be rejected by the fail-closed check for an unrelated reason.
+
+### 149. `model_price_scopes` rows survive a provider rename and delete, silently re-binding to a recycled name
+
+**Severity: 🟡 Medium** — a deleted provider's negotiated rates can be
+inherited by an unrelated provider that later reuses the name.
+
+**Files:** `wiwi/server/config_store.py:273` (`delete_provider`), `:251-268`
+(`update_provider`, which rewrites `provider_keys` and `deployments` but not
+scopes), `:108` (`model_price_scopes` DDL), `wiwi/server/app.py:2133` and
+`:2245` (the callers).
+
+**Trigger:** add provider `acct-a`, bind a scoped price with
+`PUT /admin/pricing/{model}?provider=acct-a`, then either rename `acct-a` →
+`acct-b` or delete it. Both verified against a real `ConfigStore`: after the
+rename the scope row still reads `scope='acct-a'` while the provider is named
+`acct-b`; after the delete it is still there with no provider at all. Because
+`_valid_pricing_scopes` (`app.py:3163`) validates a scope only at *write*
+time and the cost engine resolves scopes by name at *read* time
+(`cost/pricing.py:163`, account-first), a later provider created with the
+freed name `acct-a` silently inherits those rates — and `provider.delete`
+already guards against exactly this class of leak for `alias_to_provider`
+(`app.py:2128`) and for the Cline OAuth setting (`app.py:2134`), so the
+precedent is established one line away.
+
+`update_provider` is the more likely path in practice: it deliberately updates
+child rows first so the rename cannot violate referential integrity
+(`config_store.py:257-268`), and simply omits this table.
+
+**Fix sketch:** add `UPDATE model_price_scopes SET scope = :nn WHERE scope =
+:name` beside the two existing child updates in `update_provider`, and
+`DELETE FROM model_price_scopes WHERE scope = :n` in `delete_provider`. (The
+same gap exists for `settings` rows keyed `cline_oauth:<provider>` —
+`app.py:3655` — which `delete_provider` cleans up at `app.py:2134` but a
+rename leaves stranded.)
+
+**Status: fixed** — the DB half is as sketched above (`config_store.py`,
+both statements). The live end-to-end run then exposed a **second half the
+source reading had missed**: `ConfigStore` rewrote the persisted rows but the
+cost engine reads its own in-memory map, so the running server kept billing
+at the renamed account's scoped rate — and `/admin/pricing` kept echoing the
+stale scope — until a restart. Reproduced live: after `PATCH
+/admin/providers/acct-a {"name":"acct-b"}`, the DB read `acct-b` while
+`GET /admin/pricing` still reported `acct-a`. Both admin handlers now update
+the in-memory map too (`app.py`, the rename branch beside the
+`alias_to_provider` rewrite, and `admin_delete_provider`), matching how the
+alias map is already handled in the same code path.
+
+Covered by `tests/test_fix_round59.py::test_provider_rename_rewrites_price_scopes`,
+`::test_provider_delete_removes_price_scopes`,
+`::test_provider_rename_leaves_other_scopes_untouched`,
+`::test_provider_type_scope_survives_account_rename`,
+`::test_provider_rename_rewrites_the_in_memory_cost_map`,
+`::test_provider_delete_drops_the_in_memory_scope`. Live-verified: `acct-a` →
+`acct-b` → `acct-c` tracked the scope with no restart, and deleting the
+provider cleared it in both the API and the DB.
+
+**Still open:** the `settings` rows keyed `cline_oauth:<provider>` noted
+above — a rename strands them. Left unfixed here to keep this change scoped
+to the reported defect; `delete_provider` already cleans them up.
+
+### 150. Timeseries `tps_p95` reports the *sum* of bucket peaks, not the max
+
+**Severity: 🟡 Medium** — the TPS chart overstates p95 whenever a bucket mixes
+surviving raw rows with a rolled-up hour.
+
+**Files:** `wiwi/logging_core/db_sink.py:217` (`_BucketSum.__slots__`),
+`:220-222` (the additive `__init__`), `:1329` (the merge), `:1357` (the read).
+
+**Trigger:** `_BucketSum` is documented as "an additive view over a raw bucket
+row plus its rolled-up counterpart" and adds every field in `__slots__`
+uniformly. That is correct for the token counters, but `tps_max` is not
+additive — it is a maximum, produced by `MAX(CASE WHEN tps > 0 ...)` on the
+raw side (`:1271`) and by `MAX(tps_p95)` on the rollup side (`:1302`), and
+consumed as `tps_p95` at `:1357`. Adding two maxima is meaningless.
+
+Reproduced: a raw bucket with `tps_max=50` merged with a rolled-up hour whose
+`tps_p95=60` reports `tps_p95 = 110.0` where the true value is `60`. Any
+window spanning the raw/rollup boundary (which is the entire point of the
+rollup feature) can display a TPS figure that never occurred.
+
+**Fix sketch:** exclude `tps_max` from the additive loop and set it to
+`max(getattr(a, "tps_max", 0) or 0, getattr(b, "tps_max", 0) or 0)` after it,
+matching how `_merge_p95` (`:225`) already treats percentiles as
+non-additive.
+
+**Status: fixed** — exactly as sketched. Live-verified end to end: a raw row
+at `tps=50` plus a rolled-up hour at `tps_p95=60` in the same bucket now
+reports `tps_p95 = 60.0` through `/admin/stats/timeseries`; before the fix
+the same data reported `110.0`.
+
+Covered by `tests/test_fix_round59.py::test_bucket_sum_takes_max_of_tps_peak_not_the_sum`,
+`::test_bucket_sum_still_adds_the_token_counters`,
+`::test_timeseries_tps_p95_never_exceeds_a_real_peak`.
+
+### 151. `DBSink._query_cache` never evicts on the write path, so it grows without bound
+
+**Severity: ⚪ Low** — slow memory growth proportional to distinct queries
+served, not to live data.
+
+**Files:** `wiwi/logging_core/db_sink.py:276` (`_cache_get`), `:288`
+(`_cache_put`), `:291` (`invalidate_cache`), `:269` (`_CACHE_TTL`).
+
+**Trigger:** `_cache_get` evicts an entry only when *that same key* is read
+again after its 5 s TTL, and its own comment claims this keeps the dict
+bounded. It does not: a key that is written once and never read again is never
+touched, so it is never evicted. `invalidate_cache()` clears the whole dict,
+but only the two write paths call it (`write_requests` `:598`, `write_audit`
+`:818`, `rollup_and_prune` `:460`) — a read-heavy workload with no writes
+retains every distinct key forever. The cache key includes the caller's
+`key_ids` tuple (`:898`, `:984`, `:1194`), so a deployment with many users
+multiplies the key space by owner.
+
+Measured: 50,000 distinct `_cache_put` calls followed by 10 re-reads leave
+`len(_query_cache) == 50000` — nothing was evicted.
+
+**Fix sketch:** sweep expired entries on insert once the dict exceeds a cap
+(the same shape `AuthService._sweep_cache` already uses at
+`auth/service.py:120`, which is the established pattern in this codebase), or
+bound it with an `OrderedDict` LRU.
+
+**Status: fixed** — `_cache_put` now calls a new `DBSink._sweep_cache()` once
+the dict exceeds `_CACHE_MAX_ENTRIES` (4096). It uses the same two-phase rule
+as `AuthService._sweep_cache`: drop expired entries first, then the oldest
+half if everything is still fresh — the TTL sweep alone cannot bound the dict
+under sustained distinct-key traffic.
+
+Covered by `tests/test_fix_round59.py::test_query_cache_evicts_expired_entries_on_insert`,
+`::test_query_cache_keeps_live_entries`,
+`::test_query_cache_bounds_itself_when_everything_is_fresh`.

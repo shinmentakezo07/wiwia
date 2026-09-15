@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from wiwi.auth.keys import generate_virtual_key, hash_key
+from wiwi.auth.users import USERS_DDL
 
 
 def _coerce_limit(value: object, name: str) -> float | None:
@@ -138,6 +139,12 @@ class AuthService:
 
     async def startup(self) -> None:
         async with self.engine.begin() as conn:
+            # _lookup_db joins `users` to enforce owner revocation (AUDIT
+            # #148), so the table must exist even when UserService.startup()
+            # has not run — standalone AuthService uses (tests, tools) and
+            # any startup ordering. Reuses UserService's own DDL constant so
+            # the two can never drift into different shapes.
+            await conn.execute(sa.text(USERS_DDL))
             await conn.execute(sa.text(CREATE_SQL))
             # Index for ORDER BY created_at DESC in list_keys()
             await conn.execute(sa.text(
@@ -177,6 +184,15 @@ class AuthService:
             # Budget-bound keys must always reflect the latest spend so a
             # concurrent update_spend can immediately reject further use;
             # other keys (no max_budget) keep the TTL cache for speed.
+            #
+            # Owner-bound keys deliberately keep the cache too (AUDIT #148).
+            # Revocation does not rely on this read path: disabling a user
+            # expires their keys in place and evicts each one from the cache
+            # (admin PATCH -> expire_keys), so the next authenticate() misses
+            # and hits the owner check in _lookup_db. Forcing a DB round-trip
+            # here instead would also silently weaken H9's regression test,
+            # which guards that eviction by asserting an expired key stops
+            # authenticating immediately.
             info, _ts = hit
             if info is None:
                 return None
@@ -196,11 +212,27 @@ class AuthService:
         return info
 
     async def _lookup_db(self, h: str) -> AuthInfo | None:
+        # The owner check is the authoritative half of revocation (AUDIT
+        # #148): a key is only as live as the account that owns it. Disabling
+        # a user also expires their keys in place (see the admin PATCH
+        # handler), but enforcing it here means the invariant holds even when
+        # that action is bypassed — a direct DB edit, or a partial failure
+        # mid-revocation.
+        #
+        # EXISTS rather than a LEFT JOIN on purpose: this fails CLOSED. A key
+        # with no owner (owner_id IS NULL — the admin-minted ones) still
+        # authenticates, but a key whose owner row is *missing* does not. An
+        # outer join would read a dangling owner as "not disabled" and let the
+        # credential through, which is the wrong default for an auth check.
         async with self.engine.connect() as conn:
             row = (await conn.execute(
-                sa.text("SELECT id, key_alias, models, max_budget, spend_to_date,"
-                        " rpm, tpm, expires_at, disabled, owner_id FROM vkeys"
-                        " WHERE key_hash=:h"),
+                sa.text("SELECT v.id, v.key_alias, v.models, v.max_budget,"
+                        " v.spend_to_date, v.rpm, v.tpm, v.expires_at,"
+                        " v.disabled, v.owner_id FROM vkeys v"
+                        " WHERE v.key_hash=:h"
+                        " AND (v.owner_id IS NULL OR EXISTS ("
+                        "   SELECT 1 FROM users u WHERE u.id = v.owner_id"
+                        "   AND COALESCE(u.disabled, 0) = 0))"),
                 {"h": h},
             )).first()
         if row is None:
