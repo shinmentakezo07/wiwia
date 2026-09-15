@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 
+import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -175,5 +176,115 @@ async def test_key_scoped_reads_include_rolled_up_rows(tmp_path):
         after = await sink.read_overview(0, key_ids=["k1"])
         assert after["requests"] == before["requests"] == 100
         assert after["tok_in"] == before["tok_in"]
+    finally:
+        await eng.dispose()
+
+
+async def test_reprice_reaches_rolled_up_rows(tmp_path):
+    """A price added later must still correct traffic that was rolled up.
+
+    Regression: retroactive pricing only rescanned ``request_logs``, so once a
+    key's history had been rolled up and deleted its unpriced rows could never
+    be corrected and virtual-key spend silently under-charged.
+
+    The assertion is against an UNCAPPED run of the same data: the surviving
+    raw rows alone would still produce a nonzero delta, so only comparing the
+    two totals proves the rolled-up rows were priced too.
+    """
+    import orjson
+    from sqlalchemy import text as _text
+
+    rate = {"input_cost_per_token": 1e-5, "output_cost_per_token": 2e-5}
+    attempts = orjson.dumps([{"deployment": "retro/retro-gpt",
+                              "provider": "p1", "status": "ok"}]).decode()
+
+    async def seed_and_reprice(db: str, cap: int | None):
+        eng = create_async_engine(f"sqlite+aiosqlite:///{db}")
+        sink = DBSink(eng)
+        await sink.startup()
+        now = time.time()
+        rows = []
+        for i in range(300):
+            r = _row(i, now)
+            r.update({"attempts": attempts, "cost": 0.0, "model_group": "retro"})
+            rows.append(r)
+        async with eng.begin() as conn:
+            cols = ", ".join(rows[0].keys())
+            ph = ", ".join(f":{k}" for k in rows[0])
+            for i in range(0, len(rows), 1000):
+                await conn.execute(
+                    _text(f"INSERT INTO request_logs ({cols}) VALUES ({ph})"),
+                    rows[i:i + 1000])
+        if cap is not None:
+            await sink.enforce_log_cap(cap)
+        before = await sink.read_overview(0)
+        deltas = await sink.reprice_unpriced_history("retro-gpt", lambda p: rate)
+        after = await sink.read_overview(0)
+        # A second run must be a no-op (the unpriced counters are cleared).
+        again = await sink.reprice_unpriced_history("retro-gpt", lambda p: rate)
+        await eng.dispose()
+        return before, deltas, after, again
+
+    _, full_deltas, _, _ = await seed_and_reprice(f"{tmp_path}/full.db", None)
+    before, capped_deltas, after, again = await seed_and_reprice(
+        f"{tmp_path}/capped.db", 50)
+
+    assert before["cost"] == 0.0, "the seeded rows are all unpriced"
+    assert capped_deltas, "repricing must report a spend delta"
+    assert sum(capped_deltas.values()) == pytest.approx(
+        sum(full_deltas.values())), (
+        "repricing a capped table must recover the same spend as an uncapped "
+        "one; a smaller delta means the rolled-up rows were skipped")
+    assert after["cost"] == pytest.approx(sum(full_deltas.values()), abs=1e-9), (
+        "the true-up must land in the overview, not just in the return value")
+    assert after["requests"] == before["requests"], (
+        "repricing must not change the request count")
+    assert sum(again.values()) == 0, "a second reprice must be a no-op"
+
+
+async def test_every_stats_surface_survives_the_cap(tmp_path):
+    """Exhaustive sweep: no aggregate the console reads may change.
+
+    Covers overview and timeseries over several windows, both metrics, and the
+    per-key (actor-scoped) variants, which take a different SQL path.
+    """
+    eng = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/surfaces.db")
+    sink = DBSink(eng)
+    await sink.startup()
+    try:
+        now = time.time()
+        await _seed(sink, eng, 3000, now)
+
+        async def snap():
+            return {
+                "ov_all": await sink.read_overview(0),
+                "ov_1h": await sink.read_overview(60),
+                "ov_7d": await sink.read_overview(10080),
+                "ts_all": await sink.read_timeseries(86400, "tokens", 0),
+                "ts_1h": await sink.read_timeseries(60, "tokens", 60),
+                "k0": await sink.read_overview(0, key_ids=["k0"]),
+                "k1": await sink.read_overview(0, key_ids=["k1"]),
+                "k0_ts": await sink.read_timeseries(86400, "tokens", 0,
+                                                    key_ids=["k0"]),
+            }
+
+        before = await snap()
+        await sink.enforce_log_cap(500)
+        after = await snap()
+
+        fields = ("requests", "errors", "tok_in", "tok_cached", "tok_out",
+                  "tok_reasoning", "tok_cache_creation", "cost",
+                  "cache_savings", "cache_hits", "estimated_requests")
+        for section in ("ov_all", "ov_1h", "ov_7d", "k0", "k1"):
+            for f in fields:
+                assert after[section][f] == before[section][f], (
+                    f"{section}.{f} changed across the cap: "
+                    f"{before[section][f]} -> {after[section][f]}")
+        for section in ("ts_all", "ts_1h", "k0_ts"):
+            for f in ("tok_in", "tok_cached", "tok_out", "tok_reasoning",
+                      "tok_cache_creation"):
+                b = sum(x[f] for x in before[section]["buckets"])
+                a = sum(x[f] for x in after[section]["buckets"])
+                assert a == b, f"{section}.{f} changed: {b} -> {a}"
     finally:
         await eng.dispose()

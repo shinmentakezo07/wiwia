@@ -114,6 +114,7 @@ CREATE TABLE IF NOT EXISTS request_rollups (
   key_id TEXT DEFAULT '',
   model_group TEXT DEFAULT '',
   provider TEXT DEFAULT '',
+  serving_model TEXT DEFAULT '',
   requests INTEGER DEFAULT 0,
   errors INTEGER DEFAULT 0,
   estimated_requests INTEGER DEFAULT 0,
@@ -129,7 +130,12 @@ CREATE TABLE IF NOT EXISTS request_rollups (
   tps_count INTEGER DEFAULT 0,
   tps_p95 REAL DEFAULT 0,
   ttft_p95_ms REAL DEFAULT 0,
-  latency_p95_ms REAL DEFAULT 0
+  latency_p95_ms REAL DEFAULT 0,
+  unpriced_requests INTEGER DEFAULT 0,
+  unpriced_tok_in INTEGER DEFAULT 0,
+  unpriced_tok_cached INTEGER DEFAULT 0,
+  unpriced_tok_cache_creation INTEGER DEFAULT 0,
+  unpriced_tok_out INTEGER DEFAULT 0
 );
 """
 
@@ -140,6 +146,7 @@ CREATE TABLE IF NOT EXISTS request_rollups (
   key_id TEXT DEFAULT '',
   model_group TEXT DEFAULT '',
   provider TEXT DEFAULT '',
+  serving_model TEXT DEFAULT '',
   requests INTEGER DEFAULT 0,
   errors INTEGER DEFAULT 0,
   estimated_requests INTEGER DEFAULT 0,
@@ -155,17 +162,28 @@ CREATE TABLE IF NOT EXISTS request_rollups (
   tps_count INTEGER DEFAULT 0,
   tps_p95 DOUBLE PRECISION DEFAULT 0,
   ttft_p95_ms DOUBLE PRECISION DEFAULT 0,
-  latency_p95_ms DOUBLE PRECISION DEFAULT 0
+  latency_p95_ms DOUBLE PRECISION DEFAULT 0,
+  unpriced_requests INTEGER DEFAULT 0,
+  unpriced_tok_in INTEGER DEFAULT 0,
+  unpriced_tok_cached INTEGER DEFAULT 0,
+  unpriced_tok_cache_creation INTEGER DEFAULT 0,
+  unpriced_tok_out INTEGER DEFAULT 0
 );
 """
 
-# Columns written per rollup row. The unique index over the four leading
-# columns makes the upsert idempotent.
-_ROLLUP_KEY_COLS = ("bucket_ts", "key_id", "model_group", "provider")
+# Columns written per rollup row. The unique index over the five leading
+# columns makes the upsert idempotent. ``serving_model`` is the deployment's
+# model id (the tail of "<group>/<model_id>"), kept so retroactive pricing can
+# still find and correct these rows after the raw ones are gone.
+_ROLLUP_KEY_COLS = ("bucket_ts", "key_id", "model_group", "provider",
+                    "serving_model")
 _ROLLUP_ADDITIVE = ("requests", "errors", "estimated_requests", "cache_hits",
                     "tok_in", "tok_cached", "tok_cache_creation",
                     "tok_reasoning", "tok_out", "cost", "cache_savings",
-                    "tps_sum", "tps_count")
+                    "tps_sum", "tps_count",
+                    "unpriced_requests", "unpriced_tok_in",
+                    "unpriced_tok_cached", "unpriced_tok_cache_creation",
+                    "unpriced_tok_out")
 _ROLLUP_COLS = _ROLLUP_KEY_COLS + _ROLLUP_ADDITIVE + (
     "tps_p95", "ttft_p95_ms", "latency_p95_ms")
 
@@ -289,76 +307,107 @@ class DBSink:
     async def rollup_and_prune(self, cutoff_ts: float) -> int:
         """Aggregate ``request_logs`` rows older than *cutoff_ts*, then delete them.
 
-        The aggregate is bucketed hourly and grouped by ``(key_id,
-        model_group, provider)`` — the three dimensions the console slices by
-        and the finest granularity that keeps the table small: one row per
-        distinct group per hour instead of one per request.
+        Rows are grouped by ``(hour, key_id, model_group, provider,
+        serving_model)`` — the dimensions the console slices by, plus the model
+        id so retroactive pricing can still find these rows after the raw ones
+        are gone. One row per distinct group per hour, instead of one per
+        request.
 
-        Percentiles cannot be summed, so each rollup row stores the p95 of its
-        own bucket (``tps_p95``, ``ttft_p95_ms``, ``latency_p95_ms``) and a
-        weighted mean is reconstructed on read. Averaging pre-computed p95s is
-        an approximation — it is exact when a window contains one bucket and
-        converges as buckets get denser; the alternative is keeping every
-        sample forever, which is the growth this method exists to stop.
+        The aggregate and the delete share ONE transaction: a crash between
+        them would otherwise either lose the rows or double-count them on the
+        next run.
 
-        Idempotent: a row already rolled up is added to (``upsert`` on the
-        four key columns), so a crash between the aggregate and the delete
-        costs nothing — the next run re-aggregates the same rows and the
-        counts would double, so the delete and the aggregate run in ONE
-        transaction.
+        Percentiles cannot be summed, so each row stores the p95 of its own
+        bucket (``tps_p95``, ``ttft_p95_ms``, ``latency_p95_ms``) and reads
+        reconstruct a weighted mean. That is exact when a window is entirely
+        raw or entirely rolled up (the normal cases) and approximate in the
+        mixed band; the alternative is keeping every sample forever, which is
+        the growth this exists to stop.
+
+        Returns the number of raw rows deleted.
         """
         bucket_s = 3600
+        # Per-group accumulators. Keyed by the full five-tuple.
+        groups: dict[tuple, dict] = {}
+        # Bounded per-group percentile samples, mirroring the max-5000 window
+        # the overview read uses — unbounded lists here would reintroduce the
+        # memory growth this method removes.
+        samples: dict[tuple, dict[str, list[float]]] = {}
+        max_samples = 5000
+        batch = 2000
+        last_id = -1
+
         async with self.engine.begin() as conn:
-            # 1. Aggregate the doomed rows, newest-first ordering irrelevant.
-            agg_sql = f"""
-                SELECT FLOOR(ts / {bucket_s}) * {bucket_s} AS bucket_ts,
-                       key_id, model_group, provider,
-                       COUNT(*) AS requests,
-                       SUM(CASE WHEN status >= 400 OR error_code != '' THEN 1 ELSE 0 END) AS errors,
-                       SUM(CASE WHEN usage_estimated = 1 THEN 1 ELSE 0 END) AS estimated_requests,
-                       SUM(CASE WHEN cache_hit = 1 OR tok_cached > 0 THEN 1 ELSE 0 END) AS cache_hits,
-                       COALESCE(SUM(tok_in), 0) AS tok_in,
-                       COALESCE(SUM(tok_cached), 0) AS tok_cached,
-                       COALESCE(SUM(tok_cache_creation), 0) AS tok_cache_creation,
-                       COALESCE(SUM(tok_reasoning), 0) AS tok_reasoning,
-                       COALESCE(SUM(tok_out), 0) AS tok_out,
-                       COALESCE(SUM(cost), 0) AS cost,
-                       COALESCE(SUM(cache_savings), 0) AS cache_savings,
-                       COALESCE(SUM(CASE WHEN tps > 0 THEN tps ELSE 0 END), 0) AS tps_sum,
-                       COUNT(CASE WHEN tps > 0 THEN 1 END) AS tps_count
-                FROM request_logs
-                WHERE ts < :cutoff
-                GROUP BY bucket_ts, key_id, model_group, provider
-            """
-            rows = (await conn.execute(sa.text(agg_sql), {"cutoff": cutoff_ts})).all()
-            if not rows:
+            # Keyset pagination: immune to offset drift, and bounded memory
+            # because only the accumulators grow, not the row list.
+            while True:
+                rows = (await conn.execute(sa.text("""
+                    SELECT id, ts, key_id, model_group, provider, status,
+                           error_code, attempts, tok_in, tok_cached,
+                           tok_cache_creation, tok_reasoning, tok_out, cost,
+                           cache_savings, cache_hit, usage_estimated, tps,
+                           ttft_ms, latency_ms
+                    FROM request_logs
+                    WHERE ts < :cutoff AND id > :last
+                    ORDER BY id LIMIT :b
+                """), {"cutoff": cutoff_ts, "last": last_id, "b": batch})).all()
+                if not rows:
+                    break
+                last_id = rows[-1][0]
+                for r in rows:
+                    serving = self._serving_attempt(r.attempts, None) or {}
+                    dep = serving.get("deployment") or ""
+                    model_id = dep.split("/")[-1] if dep else ""
+                    k = (int(r.ts // bucket_s) * bucket_s, r.key_id,
+                         r.model_group, r.provider, model_id)
+                    acc = groups.get(k)
+                    if acc is None:
+                        acc = groups[k] = {
+                            "requests": 0, "errors": 0, "estimated_requests": 0,
+                            "cache_hits": 0, "tok_in": 0, "tok_cached": 0,
+                            "tok_cache_creation": 0, "tok_reasoning": 0,
+                            "tok_out": 0, "cost": 0.0, "cache_savings": 0.0,
+                            "tps_sum": 0.0, "tps_count": 0,
+                            "unpriced_requests": 0, "unpriced_tok_in": 0,
+                            "unpriced_tok_cached": 0,
+                            "unpriced_tok_cache_creation": 0,
+                            "unpriced_tok_out": 0,
+                        }
+                        samples[k] = {"tps": [], "ttft_ms": [], "latency_ms": []}
+                    acc["requests"] += 1
+                    if (r.status or 0) >= 400 or r.error_code:
+                        acc["errors"] += 1
+                    if r.usage_estimated:
+                        acc["estimated_requests"] += 1
+                    if r.cache_hit or r.tok_cached:
+                        acc["cache_hits"] += 1
+                    acc["tok_in"] += r.tok_in or 0
+                    acc["tok_cached"] += r.tok_cached or 0
+                    acc["tok_cache_creation"] += r.tok_cache_creation or 0
+                    acc["tok_reasoning"] += r.tok_reasoning or 0
+                    acc["tok_out"] += r.tok_out or 0
+                    acc["cost"] += r.cost or 0.0
+                    acc["cache_savings"] += r.cache_savings or 0.0
+                    if r.tps:
+                        acc["tps_sum"] += r.tps
+                        acc["tps_count"] += 1
+                    # Unpriced rows (cost 0) keep their token split so a price
+                    # added later can still be applied to this group.
+                    if not r.cost:
+                        acc["unpriced_requests"] += 1
+                        acc["unpriced_tok_in"] += r.tok_in or 0
+                        acc["unpriced_tok_cached"] += r.tok_cached or 0
+                        acc["unpriced_tok_cache_creation"] += r.tok_cache_creation or 0
+                        acc["unpriced_tok_out"] += r.tok_out or 0
+                    s = samples[k]
+                    for col in ("tps", "ttft_ms", "latency_ms"):
+                        v = getattr(r, col)
+                        if v and len(s[col]) < max_samples:
+                            s[col].append(v)
+
+            if not groups:
                 return 0
 
-            # 2. Percentiles need the raw samples, so compute them per group
-            #    in a second pass over the same (still undeleted) rows. Bounded
-            #    by the same cutoff, so it is the same row set.
-            p95_by_group: dict[tuple, dict[str, float]] = {}
-            for col, field in (("tps", "tps_p95"), ("ttft_ms", "ttft_p95_ms"),
-                               ("latency_ms", "latency_p95_ms")):
-                sample_sql = f"""
-                    SELECT FLOOR(ts / {bucket_s}) * {bucket_s} AS bucket_ts,
-                           key_id, model_group, provider, {col} AS v
-                    FROM request_logs
-                    WHERE ts < :cutoff AND {col} > 0
-                """
-                sample = (await conn.execute(sa.text(sample_sql),
-                                             {"cutoff": cutoff_ts})).all()
-                grouped: dict[tuple, list[float]] = {}
-                for r in sample:
-                    grouped.setdefault(
-                        (r.bucket_ts, r.key_id, r.model_group, r.provider),
-                        []).append(r.v)
-                for k, vals in grouped.items():
-                    p95_by_group.setdefault(k, {})[field] = _p95(vals)
-
-            # 3. Upsert: additive columns sum, percentile columns take the
-            #    incoming bucket's value (each bucket is written once in the
-            #    normal case; a re-run overwrites with the same number).
             set_add = ", ".join(f"{c} = request_rollups.{c} + excluded.{c}"
                                 for c in _ROLLUP_ADDITIVE)
             set_pct = ", ".join(
@@ -368,39 +417,31 @@ class DBSink:
             cols = ", ".join(_ROLLUP_COLS)
             upsert = sa.text(
                 f"INSERT INTO request_rollups ({cols}) VALUES ({placeholders}) "
-                f"ON CONFLICT(bucket_ts, key_id, model_group, provider) DO UPDATE SET "
+                "ON CONFLICT(bucket_ts, key_id, model_group, provider, "
+                "serving_model) DO UPDATE SET "
                 f"{set_add}, {set_pct}"
             )
             payload = []
-            for r in rows:
-                key = (r.bucket_ts, r.key_id, r.model_group, r.provider)
-                pct = p95_by_group.get(key, {})
+            for k, acc in groups.items():
+                s = samples[k]
                 payload.append({
-                    "bucket_ts": r.bucket_ts, "key_id": r.key_id,
-                    "model_group": r.model_group, "provider": r.provider,
-                    "requests": r.requests, "errors": r.errors,
-                    "estimated_requests": r.estimated_requests,
-                    "cache_hits": r.cache_hits,
-                    "tok_in": r.tok_in, "tok_cached": r.tok_cached,
-                    "tok_cache_creation": r.tok_cache_creation,
-                    "tok_reasoning": r.tok_reasoning, "tok_out": r.tok_out,
-                    "cost": r.cost, "cache_savings": r.cache_savings,
-                    "tps_sum": r.tps_sum, "tps_count": r.tps_count,
-                    "tps_p95": pct.get("tps_p95", 0.0),
-                    "ttft_p95_ms": pct.get("ttft_p95_ms", 0.0),
-                    "latency_p95_ms": pct.get("latency_p95_ms", 0.0),
+                    "bucket_ts": k[0], "key_id": k[1], "model_group": k[2],
+                    "provider": k[3], "serving_model": k[4],
+                    "tps_p95": _p95(s["tps"]),
+                    "ttft_p95_ms": _p95(s["ttft_ms"]),
+                    "latency_p95_ms": _p95(s["latency_ms"]),
+                    **acc,
                 })
             for i in range(0, len(payload), 500):
                 await conn.execute(upsert, payload[i:i + 500])
 
-            # 4. Delete the rows we just aggregated — same transaction, so a
-            #    crash cannot lose the data or double-count it.
             result = await conn.execute(
                 sa.text("DELETE FROM request_logs WHERE ts < :cutoff"),
                 {"cutoff": cutoff_ts})
             deleted = result.rowcount or 0
         self.invalidate_cache()
         return deleted
+
 
     async def enforce_log_cap(self, max_rows: int) -> int:
         """Keep at most *max_rows* raw rows, rolling the rest up first.
@@ -453,13 +494,22 @@ class DBSink:
         # - key_id: per-user filtering (scoping request logs by the key ids a
         #   user owns — key_alias is not unique in vkeys, so scope by key_id)
         # - audit_logs.ts: time-range queries on audit log
+        # The rollup unique index gained `serving_model` as a dimension so
+        # retroactive pricing can target a model. CREATE UNIQUE INDEX IF NOT
+        # EXISTS is additive, so a database created by the earlier 4-column
+        # version would keep the narrower index and every ON CONFLICT target
+        # would fail to match. Drop and recreate unconditionally — both
+        # statements are idempotent and the recreate is cheap.
+        await conn.execute(sa.text("DROP INDEX IF EXISTS idx_rollup_unique"))
+
         for idx in [
             "CREATE INDEX IF NOT EXISTS idx_request_logs_ts ON request_logs(ts)",
             "CREATE INDEX IF NOT EXISTS idx_request_logs_key_id ON request_logs(key_id)",
             "CREATE INDEX IF NOT EXISTS idx_audit_logs_ts ON audit_logs(ts)",
             "CREATE INDEX IF NOT EXISTS idx_rollup_bucket ON request_rollups(bucket_ts)",
             ("CREATE UNIQUE INDEX IF NOT EXISTS idx_rollup_unique ON "
-             "request_rollups(bucket_ts, key_id, model_group, provider)"),
+             "request_rollups(bucket_ts, key_id, model_group, provider, "
+             "serving_model)"),
         ]:
             await conn.execute(sa.text(idx))
 
@@ -591,6 +641,83 @@ class DBSink:
                     await conn.execute(sa.text(
                         "UPDATE request_logs SET cost = :c WHERE id = :id"
                         " AND cost = 0"), updates)
+                # Same reason as the rollup pass below: cached reads must not
+                # keep serving the pre-reprice cost.
+                self.invalidate_cache()
+
+        # Rolled-up rows carry the same unpriced traffic in aggregate form.
+        # Without this pass a price added later would only correct the rows
+        # still in request_logs, so a key whose history had been rolled up
+        # silently under-charged — the raw rows are gone by then.
+        rollup_deltas = await self._reprice_rolled_up(match_tail, rate_for)
+        for key_id, delta in rollup_deltas.items():
+            key_deltas[key_id] = key_deltas.get(key_id, 0.0) + delta
+        return key_deltas
+
+    async def _reprice_rolled_up(self, match_tail: str,
+                                 rate_for) -> dict[str, float]:
+        """Reprice ``request_rollups`` rows whose model now has a price.
+
+        A rollup row is unpriced when it still holds ``unpriced_requests`` with
+        token counts — those columns are populated at rollup time from rows
+        whose cost was 0, and are zeroed once priced. The model is identified by
+        ``serving_model``, so the match is exact rather than a suffix guess.
+
+        Returns ``{key_id: spend_delta}``. Idempotent: the token columns are
+        zeroed as the cost is written, so a second call finds nothing to do.
+        """
+        key_deltas: dict[str, float] = {}
+        async with self.engine.connect() as conn:
+            rows = (await conn.execute(sa.text("""
+                SELECT id, key_id, provider, serving_model, unpriced_requests,
+                       unpriced_tok_in, unpriced_tok_cached,
+                       unpriced_tok_cache_creation, unpriced_tok_out
+                FROM request_rollups
+                WHERE unpriced_requests > 0 AND serving_model = :tail
+            """), {"tail": match_tail})).all()
+        if not rows:
+            return key_deltas
+
+        updates: list[dict] = []
+        for r in rows:
+            entry = rate_for(r.provider or "")
+            if not entry:
+                continue
+            per_token_in = entry["input_cost_per_token"]
+            per_token_out = entry["output_cost_per_token"]
+            per_token_cached = entry.get("cache_read_input_cost_per_token",
+                                         per_token_in)
+            per_token_cc = entry.get("cache_creation_input_cost_per_token",
+                                     per_token_in)
+            uncached_prompt = max(0, r.unpriced_tok_in - r.unpriced_tok_cached)
+            new_cost = round(
+                uncached_prompt * per_token_in
+                + r.unpriced_tok_cached * per_token_cached
+                + r.unpriced_tok_cache_creation * per_token_cc
+                + r.unpriced_tok_out * per_token_out, 8)
+            if new_cost <= 0:
+                continue
+            updates.append({"id": r.id, "c": new_cost, "n": r.unpriced_requests})
+            if r.key_id:
+                key_deltas[r.key_id] = key_deltas.get(r.key_id, 0.0) + new_cost
+
+        if updates:
+            async with self.engine.begin() as conn:
+                # Add the cost and clear the unpriced counters in one statement
+                # per row, so a concurrent reader never sees the cost applied
+                # twice.
+                for u in updates:
+                    await conn.execute(sa.text(
+                        "UPDATE request_rollups SET cost = cost + :c,"
+                        " unpriced_requests = 0, unpriced_tok_in = 0,"
+                        " unpriced_tok_cached = 0,"
+                        " unpriced_tok_cache_creation = 0,"
+                        " unpriced_tok_out = 0"
+                        " WHERE id = :id AND unpriced_requests > 0"), u)
+            # The cost just changed under any cached overview/timeseries read;
+            # without this the dashboard keeps serving the pre-reprice numbers
+            # for the TTL and the true-up looks like it did nothing.
+            self.invalidate_cache()
         return key_deltas
 
     @staticmethod
@@ -611,7 +738,7 @@ class DBSink:
 
     @staticmethod
     def _serving_attempt(attempts_json: str | None,
-                         match_tail: str) -> dict | None:
+                         match_tail: str | None) -> dict | None:
         """The attempt whose response produced the row's usage, or None.
 
         Attempts store ``"<group>/<model_id>"`` plus the status; the serving
@@ -621,6 +748,10 @@ class DBSink:
         that actually delivered. The model match must be a full path segment
         (boundary "/"), never a bare string suffix. Rows with no successful
         attempt (pure failures) fall back to the last attempt.
+
+        ``match_tail=None`` skips the model test and returns the serving
+        attempt whatever model it names — the rollup uses that to learn which
+        model a row was served by.
         """
         if not attempts_json:
             return None
@@ -634,6 +765,8 @@ class DBSink:
                    for a in attempts]
         serving = next((a for a in reversed(entries)
                         if DBSink._is_2xx(a.get("status"))), entries[-1])
+        if match_tail is None:
+            return serving
         dep = serving.get("deployment", "")
         if not (isinstance(dep, str) and dep.endswith(f"/{match_tail}")):
             return None
