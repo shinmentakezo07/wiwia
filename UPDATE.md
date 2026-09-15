@@ -1729,3 +1729,50 @@ client's next-turn history was 400-bait. The mirror branch now emits
 scalar shape, controls for the string/dict/ordinary-thinking paths, provider
 decoder coverage for the three adapters, and two end-to-end app tests (the
 replayed-scalar 500 and the corrupt-stream case) driven through `create_app`.
+
+---
+
+## 56. OpenCode's version refresh reads npm, not a rate-limited GitHub API (AUDIT #147)
+
+**File**: `wiwi/providers/opencode_version.py`
+
+`refresh_version()` read the live opencode version from GitHub's
+`releases/latest` REST API. Anonymous calls to that API are capped at 60
+requests/hour **per IP** and the 5-minute sweep alone spends 12 of them, so
+on a shared egress IP the budget runs out and the API answers a bare `403`:
+
+```
+2026-09-15 19:40:48 [warning  ] opencode_version_fetch_bad_status status=403
+```
+
+The cache then never fills and `OpencodeAdapter.headers()` sends
+`User-Agent: opencode/unknown` — the stale fingerprint the live refresh
+exists to prevent. The request still succeeds (Zen's client gate is
+`x-opencode-session`, not the UA version), so the degradation was silent.
+
+The sweep now reads the npm registry — the CLI's distribution source of
+truth, the endpoint opencode's own `Installation.latest` uses for npm/bun/pnpm
+installs, and the source the Cline/WorkBuddy helpers already read:
+
+```
+GET https://registry.npmjs.org/opencode-ai/latest
+-> {"version": "x.y.z"}
+```
+
+`_parse_tag` (GitHub's leading-`v` stripper) became `_parse_version`, which
+sanitizes the registry value for a header value — CR/LF/NUL stripped,
+256-char cap, non-string rejected — since the response is remote input that
+lands in a `User-Agent`. Nothing else changed: same 5-minute TTL, same
+background sweep, same stale-while-revalidate read from the synchronous
+`headers()` path.
+
+**Tests:** `tests/test_fix_round58.py` (3) — the refresh asserts the GitHub
+API is *not* called (the regression guard), registry failure keeps the stale
+version, and the header sanitizer covers CRLF, padding, non-string, and
+empty input. `tests/test_fix_round27.py`'s two refresh tests were migrated to
+`NPM_LATEST_URL`; its `test_parse_tag_strips_v` was deleted along with the
+helper.
+
+**Live:** `refresh_version()` → `1.18.31` (matches GitHub's `v1.18.31`), and
+a real `big-pickle` request through the adapter's headers returns HTTP 200.
+

@@ -5,11 +5,18 @@ Zen sits behind Cloudflare and expects a real ``User-Agent: opencode/<x.y.z>``
 Sending a stale pinned version risks an upstream minimum-version gate, so the
 adapter reads the version live at request-build time from this module's cache.
 
-The cache is refreshed from the source of truth opencode itself uses for the
-``curl`` install method (see ``Installation.latest`` in the opencode repo)::
+The npm registry is the CLI's distribution source of truth (the endpoint
+opencode's own ``Installation.latest`` uses for npm/bun/pnpm installs, and the
+one the Cline and WorkBuddy version helpers already read)::
 
-    GET https://api.github.com/repos/anomalyco/opencode/releases/latest
-    -> {"tag_name": "v1.2.3"}  (leading ``v`` stripped)
+    GET https://registry.npmjs.org/opencode-ai/latest
+    -> {"version": "x.y.z"}
+
+GitHub's ``releases/latest`` REST API served this before, but anonymous calls
+to it are capped at 60 requests/hour **per IP** — a budget the 5-minute sweep
+alone spends 12 of, shared with every other API consumer behind the same
+egress IP. Once exhausted the API answers a bare ``403``, the cache never
+fills, and the adapter sends ``opencode/unknown``.
 
 Refresh policy: 5-minute TTL, background sweep (no restart needed) plus a
 stale-while-revalidate fallback in :func:`get_cached_version` so
@@ -19,18 +26,25 @@ stale-while-revalidate fallback in :func:`get_cached_version` so
 from __future__ import annotations
 
 import asyncio
+import re
 import time
+from typing import Any
 
 import structlog
 
 log = structlog.get_logger("wiwi.opencode_version")
 
-GITHUB_LATEST_URL = "https://api.github.com/repos/anomalyco/opencode/releases/latest"
+NPM_LATEST_URL = "https://registry.npmjs.org/opencode-ai/latest"
 TTL_S = 300.0
 TICK_S = 300.0
 FIRST_SWEEP_DELAY_S = 10.0
 FETCH_TIMEOUT_S = 10.0
 FALLBACK_VERSION = "unknown"
+
+# Header-injection guard: a version string reaches a header value, and the
+# registry response is remote input. Same rule as the Cline/WorkBuddy helpers.
+_HEADER_VALUE_RE = re.compile(r"[^\r\n\x00]")
+_MAX_HEADER_LEN = 256
 
 _cached_version: str | None = None
 _fetched_at: float = 0.0
@@ -59,17 +73,46 @@ def is_stale(now: float | None = None) -> bool:
     return (now - _fetched_at) >= TTL_S
 
 
-def _parse_tag(tag: object) -> str | None:
-    if not isinstance(tag, str) or not tag.strip():
+def _parse_version(value: Any) -> str | None:
+    """Read the registry's ``version`` field, sanitized for a header value.
+
+    The registry response is remote input and the value lands in a
+    ``User-Agent``, so CR/LF/NUL are stripped and the length is capped. A
+    non-string is a malformed payload: reject it rather than stringify a
+    structure into the header.
+    """
+    if not isinstance(value, str):
         return None
-    text = tag.strip()
-    if text[:1] in ("v", "V"):
-        text = text[1:]
-    return text or None
+    text = "".join(_HEADER_VALUE_RE.findall(value)).strip()
+    return text[:_MAX_HEADER_LEN] or None
+
+
+async def _fetch_npm_version(client: Any) -> str | None:
+    """Fetch the npm latest version; any failure yields None."""
+    try:
+        resp = await client.get(
+            NPM_LATEST_URL,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "wiwi-opencode-version-refresh",
+            },
+        )
+        if resp.status_code != 200:
+            log.warning("opencode_version_fetch_bad_status", status=resp.status_code)
+            return None
+        data = resp.json()
+    except Exception as e:  # noqa: BLE001 — network failures keep stale cache
+        log.warning("opencode_version_fetch_failed", err=str(e))
+        return None
+    version = _parse_version(data.get("version")) if isinstance(data, dict) else None
+    if version is None:
+        log.warning("opencode_version_bad_payload")
+        return None
+    return version
 
 
 async def refresh_version() -> str | None:
-    """Fetch the latest release from GitHub and update the cache.
+    """Fetch the latest release from npm and update the cache.
 
     Returns the new version on success, ``None`` on failure (cache kept).
     Never raises — failures only log, so the background sweep and request
@@ -80,23 +123,11 @@ async def refresh_version() -> str | None:
         import httpx
 
         async with httpx.AsyncClient(timeout=FETCH_TIMEOUT_S) as client:
-            resp = await client.get(
-                GITHUB_LATEST_URL,
-                headers={
-                    "Accept": "application/vnd.github+json",
-                    "User-Agent": "wiwi-opencode-version-refresh",
-                },
-            )
-            if resp.status_code != 200:
-                log.warning("opencode_version_fetch_bad_status", status=resp.status_code)
-                return None
-            data = resp.json()
-    except Exception as e:  # noqa: BLE001 — network failures keep stale cache
+            version = await _fetch_npm_version(client)
+    except Exception as e:  # noqa: BLE001 — the worker must survive bad runtimes
         log.warning("opencode_version_fetch_failed", err=str(e))
         return None
-    version = _parse_tag(data.get("tag_name")) if isinstance(data, dict) else None
     if version is None:
-        log.warning("opencode_version_bad_payload")
         return None
     async with _get_lock():
         _cached_version = version

@@ -132,14 +132,12 @@ def test_headers_fallback_when_never_fetched():
 # -- version helper --------------------------------------------------------------
 
 
-def test_parse_tag_strips_v():
-    assert ov._parse_tag("v1.2.3") == "1.2.3"
-    assert ov._parse_tag("V1.2.3") == "1.2.3"
-    assert ov._parse_tag("1.2.3") == "1.2.3"
-    assert ov._parse_tag("vv1.0") == "v1.0"  # single leading v only
-    assert ov._parse_tag("") is None
-    assert ov._parse_tag(None) is None
-    assert ov._parse_tag(123) is None
+def test_parse_version_sanitizes_registry_value():
+    assert ov._parse_version("1.18.31") == "1.18.31"
+    assert ov._parse_version(" 1.18.31 ") == "1.18.31"
+    assert ov._parse_version("") is None
+    assert ov._parse_version(None) is None
+    assert ov._parse_version(123) is None
 
 
 def test_stale_logic_five_minute_ttl():
@@ -150,17 +148,17 @@ def test_stale_logic_five_minute_ttl():
 
 
 @respx.mock
-async def test_refresh_version_caches_github_tag():
+async def test_refresh_version_caches_npm_latest():
     ov._set_cached_for_tests(None, 0.0)
-    respx.get(ov.GITHUB_LATEST_URL).respond(json={"tag_name": "v7.8.9"})
-    assert await ov.refresh_version() == "7.8.9"
-    assert ov.get_cached_version() == "7.8.9"
+    respx.get(ov.NPM_LATEST_URL).respond(json={"version": "1.18.31"})
+    assert await ov.refresh_version() == "1.18.31"
+    assert ov.get_cached_version() == "1.18.31"
 
 
 @respx.mock
 async def test_refresh_version_failure_keeps_stale_cache():
     ov._set_cached_for_tests("1.0.0", time.monotonic())
-    respx.get(ov.GITHUB_LATEST_URL).respond(status_code=500)
+    respx.get(ov.NPM_LATEST_URL).respond(status_code=500)
     assert await ov.refresh_version() is None
     assert ov.get_cached_version() == "1.0.0"
 

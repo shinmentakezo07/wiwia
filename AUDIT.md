@@ -3292,3 +3292,58 @@ the rollup upsert path records `serving_model` and the unpriced token split
 end-to-end.
 
 ---
+
+### 147. OpenCode's live version refresh read a per-IP-rate-limited GitHub API, so the User-Agent degraded to `opencode/unknown`
+
+**Severity:** 🟡 Medium (silent fingerprint degradation, not an outage)
+**Files:** `wiwi/providers/opencode_version.py:28` (pre-fix `GITHUB_LATEST_URL`), `:71-105` (pre-fix `refresh_version`/`_parse_tag`)
+
+**Trigger:** observed live 2026-09-15 19:40:48 —
+
+```
+[warning  ] opencode_version_fetch_bad_status status=403
+```
+
+`refresh_version()` read the version from
+`https://api.github.com/repos/anomalyco/opencode/releases/latest`. Anonymous
+calls to the GitHub REST API are capped at **60 requests/hour per IP**, and
+the 5-minute sweep alone spends 12 of them; every other API consumer behind
+the same egress IP (shared NAT, another agent CLI on the host) takes the
+rest. Once exhausted the API answers a bare `403` with no `Retry-After`, so
+`refresh_version()` returned `None`, `_cached_version` stayed empty, and
+`OpencodeAdapter.headers()` shipped `User-Agent: opencode/unknown` — exactly
+the stale fingerprint the live refresh exists to prevent. Nothing surfaced
+this to the caller: a `warning` log was the only trace, and the request
+succeeded (Zen's client gate is the `x-opencode-session` header, not the UA
+version — verified live, see the Round 10 addendum), so the degradation was
+invisible until a version gate eventually rejects it.
+
+**Fix:** read the npm registry instead — the CLI's own distribution source of
+truth, the endpoint opencode's `Installation.latest` uses for npm/bun/pnpm
+installs, and the source the sibling Cline/WorkBuddy version helpers already
+use:
+
+```
+GET https://registry.npmjs.org/opencode-ai/latest
+-> {"version": "x.y.z"}
+```
+
+`_parse_tag` (which stripped GitHub's leading `v`) is replaced by
+`_parse_version`, which sanitizes the registry value for a header (CR/LF/NUL
+stripped, 256-char cap, non-string rejected) since the response is remote
+input that lands in a `User-Agent`. Same rule as the Cline/WorkBuddy helpers.
+
+**Verification:** live `refresh_version()` → `1.18.31` (matches GitHub's
+`v1.18.31` tag), adapter ships `User-Agent: opencode/1.18.31`, and a real
+`big-pickle` request through the adapter's own headers returns HTTP 200. 30
+rapid registry calls all return 200 — no comparable per-IP budget on the
+sweep path.
+
+**Status: fixed** — `tests/test_fix_round58.py` pins the source (asserts the
+GitHub API is *not* called) plus stale-cache survival on registry failure and
+the header sanitizer; `tests/test_fix_round27.py`'s two refresh tests were
+migrated to the registry URL, and its `test_parse_tag_strips_v` was deleted
+with the helper it covered.
+
+---
+
