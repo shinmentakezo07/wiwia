@@ -3259,3 +3259,36 @@ page overflow, ≥44 px touch targets with `aria-label`s, and the scope selector
 lists the accounts that serve the chosen model.
 
 ---
+
+### 146. Startup loop on pre-existing databases: rollup index created before its columns exist
+
+**Severity: 🔴** — any deployment against a database created by the previous
+schema version crashed in a startup loop (`Application startup failed.
+Exiting.`), and never came up.
+
+The rollup commit added `serving_model` and the five `unpriced_*` columns to
+the `request_rollups` DDL and added `serving_model` to the recreated
+`idx_rollup_unique`. But `_migrate` (`wiwi/logging_core/db_sink.py`, rollup
+section) only introspected and widened `request_logs` — never
+`request_rollups`. `CREATE TABLE IF NOT EXISTS` is a no-op on an existing
+table, so on a pre-existing database the new columns never appeared and
+`CREATE UNIQUE INDEX ... (bucket_ts, key_id, model_group, provider,
+serving_model)` failed with `asyncpg.UndefinedColumnError: column
+"serving_model" does not exist` inside `DBSink.startup()` →
+`AppState.init_db` → `lifespan`. The exact same class of gap as AUDIT #145
+(model_prices), one table over.
+
+**Fix:** `_migrate` now introspects `request_rollups` (`information_schema`
+on Postgres, `PRAGMA table_info` on SQLite) and `ALTER TABLE ADD COLUMN`s
+every entry of the new `_ROLLUP_MIGRATE_COLUMNS` constant before the index
+statements run. Migrated rows read as `serving_model = ''` / unpriced counts
+0 — retroactive pricing still rescans raw `request_logs` rows, so only
+already-rolled-up history keeps its old zero cost.
+
+**Status: fixed** — `tests/test_fix_round57.py` builds a database with the
+old four-dimension rollup shape, runs `startup()` (crashed before the fix
+with the production error), and asserts the six columns are backfilled and
+the rollup upsert path records `serving_model` and the unpriced token split
+end-to-end.
+
+---

@@ -187,6 +187,24 @@ _ROLLUP_ADDITIVE = ("requests", "errors", "estimated_requests", "cache_hits",
 _ROLLUP_COLS = _ROLLUP_KEY_COLS + _ROLLUP_ADDITIVE + (
     "tps_p95", "ttft_p95_ms", "latency_p95_ms")
 
+# Columns added to request_rollups after its first release. An existing table
+# (CREATE TABLE IF NOT EXISTS is a no-op on it) must be widened in place by
+# _migrate BEFORE idx_rollup_unique is recreated — the unique index covers
+# serving_model, so a database created by the earlier four-dimension version
+# would otherwise die at startup with UndefinedColumnError. Declarations are
+# portable: TEXT/INTEGER mean the same on SQLite and Postgres. Migrated rows
+# read as serving_model = '' / unpriced counts 0 — retroactive pricing still
+# rescans the raw request_logs rows, so only already-rolled-up history keeps
+# its old zero cost.
+_ROLLUP_MIGRATE_COLUMNS = (
+    ("serving_model", "TEXT DEFAULT ''"),
+    ("unpriced_requests", "INTEGER DEFAULT 0"),
+    ("unpriced_tok_in", "INTEGER DEFAULT 0"),
+    ("unpriced_tok_cached", "INTEGER DEFAULT 0"),
+    ("unpriced_tok_cache_creation", "INTEGER DEFAULT 0"),
+    ("unpriced_tok_out", "INTEGER DEFAULT 0"),
+)
+
 
 class _BucketSum:
     """Additive view over a raw bucket row plus its rolled-up counterpart.
@@ -488,6 +506,23 @@ class DBSink:
             if col not in cols:
                 await conn.execute(
                     sa.text(f"ALTER TABLE request_logs ADD COLUMN {col} {decl}"))
+
+        # Same treatment for request_rollups: it too gained columns after its
+        # first release (serving_model for retroactive pricing, the unpriced
+        # token split), and the recreated unique index below covers
+        # serving_model — so the widening MUST happen before the index
+        # statements or a pre-existing database crashes at startup.
+        if self._is_pg:
+            rcols = {r[0] for r in (await conn.execute(sa.text(
+                "SELECT column_name FROM information_schema.columns"
+                " WHERE table_name = 'request_rollups'"))).all()}
+        else:
+            rcols = {r[1] for r in (await conn.execute(
+                sa.text("PRAGMA table_info(request_rollups)"))).all()}
+        for col, decl in _ROLLUP_MIGRATE_COLUMNS:
+            if col not in rcols:
+                await conn.execute(
+                    sa.text(f"ALTER TABLE request_rollups ADD COLUMN {col} {decl}"))
 
         # Indexes for query hot paths:
         # - ts: time-range filters in overview, timeseries, and log reads
