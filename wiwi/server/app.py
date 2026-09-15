@@ -550,6 +550,7 @@ class AppState:
         self.cline_refresh: Any = None
         self.workbuddy_refresh: Any = None
         self.opencode_refresh: Any = None
+        self.log_retention: Any = None
         self.cline_version_refresh: Any = None
         self.workbuddy_version_refresh: Any = None
         self.healer: Any = None
@@ -650,19 +651,16 @@ class AppState:
         self._db_sink = DBSink(aengine)
         await self._db_sink.startup()
         self.logs.set_db_sink(self._db_sink)
-        # Prune stale request logs so the DB doesn't grow without bound.
-        retention = self.config.wiwi_settings.log_retention_days
-        if retention > 0 and self._db_sink is not None:
-            try:
-                pruned = await self._db_sink.prune_old_requests(retention)
-                if pruned:
-                    import structlog as _sl
-                    _sl.get_logger("wiwi.startup").info(
-                        "pruned_old_request_logs", rows=pruned, retention_days=retention)
-            except Exception as e:  # noqa: BLE001 — pruning is best-effort
-                import structlog as _sl
-                _sl.get_logger("wiwi.startup").warning(
-                    "prune_failed", error=str(e))
+        # Bound request_logs: roll the doomed rows into request_rollups, then
+        # delete them, so aggregates stay complete while per-request detail is
+        # capped. This used to run once here, which meant a long-running server
+        # never pruned at all — a periodic sweep now owns it (see
+        # wiwi/logging_core/retention.py). The first pass is on a short delay,
+        # so it still happens promptly after a restart.
+        if self._db_sink is not None:
+            from wiwi.logging_core.retention import LogRetention
+            self.log_retention = LogRetention(self)
+            self.log_retention.start()
         # Persist admin-added providers/keys/deployments so they survive restart
         self.config_store = ConfigStore(aengine)
         await self.config_store.startup()
@@ -877,6 +875,8 @@ async def lifespan(app: FastAPI):
         await state.workbuddy_version_refresh.stop()
     if state.workbuddy_refresh is not None:
         await state.workbuddy_refresh.stop()
+    if state.log_retention is not None:
+        await state.log_retention.stop()
     await state.cline_refresh.stop()
     await state.shutdown()
 

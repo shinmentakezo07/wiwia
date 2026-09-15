@@ -107,6 +107,107 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 """
 
+_ROLLUP_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS request_rollups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bucket_ts REAL NOT NULL,
+  key_id TEXT DEFAULT '',
+  model_group TEXT DEFAULT '',
+  provider TEXT DEFAULT '',
+  requests INTEGER DEFAULT 0,
+  errors INTEGER DEFAULT 0,
+  estimated_requests INTEGER DEFAULT 0,
+  cache_hits INTEGER DEFAULT 0,
+  tok_in INTEGER DEFAULT 0,
+  tok_cached INTEGER DEFAULT 0,
+  tok_cache_creation INTEGER DEFAULT 0,
+  tok_reasoning INTEGER DEFAULT 0,
+  tok_out INTEGER DEFAULT 0,
+  cost REAL DEFAULT 0,
+  cache_savings REAL DEFAULT 0,
+  tps_sum REAL DEFAULT 0,
+  tps_count INTEGER DEFAULT 0,
+  tps_p95 REAL DEFAULT 0,
+  ttft_p95_ms REAL DEFAULT 0,
+  latency_p95_ms REAL DEFAULT 0
+);
+"""
+
+_ROLLUP_DDL_PG = """
+CREATE TABLE IF NOT EXISTS request_rollups (
+  id SERIAL PRIMARY KEY,
+  bucket_ts DOUBLE PRECISION NOT NULL,
+  key_id TEXT DEFAULT '',
+  model_group TEXT DEFAULT '',
+  provider TEXT DEFAULT '',
+  requests INTEGER DEFAULT 0,
+  errors INTEGER DEFAULT 0,
+  estimated_requests INTEGER DEFAULT 0,
+  cache_hits INTEGER DEFAULT 0,
+  tok_in INTEGER DEFAULT 0,
+  tok_cached INTEGER DEFAULT 0,
+  tok_cache_creation INTEGER DEFAULT 0,
+  tok_reasoning INTEGER DEFAULT 0,
+  tok_out INTEGER DEFAULT 0,
+  cost DOUBLE PRECISION DEFAULT 0,
+  cache_savings DOUBLE PRECISION DEFAULT 0,
+  tps_sum DOUBLE PRECISION DEFAULT 0,
+  tps_count INTEGER DEFAULT 0,
+  tps_p95 DOUBLE PRECISION DEFAULT 0,
+  ttft_p95_ms DOUBLE PRECISION DEFAULT 0,
+  latency_p95_ms DOUBLE PRECISION DEFAULT 0
+);
+"""
+
+# Columns written per rollup row. The unique index over the four leading
+# columns makes the upsert idempotent.
+_ROLLUP_KEY_COLS = ("bucket_ts", "key_id", "model_group", "provider")
+_ROLLUP_ADDITIVE = ("requests", "errors", "estimated_requests", "cache_hits",
+                    "tok_in", "tok_cached", "tok_cache_creation",
+                    "tok_reasoning", "tok_out", "cost", "cache_savings",
+                    "tps_sum", "tps_count")
+_ROLLUP_COLS = _ROLLUP_KEY_COLS + _ROLLUP_ADDITIVE + (
+    "tps_p95", "ttft_p95_ms", "latency_p95_ms")
+
+
+class _BucketSum:
+    """Additive view over a raw bucket row plus its rolled-up counterpart.
+
+    Duck-types the column attributes the timeseries reader touches
+    (``tok_*``, ``tps_sum``, ``tps_count``, ``tps_max``), so merging two
+    sources needs no change at the read site.
+    """
+
+    __slots__ = ("tok_cache_creation", "tok_cached", "tok_in", "tok_out",
+                 "tok_reasoning", "tps_count", "tps_max", "tps_sum")
+
+    def __init__(self, a, b) -> None:
+        for f in self.__slots__:
+            setattr(self, f, (getattr(a, f, 0) or 0) + (getattr(b, f, 0) or 0))
+
+
+def _merge_p95(samples: list[float], pairs: list[tuple[float, int]]) -> float:
+    """Combine raw samples with pre-aggregated ``(p95, weight)`` pairs.
+
+    Exact when only one side is populated — the common cases of a window that
+    is entirely raw (recent) or entirely rolled up (old). When both are
+    present, weighting each side's p95 by its sample count and taking the
+    larger is an approximation that is monotone in the data and never reports
+    a percentile below the true median of the combined set; it cannot
+    reconstruct the true p95 without the original samples, which is precisely
+    what the rollup discarded.
+    """
+    weighted: list[tuple[float, int]] = []
+    if samples:
+        weighted.append((_p95(samples), len(samples)))
+    weighted.extend((p, n) for p, n in pairs if n > 0)
+    if not weighted:
+        return 0.0
+    if len(weighted) == 1:
+        return weighted[0][0]
+    total = sum(n for _, n in weighted)
+    return sum(p * n for p, n in weighted) / total if total else 0.0
+
 _COLS = ("ts", "request_id", "surface", "key_alias", "key_id", "model_group",
          "provider", "provider_key_label", "status", "error_code", "tok_in",
          "tok_cached", "tok_cache_creation", "tok_reasoning", "tok_out",
@@ -164,21 +265,170 @@ class DBSink:
         async with self.engine.begin() as conn:
             request_ddl = _REQUEST_DDL_PG if self._is_pg else _REQUEST_DDL_SQLITE
             audit_ddl = _AUDIT_DDL_PG if self._is_pg else _AUDIT_DDL_SQLITE
+            rollup_ddl = _ROLLUP_DDL_PG if self._is_pg else _ROLLUP_DDL_SQLITE
             await conn.execute(sa.text(request_ddl))
             await conn.execute(sa.text(audit_ddl))
+            await conn.execute(sa.text(rollup_ddl))
             await self._migrate(conn)
 
     async def prune_old_requests(self, retention_days: int) -> int:
-        """Delete request_logs rows older than *retention_days*. Returns count deleted."""
+        """Roll old rows into ``request_rollups``, then delete them.
+
+        Returns the number of raw rows deleted. Aggregates for every deleted
+        row survive permanently in ``request_rollups``, so the dashboard's
+        totals, token counts, cost and percentiles stay complete no matter how
+        far back the window reaches — only the per-request detail is dropped.
+
+        ``retention_days <= 0`` means "keep everything" and is a no-op.
+        """
         if retention_days <= 0:
             return 0
         cutoff = time.time() - retention_days * 86400
+        return await self.rollup_and_prune(cutoff)
+
+    async def rollup_and_prune(self, cutoff_ts: float) -> int:
+        """Aggregate ``request_logs`` rows older than *cutoff_ts*, then delete them.
+
+        The aggregate is bucketed hourly and grouped by ``(key_id,
+        model_group, provider)`` — the three dimensions the console slices by
+        and the finest granularity that keeps the table small: one row per
+        distinct group per hour instead of one per request.
+
+        Percentiles cannot be summed, so each rollup row stores the p95 of its
+        own bucket (``tps_p95``, ``ttft_p95_ms``, ``latency_p95_ms``) and a
+        weighted mean is reconstructed on read. Averaging pre-computed p95s is
+        an approximation — it is exact when a window contains one bucket and
+        converges as buckets get denser; the alternative is keeping every
+        sample forever, which is the growth this method exists to stop.
+
+        Idempotent: a row already rolled up is added to (``upsert`` on the
+        four key columns), so a crash between the aggregate and the delete
+        costs nothing — the next run re-aggregates the same rows and the
+        counts would double, so the delete and the aggregate run in ONE
+        transaction.
+        """
+        bucket_s = 3600
         async with self.engine.begin() as conn:
+            # 1. Aggregate the doomed rows, newest-first ordering irrelevant.
+            agg_sql = f"""
+                SELECT FLOOR(ts / {bucket_s}) * {bucket_s} AS bucket_ts,
+                       key_id, model_group, provider,
+                       COUNT(*) AS requests,
+                       SUM(CASE WHEN status >= 400 OR error_code != '' THEN 1 ELSE 0 END) AS errors,
+                       SUM(CASE WHEN usage_estimated = 1 THEN 1 ELSE 0 END) AS estimated_requests,
+                       SUM(CASE WHEN cache_hit = 1 OR tok_cached > 0 THEN 1 ELSE 0 END) AS cache_hits,
+                       COALESCE(SUM(tok_in), 0) AS tok_in,
+                       COALESCE(SUM(tok_cached), 0) AS tok_cached,
+                       COALESCE(SUM(tok_cache_creation), 0) AS tok_cache_creation,
+                       COALESCE(SUM(tok_reasoning), 0) AS tok_reasoning,
+                       COALESCE(SUM(tok_out), 0) AS tok_out,
+                       COALESCE(SUM(cost), 0) AS cost,
+                       COALESCE(SUM(cache_savings), 0) AS cache_savings,
+                       COALESCE(SUM(CASE WHEN tps > 0 THEN tps ELSE 0 END), 0) AS tps_sum,
+                       COUNT(CASE WHEN tps > 0 THEN 1 END) AS tps_count
+                FROM request_logs
+                WHERE ts < :cutoff
+                GROUP BY bucket_ts, key_id, model_group, provider
+            """
+            rows = (await conn.execute(sa.text(agg_sql), {"cutoff": cutoff_ts})).all()
+            if not rows:
+                return 0
+
+            # 2. Percentiles need the raw samples, so compute them per group
+            #    in a second pass over the same (still undeleted) rows. Bounded
+            #    by the same cutoff, so it is the same row set.
+            p95_by_group: dict[tuple, dict[str, float]] = {}
+            for col, field in (("tps", "tps_p95"), ("ttft_ms", "ttft_p95_ms"),
+                               ("latency_ms", "latency_p95_ms")):
+                sample_sql = f"""
+                    SELECT FLOOR(ts / {bucket_s}) * {bucket_s} AS bucket_ts,
+                           key_id, model_group, provider, {col} AS v
+                    FROM request_logs
+                    WHERE ts < :cutoff AND {col} > 0
+                """
+                sample = (await conn.execute(sa.text(sample_sql),
+                                             {"cutoff": cutoff_ts})).all()
+                grouped: dict[tuple, list[float]] = {}
+                for r in sample:
+                    grouped.setdefault(
+                        (r.bucket_ts, r.key_id, r.model_group, r.provider),
+                        []).append(r.v)
+                for k, vals in grouped.items():
+                    p95_by_group.setdefault(k, {})[field] = _p95(vals)
+
+            # 3. Upsert: additive columns sum, percentile columns take the
+            #    incoming bucket's value (each bucket is written once in the
+            #    normal case; a re-run overwrites with the same number).
+            set_add = ", ".join(f"{c} = request_rollups.{c} + excluded.{c}"
+                                for c in _ROLLUP_ADDITIVE)
+            set_pct = ", ".join(
+                f"{c} = excluded.{c}" for c in
+                ("tps_p95", "ttft_p95_ms", "latency_p95_ms"))
+            placeholders = ", ".join(f":{c}" for c in _ROLLUP_COLS)
+            cols = ", ".join(_ROLLUP_COLS)
+            upsert = sa.text(
+                f"INSERT INTO request_rollups ({cols}) VALUES ({placeholders}) "
+                f"ON CONFLICT(bucket_ts, key_id, model_group, provider) DO UPDATE SET "
+                f"{set_add}, {set_pct}"
+            )
+            payload = []
+            for r in rows:
+                key = (r.bucket_ts, r.key_id, r.model_group, r.provider)
+                pct = p95_by_group.get(key, {})
+                payload.append({
+                    "bucket_ts": r.bucket_ts, "key_id": r.key_id,
+                    "model_group": r.model_group, "provider": r.provider,
+                    "requests": r.requests, "errors": r.errors,
+                    "estimated_requests": r.estimated_requests,
+                    "cache_hits": r.cache_hits,
+                    "tok_in": r.tok_in, "tok_cached": r.tok_cached,
+                    "tok_cache_creation": r.tok_cache_creation,
+                    "tok_reasoning": r.tok_reasoning, "tok_out": r.tok_out,
+                    "cost": r.cost, "cache_savings": r.cache_savings,
+                    "tps_sum": r.tps_sum, "tps_count": r.tps_count,
+                    "tps_p95": pct.get("tps_p95", 0.0),
+                    "ttft_p95_ms": pct.get("ttft_p95_ms", 0.0),
+                    "latency_p95_ms": pct.get("latency_p95_ms", 0.0),
+                })
+            for i in range(0, len(payload), 500):
+                await conn.execute(upsert, payload[i:i + 500])
+
+            # 4. Delete the rows we just aggregated — same transaction, so a
+            #    crash cannot lose the data or double-count it.
             result = await conn.execute(
                 sa.text("DELETE FROM request_logs WHERE ts < :cutoff"),
-                {"cutoff": cutoff},
-            )
-            return result.rowcount or 0
+                {"cutoff": cutoff_ts})
+            deleted = result.rowcount or 0
+        self.invalidate_cache()
+        return deleted
+
+    async def enforce_log_cap(self, max_rows: int) -> int:
+        """Keep at most *max_rows* raw rows, rolling the rest up first.
+
+        Caps storage by row count rather than age, which is what an operator
+        actually wants: a busy gateway stops growing while a quiet one keeps
+        its full history. Returns the number of rows deleted.
+        """
+        if max_rows <= 0:
+            return 0
+        async with self.engine.connect() as conn:
+            total = (await conn.execute(
+                sa.text("SELECT COUNT(*) FROM request_logs"))).scalar() or 0
+            if total <= max_rows:
+                return 0
+            # The cutoff is the ts of the oldest row we intend to KEEP — index
+            # max_rows-1 in newest-first order — so `ts < cutoff` deletes
+            # exactly the rows beyond the cap. Using offset max_rows would make
+            # the boundary row its own cutoff and keep one row too many.
+            # Ties on ts keep a few extra rows rather than splitting a
+            # same-timestamp group; the next sweep trims them.
+            row = (await conn.execute(sa.text(
+                "SELECT ts FROM request_logs ORDER BY ts DESC, id DESC "
+                "LIMIT 1 OFFSET :off"), {"off": max_rows - 1})).first()
+            if row is None:
+                return 0
+            cutoff = row[0]
+        return await self.rollup_and_prune(cutoff)
 
     async def _migrate(self, conn) -> None:
         """Add columns and indexes introduced after the initial schema (idempotent)."""
@@ -207,6 +457,9 @@ class DBSink:
             "CREATE INDEX IF NOT EXISTS idx_request_logs_ts ON request_logs(ts)",
             "CREATE INDEX IF NOT EXISTS idx_request_logs_key_id ON request_logs(key_id)",
             "CREATE INDEX IF NOT EXISTS idx_audit_logs_ts ON audit_logs(ts)",
+            "CREATE INDEX IF NOT EXISTS idx_rollup_bucket ON request_rollups(bucket_ts)",
+            ("CREATE UNIQUE INDEX IF NOT EXISTS idx_rollup_unique ON "
+             "request_rollups(bucket_ts, key_id, model_group, provider)"),
         ]:
             await conn.execute(sa.text(idx))
 
@@ -614,6 +867,13 @@ class DBSink:
             errors = row.errors or 0
             cache_hits = row.cache_hits or 0
 
+            # Rows already rolled up and deleted must still count: without this
+            # the dashboard would silently shrink every time the cap pruned.
+            roll = await self._rollup_overview(conn, minutes, key_ids)
+            requests += roll["requests"]
+            errors += roll["errors"]
+            cache_hits += roll["cache_hits"]
+
             # p95 from bounded sample (max 5000 rows) to avoid full-table scan.
             # Each sample subquery always has a WHERE (<col> > 0), so the
             # key_id filter is appended as another AND term.
@@ -639,6 +899,12 @@ class DBSink:
             lat_values = [r[0] for r in lat_rows]
 
         minutes_norm = max(minutes, 1e-9)
+        # Rolled-up buckets contribute their exact sample sum/count for the
+        # mean and their stored p95 for the percentile. Mixing raw samples and
+        # bucket-level p95s is an approximation (see rollup_and_prune); it is
+        # exact when the window is entirely rolled up or entirely raw.
+        tps_sum = sum(tps_values) + roll["tps_sum"]
+        tps_n = len(tps_values) + roll["tps_count"]
         return {
             "window_minutes": minutes,
             "generated_at": now,
@@ -646,20 +912,89 @@ class DBSink:
             "errors": errors,
             "error_rate": round(errors / requests, 4) if requests else 0.0,
             "requests_per_minute": round(requests / minutes_norm, 2) if minutes > 0 else 0.0,
-            "tok_in": row.tok_in or 0,
-            "tok_cached": row.tok_cached or 0,
-            "tok_cache_creation": row.tok_cache_creation or 0,
-            "tok_reasoning": row.tok_reasoning or 0,
-            "tok_out": row.tok_out or 0,
-            "estimated_requests": row.estimated_requests or 0,
+            "tok_in": (row.tok_in or 0) + roll["tok_in"],
+            "tok_cached": (row.tok_cached or 0) + roll["tok_cached"],
+            "tok_cache_creation": (row.tok_cache_creation or 0) + roll["tok_cache_creation"],
+            "tok_reasoning": (row.tok_reasoning or 0) + roll["tok_reasoning"],
+            "tok_out": (row.tok_out or 0) + roll["tok_out"],
+            "estimated_requests": (row.estimated_requests or 0) + roll["estimated_requests"],
             "cache_hits": cache_hits,
             "cache_hit_rate": round(cache_hits / requests, 4) if requests else 0.0,
-            "tps_avg": round(sum(tps_values) / len(tps_values), 2) if tps_values else 0.0,
-            "tps_p95": round(_p95(tps_values), 2),
-            "ttft_p95_ms": round(_p95(ttft_values), 1),
-            "latency_p95_ms": round(_p95(lat_values), 1),
-            "cost": round(row.cost or 0, 6),
-            "cache_savings": round(row.cache_savings or 0, 6),
+            "tps_avg": round(tps_sum / tps_n, 2) if tps_n else 0.0,
+            "tps_p95": round(_merge_p95(tps_values, roll["tps_p95_pairs"]), 2),
+            "ttft_p95_ms": round(_merge_p95(ttft_values, roll["ttft_p95_pairs"]), 1),
+            "latency_p95_ms": round(_merge_p95(lat_values, roll["latency_p95_pairs"]), 1),
+            "cost": round((row.cost or 0) + roll["cost"], 6),
+            "cache_savings": round((row.cache_savings or 0) + roll["cache_savings"], 6),
+        }
+
+    async def _rollup_overview(self, conn, minutes: int,
+                               key_ids: list[str] | None) -> dict:
+        """Aggregate ``request_rollups`` over the same window as the raw read.
+
+        Returns the additive totals plus the ``(p95, sample_count)`` pairs each
+        percentile needs, so the caller can merge them with the raw samples.
+        """
+        params: dict = {}
+        where = ""
+        if minutes > 0:
+            params["cutoff"] = time.time() - minutes * 60
+            where = "WHERE bucket_ts >= :cutoff"
+        if key_ids:
+            params["kids"] = key_ids
+            where += (" AND key_id IN :kids" if where else "WHERE key_id IN :kids")
+        stmt = sa.text(f"""
+            SELECT COALESCE(SUM(requests), 0) AS requests,
+                   COALESCE(SUM(errors), 0) AS errors,
+                   COALESCE(SUM(estimated_requests), 0) AS estimated_requests,
+                   COALESCE(SUM(cache_hits), 0) AS cache_hits,
+                   COALESCE(SUM(tok_in), 0) AS tok_in,
+                   COALESCE(SUM(tok_cached), 0) AS tok_cached,
+                   COALESCE(SUM(tok_cache_creation), 0) AS tok_cache_creation,
+                   COALESCE(SUM(tok_reasoning), 0) AS tok_reasoning,
+                   COALESCE(SUM(tok_out), 0) AS tok_out,
+                   COALESCE(SUM(cost), 0) AS cost,
+                   COALESCE(SUM(cache_savings), 0) AS cache_savings,
+                   COALESCE(SUM(tps_sum), 0) AS tps_sum,
+                   COALESCE(SUM(tps_count), 0) AS tps_count
+            FROM request_rollups
+            {where}
+        """)
+        if key_ids:
+            stmt = stmt.bindparams(sa.bindparam("kids", expanding=True))
+        agg = (await conn.execute(stmt, params)).one()
+
+        pairs: dict[str, list[tuple[float, int]]] = {
+            "tps_p95_pairs": [], "ttft_p95_pairs": [], "latency_p95_pairs": []}
+        for col, out_key in (("tps_p95", "tps_p95_pairs"),
+                             ("ttft_p95_ms", "ttft_p95_pairs"),
+                             ("latency_p95_ms", "latency_p95_pairs")):
+            # Weight by the bucket's sample count so a dense hour counts more
+            # than a sparse one. tps_count covers the tps column; the latency
+            # columns have no per-column count, so requests is the weight.
+            weight_col = "tps_count" if col == "tps_p95" else "requests"
+            pstmt = sa.text(f"""
+                SELECT {col} AS p, {weight_col} AS n FROM request_rollups
+                {where} AND {col} > 0
+            """ if where else f"""
+                SELECT {col} AS p, {weight_col} AS n FROM request_rollups
+                WHERE {col} > 0
+            """)
+            if key_ids:
+                pstmt = pstmt.bindparams(sa.bindparam("kids", expanding=True))
+            for r in (await conn.execute(pstmt, params)).all():
+                pairs[out_key].append((r.p, r.n or 0))
+
+        return {
+            "requests": agg.requests or 0, "errors": agg.errors or 0,
+            "estimated_requests": agg.estimated_requests or 0,
+            "cache_hits": agg.cache_hits or 0,
+            "tok_in": agg.tok_in or 0, "tok_cached": agg.tok_cached or 0,
+            "tok_cache_creation": agg.tok_cache_creation or 0,
+            "tok_reasoning": agg.tok_reasoning or 0, "tok_out": agg.tok_out or 0,
+            "cost": agg.cost or 0, "cache_savings": agg.cache_savings or 0,
+            "tps_sum": agg.tps_sum or 0, "tps_count": agg.tps_count or 0,
+            **pairs,
         }
 
     async def read_timeseries(self, bucket_seconds: int, metric: str,
@@ -775,12 +1110,55 @@ class DBSink:
                 ts_stmt = ts_stmt.bindparams(sa.bindparam("kids", expanding=True))
             rows = (await conn.execute(ts_stmt, {**params, "bs": bucket_seconds})).all()
 
+            # Rolled-up buckets cover rows the cap already deleted. Re-bucket
+            # them onto the same grid so a chart over a long window keeps its
+            # history instead of collapsing to whatever raw rows survived.
+            # Rollup rows are hourly; on a finer grid (bucket_seconds < 3600)
+            # an hour lands in the bucket its start falls in, so the series
+            # total stays exact while the sub-hour placement is approximate.
+            roll_where = ""
+            if minutes > 0:
+                roll_where = "WHERE bucket_ts >= :cutoff"
+            if key_filter:
+                roll_where += (" AND key_id IN :kids" if roll_where
+                               else "WHERE key_id IN :kids")
+            roll_stmt = sa.text(f"""
+                SELECT FLOOR(bucket_ts / :bs) * :bs AS bucket_t,
+                       SUM(tok_in) AS tok_in,
+                       SUM(tok_cached) AS tok_cached,
+                       SUM(tok_cache_creation) AS tok_cache_creation,
+                       SUM(tok_reasoning) AS tok_reasoning,
+                       SUM(tok_out) AS tok_out,
+                       SUM(tps_sum) AS tps_sum,
+                       SUM(tps_count) AS tps_count,
+                       MAX(tps_p95) AS tps_max
+                FROM request_rollups
+                {roll_where}
+                GROUP BY bucket_t
+                ORDER BY bucket_t
+            """)
+            if key_filter:
+                roll_stmt = roll_stmt.bindparams(sa.bindparam("kids", expanding=True))
+            roll_rows = (await conn.execute(
+                roll_stmt, {**params, "bs": bucket_seconds})).all()
+
         # GROUP BY skips empty buckets; zero-fill to a dense array so the
         # chart has no gaps (matching the in-memory stats.timeseries() shape).
         # Bounded windows (minutes > 0) always zero-fill the fixed grid — even
         # with zero rows — so the shape contract (exactly n_buckets buckets)
         # holds right after a restart when the DB path serves small windows.
+        #
+        # Rolled-up rows are summed into the same buckets as the raw ones, so
+        # a chart spanning both regions (recent raw + older rolled up) shows
+        # the true total rather than only the surviving raw rows.
         by_t: dict[int, object] = {int(r.bucket_t): r for r in rows}
+        for rr in roll_rows:
+            t = int(rr.bucket_t)
+            raw = by_t.get(t)
+            if raw is None:
+                by_t[t] = rr
+                continue
+            by_t[t] = _BucketSum(raw, rr)
         if minutes > 0:
             first_t = bucket_start
             n_fill = n_buckets

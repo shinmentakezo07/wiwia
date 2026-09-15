@@ -280,8 +280,22 @@ class WiwiSettings(BaseModel):
     drop_params: bool = True
     max_request_body_mb: int = 50
     store_prompts_in_spend_logs: bool = False
-    """Prune request_logs older than this many days at startup. 0 = keep forever."""
+    """Prune request_logs older than this many days. 0 = keep forever.
+
+    Pruning rolls the doomed rows into ``request_rollups`` first, so totals,
+    token counts, cost and percentiles survive the delete."""
     log_retention_days: int = 30
+    """Hard cap on raw ``request_logs`` rows. 0 = unlimited.
+
+    The newest N rows are kept verbatim (the log table the console shows) and
+    everything older is rolled into ``request_rollups`` and deleted, so the
+    per-request detail is bounded while every aggregate stays complete. This
+    is the knob that actually bounds storage on a busy gateway: the day-based
+    retention above can still leave millions of rows in one day."""
+    log_max_rows: int = 10000
+    """Seconds between cap/retention sweeps. 0 disables the periodic sweep, in
+    which case both run only at startup."""
+    log_prune_interval_s: float = 3600.0
     host: str = "0.0.0.0"
     port: int = 4000
     # Absolute public base URL (scheme + host, no trailing slash) when the
