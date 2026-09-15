@@ -40,9 +40,9 @@ def _lightweight_copy(evt: LogEvent) -> LogEvent:
     for the in-memory ring buffer and live SSE fan-out, where holding hundreds of
     full LLM responses would balloon memory.
     """
-    if evt.request_body is None and evt.response_body is None:
+    if all(getattr(evt, f) is None for f in _HEAVY_FIELDS):
         return evt  # already lightweight; avoid an unnecessary copy
-    return replace(evt, request_body=None, response_body=None)
+    return replace(evt, **{f: None for f in _HEAVY_FIELDS})
 
 
 class SSEBroadcastSink:
@@ -146,6 +146,26 @@ class LoggingSubsystem:
                             target=target, exc_info=True)
                 return
         log.warning("audit_no_db_sink", actor=actor, action=action, target=target)
+
+    async def read_audit(self, limit: int = 200) -> list[dict]:
+        """Newest-first audit rows from the in-memory ring.
+
+        The fallback half of the audit trail: ``DBSink.read_audit`` serves the
+        durable copy, and this serves the ring when no DB sink is configured
+        (or the write failed). Same row shape and ordering contract as the DB
+        accessor so the caller renders one format either way — including
+        ``diff``, which ``public_dict`` strips (it is noise on the request and
+        proxy streams, but it is the entire payload of an audit row).
+        """
+        ring = list(await self.sse.replay("audit", 0))
+        # The ring is oldest→newest, so slice the newest N then reverse to
+        # match read_requests' newest-first contract.
+        out: list[dict] = []
+        for _, e in reversed(ring[-limit:]):
+            d = public_dict(e)
+            d["diff"] = e.diff
+            out.append(d)
+        return out
 
     # -- lifecycle ------------------------------------------------------------
     async def start(self) -> None:

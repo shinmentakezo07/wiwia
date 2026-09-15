@@ -120,9 +120,15 @@ class DBSink:
     # TTL cache coalesces concurrent log/stat queries so a burst of dashboard
     # refreshes hits the DB once instead of running N copies of the same heavy
     # SQL. Matches the AuthService caching pattern: dict of (value, ts) tuples
-    # with a short monotonic-clock TTL. The TTL is intentionally short (5s) —
-    # logs are append-only so staleness is bounded, and a write-driven flush
-    # would defeat the cache under the exact high-traffic load it targets.
+    # with a short monotonic-clock TTL.
+    #
+    # Every write clears the cache (see ``invalidate_cache`` callers below):
+    # the 5 s TTL alone meant a request logged a moment ago stayed invisible
+    # to /admin/stats/* and /admin/logs/* until it expired. The batch pump
+    # writes at most once per drain, so the clear costs a handful of extra
+    # queries under load — the price of a dashboard that shows the request you
+    # just made. Only non-empty results are cached, so a clear cannot be
+    # followed by a re-cache of a stale empty page.
     _CACHE_TTL = 5.0
 
     def __init__(self, engine) -> None:
@@ -146,7 +152,12 @@ class DBSink:
         self._query_cache[key] = (value, time.monotonic())
 
     def invalidate_cache(self) -> None:
-        """Drop all cached query results. Call after manual data changes."""
+        """Drop all cached query results.
+
+        Called by both write paths (``write_requests``/``write_audit``) so a
+        row is never hidden from the next read by the ``_CACHE_TTL`` window.
+        Also safe to call manually after out-of-band data changes.
+        """
         self._query_cache.clear()
 
     async def startup(self) -> None:
@@ -189,19 +200,26 @@ class DBSink:
 
         # Indexes for query hot paths:
         # - ts: time-range filters in overview, timeseries, and log reads
-        # - key_alias: per-key filtering in admin API
         # - key_id: per-user filtering (scoping request logs by the key ids a
         #   user owns — key_alias is not unique in vkeys, so scope by key_id)
-        # - model_group: per-model filtering in admin API
-        # - request_id: lookup by request ID
         # - audit_logs.ts: time-range queries on audit log
         for idx in [
             "CREATE INDEX IF NOT EXISTS idx_request_logs_ts ON request_logs(ts)",
-            "CREATE INDEX IF NOT EXISTS idx_request_logs_key_alias ON request_logs(key_alias)",
             "CREATE INDEX IF NOT EXISTS idx_request_logs_key_id ON request_logs(key_id)",
-            "CREATE INDEX IF NOT EXISTS idx_request_logs_model_group ON request_logs(model_group)",
-            "CREATE INDEX IF NOT EXISTS idx_request_logs_request_id ON request_logs(request_id)",
             "CREATE INDEX IF NOT EXISTS idx_audit_logs_ts ON audit_logs(ts)",
+        ]:
+            await conn.execute(sa.text(idx))
+
+        # Drop indexes an earlier version created for queries that were never
+        # written (no SQL filters key_alias, model_group or request_id — the
+        # only predicates are on ts, key_id, cost and id). CREATE INDEX IF NOT
+        # EXISTS is additive, so an existing database keeps them forever
+        # without this. Idempotent, and a no-op on databases that never had
+        # them.
+        for idx in [
+            "DROP INDEX IF EXISTS idx_request_logs_key_alias",
+            "DROP INDEX IF EXISTS idx_request_logs_model_group",
+            "DROP INDEX IF EXISTS idx_request_logs_request_id",
         ]:
             await conn.execute(sa.text(idx))
 
@@ -237,6 +255,9 @@ class DBSink:
         async with self.engine.begin() as conn:
             await conn.execute(
                 sa.text(f"INSERT INTO request_logs ({cols}) VALUES ({vals})"), rows)
+        # The rows just written must be visible to the very next read; the
+        # 5 s TTL would otherwise hide a fresh request from the dashboard.
+        self.invalidate_cache()
 
     async def reprice_unpriced_history(self, match_tail: str,
                                        rate_for) -> dict[str, float]:
@@ -373,6 +394,66 @@ class DBSink:
                 {"ts": evt.ts, "actor": evt.actor, "action": evt.action,
                  "target": evt.target, "diff": orjson.dumps(evt.diff).decode()},
             )
+        self.invalidate_cache()
+
+    async def read_audit(self, limit: int = 200) -> list[dict]:
+        """Newest-first ``audit_logs`` rows shaped like ``public_dict(LogEvent)``.
+
+        The audit trail's only reader. ``log_audit`` writes each admin mutation
+        to this table AND to the audit SSE ring; without this accessor both
+        copies accumulated unread (the ring is capped, the table grew forever).
+
+        Same row shape and ordering contract as :meth:`read_requests` —
+        ``ts DESC`` with an ``id DESC`` tiebreak, so several mutations in one
+        second still come back deterministically. Keys match
+        ``public_dict(LogEvent)`` (request-only fields at their empty defaults)
+        plus ``diff``, which ``public_dict`` strips because it is noise on the
+        request/proxy streams but is the entire payload of an audit row.
+
+        ``Cache-Control: no-store`` on the response is the caller's job.
+        """
+        ckey = ("read_audit", int(limit))
+        cached = self._cache_get(ckey)
+        if cached is not None:
+            return cached
+        rows = await self._read_audit_uncached(limit)
+        if rows:
+            self._cache_put(ckey, rows)
+        return rows
+
+    async def _read_audit_uncached(self, limit: int) -> list[dict]:
+        # `id` orders the result (a tiebreak for same-second mutations) but is
+        # not part of the row contract: read_requests/public_dict expose no id,
+        # so neither does this.
+        cols = ("ts", "actor", "action", "target", "diff")
+        async with self.engine.connect() as conn:
+            result = (await conn.execute(sa.text(
+                f"SELECT {', '.join(cols)} FROM audit_logs"
+                " ORDER BY ts DESC, id DESC LIMIT :l"), {"l": int(limit)})).all()
+        out: list[dict] = []
+        for r in result:
+            d = dict(zip(cols, r))
+            raw = d.pop("diff", None)
+            try:
+                diff = orjson.loads(raw) if raw else {}
+            except orjson.JSONDecodeError:
+                # A malformed diff must not hide the audit row itself.
+                diff = {}
+            d["stream"] = "audit"
+            # Same key set as public_dict(LogEvent) so the admin UI can render
+            # DB-backed and ring-backed entries with one code path.
+            d.update({"request_id": "", "surface": "", "key_alias": "",
+                      "key_id": "", "model_group": "", "provider": "",
+                      "provider_key_label": "", "status": 200, "error_code": "",
+                      "tok_in": 0, "tok_cached": 0, "tok_cache_creation": 0,
+                      "tok_reasoning": 0, "tok_out": 0, "usage_estimated": False,
+                      "tps": 0.0, "ttft_ms": 0.0, "latency_ms": 0.0, "cost": 0.0,
+                      "was_stream": False, "cache_hit": False,
+                      "cache_savings": 0.0, "response_cache_hit": False,
+                      "attempts": [], "request_body": None, "response_body": None,
+                      "level": "info", "message": "", "diff": diff})
+            out.append(d)
+        return out
 
     async def read_requests(self, limit: int = 200,
                             key_ids: list[str] | None = None) -> list[dict]:
