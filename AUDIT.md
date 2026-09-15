@@ -404,9 +404,24 @@ Each builds a text list via `b.get("text", "")` without an isinstance filter and
 **File:** `wiwi/wire/openai_chat.py:96-99`
 UPDATE.md §39.1 fixed the dict case (`isinstance(raw_args, dict)`); a truthy scalar falls through `raw_args or "{}"` and `json.loads(True)` raises `TypeError`, which `except json.JSONDecodeError` does not catch. The Responses surface already defends this exact case (`_load_args` catches `TypeError` with a docstring explaining the 500). Fix: `isinstance(raw_args, str)` check or add `TypeError` to the except clause. Same unguarded pattern exists in the provider decoders (`openai_adapter.py:302-304`, `openrouter_adapter.py:186+`) where #92's wrapper downgrades it to a retryable failure; the wire path has no such wrapper.
 
+**Status: fixed** — round 54, with the residual. The wire fix is the `isinstance(raw_args, str)` guard; the provider decoders turned out to be a *worse* variant than the entry assumed (see the residual note below), and all live sites are fixed. `tests/test_fix_round54.py`.
+
+**Residual found while fixing.** The entry called the provider-decoder sites "the same unguarded pattern … where #92's wrapper downgrades it to a retryable failure". That is true of the *non-streaming* path (`openai_adapter.py:295-316`, verified: `TypeError` out of `decode_response`). On the **streaming** path it is worse: `args_fragment` is typed `str`, the scalar was placed on the delta unchecked, the gateway buffered it, and the Chat encoder's frame serialization raised mid-stream — the client received **HTTP 200, a partial `tool_calls` frame, then a synthetic `{"error": …}` frame**. Reproduced live, pre-fix:
+
+```
+HTTP 200
+data: {…"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"f","arguments":""}}]…}
+data: {…"tool_calls":[{"index":0,"function":{"arguments":true}}]…}
+data: {"error":{"message":"sequence item 0: expected str instance, bool found","type":"api_error"}}
+```
+
+Live sites fixed with a shared `coerce_args_fragment` (`wiwi/providers/base.py`): `openai_adapter.py` (both stream sites + the non-stream parse), `openrouter_adapter.py` (both stream sites + the non-stream parse, which already caught `TypeError` but still failed the response), `nim_adapter.py` (both stream sites, including the aliased-tool buffer that concatenates fragments — `str + bool` raised there too).
+
 ### 125. Sync `/v1/messages` encode drops `redacted_thinking` data
 **File:** `wiwi/wire/anthropic_messages.py:285-289` (`encode_response`)
 Verified output for an upstream turn containing a redacted block: `[{'type': 'thinking', 'thinking': ''}, ...]` — the encrypted blob is silently dropped and the emitted thinking block has no signature, i.e. the next turn's history replay is 400-bait. The streaming encoder got a redacted branch in the #103 fix (feed(), lines 448-463) and the upstream direction honors it (`anthropic_adapter.py:337-341`); the client-facing sync encode never got the mirror branch. Fix: add a `t.block_type == "redacted_thinking"` branch emitting `{"type": "redacted_thinking", "data": t.data}`.
+
+**Status: fixed** — round 54. The mirror branch is in place; verified end-to-end (encode → client echoes history → `AnthropicAdapter.encode_request`) that the blob and the `redacted_thinking` type both survive to the upstream body. `tests/test_fix_round54.py` (`test_sync_anthropic_encode_preserves_redacted_thinking`, `test_redacted_thinking_survives_client_replay_round_trip`), with an ordinary-signed-thinking control.
 
 ### 126. ⚪ Tools loop lacks the `isinstance(ttype, str)` guard — non-string `type` crashes in `builtin_tools.canonical_for`
 **File:** `wiwi/wire/anthropic_messages.py:157` (crash at `wiwi/ir/builtin_tools.py:92`)
