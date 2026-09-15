@@ -62,7 +62,22 @@ def is_cacheable_request(ir_req: ir.Request) -> bool:
 
 def response_cache_key(ir_req: ir.Request, group: str, surface: str,
                        key_id: str) -> str:
-    """SHA-256 hex digest over the normalized IR request + routing scope."""
+    """SHA-256 hex digest over the normalized IR request + routing scope.
+
+    Every ``Request`` field that can change the answer is part of the digest.
+    ``extras`` in particular is NOT inert: the wire codecs park unmapped
+    dialect params there and the adapters forward the standard ones upstream
+    (``service_tier``, ``logit_bias``, ``store``, ``metadata`` on the OpenAI
+    side; ``speed``, ``container``, ``context_management`` on the Anthropic
+    side), so two requests differing only in an extra are two different
+    requests. Leaving it out of the key served the first caller's completion
+    to the second for the whole TTL.
+
+    ``stream`` is pinned to the literal ``False`` rather than read from the
+    request: admission (``server/app.py``) only ever caches non-streaming
+    responses, and a streaming and non-streaming request produce different
+    response shapes that must not share an entry.
+    """
     payload = {
         "group": group,
         "surface": surface,
@@ -72,6 +87,7 @@ def response_cache_key(ir_req: ir.Request, group: str, surface: str,
         "tools": _encode(ir_req.tools),
         "tool_choice": _encode(ir_req.tool_choice),
         "gen_params": _encode(ir_req.gen_params),
+        "extras": _encode(ir_req.extras),
         "stream": False,
     }
     blob = orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)
