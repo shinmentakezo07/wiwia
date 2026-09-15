@@ -326,13 +326,21 @@ async def test_cache_does_not_cache_empty_results(db):
 
 
 async def test_cache_invalidated_by_invalidate_cache(db):
-    """invalidate_cache() forces the next read to hit the DB."""
+    """invalidate_cache() forces the next read to hit the DB.
+
+    The mutation has to bypass ``write_requests``: that path now clears the
+    cache itself, so only a genuinely out-of-band change still exercises this
+    method.
+    """
     now = time.time()
     await _seed(db, [_evt(now - 5, status=200, tok_in=100, tok_out=50)])
     first = await db.read_requests(200)
     assert len(first) == 1
-    # Write more data behind the cache's back.
-    await _seed(db, [_evt(now - 2, status=200, tok_in=20, tok_out=10)])
+    # Write more data behind the cache's back, straight through SQL.
+    async with db.engine.begin() as conn:
+        await conn.execute(
+            sa.text("INSERT INTO request_logs (ts, tok_in, tok_out)"
+                    " VALUES (:ts, 20, 10)"), {"ts": now - 2})
     # Cached: still the single-row result.
     assert len(await db.read_requests(200)) == 1
     db.invalidate_cache()

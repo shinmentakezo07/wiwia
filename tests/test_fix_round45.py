@@ -245,7 +245,13 @@ async def test_cache_never_serves_over_budget_payload(tmp_path):
                 "cached and replayed as a free 200 for the TTL"
             )
             assert r2.json()["error"]["type"] == "budget_exceeded"
-            assert route.call_count == 2
+            # The first request's charge is recorded even though its response
+            # was refused (the upstream already billed it), so the second
+            # request is refused by the admission pre-check and never reaches
+            # upstream. Pre-C1 this asserted `call_count == 2` because spend
+            # stayed frozen at 0 and every retry re-dispatched; one upstream
+            # call is the fix working, not a regression.
+            assert route.call_count == 1
 
 
 @respx.mock
