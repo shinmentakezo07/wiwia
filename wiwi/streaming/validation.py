@@ -38,7 +38,14 @@ def validate_tool_args(
     is skipped and ``(True, "")`` is returned. Violations are logged but never
     raise — the caller decides whether to attach a warning.
     """
-    if not schema:
+    # A truthy non-dict schema (a bare string, a list) used to reach
+    # ``schema.get`` and raise ``AttributeError``. This is a public seam — the
+    # stream pump calls it at every ``ToolCallClose`` — so a caller-supplied
+    # malformed tool schema cooled a healthy deployment and incremented the
+    # key's error streak for a shape that carries no validation semantics
+    # (AUDIT_REPORT H4). The codecs coerce at decode; skipping here is the
+    # defence in depth for every other caller.
+    if not isinstance(schema, dict) or not schema:
         return True, ""
     # Reject oversize payloads up front so a hostile/malformed model cannot
     # push megabytes of args into a JSON parse. We never log the payload

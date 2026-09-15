@@ -121,6 +121,23 @@ class ProviderKeyRef:
     secret: str
 
 
+def coerce_args_fragment(value: Any) -> str:
+    """Normalize a provider's tool-args fragment to the ``str`` the contract requires.
+
+    ``ToolCallArgsDelta.args_fragment`` is typed ``str`` and client encoders
+    serialize it straight into a JSON frame, so a non-string fragment (a bool
+    or number from a sloppy gateway) crashed the stream *after* the client had
+    already received a 200 (AUDIT #124). Args-as-object gateways send a real
+    dict, which is re-serialized; every other non-string shape is unparseable
+    and becomes "".
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return json.dumps(value)
+    return ""
+
+
 
 class ProviderAdapter(Protocol):
     provider_type: str

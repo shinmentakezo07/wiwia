@@ -25,7 +25,15 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
     if body.get("n") not in (None, 1):
         raise DialectError("'n' must be 1 (multiple choices unsupported)")
     messages = []
-    for m in body.get("messages") or []:
+    raw_messages = body.get("messages")
+    if raw_messages is not None and not isinstance(raw_messages, list):
+        # A non-list `messages` (a string, a dict, a number) is not iterable
+        # the way the loop below needs: `for m in "abc"` walks characters and
+        # `for m in 7` raises TypeError, which run_chat_like does not catch —
+        # an HTTP 500 for a plainly malformed body. Reject it as a client
+        # error so it reaches the 400 path.
+        raise DialectError("'messages' must be a list")
+    for m in raw_messages or []:
         if not isinstance(m, dict):
             continue  # malformed entry: skip rather than 500 on .get
         role = m.get("role", "user")
@@ -51,6 +59,11 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                 elif c.get("type") == "image_url":
                     ia_img = c.get("image_url")
                     url = (ia_img.get("url", "") if isinstance(ia_img, dict) else "")
+                    if not isinstance(url, str):
+                        # A non-string url (7, null, a nested dict) has no
+                        # .startswith: skip the block like the malformed-item
+                        # guard above, rather than 500 the whole request.
+                        continue
                     if url.startswith("data:"):
                         header, _, b64 = url.partition(",")
                         mime = header[5:].split(";")[0] or "image/png"
@@ -94,6 +107,14 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                 args = raw_args
                 raw_args = json.dumps(raw_args)
             else:
+                if not isinstance(raw_args, str):
+                    # A truthy scalar (`true`, `5`, `1.5`, `["a"]`) falls in
+                    # here and `json.loads` raises TypeError — not
+                    # JSONDecodeError — which the handler below does not
+                    # catch, so the request 500'd (AUDIT #124). The Responses
+                    # codec already defends this (`_load_args`); treat any
+                    # non-string as unparseable args rather than crashing.
+                    raw_args = ""
                 raw_args = raw_args or "{}"
                 try:
                     args = json.loads(raw_args)
@@ -124,8 +145,9 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                 # Concatenate text blocks if present; fall back to str() for
                 # any other shape. Common Anthropic-style list payloads are
                 # not valid here, so this is a best-effort recovery.
-                pieces = [b.get("text", "") for b in content
-                          if isinstance(b, dict) and b.get("type") == "text"]
+                pieces = [b["text"] for b in content
+                          if isinstance(b, dict) and b.get("type") == "text"
+                          and isinstance(b.get("text"), str)]
                 tool_content = "\n".join(pieces) if pieces else orjson.dumps(content).decode()
                 # Multimodal tool results: collect image blocks (base64 data
                 # URLs or remote URLs) so providers with native image support
@@ -133,7 +155,13 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                 for b in content:
                     if not isinstance(b, dict) or b.get("type") != "image_url":
                         continue
-                    url = (b.get("image_url") or {}).get("url", "")
+                    ia_img = b.get("image_url")
+                    url = (ia_img.get("url", "") if isinstance(ia_img, dict) else "")
+                    if not isinstance(url, str):
+                        # `or {}` does not help a truthy string: a bare-string
+                        # image_url reached .get and 500'd. Skip the block like
+                        # the malformed-item guard above.
+                        continue
                     if url.startswith("data:"):
                         header, _, b64 = url.partition(",")
                         mime = header[5:].split(";")[0] or "image/png"
@@ -150,16 +178,28 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         messages.append(ir.Message(role=role, parts=parts))  # type: ignore[arg-type]
 
     tools: list[ir.Tool] = []
-    for t in body.get("tools") or []:
+    raw_tools = body.get("tools")
+    if raw_tools is not None and not isinstance(raw_tools, list):
+        # Same class as `messages` above: a non-list tools value (7, "oops")
+        # is either not iterable or iterates into junk, and the TypeError
+        # escaped as a 500. Reject it on the 400 path.
+        raise DialectError("'tools' must be a list")
+    for t in raw_tools or []:
         if not isinstance(t, dict) or t.get("type") != "function":
             continue  # non-function (or malformed) entry: skip, don't crash
         fn = t.get("function")
         if not isinstance(fn, dict):
             continue
+        raw_params = fn.get("parameters")
         tools.append(ir.Tool(
             name=fn.get("name", ""),
             description=fn.get("description", ""),
-            parameters_json_schema=fn.get("parameters") or {"type": "object"},
+            # A non-dict schema ("oops") is stored verbatim otherwise, and the
+            # stream pump's validate_tool_args then raises on it — cooling a
+            # healthy deployment for a caller-controlled shape. Coerce to the
+            # same empty-object default the missing-schema case already gets.
+            parameters_json_schema=(raw_params if isinstance(raw_params, dict)
+                                    else {"type": "object"}),
             strict=fn.get("strict")))
     tc_raw = body.get("tool_choice")
     tool_choice: ir.ToolChoice | None = None
@@ -191,7 +231,11 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
     )
     rf = body.get("response_format")
     if isinstance(rf, dict) and rf.get("type") in ("json_object", "json_schema"):
-        js = rf.get("json_schema") or {}
+        raw_js = rf.get("json_schema")
+        # A non-dict json_schema ("abc") has no .get and 500'd; the Responses
+        # twin of this was AUDIT #100. Treat it as an unnamed schema — the
+        # provider renders one from `name`/`strict` alone.
+        js = raw_js if isinstance(raw_js, dict) else {}
         g.response_format = ir.ResponseFormat(type=rf["type"],
                                               json_schema=js.get("schema"),
                                               name=js.get("name"),
@@ -262,8 +306,6 @@ class ChatStreamEncoder:
         # choices array, and only when the client asked for it via
         # stream_options.include_usage (G4).
         self._include_usage = include_usage
-        self._started = False
-        self._finished = False
         self._usage: dl.UsageFinal | None = None
         self._stop: str = "stop"
         # A1 stop_reason guard: a builtin tool call was suppressed (so the
@@ -292,7 +334,6 @@ class ChatStreamEncoder:
 
     def feed(self, d: dl.IRStreamDelta) -> bytes | None:
         if isinstance(d, dl.StreamStart):
-            self._started = True
             return self._shell({"role": "assistant", "content": ""})
         if isinstance(d, dl.TextDelta):
             return self._shell({"content": d.text})

@@ -25,7 +25,7 @@ import orjson
 
 from wiwi.ir import builtin_tools as bt
 from wiwi.ir import types as ir
-from wiwi.providers.base import ProviderKeyRef
+from wiwi.providers.base import ProviderKeyRef, coerce_args_fragment
 from wiwi.providers.openai_adapter import OpenAIAdapter
 from wiwi.streaming import deltas as dl
 
@@ -193,6 +193,11 @@ class OpenRouterAdapter(OpenAIAdapter):
                 args = raw_args
                 raw_args = json.dumps(raw_args)
             else:
+                if not isinstance(raw_args, str):
+                    # Truthy scalar (`true`, `5`): json.loads raises TypeError,
+                    # not JSONDecodeError — the decode failed the whole
+                    # response (AUDIT #124).
+                    raw_args = ""
                 try:
                     args = json.loads(raw_args)
                 except (json.JSONDecodeError, TypeError):
@@ -234,6 +239,13 @@ class OpenRouterAdapter(OpenAIAdapter):
             # open still yields exactly `[StreamEnd()]`, preserving the
             # gateway's round-15 synthesis for plain text streams.
             out = self._flush_open_tools()
+            if out:
+                # Tool calls were delivered, so the stop reason is content-
+                # derived, not "stop". Without this the gateway's
+                # `finish is None` branch synthesized Finish("stop") and the
+                # client's stop_reason disagreed with the tool_use blocks it
+                # received — the same fourth copy-derived site as NIM.
+                out.append(dl.Finish("tool_call"))
             out.append(dl.StreamEnd())
             return out
         try:
@@ -332,7 +344,8 @@ class OpenRouterAdapter(OpenAIAdapter):
                     self._tool_names[idx] = name_fragment or ""
                     if fn.get("arguments"):
                         out.append(dl.ToolCallArgsDelta(
-                            index=idx, args_fragment=fn["arguments"]))
+                            index=idx,
+                            args_fragment=coerce_args_fragment(fn["arguments"])))
                     continue
                 if idx in self._open_tool_indices:
                     # The superseded call's Open may still be deferred (id
@@ -377,7 +390,9 @@ class OpenRouterAdapter(OpenAIAdapter):
                     # dispatch (AUDIT #135).
                     out.append(dl.ToolCallOpen(index=idx, id="",
                                                name=self._tool_names[idx]))
-                out.append(dl.ToolCallArgsDelta(index=idx, args_fragment=fn["arguments"]))
+                out.append(dl.ToolCallArgsDelta(
+                    index=idx,
+                    args_fragment=coerce_args_fragment(fn["arguments"])))
 
         fr = c.get("finish_reason")
         if fr:

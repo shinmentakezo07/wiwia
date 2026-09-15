@@ -208,14 +208,52 @@ class GeminiAdapter:
             msg = err.get("message", "unknown gemini error")
             return [dl.StreamError(message=msg, kind="status",
                                    status=err.get("code"))]
+        # A prompt-level safety block arrives with no candidate content at all
+        # (and often no candidates). The sync decoder maps it to
+        # ``content_filter``; the stream decoder never read it, so the pump saw
+        # a stream with no finish and called _note_stream_failure — cooling a
+        # healthy deployment, penalising a healthy key and billing an estimated
+        # partial for a legitimate content filter (AUDIT #76 class). Checked
+        # before the candidate guard below so a block is never masked by a
+        # malformed candidate riding the same frame.
+        pf = payload.get("promptFeedback")
+        block_reason = pf.get("blockReason") if isinstance(pf, dict) else None
+        # Non-dict candidates/elements carry no semantics; skipping them keeps
+        # a malformed frame from raising AttributeError into the pump's generic
+        # handler, which cooled a healthy deployment and fed the key's
+        # retirement ladder (AUDIT #110 class — the round-49 fix guarded the
+        # frame but not its first element). A frame whose first candidate is
+        # non-dict has nothing to decode, so it is dropped whole rather than
+        # opening the stream with a spurious StreamStart.
+        cands = payload.get("candidates")
+        if (not block_reason and isinstance(cands, list) and cands
+                and not isinstance(cands[0], dict)):
+            return []
         out: list[dl.IRStreamDelta] = []
         if not self._started:
             out.append(dl.StreamStart(model=""))
             self._started = True
             self._saw_function_call = False
             self._tool_seq = 0
-        cand = (payload.get("candidates") or [{}])[0]
-        for part in (cand.get("content") or {}).get("parts") or []:
+        if block_reason:
+            u = payload.get("usageMetadata")
+            if isinstance(u, dict):
+                out.append(dl.UsageFinal(
+                    prompt=u.get("promptTokenCount", 0),
+                    cached=u.get("cachedContentTokenCount", 0),
+                    reasoning=u.get("thoughtsTokenCount", 0),
+                    output=(u.get("candidatesTokenCount", 0)
+                            + u.get("thoughtsTokenCount", 0))))
+            out.append(dl.Finish("content_filter"))
+            out.append(dl.StreamEnd())
+            return out
+        cand = cands[0] if isinstance(cands, list) and cands else {}
+        content = cand.get("content")
+        parts = content.get("parts") if isinstance(content, dict) else None
+        parts = parts if isinstance(parts, list) else []
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
             if part.get("thought") and "text" in part:
                 # Thought parts are reasoning, not the answer: emit them as
                 # ThinkingDelta so the client does not render CoT as the reply

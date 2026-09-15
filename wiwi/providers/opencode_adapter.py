@@ -205,7 +205,27 @@ class OpencodeAdapter:
                 if self._resp_ended:
                     return []
                 self._resp_ended = True
-                return [dl.StreamEnd()]
+                # A stream that ends on the sentinel instead of
+                # ``response.completed`` still delivered function_call items;
+                # returning a bare StreamEnd left them unterminated and the
+                # gateway synthesized Finish("stop") for a tool-call turn
+                # (AUDIT #133 class). ``_resp_ended`` makes every later event a
+                # no-op, so those entries could never be drained afterwards.
+                # Mirrors the completed/incomplete branch below.
+                out: list[dl.IRStreamDelta] = []
+                for entry in sorted(self._resp_tools.values(),
+                                    key=lambda e: e["index"]):
+                    if not entry.get("closed"):
+                        out.append(dl.ToolCallClose(index=entry["index"]))
+                self._resp_tools.clear()
+                had_calls = self._resp_next_index > 0
+                self._resp_next_index = 0
+                if had_calls:
+                    # A function call opened during this stream: the turn ended
+                    # with tool calls, so the stop reason is content-derived.
+                    out.append(dl.Finish("tool_call"))
+                out.append(dl.StreamEnd())
+                return out
             return self._sub().decode_stream_event(event, data)
         if self._last_route == "responses" and self._resp_ended:
             return []

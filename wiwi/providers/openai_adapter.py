@@ -9,7 +9,7 @@ import orjson
 import structlog
 
 from wiwi.ir import types as ir
-from wiwi.providers.base import ProviderKeyRef
+from wiwi.providers.base import ProviderKeyRef, coerce_args_fragment
 from wiwi.streaming import deltas as dl
 
 log = structlog.get_logger("wiwi.openai_adapter")
@@ -299,6 +299,13 @@ class OpenAIAdapter:
                 args = raw_args
                 raw_args = json.dumps(raw_args)
             else:
+                if not isinstance(raw_args, str):
+                    # A truthy scalar (`true`, `5`) reaches here and
+                    # ``json.loads`` raises TypeError — not JSONDecodeError —
+                    # which the handler below does not catch, so the whole
+                    # 200 response failed to decode (AUDIT #124). Treat any
+                    # non-string as unparseable args.
+                    raw_args = ""
                 raw_args = raw_args or "{}"
                 try:
                     args = json.loads(raw_args)
@@ -445,7 +452,8 @@ class OpenAIAdapter:
                     self._tool_names[idx] = name_fragment or ""
                     if fn.get("arguments"):
                         out.append(dl.ToolCallArgsDelta(
-                            index=idx, args_fragment=fn["arguments"]))
+                            index=idx,
+                            args_fragment=coerce_args_fragment(fn["arguments"])))
                     continue
                 # a new tool call opening on the same index closes the previous one
                 if idx in self._open_tool_indices:
@@ -493,12 +501,7 @@ class OpenAIAdapter:
                     # (AUDIT #135).
                     out.append(dl.ToolCallOpen(index=idx, id="",
                                                name=self._tool_names[idx]))
-                args_val = fn["arguments"]
-                if isinstance(args_val, dict):
-                    # Args-as-object gateway: ToolCallArgsDelta.args_fragment
-                    # is typed str — downstream encoders concatenate it, and
-                    # a dict fragment crashed the Responses encoder.
-                    args_val = json.dumps(args_val)
+                args_val = coerce_args_fragment(fn["arguments"])
                 out.append(dl.ToolCallArgsDelta(index=idx, args_fragment=args_val))
         fr = c.get("finish_reason")
         if fr:

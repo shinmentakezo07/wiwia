@@ -38,7 +38,7 @@ from typing import Any
 import orjson
 
 from wiwi.ir import types as ir
-from wiwi.providers.base import ProviderKeyRef
+from wiwi.providers.base import ProviderKeyRef, coerce_args_fragment
 from wiwi.providers.nim_native_tools import (
     MiniMaxFramer,
     NimToolProtocolError,
@@ -221,9 +221,49 @@ class NimAdapter(OpenAIAdapter):
         if body.get("tools"):
             self._tool_aliases = collect_nim_tool_aliases(body["tools"])
 
+    def _flush_open_tools(self) -> list[dl.IRStreamDelta]:
+        """Close every still-open tool call, flushing deferred Opens first.
+
+        NIM's override of the base helper: an *aliased* tool buffers its args
+        fragments in ``_buffered_args`` and drains them only in the
+        ``finish_reason`` sweep, so the base implementation would close the
+        call with no arguments at all and leave the client a ``tool_use``
+        block with no input. Drains per index before its Close, mirroring the
+        finish sweep's Open -> ArgsDelta -> Close nesting.
+        """
+        out: list[dl.IRStreamDelta] = []
+        for open_idx in sorted(self._open_tool_indices):
+            if open_idx in self._pending_opens:
+                cid, cname = self._pending_opens.pop(open_idx)
+                out.append(dl.ToolCallOpen(index=open_idx, id=cid, name=cname))
+            self._flush_buffered_args(open_idx, out)
+            out.append(dl.ToolCallClose(index=open_idx))
+        self._open_tool_indices.clear()
+        self._tool_names.clear()
+        self._pending_opens.clear()
+        self._buffered_args.clear()
+        self._synthesized_opens.clear()
+        return out
+
     def decode_stream_event(self, event: str, data: str) -> list[dl.IRStreamDelta]:
         if data == "[DONE]":
+            # Terminating on the sentinel instead of a finish_reason chunk
+            # would leave every tool call open, so the gateway synthesized
+            # Finish("stop") for a turn that produced tool calls and the wire
+            # encoder emitted a tool_use block that never stopped (AUDIT #133,
+            # the third copy-derived site after OpenAI and OpenRouter). The
+            # framer tail rides ahead of the tool flush so text stays in
+            # arrival order.
             out = self._flush_framers()
+            flushed = self._flush_open_tools()
+            out.extend(flushed)
+            if flushed:
+                # Tool calls were delivered, so the stop reason is content-
+                # derived, not "stop". Without this the gateway's
+                # `finish is None` branch synthesized Finish("stop") and the
+                # client's stop_reason disagreed with the tool_use blocks it
+                # received.
+                out.append(dl.Finish("tool_call"))
             out.append(dl.StreamEnd())
             return out
         try:
@@ -254,6 +294,12 @@ class NimAdapter(OpenAIAdapter):
         if not choices:
             return out
         c = choices[0]
+        if not isinstance(c, dict):
+            # The round-49 fix guarded the frame but not its first element, so
+            # ``{"choices": [null]}`` still crashed on ``c.get`` and cooled a
+            # healthy deployment for a frame carrying no semantics (AUDIT #110
+            # class; mirrors OpenAIAdapter).
+            return out
         delta = c.get("delta") or {}
 
         # Feed content through the MiniMax framer.  The framer separates
@@ -297,10 +343,12 @@ class NimAdapter(OpenAIAdapter):
                     if fn.get("arguments"):
                         if self._tool_aliases.get(self._tool_names.get(idx, "")):
                             self._buffered_args[idx] = (
-                                self._buffered_args.get(idx, "") + fn["arguments"])
+                                self._buffered_args.get(idx, "") +
+                                coerce_args_fragment(fn["arguments"]))
                         else:
                             out.append(dl.ToolCallArgsDelta(
-                                index=idx, args_fragment=fn["arguments"]))
+                                index=idx,
+                                args_fragment=coerce_args_fragment(fn["arguments"])))
                     continue
                 if idx in self._open_tool_indices:
                     self._flush_buffered_args(idx, out)
@@ -341,10 +389,12 @@ class NimAdapter(OpenAIAdapter):
                     # Aliased tool: buffer fragments so the completed JSON
                     # can be un-aliased before the client sees it.
                     self._buffered_args[idx] = (
-                        self._buffered_args.get(idx, "") + fn["arguments"])
+                        self._buffered_args.get(idx, "") +
+                        coerce_args_fragment(fn["arguments"]))
                 else:
-                    out.append(dl.ToolCallArgsDelta(index=idx,
-                                                    args_fragment=fn["arguments"]))
+                    out.append(dl.ToolCallArgsDelta(
+                        index=idx,
+                        args_fragment=coerce_args_fragment(fn["arguments"])))
 
         fr = c.get("finish_reason")
         if fr:
@@ -352,17 +402,7 @@ class NimAdapter(OpenAIAdapter):
             flushed = self._flush_framers()
             out.extend(flushed)
             # Close ALL still-open tool calls (parallel tools).
-            for open_idx in sorted(self._open_tool_indices):
-                if open_idx in self._pending_opens:
-                    cid, cname = self._pending_opens.pop(open_idx)
-                    out.append(dl.ToolCallOpen(index=open_idx, id=cid, name=cname))
-                self._flush_buffered_args(open_idx, out)
-                out.append(dl.ToolCallClose(index=open_idx))
-            self._open_tool_indices.clear()
-            self._tool_names.clear()
-            self._pending_opens.clear()
-            self._buffered_args.clear()
-            self._synthesized_opens.clear()
+            out.extend(self._flush_open_tools())
             out.append(dl.Finish({"stop": "stop", "length": "length",
                                  "tool_calls": "tool_call",
                                  "content_filter": "content_filter"}.get(fr, "stop")))

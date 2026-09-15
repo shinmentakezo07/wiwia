@@ -86,9 +86,12 @@ def _item_text(item: dict[str, Any]) -> str:
     if isinstance(output, str):
         return output
     if isinstance(output, list):
-        return " ".join(c.get("text", "") for c in output
+        # Only string text contributes; a non-string one (7) made " ".join
+        # raise TypeError — a 500 for a malformed output block.
+        return " ".join(c["text"] for c in output
                         if isinstance(c, dict)
-                        and c.get("type") in ("output_text", "text")) \
+                        and c.get("type") in ("output_text", "text")
+                        and isinstance(c.get("text"), str)) \
             or json.dumps(output)
     if output is None:
         return ""
@@ -120,10 +123,22 @@ def _item_images(item: dict[str, Any]) -> list[ir.ImagePart]:
 def _decode_tool(t: dict[str, Any]) -> ir.Tool:
     """Map one Responses tool entry onto an IR Tool."""
     ttype = t.get("type")
+    if not isinstance(ttype, str):
+        # A non-string type (a list, a dict) is unhashable: the dict lookups in
+        # bt.canonical_for raise TypeError -> 500. Only a string names a tool
+        # kind, so treat anything else as an untyped function tool — the same
+        # default the type-omitted case already takes.
+        ttype = None
     if ttype == "function":
+        raw_params = t.get("parameters")
         return ir.Tool(name=t.get("name", ""),
                        description=t.get("description", ""),
-                       parameters_json_schema=t.get("parameters") or {"type": "object"},
+                       # A non-dict schema is otherwise stored verbatim and
+                       # crashes validate_tool_args inside the stream pump,
+                       # cooling a healthy deployment for a caller-controlled
+                       # shape. Same empty-object default as the missing case.
+                       parameters_json_schema=(raw_params if isinstance(raw_params, dict)
+                                               else {"type": "object"}),
                        strict=t.get("strict"))
     canonical = bt.canonical_for("openai_responses", ttype)
     if canonical is not None:
@@ -267,7 +282,10 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                                   images=_item_images(item))]))
         elif itype == "reasoning":
             summary = item.get("summary") or []
-            text = " ".join(s.get("text", "") for s in summary if isinstance(s, dict))
+            if not isinstance(summary, list):
+                summary = []  # non-list summary: nothing to flatten, skip it
+            text = " ".join(s["text"] for s in summary
+                            if isinstance(s, dict) and isinstance(s.get("text"), str))
             if text:
                 messages.append(ir.Message(role="assistant",
                                            parts=[ir.ThinkingPart(text)]))
@@ -277,7 +295,10 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
             # results keeps working, and the loss is visible in the logs.
             log.warning("responses_unsupported_input_item", item_type=itype)
 
-    tools = [_decode_tool(t) for t in body.get("tools") or [] if isinstance(t, dict)]
+    raw_tools = body.get("tools")
+    if raw_tools is not None and not isinstance(raw_tools, list):
+        raise DialectError("'tools' must be a list")  # non-iterable -> 500
+    tools = [_decode_tool(t) for t in raw_tools or [] if isinstance(t, dict)]
     tool_choice = _decode_tool_choice(body.get("tool_choice"))
 
     stop_raw = body.get("stop")

@@ -23,12 +23,18 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
     if isinstance(system_text, str) and system_text:
         messages.append(ir.Message(role="system", parts=[ir.TextPart(system_text)]))
     elif isinstance(system_text, list):
-        parts = [ir.TextPart(b.get("text", ""), cache_control=b.get("cache_control"))
+        parts = [ir.TextPart(b.get("text", "") if isinstance(b.get("text"), str) else "",
+                             cache_control=b.get("cache_control"))
                  for b in system_text
                  if isinstance(b, dict) and b.get("type") == "text"]
         if parts:
             messages.append(ir.Message(role="system", parts=parts))
-    for m in body.get("messages") or []:
+    raw_messages = body.get("messages")
+    if raw_messages is not None and not isinstance(raw_messages, list):
+        # Mirror of the chat codec's guard: a non-list `messages` is not
+        # iterable the way this loop needs, and the TypeError escaped as a 500.
+        raise DialectError("'messages' must be a list")
+    for m in raw_messages or []:
         if not isinstance(m, dict):
             continue  # malformed entry: skip rather than 500 on .get
         role = m.get("role", "user")
@@ -54,6 +60,11 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                                              cache_control=b.get("cache_control")))
                 elif btype == "image":
                     src = b.get("source") or {}
+                    if not isinstance(src, dict):
+                        # `or {}` does not help a truthy string/number: the
+                        # block has no source to read, so skip it like the
+                        # non-string btype guard above rather than 500.
+                        continue
                     if src.get("type") == "base64":
                         parts.append(ir.ImagePart(b64=src.get("data"),
                                                   mime=src.get("media_type", "image/png")))
@@ -63,6 +74,8 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                         parts.append(ir.ImagePart(file_id=src.get("file_id")))
                 elif btype == "document":
                     src = b.get("source") or {}
+                    if not isinstance(src, dict):
+                        continue  # same non-dict source guard as the image arm
                     if src.get("type") == "base64":
                         parts.append(ir.DocumentPart(
                             b64=src.get("data"),
@@ -90,8 +103,9 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                     if isinstance(c, str):
                         text = c
                     elif isinstance(c, list):
-                        texts = [blk.get("text", "") for blk in c
-                                 if isinstance(blk, dict) and blk.get("type") == "text"]
+                        texts = [blk["text"] for blk in c
+                                 if isinstance(blk, dict) and blk.get("type") == "text"
+                                 and isinstance(blk.get("text"), str)]
                         joined = " ".join(t for t in texts if t)
                         if joined:
                             text = joined
@@ -107,6 +121,8 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                             if not isinstance(blk, dict) or blk.get("type") != "image":
                                 continue
                             src = blk.get("source") or {}
+                            if not isinstance(src, dict):
+                                continue  # non-dict source: skip, don't 500
                             if src.get("type") == "base64":
                                 images.append(ir.ImagePart(
                                     b64=src.get("data"),
@@ -151,15 +167,30 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                                        parts=parts))
 
     tools: list[ir.Tool] = []
-    for t in body.get("tools") or []:
+    raw_tools = body.get("tools")
+    if raw_tools is not None and not isinstance(raw_tools, list):
+        raise DialectError("'tools' must be a list")  # non-iterable -> 500
+    for t in raw_tools or []:
         if not isinstance(t, dict):
             continue  # junk entry: skip rather than crash the whole request
         ttype = t.get("type")
+        if not isinstance(ttype, str) and ttype is not None:
+            # A non-string type (a list, a dict) is unhashable: `ttype in (...)`
+            # and bt.canonical_for's dict lookups raise TypeError -> 500. Only
+            # None means "function tool with the type omitted"; anything else
+            # non-string is junk, so skip it like the dict guard above.
+            continue
         if ttype in (None, "custom", "function"):
             # Plain function tool (Anthropic function tools may omit "type").
+            raw_schema = t.get("input_schema")
             tools.append(ir.Tool(
                 name=t.get("name", ""), description=t.get("description", ""),
-                parameters_json_schema=t.get("input_schema") or {"type": "object"},
+                # A non-dict input_schema is otherwise stored verbatim and
+                # crashes validate_tool_args inside the stream pump, cooling a
+                # healthy deployment for a caller-controlled shape. Coerce to
+                # the same empty-object default the missing-schema case gets.
+                parameters_json_schema=(raw_schema if isinstance(raw_schema, dict)
+                                        else {"type": "object"}),
                 strict=t.get("strict"),
                 input_examples=t.get("input_examples"),
                 cache_control=t.get("cache_control")))
@@ -283,6 +314,14 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
                     req_id: str) -> dict[str, Any]:
     content: list[dict[str, Any]] = []
     for t in turn.thinking:
+        if t.block_type == "redacted_thinking":
+            # Encrypted thinking must be re-emitted verbatim: the client
+            # replays this content on the next turn, and a blob rendered as an
+            # empty, unsigned ``thinking`` block is 400-bait upstream. The
+            # streaming encoder has had this branch since #103; the sync path
+            # was the missing mirror (AUDIT #125).
+            content.append({"type": "redacted_thinking", "data": t.data or ""})
+            continue
         tb: dict[str, Any] = {"type": "thinking", "thinking": t.text}
         if t.signature:
             tb["signature"] = t.signature
@@ -345,7 +384,6 @@ class AnthropicStreamEncoder:
         self._usage: dl.UsageFinal | None = None
         self._stop = "end_turn"
         self._stop_seq: str | None = None
-        self._started = False
         # Per-delta skeleton, allocated once: only `index` and the delta body
         # change between consecutive deltas of the same kind.
         self._text_delta: dict[str, Any] = {
@@ -415,7 +453,6 @@ class AnthropicStreamEncoder:
 
     def feed(self, d: dl.IRStreamDelta) -> bytes | None:
         if isinstance(d, dl.StreamStart):
-            self._started = True
             return self._evt("message_start", {
                 "type": "message_start",
                 "message": {"id": f"msg_{self.req_id}", "type": "message",
