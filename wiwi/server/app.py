@@ -990,6 +990,29 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 info.key_id, u.prompt_tokens + u.completion_tokens,
                 request_id=ctx.request_id)
 
+    async def record_spend(key_id: str, cost: float) -> bool:
+        """Charge *cost* to *key_id*, returning False when the cap refused it.
+
+        A False return means ``update_spend``'s conditional UPDATE was
+        rejected: the charge would cross ``max_budget``, or the key vanished.
+        The upstream already served and billed the request, so the true-up
+        below records the charge unconditionally — otherwise ``spend_to_date``
+        stayed frozen at its pre-crossing value and the key kept passing the
+        admission check for the rest of its life (AUDIT_REPORT C1). The
+        refusal is still reported so the caller refuses *this* response; the
+        recorded spend is what makes the *next* request fail admission.
+        Genuine accounting errors are suppressed so they cannot mask an
+        otherwise-successful response.
+        """
+        try:
+            recorded = await state.auth.update_spend(key_id, cost)
+        except Exception:  # noqa: BLE001
+            return True
+        if not recorded:
+            with contextlib.suppress(Exception):
+                await state.auth.apply_spend_trueup(key_id, cost)
+        return recorded
+
     async def _release_tpm_reservation(info, ctx) -> None:
         """Refund the estimated RPM/TPM slot a request reserved at admission.
 
@@ -1310,25 +1333,15 @@ def create_app(config: WiwiConfig) -> FastAPI:
             if config.wiwi_settings.store_prompts_in_spend_logs:
                 ctx.metadata["response_body"] = _serialize_turn(turn, payload)
             await _record_tpm_usage(info, ctx)
-            if info and info.key_type != "master":
-                # A False return means the conditional UPDATE was rejected —
-                # the request would breach max_budget (or the key vanished).
-                # Recording it anyway would let a caller exceed a hard cap by
-                # sending one large request. Raising a 402 here is the point of
-                # a hard budget; only genuine accounting *errors* are suppressed
-                # so they don't mask an otherwise-successful response.
-                try:
-                    recorded = await state_.auth.update_spend(info.key_id, ctx.cost)
-                except Exception:  # noqa: BLE001
-                    recorded = True
-                if not recorded:
-                    ctx.status = 402
-                    # Log exactly once: the over-budget status replaces the
-                    # success event, so the request is not double-counted in
-                    # stats/rollups (AUDIT #90).
-                    state_.logs.log_request(build_log_event(ctx))
-                    return _err(402, "budget_exceeded",
-                                "virtual key budget exhausted", request, surface)
+            if (info and info.key_type != "master"
+                    and not await record_spend(info.key_id, ctx.cost)):
+                ctx.status = 402
+                # Log exactly once: the over-budget status replaces the
+                # success event, so the request is not double-counted in
+                # stats/rollups (AUDIT #90).
+                state_.logs.log_request(build_log_event(ctx))
+                return _err(402, "budget_exceeded",
+                            "virtual key budget exhausted", request, surface)
             # Cache only AFTER the budget decision (AUDIT #116): caching above
             # this point stored the payload of a request that is about to be
             # refused with 402, and the hit path serves it as a free 200 with
@@ -1507,19 +1520,15 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 }
             state_.logs.log_request(build_log_event(ctx))
             await _record_tpm_usage(ctx.auth, ctx)
-            if ctx.usage and ctx.auth and ctx.auth.key_type != "master":
+            if (ctx.usage and ctx.auth and ctx.auth.key_type != "master"
+                    and not await record_spend(ctx.auth.key_id, ctx.cost)):
                 # The response has already been streamed, so a budget breach
-                # can't turn into a 402 here. Record it on the context (and
-                # the log) so the *next* request is refused, rather than
-                # silently allowing spend to run past the cap forever.
-                try:
-                    recorded = await state_.auth.update_spend(
-                        ctx.auth.key_id, ctx.cost)
-                except Exception:  # noqa: BLE001
-                    recorded = True
-                if not recorded:
-                    ctx.status = 402
-                    ctx.metadata["budget_exceeded"] = True
+                # can't turn into a 402 here. record_spend still trues up the
+                # charge — the upstream billed it — which is what makes the
+                # *next* request fail admission instead of letting spend run
+                # past the cap forever (AUDIT_REPORT C1).
+                ctx.status = 402
+                ctx.metadata["budget_exceeded"] = True
 
     # -- surfaces ---------------------------------------------------------------
     @app.post("/v1/chat/completions")
@@ -1583,7 +1592,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
     @app.get("/health")
     async def health():
         return {"status": "ok", "groups": len(app.state.wiwi.router.groups),
-                "providers": len(app.state.wiwi.router.providers)}
+                "providers": len(app.state.wiwi.router.providers),
+                "dropped_request_logs": app.state.wiwi.logs.dropped_request_logs}
 
     # -- metrics ---------------------------------------------------------------
     if config.router_settings.prometheus_enabled:
@@ -1596,7 +1606,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 return _err(401, "authentication_error", "master key required",
                             request, "chat")
             events = [e for _, e in await state.logs.sse.replay("request", 0)]
-            text = render_metrics(events)
+            # A dropped event is absent from the ring by definition, so the
+            # queue-full counter has to be passed in; without it a saturated
+            # log queue would silently under-report every counter below.
+            text = render_metrics(events, state.logs.dropped_request_logs)
             return PlainTextResponse(text, media_type="text/plain; version=0.0.4")
 
     # -- admin -------------------------------------------------------------------
@@ -1666,8 +1679,15 @@ def create_app(config: WiwiConfig) -> FastAPI:
         body, jerr = await json_body(request)
         if jerr:
             return jerr
-        disabled = bool(body.get("disabled", True))
-        await state.auth.set_disabled(key_id, disabled)
+        # Require a real bool, same as the sibling provider-key route
+        # (AUDIT #82): bool("false") is True, so a caller asking to *enable*
+        # a key silently revoked it instead.
+        disabled = body.get("disabled", True)
+        if not isinstance(disabled, bool):
+            return _err(400, "invalid_request_error",
+                        "disabled must be a boolean", request)
+        if not await state.auth.set_disabled(key_id, disabled):
+            return _err(404, "not_found_error", f"unknown key '{key_id}'", request)
         await state.logs.log_audit(actor=actor.username,
                                    action="key.disable" if disabled else "key.enable",
                                    target=key_id)
@@ -1704,8 +1724,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     @app.get("/admin/stream")
     async def admin_stream(request: Request):
-        if not is_admin(request):
-            return _err(401, "authentication_error", "master key required", request)
+        # Both credential forms: the SPA streams this with the master key as a
+        # bearer, and an admin logged in by cookie must get the same channel.
+        resp = await require_admin_dep(request)
+        if resp:
+            return resp
         # SSE reconnect ids are client-supplied: a malformed one must fall
         # back to 0 (full replay), not 500 the endpoint before a byte is sent.
         try:
@@ -1777,10 +1800,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
                                           "x-accel-buffering": "no"})
 
     # -- admin: providers & pools ------------------------------------------------
-    def _require_admin(request: Request) -> ORJSONResponse | None:
-        if not is_admin(request):
-            return _err(401, "authentication_error", "master key required", request)
-        return None
+    # Every /admin/* route (and the SSE channel below) authorizes through
+    # require_admin_dep, which resolves a signed session cookie OR the bearer
+    # master key. README.md and docs/ADMIN.md both promise that either
+    # credential reaches the admin API, so there is deliberately no
+    # bearer-only guard to drift away from it.
 
     # -- session / user resolution ----------------------------------------------
     async def current_user(request: Request) -> UserInfo | None:
@@ -1849,7 +1873,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     @app.get("/admin/provider-catalog")
     async def admin_provider_catalog(request: Request):
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         configured = {a.provider_type for a in state.router.providers.values()}
@@ -1862,7 +1886,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     @app.get("/admin/providers")
     async def admin_providers(request: Request):
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         mono, wall = time.monotonic(), time.time()
@@ -1889,7 +1913,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         plaintext on demand when an admin explicitly reveals a key. Reveals
         are audit-logged like mutations since they expose a credential.
         """
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         acct = state.router.providers.get(name)
@@ -1905,7 +1929,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     @app.patch("/admin/providers/{name}/keys/{label}")
     async def admin_patch_provider_key(name: str, label: str, request: Request):
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         acct = state.router.providers.get(name)
@@ -1951,7 +1975,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     @app.post("/admin/providers/{name}/keys")
     async def admin_add_provider_key(name: str, request: Request):
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         acct = state.router.providers.get(name)
@@ -1993,7 +2017,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     @app.delete("/admin/providers/{name}/keys/{label}")
     async def admin_delete_provider_key(name: str, label: str, request: Request):
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         acct = state.router.providers.get(name)
@@ -2012,7 +2036,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     @app.post("/admin/providers")
     async def admin_add_provider(request: Request):
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         body, jerr = await json_body(request)
@@ -2084,7 +2108,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     @app.delete("/admin/providers/{name}")
     async def admin_delete_provider(name: str, request: Request):
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         acct = state.router.providers.get(name)
@@ -2113,7 +2137,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     @app.patch("/admin/providers/{name}")
     async def admin_patch_provider(name: str, request: Request):
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         acct = state.router.providers.get(name)
@@ -2132,6 +2156,14 @@ def create_app(config: WiwiConfig) -> FastAPI:
             if new_name != name and new_name in state.router.providers:
                 return _err(409, "invalid_request_error",
                             f"provider '{new_name}' already exists", request)
+            if new_name != name and new_name in state.router.alias_to_provider.values():
+                # alias_to_provider is keyed by provider name, so renaming onto
+                # a name another provider's alias already resolves to would
+                # leave the two disagreeing about who owns it — resolve_group()
+                # consults the alias map first.
+                return _err(409, "invalid_request_error",
+                            f"name '{new_name}' is already an alias of another"
+                            f" provider", request)
             diff["name"] = new_name
         if "provider_type" in body:
             ptype = str(body["provider_type"])
@@ -2181,6 +2213,13 @@ def create_app(config: WiwiConfig) -> FastAPI:
             state.router.providers[new_name] = acct
             del state.router.providers[name]
             target = f"{name}→{new_name}"
+            # The alias map is keyed by provider *name*, so a rename must
+            # rewrite every entry that still points at the old one. Gating
+            # this on alias_change left the alias resolving to nothing, and a
+            # later provider reusing the freed name silently inherited it.
+            for k, v in list(state.router.alias_to_provider.items()):
+                if v == name:
+                    state.router.alias_to_provider[k] = new_name
         else:
             target = name
         if alias_change is not None:
@@ -2226,7 +2265,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         on import. Guarded by the master key like key reveals, and
         audit-logged. Optionally scoped with ?provider=name.
         """
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         provider_filter = request.query_params.get("provider", "").strip()
@@ -2273,7 +2312,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         place, missing ones are created. The whole batch is validated first
         — any validation error rejects the import with nothing applied.
         """
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         body, jerr = await json_body(request)
@@ -2561,7 +2600,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
     @app.get("/admin/providers/{name}/models")
     async def admin_provider_models(name: str, request: Request):
         """Fetch model ids live from the upstream provider (first available key)."""
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         acct = state.router.providers.get(name)
@@ -2607,7 +2646,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         key, caches the result for 5 minutes, and returns it for reuse
         across every Cline account.
         """
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         # ?refresh=true forces a re-fetch (bypasses the 5-minute in-memory cache)
@@ -2667,7 +2706,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
     @app.get("/admin/cline/settings")
     async def admin_get_cline_settings(request: Request):
         """Read the persisted Cline default-model list."""
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         cs = state.config_store
@@ -2688,7 +2727,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         group ``cline:<model_id>``.  Idempotent — re-PUTting the same
         list is a no-op for existing deployments.
         """
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         body, jerr = await json_body(request)
@@ -2729,7 +2768,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
     async def admin_delete_cline_default_model(model_id: str, request: Request):
         """Remove one model id from the persisted list and drop every
         deployment under the ``cline:<model_id>`` group."""
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         mid = (model_id or "").strip()
@@ -2778,7 +2817,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
     @app.post("/admin/model-groups/{name:path}/deployments")
     async def admin_add_deployment(name: str, request: Request):
         """Attach a provider deployment to a model group (creating the group)."""
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         body, jerr = await json_body(request)
@@ -2838,7 +2877,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         (e.g. ``z-ai/glm-5.2``), which a greedy ``{name:path}`` prefix would
         otherwise swallow into the group name.
         """
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         gname, deps = state.router.resolve_group(name)
@@ -3041,7 +3080,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
     # -- admin: logs & stats -------------------------------------------------------
     @app.get("/admin/logs/proxy")
     async def admin_proxy_logs(request: Request):
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         # Ring is oldest→newest; slice newest 500 then reverse to newest-first
@@ -3051,6 +3090,17 @@ def create_app(config: WiwiConfig) -> FastAPI:
             {"logs": [public_dict(e) for _, e in reversed(ring[-500:])]},
             headers={"Cache-Control": "no-store"},
         )
+
+    @app.get("/admin/logs/audit")
+    async def admin_audit_logs(request: Request, limit: int = 200):
+        resp = await require_admin_dep(request)
+        if resp:
+            return resp
+        limit = max(1, min(limit, 5000))
+        sink = state.logs.db_sink
+        logs = (await sink.read_audit(limit) if sink is not None
+                else await state.logs.read_audit(limit))
+        return ORJSONResponse({"logs": logs}, headers={"Cache-Control": "no-store"})
 
     async def _request_events() -> list[LogEvent]:
         return [e for _, e in await state.logs.sse.replay("request", 0)]
@@ -3070,11 +3120,14 @@ def create_app(config: WiwiConfig) -> FastAPI:
         # through the ring made usage stats silently reset on every redeploy.
         if sink is not None:
             return ORJSONResponse(await sink.read_overview(minutes, key_ids=kids))
-        minutes_ring = minutes if minutes > 0 else 1440
         evs = await _request_events()
         if kids is not None:
             evs = [e for e in evs if e.key_id in kids]
-        return ORJSONResponse(stats_mod.overview(evs, minutes_ring))
+        # minutes=0 is all-time on both backends: stats.overview treats it as
+        # "no cutoff" exactly like DBSink.read_overview. Rewriting it to 1440
+        # here made the ring answer a different question than the DB for the
+        # same request (AUDIT_REPORT M12).
+        return ORJSONResponse(stats_mod.overview(evs, minutes))
 
     @app.get("/admin/stats/timeseries")
     async def admin_stats_timeseries(request: Request, bucket: str = "minute",
@@ -3094,12 +3147,14 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 bs = stats_mod.bucket_size_for(minutes)
                 return ORJSONResponse(
                     await sink.read_timeseries(bs, metric, minutes, key_ids=kids))
-            minutes_ring = minutes if minutes > 0 else 1440
             evs = await _request_events()
             if kids is not None:
                 evs = [e for e in evs if e.key_id in kids]
+            # Same minutes contract as the DB branch above: stats.timeseries
+            # derives its width from bucket_size_for and treats 0 as all-time,
+            # so both backends answer one request identically (AUDIT_REPORT M12).
             return ORJSONResponse(
-                stats_mod.timeseries(evs, bucket, metric, minutes_ring))
+                stats_mod.timeseries(evs, bucket, metric, minutes))
         except ValueError as e:
             return _err(400, "invalid_request_error", str(e), request)
 
@@ -3138,7 +3193,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     @app.get("/admin/pricing")
     async def admin_pricing(request: Request):
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         prices = state.cost.prices
@@ -3162,7 +3217,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         account name or a provider type. Without it, the base rate that covers
         every provider.
         """
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         scope = request.query_params.get("provider")
@@ -3280,7 +3335,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         ``?provider=<scope>`` removes only that provider's override, leaving
         the base entry and every other scope intact.
         """
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         scope = request.query_params.get("provider")
@@ -3308,14 +3363,14 @@ def create_app(config: WiwiConfig) -> FastAPI:
     # -- admin: alert rules (storage only; evaluation engine is post-MVP) ----------
     @app.get("/admin/alert-rules")
     async def admin_get_alert_rules(request: Request):
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         return ORJSONResponse({"rules": state.alert_rules})
 
     @app.put("/admin/alert-rules")
     async def admin_put_alert_rules(request: Request):
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         body, jerr = await json_body(request)
@@ -3620,7 +3675,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     @app.post("/admin/cline/oauth/login-url")
     async def cline_oauth_login_url(request: Request):
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         body, jerr = await json_body(request)
@@ -3634,7 +3689,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     @app.post("/admin/cline/oauth/connect")
     async def cline_oauth_connect(request: Request):
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         body, jerr = await json_body(request)
@@ -3685,7 +3740,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         persists them, and redirects the browser to the SPA. No manual
         copy-paste required.
         """
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         body, jerr = await json_body(request)
@@ -3801,7 +3856,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     @app.get("/admin/cline/oauth/status")
     async def cline_oauth_status(request: Request):
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         provider = request.query_params.get("provider", "").strip()
@@ -3826,7 +3881,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     @app.post("/admin/cline/oauth/refresh")
     async def cline_oauth_refresh(request: Request):
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         body, jerr = await json_body(request)
@@ -3873,7 +3928,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     @app.delete("/admin/cline/oauth/disconnect")
     async def cline_oauth_disconnect(request: Request):
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         body, jerr = await json_body(request)
@@ -3930,7 +3985,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     @app.get("/admin/workbuddy/accounts")
     async def workbuddy_accounts(request: Request):
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         return ORJSONResponse({"accounts": _workbuddy_accounts()})
@@ -3946,7 +4001,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         only if every entry parses; partial failures are rejected so the
         admin can fix the file rather than end up with a half-imported set.
         """
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         body, jerr = await json_body(request)
@@ -4025,7 +4080,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         tokens) are returned in full — this is a credential backup, guarded
         by the master key like key reveals, and audit-logged.
         """
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         provider_filter = request.query_params.get("provider", "").strip()
@@ -4060,7 +4115,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     @app.post("/admin/workbuddy/refresh")
     async def workbuddy_refresh(request: Request):
-        resp = _require_admin(request)
+        resp = await require_admin_dep(request)
         if resp:
             return resp
         body, jerr = await json_body(request)

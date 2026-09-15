@@ -158,6 +158,15 @@ class AuthService:
                 "CREATE INDEX IF NOT EXISTS idx_vkeys_owner ON vkeys(owner_id)"))
 
     # -- lookup ----------------------------------------------------------------
+    @staticmethod
+    def _expired(info: AuthInfo) -> bool:
+        """True when *info* carries an expiry that has already passed.
+
+        Wall clock, matching how ``expires_at`` is written (``time.time()``)
+        and how the request path compares it.
+        """
+        return info.expires_at is not None and time.time() > info.expires_at
+
     async def authenticate(self, plaintext: str) -> AuthInfo | None:
         if hmac.compare_digest(hash_key(plaintext), self.master_hash):
             return AuthInfo(key_id="master", key_type="master", alias="master")
@@ -169,14 +178,22 @@ class AuthService:
             # concurrent update_spend can immediately reject further use;
             # other keys (no max_budget) keep the TTL cache for speed.
             info, _ts = hit
-            if info is None or info.max_budget is None:
+            if info is None:
+                return None
+            if info.max_budget is None and not self._expired(info):
                 return info
         info = await self._lookup_db(h)
+        if info is not None and self._expired(info):
+            # An expired credential must not authenticate no matter how it
+            # reached the cache. expire_keys rotates rows in place, so the
+            # AuthInfo a caller cached beforehand still carries the old,
+            # still-future expiry; refusing here keeps that rotation
+            # authoritative for every caller instead of only for the request
+            # path that happens to re-check expires_at itself.
+            info = None
         self._sweep_cache(now)
         self._cache[h] = (info, now)
-        self._cache[h] = (info, now)
         return info
-
 
     async def _lookup_db(self, h: str) -> AuthInfo | None:
         async with self.engine.connect() as conn:
@@ -318,18 +335,24 @@ class AuthService:
         self._cache.pop(row[0], None)
         return await self.get_key(key_id)
 
-    async def set_disabled(self, key_id: str, disabled: bool) -> None:
-        """Disable/enable a key and evict its cached auth info immediately."""
+    async def set_disabled(self, key_id: str, disabled: bool) -> bool:
+        """Disable/enable a key and evict its cached auth info immediately.
+
+        Returns False when the id is unknown, so the caller can answer 404
+        instead of reporting success for a row that was never touched.
+        """
         async with self.engine.connect() as conn:
             row = (await conn.execute(sa.text("SELECT key_hash FROM vkeys WHERE id=:id"),
                                       {"id": key_id})).first()
+        if row is None:
+            return False
         async with self.engine.begin() as conn:
             await conn.execute(
                 sa.text("UPDATE vkeys SET disabled=:d, updated_at=:now WHERE id=:id"),
                 {"d": int(disabled), "id": key_id, "now": time.time()},
             )
-        if row is not None:
-            self._cache.pop(row[0], None)
+        self._cache.pop(row[0], None)
+        return True
 
     async def update_spend(self, key_id: str, add_cost: float) -> bool:
         """Add *add_cost* to the key's spend_to_date.
@@ -444,7 +467,12 @@ class AuthService:
         """
         now = time.time()
         owner_clause = "owner_id IS NULL" if owner_id is None else "owner_id = :o"
-        sql = (f"SELECT id FROM vkeys WHERE {owner_clause}"
+        # key_hash is selected alongside id so the expired credentials can be
+        # evicted from the auth cache below; without that, the row reads
+        # expired while a cached AuthInfo keeps authenticating for the whole
+        # TTL (playground keys have no max_budget, so they take exactly the
+        # cached branch in authenticate()).
+        sql = (f"SELECT id, key_hash FROM vkeys WHERE {owner_clause}"
                " AND (expires_at IS NULL OR expires_at > :now)"
                " AND COALESCE(disabled, 0) = 0")
         params: dict[str, object] = {"now": now}
@@ -456,12 +484,14 @@ class AuthService:
         sql += " ORDER BY created_at DESC"
         async with self.engine.begin() as conn:
             rows = (await conn.execute(sa.text(sql), params)).all()
-            stale = [r[0] for r in rows[keep_newest:]]
-            for kid in stale:
+            stale = rows[keep_newest:]
+            for row in stale:
                 await conn.execute(
                     sa.text("UPDATE vkeys SET expires_at = :now,"
                             " updated_at = :now WHERE id = :id"),
-                    {"now": now, "id": kid})
+                    {"now": now, "id": row[0]})
+        for row in stale:
+            self._cache.pop(row[1], None)
         return len(stale)
 
     async def key_owner(self, key_id: str) -> str | None:
