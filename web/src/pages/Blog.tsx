@@ -1,8 +1,6 @@
 // Blog — listing page with inline post entries. Adapted from the llmgateway.io
 // blog index, rendered in the dark design system.
 
-import { Link } from "react-router-dom";
-import { ArrowRight } from "lucide-react";
 import { Card } from "@/components/ui";
 
 const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
@@ -104,38 +102,35 @@ export function BlogPage() {
       </section>
 
       {/* ── post list ── */}
+      {/* Entries carry a title and summary but no article body, so they are
+          presented as static cards: linking to /blog/<slug> had no route and
+          bounced to the marketing landing page. */}
       <section className="space-y-4">
         {sorted.map((entry, index) => (
-          <Link key={entry.id} to={`/blog/${entry.slug}`} className="block">
-            <Card className="group p-5 transition-colors hover:border-[var(--admin-border-hover)]">
-              <div className="flex items-start gap-4">
-                <span
-                  className="mt-1 font-mono text-[11px] tabular-nums text-[var(--admin-text-dim)]"
-                  style={{ fontFamily: MONO }}
-                >
-                  {String(index + 1).padStart(2, "0")}
-                </span>
-                <div className="flex-1">
-                  <div className="mb-1 flex items-center gap-3">
-                    <span className="admin-badge admin-badge-blue">{entry.category}</span>
-                    <span className="font-mono text-[11px] text-[var(--admin-text-dim)]" style={{ fontFamily: MONO }}>
-                      {formatDate(entry.date)}
-                    </span>
-                  </div>
-                  <h2 className="text-[16px] font-semibold tracking-[-0.01em] text-[var(--admin-text)] transition-colors group-hover:text-blue-400">
-                    {entry.title}
-                  </h2>
-                  <p className="mt-1.5 text-[13px] leading-relaxed text-[var(--admin-text-muted)]">
-                    {entry.summary}
-                  </p>
+          <Card key={entry.id} className="p-5">
+            <div className="flex items-start gap-4">
+              <span
+                className="mt-1 font-mono text-[11px] tabular-nums text-[var(--admin-text-dim)]"
+                style={{ fontFamily: MONO }}
+              >
+                {String(index + 1).padStart(2, "0")}
+              </span>
+              <div className="flex-1">
+                <div className="mb-1 flex items-center gap-3">
+                  <span className="admin-badge admin-badge-blue">{entry.category}</span>
+                  <span className="font-mono text-[11px] text-[var(--admin-text-dim)]" style={{ fontFamily: MONO }}>
+                    {formatDate(entry.date)}
+                  </span>
                 </div>
-                <ArrowRight
-                  size={16}
-                  className="mt-1 shrink-0 text-[var(--admin-text-dim)] transition-transform duration-150 group-hover:translate-x-0.5 group-hover:text-blue-400"
-                />
+                <h2 className="text-[16px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
+                  {entry.title}
+                </h2>
+                <p className="mt-1.5 text-[13px] leading-relaxed text-[var(--admin-text-muted)]">
+                  {entry.summary}
+                </p>
               </div>
-            </Card>
-          </Link>
+            </div>
+          </Card>
         ))}
       </section>
     </div>

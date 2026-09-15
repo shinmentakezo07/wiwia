@@ -88,6 +88,10 @@ function AppRoutes() {
         <Route path="/" element={<LandingPage />} />
         <Route path="/models" element={<ModelsCatalogPage />} />
         <Route path="/docs" element={<DocsPage />} />
+        {/* Docs is a single page with in-page sections, so any deeper path
+            (/docs/cursor, a bookmarked /docs/config#streaming, …) would
+            otherwise fall through the catch-all to the marketing landing. */}
+        <Route path="/docs/*" element={<Navigate to="/docs" replace />} />
         <Route path="/pricing" element={<PricingPage />} />
         <Route path="/about" element={<AboutPage />} />
         <Route path="/contact" element={<ContactPage />} />

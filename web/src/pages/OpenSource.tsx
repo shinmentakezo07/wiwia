@@ -209,11 +209,14 @@ export function OpenSourcePage() {
             </tbody>
           </table>
         </div>
+        {/* The comparison lives on one page that covers every vendor, so these
+            point at it: /compare/<vendor> had no route and bounced to the
+            marketing landing page. */}
         <div className="mt-5 flex flex-wrap gap-3 justify-center text-[13px]">
-          <Link to="/compare/open-router" className="underline">vs OpenRouter</Link>
-          <Link to="/compare/vercel-ai-gateway" className="underline">vs Vercel AI Gateway</Link>
-          <Link to="/compare/portkey" className="underline">vs Portkey</Link>
-          <Link to="/compare/litellm" className="underline">vs LiteLLM</Link>
+          <Link to="/compare" className="underline">vs OpenRouter</Link>
+          <Link to="/compare" className="underline">vs Vercel AI Gateway</Link>
+          <Link to="/compare" className="underline">vs Portkey</Link>
+          <Link to="/compare" className="underline">vs LiteLLM</Link>
         </div>
       </section>
 

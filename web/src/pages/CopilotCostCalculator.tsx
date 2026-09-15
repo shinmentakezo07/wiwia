@@ -183,11 +183,11 @@ export function CopilotCostCalculatorPage() {
           </p>
           <p>
             When the estimate looks right, the{" "}
-            <Link to="/migration/github-copilot" className="font-medium text-blue-400 underline-offset-4 hover:underline">
-              GitHub Copilot migration guide
+            <Link to="/migration" className="font-medium text-blue-400 underline-offset-4 hover:underline">
+              migration guides
             </Link>{" "}
-            maps each Copilot workflow to its gateway-backed replacement, and the{" "}
-            <Link to="/compare/github-copilot" className="font-medium text-blue-400 underline-offset-4 hover:underline">
+            map each Copilot workflow to its gateway-backed replacement, and the{" "}
+            <Link to="/compare" className="font-medium text-blue-400 underline-offset-4 hover:underline">
               full comparison
             </Link>{" "}
             covers features beyond cost.

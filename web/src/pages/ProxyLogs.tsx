@@ -227,9 +227,9 @@ function ProxyRow(props: {
         ariaLabel={`proxy log ${l.level}`}
         onClick={hasExtra ? onToggle : undefined}
       >
-        {/* Level accent bar */}
-        <LogTD className={`border-l-2 ${LEVEL_BAR[l.level]} pl-3`} />
-        <TimeAgo ts={l.ts} nowMs={nowMs} />
+        {/* Level accent rides the first cell so the row has exactly one cell
+            per header (the accent used to be its own unlabelled column). */}
+        <TimeAgo ts={l.ts} nowMs={nowMs} className={`border-l-2 ${LEVEL_BAR[l.level]} pl-3`} />
         <LogTD>
           <Badge tone={LEVEL_TONE[l.level]}>{l.level}</Badge>
         </LogTD>
@@ -258,7 +258,7 @@ function ProxyRow(props: {
       </LogRow>
       {isOpen && hasExtra && (
         <tr className={`bg-white/[0.02] ${zebra % 2 === 1 ? "bg-white/[0.012]" : ""}`}>
-          <LogTD colSpan={5} className="py-3 pl-8">
+          <LogTD colSpan={4} className="py-3 pl-8">
             <div className="space-y-2">
               {l.message.length > 120 && (
                 <div>

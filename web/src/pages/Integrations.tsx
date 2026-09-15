@@ -16,12 +16,12 @@ interface Integration {
 const INTEGRATIONS: Integration[] = [
   { name: "DevPass Code", description: "Open-source terminal coding agent built for the gateway. One browser login, every model, no per-provider keys.", href: "/guides/devpass-code", comingSoon: false },
   { name: "Claude Code", description: "Use the gateway with Claude Code for AI-powered terminal assistance and coding.", href: "/guides/claude-code", comingSoon: false },
-  { name: "Cursor", description: "Use the gateway with Cursor IDE in plan and agent mode. Tab autocomplete and inline edit stay on Cursor's backend.", href: "/docs/cursor", comingSoon: false, badge: "Plan + Agent mode" },
+  { name: "Cursor", description: "Use the gateway with Cursor IDE in plan and agent mode. Tab autocomplete and inline edit stay on Cursor's backend.", href: "/guides/cursor", comingSoon: false, badge: "Plan + Agent mode" },
   { name: "Codex CLI", description: "Use the gateway with OpenAI's Codex CLI for AI-powered terminal coding.", href: "/guides/codex-cli", comingSoon: false },
-  { name: "Cline", description: "Use the gateway with Cline for AI-powered coding assistance in VS Code.", href: "/docs/cline", comingSoon: false },
+  { name: "Cline", description: "Use the gateway with Cline for AI-powered coding assistance in VS Code.", href: "/guides/cline", comingSoon: false },
   { name: "Continue CLI", description: "Use the gateway with Continue's open-source AI code assistant CLI.", href: "/guides/continue", comingSoon: false },
   { name: "GitHub Copilot app", description: "Use the gateway as a model provider in GitHub's Copilot desktop app for agent sessions with any model.", href: "/guides/github-copilot", comingSoon: false, badge: "BYOK" },
-  { name: "n8n", description: "Connect n8n workflow automation to the gateway for AI-powered workflows.", href: "/docs/n8n", comingSoon: false },
+  { name: "n8n", description: "Connect n8n workflow automation to the gateway for AI-powered workflows.", href: "/guides/n8n", comingSoon: false },
   { name: "OpenCode", description: "Use the gateway with OpenCode CLI for AI-powered development workflows.", href: "/guides/opencode", comingSoon: false },
   { name: "VS Code", description: "Native VS Code integration for AI-powered code completion and chat.", href: "#", comingSoon: true },
 ];

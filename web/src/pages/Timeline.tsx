@@ -2,7 +2,7 @@
 // page with inlined data, in the dark design system.
 
 import { Link } from "react-router-dom";
-import { ArrowRight, ArrowUpRight, Sparkles } from "lucide-react";
+import { ArrowRight, Sparkles } from "lucide-react";
 import { Badge, Card } from "@/components/ui";
 
 const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
@@ -140,7 +140,7 @@ export function TimelinePage() {
           {MONTH_RELEASES.map((model) => (
             <Link
               key={model.id}
-              to={`/models/${encodeURIComponent(model.id)}`}
+              to="/models"
               className="flex items-baseline justify-between gap-4 border-b border-[var(--admin-border)] px-4 py-3 transition-colors last:border-b-0 hover:bg-white/[0.02]"
             >
               <span className="text-[14px] font-medium text-[var(--admin-text)] transition-colors hover:text-blue-400">
@@ -165,33 +165,29 @@ export function TimelinePage() {
           </p>
         </div>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {/* Year summaries are informational: there is no per-year route, so
+              the cards do not pretend to be links. */}
           {YEAR_SUMMARIES.map((summary) => (
-            <Link key={summary.year} to={`/timeline/${summary.year}`} className="group">
-              <Card className="p-5 transition-colors hover:border-[var(--admin-border-hover)]">
-                <div className="flex items-baseline justify-between">
-                  <h3 className="font-mono text-[22px] font-bold tabular-nums text-[var(--admin-text)]" style={{ fontFamily: MONO }}>
-                    {summary.year}
-                  </h3>
-                  <span className="text-[13px] text-[var(--admin-text-muted)]">
-                    {summary.count} {summary.count === 1 ? "model" : "models"}
-                  </span>
-                </div>
-                {summary.providers.length > 0 && (
-                  <p className="mt-2 truncate text-[12px] text-[var(--admin-text-muted)]">
-                    {summary.providers.slice(0, 4).join(" · ")}
-                  </p>
-                )}
-                {summary.highlights.length > 0 && (
-                  <p className="mt-3 line-clamp-2 text-[13px] text-[var(--admin-text)]/80">
-                    {summary.highlights.join(", ")}
-                  </p>
-                )}
-                <span className="mt-4 inline-flex items-center gap-1 text-[12px] font-medium text-blue-400">
-                  View {summary.year} releases
-                  <ArrowUpRight size={12} className="transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
+            <Card key={summary.year} className="p-5">
+              <div className="flex items-baseline justify-between">
+                <h3 className="font-mono text-[22px] font-bold tabular-nums text-[var(--admin-text)]" style={{ fontFamily: MONO }}>
+                  {summary.year}
+                </h3>
+                <span className="text-[13px] text-[var(--admin-text-muted)]">
+                  {summary.count} {summary.count === 1 ? "model" : "models"}
                 </span>
-              </Card>
-            </Link>
+              </div>
+              {summary.providers.length > 0 && (
+                <p className="mt-2 truncate text-[12px] text-[var(--admin-text-muted)]">
+                  {summary.providers.slice(0, 4).join(" · ")}
+                </p>
+              )}
+              {summary.highlights.length > 0 && (
+                <p className="mt-3 line-clamp-2 text-[13px] text-[var(--admin-text)]/80">
+                  {summary.highlights.join(", ")}
+                </p>
+              )}
+            </Card>
           ))}
         </div>
       </section>

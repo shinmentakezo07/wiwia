@@ -90,7 +90,6 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
 import type {
   AlertRule,
   BuiltinProvider,
-  ClineAutoConnectResponse,
   ClineConnectResponse,
   ClineDisconnectResponse,
   ClineLoginUrlResponse,
@@ -305,9 +304,6 @@ export const getTimeseries = (metric: TimeseriesMetric, minutes: number) =>
 export const getRequestLogs = () =>
   api<{ logs: RequestLogEntry[] }>("/admin/logs/requests?limit=10000");
 
-export const getRequestLogsWithLimit = (limit: number) =>
-  api<{ logs: RequestLogEntry[] }>(`/admin/logs/requests?limit=${limit}`);
-
 export const getPricing = () =>
   api<{ models: ModelPrice[] }>("/admin/pricing");
 
@@ -412,18 +408,15 @@ export const getPublicModels = () =>
   api<{ groups: PublicModelGroup[]; aliases: Record<string, string> }>(
     "/public/models",
   );
-// -- Cline OAuth (paste-code + automatic redirect flow) ----------------------
+// -- Cline OAuth (paste-code flow) -------------------------------------------
+// The backend also exposes POST /admin/cline/oauth/auto-connect, but Cline's
+// Google OAuth ignores callback_url (see pages/OAuthProviders.tsx), so every
+// UI drives the paste-code flow below and that route has no SPA caller.
 
 export const clineLoginUrl = (callbackUrl: string) =>
   api<ClineLoginUrlResponse>("/admin/cline/oauth/login-url", {
     method: "POST",
     body: JSON.stringify({ callback_url: callbackUrl }),
-  });
-
-export const clineAutoConnect = (provider: string, returnPath?: string) =>
-  api<ClineAutoConnectResponse>("/admin/cline/oauth/auto-connect", {
-    method: "POST",
-    body: JSON.stringify({ provider, return_path: returnPath }),
   });
 
 export const clineConnect = (provider: string, code: string) =>

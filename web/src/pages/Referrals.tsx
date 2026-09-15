@@ -26,14 +26,16 @@ import { Badge, Card } from "@/components/ui";
 const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
 
 const SELLING_POINTS: { icon: LucideIcon; title: string; description: string; href: string; accent: string; accentBg: string; external?: boolean }[] = [
-  { icon: Network, title: "200+ Models, One API", description: "Access OpenAI, Anthropic, Google, Meta, Mistral, and 40+ providers through a single OpenAI-compatible endpoint. Zero code changes to switch providers.", href: "/features/unified-api-interface", accent: "text-violet-400", accentBg: "bg-violet-500/10" },
-  { icon: RefreshCw, title: "Automatic Failover", description: "When a provider goes down or rate-limits you, requests automatically route to the next best provider. Your users never notice the difference.", href: "/features/multi-provider-support", accent: "text-emerald-400", accentBg: "bg-emerald-500/10" },
-  { icon: ImageIcon, title: "Nano Banana Simulator", description: "Up to 20% off Google Gemini 3 Pro image generation. Use the cost simulator to see exactly how much you save at any volume.", href: "/nano-banana-simulator", accent: "text-amber-400", accentBg: "bg-amber-500/10" },
+  // Feature detail pages do not exist; the AI Gateway section on /products
+  // covers exactly these capabilities, and DevPass lives at its own host.
+  { icon: Network, title: "200+ Models, One API", description: "Access OpenAI, Anthropic, Google, Meta, Mistral, and 40+ providers through a single OpenAI-compatible endpoint. Zero code changes to switch providers.", href: "/products", accent: "text-violet-400", accentBg: "bg-violet-500/10" },
+  { icon: RefreshCw, title: "Automatic Failover", description: "When a provider goes down or rate-limits you, requests automatically route to the next best provider. Your users never notice the difference.", href: "/products", accent: "text-emerald-400", accentBg: "bg-emerald-500/10" },
+  { icon: ImageIcon, title: "Nano Banana Simulator", description: "Up to 20% off Google Gemini 3 Pro image generation. Use the cost simulator to see exactly how much you save at any volume.", href: "/products", accent: "text-amber-400", accentBg: "bg-amber-500/10" },
   { icon: DollarSign, title: "5% Platform Fee", description: "Lower than competitors. OpenRouter charges 5.5%. Bring your own keys and pay zero platform fees.", href: "/pricing", accent: "text-green-400", accentBg: "bg-green-500/10" },
-  { icon: Code2, title: "Dev Plans for AI Coding", description: "Fixed-price plans from $29/mo for Claude Code, Cursor, and Windsurf. Get 3x your subscription in monthly usage with all models included.", href: "/code", accent: "text-blue-400", accentBg: "bg-blue-500/10", external: true },
-  { icon: Shield, title: "Guardrails & Safety", description: "Built-in prompt injection protection, PII detection, secrets scanning, and custom content rules. Compliance without the overhead.", href: "/features/guardrails", accent: "text-rose-400", accentBg: "bg-rose-500/10" },
-  { icon: Zap, title: "Prompt Caching", description: "Automatic response caching cuts costs and latency on repeated queries. Toggle it per-project from the dashboard.", href: "/features/performance-monitoring", accent: "text-orange-400", accentBg: "bg-orange-500/10" },
-  { icon: Globe, title: "Self-Host for Free", description: "Open source under AGPLv3. Deploy on your own infrastructure for full data control, or use the managed cloud for instant setup.", href: "/features/self-hosted-or-cloud", accent: "text-cyan-400", accentBg: "bg-cyan-500/10" },
+  { icon: Code2, title: "Dev Plans for AI Coding", description: "Fixed-price plans from $29/mo for Claude Code, Cursor, and Windsurf. Get 3x your subscription in monthly usage with all models included.", href: "https://devpass.llmgateway.io", accent: "text-blue-400", accentBg: "bg-blue-500/10", external: true },
+  { icon: Shield, title: "Guardrails & Safety", description: "Built-in prompt injection protection, PII detection, secrets scanning, and custom content rules. Compliance without the overhead.", href: "/products", accent: "text-rose-400", accentBg: "bg-rose-500/10" },
+  { icon: Zap, title: "Prompt Caching", description: "Automatic response caching cuts costs and latency on repeated queries. Toggle it per-project from the dashboard.", href: "/products", accent: "text-orange-400", accentBg: "bg-orange-500/10" },
+  { icon: Globe, title: "Self-Host for Free", description: "Open source under AGPLv3. Deploy on your own infrastructure for full data control, or use the managed cloud for instant setup.", href: "/products", accent: "text-cyan-400", accentBg: "bg-cyan-500/10" },
   { icon: KeyRound, title: "Bring Your Own Keys", description: "Use your existing provider API keys with zero platform fee. Get unified analytics, failover, and guardrails on top of your own accounts.", href: "/pricing", accent: "text-purple-400", accentBg: "bg-purple-500/10" },
 ];
 
@@ -186,7 +188,7 @@ export function ReferralsPage() {
           </table>
         </div>
         <div className="mt-5 text-center">
-          <Link to="/compare/open-router" className="inline-flex items-center gap-1.5 text-[14px] font-medium text-[var(--admin-text)] hover:text-blue-400">
+          <Link to="/compare" className="inline-flex items-center gap-1.5 text-[14px] font-medium text-[var(--admin-text)] hover:text-blue-400">
             See full comparison
             <ArrowRight size={14} />
           </Link>

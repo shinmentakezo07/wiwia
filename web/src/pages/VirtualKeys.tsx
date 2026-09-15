@@ -260,6 +260,7 @@ export function VirtualKeysPage() {
   const [clearBudget, setClearBudget] = useState(false);
   const [clearRpm, setClearRpm] = useState(false);
   const [clearTpm, setClearTpm] = useState(false);
+  const [clearModels, setClearModels] = useState(false);
 
   const editBudgetN = tryParse(editBudget);
   const editRpmN = tryParse(editRpm);
@@ -268,11 +269,19 @@ export function VirtualKeysPage() {
 
   function openEdit(k: VirtualKey) {
     setEditTarget(k);
+    // Seed every editable field from the key being edited. The inputs are the
+    // only source the patch is built from, so an unseeded field would either
+    // send a stale value from the previously edited key or read as "empty"
+    // and overwrite the stored one (models = [] silently means all-allowed).
     setEditBudget(k.max_budget != null ? String(k.max_budget) : "");
+    setEditRpm(k.rpm != null ? String(k.rpm) : "");
+    setEditTpm(k.tpm != null ? String(k.tpm) : "");
+    setEditModels(k.models.join(", "));
     setClearExpiry(false);
     setClearBudget(false);
     setClearRpm(false);
     setClearTpm(false);
+    setClearModels(false);
     setEditError(null);
   }
 
@@ -524,7 +533,11 @@ export function VirtualKeysPage() {
               else if (editRpmN != null) patch.rpm = editRpmN;
               if (clearTpm) patch.tpm = null;
               else if (editTpmN != null) patch.tpm = editTpmN;
-              patch.models = parseCsv(editModels);
+              // The allowlist follows the same rule as the numeric fields: a
+              // non-empty list overwrites, an emptied input means "leave
+              // unchanged" and only the checkbox sends the all-models [].
+              if (clearModels) patch.models = [];
+              else if (editModels.trim()) patch.models = parseCsv(editModels);
               if (clearExpiry) patch.expires_at = null;
               editSave.mutate({ id: editTarget.id, patch });
             }}
@@ -561,8 +574,8 @@ export function VirtualKeysPage() {
                 />
               </Field>
             </div>
-            <div className="flex flex-wrap gap-x-4 gap-y-2 text-[13px] text-[var(--admin-text-muted)]">
-              <label className="flex items-center gap-2">
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-[13px] text-[var(--admin-text-muted)]">
+              <label className="flex min-h-11 items-center gap-2">
                 <input
                   type="checkbox"
                   checked={clearBudget}
@@ -571,7 +584,7 @@ export function VirtualKeysPage() {
                 />
                 Clear budget → unlimited
               </label>
-              <label className="flex items-center gap-2">
+              <label className="flex min-h-11 items-center gap-2">
                 <input
                   type="checkbox"
                   checked={clearRpm}
@@ -580,7 +593,7 @@ export function VirtualKeysPage() {
                 />
                 Clear RPM → unlimited
               </label>
-              <label className="flex items-center gap-2">
+              <label className="flex min-h-11 items-center gap-2">
                 <input
                   type="checkbox"
                   checked={clearTpm}
@@ -592,28 +605,41 @@ export function VirtualKeysPage() {
             </div>
             <Field
               label="Model allowlist"
-              hint="Comma-separated; empty list = all models."
+              hint={`Currently ${
+                editTarget.models.length > 0 ? editTarget.models.join(", ") : "all models"
+              }. Empty = leave unchanged.`}
             >
               <Input
                 value={editModels}
                 onChange={(e) => setEditModels(e.target.value)}
-                placeholder="model-a, model-b"
+                placeholder="unchanged"
               />
             </Field>
-            <label className="flex items-center gap-2 text-[13px] text-[var(--admin-text-muted)]">
-              <input
-                type="checkbox"
-                checked={clearExpiry}
-                onChange={(e) => setClearExpiry(e.target.checked)}
-                className="h-4 w-4 rounded border-[var(--admin-border)] accent-blue-500"
-              />
-              Clear expiry
-              {editTarget.expires_at != null && (
-                <span className="text-[11px] text-[var(--admin-text-dim)]">
-                  (currently {fmtDateTime(editTarget.expires_at)})
-                </span>
-              )}
-            </label>
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-[13px] text-[var(--admin-text-muted)]">
+              <label className="flex min-h-11 items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={clearModels}
+                  onChange={(e) => setClearModels(e.target.checked)}
+                  className="h-4 w-4 rounded border-[var(--admin-border)] accent-blue-500"
+                />
+                Clear allowlist → all models
+              </label>
+              <label className="flex min-h-11 items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={clearExpiry}
+                  onChange={(e) => setClearExpiry(e.target.checked)}
+                  className="h-4 w-4 rounded border-[var(--admin-border)] accent-blue-500"
+                />
+                Clear expiry
+                {editTarget.expires_at != null && (
+                  <span className="text-[11px] text-[var(--admin-text-dim)]">
+                    (currently {fmtDateTime(editTarget.expires_at)})
+                  </span>
+                )}
+              </label>
+            </div>
             {editError && <ErrorText>{editError}</ErrorText>}
             <div className="flex justify-end gap-2 pt-2">
               <Button variant="ghost" type="button" onClick={closeEdit}>

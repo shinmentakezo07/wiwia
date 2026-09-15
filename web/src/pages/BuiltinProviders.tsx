@@ -128,7 +128,7 @@ function ProviderCatalogCard(props: {
             {accounts.slice(0, 4).map((a) => (
               <Link
                 key={a.name}
-                to={`/providers/${encodeURIComponent(a.name)}`}
+                to={`/console/providers/${encodeURIComponent(a.name)}`}
                 className="flex items-center justify-between rounded-md px-1.5 py-1 text-[12px] transition-colors hover:bg-white/[0.02]"
               >
                 <span className="flex items-center gap-2">

@@ -674,7 +674,7 @@ export function DashboardPage() {
         </VisualCard>
 
         <VisualCard title="status mix" subtitle="response class share" icon={AlertTriangle}>
-          <StatusMix slices={statusMix} total={logs.length} />
+          <StatusMix slices={statusMix} />
         </VisualCard>
 
         <VisualCard title="ttft profile" subtitle="time to first token" icon={Timer}>

@@ -87,6 +87,10 @@ const RANGE_OPTIONS = [
 
 const RANGE_STORAGE_KEY = "wiwi.usage.range";
 
+/** Rows rendered before the "show more" control appears. Keeps the DOM bounded
+ *  when a wide range (24h+) returns thousands of requests. */
+const ROWS_PER_PAGE = 250;
+
 function loadStoredRange(): number {
   try {
     const raw = localStorage.getItem(RANGE_STORAGE_KEY);
@@ -368,6 +372,20 @@ export function UsagePage() {
     });
     return rows;
   }, [logs, sortKey, sortDir]);
+
+  // Render at most `visible` rows. A 24h window on a busy gateway is tens of
+  // thousands of requests, and every row is ~15 DOM nodes: at 9k rows the
+  // table alone is ~136k nodes and the page visibly stalls on each sort,
+  // filter and poll. The aggregates above still use the full `sorted` set, so
+  // the numbers are unaffected — only the row list is paged.
+  const [visible, setVisible] = useState(ROWS_PER_PAGE);
+  useEffect(() => {
+    setVisible(ROWS_PER_PAGE);
+  }, [range, sortKey, sortDir, filterGroup]);
+  const visibleRows = useMemo(
+    () => (sorted.length > visible ? sorted.slice(0, visible) : sorted),
+    [sorted, visible],
+  );
 
   const groupRows = useMemo<GroupRow[]>(() => {
     const rows: GroupRow[] = [];
@@ -754,7 +772,7 @@ export function UsagePage() {
         </VisualCard>
 
         <VisualCard title="status mix" subtitle="response class share" icon={Activity}>
-          <StatusMix slices={statusMix} total={logs.length} />
+          <StatusMix slices={statusMix} />
         </VisualCard>
 
         <VisualCard title="ttft profile" subtitle="time to first token" icon={Timer}>
@@ -1095,6 +1113,8 @@ export function UsagePage() {
               {fmtInt(sorted.length)} rows · {filterGroup
                 ? `filtered by ${filterGroup.dim}: ${filterGroup.name}`
                 : "click a column to sort"}
+              {sorted.length > visibleRows.length &&
+                ` · showing first ${fmtInt(visibleRows.length)}`}
             </span>
           }
         />
@@ -1118,7 +1138,7 @@ export function UsagePage() {
               <SortHeader key="cost" label="cost" k="cost" active={sortKey} dir={sortDir} onSort={onSort} />,
             ]}
           >
-            {sorted.map((l) => (
+            {visibleRows.map((l) => (
               <tr key={l.request_id}>
                 <TD className="font-mono text-[12px] text-[var(--admin-text-dim)]">{fmtDateTime(l.ts)}</TD>
                 <TD>{l.key_alias || "(none)"}</TD>
@@ -1149,6 +1169,20 @@ export function UsagePage() {
               <TD className="font-mono tabular-nums">{fmtUsd(cost)}</TD>
             </tr>
           </Table>
+        )}
+        {sorted.length > visibleRows.length && (
+          <div className="flex items-center justify-center gap-3 border-t border-[var(--admin-border)] px-3 py-3">
+            <span className="font-mono text-[11px] text-[var(--admin-text-dim)]">
+              showing {fmtInt(visibleRows.length)} of {fmtInt(sorted.length)} rows
+            </span>
+            <button
+              type="button"
+              onClick={() => setVisible((v) => v + ROWS_PER_PAGE)}
+              className="min-h-11 rounded-md border border-[var(--admin-border)] px-4 text-[12px] font-medium hover:bg-white/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+            >
+              Show {fmtInt(Math.min(ROWS_PER_PAGE, sorted.length - visibleRows.length))} more
+            </button>
+          </div>
         )}
       </Card>
     </div>

@@ -90,7 +90,7 @@ export function RankingsPage() {
           {RANKED_MODELS.map((model, index) => (
             <Link
               key={model.id}
-              to={`/models/${encodeURIComponent(model.id)}`}
+              to="/models"
               className="group grid grid-cols-[3rem_1fr_auto_auto] items-center gap-4 border-b border-[var(--admin-border)] px-5 py-4 transition-colors last:border-b-0 hover:bg-white/[0.02]"
             >
               <span className="font-mono text-[18px] font-bold tabular-nums text-[var(--admin-text-dim)]" style={{ fontFamily: MONO }}>

@@ -1,7 +1,8 @@
 // Fetch-based SSE client: native EventSource cannot send an Authorization
 // header, so we stream /admin/stream manually with Last-Event-ID reconnect.
 
-export type SSEHandlers = Record<string, (data: unknown, id: number) => void>;
+// Handler map keyed by SSE event name; internal to this module.
+type SSEHandlers = Record<string, (data: unknown, id: number) => void>;
 
 export class WiwiStream {
   private url: string;

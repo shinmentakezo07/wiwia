@@ -1395,7 +1395,7 @@ export function AnalyticsPage() {
         </VisualCard>
 
         <VisualCard title="status mix" subtitle="response class share" icon={Activity}>
-          <StatusMix slices={statusMix} total={logs.length} />
+          <StatusMix slices={statusMix} />
         </VisualCard>
 
         <VisualCard

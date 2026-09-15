@@ -76,25 +76,22 @@ export function MigrationPage() {
       </section>
 
       {/* ── migration cards ── */}
+      {/* No per-vendor guide body exists, so these are informational cards:
+          linking to /migration/<slug> had no route and bounced to the
+          marketing landing page. */}
       <section className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
         {MIGRATIONS.map((migration) => (
-          <Link key={migration.slug} to={`/migration/${migration.slug}`} className="group">
-            <Card className="flex h-full flex-col p-5 transition-colors hover:border-[var(--admin-border-hover)]">
-              <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-lg border border-[var(--admin-border)] bg-white/[0.02] text-[16px] font-bold text-[var(--admin-text)]">
-                {migration.icon}
-              </div>
-              <h2 className="mb-2 text-[16px] font-semibold tracking-[-0.01em] text-[var(--admin-text)] transition-colors group-hover:text-blue-400">
-                {migration.title}
-              </h2>
-              <p className="mb-4 flex-grow text-[13px] leading-relaxed text-[var(--admin-text-muted)]">
-                {migration.description}
-              </p>
-              <div className="flex items-center text-[13px] font-medium text-blue-400">
-                Read guide
-                <ArrowRight size={14} className="ml-1 transition-transform group-hover:translate-x-0.5" />
-              </div>
-            </Card>
-          </Link>
+          <Card key={migration.slug} className="flex h-full flex-col p-5">
+            <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-lg border border-[var(--admin-border)] bg-white/[0.02] text-[16px] font-bold text-[var(--admin-text)]">
+              {migration.icon}
+            </div>
+            <h2 className="mb-2 text-[16px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
+              {migration.title}
+            </h2>
+            <p className="flex-grow text-[13px] leading-relaxed text-[var(--admin-text-muted)]">
+              {migration.description}
+            </p>
+          </Card>
         ))}
       </section>
 

@@ -202,8 +202,12 @@ function ComboDialog(props: {
           .map((d) => ({ provider: d.provider, model_id: d.model_id }));
         for (const e of unticked) await deleteDeployment(gname, e.provider, e.model_id);
       }
-      // (Re)attach every ticked deployment. Idempotent for ones already there.
+      // Attach only the ticked deployments that are not already on the combo.
+      // POST is not idempotent — an already-attached pair answers 409, which
+      // aborted the loop after the detaches above had already run.
+      const attached = new Set(props.editing?.deployments.map(depKey) ?? []);
       for (const e of entries) {
+        if (attached.has(depKey(e))) continue;
         await addDeployment(gname, { provider: e.provider, model_id: e.model_id, weight: 1 });
       }
     },

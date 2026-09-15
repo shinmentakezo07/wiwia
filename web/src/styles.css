@@ -1312,10 +1312,10 @@ select.admin-input option {
   --lg-control-h: clamp(38px, 5.2vh, 44px);
 }
 
-/* Hero-style lighting, adapted from landing/Hero.tsx: long rotated radial
-   "streaks" of near-white light, screened over pure black. These are the
-   signature of the hero backdrop, so the login reads as part of the same
-   family. Mix-blend-screen keeps them luminous without washing the black. */
+/* Hero-style lighting: long rotated radial "streaks" of near-white light,
+   screened over pure black. These are the signature of the hero backdrop, so
+   the login reads as part of the same family. Mix-blend-screen keeps them
+   luminous without washing the black. */
 .lg-streak-1 {
   position: absolute;
   left: 0;

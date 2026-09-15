@@ -389,7 +389,6 @@ const DEFAULT_LATENCY_EDGES = [50, 100, 250, 500, 1000, 2000, 4000];
 export function LatencyRibbon(props: {
   profile: LatencyProfile;
   color?: string;
-  unitLabel?: string;
 }) {
   const color = props.color ?? "#3b82f6";
   const max = Math.max(1, ...props.profile.buckets.map((b) => b.count));
@@ -487,9 +486,14 @@ export interface StatusSlice {
   color: string;
 }
 
-/** 2xx / 4xx / 5xx split as a single stacked strip + legend. */
-export function StatusMix(props: { slices: StatusSlice[]; total?: number }) {
-  const total = props.total ?? props.slices.reduce((a, s) => a + s.count, 0);
+/** 2xx / 4xx / 5xx split as a single stacked strip + legend.
+ *
+ *  The denominator is always the sum of `slices`: callers scope their slices
+ *  to a window (e.g. the trailing hour on the dashboard), and a separate
+ *  `total` covering a wider set under-filled the strip and understated every
+ *  legend percentage. */
+export function StatusMix(props: { slices: StatusSlice[] }) {
+  const total = props.slices.reduce((a, s) => a + s.count, 0);
   if (total === 0) return <EmptyState>No requests in this window.</EmptyState>;
   return (
     <div className="p-4">

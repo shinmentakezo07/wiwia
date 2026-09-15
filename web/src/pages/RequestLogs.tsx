@@ -1,7 +1,7 @@
 // Request logs — ring-backed table with client-side filters, optional SSE live
 // tail, and a slide-in detail drawer with sectioned metadata + retry-chain.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import {
   ArrowLeftRight,
@@ -28,6 +28,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getRequestLogs } from "@/api/client";
 import { useAdminStream } from "@/api/stream";
 import type { Attempt, RequestLogEntry } from "@/api/types";
+import { fmtInt } from "@/lib/format";
 import {
   Badge,
   Button,
@@ -64,6 +65,12 @@ type RangeFilter = "5m" | "15m" | "30m" | "1h" | "6h" | "24h" | "7d" | "all";
  *  this page is opened for, and a bounded default keeps the client-side filter
  *  (and the summary chips) meaningful on a busy gateway. */
 const DEFAULT_RANGE: RangeFilter = "30m";
+
+/** Rows rendered before the "show more" control appears. The window is applied
+ *  client-side, so a wide range (24h+) can leave thousands of rows in view;
+ *  every row is ~15 DOM nodes and the page stalls on each filter/poll without
+ *  a cap. The summary chips still aggregate the whole filtered set. */
+const ROWS_PER_PAGE = 250;
 
 const RANGE_SECS: Record<Exclude<RangeFilter, "all">, number> = {
   "5m": 300,
@@ -548,6 +555,18 @@ export function RequestLogsPage() {
     return all.filter((l) => l.ts >= minTs).length;
   }, [all, range, now]);
 
+  // Cap the rendered rows (see ROWS_PER_PAGE). Reset whenever the result set
+  // changes shape, so switching 24h → 5m and back does not leave a stale
+  // "show more" expansion in place.
+  const [visible, setVisible] = useState(ROWS_PER_PAGE);
+  useEffect(() => {
+    setVisible(ROWS_PER_PAGE);
+  }, [range, q, model, providerSel, status, surface]);
+  const visibleRows = useMemo(
+    () => (filtered.length > visible ? filtered.slice(0, visible) : filtered),
+    [filtered, visible],
+  );
+
   const modelOpts = useMemo(() => distinctOptions(all, (l) => l.model_group, "All models"), [all]);
   const providerOpts = useMemo(() => distinctOptions(all, (l) => l.provider, "All providers"), [all]);
   const surfaceOpts = useMemo(
@@ -701,7 +720,7 @@ export function RequestLogsPage() {
               "Cache",
             ]}
           >
-            {filtered.map((l, i) => (
+            {visibleRows.map((l, i) => (
               <LogRow
                 key={`${l.request_id}:${l.ts}`}
                 zebra={i}
@@ -762,8 +781,22 @@ export function RequestLogsPage() {
         </Card>
       )}
 
-      <div className="mt-2 px-1 font-mono text-[11px] text-[var(--admin-text-dim)]">
+      <div className="mt-2 flex flex-wrap items-center justify-between gap-3 px-1">
         <LogsFooter shown={filtered.length} total={all.length} />
+        {filtered.length > visibleRows.length && (
+          <div className="flex items-center gap-3">
+            <span className="font-mono text-[11px] text-[var(--admin-text-dim)]">
+              showing {fmtInt(visibleRows.length)} of {fmtInt(filtered.length)}
+            </span>
+            <button
+              type="button"
+              onClick={() => setVisible((v) => v + ROWS_PER_PAGE)}
+              className="min-h-11 rounded-md border border-[var(--admin-border)] px-4 text-[12px] font-medium hover:bg-white/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+            >
+              Show {fmtInt(Math.min(ROWS_PER_PAGE, filtered.length - visibleRows.length))} more
+            </button>
+          </div>
+        )}
       </div>
 
       {/* ── Slide-in detail drawer ── */}

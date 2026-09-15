@@ -272,12 +272,6 @@ export interface ClineConnectResponse {
   access_token_masked: string;
 }
 
-export interface ClineAutoConnectResponse {
-  auth_url: string;
-  state: string;
-  provider: string;
-}
-
 export interface ClineStatusResponse {
   connected: boolean;
   email?: string | null;
