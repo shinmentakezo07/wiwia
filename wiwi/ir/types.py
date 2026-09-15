@@ -27,7 +27,6 @@ class ImagePart:
     url: str | None = None
     b64: str | None = None
     mime: str = "image/png"
-    detail: str | None = None
     file_id: str | None = None  # Anthropic Files API reference (source.type=file)
 
 
@@ -306,10 +305,3 @@ class AssistantTurn:
     stop_sequence: str | None = None  # matched stop sequence (Anthropic surfaces it)
     usage: Usage = field(default_factory=Usage)
     raw: dict[str, Any] | None = None  # provider-native response for passthrough extras
-
-
-@dataclass
-class Response:
-    turn: AssistantTurn
-    model: str = ""
-    id: str = ""

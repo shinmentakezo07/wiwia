@@ -133,15 +133,6 @@ async def refresh_version() -> str | None:
     return version
 
 
-async def get_version() -> str:
-    """Return a fresh version, refreshing first when the cache is stale."""
-    if _cached_version is None or is_stale():
-        refreshed = await refresh_version()
-        if refreshed is not None:
-            return refreshed
-    return get_cached_version()
-
-
 def _set_cached_for_tests(version: str | None, fetched_at: float) -> None:
     """Test seam: seed or reset the module cache without network."""
     global _cached_version, _fetched_at

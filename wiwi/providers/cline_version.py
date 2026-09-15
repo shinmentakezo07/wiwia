@@ -142,18 +142,6 @@ async def refresh_version() -> tuple[str | None, str | None]:
     return cli_version, core_version
 
 
-async def get_version() -> str:
-    """Return a fresh CLI version, refreshing first when its cache is stale."""
-    if (
-        _cached_cli_version is None
-        or (time.monotonic() - _cli_fetched_at) >= TTL_S
-    ):
-        refreshed, _ = await refresh_version()
-        if refreshed is not None:
-            return refreshed
-    return get_cached_cli_version()
-
-
 def client_version() -> str:
     """Return the cached Cline CLI version for synchronous header building."""
     return get_cached_cli_version()

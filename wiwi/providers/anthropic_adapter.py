@@ -37,14 +37,6 @@ _ANTHROPIC_STANDARD = {
 }
 
 
-def _system_text(messages: list[ir.Message]) -> str:
-    parts: list[str] = []
-    for m in messages:
-        if m.role == "system":
-            parts.extend(p.text for p in m.parts if isinstance(p, ir.TextPart))
-    return "\n".join(parts)
-
-
 def _system_blocks_or_text(messages: list[ir.Message]) -> str | list[dict[str, Any]] | None:
     """System prompt for the Messages API. Preserves cache_control by emitting
     block form when any part carries it (this is what enables Anthropic prompt
@@ -158,10 +150,6 @@ class AnthropicAdapter:
 
     def __init__(self) -> None:
         self._tool_indices: set[int] = set()
-        # Block indices carrying a non-tool content block we started emitting
-        # (currently only redacted_thinking); tracked so the matching
-        # content_block_stop is a no-op rather than a phantom tool close.
-        self._think_indices: set[int] = set()
         # Usage fields seen at message_start; consumed at message_delta. Held on
         # the instance because the two SSE events arrive in separate calls.
         self._pending_prompt = 0
@@ -171,7 +159,6 @@ class AnthropicAdapter:
     def reset(self) -> None:
         """Drop per-stream state so the adapter can serve another stream."""
         self._tool_indices.clear()
-        self._think_indices.clear()
         self._pending_prompt = 0
         self._pending_cached = 0
         self._pending_cache_creation = 0
@@ -573,7 +560,6 @@ class AnthropicAdapter:
                 out.append(dl.ThinkingDelta(
                     text="", block_type="redacted_thinking",
                     data=cb.get("data", "")))
-                self._think_indices.add(idx)
             elif cb.get("type") in ("tool_use", "server_tool_use"):
                 self._tool_indices.add(idx)
                 # server_tool_use = provider-hosted builtin call (web_search,
@@ -606,10 +592,6 @@ class AnthropicAdapter:
             if idx in self._tool_indices:
                 self._tool_indices.discard(idx)
                 out.append(dl.ToolCallClose(index=idx))
-            else:
-                # A redacted_thinking block also needs its index reclaimed;
-                # it never closes a tool call.
-                self._think_indices.discard(idx)
         elif etype == "message_delta":
             d = payload.get("delta", {})
             u = payload.get("usage") or {}

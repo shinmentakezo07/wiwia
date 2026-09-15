@@ -81,7 +81,9 @@ class ProviderDef(BaseModel):
     name: str
     provider: Literal[PROVIDER_TYPES]  # type: ignore[valid-type]
     base_url: str | None = None
-    timeout_s: float = 120.0
+    # None = not set here; ``WiwiConfig._fill_provider_timeouts`` resolves it
+    # to ``router_settings.timeout`` before anything reads it.
+    timeout_s: float | None = None
     extra_headers: dict[str, str] = Field(default_factory=dict)
     # When True (default), keys are selected via smooth weighted round-robin.
     # When False, keys are used sequentially (first available, in label order).
@@ -165,6 +167,9 @@ class ModelAliasEntry(BaseModel):
 class RouterSettings(BaseModel):
     routing_strategy: Literal["simple-shuffle", "least-busy", "latency-based"] = "simple-shuffle"
     num_retries: int = 2
+    # Gateway-wide per-request timeout, used for any provider that does not set
+    # its own ``timeout_s`` (resolved in WiwiConfig._fill_provider_timeouts).
+    # A deployment's ``wiwi_params.timeout`` still overrides both.
     timeout: float = 120.0
     allowed_fails: int = 3
     cooldown_time: float = 30.0
@@ -274,7 +279,6 @@ class GeneralSettings(BaseModel):
 class WiwiSettings(BaseModel):
     drop_params: bool = True
     max_request_body_mb: int = 50
-    log_requests: bool = True
     store_prompts_in_spend_logs: bool = False
     """Prune request_logs older than this many days at startup. 0 = keep forever."""
     log_retention_days: int = 30
@@ -287,12 +291,6 @@ class WiwiSettings(BaseModel):
     # Host header (never X-Forwarded-Host) so an attacker cannot point an
     # OAuth callback at their own origin.
     public_url: str = ""
-    header_allowlist: list[str] = Field(
-        default_factory=lambda: [
-            "anthropic-version", "anthropic-beta",
-            "openai-organization", "openai-project", "openai-beta",
-        ]
-    )
 
 
 class WiwiConfig(BaseModel):
@@ -303,6 +301,21 @@ class WiwiConfig(BaseModel):
     wiwi_settings: WiwiSettings = Field(default_factory=WiwiSettings)
     cache_settings: CacheSettings = Field(default_factory=CacheSettings)
     healer: HealerSettings = Field(default_factory=HealerSettings)
+
+    @model_validator(mode="after")
+    def _fill_provider_timeouts(self) -> WiwiConfig:
+        """Resolve unset per-provider timeouts from ``router_settings.timeout``.
+
+        ``Router`` copies ``ProviderDef.timeout_s`` into ``ProviderAccount``,
+        which the gateway reads as ``dep.timeout or dep.provider.timeout_s``.
+        Left optional, the gateway's ``or`` would pass ``None`` to httpx —
+        "no timeout at all" — so the fallback is resolved here, once, rather
+        than at every call site.
+        """
+        for p in self.providers:
+            if p.timeout_s is None:
+                p.timeout_s = self.router_settings.timeout
+        return self
 
     @model_validator(mode="after")
     def _model_refs_exist(self) -> WiwiConfig:

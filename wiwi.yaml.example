@@ -77,7 +77,9 @@ model_list: []
 router_settings:
   routing_strategy: simple-shuffle
   num_retries: 2
-  timeout: 120
+  timeout: 120             # default per-request timeout; a provider's own
+                           # timeout_s overrides it, and a deployment's
+                           # wiwi_params.timeout overrides both
   allowed_fails: 3
   cooldown_time: 30
   # global_rpm: 600        # optional gateway-wide RPM/TPM caps (per process)

@@ -38,7 +38,6 @@ class RateLimiter:
         self.global_rpm = global_rpm
         self.global_tpm = global_tpm
         self._windows: dict[str, _Window] = {}
-        self._inflight = 0
         # Serializes check() and record_tokens() so concurrent callers cannot
         # both pass the limit at the same instant, and so a reservation can
         # be replaced (not appended alongside) when the actual usage arrives.

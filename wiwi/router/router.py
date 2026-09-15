@@ -531,7 +531,7 @@ class Router:
         for gname, deps in self.groups.items():
             providers = {d.provider.name for d in deps}
             if len(providers) >= 2:
-                self._group_provider_rr[gname] = _CrossProviderWRR(deps)
+                self._group_provider_rr[gname] = _CrossProviderWRR()
 
 
 @dataclass
@@ -542,16 +542,11 @@ class _CrossProviderWRR:
     per-provider key WRR (in ProviderAccount.pick_key) picks the actual key.
 
     The nginx smooth-WRR algorithm keeps deficits so a temporarily-unhealthy
-    provider doesn't get starved after it recovers.
+    provider doesn't get starved after it recovers.  Weights are recomputed
+    from the *available* deployments on every pick — a provider whose keys are
+    all cooling must not keep claiming its share of the cursor.
     """
-    deps: list[Deployment] = field(default_factory=list)
     _state: dict[str, float] = field(default_factory=dict)
-
-    def _weights(self) -> dict[str, int]:
-        out: dict[str, int] = {}
-        for d in self.deps:
-            out[d.provider.name] = out.get(d.provider.name, 0) + d.weight
-        return out
 
     def pick(self, avail: list[Deployment]) -> Deployment | None:
         # Only consider providers with at least one available deployment.
@@ -866,7 +861,6 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
         group_first_err: WiwiError | None = None
         tried_dep_ids: set[int] = set()
         tried_key_labels: set[tuple[str, str]] = set()
-        excluded_providers: set[str] = set()
         for attempt in range(router.settings.num_retries + 1):
             # cycle-3: if the chosen provider has served N consecutive
             # requests already, prefer a different one this round.
@@ -874,8 +868,7 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
             if cycle_n > 0:
                 for d in deps:
                     pname = d.provider.name
-                    if (pname in excluded_providers
-                            or provider_consec.get(pname, 0) >= cycle_n):
+                    if provider_consec.get(pname, 0) >= cycle_n:
                         prefer_exclude.add(id(d))
             dep = router.pick_deployment(deps, ctx, exclude=prefer_exclude)
             if dep is None:

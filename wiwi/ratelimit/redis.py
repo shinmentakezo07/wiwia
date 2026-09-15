@@ -72,7 +72,6 @@ class RedisRateLimiter:
                  global_tpm: int | None = None):
         self._memory = MemoryRateLimiter(global_rpm=global_rpm, global_tpm=global_tpm)
         self._redis: Any = None
-        self._redis_url = redis_url
         try:
             import redis.asyncio as aioredis
             self._redis = aioredis.from_url(redis_url, decode_responses=True)

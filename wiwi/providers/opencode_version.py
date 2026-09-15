@@ -105,15 +105,6 @@ async def refresh_version() -> str | None:
     return version
 
 
-async def get_version() -> str:
-    """Return a fresh version, refreshing first when the cache is stale."""
-    if _cached_version is None or is_stale():
-        refreshed = await refresh_version()
-        if refreshed is not None:
-            return refreshed
-    return get_cached_version()
-
-
 def build_user_agent() -> str:
     return f"opencode/{get_cached_version()}"
 
