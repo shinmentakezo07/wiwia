@@ -4010,3 +4010,53 @@ must remain reusable.
 given up. The addendum's claim that the window "errs permissive — never leaky"
 was verified only with balanced admit/release pairs, which is exactly the case
 that hides this.
+
+---
+
+## Addendum — round 67: Claude Code tool-search and server-tool fidelity (#158) (2026-09-16)
+
+Reported symptom: a Claude Code session through the gateway invoked `Skill` and
+`Task` seemingly at random and ignored `/effort`. Diagnosed by decoding a real
+`/v1/messages` body through the codecs and comparing each hop's output.
+
+Root cause: the tool *definitions* were fine (`Task`, `Skill`, MCP tools all
+round-tripped byte-faithfully), but everything around them that Claude Code uses
+to make tool-selection decisions was dropped. With tool search enabled, Claude
+Code sends a `tool_search_tool_*` server tool plus `defer_loading` flags; the
+gateway dropped the tool and the flags, so the entire MCP/skill catalog loaded
+up front. Anthropic's own guidance is that selection accuracy degrades past
+30–50 available tools, which is precisely the observed behaviour.
+
+| # | Defect | Location (pre-fix) | Client-visible symptom |
+|---|---|---|---|
+| 1 | `tool_search_tool_regex_20251119` / `_bm25_` unregistered → dropped on EVERY route, Anthropic→Anthropic included | `ir/builtin_tools.py:18-24`, `providers/anthropic_adapter.py:514` | No search step; every deferred tool loads up front |
+| 2 | `defer_loading` absent from the IR entirely | `ir/types.py:150` | Same — even a working search tool would load the whole catalog |
+| 3 | `tool_reference` blocks inside a text-bearing `tool_result` discarded | `wire/anthropic_messages.py:133-142` | Model told "found 1 tool", never which one → discovered tools unusable |
+| 4 | `output_config.effort` shadowed by `thinking.budget_tokens` | `ir/types.py:217-229` | `/effort`, `--effort`, `CLAUDE_CODE_EFFORT_LEVEL`, per-skill frontmatter all no-ops on non-Anthropic backends (8000 → always `medium`) |
+| 5 | Server-tool result blocks dropped on both decode paths; paired `server_tool_use` re-emitted as an unanswered `tool_calls` entry on OpenAI-wire backends | `providers/anthropic_adapter.py:563-599`, `:665`, `providers/openai_adapter.py:107` | No citations/search results; OpenAI-compatible upstreams 400 on the dangling call |
+| 6 | `anthropic-beta` dropped on the `opencode` route to a real Messages endpoint | `core/gateway.py:255` | Beta-gated body fields arrive without their authorizing header → hard 400 |
+| 7 | `forward_headers` lost on mid-stream resume | `core/gateway.py:861-863` | A recoverable stream error became unrecoverable on failover |
+| 8 | `parallel_tool_calls` nested inside `if encoded_tools`; `input_examples` dropped on OpenAI wire; `strict` silently ignored on Gemini | `providers/openai_adapter.py:237`, `:289`, `providers/gemini_adapter.py:135` | Serialized tool calls went concurrent when all declared tools were provider-hosted; worked examples vanished |
+
+**Fix:** `tool_search_bm25`/`tool_search_regex` registered as canonicals (bm25
+owns the Responses surface's single `tool_search` spelling, so `_build_reverse`
+now lets the FIRST canonical claim an ambiguous wire type);
+`Tool.defer_loading` threaded codec→IR→adapter; `ToolResultPart.extra_blocks`
+carries nested non-text blocks verbatim for the Anthropic encoder; effort
+precedence reordered so an explicit selection outranks the budget-derived guess;
+a new `ServerToolResultDelta` plus `AssistantTurn.server_blocks` carry
+provider-executed result blocks, and the Anthropic encoder buffers a
+`server_tool_use` until its result arrives so the pair is emitted whole (an
+unpaired call is still dropped — the A1 invariant is preserved, not weakened).
+
+**Status: fixed** — covered by `tests/test_fix_round67.py` (31 tests). One
+pre-existing test (`test_matrix_anthropic_client_receives_suppressed_trace`)
+pinned the old discard-everything behaviour and was rewritten to the corrected
+pairing contract; a new control (`test_anthropic_client_never_receives_a_half_pair`)
+pins that a truncated trace still degrades to text.
+
+**Deliberately NOT changed:** a provider-hosted builtin is still dropped (with a
+warning) on a backend that cannot host it — a function tool named `web_search`
+would be called by the model and never executed. `input_examples` is rendered
+into the description rather than a native field where none exists, so the
+information survives without risking a 400 on strict gateways.

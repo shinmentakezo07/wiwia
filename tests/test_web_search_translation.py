@@ -847,8 +847,15 @@ async def test_matrix_anthropic_client_web_search_tool_reaches_all_hosts():
 @respx.mock
 async def test_matrix_anthropic_client_receives_suppressed_trace():
     """A1 end-to-end: an Anthropic upstream that ran web_search returns its
-    trace; the Anthropic-surface client gets text only (no server_tool_use
-    half-pair, stop_reason downgraded)."""
+    trace; the Anthropic-surface client gets that trace back PAIRED.
+
+    The call and its result are emitted together (``server_tool_use`` then
+    ``web_search_tool_result``), which is the shape the API itself produces and
+    the only one that survives turn-2 replay. A half-pair — a call with no
+    result, or a result with no call — is rejected, so the encoder buffers the
+    call until its result arrives (AUDIT #158). ``stop_reason`` is end_turn:
+    the provider ran the tool itself, so there is no client-dispatched call for
+    a ``tool_use`` finish to describe."""
     lm, c = await _matrix_client()
     try:
         route = respx.post("https://api.anthropic.com/v1/messages")
@@ -863,14 +870,43 @@ async def test_matrix_anthropic_client_receives_suppressed_trace():
         assert r.status_code == 200, r.text
         data = r.json()
         types = [b["type"] for b in data["content"]]
-        assert types == ["text"]
+        assert types == ["text", "server_tool_use", "web_search_tool_result"]
+        call, result = data["content"][1], data["content"][2]
+        assert call["name"] == "web_search"
+        assert call["input"] == {"query": "wiwi proxy"}
+        assert result["tool_use_id"] == call["id"]  # the pair is intact
         assert data["stop_reason"] == "end_turn"
-        # Turn-2 replay: the client echoes our (text-only) response back.
+        # Turn-2 replay: the client echoes our response back.
         sent = orjson.loads(route.calls[0].request.content)
         assert sent["tools"] == [WS_TOOL_ANTHROPIC]
     finally:
         await c.aclose()
         await lm.__aexit__(None, None, None)
+
+
+@respx.mock
+async def test_anthropic_client_never_receives_a_half_pair():
+    """A server call whose result never arrives is dropped, not emitted alone.
+
+    This is the A1 invariant the buffering must preserve: an unpaired
+    ``server_tool_use`` is rejected by the API on the next turn, so a truncated
+    trace must degrade to text rather than ship a call the client cannot
+    answer."""
+    from wiwi.providers.anthropic_adapter import AnthropicAdapter
+    from wiwi.wire import anthropic_messages as am
+
+    orphan = {
+        "id": "msg_y", "type": "message", "role": "assistant", "model": "claude-x",
+        "content": [
+            {"type": "text", "text": "Searching."},
+            {"type": "server_tool_use", "id": "srvtoolu_9", "name": "web_search",
+             "input": {"query": "x"}},
+        ],
+        "stop_reason": "end_turn", "usage": {"input_tokens": 1, "output_tokens": 1},
+    }
+    turn = AnthropicAdapter().decode_response(200, orjson.dumps(orphan))
+    body = am.encode_response(ctx=None, turn=turn, model="claude-x", req_id="r")
+    assert [b["type"] for b in body["content"]] == ["text"]
 
 
 @respx.mock

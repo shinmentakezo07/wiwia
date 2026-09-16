@@ -38,6 +38,14 @@ def _role_parts_to_content(
         if m.role == "tool":
             for p in m.parts:
                 if isinstance(p, ir.ToolResultPart):
+                    if p.block_type != "tool_result":
+                        # A provider-executed tool's result: it answers no entry
+                        # in ``tool_calls``, so a role:"tool" message would be
+                        # an orphan. Its payload is still what the model needs
+                        # (search hits, discovered tool references), so fold it
+                        # into the assistant turn as text.
+                        out.append({"role": "assistant", "content": p.content})
+                        continue
                     content: Any = f"[tool error] {p.content}" if p.is_error else p.content
                     if p.images:
                         # Multimodal tool result: OpenAI content-parts form.
@@ -97,6 +105,15 @@ def _role_parts_to_content(
                     content.append({"type": "file",
                                     "file": {"file_data": f"data:{p.mime};base64,{p.b64}"}})
             elif isinstance(p, ir.ToolUsePart):
+                if p.builtin is not None:
+                    # Provider-hosted call (web_search, tool_search, ...). No
+                    # OpenAI-wire backend can host it and the client cannot
+                    # dispatch it, so emitting a function call would leave a
+                    # ``tool_calls`` entry that no ``role:"tool"`` message ever
+                    # answers — OpenAI-compatible upstreams reject that history
+                    # outright on the next turn. The paired result rides as a
+                    # text part instead (see the ToolResultPart arm).
+                    continue
                 tool_calls.append({
                     "id": p.id, "type": "function",
                     "function": {"name": p.name,
@@ -104,7 +121,22 @@ def _role_parts_to_content(
                 })
             elif isinstance(p, ir.ThinkingPart):
                 reasoning += p.text
-            elif isinstance(p, ir.ToolResultPart) and m.role == "user":
+            elif isinstance(p, ir.ToolResultPart):
+                if p.block_type != "tool_result":
+                    # A provider-executed tool's result (web_search_tool_result,
+                    # tool_search_tool_result, ...). It answers a call that is
+                    # NOT in ``tool_calls``, so a role:"tool" message would be
+                    # an orphan — and this can sit in an ASSISTANT turn, which
+                    # the role check below excluded entirely. Its payload is
+                    # what the model needs (search hits, discovered tool
+                    # references), so keep it as text on the current message.
+                    if content is None or isinstance(content, str):
+                        content = ([{"type": "text", "text": content}] if content
+                                   else [])
+                    content.append({"type": "text", "text": p.content})
+                    continue
+                if m.role != "user":
+                    continue
                 # Anthropic convention: tool results arrive as user-role
                 # messages with tool_result content blocks. OpenAI expects
                 # them as role=tool messages, so emit one per result.
@@ -245,10 +277,16 @@ class OpenAIAdapter:
                     body["tool_choice"] = "required"
                 elif isinstance(tc, ir.ToolChoiceNamed):
                     body["tool_choice"] = {"type": "function", "function": {"name": tc.name}}
-            # disable_parallel_tool_use (from Anthropic dialect) maps to
-            # parallel_tool_calls=false on the OpenAI side.
-            if g.disable_parallel_tool_use is not None:
-                body["parallel_tool_calls"] = not g.disable_parallel_tool_use
+        # disable_parallel_tool_use (from Anthropic dialect) maps to
+        # parallel_tool_calls=false on the OpenAI side. Deliberately OUTSIDE
+        # the `if encoded_tools` guard: an Anthropic caller can serialize its
+        # tool calls while every tool it declared was a provider-hosted
+        # builtin (all dropped here), and the constraint must still reach the
+        # backend — nesting it meant the request silently allowed concurrency
+        # the caller had forbidden (AUDIT #158). An explicit
+        # ``parallel_tool_calls`` still wins, matching the opencode adapter.
+        if g.parallel_tool_calls is None and g.disable_parallel_tool_use is not None:
+            body["parallel_tool_calls"] = not g.disable_parallel_tool_use
         if req.stream and req.stream_options_include_usage:
             body["stream_options"] = {"include_usage": True}
         for k, v in deployment_params.get("extra_body", {}).items():
@@ -292,6 +330,18 @@ class OpenAIAdapter:
             # strict tool use).
             if t.strict is not None:
                 fn["strict"] = t.strict
+            # Anthropic's ``input_examples`` has no Chat Completions field, and
+            # an unknown key on a tool definition is a 400 on strict
+            # OpenAI-compatible gateways. The examples are worth keeping — the
+            # docs recommend them precisely for complex, format-sensitive
+            # inputs — so render them into the description, which every backend
+            # accepts. Dropping them silently made a tool that arrived with
+            # worked examples look identical to one without.
+            if t.input_examples:
+                rendered = json.dumps(t.input_examples, ensure_ascii=False)
+                fn["description"] = (
+                    f"{t.description}\n\nExample inputs:\n{rendered}"
+                    if t.description else f"Example inputs:\n{rendered}")
             out.append({"type": "function", "function": fn})
         return out or None
 

@@ -18,6 +18,8 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 
+import orjson
+
 from wiwi.streaming import deltas as dl
 
 # Sentinel for deltas that don't carry client-visible content (control only).
@@ -167,7 +169,9 @@ class StreamTape:
         for e in self._entries:
             d = e.delta
             if isinstance(d, dl.ToolCallOpen):
-                open_calls[d.index] = ir.ToolUsePart(id=d.id, name=d.name, args={})
+                open_calls[d.index] = ir.ToolUsePart(
+                    id=d.id, name=d.name, args={}, builtin=d.builtin,
+                    block_type=d.block_type)
                 arg_bufs[d.index] = []
             elif isinstance(d, dl.ToolCallArgsDelta):
                 if d.index in arg_bufs:
@@ -220,6 +224,14 @@ def _delta_size(delta: dl.IRStreamDelta) -> int:
         return len(delta.args_fragment)
     if isinstance(delta, dl.ToolCallClose):
         return 4
+    if isinstance(delta, dl.ServerToolResultDelta):
+        # A whole result block (search hits, tool references) — size it by its
+        # serialized payload so a big search result cannot sit in the tape
+        # unaccounted and defeat the byte bound.
+        try:
+            return len(orjson.dumps(delta.block))
+        except (TypeError, ValueError):
+            return 64
     if isinstance(delta, dl.UsageFinal):
         return 32
     if isinstance(delta, dl.Finish):
@@ -250,12 +262,18 @@ def build_continuation_messages(
     thinking_parts = tape.replay_thinking_parts()
     # Reconstruct partial tool calls from the tape deltas.
     tool_calls = tape.replay_tool_calls()
+    # Provider-executed calls (server_tool_use / mcp_tool_use) are dropped from
+    # the continuation: the resume may land on a different backend that cannot
+    # host them, and their results came from the provider that just died. Only
+    # client-dispatched calls are replayed — those are the ones the model must
+    # not re-emit, because the client already received them.
+    client_calls = [tc for tc in tool_calls if tc.builtin is None]
     msgs = list(original_messages)
     parts: list[ir.Part] = []
     parts.extend(thinking_parts)
     if text:
         parts.append(ir.TextPart(text))
-    parts.extend(tool_calls)
+    parts.extend(client_calls)
     if parts:
         msgs.append(ir.Message(role="assistant", parts=parts))
         # A continuation user turn must answer any tool_use in the partial
@@ -265,7 +283,7 @@ def build_continuation_messages(
         # happens client-side, but the resume only needs a well-formed history
         # so the model can continue.
         follow_up: list[ir.Part] = []
-        for tc in tool_calls:
+        for tc in client_calls:
             follow_up.append(ir.ToolResultPart(
                 tool_use_id=tc.id, content="(continuing)",
                 block_type="tool_result"))

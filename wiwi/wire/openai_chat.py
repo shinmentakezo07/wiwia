@@ -199,7 +199,11 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
             # same empty-object default the missing-schema case already gets.
             parameters_json_schema=(raw_params if isinstance(raw_params, dict)
                                     else {"type": "object"}),
-            strict=fn.get("strict")))
+            strict=fn.get("strict"),
+            # Chat Completions has no tool search, but a caller may still send
+            # the flag (a shared tool catalog across surfaces). Decode it so a
+            # later re-encode to a surface that DOES host tool search keeps it.
+            defer_loading=fn.get("defer_loading")))
     tc_raw = body.get("tool_choice")
     tool_choice: ir.ToolChoice | None = None
     if tc_raw == "auto":

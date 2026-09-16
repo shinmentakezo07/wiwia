@@ -45,6 +45,24 @@ def _flag(ctx: RequestContext, msg: str) -> None:
     ctx.metadata.setdefault("tool_args_violations", []).append(msg)
 
 
+def _speaks_messages(dep: Deployment) -> bool:
+    """True when this deployment's upstream accepts Anthropic Messages headers.
+
+    ``anthropic`` obviously does. ``opencode`` (Zen) is multi-protocol and
+    routes ``claude-*`` models to a genuine Messages endpoint, so it needs the
+    caller's ``anthropic-beta`` just as much — an equality test on
+    ``provider_type`` silently dropped it there (AUDIT #158). Imported lazily:
+    the adapter module is not otherwise needed on this path.
+    """
+    ptype = dep.provider.provider_type
+    if ptype == "anthropic":
+        return True
+    if ptype == "opencode":
+        from wiwi.providers.opencode_adapter import route_for_model
+        return route_for_model(dep.model_id) == "messages"
+    return False
+
+
 def _log_attempt(router: Router, ctx: RequestContext, dep: Deployment,
                  key: ProviderKeyRef, status: str, latency_ms: int) -> None:
     """Emit a proxy-log line naming the provider and pool key that served an
@@ -245,14 +263,19 @@ class Gateway:
         that the ``anthropic-beta`` value passes through verbatim because it
         changes per release.
 
-        Forwarding is limited to Anthropic upstreams: ``anthropic-beta`` names
-        Anthropic's own feature gates, and relaying it to an unrelated provider
-        would be meaningless at best and a rejected unknown header at worst.
+        Forwarding is limited to upstreams that actually speak the Messages
+        API: ``anthropic-beta`` names Anthropic's own feature gates, and
+        relaying it to an unrelated provider would be meaningless at best and a
+        rejected unknown header at worst. The ``opencode`` (Zen) adapter serves
+        ``claude-*`` models over a genuine Anthropic Messages endpoint
+        (opencode_adapter.route_for_model), so a provider-type equality test
+        against "anthropic" alone dropped the header exactly where it was
+        still needed — every beta-gated body field on that route arrived
+        without its authorizing header (AUDIT #158).
         """
         headers = {**adapter.headers(key), **dep.provider.extra_headers,
                    **dep.extra_headers}
-        if (ctx is not None and ctx.forward_headers
-                and dep.provider.provider_type == "anthropic"):
+        if ctx is not None and ctx.forward_headers and _speaks_messages(dep):
             headers.update(ctx.forward_headers)
         return headers
 
@@ -859,10 +882,17 @@ class Gateway:
             key, _ = await dep.provider.pick_key()
             if key is None:
                 continue
-            # Create a fresh context for the resume attempt.
+            # Create a fresh context for the resume attempt. The client's
+            # forwardable headers must ride along: they gate features whose
+            # body fields are in ``resume_req`` (a beta-gated thinking or
+            # context-management config forwarded without its authorizing
+            # ``anthropic-beta`` is a hard 400), so a failover mid-turn used to
+            # turn a recoverable stream error into an unrecoverable one
+            # (AUDIT #158).
             resume_ctx = RequestContext(
                 surface=ctx.surface, ir_req=resume_req, auth=ctx.auth,
-                group=ctx.group, cancel=ctx.cancel)
+                group=ctx.group, cancel=ctx.cancel,
+                forward_headers=dict(ctx.forward_headers))
             resume_ctx.est_tokens = getattr(ctx, "est_tokens", 0)
             # Reserve under the *resume* context's id: the pump prices into
             # `resume_ctx`, so its `settle_tokens` matches this reservation.

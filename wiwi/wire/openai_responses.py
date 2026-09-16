@@ -139,7 +139,10 @@ def _decode_tool(t: dict[str, Any]) -> ir.Tool:
                        # shape. Same empty-object default as the missing case.
                        parameters_json_schema=(raw_params if isinstance(raw_params, dict)
                                                else {"type": "object"}),
-                       strict=t.get("strict"))
+                       strict=t.get("strict"),
+                       # Responses defers a function by the same field name the
+                       # Anthropic surface uses, so it round-trips unchanged.
+                       defer_loading=t.get("defer_loading"))
     canonical = bt.canonical_for("openai_responses", ttype)
     if canonical is not None:
         # Hosted builtin (web_search family). OpenAI nests domain filters

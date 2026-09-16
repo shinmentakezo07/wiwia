@@ -182,6 +182,10 @@ class AnthropicAdapter:
 
     def __init__(self) -> None:
         self._tool_indices: set[int] = set()
+        # tool_use id -> tool name, so a server tool's RESULT block (which
+        # carries only ``tool_use_id``) can be tagged with the canonical
+        # builtin its call was tagged with.
+        self._tool_names_by_id: dict[str, str] = {}
         # Usage fields seen at message_start; consumed at message_delta. Held on
         # the instance because the two SSE events arrive in separate calls.
         self._pending_prompt = 0
@@ -191,6 +195,7 @@ class AnthropicAdapter:
     def reset(self) -> None:
         """Drop per-stream state so the adapter can serve another stream."""
         self._tool_indices.clear()
+        self._tool_names_by_id.clear()
         self._pending_prompt = 0
         self._pending_cached = 0
         self._pending_cache_creation = 0
@@ -354,9 +359,13 @@ class AnthropicAdapter:
                         tr["is_error"] = True
                     if p.cache_control:
                         tr["cache_control"] = p.cache_control
-                    if p.images:
-                        # Multimodal tool result: block-form content
-                        # (text + image blocks) instead of a bare string.
+                    if p.images or p.extra_blocks:
+                        # Block-form content: text plus the blocks the inbound
+                        # dialect actually carried. Re-emitting a bare string
+                        # dropped ``tool_reference`` blocks, and those are the
+                        # only channel through which tool search tells the
+                        # model which deferred tool to load — the discovery was
+                        # silently lost and the tool never became callable.
                         content_blocks: list[dict[str, Any]] = []
                         if p.content:
                             content_blocks.append({"type": "text", "text": p.content})
@@ -369,6 +378,7 @@ class AnthropicAdapter:
                                 src = {"type": "base64", "media_type": img.mime,
                                        "data": img.b64}
                             content_blocks.append({"type": "image", "source": src})
+                        content_blocks.extend(p.extra_blocks)
                         tr["content"] = content_blocks
                     blocks.append(tr)
                 elif isinstance(p, ir.ThinkingPart):
@@ -500,13 +510,17 @@ class AnthropicAdapter:
                     # Function tool with the optional properties Anthropic
                     # supports: strict (OpenAI structured-output strictness),
                     # input_examples (Anthropic-specific), cache_control
-                    # (prompt-cache breakpoint on the tool def).
+                    # (prompt-cache breakpoint on the tool def), defer_loading
+                    # (tool search: keep the definition out of context until a
+                    # search discovers it).
                     entry = {"name": t.name, "description": t.description,
                              "input_schema": t.parameters_json_schema}
                     if t.strict is not None:
                         entry["strict"] = t.strict
                     if t.input_examples is not None:
                         entry["input_examples"] = t.input_examples
+                    if t.defer_loading is not None:
+                        entry["defer_loading"] = t.defer_loading
                     if t.cache_control is not None:
                         entry["cache_control"] = t.cache_control
                     rendered.append(entry)
@@ -521,6 +535,9 @@ class AnthropicAdapter:
                 # Native server-tool shape: type + canonical name + the config
                 # keys Anthropic understands. search_context_size has no
                 # Anthropic equivalent (count vs context budget) — dropped.
+                # The API rejects ``defer_loading`` on the search tool itself
+                # (it must stay loadable or nothing can be discovered), so it
+                # is never rendered here.
                 entry = {"type": wt, "name": t.name or t.builtin}
                 cfg = t.builtin_config or {}
                 for k in ("max_uses", "allowed_domains", "blocked_domains",
@@ -581,22 +598,32 @@ class AnthropicAdapter:
                 turn.tool_calls.append(ir.ToolUsePart(
                     id=block.get("id", ""), name=block.get("name", ""),
                     args=block.get("input") or {}))
-            elif btype == "server_tool_use":
-                # Anthropic-built-in tools (web_search, code_execution, an MCP
+            elif btype in ("server_tool_use", "mcp_tool_use"):
+                # Provider-executed tools (web_search, code_execution, an MCP
                 # tool, ...). These look like tool_use to the caller, but their
                 # results arrive as *_tool_result blocks in the same response
                 # and the CLIENT never dispatched them. Tag with ``builtin`` so
-                # the Anthropic encoder suppresses the block instead of
-                # emitting a phantom tool call Claude Code cannot execute
-                # (it would try, find no such tool, and 400 on the next turn).
+                # the Anthropic encoder suppresses an unpaired one instead of
+                # emitting a phantom tool call Claude Code cannot execute (it
+                # would try, find no such tool, and 400 on the next turn).
+                # ``block_type`` preserves the original spelling: an
+                # ``mcp_tool_use`` must come back as ``mcp_tool_use`` or its
+                # paired ``mcp_tool_result`` is unpaired on replay (AUDIT #156).
                 # The streaming path has tagged these since the builtin work;
                 # the sync path did not, so identical upstream output produced
-                # a clean stream and a phantom call depending on `stream`
-                # (AUDIT #156).
+                # a clean stream and a phantom call depending on `stream`.
                 turn.tool_calls.append(ir.ToolUsePart(
                     id=block.get("id", ""), name=block.get("name", ""),
                     args=block.get("input") or {},
-                    builtin=(block.get("name") or "server_tool")))
+                    builtin=(block.get("name") or "server_tool"),
+                    block_type=btype))
+            elif isinstance(btype, str) and btype.endswith("_tool_result"):
+                # A provider-executed tool's RESULT block. Carried whole so the
+                # Anthropic encoder can re-emit it; without it the client lost
+                # the search hits and the ``tool_reference`` entries that tell
+                # the model which deferred tool it may now call, and the paired
+                # ``server_tool_use`` replayed unpaired (AUDIT #158).
+                turn.server_blocks.append(dict(block))
         sr = data.get("stop_reason", "end_turn")
         turn.stop_reason = _STOP_REASON_IN.get(sr, "stop")
         turn.stop_sequence = data.get("stop_sequence")
@@ -662,17 +689,32 @@ class AnthropicAdapter:
                 out.append(dl.ThinkingDelta(
                     text="", block_type="redacted_thinking",
                     data=cb.get("data", "")))
-            elif cb.get("type") in ("tool_use", "server_tool_use"):
+            elif cb.get("type") in ("tool_use", "server_tool_use", "mcp_tool_use"):
                 self._tool_indices.add(idx)
                 # server_tool_use = provider-hosted builtin call (web_search,
                 # code_execution, ...): tag the delta so downstream encoders
                 # suppress (A1) or re-render as a hosted item instead of a
                 # phantom function call. Any server_tool_use block is
                 # provider-executed by definition, known to the registry or not.
-                is_server = cb.get("type") == "server_tool_use"
+                is_server = cb.get("type") in ("server_tool_use", "mcp_tool_use")
                 out.append(dl.ToolCallOpen(
                     index=idx, id=cb.get("id", ""), name=cb.get("name", ""),
-                    builtin=(cb.get("name") or "server_tool") if is_server else None))
+                    builtin=(cb.get("name") or "server_tool") if is_server else None,
+                    block_type=cb.get("type")))
+                if is_server and cb.get("id"):
+                    # Remember the pairing: the result block names only the id.
+                    self._tool_names_by_id[str(cb["id"])] = (
+                        cb.get("name") or "server_tool")
+            elif isinstance(cb.get("type"), str) and cb["type"].endswith("_tool_result"):
+                # A provider-executed tool's RESULT block, streamed whole right
+                # after its call. It carries the search hits and the
+                # ``tool_reference`` blocks that tell the model which deferred
+                # tool it may now call, so dropping it (the previous behaviour —
+                # only tool_use/server_tool_use were recognized) left Claude
+                # Code with a search trace and no results.
+                out.append(dl.ServerToolResultDelta(
+                    index=idx, block=cb,
+                    builtin=self._tool_names_by_id.get(cb.get("tool_use_id", ""))))
         elif etype == "content_block_delta":
             d = payload.get("delta")
             d = d if isinstance(d, dict) else {}

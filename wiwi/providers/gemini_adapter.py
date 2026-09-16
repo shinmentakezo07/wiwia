@@ -83,8 +83,22 @@ class GeminiAdapter:
                     elif p.url:
                         parts.append({"file_data": {"file_uri": p.url}})
                 elif isinstance(p, ir.ToolUsePart):
+                    if p.builtin is not None:
+                        # Provider-hosted call (web_search, tool_search, ...).
+                        # Gemini cannot host it and the client cannot dispatch
+                        # it, so a functionCall here is a phantom the model
+                        # will try to use and never get a result for. Its
+                        # result rides as text below.
+                        continue
                     parts.append({"functionCall": {"name": p.name, "args": p.args}})
                 elif isinstance(p, ir.ToolResultPart):
+                    if p.block_type != "tool_result":
+                        # A provider-executed tool's result: no functionCall
+                        # exists for it, so a functionResponse would be an
+                        # orphan (Gemini rejects a response with no call). Keep
+                        # the payload the model needs as text.
+                        parts.append({"text": p.content})
+                        continue
                     try:
                         import json as _j
                         resp = _j.loads(p.content)
@@ -135,6 +149,14 @@ class GeminiAdapter:
             decls = [{"name": t.name, "description": t.description,
                       "parameters": t.parameters_json_schema}
                      for t in req.tools if t.builtin is None]
+            # Gemini's functionDeclarations has no ``strict`` field, and its
+            # schema subset already rejects most of what strict mode implies.
+            # Warn rather than silently ignoring it: a caller that relies on
+            # constrained decoding to keep a tool's arguments schema-valid gets
+            # unconstrained output instead (mirrors the
+            # disable_parallel_tool_use warning below).
+            if any(t.strict for t in req.tools if t.builtin is None):
+                log.warning("unsupported_tool_strict", provider="gemini")
             entries: list[dict[str, Any]] = []
             if decls:
                 entries.append({"functionDeclarations": decls})

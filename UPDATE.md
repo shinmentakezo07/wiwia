@@ -2025,3 +2025,101 @@ gateway against a mock Anthropic upstream, reporting the upstream's
 the eleven `anthropic-beta` flags now reach the upstream verbatim; a
 `web_search_20250305` tool declaration survives to an Anthropic upstream and is
 correctly dropped (not mangled) on an OpenAI backend.
+
+---
+
+## Round 67 — Claude Code tool search, effort precedence, and server-tool traces
+
+Reported: a Claude Code session through the gateway reached for `Skill` and
+`Task` unpredictably and `/effort` had no effect. The tool definitions were
+never the problem — they round-tripped intact. What was missing was everything
+Claude Code uses to *decide* which tool to reach for.
+
+**IR** (`wiwi/ir/types.py`)
+- `Tool.defer_loading: bool | None` — Anthropic tool search holds a deferred
+  tool's definition out of context until a search discovers it. The API needs
+  the definition server-side to expand `tool_reference` blocks, so the flag is
+  sent on every request; dropping it loaded every deferred tool up front.
+- `ToolResultPart.extra_blocks: list[dict]` — non-text, non-image blocks nested
+  in a tool result, carried verbatim. `tool_reference` is the only channel
+  through which tool search tells the model which deferred tool to load.
+- `AssistantTurn.server_blocks: list[dict]` — provider-executed result blocks
+  in emission order, for the sync path.
+- `GenParams.effective_reasoning_effort` precedence reordered: an explicit
+  `reasoning_effort`, then `effort`, then the budget-derived guess. `effort` is
+  a deliberate caller selection (`/effort`, `--effort`,
+  `CLAUDE_CODE_EFFORT_LEVEL`, per-skill frontmatter); letting
+  `thinking.budget_tokens` win rewrote it to whatever the budget rounded to
+  (8000 → `medium`) on every non-Anthropic backend.
+
+**Builtin registry** (`wiwi/ir/builtin_tools.py`)
+- `tool_search_bm25` → `tool_search_tool_bm25_20251119` (Anthropic) and
+  `tool_search` (Responses); `tool_search_regex` →
+  `tool_search_tool_regex_20251119` (Anthropic), also `tool_search` on
+  Responses. Two canonicals because the query grammars differ (Python regex vs
+  natural language) and re-encoding one as the other would tell the model to
+  write patterns against a natural-language index.
+- `_build_reverse` now lets the FIRST canonical claim an ambiguous wire type, so
+  declaration order — not dict iteration luck — decides which canonical owns
+  Responses' single `tool_search` spelling.
+
+**Streaming taxonomy** (`wiwi/streaming/deltas.py`)
+- New `ServerToolResultDelta(index, block, builtin)` carrying a
+  provider-executed tool's result block whole. `ToolCallOpen.block_type` added
+  so `mcp_tool_use` replays as `mcp_tool_use` rather than being flattened to
+  `tool_use` (which leaves its `mcp_tool_result` unpaired).
+
+**Codecs**
+- `anthropic_messages`: decode `defer_loading`; collect nested non-text
+  tool-result blocks into `extra_blocks` (previously kept only when the result
+  carried no text at all, so the common "summary sentence + reference" shape
+  lost the reference); `mcp_tool_use` joins `server_tool_use` in the
+  builtin-tagged decode arm.
+- `openai_responses`: decode `defer_loading`.
+- `openai_chat`: decode `defer_loading` (Chat hosts no tool search, but a
+  shared catalog re-encoded to a surface that does must keep it).
+
+**Adapters**
+- Anthropic: forward `defer_loading` on function tools (never on the search
+  tool itself — the API rejects that); capture server-tool result blocks on
+  both the sync and streaming paths; `mcp_tool_use` treated as
+  provider-executed; re-emit `extra_blocks` as block-form tool-result content.
+- OpenAI / Gemini / opencode: a provider-hosted call is no longer emitted as an
+  unanswered function call. Its result rides as text instead, so the payload
+  the model needs survives without creating a `tool_calls` entry (or a Gemini
+  `functionResponse`) that nothing answers.
+- OpenAI: `parallel_tool_calls` hoisted out of `if encoded_tools` (a request
+  whose tools were all provider-hosted lost the constraint silently); explicit
+  `parallel_tool_calls` now wins over `disable_parallel_tool_use`, matching the
+  opencode adapter. `input_examples` rendered into the description where no
+  native field exists.
+- OpenRouter / opencode: same `input_examples` rendering; opencode also
+  forwards `defer_loading` natively (Responses hosts tool search).
+- Gemini: warns when `strict` is dropped instead of ignoring it silently.
+
+**Encoders** (`wiwi/wire/anthropic_messages.py`)
+- A `server_tool_use` is now BUFFERED until its result block arrives, then both
+  are emitted as consecutive complete blocks — the shape the API itself
+  produces. A call whose result never arrives is still discarded, so the A1
+  invariant (never ship an unpaired `server_tool_use`) is preserved rather than
+  weakened. Sync `encode_response` pairs the same way.
+
+**Gateway** (`wiwi/core/gateway.py`)
+- `_speaks_messages(dep)` replaces the `provider_type == "anthropic"` equality
+  test for beta forwarding: the `opencode` (Zen) adapter serves `claude-*` over
+  a genuine Messages endpoint and needs the caller's betas just as much.
+- `_attempt_resume` copies `ctx.forward_headers` into the resume context. A
+  beta-gated body field forwarded without its authorizing header is a hard 400,
+  so losing them turned a recoverable stream error into a fatal one.
+
+**Resume** (`wiwi/streaming/resume.py`)
+- Provider-executed calls are excluded from the continuation message: the
+  resume may land on a backend that cannot host them, and synthesizing a
+  `tool_result` for one would create exactly the unpaired history the API
+  rejects. `block_type`/`builtin` now survive tape replay.
+
+**Tests:** `tests/test_fix_round67.py` (31). One pre-existing test
+(`test_matrix_anthropic_client_receives_suppressed_trace`) pinned the old
+discard-everything behaviour and was rewritten to the corrected pairing
+contract; `test_anthropic_client_never_receives_a_half_pair` is its control.
+Full suite 1910 passing, ruff clean.

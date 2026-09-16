@@ -82,6 +82,13 @@ class OpenRouterAdapter(OpenAIAdapter):
                                   "parameters": t.parameters_json_schema}
             if t.strict is not None:
                 fn["strict"] = t.strict
+            # Anthropic's worked examples have no OpenRouter field; render them
+            # into the description (see the OpenAI adapter for the rationale).
+            if t.input_examples:
+                rendered = json.dumps(t.input_examples, ensure_ascii=False)
+                fn["description"] = (
+                    f"{t.description}\n\nExample inputs:\n{rendered}"
+                    if t.description else f"Example inputs:\n{rendered}")
             out.append({"type": "function", "function": fn})
         return out or None
 

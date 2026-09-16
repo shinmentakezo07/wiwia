@@ -126,6 +126,7 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                     # mcp_tool_result, computer_tool_result, browser_tool_result).
                     c = b.get("content")
                     images: list[ir.ImagePart] = []
+                    extra: list[dict[str, Any]] = []
                     if isinstance(c, str):
                         text = c
                     elif isinstance(c, list):
@@ -141,27 +142,41 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                                       and b.get("type") not in ("image", "input_image")]
                             text = json.dumps(others) if others else ""
                         for blk in c:
+                            if not isinstance(blk, dict):
+                                continue
                             # Multimodal tool results: collect image blocks
                             # (base64/url/file sources) so providers with
                             # native image support can re-emit them.
-                            if not isinstance(blk, dict) or blk.get("type") != "image":
+                            if blk.get("type") == "image":
+                                src = blk.get("source") or {}
+                                if not isinstance(src, dict):
+                                    continue  # non-dict source: skip, don't 500
+                                if src.get("type") == "base64":
+                                    images.append(ir.ImagePart(
+                                        b64=src.get("data"),
+                                        mime=src.get("media_type", "image/png"),
+                                        cache_control=blk.get("cache_control")))
+                                elif src.get("type") == "url":
+                                    images.append(ir.ImagePart(
+                                        url=src.get("url"),
+                                        cache_control=blk.get("cache_control")))
+                                elif src.get("type") == "file":
+                                    images.append(ir.ImagePart(
+                                        file_id=src.get("file_id"),
+                                        cache_control=blk.get("cache_control")))
                                 continue
-                            src = blk.get("source") or {}
-                            if not isinstance(src, dict):
-                                continue  # non-dict source: skip, don't 500
-                            if src.get("type") == "base64":
-                                images.append(ir.ImagePart(
-                                    b64=src.get("data"),
-                                    mime=src.get("media_type", "image/png"),
-                                    cache_control=blk.get("cache_control")))
-                            elif src.get("type") == "url":
-                                images.append(ir.ImagePart(
-                                    url=src.get("url"),
-                                    cache_control=blk.get("cache_control")))
-                            elif src.get("type") == "file":
-                                images.append(ir.ImagePart(
-                                    file_id=src.get("file_id"),
-                                    cache_control=blk.get("cache_control")))
+                            # Blocks with no IR representation but real meaning
+                            # for the model — above all ``tool_reference``,
+                            # which is how tool search tells the model WHICH
+                            # deferred tool to load. Keeping them only when the
+                            # result carried no text at all meant the common
+                            # "Found 1 tool. + tool_reference" result lost the
+                            # reference and the model never discovered the
+                            # tool (it saw a sentence and nothing else).
+                            # Carried verbatim for the Anthropic encoder;
+                            # dialects without the block still get ``content``.
+                            if blk.get("type") != "text":
+                                extra.append(dict(blk))
                     elif c is None:
                         text = ""
                     else:
@@ -171,6 +186,7 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                                                    is_error=bool(b.get("is_error")),
                                                    cache_control=b.get("cache_control"),
                                                    images=images,
+                                                   extra_blocks=extra,
                                                    block_type=btype))
                 elif btype == "thinking":
                     raw_think = b.get("thinking", "")
@@ -231,6 +247,7 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                                         else {"type": "object"}),
                 strict=t.get("strict"),
                 input_examples=t.get("input_examples"),
+                defer_loading=t.get("defer_loading"),
                 cache_control=t.get("cache_control")))
             continue
         canonical = bt.canonical_for("anthropic", ttype)
@@ -374,6 +391,16 @@ _STOP_REASON_OUT: dict[str, str] = {
 def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
                     req_id: str) -> dict[str, Any]:
     content: list[dict[str, Any]] = []
+    # Provider-executed result blocks, grouped by the call they answer so each
+    # one lands directly after its ``server_tool_use`` (the order the API
+    # itself emits). Blocks whose id matches no call stay in the leftover pass
+    # below rather than being dropped.
+    _blocks_by_call: dict[str, list[dict[str, Any]]] = {}
+    for blk in turn.server_blocks:
+        tid = blk.get("tool_use_id")
+        if isinstance(tid, str) and tid:
+            _blocks_by_call.setdefault(tid, []).append(blk)
+    _result_ids = set(_blocks_by_call)
     for t in turn.thinking:
         if t.block_type == "redacted_thinking":
             # Encrypted thinking must be re-emitted verbatim: the client
@@ -390,22 +417,36 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
     if turn.text:
         content.append({"type": "text", "text": turn.text})
     for t in turn.tool_calls:
-        # A1: provider-hosted builtin calls are suppressed — their result
-        # blocks (web_search_tool_result) are round 2, and an unpaired
-        # server_tool_use in replayed history is rejected by Anthropic.
-        # Keyed on the ``builtin`` flag, NOT the tool name: a caller may
-        # legitimately define a function tool called ``web_search``, and a
-        # name match deleted that real call from the response entirely
-        # (AUDIT #156).
+        # A1: a provider-hosted call with NO result block to pair it with is
+        # suppressed — the client would try to execute a phantom function, and
+        # an unpaired server_tool_use in replayed history is rejected by
+        # Anthropic. A call whose result IS present is emitted as
+        # ``server_tool_use`` and followed by that result, which is the shape
+        # the API itself produces. Keyed on the ``builtin`` flag, NOT the tool
+        # name: a caller may legitimately define a function tool called
+        # ``web_search``, and a name match deleted that real call from the
+        # response entirely (AUDIT #156).
         if t.builtin is not None:
+            if t.id and t.id in _result_ids:
+                content.append({"type": t.block_type or "server_tool_use",
+                                "id": t.id, "name": t.name, "input": t.args})
+                content.extend(_blocks_by_call.pop(t.id, []))
             continue
         content.append({"type": "tool_use", "id": t.id, "name": t.name,
                         "input": t.args})
+    # Results whose call the upstream never streamed (or that arrived after the
+    # call list was built) still belong in the turn: dropping them would lose
+    # the search hits the model needs to answer.
+    for leftover in _blocks_by_call.values():
+        content.extend(leftover)
     if not content:
         content = [{"type": "text", "text": ""}]
     u = turn.usage
     sr = _STOP_REASON_OUT.get(turn.stop_reason, "end_turn")
     # A1 downgrade guard: tool_call with every call suppressed is invalid.
+    # A paired ``server_tool_use`` is not a tool_use block, so it does not
+    # satisfy this check either — but such a turn also ends with end_turn
+    # upstream (the provider ran the tool itself), so the guard stands.
     if sr == "tool_use" and not any(b["type"] == "tool_use" for b in content):
         sr = "end_turn"
     return {
@@ -439,6 +480,11 @@ class AnthropicStreamEncoder:
         # A suppressed-builtin-only stream must not finish with stop_reason
         # tool_use — Anthropic rejects a tool_use finish with no tool_use block.
         self._saw_tool_use = False
+        # Provider-executed calls awaiting their result block, keyed by IR
+        # index. Held rather than emitted so a call whose result never arrives
+        # is dropped (unpaired ``server_tool_use`` is rejected on replay) while
+        # a complete search turn is passed through with its results.
+        self._server_calls: dict[int, dict[str, Any]] = {}
         # Signature seen while no thinking block is open (cross-provider quirk);
         # flushed into the next thinking block right before it closes.
         self._pending_sig: str | None = None
@@ -541,6 +587,52 @@ class AnthropicStreamEncoder:
                 td["delta"]["text"] = text
                 out.append(self._evt("content_block_delta", td))
         self._deferred.clear()
+        return out
+
+    def _take_server_call(self, block: dict[str, Any]) -> dict[str, Any] | None:
+        """Pop the buffered provider call that *block* answers, if any.
+
+        Matching is by ``tool_use_id`` first (authoritative), falling back to
+        the single remaining buffered call when the result names an id the
+        adapter never saw — an upstream that omitted the call's id still gets
+        its result emitted rather than dropped.
+        """
+        tid = block.get("tool_use_id")
+        for index, call in self._server_calls.items():
+            if tid and call["id"] == tid:
+                return self._server_calls.pop(index)
+        if len(self._server_calls) == 1 and not tid:
+            return self._server_calls.pop(next(iter(self._server_calls)))
+        return None
+
+    def _emit_server_call(self, call: dict[str, Any]) -> list[bytes]:
+        """Emit a buffered provider call as a complete content block.
+
+        Delivered whole (the adapter buffers its args), so it opens, carries
+        its input, and closes in one frame. Emitted as ``server_tool_use`` (or
+        the original ``mcp_tool_use`` spelling) rather than ``tool_use``: the
+        client must not try to execute it, and the API requires the result that
+        follows to be paired with the same type.
+        """
+        out: list[bytes] = []
+        if self._open_block is not None:
+            out.extend(self._close_block())
+        if self._deferred:
+            out.extend(self._flush_deferred())
+        raw = "".join(call["args"])
+        out.append(self._evt("content_block_start", {
+            "type": "content_block_start", "index": self._block_idx,
+            "content_block": {"type": call["block_type"], "id": call["id"],
+                              "name": call["name"], "input": {}}}))
+        if raw:
+            jd = self._json_delta
+            jd["index"] = self._block_idx
+            jd["delta"]["partial_json"] = raw
+            out.append(self._evt("content_block_delta", jd))
+        out.append(self._evt("content_block_stop",
+                             {"type": "content_block_stop",
+                              "index": self._block_idx}))
+        self._block_idx += 1
         return out
 
     def _flush_pending_sig(self) -> list[bytes]:
@@ -655,12 +747,21 @@ class AnthropicStreamEncoder:
                 self._pending_sig = d.signature
             return b"".join(out)
         if isinstance(d, dl.ToolCallOpen):
-            # A1: provider-hosted builtin calls (web_search) are suppressed —
-            # their result block (web_search_tool_result) is deferred to round
-            # 2, and an unpaired server_tool_use in replayed history is
-            # rejected by Anthropic. The paired ArgsDelta/Close become orphans
-            # and drop via the _tool_blocks lookups below.
+            # A provider-hosted call (web_search, tool_search, an MCP tool) is
+            # BUFFERED, not suppressed: it is emitted only if its result block
+            # arrives, because the API pairs them and an unpaired
+            # ``server_tool_use`` in replayed history is rejected. A stream
+            # that never delivers the result leaves the buffer to be discarded
+            # at final_frame, which preserves the old A1 behaviour for the
+            # half-trace case (AUDIT #156) while no longer throwing away a
+            # complete search turn (AUDIT #158).
             if d.builtin is not None:
+                self._server_calls[d.index] = {
+                    "id": d.id if isinstance(d.id, str) else str(d.id),
+                    "name": d.name,
+                    "block_type": d.block_type or "server_tool_use",
+                    "args": [],
+                }
                 return None
             out: list[bytes] = []
             # Only close the open block if it's text/thinking — parallel
@@ -681,6 +782,10 @@ class AnthropicStreamEncoder:
             self._block_idx += 1
             return b"".join(out)
         if isinstance(d, dl.ToolCallArgsDelta):
+            pending = self._server_calls.get(d.index)
+            if pending is not None:
+                pending["args"].append(d.args_fragment)
+                return None
             idx = self._tool_blocks.get(d.index)
             if idx is None:
                 # No open tool_use block for this index. The IR contract
@@ -694,6 +799,10 @@ class AnthropicStreamEncoder:
             jd["delta"]["partial_json"] = d.args_fragment
             return self._evt("content_block_delta", jd)
         if isinstance(d, dl.ToolCallClose):
+            if d.index in self._server_calls:
+                # Keep the buffered call: its result decides whether it is
+                # emitted at all.
+                return None
             out = self._close_block(tool_index=d.index)
             # Interleaved text/thinking buffered while this tool was open can
             # now be emitted — but only once NO tool block is open, so parallel
@@ -701,6 +810,29 @@ class AnthropicStreamEncoder:
             # land in the middle of the tool group (AUDIT #156).
             if self._open_block != "tool" and self._deferred:
                 out.extend(self._flush_deferred())
+            return b"".join(out)
+        if isinstance(d, dl.ServerToolResultDelta):
+            # A provider-executed tool's result. Flush its buffered call first
+            # so the pair is emitted in the order the API itself produces, then
+            # the result as its own block. Both are delivered whole, so each
+            # opens and closes in one frame — but any text/thinking block must
+            # close first, and buffered interleaved content must drain, because
+            # content blocks are strictly sequential.
+            out = []
+            call = self._take_server_call(d.block)
+            if call is not None:
+                out.extend(self._emit_server_call(call))
+            if self._open_block is not None:
+                out.extend(self._close_block())
+            if self._deferred:
+                out.extend(self._flush_deferred())
+            out.append(self._evt("content_block_start", {
+                "type": "content_block_start", "index": self._block_idx,
+                "content_block": d.block}))
+            out.append(self._evt("content_block_stop",
+                                 {"type": "content_block_stop",
+                                  "index": self._block_idx}))
+            self._block_idx += 1
             return b"".join(out)
         if isinstance(d, dl.UsageFinal):
             self._usage = d

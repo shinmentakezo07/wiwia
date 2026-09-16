@@ -409,11 +409,21 @@ def _encode_responses_request(req: ir.Request, model_id: str,
                                       if isinstance(p, ir.TextPart) and p.text)
             continue
         if m.role == "tool":
+            tool_text: list[str] = []
             for p in m.parts:
                 if isinstance(p, ir.ToolResultPart):
+                    if p.block_type != "tool_result":
+                        # Provider-executed tool result: no function_call exists
+                        # for it, so a function_call_output would be an orphan.
+                        tool_text.append(p.content or "")
+                        continue
                     input_items.append({"type": "function_call_output",
                                         "call_id": p.tool_use_id,
                                         "output": p.content or ""})
+            if tool_text:
+                input_items.append({"type": "message", "role": "user",
+                                    "content": [{"type": "input_text", "text": t}
+                                                for t in tool_text if t]})
             continue
         # user / assistant roles
         text_buf: list[str] = []
@@ -427,10 +437,21 @@ def _encode_responses_request(req: ir.Request, model_id: str,
                 if url:
                     image_parts.append({"type": "input_image", "image_url": url})
             elif isinstance(p, ir.ToolUsePart):
+                if p.builtin is not None:
+                    # Provider-hosted call: the backend cannot host it and the
+                    # client cannot dispatch it, so a function_call here is a
+                    # phantom with no output. Its result rides as text.
+                    continue
                 input_items.append({"type": "function_call",
                                     "call_id": p.id, "name": p.name,
                                     "arguments": p.raw_args or json.dumps(p.args)})
             elif isinstance(p, ir.ToolResultPart):
+                if p.block_type != "tool_result":
+                    # Provider-executed result: fold the payload into the
+                    # message text rather than emitting an orphan output.
+                    if p.content:
+                        text_buf.append(p.content)
+                    continue
                 input_items.append({"type": "function_call_output",
                                     "call_id": p.tool_use_id,
                                     "output": p.content or ""})
@@ -490,6 +511,19 @@ def _encode_responses_request(req: ir.Request, model_id: str,
                                   "parameters": t.parameters_json_schema}
             if t.strict is not None:
                 fn["strict"] = t.strict
+            # The Responses dialect is the one non-Anthropic surface that hosts
+            # tool search, so a deferral flag rides through natively rather
+            # than being flattened.
+            if t.defer_loading is not None:
+                fn["defer_loading"] = t.defer_loading
+            # No Responses field for Anthropic's examples: render them into the
+            # description so a tool that arrived with worked examples is not
+            # indistinguishable from one without.
+            if t.input_examples:
+                rendered = json.dumps(t.input_examples, ensure_ascii=False)
+                fn["description"] = (
+                    f"{t.description}\n\nExample inputs:\n{rendered}"
+                    if t.description else f"Example inputs:\n{rendered}")
             tools.append(fn)
         if tools:
             body["tools"] = tools

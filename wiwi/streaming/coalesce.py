@@ -8,9 +8,9 @@ overhead and client-side parse work.
 It activates only when queue depth exceeds a threshold; for fast consumers,
 the coalescer is a no-op (single delta passes through immediately).
 
-Never coalesces across ``ToolCallOpen/Close``, ``ThinkingDelta``, ``UsageFinal``,
-``Finish``, ``StreamEnd``, or ``StreamError`` — these are control deltas whose
-ordering contract must be preserved.
+Never coalesces across ``ToolCallOpen/Close``, ``ServerToolResultDelta``,
+``ThinkingDelta``, ``UsageFinal``, ``Finish``, ``StreamEnd``, or ``StreamError``
+— these are control deltas whose ordering contract must be preserved.
 """
 
 from __future__ import annotations

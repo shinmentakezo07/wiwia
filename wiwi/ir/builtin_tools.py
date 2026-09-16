@@ -23,6 +23,31 @@ BUILTIN_TOOL_TYPES: dict[str, dict[str, str | None]] = {
         "openrouter": "openrouter:web_search",
         "gemini": "google_search",
     },
+    # Anthropic tool search: a server-side tool that searches the caller's own
+    # tool catalog and returns the matches as ``tool_reference`` blocks. Two
+    # variants with different query grammars — regex patterns vs natural
+    # language — so they are separate canonicals: re-encoding a bm25 search as
+    # regex would tell the model to write patterns against a natural-language
+    # index. Both map onto the Responses surface's generic ``tool_search``,
+    # whose query grammar the model picks for itself.
+    #
+    # Declaration order matters for that shared wire type: ``_build_reverse``
+    # lets the FIRST canonical claim an ambiguous spelling, so bm25 (natural
+    # language, the closer analogue) owns Responses' ``tool_search``.
+    "tool_search_bm25": {
+        "anthropic": "tool_search_tool_bm25_20251119",
+        "openai_responses": "tool_search",
+        "openai_chat": None,
+        "openrouter": None,
+        "gemini": None,
+    },
+    "tool_search_regex": {
+        "anthropic": "tool_search_tool_regex_20251119",
+        "openai_responses": "tool_search",
+        "openai_chat": None,
+        "openrouter": None,
+        "gemini": None,
+    },
 }
 
 # Provider-common config subset carried in Tool.builtin_config. Surfaces
@@ -51,7 +76,12 @@ def _build_reverse(surface: str) -> dict[str, str]:
     out: dict[str, str] = {}
     for canonical, row in BUILTIN_TOOL_TYPES.items():
         wt = row.get(surface)
-        if isinstance(wt, str):
+        # First canonical to claim a wire type keeps it: two canonicals may
+        # legitimately share one spelling (Anthropic's regex/bm25 search
+        # variants both ride the Responses surface's single ``tool_search``),
+        # and declaration order in BUILTIN_TOOL_TYPES is what picks the
+        # preferred decode target. Last-wins would make that order meaningless.
+        if isinstance(wt, str) and wt not in out:
             out[wt] = canonical
     return out
 

@@ -91,6 +91,14 @@ class ToolResultPart:
     # Adapters with native image support re-emit them as block-form content;
     # others drop them (text-only providers).
     images: list[ImagePart] = field(default_factory=list)
+    # Non-text, non-image content blocks carried verbatim from the inbound
+    # dialect. Anthropic's tool-search feature returns discovered tools as
+    # ``tool_reference`` blocks INSIDE a tool_result; the model only learns
+    # which deferred tool to load from those blocks, so flattening the result
+    # to its text made every discovered tool invisible. Only the Anthropic
+    # encoder re-emits them (other dialects have no equivalent block); a
+    # provider that cannot carry them still receives the flattened ``content``.
+    extra_blocks: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not isinstance(self.tool_use_id, str):
@@ -152,6 +160,12 @@ class Tool:
     # an unknown builtin keeps its raw wire type under "_wire_type".
     builtin: str | None = None
     builtin_config: dict[str, Any] | None = None
+    # Anthropic tool search: the tool's definition is sent on every request but
+    # held out of the model's context until a search discovers it. The API
+    # needs it server-side to expand ``tool_reference`` blocks, so dropping the
+    # flag does not just lose a hint — it loads every deferred tool up front,
+    # which is what degrades tool-selection accuracy on large catalogs.
+    defer_loading: bool | None = None
 
 
 @dataclass
@@ -224,9 +238,18 @@ class GenParams:
         """
         if self.reasoning_effort:
             return self.reasoning_effort
+        # ``effort`` is an EXPLICIT caller selection — /effort, --effort,
+        # CLAUDE_CODE_EFFORT_LEVEL, per-skill frontmatter — so it outranks the
+        # budget-derived guess. Claude Code sends ``thinking.budget_tokens``
+        # and ``output_config.effort`` together on most turns; letting the
+        # budget win silently rewrote every non-Anthropic backend's reasoning
+        # level to whatever the budget happened to round to (8000 -> "medium"),
+        # so /effort was a no-op everywhere except a native Anthropic upstream.
+        if self.effort:
+            return self.effort
         if self.thinking_budget is not None:
             return thinking_budget_to_effort(self.thinking_budget)
-        return self.effort
+        return None
 
     def effective_thinking_budget(self) -> int | None:
         """Return thinking_budget, deriving it from reasoning_effort if not set.
@@ -353,3 +376,10 @@ class AssistantTurn:
     stop_sequence: str | None = None  # matched stop sequence (Anthropic surfaces it)
     usage: Usage = field(default_factory=Usage)
     raw: dict[str, Any] | None = None  # provider-native response for passthrough extras
+    # Blocks a provider-executed tool produced, in emission order
+    # (``web_search_tool_result``, ``tool_search_tool_result``, ...). The
+    # Anthropic encoder re-emits them after the calls they answer — without
+    # them a replayed server-tool turn loses the search hits and the
+    # ``tool_reference`` entries tool search discovered, and an unpaired
+    # ``server_tool_use`` is rejected by the API on the next turn.
+    server_blocks: list[dict[str, Any]] = field(default_factory=list)

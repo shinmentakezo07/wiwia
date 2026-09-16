@@ -3,6 +3,7 @@
 Ordering contract (adapters guarantee, encoders rely on):
   exactly one StreamStart first;
   ToolCallOpen -> ToolCallArgsDelta* -> ToolCallClose strictly nested per index;
+  a ServerToolResultDelta may follow the Close of its own server-tool index;
   UsageFinal exactly once, after the last content delta;
   then Finish;
   then exactly one of StreamEnd | StreamError.
@@ -13,7 +14,7 @@ emitted delta — it is the abnormal-path terminal and needs no Finish.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from wiwi.ir.types import StopReason
 
@@ -59,6 +60,10 @@ class ToolCallOpen:
     # provider-hosted tool (e.g. Anthropic server_tool_use for web_search).
     # Encoders use it to suppress (A1) or re-render as a hosted item.
     builtin: str | None = None
+    # Original wire block type (``tool_use`` | ``server_tool_use`` |
+    # ``mcp_tool_use``). Replay must re-emit the same spelling or the paired
+    # result block is unpaired and the API rejects the history.
+    block_type: str = "tool_use"
 
 
 @dataclass(frozen=True)
@@ -70,6 +75,28 @@ class ToolCallArgsDelta:
 @dataclass(frozen=True)
 class ToolCallClose:
     index: int
+
+
+@dataclass(frozen=True)
+class ServerToolResultDelta:
+    """A provider-executed tool's RESULT block, carried verbatim.
+
+    Anthropic streams a server tool's result as its own content block
+    (``web_search_tool_result``, ``tool_search_tool_result``, ``mcp_tool_result``)
+    immediately after the call block. The IR had no delta for it, so the block
+    was dropped on decode and the client never saw the search results or the
+    discovered-tool references it carries.
+
+    Modelled as a whole block rather than Open/Args/Close because it is
+    delivered whole upstream and has no partial-JSON lifecycle to preserve.
+    ``index`` is the block index so an encoder that emits it can keep the
+    client's numbering; encoders for dialects with no equivalent block (Chat,
+    Responses, Gemini) ignore it.
+    """
+
+    index: int
+    block: dict[str, Any]
+    builtin: str | None = None
 
 
 @dataclass(frozen=True)
@@ -108,5 +135,6 @@ class StreamError:
 
 IRStreamDelta = (
     StreamStart | TextDelta | ThinkingDelta | ToolCallOpen | ToolCallArgsDelta
-    | ToolCallClose | UsageFinal | Finish | StreamEnd | StreamError
+    | ToolCallClose | ServerToolResultDelta | UsageFinal | Finish | StreamEnd
+    | StreamError
 )
