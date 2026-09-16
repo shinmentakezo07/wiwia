@@ -101,6 +101,18 @@ class NimAdapter(OpenAIAdapter):
                     "reasoning_tokens", "thinking", "thinking_budget_tokens"):
             body.pop(key, None)
 
+        # OpenAI-2026 platform params (forwarded by the OpenAI adapter's
+        # _STANDARD set from client extras / deployment extra_body) are
+        # OpenAI-platform-only: NIM strict-validates and 400s on them
+        # ("Unsupported parameter(s): `prompt_cache_key`").  Strip them the
+        # same way as the reasoning keys — capability-driven, independent of
+        # drop_params (drop_params governs *unknown* extras; these are known
+        # NIM-unsupported keys).
+        for key in ("prompt_cache_key", "safety_identifier", "store",
+                    "verbosity", "web_search_options", "prediction",
+                    "modalities", "audio", "logit_bias", "service_tier"):
+            body.pop(key, None)
+
         # If the client or deployment supplied chat_template_kwargs, strip
         # the reasoning sub-keys so we have full control over them below.
         # Non-reasoning sub-keys are preserved.

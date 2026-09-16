@@ -1776,3 +1776,21 @@ helper.
 **Live:** `refresh_version()` → `1.18.31` (matches GitHub's `v1.18.31`), and
 a real `big-pickle` request through the adapter's headers returns HTTP 200.
 
+
+## NIM: strip OpenAI-2026 platform params (`prompt_cache_key` 400) — 2026-09-16
+
+`NimAdapter.encode_request` (`wiwi/providers/nim_adapter.py`) now strips the
+OpenAI-2026 platform params that the OpenAI adapter's `_STANDARD` set forwards
+from client extras / deployment `extra_body`:
+`prompt_cache_key`, `safety_identifier`, `store`, `verbosity`,
+`web_search_options`, `prediction`, `modalities`, `audio`, `logit_bias`,
+`service_tier`.
+
+NIM strict-validates its request body and answered every request carrying one
+of these with `400 Validation: Unsupported parameter(s): \`prompt_cache_key\``
+— which made all Codex CLI (`/v1/responses`) traffic through a `nvidia-nim`
+deployment fail, since Codex sends `prompt_cache_key` on every turn. The strip
+is capability-driven and ignores `drop_params`, same as the adapter's existing
+reasoning-key strip. The plain `openai` adapter is unchanged.
+
+**Tests:** `tests/test_fix_round60.py` (5).

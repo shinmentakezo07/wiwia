@@ -3567,3 +3567,41 @@ under sustained distinct-key traffic.
 Covered by `tests/test_fix_round59.py::test_query_cache_evicts_expired_entries_on_insert`,
 `::test_query_cache_keeps_live_entries`,
 `::test_query_cache_bounds_itself_when_everything_is_fresh`.
+
+### 152. NIM 400s on OpenAI-2026 platform params forwarded from the OpenAI adapter's `_STANDARD` set
+
+**Severity:** 🟠 High — every Codex CLI (`/v1/responses`) request through a
+`nvidia-nim` deployment failed with a hard 400; no retry/fallback path recovers
+a non-retryable validation error.
+
+**Files:** `wiwi/providers/nim_adapter.py:88-149` (`encode_request`); root
+cause spans `wiwi/providers/openai_adapter.py:242-249` (`_STANDARD` forwarding)
+and `wiwi/wire/openai_responses.py:323-328` (unmapped Responses params kept in
+`req.extras`).
+
+**Trigger:** point a `nvidia-nim` deployment at Codex CLI. The Responses codec
+captures `prompt_cache_key` (Codex sends it every request) into `req.extras`,
+the OpenAI adapter forwards the OpenAI-2026 standard set
+(`prompt_cache_key`, `safety_identifier`, `store`, `verbosity`,
+`web_search_options`, `prediction`, `modalities`, `audio`, `logit_bias`,
+`service_tier`) upstream by default, and NIM — a vLLM-backed endpoint that
+strict-validates params — rejects the body:
+
+```
+{"message":"Validation: Unsupported parameter(s): `prompt_cache_key`",
+"type":"Bad Request","code":400}
+```
+
+The NIM adapter already stripped OpenAI reasoning fields for exactly this
+reason but never handled the 2026 platform params. The same 400 is reachable
+through the chat-completions surface whenever a client sends any of these keys.
+
+**Fix:** strip the ten platform params in `NimAdapter.encode_request` beside
+the existing reasoning-key strip — capability-driven, independent of
+`drop_params` (`drop_params` governs *unknown* extras; these are *known*
+NIM-unsupported keys, mirroring how the reasoning strip already ignores it).
+
+**Status: fixed** — covered by `tests/test_fix_round60.py`
+(5 tests: the full ten-key strip, strip under `drop_params=False`, strip from
+deployment `extra_body`, benign params survive, and a control asserting the
+plain OpenAI adapter still forwards them).
