@@ -228,7 +228,9 @@ Three things to know before touching the deploy path:
 
 Auth is `HF_TOKEN` — a write token with `repo.write` on `shimen` — taken from the environment, else from the gitignored `.env`. It reaches git through a transient credential helper, so it never lands in the scratch clone's `.git/config` or in argv.
 
-Runtime configuration lives in the Space's **Settings → Variables and secrets**, injected as environment variables — which is precisely how `wiwi.yaml.example` resolves provider keys (`os.environ/NAME`). `DATABASE_URL` is pre-set to SQLite under `/data`, the only writable path in a Space container and ephemeral across rebuilds; durable state means pointing it at an external Postgres.
+Runtime configuration lives in the Space's **Settings → Variables and secrets**, injected as environment variables — which is precisely how `wiwi.yaml.example` resolves provider keys (`os.environ/NAME`). `WIWI_MASTER_KEY` is **required and already set**: the gateway fails closed without a session secret, so a Space whose secret is missing builds fine and then dies at `RUNTIME_ERROR`. `DATABASE_URL` is pre-set to SQLite under `/data`, the only writable path in a Space container and ephemeral across rebuilds; durable state means pointing it at an external Postgres. Both are live at <https://shimen-yapapa.hf.space>; the master key is mirrored into the gitignored `.env` as `WIWI_MASTER_KEY_SPACE`.
+
+One deploy-path detail worth keeping: HF rejects a push containing binaries that are not in LFS, and the tracked UI carries PNG logos, so the script runs `git lfs track "*.png"` in the scratch clone. Removing that turns a successful deploy into `Your push was rejected because it contains binary files`.
 
 ## Project rules & skills
 

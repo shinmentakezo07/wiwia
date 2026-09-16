@@ -41,7 +41,14 @@ if [[ -z "${HF_TOKEN:-}" ]]; then
 fi
 
 # The helper is expanded by git's shell, so the value stays out of argv/config.
-GIT_AUTH=(-c "credential.helper=!f() { echo username=wiwi-deploy; echo password=\$HF_TOKEN; }; f")
+# The leading `credential.helper=` resets the helper list: without it the global
+# `credential.helper store` (and any other configured helper) is consulted
+# first, and a stale stored token for huggingface.co shadows the one we pass.
+# Helpers are asked in order until a username+password pair is complete.
+GIT_AUTH=(
+  -c "credential.helper="
+  -c "credential.helper=!f() { echo username=${SPACE_ID%%/*}; echo password=\$HF_TOKEN; }; f"
+)
 
 REV="$(git -C "$ROOT" rev-parse --short HEAD)"
 echo "==> Space: https://huggingface.co/spaces/$SPACE_ID (branch $BRANCH)"
@@ -67,7 +74,9 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 echo "==> cloning Space into $WORK"
-env HF_TOKEN="$HF_TOKEN" git "${GIT_AUTH[@]}" clone --depth 1 --branch "$BRANCH" \
+# Skip LFS smudge: the Space holds no LFS objects we need locally, and a smudge
+# would try to authenticate a download before the push helper is in play.
+env HF_TOKEN="$HF_TOKEN" GIT_LFS_SKIP_SMUDGE=1 git "${GIT_AUTH[@]}" clone --depth 1 --branch "$BRANCH" \
   "https://huggingface.co/spaces/$SPACE_ID" "$WORK/space" >/dev/null 2>&1 || {
     echo "error: could not clone the Space. Check HF_TOKEN (needs repo.write on '${SPACE_ID%%/*}')." >&2
     exit 1
@@ -93,6 +102,16 @@ cp "$ROOT/deploy/hf-space/README.md" "$WORK/space/README.md"
 
 # --- commit + push -----------------------------------------------------------
 cd "$WORK/space"
+
+# HF rejects a push containing binaries that are not in LFS/xet ("Your push was
+# rejected because it contains binary files ... use xet to store binary files").
+# The tracked tree carries the UI's PNG logos, so they must go through LFS. The
+# Space's own .gitattributes covers model weights (*.bin, *.safetensors, ...) but
+# not *.png, hence the explicit track. git-lfs uploads the objects to HF's LFS
+# endpoint during push, authenticating through the same helper.
+git lfs install --local >/dev/null
+git lfs track "*.png" >/dev/null
+
 MSG="Deploy wiwi $REV"
 
 git add -A

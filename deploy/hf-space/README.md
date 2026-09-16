@@ -38,9 +38,13 @@ injected as environment variables at runtime, which is exactly how
 
 | Variable | Purpose |
 |---|---|
-| `WIWI_MASTER_KEY` | Admin API/UI access. **Required** — set it, or the admin surface is unusable. |
-| `DATABASE_URL` | Pre-set by the deploy script to SQLite under `/data`. Override with a Postgres URL to survive restarts. |
+| `WIWI_MASTER_KEY` | Admin API/UI access. **Required and already set.** The gateway refuses to start without it (`no session secret configured … Refusing to start with a default secret, which would allow forged admin sessions`), so a fresh Space reaches `RUNTIME_ERROR` until this secret exists. |
+| `DATABASE_URL` | Already set by the deploy to SQLite under `/data`. Override with a Postgres URL to survive restarts. |
 | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, … | Provider keys. Providers whose key is unset are silently filtered out at config load. |
+
+A Space with no provider key still boots and serves `/health`, the admin SPA and
+`/v1/models` — the model list is simply empty, since a model only appears once a
+provider can serve it.
 
 ### Data persistence
 
