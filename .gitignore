@@ -12,10 +12,21 @@ __pycache__/
 wiwi.yaml
 key.md
 wiwi.db
+# SQLite WAL sidecars: untracked, and `git clean -fd` would otherwise unlink
+# the live DB's WAL while a backend holds it open, silently dropping writes.
+wiwi.db-shm
+wiwi.db-wal
 
 # Local opencode agent config (holds live provider keys, e.g. ptcider-alt)
 opencode.json
 opencode.jsonc
+
+# Admin-UI exports (downloaded to the repo root by the browser). Both carry
+# live credentials in plaintext — provider keys/OAuth tokens — so they must
+# never be committed. The `*` also covers the browser's duplicate-name suffix
+# (`wiwi-providers-2026-09-16 (1).json`).
+wiwi-providers-*.json
+workbuddy-auths-*.json
 
 # Local scratch project (not part of wiwi)
 tryproxy/
@@ -39,6 +50,12 @@ web/tsconfig.tsbuildinfo
 wiwi/server/static/assets/*.js
 wiwi/server/static/assets/*.css
 wiwi/server/static/index.html
+# Rust implementation (wiwi2) build artifacts
+wiwi2/target/
+
+# Go implementation (wiwi3) build artifacts
+wiwi3/bin/
+
 # Agent harness scratch
 .omp/
 
