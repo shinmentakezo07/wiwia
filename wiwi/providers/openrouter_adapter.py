@@ -297,14 +297,21 @@ class OpenRouterAdapter(OpenAIAdapter):
             # Non-dict choice must be skipped, not crash on ``c.get``
             # (AUDIT #110).
             return out
-        delta = c.get("delta") or {}
+        delta = c.get("delta")
+        if not isinstance(delta, dict):
+            # A truthy non-dict delta has nothing to decode; decode with an
+            # empty delta (finish-only chunks carry no delta key — AUDIT
+            # #154).
+            delta = {}
 
-        if delta.get("content"):
+        # Typed-wrong content/reasoning is dropped, not forwarded as a
+        # non-str delta (contract break — AUDIT #154).
+        if isinstance(delta.get("content"), str) and delta["content"]:
             out.append(dl.TextDelta(delta["content"]))
 
         # OpenRouter streams reasoning via ``reasoning`` or ``reasoning_details``
         reasoning_text = delta.get("reasoning") or delta.get("reasoning_content")
-        if reasoning_text:
+        if isinstance(reasoning_text, str) and reasoning_text:
             out.append(dl.ThinkingDelta(reasoning_text))
 
         for rd in delta.get("reasoning_details") or []:
@@ -327,10 +334,16 @@ class OpenRouterAdapter(OpenAIAdapter):
                 if enc:
                     out.append(dl.ThinkingDelta(enc, signature=rd.get("id")))
 
-        tool_calls = delta.get("tool_calls") or []
+        tool_calls = delta.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            tool_calls = []
         for i, tc in enumerate(tool_calls):
+            if not isinstance(tc, dict):
+                # Malformed entry (null/scalar): skip, not crash (AUDIT #154).
+                continue
             idx = tc.get("index", i)
-            fn = tc.get("function") or {}
+            fn = tc.get("function")
+            fn = fn if isinstance(fn, dict) else {}
             name_fragment = fn.get("name", "")
             if tc.get("id"):
                 if idx in self._synthesized_opens:

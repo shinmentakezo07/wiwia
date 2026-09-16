@@ -1794,3 +1794,34 @@ is capability-driven and ignores `drop_params`, same as the adapter's existing
 reasoning-key strip. The plain `openai` adapter is unchanged.
 
 **Tests:** `tests/test_fix_round60.py` (5).
+
+## Decoder hardening: typed-wrong upstream frames (AUDIT #153/#154) — 2026-09-16
+
+`AnthropicAdapter.decode_stream_event` crashed with `AttributeError` on
+syntactically-valid-but-typed-wrong SSE payloads (non-dict frames,
+`message: null`, `usage: "x"`, `content_block: null`, `delta: null`,
+`error: null`). The same frame class crashed the OpenAI-wire decoders on a
+truthy non-dict `delta` or malformed `tool_calls` entries — and, worse, the
+OpenAI/OpenRouter/NIM decoders *forwarded* non-string `content`/`reasoning`
+as `TextDelta`/`ThinkingDelta`, a streaming-contract break that crashes the
+pump (`len(d.text)`) or serializes an invalid chunk; NIM's variant fed the
+non-string into `MiniMaxFramer.feed` (`str + int` TypeError escaping
+`_feed_safely`). Gemini's nested `functionCall`/`usageMetadata` reads were
+likewise unguarded. In every case the `AttributeError`/`TypeError` escaped
+into the pump's generic handler: mid-stream `StreamError` to the client,
+partial billing, `dep.record_fail`, and key cooldown for a frame carrying no
+semantic content.
+
+Fixed in all four decoder implementations (`anthropic_adapter.py`,
+`openai_adapter.py` — inherited by openai-compatible/gmicloud/bai/cline/
+workbuddy/opencode-chat — `openrouter_adapter.py` copy, `nim_adapter.py`,
+`gemini_adapter.py`): type-guard per read, not per frame. Non-dict `delta`
+decodes as empty (finish-only chunks must still reach finish handling);
+malformed `tool_calls` entries are skipped; non-str `content`/`reasoning` are
+dropped, not forwarded; NIM str-gates content before the framer; Gemini skips
+typed-wrong `functionCall` parts and non-dict `usageMetadata`. Deltas
+contract stays binding: adapters guarantee legality, encoders never defend.
+
+**Tests:** `tests/test_fix_round61.py` (36, incl. an end-to-end streaming
+smoke: an upstream injecting every poison frame mid-stream still completes
+the client's Anthropic stream with no error event).

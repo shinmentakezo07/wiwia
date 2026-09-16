@@ -294,9 +294,11 @@ class NimAdapter(OpenAIAdapter):
 
         # Usage may ride in any chunk.
         u = chunk.get("usage")
-        if u:
-            dp = u.get("prompt_tokens_details") or {}
-            dc = u.get("completion_tokens_details") or {}
+        if isinstance(u, dict):
+            dp = u.get("prompt_tokens_details")
+            dp = dp if isinstance(dp, dict) else {}
+            dc = u.get("completion_tokens_details")
+            dc = dc if isinstance(dc, dict) else {}
             out.append(dl.UsageFinal(
                 prompt=u.get("prompt_tokens", 0), cached=dp.get("cached_tokens", 0),
                 reasoning=dc.get("reasoning_tokens", 0),
@@ -312,13 +314,21 @@ class NimAdapter(OpenAIAdapter):
             # healthy deployment for a frame carrying no semantics (AUDIT #110
             # class; mirrors OpenAIAdapter).
             return out
-        delta = c.get("delta") or {}
+        delta = c.get("delta")
+        if not isinstance(delta, dict):
+            # A truthy non-dict delta has nothing to decode; decode with an
+            # empty delta (finish-only chunks carry no delta key — AUDIT
+            # #154).
+            delta = {}
 
         # Feed content through the MiniMax framer.  The framer separates
         # visible text from native tool markup.  If a complete tool block
-        # is detected, emit tool-call deltas instead of text.
+        # is detected, emit tool-call deltas instead of text.  Typed-wrong
+        # content must be dropped, not fed: the framer expects ``str`` and a
+        # non-str raises TypeError ``_feed_safely`` cannot catch (it only
+        # handles NimToolProtocolError — AUDIT #154).
         content = delta.get("content")
-        if content:
+        if isinstance(content, str) and content:
             visible = self._feed_safely(self._content_framer, content, "content")
             if visible:
                 out.append(dl.TextDelta(visible))
@@ -327,9 +337,9 @@ class NimAdapter(OpenAIAdapter):
                 self._content_framer.tool_block = None
 
         # Reasoning content also goes through a framer (some models leak
-        # tool markup in reasoning too).
+        # tool markup in reasoning too). Same str gate as content above.
         reasoning = delta.get("reasoning_content") or delta.get("reasoning")
-        if reasoning:
+        if isinstance(reasoning, str) and reasoning:
             visible_r = self._feed_safely(self._reasoning_framer, reasoning,
                                           "reasoning")
             if visible_r:
@@ -339,10 +349,16 @@ class NimAdapter(OpenAIAdapter):
                 self._reasoning_framer.tool_block = None
 
         # Structured tool_calls (normal OpenAI format) -- pass through.
-        tool_calls = delta.get("tool_calls") or []
+        tool_calls = delta.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            tool_calls = []
         for i, tc in enumerate(tool_calls):
+            if not isinstance(tc, dict):
+                # Malformed entry (null/scalar): skip, not crash (AUDIT #154).
+                continue
             idx = tc.get("index", i)
-            fn = tc.get("function") or {}
+            fn = tc.get("function")
+            fn = fn if isinstance(fn, dict) else {}
             name_fragment = fn.get("name", "")
             if tc.get("id"):
                 if idx in self._synthesized_opens:

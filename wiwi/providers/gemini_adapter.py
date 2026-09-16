@@ -263,6 +263,10 @@ class GeminiAdapter:
                 out.append(dl.TextDelta(part["text"] or ""))
             elif "functionCall" in part:
                 fc = part["functionCall"]
+                if not isinstance(fc, dict):
+                    # Typed-wrong functionCall (null/scalar): skip the part,
+                    # not crash on ``fc.get`` (AUDIT #154).
+                    continue
                 self._saw_function_call = True
                 n = self._tool_seq
                 self._tool_seq += 1
@@ -272,6 +276,10 @@ class GeminiAdapter:
                                                 args_fragment=json.dumps(fc.get("args") or {})))
                 out.append(dl.ToolCallClose(index=n))
         u = payload.get("usageMetadata")
+        if not isinstance(u, dict):
+            # A truthy non-dict usageMetadata must not reach u.get (AUDIT
+            # #154); treat it as absent.
+            u = None
         finish = cand.get("finishReason")
         if finish:
             if u:

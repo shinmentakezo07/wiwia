@@ -538,17 +538,31 @@ class AnthropicAdapter:
             payload = orjson.loads(data)
         except json.JSONDecodeError:
             return []
+        if not isinstance(payload, dict):
+            # A non-dict frame (null/number/string/array) must be ignored, not
+            # crash on ``payload.get``. The AttributeError escaped into the
+            # pump's generic handler, which cooled a healthy deployment and
+            # fed the key's retirement ladder for a frame carrying no semantic
+            # content (AUDIT #153 — the same frame class #110/#136 fixed for
+            # the openai/gemini adapters).
+            return []
         etype = payload.get("type", event)
         out: list[dl.IRStreamDelta] = []
+        # Typed-wrong nested fields are coerced to their empty shape rather
+        # than crashing (AUDIT #153): ``payload.get("message", {})`` only
+        # defaults a *missing* key, not a null/typed-wrong value.
+        m = payload.get("message")
         if etype == "message_start":
-            m = payload.get("message", {})
+            m = m if isinstance(m, dict) else {}
             out.append(dl.StreamStart(model=m.get("model", "")))
-            u = m.get("usage") or {}
+            u = m.get("usage")
+            u = u if isinstance(u, dict) else {}
             self._pending_prompt = u.get("input_tokens", 0)
             self._pending_cached = u.get("cache_read_input_tokens", 0)
             self._pending_cache_creation = u.get("cache_creation_input_tokens", 0)
         elif etype == "content_block_start":
-            cb = payload.get("content_block", {})
+            cb = payload.get("content_block")
+            cb = cb if isinstance(cb, dict) else {}
             idx = payload.get("index", 0)
             if cb.get("type") == "redacted_thinking":
                 # Anthropic's extended-thinking redaction: an opaque encrypted
@@ -572,7 +586,8 @@ class AnthropicAdapter:
                     index=idx, id=cb.get("id", ""), name=cb.get("name", ""),
                     builtin=(cb.get("name") or "server_tool") if is_server else None))
         elif etype == "content_block_delta":
-            d = payload.get("delta", {})
+            d = payload.get("delta")
+            d = d if isinstance(d, dict) else {}
             dtype = d.get("type")
             if dtype == "text_delta":
                 raw = d.get("text", "")
@@ -593,10 +608,13 @@ class AnthropicAdapter:
                 self._tool_indices.discard(idx)
                 out.append(dl.ToolCallClose(index=idx))
         elif etype == "message_delta":
-            d = payload.get("delta", {})
-            u = payload.get("usage") or {}
+            d = payload.get("delta")
+            d = d if isinstance(d, dict) else {}
+            u = payload.get("usage")
+            u = u if isinstance(u, dict) else {}
             sr = d.get("stop_reason", "end_turn")
-            out_details = u.get("output_tokens_details") or {}
+            out_details = u.get("output_tokens_details")
+            out_details = out_details if isinstance(out_details, dict) else {}
             out.append(dl.UsageFinal(
                 prompt=getattr(self, "_pending_prompt", 0),
                 cached=getattr(self, "_pending_cached", 0),
@@ -612,7 +630,8 @@ class AnthropicAdapter:
         elif etype == "message_stop":
             out.append(dl.StreamEnd())
         elif etype == "error":
-            err = payload.get("error", {})
+            err = payload.get("error")
+            err = err if isinstance(err, dict) else {}
             out.append(dl.StreamError(message=err.get("message", "unknown anthropic error"),
                                       kind="status"))
         return out

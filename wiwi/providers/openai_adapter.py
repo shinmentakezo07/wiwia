@@ -414,9 +414,11 @@ class OpenAIAdapter:
         # final chunk as choices+finish_reason. Parse it whenever present;
         # later cumulative values replace earlier ones.
         u = chunk.get("usage")
-        if u:
-            dp = u.get("prompt_tokens_details") or {}
-            dc = u.get("completion_tokens_details") or {}
+        if isinstance(u, dict):
+            dp = u.get("prompt_tokens_details")
+            dp = dp if isinstance(dp, dict) else {}
+            dc = u.get("completion_tokens_details")
+            dc = dc if isinstance(dc, dict) else {}
             out.append(dl.UsageFinal(
                 prompt=u.get("prompt_tokens", 0), cached=dp.get("cached_tokens", 0),
                 reasoning=dc.get("reasoning_tokens", 0),
@@ -428,17 +430,33 @@ class OpenAIAdapter:
             # Non-dict choice must be skipped, not crash on ``c.get``
             # (AUDIT #110).
             return out
-        delta = c.get("delta") or {}
-        if delta.get("content"):
+        delta = c.get("delta")
+        if not isinstance(delta, dict):
+            # A truthy non-dict delta (int/string/bool/list) has nothing to
+            # decode; decode with an empty delta (a finish-only chunk carries
+            # no delta key at all and must still reach the finish handling —
+            # AUDIT #154).
+            delta = {}
+        # Typed-wrong content/reasoning must be dropped, not forwarded as a
+        # TextDelta/ThinkingDelta — the deltas contractually carry ``str``,
+        # and a non-str breaks the pump (len()) or the wire encoder
+        # (AUDIT #154).
+        if isinstance(delta.get("content"), str) and delta["content"]:
             out.append(dl.TextDelta(delta["content"]))
-        if delta.get("reasoning_content"):
+        if isinstance(delta.get("reasoning_content"), str) and delta["reasoning_content"]:
             out.append(dl.ThinkingDelta(delta["reasoning_content"]))
-        elif delta.get("reasoning"):
+        elif isinstance(delta.get("reasoning"), str) and delta["reasoning"]:
             out.append(dl.ThinkingDelta(delta["reasoning"]))
-        tool_calls = delta.get("tool_calls") or []
+        tool_calls = delta.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            tool_calls = []
         for i, tc in enumerate(tool_calls):
+            if not isinstance(tc, dict):
+                # Malformed entry (null/scalar): skip, not crash (AUDIT #154).
+                continue
             idx = tc.get("index", i)
-            fn = tc.get("function") or {}
+            fn = tc.get("function")
+            fn = fn if isinstance(fn, dict) else {}
             name_fragment = fn.get("name", "")
             if tc.get("id"):
                 if idx in self._synthesized_opens:

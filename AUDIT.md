@@ -3605,3 +3605,112 @@ NIM-unsupported keys, mirroring how the reasoning strip already ignores it).
 (5 tests: the full ten-key strip, strip under `drop_params=False`, strip from
 deployment `extra_body`, benign params survive, and a control asserting the
 plain OpenAI adapter still forwards them).
+
+---
+
+## 🟠 High — round 61 (new, 2026-09-16)
+
+### 153. `AnthropicAdapter.decode_stream_event` crashes on null/typed-wrong payload fields — seven sites, none guarded
+**File:** `wiwi/providers/anthropic_adapter.py:536-618`
+**Trigger:** any Anthropic-shaped upstream (or the proxy in front of one) that
+emits a syntactically-valid-but-empty SSE frame. Reproduced against
+`fresh_adapter("anthropic")`:
+
+- `data: null` / `[]` / `5` / `"s"` / `true` → `AttributeError` at `:541`
+  (`payload.get`) — the adapter never got the `isinstance(payload, dict)`
+  guard that `openai_adapter.py:407` (#110) and `gemini_adapter.py:199-204`
+  (#136) received for exactly this frame class.
+- `{"type":"message_start","message":null}` → crash at `:545` (`m.get`) —
+  `payload.get("message", {})` only defaults a *missing* key, not `null`.
+- `{"type":"message_start","message":{"usage":"x"}}` → crash at `:547` —
+  `m.get("usage") or {}` passes a truthy non-dict through.
+- `{"type":"content_block_start","content_block":null}` → crash at `:553`.
+- `{"type":"content_block_delta","delta":null}` → crash at `:576`.
+- `{"type":"message_delta","delta":null}` → crash at `:598`.
+
+**Consequence (reproduced end-to-end through `Gateway.stream` with a mocked
+upstream):** the `AttributeError` escapes into the pump's mid-stream handler
+(`gateway.py:1188-1207`): the client is streamed `StreamError("'NoneType'
+object has no attribute 'get'")` after `StreamStart`, the partial output is
+billed, `dep.record_fail` fires, and `on_result_locked(key, 502)` cools the
+key (`err_count` 0→1, status `active`→`cooling`). A frame carrying *zero*
+semantic content penalizes a healthy credential and deployment — the exact
+failure mode #110/#136 registered, still open on this adapter.
+
+**Fix sketch:** at `:541` add `if not isinstance(payload, dict): return []`
+(mirror `gemini_adapter.py:198-204`); coerce each nested read:
+`m = payload.get("message"); m = m if isinstance(m, dict) else {}`, likewise
+`usage`/`content_block`/`delta`/`error`. Apply the same pattern at the crash
+lines above, not only the entry guard.
+
+**Status: fixed** — the entry guard mirrors `gemini_adapter.py:198-204`
+(`non-dict frame → []`) and every nested read is type-coerced to its empty
+shape: `message`, `usage`, `content_block`, `delta`, `error`,
+`output_tokens_details`. Control test `test_anthropic_happy_path_unharmed`
+pins unchanged normal-stream behavior.
+
+Covered by `tests/test_fix_round61.py` (Anthropic: junk frames, null
+message/usage/content_block/delta/error, happy-path control) and the
+end-to-end `test_anthropic_stream_survives_poison_frames_end_to_end`, which
+drives a Claude-Code-shaped streaming request through `create_app` with an
+upstream injecting every poison frame mid-stream and asserts the client
+still receives the completion with no error event.
+**File:** `wiwi/providers/openai_adapter.py:431-442` (+ inherited/forwarded by
+`openai-compatible`, `gmicloud`, `bai`, `cline`, `workbuddy`, `openrouter`,
+`opencode` chat route); `wiwi/providers/nim_adapter.py:303-310` +
+`wiwi/providers/nim_native_tools.py:106`; `wiwi/providers/gemini_adapter.py:264-269,277-283`
+**Trigger (each reproduced against `fresh_adapter`):**
+
+- `{"choices":[{"delta":5}]}` → `delta = c.get("delta") or {}` keeps the
+  truthy int; `AttributeError` at `openai_adapter.py:432`. Same frame crashes
+  openrouter, opencode, gmicloud, bai, cline, workbuddy (inherited path).
+- `{"choices":[{"delta":{"tool_calls":[{"index":0,"function":"x"}]}}]}` →
+  `fn.get` crash (`:441`); a `null` tool_calls entry crashes at `:440`.
+- `{"choices":[{"delta":{"content":5}}]}` → **no crash in the adapter**:
+  `if delta.get("content")` admits the int and the decoder emits
+  `TextDelta(text=5)`. `TextDelta.text` is contractually `str`
+  (`streaming/deltas.py`), so the fault lands downstream: the pump's
+  `text_len += len(d.text)` (`gateway.py:1039`) raises `TypeError`, or the
+  wire encoder serializes `"content": 5` to the client — an invalid OpenAI
+  chunk. Adapters guarantee contract legality; this one does not. NIM's
+  variant is worse: the int reaches `MiniMaxFramer.feed` and raises
+  `TypeError` at `nim_native_tools.py:106`, escaping `_feed_safely`
+  (`nim_adapter.py:411-429`), which catches only `NimToolProtocolError`.
+- `{"candidates":[{"content":{"parts":[{"functionCall":null}]}}]}` →
+  `AttributeError` at `gemini_adapter.py:269`; `{"candidates":[{"finishReason
+  ":"STOP"}],"usageMetadata":"x"}` → crash at `:279` (truthy non-dict passes
+  `if u:`). Gemini's *entry* guard (#136) exists but its nested reads do not.
+
+**Consequence:** identical to #153 — mid-stream `StreamError` to the client,
+partial billing, deployment `record_fail`, key cooldown/retirement ladder,
+for frames carrying no usable content. Reachable from ordinary
+compatible-gateway glitches (truncated chunk bodies serialize to scalars).
+
+**Fix sketch:** type-guard per read, not per frame: `delta =
+c.get("delta") if isinstance(c.get("delta"), dict) else {}`;
+`if not isinstance(tc, dict): continue` in the tool loop and likewise for
+`fn`; coerce content/reasoning: `out.append(dl.TextDelta(txt))` only when
+`isinstance(txt, str)` (drop otherwise — mirrors `anthropic_adapter.py:578-579`
+which already does `raw if isinstance(raw, str) else ""`); NIM: guard
+`content` to `str` before the framer (or widen `_feed_safely`'s except to
+`Exception`); Gemini: `fc = part["functionCall"]; if not isinstance(fc, dict):
+continue`, and `u if isinstance(u, dict) else None` at the two usage reads.
+
+**Status: fixed** — type-guarded per read, not per frame, in all three
+decoder implementations (the pure-inheritance adapters — `openai-compatible`,
+`gmicloud`, `bai`, `cline`, `workbuddy`, `opencode` chat route — get it from
+the OpenAI base): `delta` non-dict decodes as empty (a finish-only chunk
+carries no `delta` key and must still reach finish handling); `tool_calls`
+non-list becomes empty, null/scalar entries are skipped, `function` is
+dict-coerced; `content`/`reasoning` are emitted as deltas only when `str`
+(truthy non-str dropped, mirroring `anthropic_adapter.py:578-579`); NIM
+str-gates `content`/`reasoning` *before* the framer (better than widening
+`_feed_safely`'s except: the framer never sees garbage); `usage` is
+dict-gated in both OpenAI-wire adapters; Gemini skips typed-wrong
+`functionCall` parts and treats a truthy non-dict `usageMetadata` as absent.
+The plain OpenAI-side OpenRouter copy (`openrouter_adapter.py:300-334`)
+received the identical patch.
+
+Covered by `tests/test_fix_round61.py` (35 tests: per-adapter poison frames,
+drop-not-forward contract tests with real-text controls, and the end-to-end
+Anthropic smoke).
