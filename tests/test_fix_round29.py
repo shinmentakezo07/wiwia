@@ -1,24 +1,30 @@
-"""Round-29 regression tests: OpenCode Zen free-tier client-gate headers.
+"""Round-29 regression tests: OpenCode Zen client metadata headers.
 
-Zen tightened the free-tier gate after round 27: ``User-Agent`` alone no
-longer unlocks ``-free`` models — the edge now requires the client session
-header and rejects with ``400 MissingSessionID`` ("OpenCode's free tier can
-only be used in OpenCode") otherwise (verified live 2026-09-07). The real
-client (``packages/opencode/src/session/llm/request.ts``) sends
-``x-opencode-session`` + ``x-opencode-client`` on every opencode-provider
-request.
+Zen gates its free tier behind the official client's session header: the edge
+rejects with ``400 MissingSessionID`` ("OpenCode's free tier can only be used
+in OpenCode") when it is absent (verified live 2026-09-07, re-verified
+2026-09-16 on ``union-alpha``). The real client
+(``packages/opencode/src/session/llm/request.ts``) sends the full metadata set
+on every request to an ``opencode``-provider model, paid or free:
+
+- ``x-opencode-session`` — per-session id
+- ``x-opencode-request`` — per-request id
+- ``x-opencode-client`` — ``cli``
+- ``x-opencode-project`` — project id (the CLI's ``global`` fallback)
+
+Zen consumes them for metrics and sticky routing on every model, so the
+adapter sends all four unconditionally. Round 29 originally gated them to
+free models only; that left paid traffic without the client fingerprint and
+sent ``union-alpha`` (free, Messages route) to the wrong endpoint entirely
+(see round 63).
 
 These tests pin:
 
-- free models (``-free`` suffixed plus the unsuffixed stealth free model
-  ``big-pickle``) get ``x-opencode-session``/``x-opencode-client`` headers
-- paid models do NOT — session headers shard Zen's routing by session id
-  (kimi-k2.7-code: ~50% of fresh session ids land on a broken replica) and
-  paid models are not session-gated, so spoofing there is pure downside
-- the session id is stable across header rebuilds within one request (the
+- every model gets the four metadata headers, anonymous key or real key
+- the ids are stable across header rebuilds within one request (the
   401-refresh retry path rebuilds headers) and fresh per request instance
-- the gateway end-to-end sends the session header upstream for free models
-  and omits it for paid ones, streaming included
+- ``reset()`` rotates both ids
+- the gateway end-to-end sends them upstream, streaming included
 """
 
 from __future__ import annotations
@@ -43,7 +49,7 @@ from wiwi.config import (
 from wiwi.ir import types as ir
 from wiwi.providers import opencode_version as ov
 from wiwi.providers.base import ProviderKeyRef
-from wiwi.providers.opencode_adapter import OpencodeAdapter, is_free_model
+from wiwi.providers.opencode_adapter import OpencodeAdapter
 from wiwi.server.app import create_app
 from wiwi.streaming import deltas as dl
 from wiwi.wire import openai_chat as oc
@@ -65,122 +71,78 @@ def _seed_version():
     ov._set_cached_for_tests(None, 0.0)
 
 
-# -- free-model classification -------------------------------------------------
+# -- client metadata headers (every model) --------------------------------------
 
 
-def test_is_free_model_matches_live_catalog():
-    # Live catalog free models (verified 2026-09-07) + the unsuffixed stealth one.
-    for m in ["deepseek-v4-flash-free", "ling-3.0-flash-fin-free", "mimo-v2.5-free",
-              "muse-spark-1.2-contributor-free", "muse-spark-1.3-contributor-free",
-              "nemotron-3-ultra-free", "nemotron-3.5-lightning-free", "big-pickle"]:
-        assert is_free_model(m), m
+def _metadata(h: dict[str, str]) -> dict[str, str]:
+    return {k: h[k] for k in ("x-opencode-session", "x-opencode-request",
+                              "x-opencode-client", "x-opencode-project")}
 
 
-def test_is_free_model_rejects_paid_and_non_suffix():
-    for m in ["glm-5.3-flash", "kimi-k2.6", "deepseek-v4-flash", "claude-sonnet-5",
-              "free-tier-v2", "gpt-5.5", "", "minimax-m3"]:
-        assert not is_free_model(m), m
+def test_every_model_carries_client_metadata():
+    # Paid and free alike: the CLI sends the full set on every opencode-model
+    # request, and Zen reads it for metrics/sticky routing.
+    for m in ["mimo-v2.5-free", "big-pickle", "glm-5.3-flash", "kimi-k2.6",
+              "claude-sonnet-5", "gemini-3.1-pro", "gpt-5.5", "union-alpha"]:
+        a = OpencodeAdapter()
+        a.encode_request(_chat_req(), m, {})
+        h = a.headers(_key())
+        assert h["User-Agent"] == "opencode/9.9.9", m
+        assert h["x-opencode-client"] == "cli", m
+        assert h["x-opencode-project"] == "global", m
+        assert h["x-opencode-session"].startswith("ses_"), m
+        assert h["x-opencode-request"].startswith("msg_"), m
+        assert h["x-opencode-session"] != h["x-opencode-request"], m
 
 
-def test_is_free_model_case_insensitive():
-    assert is_free_model("MIMO-V2.5-FREE")
-    assert is_free_model("Big-Pickle")
-
-
-# -- headers: free models carry the client session ------------------------------
-
-
-def test_free_model_headers_include_session_and_client():
+def test_headers_before_any_model_known_still_carry_metadata():
+    # The admin test-connection path calls headers() with no model learned;
+    # the client fingerprint does not depend on the model, so it is present.
     a = OpencodeAdapter()
-    a.encode_request(_chat_req(), "mimo-v2.5-free", {})
     h = a.headers(_key())
-    assert h["User-Agent"] == "opencode/9.9.9"
-    assert h["Authorization"] == "Bearer zen-key-123"
     assert h["x-opencode-client"] == "cli"
-    ses = h["x-opencode-session"]
-    assert ses.startswith("ses_") and len(ses) > len("ses_")
+    assert h["x-opencode-session"].startswith("ses_")
+    assert h["x-opencode-request"].startswith("msg_")
+    assert h["User-Agent"] == "opencode/9.9.9"
 
 
-def test_big_pickle_headers_include_session():
-    # Stealth free model: documented free, gated by MissingSessionID live,
-    # but carries no -free suffix.
-    a = OpencodeAdapter()
-    a.encode_request(_chat_req(), "big-pickle", {})
-    assert a.headers(_key())["x-opencode-session"].startswith("ses_")
-
-
-def test_responses_route_free_model_headers_include_session():
-    a = OpencodeAdapter()
-    a.encode_request(_chat_req(), "muse-spark-1.3-contributor-free", {})
-    assert a.headers(_key())["x-opencode-session"].startswith("ses_")
-
-
-def test_session_id_stable_across_header_rebuilds():
+def test_ids_stable_across_header_rebuilds():
     # The 401-refresh retry path rebuilds headers on the same adapter
-    # instance; the session id must not change mid-request.
+    # instance; neither id may change mid-request.
     a = OpencodeAdapter()
     a.encode_request(_chat_req(), "mimo-v2.5-free", {})
-    s1 = a.headers(_key())["x-opencode-session"]
-    s2 = a.headers(_key())["x-opencode-session"]
-    assert s1 == s2
+    first = _metadata(a.headers(_key()))
+    second = _metadata(a.headers(_key()))
+    assert first == second
 
 
-def test_session_id_fresh_per_request_instance():
-    # Each request gets its own fresh adapter (fresh_adapter on the hot
-    # path); each must present a distinct session id so a bad Zen replica
-    # is never sticky across requests (cf. kimi-k2.7-code session sharding).
+def test_ids_fresh_per_request_instance():
+    # Each request gets its own fresh adapter (fresh_adapter on the hot path);
+    # a bad Zen replica must never be sticky across requests.
     a1 = OpencodeAdapter()
     a1.encode_request(_chat_req(), "mimo-v2.5-free", {})
     a2 = OpencodeAdapter()
     a2.encode_request(_chat_req(), "mimo-v2.5-free", {})
     assert (a1.headers(_key())["x-opencode-session"]
             != a2.headers(_key())["x-opencode-session"])
+    assert (a1.headers(_key())["x-opencode-request"]
+            != a2.headers(_key())["x-opencode-request"])
 
 
-def test_build_url_alone_primes_free_model_headers():
-    # The admin test-connection path calls build_url before headers without
-    # encode_request; the model id learned there must still gate the spoof.
-    a = OpencodeAdapter()
-    a.build_url("https://opencode.ai/zen/v1", "mimo-v2.5-free", True)
-    assert a.headers(_key())["x-opencode-session"].startswith("ses_")
-
-
-# -- headers: paid models carry no session --------------------------------------
-
-
-def test_paid_model_headers_have_no_session():
-    # Session ids shard Zen's upstream routing (kimi-k2.7-code: fresh session
-    # ids fail ~50% on a broken replica) and paid models are not gated, so
-    # the spoof headers must never leak to paid traffic.
-    for m in ["glm-5.3-flash", "kimi-k2.6", "deepseek-v4-flash", "claude-sonnet-5",
-              "gemini-3.1-pro", "gpt-5.5"]:
-        a = OpencodeAdapter()
-        a.encode_request(_chat_req(), m, {})
-        h = a.headers(_key())
-        assert "x-opencode-session" not in h, m
-        assert "x-opencode-client" not in h, m
-
-
-def test_headers_before_any_model_known_have_no_session():
-    # No encode/build_url yet → model unknown → fail safe: no spoof headers.
-    a = OpencodeAdapter()
-    h = a.headers(_key())
-    assert "x-opencode-session" not in h
-    assert h["User-Agent"] == "opencode/9.9.9"
-
-
-def test_reset_clears_free_model_state():
+def test_reset_rotates_both_ids():
     a = OpencodeAdapter()
     a.encode_request(_chat_req(), "mimo-v2.5-free", {})
-    assert "x-opencode-session" in a.headers(_key())
+    before = _metadata(a.headers(_key()))
     a.reset()
-    assert "x-opencode-session" not in a.headers(_key())
+    after = _metadata(a.headers(_key()))
+    assert after["x-opencode-session"] != before["x-opencode-session"]
+    assert after["x-opencode-request"] != before["x-opencode-request"]
 
 
 # -- anonymous sentinel ---------------------------------------------------------
 
 
-def test_anonymous_key_omits_authorization_for_free_model():
+def test_anonymous_key_omits_authorization():
     # Free models serve anonymous traffic; a keyless setup (config requires
     # non-empty keys) declares intent with the literal `anonymous` sentinel,
     # and the adapter then omits Authorization entirely — a placeholder
@@ -199,8 +161,8 @@ def test_anonymous_key_omits_authorization_case_insensitive():
     assert "Authorization" not in a.headers(_key("Anonymous"))
 
 
-def test_real_key_keeps_authorization_for_free_model():
-    # A valid Zen key must keep flowing: with the session headers this is
+def test_real_key_keeps_authorization():
+    # A valid Zen key must keep flowing: with the metadata headers this is
     # byte-for-byte what the official client sends, preserving per-account
     # attribution and quotas.
     a = OpencodeAdapter()
@@ -266,7 +228,9 @@ async def test_gateway_free_model_sends_session_header(zen_client):
 
 
 @respx.mock
-async def test_gateway_paid_model_omits_session_header(zen_client):
+async def test_gateway_paid_model_sends_session_header(zen_client):
+    # Zen reads the client metadata for metrics/sticky routing on every
+    # model; the CLI sends it unconditionally, so paid traffic carries it too.
     route = respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
         json=_CHAT_COMPLETION)
     r = await zen_client.post("/v1/chat/completions", json={
@@ -275,8 +239,10 @@ async def test_gateway_paid_model_omits_session_header(zen_client):
     assert r.status_code == 200, r.text
     assert route.called
     sent = route.calls[0].request.headers
-    assert "x-opencode-session" not in sent
-    assert "x-opencode-client" not in sent
+    assert sent.get("x-opencode-session", "").startswith("ses_")
+    assert sent.get("x-opencode-request", "").startswith("msg_")
+    assert sent.get("x-opencode-client") == "cli"
+    assert sent.get("x-opencode-project") == "global"
 
 
 @respx.mock

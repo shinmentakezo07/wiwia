@@ -1825,3 +1825,63 @@ contract stays binding: adapters guarantee legality, encoders never defend.
 **Tests:** `tests/test_fix_round61.py` (36, incl. an end-to-end streaming
 smoke: an upstream injecting every poison frame mid-stream still completes
 the client's Anthropic stream with no error event).
+
+## OpenCode Zen: `union-alpha` route + universal client metadata — 2026-09-16
+
+**File**: `wiwi/providers/opencode_adapter.py`
+
+Two defects, both reported as `500 Internal server error` through a Zen
+deployment (`provider_type: opencode`).
+
+**1. `union-alpha` was routed to the wrong upstream protocol.** The
+adapter's prefix table sent it to `POST {base}/chat/completions`
+("everything else"). Zen's own endpoint table (`zen.mdx`, and the live
+`https://opencode.ai/zen/v1/models`) puts it on the Anthropic Messages
+protocol — `POST {base}/messages`, `@ai-sdk/anthropic`. Chat Completions
+answers that model with a bare `500 Internal server error` envelope:
+
+```
+POST /zen/v1/chat/completions {"model":"union-alpha",...}
+-> 500 {"type":"error","error":{"type":"error","message":"Internal server error"}}
+```
+
+which the gateway surfaced verbatim to the caller. `union-alpha` now joins
+`_MESSAGES_PREFIXES`, so it encodes/decodes through the existing Anthropic
+adapter like every other Messages model.
+
+**2. The client metadata headers were gated to free models.** Round 29
+added `x-opencode-session`/`x-opencode-client` for `-free` models only,
+reasoning that paid models are not session-gated and that session ids shard
+Zen's routing. The official client sends the full set on **every** request
+to an `opencode`-provider model
+(`packages/opencode/src/session/llm/request.ts`):
+
+```
+x-opencode-session: <sessionID>
+x-opencode-request: <user.id>
+x-opencode-client:  <flags.client>   # "cli"
+x-opencode-project: <project.id>     # "global" fallback when unbound
+```
+
+and Zen's edge consumes all four for metrics and sticky routing
+(`packages/console/.../zen/util/handler.ts`, including `$session`/`$project`
+header substitutions into upstream requests). `headers()` now always sends
+them; `union-alpha` — free, no `-free` suffix — was previously sent with no
+session header at all, which the edge rejects with
+`400 MissingSessionID` ("OpenCode's free tier can only be used in OpenCode").
+
+The now-unused `is_free_model` classifier and `_last_model_id` state are
+deleted rather than left as dead code.
+
+**Tests:** `tests/test_fix_round63.py` (2, end-to-end through `create_app`:
+Chat Completions → `/messages` with an Anthropic body, and a streamed
+`input_json_delta` tool call decoded into Chat `tool_calls`);
+`tests/test_fix_round29.py` migrated (14) — the free-only header tests and
+the paid-model-omits-session test were replaced by universal-metadata tests,
+`reset()` now pins rotation of both ids, and the classifier tests were
+deleted with the helper.
+
+**Live:** adapter → `POST /zen/v1/messages` with the metadata headers
+returns `200` for `union-alpha` (non-stream, tool call parsed); the same
+request without the session header returns `400 MissingSessionID`; the
+pre-fix `/chat/completions` route returns `500`.

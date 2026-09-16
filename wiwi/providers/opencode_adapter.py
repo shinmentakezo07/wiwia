@@ -6,7 +6,7 @@ table and the ``models.dev`` ``opencode`` provider entry, whose base
 ``api`` is ``https://opencode.ai/zen/v1`` with per-model SDK overrides)::
 
     responses  gpt-*, grok-*, muse-spark-*   POST {base}/responses         (Responses API)
-    messages   claude-*, qwen*               POST {base}/messages          (Anthropic Messages API)
+    messages   claude-*, qwen*, union-alpha  POST {base}/messages          (Anthropic Messages API)
     gemini     gemini-*                      POST {base}/models/{id}:...   (Gemini generateContent)
     chat       everything else               POST {base}/chat/completions  (OpenAI Chat API)
 
@@ -18,15 +18,15 @@ as ``Authorization: Bearer`` plus a live ``User-Agent: opencode/<version>``
 the version is read live from :mod:`wiwi.providers.opencode_version` (5-min
 TTL background refresh, no restart needed).
 
-Free-tier models (``-free`` suffix plus stealth free models like
-``big-pickle``; see :func:`is_free_model`) add another gate: the edge only
-serves anonymous free traffic to the official client, rejecting everything
-else with ``400 MissingSessionID`` ("OpenCode's free tier can only be used
-in OpenCode"). What the edge actually checks is the client session header
-(``x-opencode-session`` — verified live 2026-09-07: session header alone
-passes even with a non-opencode UA), so ``headers()`` adds the session +
-client headers for free models only. Paid models are not session-gated and
-session ids shard Zen's upstream routing, so they never get them.
+Every request also carries the official client's metadata headers exactly as
+the opencode CLI sends them (``packages/opencode/src/session/llm/request.ts``):
+``x-opencode-session`` + ``x-opencode-request`` (per-request ids, stable
+across header rebuilds within one request), ``x-opencode-client: cli``, and
+``x-opencode-project`` (the CLI's global fallback). Free models 400
+``MissingSessionID`` ("OpenCode's free tier can only be used in OpenCode")
+without them — verified live 2026-09-16 on union-alpha. The edge consumes
+them for metrics/sticky routing on every model, so they ride all traffic;
+the previous free-only gating sent paid models out without a session id.
 """
 
 from __future__ import annotations
@@ -53,30 +53,13 @@ OPENCODE_ZEN_BASE = "https://opencode.ai/zen/v1"
 Route = Literal["responses", "messages", "gemini", "chat"]
 
 _RESPONSES_PREFIXES = ("gpt-", "grok-", "muse-spark-")
-_MESSAGES_PREFIXES = ("claude-", "qwen")
+_MESSAGES_PREFIXES = ("claude-", "qwen", "union-alpha")
 _GEMINI_PREFIXES = ("gemini-",)
-
-# Stealth free models: documented free on Zen but carrying no ``-free``
-# suffix. The live catalog (2026-09-07) has exactly one.
-_STEALTH_FREE_MODELS = frozenset({"big-pickle"})
 
 # Config keys are validated non-empty (KeyDef._key_required), so a keyless
 # free-tier setup declares itself with this literal sentinel and the
 # adapter omits Authorization entirely for it.
 ANONYMOUS_KEY_SENTINEL = "anonymous"
-
-
-def is_free_model(model_id: str) -> bool:
-    """True for Zen free-tier models — the ones behind the client gate.
-
-    Free models serve anonymous traffic, but only when the request carries
-    the official client's session header (``x-opencode-session``); anything
-    else gets ``400 MissingSessionID`` ("OpenCode's free tier can only be
-    used in OpenCode"). Classified by ``-free`` suffix plus the known
-    stealth free models.
-    """
-    m = (model_id or "").strip().lower()
-    return m.endswith("-free") or m in _STEALTH_FREE_MODELS
 
 
 def route_for_model(model_id: str) -> Route:
@@ -106,12 +89,12 @@ class OpencodeAdapter:
         self._msg = AnthropicAdapter()
         self._gem = GeminiAdapter()
         self._last_route: Route = "chat"
-        self._last_model_id: str | None = None
-        # Free-tier client-gate spoof: per-request session id, generated
-        # lazily so it stays stable across the 401-refresh retry path's
-        # header rebuilds (same adapter instance) while every request gets
-        # its own fresh one (fresh_adapter on the hot path).
+        # Official-client fingerprint ids: generated lazily so they stay
+        # stable across the 401-refresh retry path's header rebuilds (same
+        # adapter instance) while every request gets its own fresh pair
+        # (fresh_adapter on the hot path).
         self._spoof_session: str | None = None
+        self._spoof_request: str | None = None
         # Responses-upstream per-stream state (mirrors OpenAIAdapter's).
         self._resp_tools: dict[str, dict[str, Any]] = {}  # item_id -> entry
         self._resp_next_index = 0
@@ -123,8 +106,8 @@ class OpencodeAdapter:
         self._msg.reset()
         self._gem.reset()
         self._last_route = "chat"
-        self._last_model_id = None
         self._spoof_session = None
+        self._spoof_request = None
         self._resp_tools.clear()
         self._resp_next_index = 0
         self._resp_started = False
@@ -144,24 +127,26 @@ class OpencodeAdapter:
         # entirely; a placeholder bearer would be 401 Invalid API key.
         if key.secret.strip().lower() != ANONYMOUS_KEY_SENTINEL:
             h["Authorization"] = f"Bearer {key.secret.strip()}"
-        # Free models ride the anonymous tier, which the edge only serves
-        # to the official client: it must see the client session header or
-        # it rejects with 400 MissingSessionID ("OpenCode's free tier can
-        # only be used in OpenCode"). Paid models get nothing extra — their
-        # traffic is not session-gated, and session ids actively shard
-        # Zen's upstream routing (kimi-k2.7-code: fresh session ids fail
-        # ~50% on a broken replica), so spoofing there is pure downside.
-        if self._last_model_id is not None and is_free_model(self._last_model_id):
-            if self._spoof_session is None:
-                self._spoof_session = f"ses_{uuid.uuid4().hex[:24]}"
-            h["x-opencode-session"] = self._spoof_session
-            h["x-opencode-client"] = "cli"
+        # Official-client fingerprint, on every model exactly as the
+        # opencode CLI does (packages/opencode/src/session/llm/request.ts):
+        # per-request session + request ids, client tag, and project id
+        # (the CLI's global fallback when no workspace is bound). Union Alpha
+        # (and every free model) 400s MissingSessionID without the session
+        # header; ids stay stable per adapter instance across the 401-refresh
+        # retry path's header rebuilds and rotate on reset()/fresh instance.
+        if self._spoof_session is None:
+            self._spoof_session = f"ses_{uuid.uuid4().hex[:24]}"
+        if self._spoof_request is None:
+            self._spoof_request = f"msg_{uuid.uuid4().hex[:24]}"
+        h["x-opencode-session"] = self._spoof_session
+        h["x-opencode-request"] = self._spoof_request
+        h["x-opencode-client"] = "cli"
+        h["x-opencode-project"] = "global"
         return h
 
     def build_url(self, base_url: str, model_id: str, stream: bool) -> str:
         route = route_for_model(model_id)
         self._last_route = route
-        self._last_model_id = model_id
         base = _base(base_url)
         if route == "responses":
             return f"{base}/responses"
@@ -178,7 +163,6 @@ class OpencodeAdapter:
                        deployment_params: dict[str, Any]) -> dict[str, Any]:
         route = route_for_model(model_id)
         self._last_route = route
-        self._last_model_id = model_id
         if route == "messages":
             return self._msg.encode_request(req, model_id, dict(deployment_params))
         if route == "gemini":
