@@ -3756,3 +3756,93 @@ received the identical patch.
 Covered by `tests/test_fix_round61.py` (35 tests: per-adapter poison frames,
 drop-not-forward contract tests with real-text controls, and the end-to-end
 Anthropic smoke).
+
+---
+
+### 154. Live Neon Postgres credential committed in `.env.example`
+
+**Severity:** 🔴 Critical (live secret in a public repo)
+**Files:** `.env.example:14` (pre-fix) — introduced by `8da5440`
+
+**Trigger:** none required. `.env.example` is **tracked**, and
+`shinmentakezo07/wiwia` is **public**, so the owner password for the Neon
+database was world-readable from the moment `8da5440` was pushed. The string is
+not a placeholder: `neondb_owner:npg_cr25hgtaFOmp@ep-wandering-math-…`.
+
+A tracked template is exactly where the repo's own "never commit" rule does not
+look — `.env` is gitignored, so copying a real value into `.env.example`
+during debugging survives every `git status` check. `git log -S` confirms the
+credential is in committed history on `origin/main`, not just the working tree.
+
+**Fix:** replaced the value with a placeholder
+(`postgresql://user:password@ep-xxx-pooler.…`) and added `HF_TOKEN=` to the
+template as a documented-but-empty entry.
+
+**Status: fixed** — `.env.example:14`.
+
+**Operator action still required.** The fix stops *future* exposure; it does not
+revoke the credential, which remains in `origin/main` history and must be
+treated as compromised:
+
+1. Roll the Neon role password (Neon console → Roles → Reset password).
+2. Put the new value in the gitignored `.env` and a Space secret — never in a
+   tracked file.
+3. Purge history only if the old value is unacceptable to keep readable; the
+   password is public either way, so rotation is the load-bearing step.
+
+**Blast radius:** the credential grants direct database access to whatever the
+Neon project holds — request logs, virtual keys, budgets, provider
+configurations. No gateway auth is involved, so `WIWI_MASTER_KEY` does not gate
+it.
+
+---
+
+## Addendum — round 64: Anthropic `/v1/messages` fidelity for Claude Code (#156) (2026-09-16)
+
+Reported symptom: a Claude Code session on the Anthropic surface could not use
+the features and tools it should. Confirmed by driving the real CLI (2.1.273)
+through the gateway against a mock Anthropic upstream, capturing the outbound
+request, and validating the emitted SSE with the `anthropic` SDK.
+
+**All items fixed; do not re-fix.** Details and rationale in `UPDATE.md`
+§ "Anthropic `/v1/messages` fidelity for Claude Code". Regression coverage in
+`tests/test_fix_round64.py` (37).
+
+| # | Defect | Location (pre-fix) | Client-visible symptom |
+|---|---|---|---|
+| 1 | `anthropic-beta` read nowhere, forwarded nowhere | `providers/anthropic_adapter.py:166`, `core/context.py` | 1M context and interleaved thinking silently unavailable; body fields forwarded without their authorizing header → hard 400 |
+| 2 | `message_start.usage` hardcoded zeros | `wire/anthropic_messages.py:461` | Claude Code's context meter pinned at 0% all session; auto-compact never fires |
+| 3 | `output_config.effort` dropped | `wire/anthropic_messages.py:243`, `:307` | `/effort`, `--effort`, `CLAUDE_CODE_EFFORT_LEVEL` all no-ops |
+| 4 | Builtin suppression keyed on tool name | `wire/anthropic_messages.py:336`, `openai_chat.py:266`, `openai_responses.py:432` | A function tool named `web_search` was deleted from the response |
+| 5 | Sync path left `server_tool_use` untagged | `providers/anthropic_adapter.py:510` | Phantom client tool call in non-streaming mode only |
+| 6 | Stop reasons collapsed to `end_turn` | `ir/types.py:14` | `pause_turn` loops truncated; context overflow indistinguishable from a normal stop |
+| 7 | `count_tokens` ignored base64 media | `core/gateway.py:1410` | 300 KB screenshot → 7 tokens; auto-compact overrun |
+| 8 | `max_tokens: 0` became 4096 | `providers/anthropic_adapter.py:346` | Cache pre-warm generated and billed 4096 output tokens |
+| 9 | Empty `system` blocks forwarded | `providers/anthropic_adapter.py:58` | Hard 400 on an empty text block |
+| 10 | Mid-conversation `role: "system"` → `user` | `wire/anthropic_messages.py:166` | Weakened instruction; cache breakpoint lost |
+| 11 | `mcp_tool_use` had no decode arm | `wire/anthropic_messages.py:57-164` | Unpaired `mcp_tool_result` on replay |
+| 12 | Image/document `cache_control` had no IR field | `ir/types.py:26`, `:88` | Screenshot/PDF prefixes never cached |
+| 13 | Error path left blocks open, skipped `message_delta`, always `api_error` | `server/app.py:1474`, `wire/anthropic_messages.py:593` | Tool call with empty args; no final usage; no retryable error class |
+| 14 | `ping` documented but never emitted | `docs/API_REFERENCE.md:43` | Idle-proxy disconnect during long thinking |
+| 15 | No `x-accel-buffering: no` on `/v1/messages` | `server/app.py:1359` | nginx buffers the stream into one burst |
+| 16 | Error bodies lacked `request_id` | `wire/anthropic_messages.py:742` | Incidents not traceable to a log row |
+| 16b | Interleaved text/thinking dropped silently | `wire/anthropic_messages.py:469`, `:513` | Model's prose invisible to the user and absent from replayed history |
+| 17 | Gemini encoded no `tool_choice`; dropped `DocumentPart` | `providers/gemini_adapter.py:122-141` | Forced/named tool choice became prose; PDFs vanished |
+| 18 | OpenAI-family adapters dropped `DocumentPart` | `providers/openai_adapter.py:59-103` | PDF attachment reached the model as nothing |
+| 19 | OpenRouter leaked `_synthesized_opens` | `providers/openrouter_adapter.py:411` | Open-less `ToolCallDelta` → truncated tool args |
+| 20 | `effort` not resolved on non-Anthropic adapters | `nim`/`openrouter`/`opencode` | Effort selection dropped on every non-Anthropic backend |
+
+### Deliberately not changed
+
+- **`web_search` execution on non-hostable backends.** A provider-hosted
+  builtin is still dropped when the target cannot host it (correct — a function
+  tool named `web_search` would be called by the model and never executed), but
+  the drop remains server-log-only. Surfacing it to the client needs a response
+  channel that does not exist yet; recorded in `docs/MVP.md` G22.
+- **`disable_parallel_tool_use` on Gemini.** Gemini exposes no knob for it;
+  the adapter now warns instead of ignoring it silently.
+- **Anthropic `web_search_requests` billing** and response-side search traces
+  (`web_search_tool_result` blocks, citations) remain unmodeled — unchanged
+  from the Round 8 position.
+- **`WiwiSettings.header_allowlist`** is still absent as a config field; the
+  allowlist is now a code constant (`server/app.py:_FORWARDABLE_HEADERS`).
