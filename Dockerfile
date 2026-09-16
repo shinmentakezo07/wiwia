@@ -36,8 +36,11 @@ ENV WIWI_STATIC_DIR=/app/wiwi/server/static
 # providers; absent keys are filtered out at load time.
 COPY wiwi.yaml.example /app/wiwi.yaml
 
-# Writable data dir for SQLite DB (mounted as a volume in docker-compose)
-RUN mkdir -p /app/data && chown wiwi:wiwi /app/data
+# Writable data dir for SQLite DB (mounted as a volume in docker-compose).
+# /data is also the only writable path on a HuggingFace Docker Space, where
+# no volume is mounted — deploy/hf_space.sh points DATABASE_URL there.
+RUN mkdir -p /app/data && chown wiwi:wiwi /app/data \
+    && mkdir -p /data && chown wiwi:wiwi /data
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \

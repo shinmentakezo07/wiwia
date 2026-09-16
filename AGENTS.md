@@ -108,6 +108,10 @@ cd web && bun run lint                      # eslint src (web/ is NOT covered by
 # docker (Postgres + Redis have healthcheck-gated depends_on; no --profile)
 docker compose up --build
 
+# deploy the gateway to the HuggingFace Docker Space (shimen/yapapa)
+./deploy/hf_space.sh --dry-run              # list the exact file set that would ship
+./deploy/hf_space.sh                        # export committed HEAD into the Space and push
+
 # load test
 python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95, output TPS
 ```
@@ -158,6 +162,10 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
   `DATABASE_URL`, provider keys).
 - `Dockerfile`, `docker-compose.yml`, `start.sh` (legacy npm; runs backend + Vite together),
   `bench.py`.
+- `deploy/` — `hf_space.sh` pushes the gateway to the HuggingFace Docker Space
+  `shimen/yapapa` (`git archive HEAD` → scratch clone → one commit; the repo's
+  `README.md` never travels, because the Space's `README.md` is its YAML manifest —
+  `deploy/hf-space/README.md` is copied over it). Deploy target only; see `CLAUDE.md`.
 - `AUDIT.md` — bug register: severity badge, file:line, trigger, fix sketch; fixed entries
   marked `**Status: fixed**`. Read first for bugfix work; record new bugs here.
 - `UPDATE.md` — **binding** translation-fix changelog (OpenAI↔Anthropic translation, OpenRouter
@@ -189,6 +197,11 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
 - **Never commit:** `wiwi.yaml`, `wiwi.db`, `.env`, `key.md`, `opencode.json(c)`, `*.har`, or
   anything under `.wiwi/` or `.verify/` — live keys and runtime state. Provider keys enter via
   `os.environ/NAME` in config; admin endpoints require `WIWI_MASTER_KEY`.
+- **`HF_TOKEN`** (HuggingFace write token for the `shimen/yapapa` Space) lives in the
+  gitignored `.env`; `.env.example` carries the name with an empty value. It is read only by
+  `deploy/hf_space.sh` — the gateway itself never reads it. The Space is **public**, so a
+  token or key pasted into any tracked file is world-readable: never put a live value in
+  `.env.example` (see `AUDIT.md` #154).
 
 ## Testing & QA
 

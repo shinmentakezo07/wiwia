@@ -209,6 +209,27 @@ When an agent discovers a bug, error, or suspicious behavior in this codebase:
 
 5. **Read `AUDIT.md` at the start of every bugfix session.** If a previous session already discovered and reported the issue you are about to investigate, you should see it there. Starting from `AUDIT.md` avoids duplicate work and makes it obvious which fixes are still pending.
 
+## Deployment — HuggingFace Space (`shimen/yapapa`)
+
+[`shimen/yapapa`](https://huggingface.co/spaces/shimen/yapapa) — live at <https://shimen-yapapa.hf.space> — is a Docker Space that runs this gateway. It is a **deploy target, not a source of truth**: never edit it by hand, it is built from this repo.
+
+```bash
+./deploy/hf_space.sh --dry-run    # list the exact file set that would ship
+./deploy/hf_space.sh              # export committed HEAD into the Space and push
+```
+
+`git archive HEAD` exports the committed tree into a scratch clone of the Space, `deploy/hf-space/README.md` is written over the Space's `README.md` (the Space manifest — `sdk: docker`, `app_port: 4000`), and a single `Deploy wiwi <sha>` commit is pushed. Nothing is force-pushed and the gateway's own git history is untouched.
+
+Three things to know before touching the deploy path:
+
+- **The Space is public, so the export must stay secret-free.** `git archive` exports *tracked* files only — that is exactly why the script uses it instead of `hf upload`, which walks the working tree and would ship `.env`, `wiwi.yaml` and `wiwi.db` whenever they sit in the checkout. Do not "simplify" it back to a working-tree copy.
+- **The repo README and the Space README are different documents.** The repo root `README.md` is the project front page; the Space's `README.md` is its YAML manifest. GitHub renders YAML front matter as a nested table, so the manifest cannot live at the repo root — it lives in `deploy/hf-space/README.md` and is copied in at deploy time.
+- **Only committed work deploys.** Local edits are silently left behind (the script warns). Commit first, then deploy.
+
+Auth is `HF_TOKEN` — a write token with `repo.write` on `shimen` — taken from the environment, else from the gitignored `.env`. It reaches git through a transient credential helper, so it never lands in the scratch clone's `.git/config` or in argv.
+
+Runtime configuration lives in the Space's **Settings → Variables and secrets**, injected as environment variables — which is precisely how `wiwi.yaml.example` resolves provider keys (`os.environ/NAME`). `DATABASE_URL` is pre-set to SQLite under `/data`, the only writable path in a Space container and ephemeral across rebuilds; durable state means pointing it at an external Postgres.
+
 ## Project rules & skills
 
 - For bug fixes, follow the workflow in `.claude/rules/wiwi-bugfix-workflow.md` (TDD via `.claude/skills/test-driven-development`, root-cause via `.claude/skills/systematic-debugging`, review via `.claude/skills/requesting-code-review`). New bugfix tests go into the next `test_fix_roundN.py` file (see Testing above for how to find the next number).
