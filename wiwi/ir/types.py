@@ -11,7 +11,18 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 Role = Literal["system", "user", "assistant", "tool"]
-StopReason = Literal["stop", "length", "tool_call", "content_filter"]
+# Anthropic's stop_reason vocabulary is wider than the other dialects'. Three of
+# its values carry meaning that "stop" cannot: ``pause_turn`` tells the client a
+# provider-hosted tool loop is mid-flight and the turn must be re-sent to
+# continue; ``stop_sequence`` reports which caller-supplied sequence fired; and
+# ``model_context_window_exceeded`` distinguishes a context overflow from a
+# normal completion. Collapsing all of them into "stop" made Claude Code end a
+# server-tool turn early and made auto-compact unable to see an overflow.
+# Encoders for the narrower dialects map these onto their own vocabulary.
+StopReason = Literal[
+    "stop", "length", "tool_call", "content_filter",
+    "pause_turn", "stop_sequence", "context_window_exceeded", "compaction",
+]
 
 CacheControl = dict[str, Any] | None  # e.g. {"type": "ephemeral"} (Anthropic passthrough, G8)
 
@@ -28,6 +39,11 @@ class ImagePart:
     b64: str | None = None
     mime: str = "image/png"
     file_id: str | None = None  # Anthropic Files API reference (source.type=file)
+    # Prompt-cache breakpoint. Claude Code marks long-lived image prefixes (a
+    # screenshot reused across turns) exactly as it marks text; without this
+    # field the marker was dropped on decode and the prefix re-billed at 1x
+    # every turn, because Anthropic only caches at a breakpoint.
+    cache_control: CacheControl = None
 
 
 @dataclass
@@ -36,6 +52,22 @@ class ToolUsePart:
     name: str
     args: dict[str, Any] = field(default_factory=dict)
     raw_args: str | None = None  # original JSON string if provider gave one
+    # Canonical builtin name (ir/builtin_tools.py) when the PROVIDER executed
+    # this call itself (Anthropic ``server_tool_use``: web_search,
+    # code_execution, an MCP tool). Encoders must suppress these — the client
+    # never dispatched them and cannot return a result — and suppression has to
+    # key on this flag, not on the tool's *name*: a caller may legitimately
+    # define a function tool called ``web_search``, and a name match deleted
+    # that real call from the response.
+    builtin: str | None = None
+    # Original Anthropic block type when the inbound dialect distinguishes
+    # them: ``tool_use`` (client-dispatched), ``server_tool_use``
+    # (provider-hosted, e.g. web_search) or ``mcp_tool_use`` (executed by a
+    # server listed in ``mcp_servers``). Replay must re-emit the same type: a
+    # ``mcp_tool_result`` whose paired call was rewritten to a plain
+    # ``tool_use`` is an unpaired result block and Anthropic rejects the
+    # history. Mirrors ToolResultPart.block_type.
+    block_type: str = "tool_use"
 
     def __post_init__(self) -> None:
         # Providers/decoders can hand us a non-string id (OpenAI-compatible
@@ -91,6 +123,7 @@ class DocumentPart:
     mime: str = "application/pdf"
     name: str | None = None  # Anthropic block-level "title"
     context: str | None = None  # Anthropic block-level "context"
+    cache_control: CacheControl = None  # prompt-cache breakpoint (see ImagePart)
 
 
 Part = (
@@ -167,6 +200,13 @@ class GenParams:
     disable_parallel_tool_use: bool | None = None
     reasoning_effort: str | None = None  # "none" | "minimal" | "low" … "max"
     thinking_budget: int | None = None
+    # Anthropic 2026 ``output_config.effort`` — the knob behind Claude Code's
+    # /effort command, --effort flag, CLAUDE_CODE_EFFORT_LEVEL and per-skill
+    # frontmatter. Distinct from reasoning_effort: it is Anthropic's own
+    # top-level field, so an Anthropic upstream receives it verbatim rather
+    # than through the effort→budget mapping, and other providers fall back to
+    # reasoning_effort when this is set.
+    effort: str | None = None
     # Anthropic thinking modes: "enabled" (budget via thinking_budget), "adaptive"
     # (model-driven budget, no budget_tokens), "disabled" (also sets
     # reasoning_effort="none" so OpenAI upstreams disable reasoning).
@@ -175,12 +215,18 @@ class GenParams:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def effective_reasoning_effort(self) -> str | None:
-        """Return reasoning_effort, deriving it from thinking_budget if not set."""
+        """Return reasoning_effort, deriving it from thinking_budget if not set.
+
+        ``effort`` (Anthropic's ``output_config.effort``) participates as a
+        fallback so a Claude Code session that sets only the effort slider
+        still produces a reasoning control on a non-Anthropic backend, which
+        has no ``output_config`` of its own.
+        """
         if self.reasoning_effort:
             return self.reasoning_effort
         if self.thinking_budget is not None:
             return thinking_budget_to_effort(self.thinking_budget)
-        return None
+        return self.effort
 
     def effective_thinking_budget(self) -> int | None:
         """Return thinking_budget, deriving it from reasoning_effort if not set.
@@ -193,6 +239,8 @@ class GenParams:
             return self.thinking_budget
         if self.reasoning_effort:
             return effort_to_thinking_budget(self.reasoning_effort)
+        if self.effort:
+            return effort_to_thinking_budget(self.effort)
         return None
 
 

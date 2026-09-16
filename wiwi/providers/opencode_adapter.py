@@ -460,12 +460,11 @@ def _encode_responses_request(req: ir.Request, model_id: str,
         body["temperature"] = g.temperature
     if g.top_p is not None:
         body["top_p"] = g.top_p
-    if g.reasoning_effort:
-        body["reasoning"] = {"effort": g.reasoning_effort}
-    elif g.thinking_budget is not None:
-        effort = g.effective_reasoning_effort()
-        if effort:
-            body["reasoning"] = {"effort": effort}
+    # Reconcile all three effort spellings through the shared resolver so an
+    # Anthropic output_config.effort reaches this route too (AUDIT #156).
+    effort = g.effective_reasoning_effort()
+    if effort:
+        body["reasoning"] = {"effort": effort}
     if g.response_format and g.response_format.type != "text":
         if g.response_format.type == "json_schema" and g.response_format.json_schema:
             fmt: dict[str, Any] = {"type": "json_schema",
@@ -503,8 +502,16 @@ def _encode_responses_request(req: ir.Request, model_id: str,
                 body["tool_choice"] = "required"
             elif isinstance(tc, ir.ToolChoiceNamed):
                 body["tool_choice"] = {"type": "function", "name": tc.name}
-    if g.parallel_tool_calls is not None:
-        body["parallel_tool_calls"] = g.parallel_tool_calls
+    # The Responses dialect spells it ``parallel_tool_calls``; an Anthropic
+    # client sets ``disable_parallel_tool_use`` instead, which the IR keeps
+    # separate. Reading only the former meant a Claude Code request that
+    # explicitly serialized its tool calls got concurrent ones anyway
+    # (AUDIT #156).
+    parallel = g.parallel_tool_calls
+    if parallel is None and g.disable_parallel_tool_use is not None:
+        parallel = not g.disable_parallel_tool_use
+    if parallel is not None:
+        body["parallel_tool_calls"] = parallel
     for k, v in deployment_params.get("extra_body", {}).items():
         body.setdefault(k, v)
     return body

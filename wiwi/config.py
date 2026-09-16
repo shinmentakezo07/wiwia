@@ -194,6 +194,13 @@ class RouterSettings(BaseModel):
     global_tpm: int | None = None
     # Streaming resilience
     stream_idle_timeout_s: float = 30.0  # max seconds between upstream chunks
+    # SSE keep-alive. Anthropic's wire has a named ``ping`` event for exactly
+    # this: a long thinking phase produces no upstream bytes, and an idle
+    # proxy/ALB reaps the connection mid-turn. Claude Code's SSE reader skips
+    # pings, and the official SDKs do too. 0 disables. Must stay below
+    # ``stream_idle_timeout_s`` to be useful — the gateway itself aborts the
+    # stream once the upstream has been silent that long.
+    stream_ping_interval_s: float = 15.0
     stream_loop_detection: bool = True
     stream_loop_limit: int = 100  # identical consecutive chunks before abort
     stream_coalesce: bool = False  # coalesce TextDeltas under backpressure

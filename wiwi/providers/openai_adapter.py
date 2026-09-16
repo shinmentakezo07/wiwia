@@ -79,6 +79,23 @@ def _role_parts_to_content(
                 fmt = (p.mime or "audio/wav").removeprefix("audio/")
                 content.append({"type": "input_audio",
                                 "input_audio": {"data": p.b64, "format": fmt}})
+            elif isinstance(p, ir.DocumentPart):
+                # Anthropic PDFs arrive as DocumentPart. Chat Completions has
+                # no document block, but dropping it silently (the previous
+                # behaviour) meant Claude Code attached a PDF and the model
+                # answered as if no file were sent, with nothing in the logs.
+                # OpenAI-compatible backends that DO accept documents take the
+                # ``file`` content part, so emit that; a backend that rejects
+                # it fails loudly instead of quietly answering a different
+                # question (AUDIT #156).
+                if content is None or isinstance(content, str):
+                    content = ([{"type": "text", "text": content}] if content else [])
+                if p.url:
+                    content.append({"type": "file",
+                                    "file": {"file_data": p.url}})
+                elif p.b64:
+                    content.append({"type": "file",
+                                    "file": {"file_data": f"data:{p.mime};base64,{p.b64}"}})
             elif isinstance(p, ir.ToolUsePart):
                 tool_calls.append({
                     "id": p.id, "type": "function",
@@ -190,19 +207,21 @@ class OpenAIAdapter:
             "openai-compatible", "gmicloud", "nvidia-nim", "bai",
         }
         _VALID_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
-        if g.reasoning_effort:
-            # Only forward a KNOWN effort: a typo or a future level this map
-            # has not learned must not reach the upstream (instant 400), and
-            # must not enable thinking on budget-based providers.
-            if is_native_openai and g.reasoning_effort in _VALID_EFFORTS:
-                body["reasoning_effort"] = g.reasoning_effort
-        elif g.thinking_budget is not None:
-            # Client sent thinking_budget (Anthropic dialect) — map to OpenAI
-            # reasoning_effort. thinking_budget_to_effort only yields known
-            # levels, so no unknown string can leak from this branch.
-            effort = g.effective_reasoning_effort()
-            if effort and is_native_openai:
-                body["reasoning_effort"] = effort
+        # Resolve the effort the caller actually asked for. The three dialects
+        # spell it differently — reasoning_effort (OpenAI), thinking_budget
+        # (Anthropic's legacy budget) and effort (Anthropic's
+        # output_config.effort, which is where Claude Code's /effort command,
+        # --effort and CLAUDE_CODE_EFFORT_LEVEL land) — and
+        # ``effective_reasoning_effort`` is the one place that reconciles them.
+        # Reading only the first two meant an effort selection was dropped on
+        # every non-Anthropic backend (AUDIT #156).
+        effort = g.effective_reasoning_effort()
+        if effort and is_native_openai and effort in _VALID_EFFORTS:
+            # Only forward a KNOWN effort to a NATIVE OpenAI endpoint: a typo or
+            # a future level this map has not learned must not reach the
+            # upstream (instant 400), and compatible gateways reject the field
+            # outright.
+            body["reasoning_effort"] = effort
         if g.response_format and g.response_format.type != "text":
             rf: dict[str, Any] = {"type": g.response_format.type}
             if g.response_format.json_schema:

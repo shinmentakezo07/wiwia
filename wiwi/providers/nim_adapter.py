@@ -134,7 +134,10 @@ class NimAdapter(OpenAIAdapter):
         # the NVIDIA NIM reference implementation rather than wiwi's global
         # effort→budget map (which targets 32K–64K tokens for Anthropic).
         g = req.gen_params
-        effort = g.reasoning_effort
+        # ``effective_reasoning_effort`` reconciles reasoning_effort,
+        # thinking_budget and Anthropic's output_config.effort; reading the raw
+        # field dropped an effort-only request (AUDIT #156).
+        effort = g.effective_reasoning_effort()
         budget = g.thinking_budget
 
         if effort == "none":

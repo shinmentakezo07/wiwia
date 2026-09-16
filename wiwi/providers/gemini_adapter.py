@@ -73,6 +73,15 @@ class GeminiAdapter:
                         parts.append({"inline_data": {"mime_type": p.mime, "data": p.b64}})
                     elif p.url:
                         parts.append({"file_data": {"file_uri": p.url}})
+                elif isinstance(p, ir.DocumentPart):
+                    # PDFs arrive as DocumentPart. Gemini takes documents as
+                    # inline/file data exactly like images; dropping them (the
+                    # previous behaviour) meant a Claude Code PDF attachment
+                    # reached the model as nothing at all (AUDIT #156).
+                    if p.b64:
+                        parts.append({"inline_data": {"mime_type": p.mime, "data": p.b64}})
+                    elif p.url:
+                        parts.append({"file_data": {"file_uri": p.url}})
                 elif isinstance(p, ir.ToolUsePart):
                     parts.append({"functionCall": {"name": p.name, "args": p.args}})
                 elif isinstance(p, ir.ToolResultPart):
@@ -140,7 +149,44 @@ class GeminiAdapter:
                 entries.append({wt: {}})
             if entries:
                 body["tools"] = entries
+            # tool_choice maps onto toolConfig.functionCallingConfig. Without
+            # it a client asking for {"type":"any"} or a specific tool got
+            # prose instead: the choice was dropped entirely, with no log
+            # (AUDIT #156).
+            fcc = self._function_calling_config(req)
+            if fcc:
+                body["toolConfig"] = {"functionCallingConfig": fcc}
+            # disable_parallel_tool_use has no Gemini equivalent: Gemini emits
+            # parallel functionCall parts within one candidate and the API
+            # exposes no knob to forbid it. Warn rather than silently ignoring
+            # the caller's constraint — a client that serializes tool calls for
+            # correctness (file edits, shell state) would otherwise get
+            # concurrent calls it did not ask for (AUDIT #156).
+            if req.gen_params.disable_parallel_tool_use:
+                log.warning("unsupported_disable_parallel_tool_use",
+                            provider="gemini")
         return body
+
+    @staticmethod
+    def _function_calling_config(req: ir.Request) -> dict[str, Any] | None:
+        """Gemini ``functionCallingConfig`` for the IR tool choice.
+
+        Mode vocabulary: AUTO (model decides), ANY (must call some function),
+        NONE (no calls), and for a named tool ``ANY`` plus
+        ``allowedFunctionNames``.
+        """
+        tc = req.tool_choice
+        if tc is None:
+            return None
+        if isinstance(tc, ir.ToolChoiceNone):
+            return {"mode": "NONE"}
+        if isinstance(tc, ir.ToolChoiceRequired):
+            return {"mode": "ANY"}
+        if isinstance(tc, ir.ToolChoiceNamed):
+            return {"mode": "ANY", "allowedFunctionNames": [tc.name]}
+        if isinstance(tc, ir.ToolChoiceAuto):
+            return {"mode": "AUTO"}
+        return None
 
     def decode_response(self, status: int, body: bytes) -> ir.AssistantTurn:
         data = orjson.loads(body)

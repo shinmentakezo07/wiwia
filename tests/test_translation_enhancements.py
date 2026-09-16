@@ -274,7 +274,12 @@ def test_anthropic_stream_server_tool_use():
 # -- pause_turn stop reason ---------------------------------------------------
 
 def test_anthropic_pause_turn_mapped_to_stop():
-    """pause_turn is a valid Anthropic stop_reason; map to IR 'stop'."""
+    """pause_turn survives as its own IR stop_reason.
+
+    It means a provider-hosted tool loop is mid-flight and the client must
+    re-send the turn to continue. Collapsing it to "stop" made Claude Code end
+    multi-search turns early (AUDIT #156).
+    """
     payload = {
         "id": "msg_1", "type": "message", "role": "assistant", "model": "claude",
         "stop_reason": "pause_turn",
@@ -282,7 +287,7 @@ def test_anthropic_pause_turn_mapped_to_stop():
         "usage": {"input_tokens": 10, "output_tokens": 5},
     }
     turn = AnthropicAdapter().decode_response(200, json.dumps(payload).encode())
-    assert turn.stop_reason == "stop"
+    assert turn.stop_reason == "pause_turn"
 
 
 # -- output_tokens_details in Anthropic encode_response ----------------------
@@ -980,18 +985,27 @@ def test_anthropic_document_url_roundtrip():
     assert block["title"] == "spec"
 
 
-def test_document_part_dropped_safely_by_openai_adapter():
-    """OpenAI has no document-input equivalent; DocumentPart must not crash
-    the adapter (silently dropped today is acceptable)."""
+def test_document_part_emitted_by_openai_adapter():
+    """A DocumentPart becomes a ``file`` content part.
+
+    Silently dropping it meant Claude Code attached a PDF and the model
+    answered as if no file were sent, with nothing in the logs. Backends that
+    accept documents now receive one; backends that do not fail loudly instead
+    of quietly answering a different question (AUDIT #156).
+    """
     req = ir.Request(
         model="gpt-4o",
         messages=[ir.Message(role="user", parts=[
-            ir.DocumentPart(b64="JVBERi0xLjQ="),
+            ir.DocumentPart(b64="JVBERi0xLjQ=", mime="application/pdf"),
             ir.TextPart("summarize"),
         ])],
     )
     body = OpenAIAdapter().encode_request(req, "gpt-4o", {})
-    assert body["messages"][0]["content"] == "summarize"
+    content = body["messages"][0]["content"]
+    assert isinstance(content, list)
+    assert {"type": "file",
+            "file": {"file_data": "data:application/pdf;base64,JVBERi0xLjQ="}} in content
+    assert {"type": "text", "text": "summarize"} in content
 
 
 def test_openai_input_audio_decoded_to_ir():

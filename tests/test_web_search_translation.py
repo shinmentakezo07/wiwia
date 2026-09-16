@@ -652,12 +652,17 @@ def test_anthropic_adapter_stream_decoder_sets_builtin():
 
 
 def test_anthropic_encode_response_suppresses_builtin_tool_calls():
-    """Non-streaming A1: builtin tool_calls drop from the response body and
-    stop_reason downgrades tool_call -> end_turn."""
+    """Non-streaming A1: provider-hosted tool_calls drop from the response body
+    and stop_reason downgrades tool_call -> end_turn.
+
+    Suppression keys on the ``builtin`` marker, not the tool name: a caller may
+    legitimately define a function tool called ``web_search``, and matching on
+    the name deleted that real call (AUDIT #156)."""
     turn = ir.AssistantTurn(text="Found things.",
                             tool_calls=[ir.ToolUsePart(
                                 id="srvtoolu_1", name="web_search",
-                                args={"query": "wiwi"})],
+                                args={"query": "wiwi"},
+                                builtin="web_search")],
                             stop_reason="tool_call")
     body = am.encode_response(ctx=None, turn=turn, model="claude-x", req_id="r9")
     blocks = [b["type"] for b in body["content"]]
@@ -665,11 +670,26 @@ def test_anthropic_encode_response_suppresses_builtin_tool_calls():
     assert body["stop_reason"] == "end_turn"
 
 
+def test_anthropic_encode_response_keeps_function_tool_named_web_search():
+    """A client-defined function tool that happens to be named ``web_search``
+    is a real call and must survive (AUDIT #156)."""
+    turn = ir.AssistantTurn(text="Looking.",
+                            tool_calls=[ir.ToolUsePart(
+                                id="toolu_1", name="web_search",
+                                args={"query": "wiwi"})],
+                            stop_reason="tool_call")
+    body = am.encode_response(ctx=None, turn=turn, model="claude-x", req_id="r9")
+    blocks = [b["type"] for b in body["content"]]
+    assert blocks == ["text", "tool_use"]
+    assert body["stop_reason"] == "tool_use"
+
+
 def test_chat_encode_response_suppresses_builtin_tool_calls():
     turn = ir.AssistantTurn(text="Found things.",
                             tool_calls=[ir.ToolUsePart(
                                 id="call_ws", name="web_search",
-                                args={"query": "wiwi"})],
+                                args={"query": "wiwi"},
+                                builtin="web_search")],
                             stop_reason="tool_call")
     body = oc.encode_response(ctx=None, turn=turn, model="gpt-x", req_id="r9")
     assert "tool_calls" not in body["choices"][0]["message"]
@@ -680,7 +700,8 @@ def test_responses_encode_response_emits_web_search_call():
     turn = ir.AssistantTurn(text="Found things.",
                             tool_calls=[ir.ToolUsePart(
                                 id="ws_1", name="web_search",
-                                args={"query": "wiwi proxy"})],
+                                args={"query": "wiwi proxy"},
+                                builtin="web_search")],
                             stop_reason="tool_call")
     body = resp.encode_response(ctx=None, turn=turn, model="gpt-x", req_id="r9")
     types = [o["type"] for o in body["output"]]

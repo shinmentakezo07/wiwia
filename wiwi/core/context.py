@@ -54,6 +54,14 @@ class RequestContext:
     status: int = 200
     error: Any = None  # WiwiError
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Inbound request headers the client expects the upstream to see.
+    # Anthropic's Messages format is header-and-body coupled: ``anthropic-beta``
+    # gates features that body fields then rely on, so stripping the header
+    # while forwarding the body produces hard 400s (and silently disables every
+    # header-only capability, e.g. the 1M context window). Populated by the
+    # server from the inbound request; merged into the outbound header set by
+    # the gateway. Empty for dialects with no header-coupled surface.
+    forward_headers: dict[str, str] = field(default_factory=dict)
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
     # Set by the streaming path: `execute_with_retries` must NOT credit the key
     # at connect time (its call_one returns as soon as the pump connects). The

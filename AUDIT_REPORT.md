@@ -387,7 +387,7 @@ and disk for nothing, plus comments promising filters that do not exist.
 | Field | Claim in docs | Reality |
 |---|---|---|
 | `WiwiSettings.log_requests` | `README.md:553`, `detailed.md:117` | no reader anywhere; logging is unconditional, so `false` changes nothing |
-| `WiwiSettings.header_allowlist` | `README.md:921` — "controls which inbound headers are forwarded upstream" | no reader; no inbound header is ever forwarded (`gateway.py:228` builds from adapter + `extra_headers` only) |
+| `WiwiSettings.header_allowlist` | `README.md:921` — "controls which inbound headers are forwarded upstream" | **fixed** — the config field is still absent, but header forwarding itself now exists: `server/app.py` captures `anthropic-beta` into `RequestContext.forward_headers` and `gateway.py:_headers` merges it for Anthropic upstreams (AUDIT #156). An operator-tunable allowlist remains unbuilt. |
 | `RouterSettings.timeout` | `wiwi.yaml.example:80` | no reader (see M11) |
 
 ### Python symbols with zero production callers

@@ -9,7 +9,6 @@ from typing import Any
 import orjson
 
 from wiwi.core.context import RequestContext
-from wiwi.ir import builtin_tools as bt
 from wiwi.ir import types as ir
 from wiwi.streaming import deltas as dl
 from wiwi.streaming.sse import sse_frame
@@ -262,8 +261,11 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
     message: dict[str, Any] = {"role": "assistant",
                                "content": turn.text if turn.text else None}
     # A1: provider-hosted builtin calls (web_search) are suppressed — the
-    # client would otherwise try to execute a phantom function.
-    tool_calls = [t for t in turn.tool_calls if not bt.is_builtin_name(t.name)]
+    # client would otherwise try to execute a phantom function. Keyed on the
+    # ``builtin`` flag rather than the tool name: a caller may legitimately
+    # define a function tool called ``web_search``, and a name match deleted
+    # that real call (AUDIT #156).
+    tool_calls = [t for t in turn.tool_calls if t.builtin is None]
     if tool_calls:
         message["tool_calls"] = [
             {"id": t.id, "type": "function",

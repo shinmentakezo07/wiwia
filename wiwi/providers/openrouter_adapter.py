@@ -114,15 +114,15 @@ class OpenRouterAdapter(OpenAIAdapter):
 
         g = req.gen_params
         reasoning_obj: dict[str, Any] | None = None
+        # A direct token budget is more precise than a named level, so it wins
+        # — OpenRouter can express it exactly as reasoning.max_tokens, whereas
+        # an effort name would be rounded through the global effort→budget map.
+        # ``effort`` reconciles the named spellings (reasoning_effort and
+        # Anthropic's output_config.effort); reading only the raw
+        # reasoning_effort dropped an effort-only request (AUDIT #156).
+        effort = g.effective_reasoning_effort()
 
-        if g.reasoning_effort == "none":
-            # Explicitly disable reasoning
-            reasoning_obj = {"enabled": False}
-        elif g.reasoning_effort:
-            # OpenAI-style effort string -> OpenRouter reasoning.effort.
-            # OpenRouter accepts: max, xhigh, high, medium, low, minimal, none.
-            reasoning_obj = {"effort": g.reasoning_effort}
-        elif g.thinking_budget == 0:
+        if g.thinking_budget == 0:
             # Zero budget is the documented thinking-off value; the sibling
             # adapters (Anthropic/Gemini/OpenAI) honor it. Clamping to the
             # 1024 minimum instead switched thinking ON for an explicit
@@ -133,6 +133,13 @@ class OpenRouterAdapter(OpenAIAdapter):
             # OpenRouter enforces a minimum of 1024 for Anthropic models.
             budget = max(g.thinking_budget, 1024)
             reasoning_obj = {"max_tokens": budget}
+        elif effort == "none":
+            # Explicitly disable reasoning
+            reasoning_obj = {"enabled": False}
+        elif effort:
+            # OpenAI-style effort string -> OpenRouter reasoning.effort.
+            # OpenRouter accepts: max, xhigh, high, medium, low, minimal, none.
+            reasoning_obj = {"effort": effort}
 
         if reasoning_obj is not None:
             body["reasoning"] = reasoning_obj
@@ -417,6 +424,13 @@ class OpenRouterAdapter(OpenAIAdapter):
             self._open_tool_indices.clear()
             self._tool_names.clear()
             self._pending_opens.clear()
+            # Must clear alongside the other three: a stale index makes a later
+            # tool call that reuses it take the "adopt the real id" branch and
+            # emit ToolCallArgsDelta with no preceding ToolCallOpen, which every
+            # encoder drops (AUDIT #129). The base class clears it and NIM
+            # inherits that; this override re-implemented the sweep without it
+            # (AUDIT #156).
+            self._synthesized_opens.clear()
             out.append(dl.Finish({"stop": "stop", "length": "length",
                                   "tool_calls": "tool_call",
                                   "content_filter": "content_filter",

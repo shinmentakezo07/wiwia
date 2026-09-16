@@ -66,12 +66,18 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                         # non-string btype guard above rather than 500.
                         continue
                     if src.get("type") == "base64":
-                        parts.append(ir.ImagePart(b64=src.get("data"),
-                                                  mime=src.get("media_type", "image/png")))
+                        parts.append(ir.ImagePart(
+                            b64=src.get("data"),
+                            mime=src.get("media_type", "image/png"),
+                            cache_control=b.get("cache_control")))
                     elif src.get("type") == "url":
-                        parts.append(ir.ImagePart(url=src.get("url")))
+                        parts.append(ir.ImagePart(
+                            url=src.get("url"),
+                            cache_control=b.get("cache_control")))
                     elif src.get("type") == "file":
-                        parts.append(ir.ImagePart(file_id=src.get("file_id")))
+                        parts.append(ir.ImagePart(
+                            file_id=src.get("file_id"),
+                            cache_control=b.get("cache_control")))
                 elif btype == "document":
                     src = b.get("source") or {}
                     if not isinstance(src, dict):
@@ -80,20 +86,40 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                         parts.append(ir.DocumentPart(
                             b64=src.get("data"),
                             mime=src.get("media_type", "application/pdf"),
-                            name=b.get("title"), context=b.get("context")))
+                            name=b.get("title"), context=b.get("context"),
+                            cache_control=b.get("cache_control")))
                     elif src.get("type") == "url":
                         parts.append(ir.DocumentPart(
                             url=src.get("url"), name=b.get("title"),
-                            context=b.get("context")))
+                            context=b.get("context"),
+                            cache_control=b.get("cache_control")))
                 elif btype == "tool_use":
                     parts.append(ir.ToolUsePart(id=b.get("id", ""), name=b.get("name", ""),
                                                 args=b.get("input") or {}))
-                elif btype == "server_tool_use":
+                elif btype == "server_tool_use" or btype == "mcp_tool_use":
                     # Server-side tools (web_search, code_execution, mcp, ...):
-                    # treat as a plain tool use so echoed history keeps the
-                    # turn and its paired *_tool_result stays balanced.
-                    parts.append(ir.ToolUsePart(id=b.get("id", ""), name=b.get("name", ""),
-                                                args=b.get("input") or {}))
+                    # the PROVIDER executes these, so tag them builtin — the
+                    # client never dispatched them and cannot return a result.
+                    # Keeping the original block type matters on replay: a
+                    # ``mcp_tool_use`` paired with an ``mcp_tool_result`` must
+                    # go back as ``mcp_tool_use`` or the result is unpaired and
+                    # Anthropic rejects the history (AUDIT #156).
+                    parts.append(ir.ToolUsePart(
+                        id=b.get("id", ""), name=b.get("name", ""),
+                        args=b.get("input") or {},
+                        builtin=(b.get("name") or "server_tool"),
+                        block_type=btype))
+                elif btype in ("search_result", "container_upload",
+                               "tool_reference"):
+                    # Blocks the IR has no first-class part for. They carry
+                    # content the model needs (a search result body, an
+                    # uploaded file reference, a deferred MCP tool reference),
+                    # so render them as text rather than dropping the block —
+                    # silently losing a ``tool_reference`` meant the model
+                    # never learned which deferred tool to load (AUDIT #156).
+                    rendered = json.dumps(
+                        {k: v for k, v in b.items() if k != "type"})
+                    parts.append(ir.TextPart(rendered))
                 elif btype == "tool_result" or btype.endswith("_tool_result"):
                     # Covers user tool_result AND the server-tool result
                     # family (web_search_tool_result, code_execution_tool_result,
@@ -126,11 +152,16 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                             if src.get("type") == "base64":
                                 images.append(ir.ImagePart(
                                     b64=src.get("data"),
-                                    mime=src.get("media_type", "image/png")))
+                                    mime=src.get("media_type", "image/png"),
+                                    cache_control=blk.get("cache_control")))
                             elif src.get("type") == "url":
-                                images.append(ir.ImagePart(url=src.get("url")))
+                                images.append(ir.ImagePart(
+                                    url=src.get("url"),
+                                    cache_control=blk.get("cache_control")))
                             elif src.get("type") == "file":
-                                images.append(ir.ImagePart(file_id=src.get("file_id")))
+                                images.append(ir.ImagePart(
+                                    file_id=src.get("file_id"),
+                                    cache_control=blk.get("cache_control")))
                     elif c is None:
                         text = ""
                     else:
@@ -163,8 +194,15 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                         text="", block_type="redacted_thinking",
                         data=raw_data if isinstance(raw_data, str) else ""))
         if parts:
-            messages.append(ir.Message(role="assistant" if role == "assistant" else "user",
-                                       parts=parts))
+            # ``role`` is one of user/assistant/system. A ``system`` entry
+            # appended MID-conversation (the mid-conversation-system beta) is a
+            # real role the API accepts; rewriting it to ``user`` both weakens
+            # the instruction and moves it to a different cache-prefix
+            # position, which drops its cache_control breakpoint. Only
+            # ``tool`` has no Messages representation, so it alone folds into
+            # user (AUDIT #156).
+            normalized = role if role in ("user", "assistant", "system") else "user"
+            messages.append(ir.Message(role=normalized, parts=parts))
 
     tools: list[ir.Tool] = []
     raw_tools = body.get("tools")
@@ -240,12 +278,19 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
     # Structured outputs GA: output_config.format is the native json_schema
     # carrier (analogous to OpenAI's response_format.json_schema).
     response_format: ir.ResponseFormat | None = None
-    oc_fmt = ((body.get("output_config") or {}).get("format")
-              if isinstance(body.get("output_config"), dict) else None)
+    oc = body.get("output_config") if isinstance(body.get("output_config"), dict) else {}
+    oc_fmt = oc.get("format")
     if isinstance(oc_fmt, dict) and oc_fmt.get("type") == "json_schema":
         response_format = ir.ResponseFormat(
             type="json_schema", json_schema=oc_fmt.get("schema"),
             name=oc_fmt.get("name"), strict=oc_fmt.get("strict"))
+    # output_config.effort is where Claude Code's /effort command, the effort
+    # slider, --effort and CLAUDE_CODE_EFFORT_LEVEL all land. Only ``format``
+    # used to be read and ``output_config`` was not in _PASSTHROUGH_KEYS, so
+    # every effort selection was silently discarded and the model always ran at
+    # the API default (AUDIT #156).
+    effort = oc.get("effort")
+    effort = effort if isinstance(effort, str) and effort else None
     budget_raw = thinking.get("budget_tokens") if thinking_type == "enabled" else None
     # Coerce numeric strings ("1024") and reject garbage: a str budget reaches
     # the Anthropic adapter's `<=`/`>` comparisons and raises TypeError — a
@@ -290,6 +335,7 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         thinking_budget=thinking_budget,
         thinking_type=thinking_type,
         reasoning_effort=reasoning_effort,
+        effort=effort,
         top_k=body.get("top_k") if isinstance(body.get("top_k"), int) else None,
         disable_parallel_tool_use=disable_parallel,
         response_format=response_format,
@@ -307,6 +353,21 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
 _PASSTHROUGH_KEYS = {
     "service_tier", "speed", "metadata", "mcp_servers", "container",
     "context_management", "fallbacks", "cache_control",
+}
+
+# IR StopReason -> Anthropic stop_reason. The IR now carries Anthropic's own
+# vocabulary (pause_turn, stop_sequence, context_window_exceeded, compaction),
+# so those round-trip unchanged; the remaining IR values come from the narrower
+# dialects and map onto their closest Anthropic spelling.
+_STOP_REASON_OUT: dict[str, str] = {
+    "stop": "end_turn",
+    "length": "max_tokens",
+    "tool_call": "tool_use",
+    "content_filter": "refusal",
+    "pause_turn": "pause_turn",
+    "stop_sequence": "stop_sequence",
+    "context_window_exceeded": "model_context_window_exceeded",
+    "compaction": "compaction",
 }
 
 
@@ -332,15 +393,18 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
         # A1: provider-hosted builtin calls are suppressed — their result
         # blocks (web_search_tool_result) are round 2, and an unpaired
         # server_tool_use in replayed history is rejected by Anthropic.
-        if bt.is_builtin_name(t.name):
+        # Keyed on the ``builtin`` flag, NOT the tool name: a caller may
+        # legitimately define a function tool called ``web_search``, and a
+        # name match deleted that real call from the response entirely
+        # (AUDIT #156).
+        if t.builtin is not None:
             continue
         content.append({"type": "tool_use", "id": t.id, "name": t.name,
                         "input": t.args})
     if not content:
         content = [{"type": "text", "text": ""}]
     u = turn.usage
-    sr = {"stop": "end_turn", "length": "max_tokens", "tool_call": "tool_use",
-          "content_filter": "refusal"}.get(turn.stop_reason, "end_turn")
+    sr = _STOP_REASON_OUT.get(turn.stop_reason, "end_turn")
     # A1 downgrade guard: tool_call with every call suppressed is invalid.
     if sr == "tool_use" and not any(b["type"] == "tool_use" for b in content):
         sr = "end_turn"
@@ -384,6 +448,13 @@ class AnthropicStreamEncoder:
         self._usage: dl.UsageFinal | None = None
         self._stop = "end_turn"
         self._stop_seq: str | None = None
+        # Text/thinking that arrived while a tool_use block was open. Anthropic
+        # content blocks are strictly sequential, so such content cannot be
+        # emitted inline — but it must not be discarded either: it is part of
+        # the answer and the client replays it on the next turn. Buffer it as
+        # ("text"|"thinking", text, signature) and emit it as its own block as
+        # soon as the tool block closes (AUDIT #156).
+        self._deferred: list[tuple[str, str, str | None]] = []
         # Per-delta skeleton, allocated once: only `index` and the delta body
         # change between consecutive deltas of the same kind.
         self._text_delta: dict[str, Any] = {
@@ -436,6 +507,42 @@ class AnthropicStreamEncoder:
                              {"type": "content_block_stop", "index": idx}))
         return out
 
+    def _flush_deferred(self) -> list[bytes]:
+        """Emit buffered interleaved text/thinking as their own blocks.
+
+        Only safe to call when no tool block is open: the buffer exists
+        precisely because a tool block was in the way. Runs of the same kind
+        coalesce into one block, so text-then-thinking yields two blocks and
+        thinking-then-text yields two, matching how the real API interleaves
+        content around a tool call.
+        """
+        if not self._deferred:
+            return []
+        out: list[bytes] = []
+        for kind, text, sig in self._deferred:
+            if self._open_block != kind:
+                out.extend(self._close_block())
+                out.append(self._evt("content_block_start", {
+                    "type": "content_block_start", "index": self._block_idx,
+                    "content_block": {"type": kind,
+                                      kind if kind == "thinking" else "text": ""}}))
+                self._open_block = kind
+                self._block_idx += 1
+            if kind == "thinking":
+                thd = self._think_delta
+                thd["index"] = self._block_idx - 1
+                thd["delta"]["thinking"] = text
+                out.append(self._evt("content_block_delta", thd))
+                if sig:
+                    self._pending_sig = sig
+            else:
+                td = self._text_delta
+                td["index"] = self._block_idx - 1
+                td["delta"]["text"] = text
+                out.append(self._evt("content_block_delta", td))
+        self._deferred.clear()
+        return out
+
     def _flush_pending_sig(self) -> list[bytes]:
         """Emit a pending signature as a late delta against the last thinking
         block. Fires when a NEW thinking block opens while one is pending (the
@@ -453,20 +560,34 @@ class AnthropicStreamEncoder:
 
     def feed(self, d: dl.IRStreamDelta) -> bytes | None:
         if isinstance(d, dl.StreamStart):
+            # Prompt/cache usage when the provider reports it up front
+            # (Anthropic does). Claude Code reads this frame to size the
+            # context window and decide when to auto-compact, so emitting
+            # zeros left its meter pinned at 0% for the entire session
+            # (AUDIT #156). Providers that report usage only at the end leave
+            # these zero and the trailing message_delta carries the totals.
             return self._evt("message_start", {
                 "type": "message_start",
                 "message": {"id": f"msg_{self.req_id}", "type": "message",
                             "role": "assistant", "model": self.model, "content": [],
                             "stop_reason": None, "stop_sequence": None,
-                            "usage": {"input_tokens": 0, "output_tokens": 0}}})
+                            "usage": {"input_tokens": d.prompt,
+                                      "output_tokens": 0,
+                                      "cache_read_input_tokens": d.cached,
+                                      "cache_creation_input_tokens":
+                                          d.cache_creation}}})
         if isinstance(d, dl.TextDelta):
             # A text delta can never be emitted while a tool_use block is
             # open: Anthropic content blocks are strictly sequential, and
             # closing the tool block would lose its index mapping so a later
             # ToolCallArgsDelta would land on the text block (Claude Code
-            # rejects "Content block is not a input_json block"). Interleaved
-            # text is suppressed; the tool's args keep streaming legally.
+            # rejects "Content block is not a input_json block"). Defer it
+            # instead of dropping it — the text is part of the answer and the
+            # client replays it on the next turn, so discarding it made the
+            # model's own prose invisible to both the user and itself
+            # (AUDIT #156).
             if self._open_block == "tool":
+                self._deferred.append(("text", d.text, None))
                 return None
             out = []
             if self._open_block != "text":
@@ -508,11 +629,11 @@ class AnthropicStreamEncoder:
                 # onto a nonexistent (or wrong-type) block.
                 self._pending_sig = d.signature
                 return None
-            # Thinking with text while a tool block is open: suppress it so a
-            # later ToolCallArgsDelta keeps routing to the tool block.
+            # Thinking with text while a tool block is open: defer it, like
+            # interleaved text. It is part of the model's reasoning, and the
+            # client replays thinking blocks on the next turn (AUDIT #156).
             if self._open_block == "tool":
-                if d.signature:
-                    self._pending_sig = d.signature
+                self._deferred.append(("thinking", d.text, d.signature))
                 return None
             out = []
             if self._open_block != "thinking":
@@ -573,32 +694,60 @@ class AnthropicStreamEncoder:
             jd["delta"]["partial_json"] = d.args_fragment
             return self._evt("content_block_delta", jd)
         if isinstance(d, dl.ToolCallClose):
-            return b"".join(self._close_block(tool_index=d.index))
+            out = self._close_block(tool_index=d.index)
+            # Interleaved text/thinking buffered while this tool was open can
+            # now be emitted — but only once NO tool block is open, so parallel
+            # siblings keep their consecutive indices and a text block cannot
+            # land in the middle of the tool group (AUDIT #156).
+            if self._open_block != "tool" and self._deferred:
+                out.extend(self._flush_deferred())
+            return b"".join(out)
         if isinstance(d, dl.UsageFinal):
             self._usage = d
             return None
         if isinstance(d, dl.Finish):
-            self._stop = {"stop": "end_turn", "length": "max_tokens",
-                          "tool_call": "tool_use",
-                          "content_filter": "refusal"}.get(d.stop_reason, "end_turn")
+            self._stop = _STOP_REASON_OUT.get(d.stop_reason, "end_turn")
             self._stop_seq = d.stop_sequence
             # A1 downgrade guard: suppression may have removed the only tool
             # call — a tool_use stop_reason with no tool_use block is invalid.
             if self._stop == "tool_use" and not self._saw_tool_use:
                 self._stop = "end_turn"
+                # The matched sequence is only meaningful alongside
+                # stop_reason "stop_sequence"; leaving it set on a downgraded
+                # turn makes a client that branches on stop_sequence != null
+                # see a spurious match (AUDIT #156).
+                self._stop_seq = None
             return None
         if isinstance(d, dl.StreamEnd):
             return None  # caller emits message_delta (final_frame) then message_stop
         if isinstance(d, dl.StreamError):
-            return self._evt("error", {"type": "error",
-                                       "error": {"type": "api_error",
-                                                 "message": d.message}})
+            # Close whatever is open BEFORE the error frame. A stream that
+            # dies mid-text or mid-tool-args would otherwise leave a
+            # content_block_start with no matching stop, so a client that
+            # accumulates the SSE sees a tool_use block whose ``input`` never
+            # finished parsing — the tool renders with empty arguments
+            # (AUDIT #156). StreamError may terminate at any point, so this is
+            # the last chance to make the emitted stream well-formed.
+            out = self._close_block()
+            for idx in sorted(self._tool_blocks):
+                out.extend(self._close_block(tool_index=idx))
+            out.append(self._evt("error", {
+                "type": "error",
+                "error": {"type": _stream_error_type(d),
+                          "message": d.message}}))
+            return b"".join(out)
         return None
 
     def final_frame(self) -> bytes:
+        # Content buffered while a tool block was open is emitted first, as its
+        # own block, so it lands inside the message rather than being lost
+        # (AUDIT #156). Safe here: the tool blocks below are still open, but
+        # _flush_deferred closes whatever it needs and the tool indices are
+        # tracked separately from _open_block.
+        out = b"".join(self._flush_deferred())
         # A legal stream always closes the currently open content block before
         # the terminating message_delta, even when the last delta left one open.
-        out = b"".join(self._close_block())
+        out += b"".join(self._close_block())
         # Parallel tool calls are siblings: an adapter may end the message with
         # several tool_use blocks still open (the Anthropic upstream omits their
         # content_block_stop). _close_block() only closes the *current* one, so
@@ -620,7 +769,30 @@ class AnthropicStreamEncoder:
                       "cache_creation_input_tokens": u.cache_creation}})
 
 
-def error_body(status: int, etype: str, message: str) -> dict[str, Any]:
+def _stream_error_type(d: dl.StreamError) -> str:
+    """Anthropic error type for a mid-stream failure.
+
+    Claude Code's retry/backoff branch keys on this. Reporting every mid-stream
+    failure as ``api_error`` presented an overloaded or rate-limited upstream as
+    an opaque error the client would not back off from, even though the IR
+    carried the real classification in ``StreamError.kind``/``etype``
+    (AUDIT #156).
+    """
+    # The upstream named its own type (Anthropic error frames carry one):
+    # that is the most precise signal and passes through verbatim.
+    if d.etype:
+        return d.etype
+    if d.status == 529:
+        return "overloaded_error"
+    if d.status == 429:
+        return "rate_limit_error"
+    if d.kind == "timeout":
+        return "timeout_error"
+    return "api_error"
+
+
+def error_body(status: int, etype: str, message: str,
+               request_id: str = "") -> dict[str, Any]:
     amap = {"authentication_error": "authentication_error",
             "permission_error": "permission_error",
             "rate_limit_error": "rate_limit_error",
@@ -632,5 +804,12 @@ def error_body(status: int, etype: str, message: str) -> dict[str, Any]:
             "budget_exceeded": "permission_error",
             "context_window_exceeded": "invalid_request_error",
             "content_policy_violation": "invalid_request_error"}
-    return {"type": "error",
-            "error": {"type": amap.get(etype, "api_error"), "message": message}}
+    body: dict[str, Any] = {
+        "type": "error",
+        "error": {"type": amap.get(etype, "api_error"), "message": message}}
+    # The real API always echoes the request id in an error body, and Claude
+    # Code surfaces it in bug reports; without it a user-reported failure could
+    # not be tied to a wiwi request-log row (AUDIT #156).
+    if request_id:
+        body["request_id"] = request_id
+    return body

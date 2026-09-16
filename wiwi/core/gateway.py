@@ -15,7 +15,11 @@ import structlog
 
 from wiwi.core.context import RequestContext
 from wiwi.core.recovery import build_url, parse_retry_after
-from wiwi.cost.pricing import CostEngine, estimate_tokens_async
+from wiwi.cost.pricing import (
+    CostEngine,
+    estimate_media_tokens,
+    estimate_tokens_async,
+)
 from wiwi.ir import types as ir
 from wiwi.logging_core.events import LogEvent
 from wiwi.providers.base import (
@@ -229,6 +233,29 @@ class Gateway:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    @staticmethod
+    def _headers(adapter, key, dep, ctx: RequestContext | None) -> dict[str, str]:
+        """Assemble outbound headers for one upstream call.
+
+        Order matters, least specific first: adapter defaults (auth, version),
+        then the account's configured ``extra_headers``, then per-deployment
+        overrides, then the client's own forwardable headers. The client's
+        headers come last so an operator cannot accidentally pin a stale beta
+        list that the caller is actively negotiating — Anthropic's guidance is
+        that the ``anthropic-beta`` value passes through verbatim because it
+        changes per release.
+
+        Forwarding is limited to Anthropic upstreams: ``anthropic-beta`` names
+        Anthropic's own feature gates, and relaying it to an unrelated provider
+        would be meaningless at best and a rejected unknown header at worst.
+        """
+        headers = {**adapter.headers(key), **dep.provider.extra_headers,
+                   **dep.extra_headers}
+        if (ctx is not None and ctx.forward_headers
+                and dep.provider.provider_type == "anthropic"):
+            headers.update(ctx.forward_headers)
+        return headers
+
     async def complete(self, ctx: RequestContext) -> ir.AssistantTurn:
         async def call_one(dep: Deployment, key: ProviderKeyRef, c: RequestContext):
             return await self._call(dep, key, c)
@@ -270,8 +297,7 @@ class Gateway:
         body = adapter.encode_request(ctx.ir_req, dep.model_id, params)
         if hasattr(adapter, "set_tool_context"):
             adapter.set_tool_context(body)
-        headers = {**adapter.headers(key), **dep.provider.extra_headers,
-                   **dep.extra_headers}
+        headers = self._headers(adapter, key, dep, ctx)
         t0 = time.monotonic()
         try:
             resp = await self._client.post(url, json=body, headers=headers,
@@ -310,9 +336,7 @@ class Gateway:
                     retry_key = (ProviderKeyRef(label=key.label,
                                                 secret=live_key.secret)
                                  if live_key is not None else key)
-                    retry_headers = {**adapter.headers(retry_key),
-                                     **dep.provider.extra_headers,
-                                     **dep.extra_headers}
+                    retry_headers = self._headers(adapter, retry_key, dep, ctx)
                     try:
                         retry_resp = await self._client.post(
                             url, json=body, headers=retry_headers,
@@ -373,8 +397,7 @@ class Gateway:
         body = adapter.encode_request(ctx.ir_req, dep.model_id, params)
         if hasattr(adapter, "set_tool_context"):
             adapter.set_tool_context(body)
-        headers = {**adapter.headers(key), **dep.provider.extra_headers,
-                   **dep.extra_headers}
+        headers = self._headers(adapter, key, dep, ctx)
         t0 = time.monotonic()
         try:
             resp_cm = self._client.stream("POST", url, json=body, headers=headers,
@@ -416,9 +439,7 @@ class Gateway:
                     retry_key = (ProviderKeyRef(label=key.label,
                                                 secret=live_key.secret)
                                  if live_key is not None else key)
-                    retry_headers = {**adapter.headers(retry_key),
-                                     **dep.provider.extra_headers,
-                                     **dep.extra_headers}
+                    retry_headers = self._headers(adapter, retry_key, dep, ctx)
                     try:
                         retry_cm = self._client.stream(
                             "POST", url, json=body, headers=retry_headers,
@@ -566,8 +587,9 @@ class Gateway:
         # provider did report.
         if turn.usage.prompt_tokens == 0:
             turn.usage = ir.Usage(
-                prompt_tokens=await estimate_tokens_async(
-                    flatten_request_text(ctx), dep.model_id),
+                prompt_tokens=(await estimate_tokens_async(
+                    flatten_request_text(ctx), dep.model_id)
+                    + media_tokens(ctx)),
                 completion_tokens=(turn.usage.completion_tokens
                                    or max(1, len(text) // 4)),
                 cached_tokens=turn.usage.cached_tokens,
@@ -639,12 +661,55 @@ class Gateway:
                 pump_task.cancel()
             raise
         assert pump_task is not None
-        yield dl.StreamStart(model=ctx.ir_req.model, group=ctx.group or "")
         first = True
         content_flowed = False
+        # StreamStart is emitted lazily on the pump's first delta rather than
+        # here, so the upstream's own StreamStart can be folded in. Anthropic
+        # reports prompt/cache usage in message_start — before any content —
+        # and Claude Code reads it there to drive its context meter and
+        # auto-compact threshold. Emitting ours unconditionally meant the
+        # adapter's numbers were discarded (`continue`) and the client's
+        # running total stayed at zero for the whole session (AUDIT #156).
+        started = False
+        # SSE keep-alive. A long thinking phase (or a cold cache-miss prompt)
+        # produces no upstream bytes for many seconds, and an idle proxy/ALB
+        # reaps the connection mid-turn. Anthropic's wire has a named ``ping``
+        # event for this and Claude Code's reader skips it, so emit one when the
+        # pump has been quiet. ``wait_for`` on the queue get is used instead of
+        # the SSE comment form because the Anthropic encoder owns its framing;
+        # the timeout never cancels the pump, only this await.
+        ping_s = self.router.settings.stream_ping_interval_s
+        # The gateway is dialect-agnostic; only the Anthropic wire defines a
+        # named ``ping`` event, so gate on the inbound surface rather than
+        # leaking an encoder concept into the pump.
+        ping_frame = (b'event: ping\ndata: {"type": "ping"}\n\n'
+                      if ctx.surface == "messages" and ping_s > 0 else None)
         try:
             while True:
-                d = await queue.get()
+                if ping_frame is None:
+                    d = await queue.get()
+                else:
+                    try:
+                        d = await asyncio.wait_for(queue.get(), timeout=ping_s)
+                    except TimeoutError:
+                        # Nothing from the upstream yet: keep the client's
+                        # connection alive. Not counted as content, so the
+                        # first-token timer is untouched.
+                        yield ping_frame
+                        continue
+                if isinstance(d, dl.StreamStart):
+                    yield dl.StreamStart(model=ctx.ir_req.model,
+                                         group=ctx.group or "",
+                                         prompt=d.prompt, cached=d.cached,
+                                         cache_creation=d.cache_creation)
+                    started = True
+                    continue
+                if not started:
+                    # Adapter emitted no StreamStart (contract violation, but
+                    # the client still needs a well-formed opening frame).
+                    yield dl.StreamStart(model=ctx.ir_req.model,
+                                         group=ctx.group or "")
+                    started = True
                 if first and isinstance(d, (dl.TextDelta, dl.ThinkingDelta,
                                              dl.ToolCallOpen)):
                     ctx.first_token_at = time.monotonic()
@@ -654,8 +719,6 @@ class Gateway:
                     content_flowed = True
                 if isinstance(d, dl.ToolCallOpen):
                     content_flowed = True
-                if isinstance(d, dl.StreamStart):
-                    continue  # we emitted our own
                 # Record content-bearing deltas to the tape for resume/replay.
                 # Skipped when resume is off (the default): the tape is only
                 # read by _attempt_resume, so recording it is pure waste.
@@ -889,8 +952,7 @@ class Gateway:
             body = adapter.encode_request(ctx.ir_req, dep.model_id, params)
             if hasattr(adapter, "set_tool_context"):
                 adapter.set_tool_context(body)
-            headers = {**adapter.headers(key), **dep.provider.extra_headers,
-                       **dep.extra_headers}
+            headers = self._headers(adapter, key, dep, ctx)
         except Exception as e:  # noqa: BLE001
             ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
                              key.label, "encode_error", 0)
@@ -982,9 +1044,7 @@ class Gateway:
                         retry_key = (ProviderKeyRef(label=key.label,
                                                     secret=live_key.secret)
                                      if live_key is not None else key)
-                        retry_headers = {**adapter.headers(retry_key),
-                                         **dep.provider.extra_headers,
-                                         **dep.extra_headers}
+                        retry_headers = self._headers(adapter, retry_key, dep, ctx)
                         try:
                             cm = self._client.stream(
                                 "POST", url, json=body, headers=retry_headers,
@@ -1148,8 +1208,11 @@ class Gateway:
             est_usage = real_usage
             if real_usage.prompt == 0:
                 # Provider sent no usable usage: estimate, keeping any real
-                # output / cache counts it did report.
-                est_prompt = await estimate_tokens_async(flatten_request_text(ctx), dep.model_id)
+                # output / cache counts it did report. Includes binary media,
+                # which flatten_request_text cannot represent (AUDIT #156).
+                est_prompt = (await estimate_tokens_async(
+                    flatten_request_text(ctx), dep.model_id)
+                    + media_tokens(ctx))
                 est_usage = dl.UsageFinal(
                     prompt=est_prompt,
                     cached=real_usage.cached, reasoning=real_usage.reasoning,
@@ -1312,7 +1375,9 @@ class Gateway:
         u = usage_final or dl.UsageFinal()
         if u.prompt == 0:
             u = dl.UsageFinal(
-                prompt=await estimate_tokens_async(flatten_request_text(ctx), dep.model_id),
+                prompt=(await estimate_tokens_async(
+                    flatten_request_text(ctx), dep.model_id)
+                    + media_tokens(ctx)),
                 cached=u.cached, reasoning=u.reasoning,
                 output=u.output or max(1, text_len // 4),
                 cache_creation=u.cache_creation, estimated=True)
@@ -1387,6 +1452,10 @@ def flatten_request_text(ctx: RequestContext) -> str:
     Tool *schemas* are included: they are serialized into every request and
     are a large share of a real agent prompt — omitting them undercounted
     Claude Code-style traffic by thousands of tokens (AUDIT #130).
+
+    Text only. Binary media (``ImagePart.b64``, ``DocumentPart.b64``) is not
+    representable here and is accounted separately by
+    :func:`media_tokens` — see :func:`estimate_request_tokens`.
     """
     out = []
     for m in ctx.ir_req.messages:
@@ -1396,7 +1465,7 @@ def flatten_request_text(ctx: RequestContext) -> str:
             elif isinstance(p, ir.ToolResultPart):
                 out.append(p.content)
                 # Multimodal tool results (screenshots etc.) carry no text of
-                # their own; account for the payload so they are not free.
+                # their own; their payload is counted by media_tokens.
                 for img in p.images:
                     out.append(img.url or img.file_id or "")
             elif isinstance(p, ir.ThinkingPart):
@@ -1417,6 +1486,39 @@ def flatten_request_text(ctx: RequestContext) -> str:
         if t.parameters_json_schema:
             out.append(orjson.dumps(t.parameters_json_schema).decode())
     return " ".join(out)
+
+
+def media_tokens(ctx: RequestContext) -> int:
+    """Prompt tokens contributed by binary media in the request.
+
+    Separate from :func:`flatten_request_text` because base64 payloads are not
+    text: they are billed by decoded size, not by character count. Counting
+    only ``url``/``file_id`` (the old behaviour) made every inline image and
+    PDF free — a 300 KB screenshot reported 7 tokens instead of ~1500 — which
+    is what let Claude Code's auto-compact window silently overrun.
+    """
+    total = 0
+    for m in ctx.ir_req.messages:
+        for p in m.parts:
+            if (isinstance(p, (ir.ImagePart, ir.DocumentPart))
+                    and p.b64):
+                total += estimate_media_tokens(len(p.b64), p.mime)
+            elif isinstance(p, ir.ToolResultPart):
+                for img in p.images:
+                    if img.b64:
+                        total += estimate_media_tokens(len(img.b64), img.mime)
+    return total
+
+
+async def estimate_request_tokens(ctx: RequestContext, model: str | None) -> int:
+    """Total prompt tokens for a request: text + binary media.
+
+    The single entry point for both ``/v1/messages/count_tokens`` and the
+    stream pump's usage fallback, so the number reported to the client and the
+    number the gateway bills against can never drift apart.
+    """
+    text = await estimate_tokens_async(flatten_request_text(ctx), model)
+    return text + media_tokens(ctx)
 
 
 def build_log_event(ctx: RequestContext) -> LogEvent:

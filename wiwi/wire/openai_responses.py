@@ -429,7 +429,10 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
         output.append(_message_item(turn.text, req_id))
         out_id += 1
     for t in turn.tool_calls:
-        if bt.is_builtin_name(t.name):
+        if t.builtin is not None:
+            # Provider-hosted call (web_search, ...): render as a hosted item
+            # rather than a phantom function call the client cannot dispatch.
+            # Keyed on the flag, not the name (AUDIT #156).
             # Read the parsed dict, not raw_args: providers set both, but a
             # raw_args that failed to parse must not blank an available query.
             output.append(_builtin_call_item(t.id, t.args.get("query", "")))

@@ -1885,3 +1885,143 @@ deleted with the helper.
 returns `200` for `union-alpha` (non-stream, tool call parsed); the same
 request without the session header returns `400 MissingSessionID`; the
 pre-fix `/chat/completions` route returns `500`.
+
+## Anthropic `/v1/messages` fidelity for Claude Code (AUDIT #156) — 2026-09-16
+
+A Claude Code session routed through `/v1/messages` lost a set of features
+silently. Found by driving the real CLI (2.1.273) against the gateway with a
+mock Anthropic upstream, capturing the outbound request, and validating the
+emitted SSE with the `anthropic` SDK. All items below are fixed.
+
+### Header/body coupling — `anthropic-beta` never forwarded
+
+Claude Code sends eleven betas on every request (`context-1m-2025-08-07`,
+`interleaved-thinking-2025-05-14`, `context-management-2025-06-27`,
+`effort-2025-11-24`, `mid-conversation-system-2026-04-07`, …). `grep
+anthropic-beta` over `wiwi/` returned zero hits: the header was unread, and
+`RequestContext` had no channel for it. Meanwhile the BODY fields those betas
+authorize (`context_management`, `strict`, `output_config`) *were* forwarded —
+Anthropic's documented hard-400 case.
+
+`RequestContext.forward_headers` is the new channel. The server captures an
+explicit allowlist (`server/app.py:_FORWARDABLE_HEADERS`) and
+`Gateway._headers` merges it **last** (after adapter defaults, account
+`extra_headers`, and deployment overrides) so an operator cannot pin a stale
+beta list. Forwarding is restricted to Anthropic upstreams.
+
+### `message_start.usage` was hardcoded to zeros
+
+`dl.StreamStart` had no usage carrier, so the encoder emitted
+`{"input_tokens": 0, "output_tokens": 0}` and discarded the adapter's real
+counts. Claude Code's SSE scanner merges `message_start` usage by assigning
+`cache_read_input_tokens`/`cache_creation_input_tokens` unconditionally and
+copies only `output_tokens` from `message_delta`, so its running context total
+stayed at zero for the whole session.
+
+`StreamStart` now carries `prompt`/`cached`/`cache_creation`; the Anthropic
+adapter populates them, `Gateway.stream` folds the upstream `StreamStart` into
+its own instead of `continue`-ing past it, and the encoder emits them.
+
+### `output_config.effort` was dropped
+
+Only `output_config.format` was read, and `output_config` was not in
+`_PASSTHROUGH_KEYS`. `/effort`, `--effort`, `CLAUDE_CODE_EFFORT_LEVEL` and
+per-skill frontmatter all land in `output_config.effort`, so every effort
+selection was a no-op while the session header still displayed it.
+
+`GenParams.effort` is the new field. `effective_reasoning_effort` /
+`effective_thinking_budget` reconcile the three dialect spellings
+(`reasoning_effort`, `thinking_budget`, `effort`), which also fixed the same
+drop on every non-Anthropic adapter — `nim`, `openrouter` and `opencode`
+read only the raw `reasoning_effort`.
+
+### Builtin suppression keyed on the tool *name*
+
+`bt.is_builtin_name(t.name)` deleted any tool call whose name was
+`web_search` — including a legitimate caller-defined function tool — and, in
+the sync path, produced an empty `end_turn` turn. Suppression now keys on the
+new `ir.ToolUsePart.builtin` flag, which the sync Anthropic decoder sets for
+`server_tool_use` (it previously did not, so an identical upstream response
+gave a clean stream but a phantom client tool call in non-streaming mode).
+The same fix landed in `openai_chat` and `openai_responses` encoders.
+
+### Stop-reason vocabulary collapsed into `stop`
+
+`ir.StopReason` had no member for `pause_turn` (a provider-hosted tool loop
+mid-flight — the client must re-send to continue), `stop_sequence` (which
+caller-supplied sequence fired) or `model_context_window_exceeded` (an
+overflow, not a completion). All three, plus `compaction`, became `end_turn`,
+so Claude Code ended multi-search turns early and auto-compact could not see
+an overflow. The literal is widened and both adapters use a shared
+`_STOP_REASON_IN`/`_STOP_REASON_OUT` pair. A downgraded `tool_use` now also
+clears `stop_sequence`, which was previously left set on a turn that did not
+end by stop sequence.
+
+### Other fixes
+
+- **`count_tokens` blind to binary media.** `flatten_request_text` counted
+  `p.url or p.file_id` and never read `b64`: a 300 KB screenshot reported 7
+  tokens instead of ~1500. New `estimate_media_tokens` (per-format density)
+  plus `estimate_request_tokens`, used by the route and by both usage
+  fallbacks so the reported and billed numbers cannot drift. `_MODEL_ENCODING`
+  gains a `claude` prefix so Claude models stop using chars/4.
+- **`max_tokens: 0`** (Anthropic's cache pre-warm) was a falsy-or chain
+  target and became `DEFAULT_MAX_TOKENS`, generating and billing up to 4096
+  output tokens. Now tested for `None` explicitly.
+- **Empty `system` blocks** were forwarded verbatim; Anthropic rejects them
+  ("text content blocks must be non-empty"). The message path already filtered
+  them; `_system_blocks_or_text` now does too.
+- **Mid-conversation `role: "system"`** was rewritten to `user`, weakening the
+  instruction and moving it out of its cache-prefix position. The role is
+  preserved, and only *leading* system messages are hoisted to the top-level
+  field.
+- **`mcp_tool_use`** had no decode arm, so the call vanished while its
+  `mcp_tool_result` survived — an unpaired result block. `ToolUsePart.block_type`
+  now preserves the original spelling on replay.
+- **Image/document `cache_control`** had no IR field at all, so a long-lived
+  screenshot or PDF prefix was never cached and re-billed at 1x every turn.
+- **Errored streams** left the open content block unclosed and skipped
+  `message_delta`, so a client saw a `tool_use` block with unparsable input and
+  no final usage. The error path now closes blocks, emits `message_delta`, and
+  types the error from `StreamError.kind`/`status` (`timeout_error`,
+  `overloaded_error`, `rate_limit_error`) instead of always `api_error`.
+- **`ping`** was documented in `docs/API_REFERENCE.md` and `docs/STREAMING.md`
+  but never emitted. `stream_ping_interval_s` (default 15s) now emits it while
+  the pump is quiet, and `/v1/messages` sets `x-accel-buffering: no` (as
+  `/admin/stream` already did).
+- **Interleaved text/thinking was dropped entirely.** When content arrived
+  while a tool_use block was open, the encoder returned `None` with no log and
+  no counter. Anthropic blocks are strictly sequential so it cannot be emitted
+  inline, but discarding it made the model's prose invisible to the user *and*
+  absent from the replayed history, so the model could not see its own prior
+  explanation. Such content is now buffered and emitted as its own block when
+  the tool block closes (or at `final_frame` if the upstream never closes it).
+- **Error bodies** now carry `request_id`, matching the real API.
+- **Cross-provider:** Gemini encoded no `tool_choice` and no parallel control
+  (new `toolConfig.functionCallingConfig`; parallel has no Gemini equivalent and
+  now warns), and dropped `DocumentPart`; the OpenAI-family adapters dropped
+  `DocumentPart` (now a `file` content part); OpenRouter's finish sweep failed
+  to clear `_synthesized_opens`, the exact defect AUDIT #129 fixed in the base
+  class — reproduced as an Open-less `ToolCallDelta`; opencode's Responses route
+  ignored `disable_parallel_tool_use`.
+
+**Tests:** `tests/test_fix_round64.py` (37, contract-level: usage on
+`message_start`, flag-based suppression, sync/stream `server_tool_use` parity,
+the full stop-reason matrix, error-path block closing and error typing, effort
+across backends, `max_tokens: 0`, empty/mid-conversation system handling, media
+counting, MCP pairing, Gemini `toolConfig` and documents, the OpenRouter leak).
+Five existing tests that pinned the old behaviour were updated rather than
+deleted: `test_anthropic_adapter_reads_stop_sequence`,
+`test_anthropic_compaction_stop_reason`,
+`test_anthropic_pause_turn_mapped_to_stop`,
+`test_anthropic_happy_path_unharmed` (now expects usage on `StreamStart`), and
+`test_anthropic_encode_response_suppresses_builtin_tool_calls` (now asserts the
+flag contract, plus a new sibling proving a function tool named `web_search`
+survives).
+
+**Live:** the real Claude Code CLI (2.1.273) completed a turn through the
+gateway against a mock Anthropic upstream, reporting the upstream's
+`input_tokens`/`cache_read_input_tokens` in its `--output-format json` usage;
+the eleven `anthropic-beta` flags now reach the upstream verbatim; a
+`web_search_20250305` tool declaration survives to an Anthropic upstream and is
+correctly dropped (not mangled) on an OpenAI backend.

@@ -150,9 +150,13 @@ from wiwi.config import (
     load_env,
 )
 from wiwi.core.context import RequestContext
-from wiwi.core.gateway import Gateway, build_log_event, flatten_request_text
+from wiwi.core.gateway import (
+    Gateway,
+    build_log_event,
+    estimate_request_tokens,
+)
 from wiwi.core.recovery import HealthHealer
-from wiwi.cost.pricing import CostEngine, estimate_tokens_async
+from wiwi.cost.pricing import CostEngine
 from wiwi.ir import types as ir
 from wiwi.logging_core.events import LogEvent
 from wiwi.logging_core.subsystem import LoggingSubsystem, encode_sse, public_dict
@@ -920,6 +924,27 @@ def create_app(config: WiwiConfig) -> FastAPI:
         xkey = request.headers.get("x-api-key")  # Claude Code on /v1/messages
         return xkey.strip() if xkey else ""
 
+    # Headers an Anthropic client sets to negotiate capabilities that its
+    # BODY then depends on. Anthropic's Messages format is header-coupled:
+    # ``anthropic-beta`` gates features whose body fields are rejected with a
+    # hard 400 when the header is absent, so a gateway that forwards the body
+    # must forward the header. Claude Code sends eleven betas on every request
+    # (context-1m, interleaved-thinking, context-management, effort,
+    # mid-conversation-system, …) and wiwi previously read none of them: every
+    # header-only capability vanished and every body/header pair 400'd.
+    # An explicit allowlist is required because Anthropic's guidance is that
+    # the beta VALUE must pass through verbatim (it changes per release) while
+    # arbitrary client headers must not be relayed to an upstream.
+    _FORWARDABLE_HEADERS = ("anthropic-beta",)
+
+    def _forward_headers(request: Request) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for name in _FORWARDABLE_HEADERS:
+            value = request.headers.get(name)
+            if value:
+                out[name] = value
+        return out
+
     def is_admin(request: Request) -> bool:
         mk = config.general_settings.master_key
         if not mk:
@@ -1108,7 +1133,14 @@ def create_app(config: WiwiConfig) -> FastAPI:
     def _err(status: int, etype: str, message: str,
              request: Request, surface: str = "chat") -> ORJSONResponse:
         rid = getattr(request.state, "request_id", "")
-        body = _error_body_for(surface)(status, etype, message)
+        # Only the Anthropic dialect echoes the id inside the body (the real
+        # Messages API always does, and Claude Code surfaces it in bug
+        # reports). The OpenAI-shaped dialects carry it as a header only, so
+        # their error_body() signatures stay untouched.
+        if surface == "messages":
+            body = am.error_body(status, etype, message, request_id=rid)
+        else:
+            body = _error_body_for(surface)(status, etype, message)
         return ORJSONResponse(body, status_code=status,
                               headers={"x-wiwi-request-id": rid})
 
@@ -1172,7 +1204,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if rl_err:
             return rl_err
         ctx = RequestContext(surface=surface, ir_req=ir_req, auth=info, group=group,
-                             request_id=request_id)
+                             request_id=request_id,
+                             forward_headers=_forward_headers(request))
         # Per-deployment tpm admission needs the request's size up front. The
         # same body-size estimate that feeds the virtual-key limiter is good
         # enough for a sliding-window cap and costs nothing extra; it is
@@ -1331,6 +1364,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     it,
                     media_type="text/event-stream",
                     headers={"Cache-Control": "no-cache",
+                             # nginx and friends buffer an SSE body unless told
+                             # not to, which turns a stream into one burst at
+                             # the end and can trip a proxy write timeout on a
+                             # long turn. /admin/stream already set this; the
+                             # inference surfaces did not (AUDIT #156).
+                             "x-accel-buffering": "no",
                              "x-wiwi-request-id": ctx.request_id})
             turn = await gateway.complete(ctx)
             ctx.status = 200
@@ -1472,12 +1511,21 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         yield t
             # terminal frames, correct order per dialect:
             if errored:
-                # The error frame was already emitted by the encoder's feed();
-                # still terminate the client's stream so it is well-formed. A
-                # lone Anthropic `error` with no following `message_stop`
-                # leaves Claude Code's SSE reader waiting for the stream to
-                # end. (OpenAI/Responses clients close on the error frame.)
+                # The error frame was already emitted by the encoder's feed(),
+                # which also closed any open content block. Still terminate the
+                # client's stream so it is well-formed: a lone Anthropic
+                # ``error`` with no following ``message_stop`` leaves Claude
+                # Code's SSE reader waiting for the stream to end. The
+                # ``message_delta`` carries the final usage and stop_reason —
+                # without it a failed turn contributed nothing to the client's
+                # token accounting and reported no stop_reason at all
+                # (AUDIT #156). (OpenAI/Responses clients close on the error
+                # frame and need neither.)
                 if style == "anthropic":
+                    chunk = encoder.final_frame()
+                    if chunk:
+                        async for t in _emit(chunk):
+                            yield t
                     async for t in _emit(b"event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n"):
                         yield t
             elif style == "chat":
@@ -1580,8 +1628,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
         # blocks — the bulk of an agentic prompt — and the private
         # ``len(text) // 4 + 1`` heuristic disagreed with ``estimate_tokens``
         # (tiktoken where available) for identical text (AUDIT #130).
+        # ``estimate_request_tokens`` also adds binary media, which a text
+        # walk cannot represent: a 300 KB screenshot used to count 7 tokens
+        # instead of ~1500, so Claude Code's auto-compact never fired and the
+        # session died on an upstream context error (AUDIT #156).
         ctx = RequestContext(surface="messages", ir_req=ir_req)
-        total = await estimate_tokens_async(flatten_request_text(ctx), ir_req.model)
+        total = await estimate_request_tokens(ctx, ir_req.model)
         return ORJSONResponse({"input_tokens": max(1, total)})
 
     @app.get("/v1/models")

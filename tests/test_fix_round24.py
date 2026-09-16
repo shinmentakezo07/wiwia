@@ -286,7 +286,10 @@ def test_anthropic_adapter_reads_stop_sequence():
         "delta": {"stop_reason": "stop_sequence", "stop_sequence": "\n\n"},
         "usage": {"output_tokens": 5}}))
     finish = next(d for d in deltas if isinstance(d, dl.Finish))
-    assert finish.stop_reason == "stop"
+    # A matched stop sequence is its own stop_reason, not a plain completion:
+    # Claude Code branches on it to tell "the model finished" from "my stop
+    # sequence fired" (AUDIT #156).
+    assert finish.stop_reason == "stop_sequence"
     assert finish.stop_sequence == "\n\n"
 
 
@@ -456,11 +459,13 @@ def test_anthropic_compaction_stop_reason():
         "stop_reason": "compaction",
         "usage": {"input_tokens": 1, "output_tokens": 1},
     }).encode())
-    assert turn.stop_reason == "stop"
+    # Compaction is the provider telling the client it compacted the history;
+    # reporting it as a plain "stop" hid that from the client (AUDIT #156).
+    assert turn.stop_reason == "compaction"
     a2 = AnthropicAdapter()
     deltas = a2.decode_stream_event("message_delta", json.dumps({
         "type": "message_delta",
         "delta": {"stop_reason": "compaction"},
         "usage": {"output_tokens": 1}}))
     finish = next(d for d in deltas if isinstance(d, dl.Finish))
-    assert finish.stop_reason == "stop"
+    assert finish.stop_reason == "compaction"

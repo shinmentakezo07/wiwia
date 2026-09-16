@@ -36,13 +36,45 @@ _ANTHROPIC_STANDARD = {
     "context_management", "fallbacks", "cache_control",
 }
 
+# Anthropic stop_reason -> IR StopReason. Only ``end_turn`` is a true "the model
+# finished"; the rest carry information a client acts on. Collapsing
+# ``pause_turn`` (a provider-hosted tool loop is mid-flight; re-send to
+# continue), ``stop_sequence`` (which caller-supplied sequence fired) and
+# ``model_context_window_exceeded`` (an overflow, not a completion) into
+# ``stop`` made Claude Code end server-tool turns early and left auto-compact
+# unable to see an overflow (AUDIT #156).
+_STOP_REASON_IN: dict[str, str] = {
+    "end_turn": "stop",
+    "max_tokens": "length",
+    "tool_use": "tool_call",
+    "stop_sequence": "stop_sequence",
+    "refusal": "content_filter",
+    "pause_turn": "pause_turn",
+    "model_context_window_exceeded": "context_window_exceeded",
+    "compaction": "compaction",
+}
+
 
 def _system_blocks_or_text(messages: list[ir.Message]) -> str | list[dict[str, Any]] | None:
     """System prompt for the Messages API. Preserves cache_control by emitting
     block form when any part carries it (this is what enables Anthropic prompt
-    caching); plain string otherwise."""
-    text_parts = [p for m in messages if m.role == "system"
-                  for p in m.parts if isinstance(p, ir.TextPart)]
+    caching); plain string otherwise.
+
+    Only LEADING system messages are hoisted: a ``system`` entry that follows a
+    user/assistant turn is a mid-conversation system message, which the API
+    accepts inside ``messages`` and whose position matters to the cache prefix.
+
+    Empty text blocks are dropped. Anthropic rejects them ("text content blocks
+    must be non-empty"), and a client may legitimately send one — the message
+    path already filtered them but this path did not, so a single empty block
+    in the ``system`` array was a hard 400 (AUDIT #156).
+    """
+    text_parts: list[ir.TextPart] = []
+    for m in messages:
+        if m.role != "system":
+            break  # everything after the first non-system turn stays in messages
+        text_parts.extend(p for p in m.parts
+                          if isinstance(p, ir.TextPart) and p.text)
     if not text_parts:
         return None
     if any(p.cache_control for p in text_parts):
@@ -247,9 +279,18 @@ class AnthropicAdapter:
         if isinstance(system, str) and self._should_inject(req, deployment_params):
             system = [{"type": "text", "text": system}]
         msgs: list[dict[str, Any]] = []
+        # ``_system_blocks_or_text`` hoists EVERY system message into the
+        # top-level ``system`` field, which is wrong for a mid-conversation
+        # system entry: the Messages API accepts ``role: "system"`` inside
+        # ``messages`` (mid-conversation-system beta) and moving it to the top
+        # changes its position in the cache prefix. Only leading system
+        # messages are hoisted; a system entry that follows a non-system
+        # message stays in the message list.
+        seen_non_system = False
         for m in req.messages:
-            if m.role == "system":
+            if m.role == "system" and not seen_non_system:
                 continue
+            seen_non_system = True
             blocks: list[dict[str, Any]] = []
             for p in m.parts:
                 if isinstance(p, ir.TextPart):
@@ -269,7 +310,10 @@ class AnthropicAdapter:
                         src = {"type": "url", "url": p.url}
                     else:
                         src = {"type": "base64", "media_type": p.mime, "data": p.b64}
-                    blocks.append({"type": "image", "source": src})
+                    img: dict[str, Any] = {"type": "image", "source": src}
+                    if p.cache_control:
+                        img["cache_control"] = p.cache_control
+                    blocks.append(img)
                 elif isinstance(p, ir.DocumentPart):
                     doc: dict[str, Any]
                     if p.url:
@@ -283,13 +327,20 @@ class AnthropicAdapter:
                         doc["title"] = p.name
                     if p.context:
                         doc["context"] = p.context
+                    if p.cache_control:
+                        doc["cache_control"] = p.cache_control
                     blocks.append(doc)
                 elif isinstance(p, ir.ToolUsePart):
-                    # Server-hosted builtins (web_search, ...) replay as
-                    # server_tool_use blocks; their results arrive as
-                    # *_tool_result blocks (see ToolResultPart below).
-                    utype = ("server_tool_use" if bt.is_builtin_name(p.name)
-                             else "tool_use")
+                    # Replay the block type the client actually sent. A
+                    # provider-hosted call (server_tool_use) or an MCP call
+                    # (mcp_tool_use) must come back as that same type, or its
+                    # paired result block is unpaired and Anthropic rejects the
+                    # history. ``block_type`` carries the original spelling;
+                    # the name check is only a fallback for IR built without it
+                    # (AUDIT #156).
+                    utype = p.block_type or ("server_tool_use"
+                                             if bt.is_builtin_name(p.name)
+                                             else "tool_use")
                     blocks.append({"type": utype, "id": p.id, "name": p.name,
                                    "input": p.args})
                 elif isinstance(p, ir.ToolResultPart):
@@ -331,9 +382,15 @@ class AnthropicAdapter:
                     if p.signature:
                         tb["signature"] = p.signature
                     blocks.append(tb)
-            role = "assistant" if m.role == "assistant" else "user"
-            if m.role == "tool":
-                # tool results ride in a user turn
+            if m.role == "assistant":
+                role = "assistant"
+            elif m.role == "system":
+                # Mid-conversation system entry: the API accepts this role in
+                # ``messages`` and its position matters to the cache prefix, so
+                # pass it through rather than folding it into the user turn.
+                role = "system"
+            else:
+                # user, and tool (tool results ride in a user turn)
                 role = "user"
             if blocks:
                 if msgs and msgs[-1]["role"] == role:
@@ -341,9 +398,19 @@ class AnthropicAdapter:
                 else:
                     msgs.append({"role": role, "content": blocks})
 
+        # ``max_tokens: 0`` is Anthropic's documented cache pre-warm signal: the
+        # API reads the prompt, writes the cache and returns with zero output
+        # tokens. A falsy-or chain turned that into DEFAULT_MAX_TOKENS, so the
+        # pre-warm generated and BILLED up to 4096 output tokens and returned a
+        # real completion instead of an empty one (AUDIT #156). Test for None
+        # explicitly; only a genuinely absent value falls through.
+        if g.max_tokens is not None:
+            max_tokens = g.max_tokens
+        else:
+            max_tokens = deployment_params.get("max_tokens") or DEFAULT_MAX_TOKENS
         body: dict[str, Any] = {
             "model": model_id,
-            "max_tokens": g.max_tokens or deployment_params.get("max_tokens") or DEFAULT_MAX_TOKENS,
+            "max_tokens": max_tokens,
             "messages": msgs,
         }
         # Structured outputs: json_schema rides natively as output_config.format
@@ -361,6 +428,13 @@ class AnthropicAdapter:
             body["output_config"] = {"format": fmt}
         else:
             system = _with_response_format_instruction(system, g.response_format)
+        # output_config.effort is Anthropic's own effort knob (Claude Code's
+        # /effort, --effort, CLAUDE_CODE_EFFORT_LEVEL). It rides verbatim rather
+        # than through the effort→budget map, because the API has a native
+        # field for it. Merge into the same object as ``format`` so a request
+        # setting both sends one output_config.
+        if g.effort:
+            body.setdefault("output_config", {})["effort"] = g.effort
         if system:
             body["system"] = system
         if g.temperature is not None:
@@ -508,17 +582,23 @@ class AnthropicAdapter:
                     id=block.get("id", ""), name=block.get("name", ""),
                     args=block.get("input") or {}))
             elif btype == "server_tool_use":
-                # Anthropic-built-in tools (web_search, computer, etc.).  These
-                # look like tool_use to the caller, but their results arrive as
-                # web_search_tool_result / similar blocks in the same response.
+                # Anthropic-built-in tools (web_search, code_execution, an MCP
+                # tool, ...). These look like tool_use to the caller, but their
+                # results arrive as *_tool_result blocks in the same response
+                # and the CLIENT never dispatched them. Tag with ``builtin`` so
+                # the Anthropic encoder suppresses the block instead of
+                # emitting a phantom tool call Claude Code cannot execute
+                # (it would try, find no such tool, and 400 on the next turn).
+                # The streaming path has tagged these since the builtin work;
+                # the sync path did not, so identical upstream output produced
+                # a clean stream and a phantom call depending on `stream`
+                # (AUDIT #156).
                 turn.tool_calls.append(ir.ToolUsePart(
                     id=block.get("id", ""), name=block.get("name", ""),
-                    args=block.get("input") or {}))
+                    args=block.get("input") or {},
+                    builtin=(block.get("name") or "server_tool")))
         sr = data.get("stop_reason", "end_turn")
-        turn.stop_reason = {"end_turn": "stop", "stop_sequence": "stop",
-                            "max_tokens": "length", "tool_use": "tool_call",
-                            "refusal": "content_filter", "pause_turn": "stop",
-                            "compaction": "stop"}.get(sr, "stop")
+        turn.stop_reason = _STOP_REASON_IN.get(sr, "stop")
         turn.stop_sequence = data.get("stop_sequence")
         u = data.get("usage") or {}
         # output_tokens_details.thinking_tokens is where Anthropic reports
@@ -554,12 +634,20 @@ class AnthropicAdapter:
         m = payload.get("message")
         if etype == "message_start":
             m = m if isinstance(m, dict) else {}
-            out.append(dl.StreamStart(model=m.get("model", "")))
             u = m.get("usage")
             u = u if isinstance(u, dict) else {}
             self._pending_prompt = u.get("input_tokens", 0)
             self._pending_cached = u.get("cache_read_input_tokens", 0)
             self._pending_cache_creation = u.get("cache_creation_input_tokens", 0)
+            # Anthropic reports prompt/cache usage HERE, before any content,
+            # and Claude Code drives its context meter and auto-compact
+            # decision off this value. Carry it on StreamStart so the encoder
+            # can emit it in message_start instead of zeros (AUDIT #156).
+            out.append(dl.StreamStart(
+                model=m.get("model", ""),
+                prompt=self._pending_prompt,
+                cached=self._pending_cached,
+                cache_creation=self._pending_cache_creation))
         elif etype == "content_block_start":
             cb = payload.get("content_block")
             cb = cb if isinstance(cb, dict) else {}
@@ -621,18 +709,17 @@ class AnthropicAdapter:
                 cache_creation=getattr(self, "_pending_cache_creation", 0),
                 reasoning=out_details.get("thinking_tokens", 0),
                 output=u.get("output_tokens", 0)))
-            out.append(dl.Finish(
-                {"end_turn": "stop", "stop_sequence": "stop",
-                 "max_tokens": "length", "tool_use": "tool_call",
-                 "refusal": "content_filter", "pause_turn": "stop",
-                 "compaction": "stop"}.get(sr, "stop"),
-                stop_sequence=d.get("stop_sequence")))
+            out.append(dl.Finish(_STOP_REASON_IN.get(sr, "stop"),
+                                 stop_sequence=d.get("stop_sequence")))
         elif etype == "message_stop":
             out.append(dl.StreamEnd())
         elif etype == "error":
             err = payload.get("error")
             err = err if isinstance(err, dict) else {}
-            out.append(dl.StreamError(message=err.get("message", "unknown anthropic error"),
-                                      kind="status"))
+            etype_val = err.get("type")
+            out.append(dl.StreamError(
+                message=err.get("message", "unknown anthropic error"),
+                kind="status",
+                etype=etype_val if isinstance(etype_val, str) else None))
         return out
 

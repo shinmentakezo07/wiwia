@@ -124,7 +124,10 @@ def test_anthropic_happy_path_unharmed():
         '"usage":{"output_tokens":2,"output_tokens_details":'
         '{"thinking_tokens":5}}}')
     assert out == [
-        dl.StreamStart(model="claude"),
+        # StreamStart carries the message_start usage: Claude Code reads the
+        # prompt/cache counts from this frame to size its context window, so
+        # the adapter must surface them rather than dropping them (AUDIT #156).
+        dl.StreamStart(model="claude", prompt=3, cached=1, cache_creation=0),
         dl.TextDelta("hi"),
         dl.UsageFinal(prompt=3, cached=1, cache_creation=0, reasoning=5,
                       output=2),

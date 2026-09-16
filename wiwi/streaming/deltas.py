@@ -22,6 +22,15 @@ from wiwi.ir.types import StopReason
 class StreamStart:
     model: str
     group: str = ""
+    # Anthropic reports prompt/cache usage in ``message_start``, before any
+    # content, and Claude Code reads it there to drive its context meter and
+    # auto-compact decision. The IR had no carrier for it, so the encoder had
+    # to emit zeros and the client's running total stayed at 0 for the whole
+    # session (AUDIT #156). Providers that only report usage at the end leave
+    # these at 0 and the encoder falls back to the trailing UsageFinal.
+    prompt: int = 0
+    cached: int = 0
+    cache_creation: int = 0
 
 
 @dataclass(frozen=True)
@@ -90,6 +99,11 @@ class StreamError:
     message: str
     kind: Literal["timeout", "connection", "status", "cancelled", "unknown"] = "unknown"
     status: int | None = None
+    # The provider's OWN error type when it named one (Anthropic's
+    # ``overloaded_error``, ``rate_limit_error``, …). A mid-stream error frame
+    # carries no HTTP status, so ``kind``/``status`` alone cannot recover the
+    # classification the client retries on; this preserves it verbatim.
+    etype: str | None = None
 
 
 IRStreamDelta = (
