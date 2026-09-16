@@ -3917,3 +3917,96 @@ be repriced. Legacy rows without the new field are covered by their own test.
 (`tests/test_fix_round32.py`, `tests/test_fix_round52.py`) only ever use
 slash-free ids (`priced-model`, `retro-gpt`), which is why this survived. Any
 future test of model-keyed logic should include a slash-bearing id.
+
+---
+
+## ✅ Fixed — round 66: rate-limiter RPM refunds and the unbounded sweep (2026-09-16)
+
+Two defects in `wiwi/ratelimit/memory.py`, both found by reading the module
+against its own docstrings. **Both fixed**; each had a reachable trigger, and
+each is pinned by a test that fails on the pre-fix code.
+
+### 160. `release()` refunds an RPM slot it does not own — admission past the configured cap
+
+**Severity:** 🟠 High (rate-limit bypass)
+**File:** `wiwi/ratelimit/memory.py:189-195` (pre-fix `release`),
+`:120` (pre-fix admission)
+
+**Trigger:** a request that reserved an RPM slot more than 60 s ago (a long
+stream, or any slow turn) and then fails upstream.
+
+Admission appended RPM events with **no identity** —
+`_Event(ts=now, tokens=1)` — while `release()` pruned the window and then
+popped whatever was *newest*. If the releasing request's own event had already
+aged out of the 60 s window, the pop removed a **different, still-in-flight**
+request's slot. The window total then under-counted and admission let requests
+past the cap.
+
+Reproduced: 3 long-lived streams in flight (`key_rpm=3`), all older than 60 s;
+each failed-and-released request freed a live slot, after which 3 *more*
+requests were admitted — 6 concurrent against a cap of 3. The global scope is
+worse: `global:rpm` is shared by every key, so one spurious refund raises the
+effective cap for all of them.
+
+The docstring claimed the opposite was guaranteed — "Safe to call after
+``_record_tpm_usage`` too: release only removes still-estimated reservations".
+That held for RPM not at all (its events were neither tagged nor filtered) and
+for TPM only partially: TPM events *are* tagged, but the shared
+``_find_reservation`` falls back to "newest estimated" when the id does not
+match, so an unmatched TPM release also freed a live request's tokens
+(``release("k1", request_id="ghost")`` dropped a live 300-token reservation to
+0). That fallback is correct for ``record_tokens`` — which *replaces* an
+estimate for a request that succeeded, so attributing it to another in-flight
+estimate keeps the total right — but wrong for ``release``, which *removes*
+capacity.
+
+**Fix:** RPM events now carry `request_id` at admission. Both scopes refund via
+a new strict `_find_refund`, which has deliberately **no** "newest event"
+fallback when an id is supplied — an unmatched release must refund nothing,
+because every other event belongs to a live request. The id-less fallback is
+retained only for callers that predate request ids, where at most one request
+can be in flight. `_find_reservation` keeps its lenient fallback for
+``record_tokens``, and `_drop` keeps the running total in sync while tolerating
+an already-pruned event.
+
+### 161. The window sweep runs on every admission once over the cap — O(n) scan under the limiter's lock
+
+**Severity:** 🟡 Medium (availability; needs ≥10k distinct keys)
+**File:** `wiwi/ratelimit/memory.py:50-60` (pre-fix `_sweep_windows`)
+
+**Trigger:** more than `_max_windows` (10 000) distinct rate-limited keys.
+
+`_sweep_windows` was called from `check()` and, once the map exceeded the cap,
+scanned **every** window on **every** admission — inside `self._lock`, so it
+serialized all concurrent admissions behind an O(n) scan. Measured: 22 000
+windows, **6.28 ms per check**, against 0.005 ms at baseline.
+
+The declared cap was also not a bound: the sweep only deleted windows that were
+*empty after pruning*, so a burst of distinct keys left the map permanently
+above it (22 000 observed against a cap of 10 000).
+
+**Fix:** the sweep is throttled to one pass per `_SWEEP_INTERVAL_S` (5 s), which
+amortizes the scan instead of paying it per request. Correctness does not depend
+on sweep frequency — admission already prunes the windows it consults, so the
+sweep exists only to reclaim idle keys' memory.
+
+**Deliberately NOT fixed by evicting live windows.** The first attempt capped
+the map by evicting the stalest windows; that resets an *actively
+rate-limited* key's count and admits it over its cap — a worse bypass than the
+one being fixed. A control test (`test_active_key_survives_sweep_pressure`)
+pins that a key still holding traffic is never dropped. The map is bounded by
+concurrent active keys, which is the algorithm rather than a leak.
+
+**Status: fixed** — covered by `tests/test_fix_round66.py` (11 tests). Six fail
+on the pre-fix code (verified by stashing `wiwi/`): five for the refund defect
+(four RPM, one TPM), one for the sweep frequency. Five controls guard against
+over-correcting — an ordinary failure must still refund its own slot (or AUDIT
+#70/#121 return), `record_tokens` must keep its lenient newest-estimated
+fallback, a live key must survive sweep pressure, and a genuinely freed slot
+must remain reusable.
+
+**Note:** #160 is a residual of the #121 fix. #121 stopped the global slot from
+*leaking*; this fixes the opposite failure — refunding a slot that was never
+given up. The addendum's claim that the window "errs permissive — never leaky"
+was verified only with balanced admit/release pairs, which is exactly the case
+that hides this.
