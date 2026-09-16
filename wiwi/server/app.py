@@ -3378,8 +3378,14 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         _mid, acct.provider_type if acct else None,
                         provider_name)
 
+                # The FULL pricing key, not its last path segment: model ids
+                # routinely contain "/" (OpenRouter's ``stealth/ox-alpha``), so
+                # truncating here made the reprice match any model sharing a
+                # final segment and bill its history at this model's rate
+                # (round 65). The matcher applies the same slash-tail rule the
+                # cost engine's lookup does, so a bare-tail key still works.
                 key_deltas = await state.logs.db_sink.reprice_unpriced_history(
-                    model_id.split("/")[-1], rate_for)
+                    model_id, rate_for)
             except Exception:  # noqa: BLE001 — pricing update must not 500
                 state.logs.log_proxy(
                     "error", "retroactive pricing true-up failed",

@@ -21,6 +21,14 @@ class AttemptRecord:
     status: str  # "ok" | error kind
     latency_ms: int
     detail: str = ""
+    # The provider-native model id this attempt was sent to. ``deployment`` is
+    # ``"<group>/<model_id>"`` and BOTH halves may contain "/" (OpenRouter ids
+    # such as ``stealth/ox-alpha`` are the normal case), so the model cannot be
+    # recovered from the deployment string by splitting on "/": the rollup
+    # recorded the bare tail and the retroactive repricer matched on it, which
+    # conflated two models sharing a last path segment and billed one model's
+    # history at the other's rate (round 65). Record it instead of re-deriving.
+    model_id: str = ""
 
 
 
@@ -69,5 +77,7 @@ class RequestContext:
     _defer_key_credit: bool = False
 
     def note_attempt(self, deployment: str, provider: str, key_label: str,
-                     status: str, latency_ms: int, detail: str = "") -> None:
-        self.attempts.append(AttemptRecord(deployment, provider, key_label, status, latency_ms, detail))
+                     status: str, latency_ms: int, detail: str = "",
+                     model_id: str = "") -> None:
+        self.attempts.append(AttemptRecord(deployment, provider, key_label, status,
+                                           latency_ms, detail, model_id))

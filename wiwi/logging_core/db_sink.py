@@ -417,8 +417,7 @@ class DBSink:
                 last_id = rows[-1][0]
                 for r in rows:
                     serving = self._serving_attempt(r.attempts, None) or {}
-                    dep = serving.get("deployment") or ""
-                    model_id = dep.split("/")[-1] if dep else ""
+                    model_id = self._model_id_from_attempt(serving, r.model_group)
                     k = (int(r.ts // bucket_s) * bucket_s, r.key_id,
                          r.model_group, r.provider, model_id)
                     acc = groups.get(k)
@@ -745,14 +744,30 @@ class DBSink:
         zeroed as the cost is written, so a second call finds nothing to do.
         """
         key_deltas: dict[str, float] = {}
+        # A rollup row is repriced when the priced key is the served model id or
+        # any of its slash-tails (the CostEngine._lookup convention), so
+        # pricing "claude-sonnet-4" still matches "anthropic/claude-sonnet-4".
+        # The comparison is on WHOLE remaining path segments: the previous
+        # exact match required the caller to pre-truncate the key to its last
+        # segment, which made two models sharing that segment indistinguishable
+        # and billed one at the other's rate (round 65).
+        like = "%/" + (match_tail.replace("\\", "\\\\")
+                       .replace("%", "\\%").replace("_", "\\_"))
         async with self.engine.connect() as conn:
             rows = (await conn.execute(sa.text("""
                 SELECT id, key_id, provider, serving_model, unpriced_requests,
                        unpriced_tok_in, unpriced_tok_cached,
                        unpriced_tok_cache_creation, unpriced_tok_out
                 FROM request_rollups
-                WHERE unpriced_requests > 0 AND serving_model = :tail
-            """), {"tail": match_tail})).all()
+                WHERE unpriced_requests > 0
+                  AND (serving_model = :tail
+                       OR serving_model LIKE :like ESCAPE '\\')
+            """), {"tail": match_tail, "like": like})).all()
+            # The LIKE is a prefilter (it cannot express the segment
+            # boundary); the tail rule decides, exactly as in the cost engine.
+            rows = [r for r in rows
+                    if match_tail in {"/".join((r.serving_model or "").split("/")[i:])
+                                      for i in range(len((r.serving_model or "").split("/")))}]
         if not rows:
             return key_deltas
 
@@ -815,6 +830,28 @@ class DBSink:
         return status in ("ok", "ok_after_refresh")
 
     @staticmethod
+    def _model_id_from_attempt(serving: dict, group: str | None) -> str:
+        """The provider-native model id an attempt was sent to.
+
+        Prefers the ``model_id`` the attempt recorded. For rows written before
+        that field existed, recovers it from the ``"<group>/<model_id>"``
+        deployment string by stripping the row's own group prefix — exact, and
+        correct even when the model id contains "/". Falls back to the last
+        path segment only when the group is unknown, which is the lossy case
+        that conflated ``stealth/ox-alpha`` with ``vendor/ox-alpha``
+        (round 65).
+        """
+        recorded = serving.get("model_id")
+        if isinstance(recorded, str) and recorded:
+            return recorded
+        dep = serving.get("deployment") or ""
+        if not isinstance(dep, str) or not dep:
+            return ""
+        if group and dep.startswith(f"{group}/"):
+            return dep[len(group) + 1:]
+        return dep.split("/")[-1]
+
+    @staticmethod
     def _serving_attempt(attempts_json: str | None,
                          match_tail: str | None) -> dict | None:
         """The attempt whose response produced the row's usage, or None.
@@ -845,6 +882,24 @@ class DBSink:
                         if DBSink._is_2xx(a.get("status"))), entries[-1])
         if match_tail is None:
             return serving
+        # Match on the model id the attempt recorded. The deployment string is
+        # "<group>/<model_id>" and both halves may contain "/", so
+        # `endswith("/" + tail)` cannot tell `stealth/ox-alpha` from
+        # `vendor/ox-alpha` when the tail is the truncated last segment — the
+        # collision that mispriced one model's history at another's rate
+        # (round 65). The suffix rule survives only as a fallback for rows
+        # logged before the field existed.
+        recorded = serving.get("model_id")
+        if isinstance(recorded, str) and recorded:
+            # Mirror CostEngine._lookup: a price registered under any
+            # slash-tail of the served model id applies to it, so pricing
+            # "claude-sonnet-4" still matches a row served by
+            # "anthropic/claude-sonnet-4". Crucially this compares the
+            # *whole* remaining path, so "vendor/ox-alpha" no longer matches a
+            # row served by "stealth/ox-alpha" (round 65).
+            parts = recorded.split("/")
+            candidates = {"/".join(parts[i:]) for i in range(len(parts))}
+            return serving if match_tail in candidates else None
         dep = serving.get("deployment", "")
         if not (isinstance(dep, str) and dep.endswith(f"/{match_tail}")):
             return None

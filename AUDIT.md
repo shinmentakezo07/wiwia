@@ -3846,3 +3846,74 @@ request, and validating the emitted SSE with the `anthropic` SDK.
   from the Round 8 position.
 - **`WiwiSettings.header_allowlist`** is still absent as a config field; the
   allowlist is now a code constant (`server/app.py:_FORWARDABLE_HEADERS`).
+
+---
+
+## ✅ Fixed — round 65: retroactive pricing keyed on a truncated model id (2026-09-16)
+
+### 157. Retroactive pricing conflates models that share a last path segment — one model's history is billed at another's rate
+
+**Severity:** 🟠 High (silent mis-billing + wrong key budgets)
+**Files:** `wiwi/logging_core/db_sink.py:421` (rollup truncation),
+`wiwi/logging_core/db_sink.py:818-870` (`_serving_attempt` suffix match),
+`wiwi/logging_core/db_sink.py:754` (`_reprice_rolled_up` exact match),
+`wiwi/server/app.py:3382` (`PUT /admin/pricing` truncation)
+
+**Trigger:** a model id that itself contains `/` — the normal OpenRouter /
+gateway form, and what the shipped `wiwi.yaml` uses
+(`model_name: stealth/ox-alpha`, `model: stealth/ox-alpha`). Two models whose
+ids share a last segment (`stealth/ox-alpha`, `vendor/ox-alpha`) both reduce to
+`ox-alpha`.
+
+Three sites each truncated or suffix-matched the model identity:
+
+1. `rollup_and_prune` stored `dep.split("/")[-1]` as `serving_model`, so the
+   rollup row lost which model served it.
+2. `_serving_attempt` matched `dep.endswith(f"/{match_tail}")`.
+3. `PUT /admin/pricing/{model_id}` passed `model_id.split("/")[-1]` as the
+   match tail, so even a correct matcher was handed a lossy key.
+
+Pricing `vendor/ox-alpha` then repriced `stealth/ox-alpha` history at
+`vendor`'s rate and charged its virtual key — corrupting both the cost column
+and that key's `spend_to_date`, which is what budget enforcement reads.
+
+**Reproduced end-to-end** through the real admin route: two requests (one per
+model), then `PUT /admin/pricing/vendor/ox-alpha`. Pre-fix the true-up logged
+`total_delta=6.0` for what should have been a single row's 3.0, and both
+`request_logs` rows carried cost 3.0.
+
+**Root cause:** model identity was *reconstructed* from the concatenated
+`"<group>/<model_id>"` deployment string rather than recorded. Both halves of
+that string may contain `/`, so no suffix rule can recover the model. Fixing
+the matcher alone would have been a symptom fix — the truncation happened at
+the source.
+
+**Fix:**
+- `AttemptRecord` gained a `model_id` field, populated at all 14
+  `ctx.note_attempt(...)` call sites in `core/gateway.py` from `dep.model_id`,
+  and serialized into the row's `attempts` JSON. Identity is now recorded, not
+  re-derived.
+- `_model_id_from_attempt` prefers the recorded field; for rows written before
+  it existed it strips the row's own `model_group` prefix from the deployment
+  string (exact, and correct for slash-bearing ids), falling back to the lossy
+  last segment only when the group is unknown.
+- `_serving_attempt` and `_reprice_rolled_up` now compare *whole remaining
+  path segments* — the same slash-tail convention `CostEngine._lookup`
+  already uses — so a bare-tail price (`claude-sonnet-4`) still matches
+  `anthropic/claude-sonnet-4`, while `vendor/ox-alpha` no longer matches
+  `stealth/ox-alpha`. The rollup query uses an escaped `LIKE` as a prefilter
+  and applies the segment rule in Python.
+- `PUT /admin/pricing` passes the full pricing key instead of a pre-truncated
+  tail.
+
+**Status: fixed** — covered by `tests/test_fix_round65.py` (9 tests). Three
+fail on the pre-fix code (verified by stashing `wiwi/`): the rollup storage
+test, the rollup reprice test, and the end-to-end route test. Two controls
+guard against over-correcting — a bare-tail key must still reprice its full id
+(the `_lookup` convention), and a slash-bearing model's own history must still
+be repriced. Legacy rows without the new field are covered by their own test.
+
+**Note for the register:** the pre-existing reprice tests
+(`tests/test_fix_round32.py`, `tests/test_fix_round52.py`) only ever use
+slash-free ids (`priced-model`, `retro-gpt`), which is why this survived. Any
+future test of model-keyed logic should include a slash-bearing id.

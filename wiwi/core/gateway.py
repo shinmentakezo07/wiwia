@@ -304,7 +304,8 @@ class Gateway:
                                            timeout=dep.timeout or dep.provider.timeout_s)
         except httpx.TransportError as e:
             ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
-                             type(e).__name__, int((time.monotonic() - t0) * 1000))
+                             type(e).__name__, int((time.monotonic() - t0) * 1000),
+                             model_id=dep.model_id)
             _log_attempt(self.router, ctx, dep, key, type(e).__name__,
                          int((time.monotonic() - t0) * 1000))
             raise WiwiError(504 if "Timeout" in type(e).__name__ else 502,
@@ -314,7 +315,7 @@ class Gateway:
         latency = int((time.monotonic() - t0) * 1000)
         if resp.status_code != 200:
             ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
-                             f"http_{resp.status_code}", latency)
+                             f"http_{resp.status_code}", latency, model_id=dep.model_id)
             _log_attempt(self.router, ctx, dep, key, f"http_{resp.status_code}", latency)
             err = error_from_provider_status(resp.status_code, resp.text,
                                              dep.provider.name)
@@ -349,7 +350,7 @@ class Gateway:
                         ctx.note_attempt(f"{dep.group}/{dep.model_id}",
                                          dep.provider.name, key.label,
                                          "ok_after_refresh",
-                                         int((time.monotonic() - t0) * 1000))
+                                         int((time.monotonic() - t0) * 1000), model_id=dep.model_id)
                         _log_attempt(self.router, ctx, dep, key, "ok_after_refresh",
                                      int((time.monotonic() - t0) * 1000))
                         dep.latencies.append(int((time.monotonic() - t0) * 1000))
@@ -360,7 +361,7 @@ class Gateway:
                         return turn
             raise err
         ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
-                         "ok", latency)
+                         "ok", latency, model_id=dep.model_id)
         _log_attempt(self.router, ctx, dep, key, "ok", latency)
         dep.latencies.append(latency)
         turn = _decode_response_guarded(adapter, resp.status_code,
@@ -405,7 +406,8 @@ class Gateway:
             resp = await resp_cm.__aenter__()
         except httpx.TransportError as e:
             ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
-                             type(e).__name__, int((time.monotonic() - t0) * 1000))
+                             type(e).__name__, int((time.monotonic() - t0) * 1000),
+                             model_id=dep.model_id)
             _log_attempt(self.router, ctx, dep, key, type(e).__name__,
                          int((time.monotonic() - t0) * 1000))
             raise WiwiError(504 if "Timeout" in type(e).__name__ else 502,
@@ -417,7 +419,7 @@ class Gateway:
             await resp_cm.__aexit__(None, None, None)
             ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
                              f"http_{resp.status_code}",
-                             int((time.monotonic() - t0) * 1000))
+                             int((time.monotonic() - t0) * 1000), model_id=dep.model_id)
             _log_attempt(self.router, ctx, dep, key, f"http_{resp.status_code}",
                          int((time.monotonic() - t0) * 1000))
             err = error_from_provider_status(resp.status_code,
@@ -539,7 +541,7 @@ class Gateway:
                     # ``execute_with_retries``' except handler.
                     latency = int((time.monotonic() - t0) * 1000)
                     ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
-                                     key.label, type(e).__name__, latency)
+                                     key.label, type(e).__name__, latency, model_id=dep.model_id)
                     _log_attempt(self.router, ctx, dep, key, type(e).__name__, latency)
                     raise WiwiError(504 if "Timeout" in type(e).__name__ else 502,
                                     "timeout" if "Timeout" in type(e).__name__
@@ -571,7 +573,7 @@ class Gateway:
             await resp_cm.__aexit__(None, None, None)
         latency = int((time.monotonic() - t0) * 1000)
         ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
-                         "ok", latency)
+                         "ok", latency, model_id=dep.model_id)
         _log_attempt(self.router, ctx, dep, key, "ok", latency)
         dep.latencies.append(latency)
         turn = ir.AssistantTurn(text=text, tool_calls=tool_calls,
@@ -955,7 +957,7 @@ class Gateway:
             headers = self._headers(adapter, key, dep, ctx)
         except Exception as e:  # noqa: BLE001
             ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
-                             key.label, "encode_error", 0)
+                             key.label, "encode_error", 0, model_id=dep.model_id)
             _log_attempt(self.router, ctx, dep, key, "encode_error", 0)
             err_box[0] = WiwiError(400, "invalid_request_error",
                                    f"failed to encode request: {e}")
@@ -1008,7 +1010,7 @@ class Gateway:
             except httpx.TransportError as e:
                 ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
                                  key.label, type(e).__name__,
-                                 int((time.monotonic() - t0) * 1000))
+                                 int((time.monotonic() - t0) * 1000), model_id=dep.model_id)
                 _log_attempt(self.router, ctx, dep, key, type(e).__name__,
                              int((time.monotonic() - t0) * 1000))
                 err_box[0] = WiwiError(
@@ -1065,7 +1067,8 @@ class Gateway:
                             ctx.note_attempt(f"{dep.group}/{dep.model_id}",
                                              dep.provider.name, key.label,
                                              "ok_after_refresh",
-                                             int((time.monotonic() - t0) * 1000))
+                                             int((time.monotonic() - t0) * 1000),
+                                             model_id=dep.model_id)
                             _log_attempt(self.router, ctx, dep, key,
                                          "ok_after_refresh",
                                          int((time.monotonic() - t0) * 1000))
@@ -1086,7 +1089,7 @@ class Gateway:
                     ctx.note_attempt(f"{dep.group}/{dep.model_id}",
                                      dep.provider.name, key.label,
                                      f"http_{resp.status_code}",
-                                     int((time.monotonic() - t0) * 1000))
+                                     int((time.monotonic() - t0) * 1000), model_id=dep.model_id)
                     _log_attempt(self.router, ctx, dep, key,
                                  f"http_{resp.status_code}",
                                  int((time.monotonic() - t0) * 1000))
@@ -1200,7 +1203,8 @@ class Gateway:
             # execute_with_retries when the stream started — don't double count.
             if not client_gone:
                 ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
-                                 key.label, "ok", int((time.monotonic() - t0) * 1000))
+                                 key.label, "ok", int((time.monotonic() - t0) * 1000),
+                                 model_id=dep.model_id)
                 _log_attempt(self.router, ctx, dep, key, "ok",
                              int((time.monotonic() - t0) * 1000))
                 dep.latencies.append(int((time.monotonic() - t0) * 1000))
@@ -1278,7 +1282,7 @@ class Gateway:
             if not started:
                 ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
                                  key.label, f"error:{type(e).__name__}",
-                                 int((time.monotonic() - t0) * 1000))
+                                 int((time.monotonic() - t0) * 1000), model_id=dep.model_id)
                 _log_attempt(self.router, ctx, dep, key,
                              f"error:{type(e).__name__}",
                              int((time.monotonic() - t0) * 1000))
@@ -1563,7 +1567,8 @@ def build_log_event(ctx: RequestContext) -> LogEvent:
         response_cache_hit=bool(ctx.metadata.get("response_cache_hit")),
         attempts=[{"deployment": a.deployment, "provider": a.provider,
                    "key": a.provider_key_label, "status": a.status,
-                   "latency_ms": a.latency_ms} for a in ctx.attempts],
+                   "latency_ms": a.latency_ms,
+                   "model_id": a.model_id} for a in ctx.attempts],
         request_body=ctx.metadata.get("request_body"),
         response_body=ctx.metadata.get("response_body"),
     )
