@@ -4,6 +4,7 @@ round-robin, cooldowns, retries, fallbacks (docs/ADMIN.md §2, ARCHITECTURE.md �
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import random
 import time
 from collections import deque
@@ -264,6 +265,92 @@ class ProviderAccount:
                            failover_mode=failover_mode,
                            key_max_consecutive_fails=key_max_consecutive_fails)
 
+#: Per-deployment rpm/tpm windows are 60s sliding windows, matching the
+#: virtual-key limiter (wiwi/ratelimit/memory.py) so both caps describe the
+#: same "per minute" interval.
+_WINDOW_S = 60.0
+
+
+@dataclass
+class _DepEvent:
+    """One reservation inside a deployment's sliding window."""
+    ts: float
+    tokens: int
+    estimated: bool = False
+    request_id: str = ""
+
+
+@dataclass
+class _DepWindow:
+    """60s sliding window over ``_DepEvent``s with an O(1) running total.
+
+    ``rpm`` windows hold one event per admitted request (``tokens == 1``);
+    ``tpm`` windows hold one event per request carrying its token cost.
+    """
+    events: deque = field(default_factory=deque)
+    total: int = 0
+
+    def prune(self, now: float) -> None:
+        cutoff = now - _WINDOW_S
+        while self.events and self.events[0].ts < cutoff:
+            self.total -= self.events.popleft().tokens
+
+    def add(self, event: _DepEvent) -> None:
+        self.events.append(event)
+        self.total += event.tokens
+
+    def find_estimated(self, request_id: str) -> _DepEvent | None:
+        """Newest estimated reservation, preferring an exact request-id match."""
+        if request_id:
+            for e in reversed(self.events):
+                if e.estimated and e.request_id == request_id:
+                    return e
+        for e in reversed(self.events):
+            if e.estimated:
+                return e
+        return None
+
+    def find_event(self, request_id: str) -> _DepEvent | None:
+        """Newest event for *request_id*, estimated or already settled.
+
+        Used by :meth:`Deployment.settle_tokens` so a second settle for the
+        same request *adjusts* the existing charge instead of appending a
+        duplicate. That path is real: the pump prices a completed stream and
+        can then be cancelled while blocking on the output queue, and its
+        cancellation handler prices the same request again.
+        """
+        if request_id:
+            for e in reversed(self.events):
+                if e.request_id == request_id:
+                    return e
+        return None
+
+    def drop_matching(self, request_id: str, estimated_only: bool = False) -> bool:
+        """Remove this request's reservation from the window.
+
+        With a ``request_id`` the match is strict — an id that has no event
+        (already refunded, or a request whose usage was confirmed) removes
+        nothing. That strictness is what makes a double release harmless: the
+        second call cannot fall through and evict an unrelated request's slot.
+        ``estimated_only`` additionally refuses to refund confirmed usage, so a
+        stream that delivered tokens and then died stays billed.
+        """
+        if request_id:
+            for e in reversed(self.events):
+                if e.request_id == request_id and (e.estimated or not estimated_only):
+                    self.events.remove(e)
+                    self.total = max(0, self.total - e.tokens)
+                    return True
+            return False
+        # No id to match on: fall back to the newest eligible event.
+        for e in reversed(self.events):
+            if e.estimated or not estimated_only:
+                self.events.remove(e)
+                self.total = max(0, self.total - e.tokens)
+                return True
+        return False
+
+
 @dataclass
 class Deployment:
     group: str
@@ -289,6 +376,147 @@ class Deployment:
     # record_fail demotes.
     probation: bool = False
     latencies: deque = field(default_factory=lambda: deque(maxlen=50))
+    # Per-deployment sliding windows for the optional rpm/tpm caps
+    # (AUDIT #101). Created lazily on first reservation so an uncapped
+    # deployment pays nothing. Every window operation below is synchronous, so
+    # in asyncio's cooperative model a check-and-reserve in ``pick_deployment``
+    # cannot be interleaved by another coroutine — no lock is needed.
+    _rpm_window: _DepWindow | None = field(default=None, repr=False, compare=False)
+    _tpm_window: _DepWindow | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def limited(self) -> bool:
+        """Whether this deployment declares any per-deployment cap."""
+        return bool(self.rpm or self.tpm)
+
+    def _window(self, is_token: bool) -> _DepWindow:
+        if is_token:
+            if self._tpm_window is None:
+                self._tpm_window = _DepWindow()
+            return self._tpm_window
+        if self._rpm_window is None:
+            self._rpm_window = _DepWindow()
+        return self._rpm_window
+
+    def rate_limited(self, now: float | None = None, est_tokens: int = 0) -> bool:
+        """Whether admitting *est_tokens* would cross an rpm/tpm cap.
+
+        Admission-shaped: ``rpm`` costs one event, ``tpm`` costs *est_tokens*.
+        Returns False immediately for an uncapped deployment, so the routing
+        hot path is unchanged unless an operator set a cap.
+        """
+        if not self.limited:
+            return False
+        now = time.monotonic() if now is None else now
+        if self.rpm:
+            w = self._window(False)
+            w.prune(now)
+            if w.total + 1 > self.rpm:
+                return True
+        if self.tpm:
+            w = self._window(True)
+            w.prune(now)
+            if w.total + max(0, est_tokens) > self.tpm:
+                return True
+        return False
+
+    def reserve_slot(self, request_id: str, est_tokens: int = 0) -> None:
+        """Take this deployment's rpm/tpm slot for an admitted request.
+
+        Both events start ``estimated``: the rpm charge is a request that has
+        not completed yet, and the tpm charge is an *estimate*.
+        :meth:`settle_tokens` clears the flag once actual usage is known, and
+        :meth:`release_slot` refunds only still-estimated events — so a
+        completed request can never have its slots reclaimed by a late refund.
+        """
+        if not self.limited:
+            return
+        now = time.monotonic()
+        if self.rpm:
+            self._window(False).add(_DepEvent(ts=now, tokens=1,
+                                              estimated=True,
+                                              request_id=request_id))
+        if self.tpm:
+            self._window(True).add(_DepEvent(ts=now,
+                                             tokens=max(0, est_tokens),
+                                             estimated=True,
+                                             request_id=request_id))
+
+    def settle_tokens(self, request_id: str, tokens: int) -> None:
+        """Mark this request complete: replace the tpm estimate with actual
+        usage and stop either slot from being refundable.
+
+        Idempotent for repeated settles of the same request: the pump prices a
+        completed stream and can then be cancelled while blocking on the
+        output queue, and its cancellation handler prices the same request
+        again. Appending a second event would double-charge the cap, so an
+        existing settled event is *adjusted* to the new value instead.
+        """
+        if not self.limited:
+            return
+        now = time.monotonic()
+        if self.tpm:
+            w = self._window(True)
+            w.prune(now)
+            target = w.find_estimated(request_id)
+            if target is not None:
+                w.total += max(0, tokens) - target.tokens
+                target.tokens = max(0, tokens)
+                target.estimated = False
+            else:
+                existing = w.find_event(request_id)
+                if existing is not None:
+                    w.total += max(0, tokens) - existing.tokens
+                    existing.tokens = max(0, tokens)
+                else:
+                    # No reservation found (e.g. a resume attempt on a
+                    # deployment that never admitted the original request):
+                    # record the actual usage so it is still accounted for.
+                    w.add(_DepEvent(ts=now, tokens=max(0, tokens),
+                                    request_id=request_id))
+        if self.rpm:
+            # Settle the rpm event too, so the completed request holds its
+            # slot until it ages out rather than being refundable.
+            w = self._window(False)
+            w.prune(now)
+            for e in reversed(w.events):
+                if e.request_id == request_id:
+                    e.estimated = False
+                    break
+
+    def release_slot(self, request_id: str) -> None:
+        """Refund an admitted-but-unpriced request's rpm/tpm slots.
+
+        Only *estimated* events are refunded, so a request that completed (or
+        a stream that delivered tokens and then died) keeps its slot and stays
+        billed against the cap — mirroring
+        :meth:`wiwi.ratelimit.memory.RateLimiter.release`.
+        """
+        if not self.limited:
+            return
+        now = time.monotonic()
+        if self.tpm:
+            w = self._window(True)
+            w.prune(now)
+            w.drop_matching(request_id, estimated_only=True)
+        if self.rpm:
+            w = self._window(False)
+            w.prune(now)
+            w.drop_matching(request_id, estimated_only=True)
+
+    def retry_after_s(self, now: float | None = None) -> int:
+        """Seconds until the next slot frees, clamped to the window (1..60)."""
+        now = time.monotonic() if now is None else now
+        oldest: float | None = None
+        for w, limit in ((self._rpm_window, self.rpm), (self._tpm_window, self.tpm)):
+            if not limit or w is None:
+                continue
+            w.prune(now)
+            if w.events and (oldest is None or w.events[0].ts < oldest):
+                oldest = w.events[0].ts
+        if oldest is None:
+            return 1
+        return max(1, min(60, int(_WINDOW_S - (now - oldest)) + 1))
 
     @property
     def available(self) -> bool:
@@ -453,19 +681,44 @@ class Router:
                         exclude: set[int] | None = None) -> Deployment | None:
         """Pick a healthy deployment. `exclude` holds id()s of deployments that
         already failed this request, so retries land on a *different* deployment
-        when one exists (LiteLLM semantics)."""
+        when one exists (LiteLLM semantics).
+
+        A deployment whose per-deployment ``rpm``/``tpm`` window is full is
+        skipped so traffic diverts to a sibling (AUDIT #101). When every
+        candidate is saturated this returns ``None`` — the caller turns that
+        into a 429 rather than silently overrunning the configured cap.
+        The picked deployment's slot is reserved here, at admission, because
+        this is the only point that can both see the cap and choose to avoid it.
+        """
         exclude = exclude or set()
         avail = [d for d in deps if d.available and id(d) not in exclude]
         if not avail:
             avail = [d for d in deps if d.available]  # nothing fresh left: reuse allowed
         if not avail:
             return None
+        est = getattr(ctx, "est_tokens", 0)
+        uncapped = [d for d in avail if not d.rate_limited(est_tokens=est)]
+        if not uncapped:
+            # Every candidate is at its cap: refuse rather than exceed it.
+            return None
+        avail = uncapped
         # Prefer fully-healthy deployments; probation ones only serve when no
         # fresh sibling exists (the healer restored them on a trial basis).
         fresh = [d for d in avail if not d.probation]
         if fresh:
             avail = fresh
         strategy = self.settings.routing_strategy
+        chosen = self._choose(avail, deps, strategy)
+        # Reserve at the single exit point: every strategy path above returns
+        # through here, so a new strategy cannot forget the reservation (the
+        # first cut reserved inside two of the four branches, leaving
+        # simple-shuffle and the cross-provider pool uncapped).
+        chosen.reserve_slot(getattr(ctx, "request_id", ""), est)
+        return chosen
+
+    def _choose(self, avail: list[Deployment], deps: list[Deployment],
+                strategy: str) -> Deployment:
+        """Apply the routing strategy to an already-filtered candidate list."""
         if strategy == "least-busy":
             return min(avail, key=lambda d: d.inflight)
         if strategy == "latency-based":
@@ -875,9 +1128,28 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                 # relax cycle exclusion and try again with just the tried dep set
                 dep = router.pick_deployment(deps, ctx, exclude=tried_dep_ids)
                 if dep is None:
-                    last_err = WiwiError(503, "service_unavailable",
-                                         f"no healthy deployment for '{group_name}'",
-                                         retryable=True)
+                    # Distinguish "nothing healthy" (503 — an outage) from
+                    # "everything healthy but at its per-deployment rpm/tpm
+                    # cap" (429 — a rate limit, retryable, with a horizon).
+                    # Reporting the cap as 503 told the client to give up on a
+                    # deployment that is serving fine (AUDIT #101).
+                    now = time.monotonic()
+                    capped = [d for d in deps
+                              if d.available
+                              and d.rate_limited(now, getattr(ctx, "est_tokens", 0))]
+                    if capped:
+                        retry_after = min(d.retry_after_s(now) for d in capped)
+                        last_err = WiwiError(
+                            429, "rate_limit_error",
+                            f"all deployments for '{group_name}' are at their"
+                            f" rpm/tpm cap", retry_after=float(retry_after))
+                        _proxy("warn",
+                               f"deployment cap reached for '{group_name}':"
+                               f" retry in {retry_after}s")
+                    else:
+                        last_err = WiwiError(503, "service_unavailable",
+                                             f"no healthy deployment for '{group_name}'",
+                                             retryable=True)
                     break
             key_exclude = {lbl for (pn, lbl) in tried_key_labels
                            if pn == dep.provider.name}
@@ -895,6 +1167,10 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                 probation_weight=getattr(router, "probation_weight", 1.0),
             )
             if key is None:
+                # The slot was reserved at pick time but no upstream call will
+                # happen: refund it, or a key outage would hold the
+                # deployment's rpm/tpm window for the full 60s.
+                _refund_deployment_slot(dep, ctx)
                 tried_dep_ids.add(id(dep))
                 tried_key_labels.add((dep.provider.name, "*"))
                 last_err = WiwiError(429, "rate_limit_error",
@@ -948,6 +1224,10 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                         key_consec.get((dep.provider.name, key.label), 0) + 1)
                 return result
             except WiwiError as e:
+                # The attempt failed before pricing could reconcile the
+                # deployment's admission estimate: refund the rpm/tpm slot so
+                # one 5xx does not throttle this deployment for the window.
+                _refund_deployment_slot(dep, ctx)
                 tried_dep_ids.add(id(dep))
                 if group_first_err is None:
                     group_first_err = e
@@ -983,6 +1263,14 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                 fresh = any(d.available and id(d) not in tried_dep_ids for d in deps)
                 if not fresh and attempt < router.settings.num_retries:
                     await asyncio.sleep(_RETRY_BACKOFF.delay(attempt, e.retry_after))
+            except BaseException:
+                # Cancellation (client gone) or an unexpected non-WiwiError
+                # failure: refund the admission reservation so an aborted
+                # request does not hold the deployment's rpm/tpm slot for the
+                # window. A no-op when pricing already settled it, because
+                # `release_slot` refunds estimated events only.
+                _refund_deployment_slot(dep, ctx)
+                raise
         if first_error is None:
             first_error = group_first_err or last_err
         # enqueue fallbacks for this group
@@ -1008,3 +1296,18 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
 
 def _status_of(e: WiwiError) -> int | None:
     return status_for_key_pool(e)
+
+
+def _refund_deployment_slot(dep: Deployment, ctx: RequestContext) -> None:
+    """Return an admitted-but-unpriced request's slot to *dep*.
+
+    ``pick_deployment`` reserves the deployment's rpm/tpm slot at admission,
+    but the request may never reach pricing: ``pick_key`` can find no live key,
+    or ``call_one`` can fail before any usage is known. Without the refund a
+    single failed attempt would hold the cap for the whole 60s window and
+    refuse unrelated requests (the #70/#121 phantom-reservation class, one
+    layer up). A request that *was* priced keeps its slot — ``release_slot``
+    only refunds estimated reservations.
+    """
+    with contextlib.suppress(Exception):
+        dep.release_slot(getattr(ctx, "request_id", ""))

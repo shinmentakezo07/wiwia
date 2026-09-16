@@ -782,6 +782,15 @@ class Gateway:
         for dep in candidates:
             if not dep.available:
                 continue
+            # Respect the per-deployment rpm/tpm cap on resume too (AUDIT #101):
+            # this path picks a deployment directly instead of going through
+            # `pick_deployment`, so without the check a resume could push a
+            # saturated deployment further over its cap. The originating
+            # request's estimate is the best available size for the
+            # continuation (the resume prompt is that request plus the partial
+            # output), and the pump settles it against real usage.
+            if dep.rate_limited(est_tokens=getattr(ctx, "est_tokens", 0)):
+                continue
             key, _ = await dep.provider.pick_key()
             if key is None:
                 continue
@@ -789,6 +798,11 @@ class Gateway:
             resume_ctx = RequestContext(
                 surface=ctx.surface, ir_req=resume_req, auth=ctx.auth,
                 group=ctx.group, cancel=ctx.cancel)
+            resume_ctx.est_tokens = getattr(ctx, "est_tokens", 0)
+            # Reserve under the *resume* context's id: the pump prices into
+            # `resume_ctx`, so its `settle_tokens` matches this reservation.
+            dep.reserve_slot(resume_ctx.request_id,
+                             getattr(ctx, "est_tokens", 0))
             ready = asyncio.Event()
             err_box: list[WiwiError | None] = [None]
             new_pump_task = asyncio.create_task(
@@ -820,6 +834,10 @@ class Gateway:
             if status in (408, 500, 502, 503, 504, 529):
                 dep.record_fail(self.router.settings.allowed_fails,
                                 self.router.settings.cooldown_time)
+            # The resume never delivered a token, so refund the slot reserved
+            # above — otherwise one failed resume holds this deployment's cap
+            # for the window (AUDIT #101).
+            dep.release_slot(resume_ctx.request_id)
             new_pump_task.cancel()
         return False, None
 
@@ -834,6 +852,14 @@ class Gateway:
             await self._pump_once(dep, key, ctx, queue, ready, err_box)
         finally:
             dep.inflight -= 1
+            # The admission reservation made by `pick_deployment` is settled by
+            # `_price_stream`/`_price_partial` as soon as usage is known. A pump
+            # torn down before either ran (cancelled between connect and the
+            # first priced chunk) would otherwise hold the deployment's rpm/tpm
+            # slot until it aged out. `release_slot` refunds estimated events
+            # only, so a priced stream is untouched (AUDIT #101).
+            with contextlib.suppress(Exception):
+                dep.release_slot(ctx.request_id)
 
     async def _pump_once(self, dep: Deployment, key: ProviderKeyRef,
                          ctx: RequestContext, queue: asyncio.Queue,
@@ -1295,6 +1321,10 @@ class Gateway:
     def _price(self, ctx: RequestContext, dep: Deployment, u: ir.Usage) -> None:
         model_key = f"{dep.provider.provider_type}/{dep.model_id}"
         ctx.usage = u
+        # Reconcile the deployment's admission-time tpm estimate with the
+        # provider-reported usage, so one request is charged once against the
+        # cap, not estimate + actual (AUDIT #101).
+        dep.settle_tokens(ctx.request_id, u.prompt_tokens + u.completion_tokens)
         includes_cached = dep.provider.provider_type != "anthropic"
         state = self.cost.cost_with_status(
             model_key, u.prompt_tokens, u.completion_tokens, u.cached_tokens,
@@ -1331,6 +1361,9 @@ class Gateway:
                              cached_tokens=u.cached, reasoning_tokens=u.reasoning,
                              estimated=u.estimated,
                              cache_creation_tokens=u.cache_creation)
+        # Settle the deployment's admission-time estimate against actual usage
+        # (AUDIT #101) — see `_price`.
+        dep.settle_tokens(ctx.request_id, u.prompt + u.output)
         includes_cached = dep.provider.provider_type != "anthropic"
         state = self.cost.cost_with_status(
             model_key, u.prompt, u.output, u.cached, u.cache_creation,

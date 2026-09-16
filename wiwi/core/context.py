@@ -43,6 +43,11 @@ class RequestContext:
 
     usage: Usage | None = None
     cost: float = 0.0
+    # Estimated prompt+completion tokens for this request, charged against a
+    # deployment's per-deployment tpm cap at admission and reconciled to actual
+    # usage at pricing time (AUDIT #101). 0 means "unknown": the tpm check then
+    # charges nothing for this request.
+    est_tokens: int = 0
     # outcomes
     cache_hit: bool = False
     stop_reason: str | None = None

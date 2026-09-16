@@ -63,6 +63,14 @@ providers:
 #   - model_name: my-gpt
 #     wiwi_params: {provider: openai-main, model: gpt-4o, weight: 2}
 #
+# Per-deployment caps (opt-in): a deployment at its cap is skipped in favour
+# of a sibling, and when every candidate is capped the request gets a 429
+# (with Retry-After) instead of running uncapped. Both are 60-second sliding
+# windows, the same interval as a virtual key's rpm/tpm.
+#   rpm: 500        # requests per minute through this deployment
+#   tpm: 100000     # tokens (estimated at admission, reconciled to actual)
+#                   # per minute through this deployment
+#
 # Anthropic prompt caching (opt-in, per deployment):
 #   prompt_cache: true   # mark the STABLE prefix (tools + system) so repeat
 #                        # calls read at 0.1x instead of paying full input.

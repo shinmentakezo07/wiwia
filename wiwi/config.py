@@ -142,6 +142,20 @@ class DeploymentParams(BaseModel):
     # adapter default (1024).
     prompt_cache_min_tokens: int | None = None
 
+    @field_validator("rpm", "tpm")
+    @classmethod
+    def _limits_must_be_positive(cls, v: int | None, info) -> int | None:
+        """Reject a non-positive cap instead of silently ignoring it.
+
+        ``rpm: 0`` reads as "no requests allowed" but the enforcement check
+        treats a falsy limit as "no cap", so a zero slipped through as an
+        unlimited deployment — the exact silent no-op AUDIT #101 is about.
+        A negative value has no sensible meaning at all.
+        """
+        if v is not None and v <= 0:
+            raise ValueError(f"{info.field_name} must be a positive integer")
+        return v
+
 
 class ModelEntry(BaseModel):
     model_name: str

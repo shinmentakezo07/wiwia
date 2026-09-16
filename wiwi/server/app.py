@@ -1173,6 +1173,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return rl_err
         ctx = RequestContext(surface=surface, ir_req=ir_req, auth=info, group=group,
                              request_id=request_id)
+        # Per-deployment tpm admission needs the request's size up front. The
+        # same body-size estimate that feeds the virtual-key limiter is good
+        # enough for a sliding-window cap and costs nothing extra; it is
+        # reconciled to actual usage at pricing time (AUDIT #101).
+        ctx.est_tokens = est
         # -- durable stream replay ------------------------------------------------
         # A client whose stream died (process restart, dropped connection)
         # re-POSTs the same request with `x-wiwi-stream-id: <original

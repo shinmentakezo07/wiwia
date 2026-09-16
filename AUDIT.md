@@ -634,6 +634,48 @@ does nothing.
 **Fix:** enforce `dep.rpm`/`dep.tpm` at deployment selection, or reject the fields in config
 validation so the no-op is not silent.
 
+**Status: fixed** — round 62 (2026-09-16). Both caps are now enforced as 60-second sliding
+windows on the `Deployment` itself, mirroring the virtual-key limiter's window semantics
+(`wiwi/ratelimit/memory.py`) so "per minute" means the same interval at both layers. The
+resolution followed the finding's first option (enforce, not reject), with the second applied
+only to *nonsensical* values:
+
+- `Deployment` gained `_rpm_window`/`_tpm_window` (`_DepWindow`: a deque plus an O(1) running
+  total, pruned on access) and `rate_limited` / `reserve_slot` / `settle_tokens` /
+  `release_slot` / `retry_after_s`. Windows are created lazily, so an uncapped deployment
+  pays nothing and the routing hot path is byte-for-byte unchanged unless an operator sets a
+  cap.
+- `pick_deployment` filters saturated candidates out, so traffic diverts to a sibling
+  deployment instead of failing. The reservation happens at the method's single exit point
+  (via the new `_choose` helper) — the first cut reserved inside individual strategy branches
+  and silently left `simple-shuffle` and the cross-provider pool uncapped.
+- When *every* candidate is saturated, `execute_with_retries` answers **429**
+  (`rate_limit_error`, carrying `retry_after` from `retry_after_s`) rather than the previous
+  503 — a per-deployment cap is a rate limit, not an outage, and 503 told the client to give
+  up on a deployment that is serving fine.
+- Admission charges the request's *estimated* tokens (`RequestContext.est_tokens`, seeded from
+  the same body-size estimate that feeds the virtual-key limiter in `run_chat_like`).
+  `Gateway._price`/`_price_stream` reconcile that estimate to provider-reported usage, so one
+  request is charged once against the cap, not estimate + actual. `settle_tokens` is
+  idempotent: the pump can price a completed stream and then be cancelled while blocked on the
+  output queue, and its cancellation handler prices the same request again — an append there
+  would double-charge the window.
+- `_refund_deployment_slot` returns the slot when the request never reaches pricing (no live
+  key, a `WiwiError` before usage is known, cancellation, or any other abort), preventing the
+  #70/#121 phantom-reservation class one layer up. Only still-*estimated* events are
+  refundable, so a request that completed — or a stream that delivered tokens and then died —
+  keeps its slot and stays billed.
+- `DeploymentParams` now rejects `rpm <= 0` / `tpm <= 0` at config validation. A stored `0`
+  read as "no requests allowed" but was treated by enforcement as falsy, i.e. "no cap" — the
+  exact silent no-op this finding is about.
+
+Verified: `tests/test_fix_round62.py` (14 tests; 13 fail against the pre-fix tree — the
+fourteenth is a refund guard that passes pre-fix by construction, documented as such). Full
+suite 1822 passed, `ruff check wiwi/ tests/` clean.
+
+Docs note: `README.md:149` and `detailed.md` already advertised these fields as working
+overrides; they now describe real behaviour, so no doc change was needed.
+
 ### 102. Gemini request encoder silently drops `ThinkingPart` (and Document/Audio)
 **File:** `wiwi/providers/gemini_adapter.py:59-78`
 **Trigger:** a request whose IR history contains a `ThinkingPart` (e.g. multi-turn
