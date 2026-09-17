@@ -3918,6 +3918,67 @@ be repriced. Legacy rows without the new field are covered by their own test.
 slash-free ids (`priced-model`, `retro-gpt`), which is why this survived. Any
 future test of model-keyed logic should include a slash-bearing id.
 
+**ECC review follow-up (same round).** Two further findings from
+`ecc:python-review`, both reproduced before fixing:
+
+- **H1 (fallback truncation)** — see the review follow-up above; the ECC
+  reviewer independently reproduced it and rated the committed state FAIL on
+  this alone. Fixed.
+- **M1 (repricer narrower than the cost engine)** — the gateway prices live
+  traffic with `f"{provider_type}/{model_id}"` and `CostEngine._lookup` accepts
+  that full prefixed key, but the repricer matched the registered key only
+  against slash-tails of the *recorded* id. A price registered as
+  `openrouter/anthropic/claude-sonnet-4` (which live traffic honours) silently
+  true-upped **nothing** — history stayed at cost 0 and budgets stayed
+  under-charged, the same silent mis-accounting this round removes. Fixed by
+  matching in **both** directions via a shared `_shares_model_tail` /
+  `_slash_tails` helper, which also removes the duplicated inline segment rule
+  the reviewer flagged. Covered by
+  `test_reprice_accepts_a_provider_prefixed_key` and its control
+  `test_reprice_still_rejects_an_unrelated_provider_prefixed_key` (the control
+  proves the two-way rule did not resurrect the collision).
+
+Also addressed from the same review: `_model_id_from_attempt` now takes
+`dict[str, Any]` and no longer takes an unused `group` parameter (the
+signature implied a cross-check that did not happen); the sweep-throttle
+docstring no longer implies the window map is hard-bounded; and `release`
+returns early on an empty `key_id`.
+
+**Round 68 interaction (same subsystem).** A parallel session found that
+stripping a fixed *first* segment is also wrong in the other direction: when
+the **group** name contains a slash (the shipped config's
+``minimax/minimax-m3``, ``stealth/ox-alpha``), it leaves the rest of the group
+glued to the front of the id — ``minimax-m3/MiniMax-M3`` — which matches no
+price row, so the rollup stores it unpriced and the row can never be repriced.
+Fixed by stripping the row's own ``model_group`` when it prefixes the
+deployment (exact, and the common non-failed-over case), keeping the
+first-segment strip only for a fallback-served row where the serving group is
+not recorded. Covered by ``tests/test_fix_round68.py``.
+
+Note both halves of the deployment string may contain ``/`` and neither is
+recoverable from the other in general — that is why identity is now *recorded*
+on the attempt rather than re-derived; the fallbacks exist only for rows
+written before the field existed, and age out under the 30-day retention
+default.
+
+**Known residual (M2, documented not fixed):** for rows logged *before*
+`model_id` existed, the raw-row path still falls back to the lossy
+`endswith("/" + tail)` rule, so bare-tail pricing can still conflate two
+legacy rows sharing a last segment. This is time-bounded by the 30-day
+retention default that ages those rows out, and cannot affect rows written
+after the fix. Recorded here so a later reader does not re-diagnose it.
+
+**Review follow-up (same round).** Code review found the legacy fallback in
+`_model_id_from_attempt` still truncated for **fallback-served** rows: it keyed
+the group-prefix strip on the row's `model_group`, which is the *client-requested*
+group (`ctx.group`, never reassigned on failover), so a row with
+`model_group="A"` served by `deployment="B/stealth/ox-alpha"` missed the prefix
+test and fell through to `split("/")[-1]` — silently reintroducing this exact
+truncation on the rollup path. Fixed by stripping the deployment's own FIRST
+segment (always the serving group), and by returning `""` rather than guessing a
+tail when nothing is recoverable. Covered by
+`test_legacy_fallback_row_keeps_its_full_model_id_in_the_rollup`.
+
 ---
 
 ## ✅ Fixed — round 66: rate-limiter RPM refunds and the unbounded sweep (2026-09-16)
@@ -3926,7 +3987,7 @@ Two defects in `wiwi/ratelimit/memory.py`, both found by reading the module
 against its own docstrings. **Both fixed**; each had a reachable trigger, and
 each is pinned by a test that fails on the pre-fix code.
 
-### 160. `release()` refunds an RPM slot it does not own — admission past the configured cap
+### 174. `release()` refunds an RPM slot it does not own — admission past the configured cap
 
 **Severity:** 🟠 High (rate-limit bypass)
 **File:** `wiwi/ratelimit/memory.py:189-195` (pre-fix `release`),
@@ -3969,7 +4030,7 @@ can be in flight. `_find_reservation` keeps its lenient fallback for
 ``record_tokens``, and `_drop` keeps the running total in sync while tolerating
 an already-pruned event.
 
-### 161. The window sweep runs on every admission once over the cap — O(n) scan under the limiter's lock
+### 175. The window sweep runs on every admission once over the cap — O(n) scan under the limiter's lock
 
 **Severity:** 🟡 Medium (availability; needs ≥10k distinct keys)
 **File:** `wiwi/ratelimit/memory.py:50-60` (pre-fix `_sweep_windows`)
@@ -4005,7 +4066,7 @@ over-correcting — an ordinary failure must still refund its own slot (or AUDIT
 fallback, a live key must survive sweep pressure, and a genuinely freed slot
 must remain reusable.
 
-**Note:** #160 is a residual of the #121 fix. #121 stopped the global slot from
+**Note:** #174 is a residual of the #121 fix. #121 stopped the global slot from
 *leaking*; this fixes the opposite failure — refunding a slot that was never
 given up. The addendum's claim that the window "errs permissive — never leaky"
 was verified only with balanced admit/release pairs, which is exactly the case
@@ -4060,3 +4121,437 @@ warning) on a backend that cannot host it — a function tool named `web_search`
 would be called by the model and never executed. `input_examples` is rendered
 into the description rather than a native field where none exists, so the
 information survives without risking a 400 on strict gateways.
+
+---
+
+## ✅ Fixed — round 68: legacy model-id recovery corrupts slash-bearing groups (2026-09-16)
+
+### 158. Legacy model-id fallback strips the serving group's *first segment* — wrong for every slash-bearing `model_name`
+
+**Severity:** 🟠 High (corrupted `serving_model` rollup dimension; a regression introduced by the round-65 review fix, not a pre-existing bug)
+**Files:** `wiwi/logging_core/db_sink.py:877` (`_model_id_from_attempt`),
+`wiwi/logging_core/db_sink.py:447` (rollup call site)
+**Introduced by:** the uncommitted round-65 review change that dropped the
+`group` parameter (previously `db_sink.py:857`).
+
+**Trigger:** any model whose *group* (`model_name`) contains a `/` — which is
+the normal shape in this repo. The shipped, live `wiwi.yaml` opens its
+`model_list` with `model_name: stealth/ox-alpha` and
+`model_name: minimax/minimax-m3`, and the round-65 fixtures themselves use
+`stealth/ox-alpha` / `vendor/ox-alpha`.
+
+`deployment` is written as `f"{dep.group}/{dep.model_id}"`
+(`core/gateway.py:329` and 15 sibling call sites), so for those groups the
+string is `"minimax/minimax-m3/MiniMax-M3"`. Stripping the **first** `/`
+segment yields `"minimax-m3/MiniMax-M3"` — the tail of the group glued to the
+front of the model id. A value that names no real model.
+
+Reproduced against the real rollup path:
+
+```
+group='minimax/minimax-m3'  true model='MiniMax-M3/air'
+stored serving_model='minimax-m3/MiniMax-M3/air'
+```
+
+And against the live config, comparing HEAD to the working tree:
+
+| deployment | HEAD (old) | worktree (new) |
+|---|---|---|
+| `stealth/ox-alpha/stealth/ox-alpha` | `stealth/ox-alpha` ✅ | `ox-alpha/stealth/ox-alpha` ❌ |
+| `minimax/minimax-m3/minimax/minimax-m3` | `minimax/minimax-m3` ✅ | `minimax-m3/minimax/minimax-m3` ❌ |
+
+**Consequence.** `serving_model` is part of the rollup's unique key
+(`bucket_ts, key_id, model_group, provider, serving_model`), so a corrupted
+value does not merely mislabel a row — it creates a **second bucket for the
+same model in the same window** (verified: one model, two rollup rows). The
+stored dimension is permanently wrong for every legacy row of a
+slash-bearing group.
+
+The old code was correct here because it keyed the strip on the row's
+`model_group`, which for a non-failed-over request *is* the serving group,
+slashes included. The review fix removed that and replaced it with a
+first-segment strip, which fixed the fallback case at the cost of the far more
+common one.
+
+**Why the round-65 tests did not catch it:** the fixture sets
+`MODEL_A_GROUP == MODEL_A_ID == "stealth/ox-alpha"`, so the group and the model
+id are the same string and a corrupted recovery never collides with the
+sibling — the conflation assertion passes vacuously. The new test file uses a
+slash-bearing group whose model id differs from it.
+
+**Fix:** key the strip on the row's `model_group` when it actually prefixes the
+deployment (the exact, non-failed-over case — correct for slash-bearing groups
+*and* slash-bearing model ids), and fall back to the first-segment strip only
+for a fallback-served row, where the serving group is not recorded at all and
+the split point is genuinely ambiguous. The `f"{group}/"` prefix test is
+path-boundary-safe, so a group `A` does not match a deployment `AB/x`.
+
+**Severity, measured not assumed.** `reprice_unpriced_history` still finds the
+row, because `_shares_model_tail` matches the real id among the corrupted
+string's slash-tails — so retroactive pricing *does* recover and no request goes
+unbilled. The damage is the stored `serving_model`: it is a rollup dimension, so
+one model splits into two buckets in the same window (verified: one model, two
+rows, one named `minimax-m3/MiniMax-M3/air`), and the console reports a model
+name that does not exist. This is a data-fidelity defect, not a billing one.
+
+Covered by `tests/test_fix_round68.py` (3 tests: direct recovery, rollup
+storage, and rollup-dimension split). All three were RED against the
+first-segment-only implementation and are GREEN after the fix.
+
+**Residual, deliberately not fixed.** The fallback branch is still lossy when
+the *serving* group itself contains a `/`: `deployment="minimax/minimax-m3/MiniMax-M3"`
+with `model_group="A"` (a fallback-served row) yields `minimax-m3/MiniMax-M3`.
+This is not a regression — HEAD produced the same corrupted value, and the
+pre-HEAD `split("/")[-1]` produced `MiniMax-M3`, which is right for this
+sub-case but wrong for the slash-bearing-*model-id* case round 65 fixed — so
+the change trades one sub-case for another and is net better. It is also
+unreachable in the shipped configuration: fallbacks are opt-in and the live
+`wiwi.yaml` configures no `fallbacks:` table, and a directly-requested group
+takes the exact-strip branch. Repairing it would require recording the serving
+group on the attempt, which is a schema change, not a bugfix.
+
+**Backfill deliberately declined.** Rows already written by the buggy version
+carry a corrupted `serving_model`. They are not irrecoverable — `_shares_model_tail`
+finds the real id among the corrupted string's slash-tails, so repricing still
+recovers them — but the stored dimension stays wrong (one model shown twice in
+the console). No re-key/backfill is attempted; the corrupted label is left as
+history rather than guessed at.
+
+---
+
+## 🟠 Open — round 68 audit sweep: newly confirmed defects (2026-09-16)
+
+Found by a five-agent read of the backend (`core/`, `streaming/`, `router/`,
+`auth/`, `ratelimit/`, `cache/`, `wire/`, `providers/`, `server/`,
+`logging_core/`), each finding then reproduced independently against the real
+modules before being recorded here. Entries marked **disproven** were reported
+by an agent but did **not** reproduce on retest — recorded so a later agent
+does not chase them.
+
+### 159. Mid-stream resume emits a second `StreamStart` → a second `message_start` mid-stream
+
+**Severity:** 🟠 High (streaming-contract violation on the Anthropic surface)
+**Files:** `wiwi/core/gateway.py:725-727` (the `StreamStart` arm), `:690`
+(`started` is a local of `stream()`), `:762-764` (resume `continue`)
+
+`started` is initialised once before the consumer loop and the resume branch
+`continue`s back into it without resetting the flag. `_attempt_resume` starts a
+**new** pump on a **new** adapter instance, and the Anthropic adapter emits its
+own `StreamStart` from `message_start` (`providers/anthropic_adapter.py:673`),
+so the second one is yielded verbatim.
+
+**Trigger:** `stream_resume="enabled"`, an Anthropic upstream that dies after
+content, and a fallback that connects.
+
+**Reproduced** — the consumer observes two `StreamStart`s with the *primary's*
+and the *resume's* prompt counts (`prompt=11`, then `prompt=99`), and rendered
+through the real `AnthropicStreamEncoder` the client receives:
+
+```
+event: message_start      <- original
+event: content_block_start
+event: content_block_delta
+event: message_start      <- resume attempt, mid-stream
+event: content_block_delta
+```
+
+**Consequence:** `streaming/deltas.py` requires exactly one `StreamStart` first.
+Anthropic clients treat `message_start` as the start of a new message, so Claude
+Code re-initialises its context meter and accumulator and the turn is split
+across two message objects; the resume attempt's usage also *replaces* the
+opening usage rather than being summed.
+
+**Why the existing test missed it:** `tests/test_fix_round20.py:481`
+(`_assert_single_logical_stream`) asserts exactly one `StreamStart`, but its
+harness (`_h2_config`) uses **OpenAI** providers, whose adapter emits no
+`StreamStart` — the gateway synthesizes one, and the synthetic branch is
+guarded. Only the Anthropic adapter emits one, which is the unguarded path.
+
+**Fix sketch:** reset `started` in the resume branch (or fold the resumed
+attempt's `StreamStart` into the existing one instead of re-emitting).
+
+### 160. Anthropic adapter emits `ToolCallArgsDelta(args_fragment=None)` — the gateway's `"".join()` raises
+
+**Severity:** 🟠 High (500 mid-stream)
+**Files:** `wiwi/providers/anthropic_adapter.py:730-732`; consumers
+`wiwi/core/gateway.py:527` and `:583`
+
+`d.get("partial_json", "")` defaults only a *missing* key; a `null` (or any
+non-string) value passes through, unlike every sibling arm in the same method
+and every other adapter, which gate with `isinstance(..., str)`.
+`streaming/deltas.py` types `args_fragment: str`.
+
+**Reproduced:** frame
+`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":null}}`
+→ `ToolCallArgsDelta(args_fragment=None)`; folding it raises
+`TypeError: sequence item 0: expected str instance, NoneType found`.
+
+**Fix sketch:** `frag = d.get("partial_json"); args_fragment=frag if isinstance(frag, str) else ""`.
+
+### 161. Gemini can emit two `UsageFinal` / `Finish` / `StreamEnd` for one stream
+
+**Severity:** 🟠 High (billed on the wrong frame; contract violation)
+**Files:** `wiwi/providers/gemini_adapter.py:346-396` — both the `if finish:`
+arm and the `elif u and not parts:` arm emit a full terminal tail.
+
+**Reproduced:** a parts-less usage-bearing frame followed by a finish frame
+yields `[StreamStart, UsageFinal, Finish, StreamEnd, UsageFinal, Finish,
+StreamEnd]`. Gemini 2.5 / Vertex attach `usageMetadata` to every chunk, so the
+`elif` fires on an intermediate frame and the later finish frame fires the
+`if`. Every consumer keeps the last value, so the stream is billed on the
+intermediate frame's counts.
+
+**Fix sketch:** a `self._saw_tail` flag set on first emission, checked in the
+`elif`.
+
+### 162. Revoking a credential is undone by an in-flight `authenticate()` re-caching its stale `AuthInfo`
+
+**Severity:** 🟠 High (revocation silently ineffective for up to the 60 s TTL)
+**Files:** `wiwi/auth/service.py:201` (DB read), `:210-211` (`_sweep_cache` +
+store); eviction sites `:304`, `:367`, `:386`, `:526`
+
+`authenticate()` has no lock and does read-modify-write on `self._cache`. Every
+revocation path works by *evicting* the entry, which is a no-op while it is
+absent — i.e. exactly during the window between the read at `:201` and the
+store at `:211`. An admin revoking in that window is overwritten by the late
+store.
+
+**Reproduced** with a faithful single-threaded interleaving at the only await
+point: after `revoke()`, the in-flight `authenticate()` still returns live info,
+re-inserts it into the cache, and a subsequent `authenticate()` also succeeds.
+
+**Consequence:** `DELETE /admin/keys/{id}`, `POST /admin/keys/{id}/disable` and
+the owner-revocation `expire_keys` all leave the credential authenticating for
+the rest of the TTL. Keys with `max_budget=None` and no expiry are only
+revocable by deletion, so this is their only revocation path.
+
+**Fix sketch:** a per-service `asyncio.Lock` around the `_lookup_db`→store pair,
+or re-validate liveness after any eviction generation change.
+
+### 163. `rpm: 0` / `tpm: 0` on a virtual key means *unlimited*, not *blocked*
+
+**Severity:** 🟡 Medium (an operator parking a key silently grants it unlimited throughput)
+**Files:** `wiwi/auth/service.py:41-43` (`_coerce_limit` rejects only `< 0`),
+`wiwi/ratelimit/memory.py:125-128` (`if key_rpm:` / `if key_tpm:`)
+
+**Reproduced:** `check(key_rpm=0, key_tpm=0)` returns allowed five times and
+creates no windows at all — the falsy guard skips the scope entirely.
+
+`DeploymentParams` rejects `rpm <= 0` for exactly this semantic (AUDIT #101),
+so the two boundaries disagree and the looser one is the one reachable through
+the admin API.
+
+**Fix sketch:** reject `<= 0` in `_coerce_limit` for `rpm`/`tpm`, mirroring
+`DeploymentParams`.
+
+### 164. Live OAuth credentials in `code.md` at the repo root are untracked but **not** gitignored
+
+**Severity:** 🟠 High (secret exposure risk — same class as #154)
+**File:** `code.md` (repo root; `.gitignore` covers `key.md` but not this)
+
+Holds four live WorkBuddy/CodeBuddy JWTs (two `accessToken`, two
+`refreshToken`, ~1.4 KB and 700 B each) for two accounts. `.gitignore:13`
+protects the sibling `key.md`, and the file's own section documents the same
+class of file (`wiwi-providers-*.json`, `workbuddy-auths-*.json`) — but
+`code.md` was not added, so a `git add -A` / `git add .` commits it. Confirmed
+never committed (`git log --all -- code.md` is empty) and confirmed
+`git check-ignore code.md` does not match.
+
+**Fix:** add `code.md` to `.gitignore` beside `key.md`; rotate the tokens if the
+file was ever staged.
+
+### 165. Responses encoder crashes on a hosted `web_search` call whose args aren't a JSON object
+
+**Severity:** 🟠 High (500 mid-stream, after content already sent)
+**File:** `wiwi/wire/openai_responses.py:409` (`_builtin_query`, reached from
+`:507`)
+
+`args = orjson.loads(arguments) if arguments else {}` then `args.get("query", "")`
+with no `isinstance(args, dict)` guard. The sibling path at `:441` is guarded.
+
+**Reproduced:** `ToolCallOpen(index=0, id=..., name="web_search",
+builtin="web_search")` + `ToolCallArgsDelta(args_fragment="[1]")` +
+`ToolCallClose(0)` raises `AttributeError: 'list' object has no attribute 'get'`
+— likewise for `5`, `"abc"`, `null`, `true`.
+
+**Fix sketch:** `return args.get("query", "") if isinstance(args, dict) else ""`.
+
+### 166. Chat codec forwards a non-string `role` to the upstream verbatim
+
+**Severity:** 🟡 Medium (upstream 400 misattributed far from its cause)
+**File:** `wiwi/wire/openai_chat.py:177` (`# type: ignore[arg-type]` is the tell)
+
+The Anthropic codec normalizes the role and the Responses codec normalizes it;
+Chat does not.
+
+**Reproduced:** `{"role": 7, "content": "hi"}` decodes to `role=7` and the
+OpenAI adapter emits `{"role": 7, ...}`; same for `["user"]`, `{"a":1}`, `null`.
+
+**Fix sketch:** coerce to the known role set, defaulting to `"user"` (the
+Anthropic codec's `normalized` line).
+
+### 167. Anthropic codec silently drops an assistant turn whose `content` is `null`
+
+**Severity:** 🟡 Medium (turn alternation corrupted on replayed history)
+**File:** `wiwi/wire/anthropic_messages.py:212-221` — `if parts:` guards the
+append with no `elif role == "assistant"` arm.
+
+**Reproduced:** `[{"role":"assistant","content":None},{"role":"user","content":"hi"}]`
+decodes to a single `user` turn on `/v1/messages`, while the Chat codec keeps
+the assistant turn (`openai_chat.py:175-176`). `content: null` is legal
+Anthropic input — it is what the API emits for a tool-use-only turn.
+
+**Fix sketch:** append an empty-parts assistant message, as the Chat codec does.
+
+### 168. A malformed image block is forwarded upstream as a bogus image instead of being dropped
+
+**Severity:** 🟡 Medium (upstream 400 with no indication of which block was junk)
+**Files:** `wiwi/wire/openai_responses.py:247` (`_decode_image(c.get("image_url") or "")`
+— the empty string passes the None guard), `wiwi/wire/anthropic_messages.py:69-72`
+(`source.type == "base64"` with no `data` → `b64=None`)
+
+**Reproduced** end to end through the real adapters:
+
+```
+POST /v1/responses  {"type":"input_image"}                       (no image_url)
+  -> outbound {"type":"image_url","image_url":{"url":"data:image/png;base64,None"}}
+
+POST /v1/messages   {"type":"image","source":{"type":"base64"}}   (no data)
+  -> outbound {"type":"image","source":{"type":"base64","data":null}}
+```
+
+`_decode_image` already returns `None` for non-string input; it just does not for
+the empty/absent case, so the malformed block survives as a 4-byte "image" or an
+upstream 400 that names no offending block. Note this is the opposite failure
+direction from this repo's usual crash-on-malformed.
+
+**Fix sketch:** return `None` from `_decode_image` when the url is empty, and skip
+the Anthropic base64/url arm when `data`/`url` is falsy.
+
+### 169. Cline's on-demand 401 refresh bypasses the sweeper's lock and circuit — a rotating refresh token can be burned twice
+
+**Severity:** 🟠 High (provider permanently marked dead until a human re-authenticates)
+**Files:** `wiwi/providers/cline_auto_refresh.py:191-218` (the on-demand hook,
+which builds its **own** `ClineAutoRefresh` worker at `:191`) vs `:112-121`
+(the sweeper, which takes a per-provider `asyncio.Lock` and re-reads the record
+under it); wiring at `wiwi/server/app.py:811-820`
+
+`_do_refresh` is lock-guarded and re-reads the record under the lock. The hook
+performs the identical refresh with **neither the lock nor the shared circuit**:
+it constructs a fresh worker, so `worker._circuit` is a different object from
+the sweeper's.
+
+`cline_oauth.py:12` states the hazard in its own module docstring — *"Refresh
+tokens rotate. Each refresh consumes the old refresh_token"* — and
+`_UNRECOVERABLE_CODES = {"invalid_grant", "invalid_request"}` (`:39`) maps the
+resulting error to `mark_dead(provider)`, which `CircuitBreaker.blocked` treats
+as permanent.
+
+**Trigger:** the access token is inside the refresh lead window (the documented
+steady state), and a sweeper tick and a client 401 land in the same window.
+Both read the same `refresh_token` from the config store and both POST
+`/auth/refresh`; the second presents a consumed token.
+
+**Consequence:** the provider stops refreshing until an operator
+re-authenticates. The hook path has no lock, so N concurrent 401s make it
+N-way. `workbuddy_auto_refresh._worker_for` already routes through the shared
+worker — the Cline path is the one that does not.
+
+**Fix sketch:** route the hook through the shared `state.cline_refresh` worker
+so both paths share one lock and one circuit (mirroring WorkBuddy).
+
+### 170. WorkBuddy treats an unknown expiry as "refresh now", rotating every key every sweep
+
+**Severity:** 🟡 Medium (needless token rotation + DB writes; false `mark_dead`)
+**Files:** `wiwi/providers/workbuddy_auto_refresh.py:118-120` and `:133-135`;
+`wiwi/providers/workbuddy_auth.py:177-178`
+
+`expires_within_lead(expires_epoch)` returns `True` when `expires_epoch <= 0`,
+and the sweeper uses it as the *only* due-check. `parse_auth` defaults a missing
+`expiresAt` to 0, so a stored record with no expiry is "always due".
+
+**Consequence:** with `TICK_S = 60`, such a key gets one POST to
+`/v2/plugin/auth/token/refresh` and one `update_key_secret` DB write per minute,
+indefinitely — each consuming a rotating refresh token. The first transient
+failure trips the circuit, and any 401/403 or "session dead" response calls
+`mark_dead` on a key that was never actually expired. The Cline path treats a
+missing/unparseable `expires_at` as *not due* (`cline_auto_refresh.py:108-110`),
+so the two OAuth sweeps disagree.
+
+**Fix sketch:** skip when `expires_at <= 0`, or keep the `<= 0` short-circuit in
+`needs_refresh` only and drop it from the sweeper's due-check.
+
+### 171. A failed request-log DB write silently discards the batch and leaves the drop counter at 0
+
+**Severity:** 🟠 High (unrecoverable accounting loss reported as "healthy")
+**Files:** `wiwi/logging_core/subsystem.py:121` (the only increment of
+`dropped_request_logs`), `:208-215` (`_emit`, whose `except Exception` logs but
+never counts); surfaced at `wiwi/server/app.py:1653`, `:1669` and
+`wiwi/server/metrics.py:65`
+
+`_emit` awaits `write_requests(batch)`; on failure the exception is caught and
+logged, and the batch is discarded. Nothing counts it — `dropped_request_logs`
+is incremented **only** on `asyncio.QueueFull`.
+
+**Trigger:** the database is unavailable, locked, or rejecting writes (SQLite
+`database is locked`, Postgres failover, disk full).
+
+**Reproduced** against the real `_emit` with a failing sink:
+
+```
+request_log_db_write_failed    count=1 error='database is locked'
+dropped_request_logs before: 0
+dropped_request_logs after : 0
+```
+
+**Consequence:** `/health` reports `"dropped_request_logs": 0` and `/metrics`
+exports `wiwi_request_logs_dropped_total 0` while every request row is lost —
+and `request_logs` is the only durable copy (the SSE ring is capped and dies
+with the process). A spend audit during a DB outage reads as "everything is
+fine" and under-reports cost, tokens and per-key budget consumption with no
+signal on any operator surface.
+
+**Fix sketch:** increment the counter (or a sibling
+`failed_request_log_writes`) in the `except` by `len(batch)`, and expose it
+beside the queue-full counter in `/health` and `render_metrics`.
+
+### 172. An invalid `prometheus_path` crashes the gateway at startup instead of degrading metrics
+
+**Severity:** 🟡 Medium (a config typo is a total outage, not a lost feature)
+**Files:** `wiwi/config.py:218-220`, `wiwi/server/app.py:1657-1670`
+
+`@app.get(metrics_path)` runs inside `create_app`, so a non-literal path (e.g.
+`/metrics/{job}`, or `metrics` with no leading slash) makes FastAPI raise at
+route registration and the process fails to boot. Nothing validates the value
+against the mounted routes.
+
+**Fix sketch:** validate at config-parse time (`startswith("/")`, no `{`/`}`),
+or catch the registration error, warn, and leave metrics disabled.
+
+### 173. Audit and proxy log losses are never counted at all
+
+**Severity:** 🟡 Medium (an admin mutation can succeed while its audit row is lost)
+**Files:** `wiwi/logging_core/subsystem.py:128-129` (`log_proxy`'s
+`except QueueFull: pass`), `:141-148` (`log_audit`)
+
+`write_audit` is awaited on the request path, so a DB failure there can lose the
+audit row while the mutation succeeds; the ring copy is the only trace and is
+capped. Proxy-log drops are silent by design but invisible to `/health` and
+`/metrics`. #38 covered the missing audit *ring* (fixed); this is the uncounted
+loss.
+
+**Fix sketch:** one shared `dropped_log_events` counter across the three
+streams, exposed like #171's.
+
+### Disproven on retest (do not re-investigate)
+
+- **NIM adopt-branch alias loss** (`nim_adapter.py:366-383`): reported as
+  emitting fragments out of order and leaking `_nim_arg_type`. Retested with a
+  real aliased schema (`{"type": ...}` → `_nim_arg_type`) through
+  `fresh_adapter("nvidia-nim")` on both orderings — the args concatenate to
+  `{"type":"x"}` correctly and the alias *is* restored. Not a defect.
+- **Rate-limiter scope collision via a custom key** (`ratelimit/memory.py:126`):
+  reported that a custom key's plaintext becomes `key_id`, so a key literally
+  named `global` could charge into the shared `global:rpm` window. Retested:
+  `AuthInfo.key_id` is always `v.id` (`auth/service.py:243`), the minted
+  `"k"+hex`, never the plaintext. Not reachable.

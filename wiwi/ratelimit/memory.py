@@ -62,10 +62,17 @@ class RateLimiter:
         """Reclaim windows that have gone empty, at most once per window period.
 
         Only *empty* windows are dropped. A window still holding events belongs
-        to a key with traffic inside the last 60 s, so the map is bounded by
-        concurrent active keys — that is the algorithm, not a leak, and evicting
-        a live window would reset that key's count and admit it over its cap
-        (a worse bug than the one this sweep exists to prevent).
+        to a key with traffic inside the last 60 s, and evicting a live window
+        would reset that key's count and admit it over its cap — a worse bug
+        than the one this sweep exists to prevent.
+
+        Note the bound is therefore "concurrent active keys *while traffic
+        continues*", not a hard cap: the sweep only runs from ``check``, so a
+        deployment that goes quiet with a large historical key set keeps the
+        map at its high-water mark until the next admission. That is strictly
+        better than the pre-fix behaviour (same entry condition, plus an O(n)
+        scan per request) and costs one idle window per key seen, which the
+        per-window ``_prune`` keeps correct without needing the sweep at all.
 
         What *was* wrong: the sweep scanned every window on **every** admission
         once the map passed ``_max_windows``, and it ran inside the limiter's
@@ -227,6 +234,14 @@ class RateLimiter:
             # request admitted more than a minute ago. The window total then
             # under-counted and admission let requests past the configured cap
             # (round 66).
+            #
+            # An empty key_id would build the literal scopes ":rpm"/":tpm",
+            # which are real dict keys: a caller admitting with "" creates them
+            # and a later release would touch them. No caller does today
+            # (``authenticate`` always supplies a key id), but guarding here
+            # makes "no phantom window" structural rather than incidental.
+            if not key_id:
+                return
             for scope in ("global:tpm", f"{key_id}:tpm"):
                 w = self._windows.get(scope)
                 if w is None or not w.is_token:

@@ -11,6 +11,11 @@ __pycache__/
 # Live config & secrets (tracked template: wiwi.yaml.example)
 wiwi.yaml
 key.md
+# Same class as key.md: a plaintext scratch file of live OAuth
+# access/refresh tokens. It is not named after any convention this file
+# already covers, so `git add -A` would otherwise commit live credentials
+# (AUDIT #164).
+code.md
 wiwi.db
 # SQLite WAL sidecars: untracked, and `git clean -fd` would otherwise unlink
 # the live DB's WAL while a backend holds it open, silently dropping writes.

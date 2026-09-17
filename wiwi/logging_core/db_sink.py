@@ -10,6 +10,7 @@ detection on Postgres; bucket math uses ``FLOOR()`` instead of
 from __future__ import annotations
 
 import time
+from typing import Any
 
 import orjson
 import sqlalchemy as sa
@@ -233,6 +234,32 @@ class _BucketSum:
         # already does for the percentiles.
         self.tps_max = max(getattr(a, "tps_max", 0) or 0,
                            getattr(b, "tps_max", 0) or 0)
+
+
+def _slash_tails(value: str) -> set[str]:
+    """Every suffix of *value* that starts at a "/" boundary, plus the whole.
+
+    For ``"openrouter/anthropic/claude-sonnet-4"`` this is the whole string,
+    ``"anthropic/claude-sonnet-4"`` and ``"claude-sonnet-4"``. Segments are
+    never split mid-path, which is what keeps ``"vendor/ox-alpha"`` from
+    matching ``"stealth/ox-alpha"`` — a bare-string suffix test would.
+    """
+    parts = value.split("/")
+    return {"/".join(parts[i:]) for i in range(len(parts))}
+
+
+def _shares_model_tail(a: str, b: str) -> bool:
+    """True when *a* and *b* name the same model under a shared slash-tail.
+
+    Used to reconcile a registered pricing key with the model id a row
+    recorded. Direction matters and both are needed: the key may be *shorter*
+    than the id (a bare ``"claude-sonnet-4"`` price for a row served by
+    ``"anthropic/claude-sonnet-4"``) or *longer* than it (the gateway's own
+    ``"openrouter/anthropic/claude-sonnet-4"`` key, which
+    ``CostEngine._lookup`` honours for live traffic). An exact-equality test
+    would silently no-op on the second shape (round 65 review, M1).
+    """
+    return a in _slash_tails(b) or b in _slash_tails(a)
 
 
 def _merge_p95(samples: list[float], pairs: list[tuple[float, int]]) -> float:
@@ -744,30 +771,47 @@ class DBSink:
         zeroed as the cost is written, so a second call finds nothing to do.
         """
         key_deltas: dict[str, float] = {}
-        # A rollup row is repriced when the priced key is the served model id or
-        # any of its slash-tails (the CostEngine._lookup convention), so
-        # pricing "claude-sonnet-4" still matches "anthropic/claude-sonnet-4".
-        # The comparison is on WHOLE remaining path segments: the previous
-        # exact match required the caller to pre-truncate the key to its last
+        # A rollup row is repriced when the priced key and the served model id
+        # share a slash-tail, in either direction (see _shares_model_tail):
+        # a bare "claude-sonnet-4" price matches "anthropic/claude-sonnet-4",
+        # and the gateway's own provider-prefixed key matches the bare id.
+        # Comparison is on WHOLE remaining path segments — the previous exact
+        # match required the caller to pre-truncate the key to its last
         # segment, which made two models sharing that segment indistinguishable
         # and billed one at the other's rate (round 65).
-        like = "%/" + (match_tail.replace("\\", "\\\\")
-                       .replace("%", "\\%").replace("_", "\\_"))
+        #
+        # The SQL narrows candidates; the Python rule decides. LIKE cannot
+        # express the segment boundary, so it is a prefilter only — and it must
+        # consider the key's tails too, since the key may be the LONGER side.
+        # Two ways a row can qualify, matching the two directions of the rule:
+        #   * the served id ENDS WITH one of the key's tails
+        #     ("anthropic/claude-sonnet-4" vs key "claude-sonnet-4"), or
+        #   * the served id IS one of the key's tails exactly — the case where
+        #     the key is the longer side (the gateway's provider-prefixed key),
+        #     which the LIKE alone cannot see because there is no leading "/".
+        tails = _slash_tails(match_tail)
+        like_suffixes = ["%/" + t.replace("\\", "\\\\")
+                         .replace("%", "\\%").replace("_", "\\_")
+                         for t in tails]
+        clauses = ["serving_model = :tail"]
+        params: dict[str, Any] = {"tail": match_tail}
+        for i, v in enumerate(like_suffixes):
+            clauses.append(f"serving_model LIKE :like{i} ESCAPE '\\'")
+            params[f"like{i}"] = v
+        for i, t in enumerate(sorted(tails)):
+            clauses.append(f"serving_model = :tail{i}")
+            params[f"tail{i}"] = t
         async with self.engine.connect() as conn:
-            rows = (await conn.execute(sa.text("""
+            rows = (await conn.execute(sa.text(f"""
                 SELECT id, key_id, provider, serving_model, unpriced_requests,
                        unpriced_tok_in, unpriced_tok_cached,
                        unpriced_tok_cache_creation, unpriced_tok_out
                 FROM request_rollups
                 WHERE unpriced_requests > 0
-                  AND (serving_model = :tail
-                       OR serving_model LIKE :like ESCAPE '\\')
-            """), {"tail": match_tail, "like": like})).all()
-            # The LIKE is a prefilter (it cannot express the segment
-            # boundary); the tail rule decides, exactly as in the cost engine.
+                  AND ({" OR ".join(clauses)})
+            """), params)).all()
             rows = [r for r in rows
-                    if match_tail in {"/".join((r.serving_model or "").split("/")[i:])
-                                      for i in range(len((r.serving_model or "").split("/")))}]
+                    if _shares_model_tail(match_tail, r.serving_model or "")]
         if not rows:
             return key_deltas
 
@@ -830,16 +874,36 @@ class DBSink:
         return status in ("ok", "ok_after_refresh")
 
     @staticmethod
-    def _model_id_from_attempt(serving: dict, group: str | None) -> str:
+    def _model_id_from_attempt(serving: dict[str, Any],
+                               group: str | None) -> str:
         """The provider-native model id an attempt was sent to.
 
         Prefers the ``model_id`` the attempt recorded. For rows written before
-        that field existed, recovers it from the ``"<group>/<model_id>"``
-        deployment string by stripping the row's own group prefix — exact, and
-        correct even when the model id contains "/". Falls back to the last
-        path segment only when the group is unknown, which is the lossy case
-        that conflated ``stealth/ox-alpha`` with ``vendor/ox-alpha``
-        (round 65).
+        that field existed, recovers it from the ``"<serving_group>/<model_id>"``
+        deployment string.
+
+        Stripping a fixed *first* segment is only correct when the serving
+        group contains no "/" — and a slash-bearing group is the normal shape
+        here: the shipped ``wiwi.yaml`` uses ``model_name: stealth/ox-alpha``
+        and ``model_name: minimax/minimax-m3``. For those, the first-segment
+        strip leaves the rest of the group glued to the front of the id
+        (``minimax/minimax-m3`` + ``MiniMax-M3`` → ``minimax-m3/MiniMax-M3``),
+        a value that names no real model.
+
+        So the row's ``model_group`` is the exact prefix whenever the request
+        was *not* failed over — it is the serving group then, slashes and all,
+        and stripping it is exact even when the model id also contains "/".
+        Only a fallback-served row differs (``ctx.group`` is the
+        client-requested group and is never reassigned, so the row reads
+        ``model_group="A"`` with ``deployment="B/real-model"``); there the
+        serving group is not recorded at all and the split point is genuinely
+        ambiguous, so we fall back to stripping the first segment — correct
+        whenever the serving group has no slash, which is the case the
+        fallback path was added for (round 65 review).
+
+        Returns ``""`` when nothing can be recovered — the caller treats an
+        empty id as unknown rather than guessing a tail that may belong to a
+        different model.
         """
         recorded = serving.get("model_id")
         if isinstance(recorded, str) and recorded:
@@ -847,9 +911,16 @@ class DBSink:
         dep = serving.get("deployment") or ""
         if not isinstance(dep, str) or not dep:
             return ""
+        # Exact strip: the row's group IS the serving group (the common,
+        # non-failed-over case). Handles a slash-bearing group correctly.
         if group and dep.startswith(f"{group}/"):
             return dep[len(group) + 1:]
-        return dep.split("/")[-1]
+        if "/" not in dep:
+            # No group prefix at all: the whole string is the model id.
+            return dep
+        # Failed over: the serving group is unknown. First-segment strip is
+        # the best available guess, and is exact when that group has no slash.
+        return dep.split("/", 1)[1]
 
     @staticmethod
     def _serving_attempt(attempts_json: str | None,
@@ -891,15 +962,18 @@ class DBSink:
         # logged before the field existed.
         recorded = serving.get("model_id")
         if isinstance(recorded, str) and recorded:
-            # Mirror CostEngine._lookup: a price registered under any
-            # slash-tail of the served model id applies to it, so pricing
-            # "claude-sonnet-4" still matches a row served by
-            # "anthropic/claude-sonnet-4". Crucially this compares the
-            # *whole* remaining path, so "vendor/ox-alpha" no longer matches a
-            # row served by "stealth/ox-alpha" (round 65).
-            parts = recorded.split("/")
-            candidates = {"/".join(parts[i:]) for i in range(len(parts))}
-            return serving if match_tail in candidates else None
+            # Mirror CostEngine._lookup in BOTH directions. A price registered
+            # under any slash-tail of the served id applies to it (pricing
+            # "claude-sonnet-4" matches a row served by
+            # "anthropic/claude-sonnet-4"), AND a price registered under a
+            # provider-prefixed key applies too — the gateway prices live
+            # traffic with f"{provider_type}/{model_id}", so
+            # "openrouter/anthropic/claude-sonnet-4" is a key the cost engine
+            # honours and the repricer must not silently no-op on it (round 65
+            # review, M1). Comparing whole remaining paths in both directions
+            # keeps the collision closed: "vendor/ox-alpha" is not a tail of
+            # "stealth/ox-alpha", nor the reverse.
+            return serving if _shares_model_tail(match_tail, recorded) else None
         dep = serving.get("deployment", "")
         if not (isinstance(dep, str) and dep.endswith(f"/{match_tail}")):
             return None

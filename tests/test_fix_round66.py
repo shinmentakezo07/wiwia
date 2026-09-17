@@ -15,8 +15,6 @@
 
 from __future__ import annotations
 
-import time
-
 from wiwi.ratelimit.memory import RateLimiter
 
 # -- 1. release() must not refund a slot it does not own ------------------------
@@ -236,26 +234,43 @@ async def test_sweep_runs_at_most_once_per_interval():
         "still paying an O(n) scan under the lock")
 
 
-async def test_admission_stays_fast_with_many_windows():
-    """Admission must not degrade linearly with the window count."""
+async def test_admission_does_not_rescan_every_window():
+    """Admission must not walk the whole window map once past the cap.
+
+    Asserts the *behaviour* rather than wall-clock time: the sweep is the only
+    thing that iterates every window, so counting sweep passes is a
+    deterministic proxy for the O(n) scan. A timing assertion here was flaky
+    under full-suite load (the pre-fix cost is ~6 ms, but a loaded machine can
+    inflate the post-fix 0.007 ms past any fixed threshold).
+
+    RED: the pre-fix ``_sweep_windows`` ran on every ``check`` once the map
+    exceeded ``_max_windows``, so N admissions produced N full scans.
+    """
     limiter = RateLimiter()
-    limiter._max_windows = 100
-    for i in range(300):
-        await limiter.check(f"key{i}", key_rpm=100, key_tpm=10_000_000,
-                            est_tokens=10)
+    limiter._max_windows = 10
 
-    start = time.perf_counter()
+    # Fill well past the cap so the sweep condition is permanently true.
     for i in range(200):
-        await limiter.check(f"hot{i}", key_rpm=100, key_tpm=10_000_000,
-                            est_tokens=10)
-    per_check_ms = (time.perf_counter() - start) / 200 * 1000
+        await limiter.check(f"key{i}", key_rpm=100, est_tokens=10)
 
-    # Baseline is ~0.005 ms; an unthrottled 600-window scan measured ~6 ms.
-    # 1 ms leaves generous headroom for a slow CI box while still failing
-    # loudly if every admission is scanning the whole map.
-    assert per_check_ms < 1.0, (
-        f"admission took {per_check_ms:.2f} ms per check with "
-        f"{len(limiter._windows)} windows — the sweep is not throttled")
+    # Count how many admissions trigger a sweep pass.
+    passes = 0
+    real_sweep = limiter._sweep_windows
+
+    def counting_sweep(now: float) -> None:
+        nonlocal passes
+        before = limiter._last_sweep
+        real_sweep(now)
+        if limiter._last_sweep != before:
+            passes += 1
+
+    limiter._sweep_windows = counting_sweep
+    for i in range(50):
+        await limiter.check(f"burst{i}", key_rpm=100, est_tokens=10)
+
+    assert passes <= 1, (
+        f"{passes} full sweeps ran across 50 admissions — the sweep is not "
+        "throttled, so every request pays an O(n) scan under the lock")
 
 
 async def test_active_key_survives_sweep_pressure():

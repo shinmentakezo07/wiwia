@@ -160,9 +160,9 @@ async def test_rollup_reprice_survives_a_bare_tail_key(sink):
 async def test_legacy_rows_without_model_id_are_not_conflated(sink):
     """Rows logged before ``model_id`` existed must still be told apart.
 
-    The deployment string alone is ambiguous, but the row's own ``model_group``
-    gives the exact prefix to strip, so the legacy fallback recovers the full
-    model id rather than the lossy last segment.
+    The deployment string alone is ambiguous, but it is always
+    ``"<serving_group>/<model_id>"``, so stripping the FIRST segment recovers
+    the full model id rather than the lossy last segment.
     """
     await sink.write_requests([
         _unpriced_row("A", MODEL_A_GROUP, MODEL_A_ID, record_model_id=False),
@@ -175,6 +175,42 @@ async def test_legacy_rows_without_model_id_are_not_conflated(sink):
         "legacy row for stealth/ox-alpha was charged by the vendor/ox-alpha "
         "reprice — the group-prefix fallback failed")
     assert deltas.get("key-B", 0) > 0
+
+
+async def test_legacy_fallback_row_keeps_its_full_model_id_in_the_rollup(sink):
+    """A fallback-served legacy row must not lose its model id in the rollup.
+
+    ``model_group`` is the CLIENT-requested group and is never reassigned, so
+    when a request for group A is served by a fallback group's deployment the
+    row carries ``model_group="A"`` but ``deployment="B/stealth/ox-alpha"``.
+    Keying the legacy prefix strip on ``model_group`` therefore misses, and the
+    code fell through to ``split("/")[-1]`` — storing ``serving_model`` as the
+    bare tail, which is the exact truncation this round removes (round 65
+    review).
+
+    The deployment always begins with the SERVING group, so stripping its first
+    segment is correct in both the fallback and the non-fallback case.
+    """
+    # Client asked for group "A"; the request failed over to group "B", which
+    # served model id "stealth/ox-alpha". Written before model_id existed.
+    await sink.write_requests([LogEvent(
+        stream="request", ts=time.time(), status=200, key_id="key-fb",
+        model_group="A", provider="openrouter",
+        tok_in=1_000_000, tok_out=0, cost=0.0,
+        attempts=[{"deployment": f"B/{MODEL_A_ID}", "provider": "openrouter",
+                   "provider_key_label": "k", "status": "ok", "latency_ms": 1}],
+    )])
+    await sink.rollup_and_prune(cutoff_ts=time.time() + 3600)
+
+    async with sink.engine.connect() as conn:
+        stored = (await conn.execute(sa.text(
+            "SELECT serving_model FROM request_rollups"))).scalar()
+
+    assert stored == MODEL_A_ID, (
+        f"rollup stored serving_model={stored!r} for a fallback-served row "
+        f"whose true model id is {MODEL_A_ID!r} — the legacy fallback keyed "
+        "the group strip on the client-requested group, missed, and truncated "
+        "to the bare tail")
 
 
 # -- storage path 2: the raw rows ---------------------------------------------
@@ -278,6 +314,13 @@ async def _rows(client) -> list[dict]:
 
 
 async def _serve(client, model: str, n: int = 1) -> None:
+    """Drive *n* mocked completions for *model* and wait for its rows to land.
+
+    Waits on the row's CONTENT (its ``model_group``), not just the row count:
+    waiting on a count lets a later call return while an earlier model's row is
+    still in flight, and a missing row then reads as "cost 0" in a cost
+    assertion — passing vacuously instead of failing.
+    """
     with respx.mock:
         respx.post(OPENAI_URL).respond(json=_completion_body(model))
         for _ in range(n):
@@ -288,10 +331,11 @@ async def _serve(client, model: str, n: int = 1) -> None:
                                   headers=AUTH)
             assert r.status_code == 200, r.text
     for _ in range(60):
-        if len(await _rows(client)) >= n:
+        rows = await _rows(client)
+        if sum(1 for row in rows if row["model_group"] == model) >= n:
             return
         await asyncio.sleep(0.02)
-    raise AssertionError("request log did not flush")
+    raise AssertionError(f"request log for {model!r} did not flush")
 
 
 async def test_put_pricing_does_not_reprice_a_sibling_model(e2e_client):
@@ -310,6 +354,10 @@ async def test_put_pricing_does_not_reprice_a_sibling_model(e2e_client):
     assert r.status_code == 200, r.text
 
     costs = {row["model_group"]: row["cost"] for row in await _rows(e2e_client)}
+    # Both rows must exist, or "sibling not repriced" is indistinguishable
+    # from "sibling row never written" and the assertion below passes vacuously.
+    assert set(costs) == {"stealth/ox-alpha", "vendor/ox-alpha"}, (
+        f"expected a logged row per model, got {sorted(costs)}")
     assert costs["vendor/ox-alpha"] > 0, (
         "the priced model's own history must be repriced")
     assert costs["stealth/ox-alpha"] == 0.0, (
@@ -333,3 +381,56 @@ async def test_put_pricing_reprices_its_own_slash_bearing_model(e2e_client):
     costs = {row["model_group"]: row["cost"] for row in await _rows(e2e_client)}
     assert costs["stealth/ox-alpha"] == pytest.approx(3.0), (
         "a slash-bearing model's own history must still be repriced")
+
+
+# -- the repricer must accept every key shape the cost engine honours ----------
+
+
+async def test_reprice_accepts_a_provider_prefixed_key(sink):
+    """A price registered under the gateway's own live key must reprice history.
+
+    The gateway prices live traffic with ``f"{provider_type}/{model_id}"``
+    (``core/gateway.py``), and ``CostEngine._lookup`` tries that full key first.
+    So an operator may legitimately register a price under
+    ``"openrouter/anthropic/claude-sonnet-4"`` — and live traffic will find it.
+    If the repricer's candidate set is narrower, that key silently true-ups
+    nothing: history stays at cost 0 and budgets stay under-charged, which is
+    the same silent mis-accounting this round exists to remove (round 65
+    review, M1).
+
+    The row's recorded model id is a *tail* of the registered key, so the match
+    must consider tails in both directions.
+    """
+    await sink.write_requests([LogEvent(
+        stream="request", ts=time.time(), status=200, key_id="key-A",
+        model_group="g", provider="openrouter", tok_in=1_000_000, tok_out=0,
+        cost=0.0,
+        attempts=[{"deployment": "g/anthropic/claude-sonnet-4",
+                   "provider": "openrouter", "provider_key_label": "k",
+                   "status": "ok", "latency_ms": 1,
+                   "model_id": "anthropic/claude-sonnet-4"}])])
+
+    deltas = await sink.reprice_unpriced_history(
+        "openrouter/anthropic/claude-sonnet-4", _rate_for)
+
+    assert deltas.get("key-A", 0) > 0, (
+        "a price registered under the provider-prefixed key the gateway itself "
+        "uses for live pricing repriced nothing — the repricer's candidate set "
+        "is narrower than CostEngine._lookup's")
+
+
+async def test_reprice_still_rejects_an_unrelated_provider_prefixed_key(sink):
+    """Control: widening the match must not resurrect the collision.
+
+    ``vendor/ox-alpha`` must still not match a row served by
+    ``stealth/ox-alpha``, in either direction.
+    """
+    await _write_collision_pair(sink)
+
+    deltas = await sink.reprice_unpriced_history(
+        "someprovider/vendor/ox-alpha", _rate_for)
+
+    assert "key-A" not in deltas, (
+        "the provider-prefixed key matched a different model — the two-way "
+        "tail rule reintroduced the collision")
+    assert deltas.get("key-B", 0) > 0
