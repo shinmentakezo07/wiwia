@@ -46,28 +46,39 @@ throwaway harnesses the fixers wrote are not.
 
 Each fixer was scoped to code only, so these doc lines still describe the old behaviour:
 
-- [ ] `docs/API_REFERENCE.md:79` — lists `wiwi_provider_cooldowns`, which is rendered
-      nowhere, and documents the three quantile metrics as histograms.
-- [ ] `docs/API_REFERENCE.md:203` / `docs/ADMIN.md:98` / `docs/ARCHITECTURE.md:58` — pin
-      budget-cap semantics to `402`; confirm they still match the C1 fix.
+- [x] `docs/API_REFERENCE.md:79` — **done this round.** `wiwi_provider_cooldowns` (rendered
+      nowhere) is gone; the line now lists the series actually exported and states that the
+      three quantile families are `summary`, not `histogram`.
+- [x] `docs/API_REFERENCE.md:203` / `docs/ADMIN.md:98` / `docs/ARCHITECTURE.md:58` — **verified
+      this round**: budget caps are still reported as `402` on the refusal path, and the
+      post-response semantics ("applied post-response; exceeding a cap yields `402` on
+      subsequent requests") match the shipped behaviour. No edit needed.
 - [x] `wiwi.yaml.example` — done this round: the comment now states the real precedence
       (`wiwi_params.timeout` > provider `timeout_s` > `router_settings.timeout`).
-- [ ] `docs/CORE.md` / `docs/ARCHITECTURE.md` — list `raw_body_bytes` and `log_buffer` as
-      part of `RequestContext`'s contract; those fields were removed.
-- [ ] `UPDATE.md` — **binding** changelog for translation-layer fixes. Any change under
-      `wiwi/wire/` or `wiwi/providers/` needs an entry here.
+- [x] `docs/CORE.md` / `docs/ARCHITECTURE.md` — **done this round.** `raw_body_bytes` and
+      `log_buffer` are removed from the `RequestContext` field lists; `est_tokens` and
+      `forward_headers` (both live) are named instead.
+- [x] `UPDATE.md` — **done this round.** The round-75/76/78 entry records the codec, adapter
+      and gateway fixes (AUDIT #159-#211) across `wiwi/wire/`, `wiwi/providers/` and
+      `wiwi/core/gateway.py`.
 
 ## 4. Test files the agents were forbidden to touch
 
 All four were deliberately **kept** this round, so these test files need no edit:
 
 - [x] `StreamTape.replay_thinking` — kept (test-pinned). Still has no production caller.
-- [ ] `ClineAdapter.set_header_context` — kept (test-pinned, no production caller). To make
-      `X-Task-ID` actually reach Cline, add
-      `adapter.set_header_context({"task_id": request.headers.get("x-task-id")})` beside the
-      three `set_tool_context` call sites in `wiwi/core/gateway.py` (~226, ~329, ~772).
-      There is no inbound-header path into `RequestContext` today, so this needs a codec
-      change too — that is why it was not done.
+- [x] `ClineAdapter.set_header_context` — **KEPT, decision recorded (round 85).** The
+      wiring was investigated and deliberately NOT added. `X-Task-ID` is *optional*
+      client-identity context: `headers()` already emits it whenever `_context["task_id"]`
+      is set, and the adapter's module docstring lists the headers Cline actually
+      *requires* (`HTTP-Referer`, `X-Title`, `X-CLIENT-*`, `X-PLATFORM*`) — `X-Task-ID` is
+      not among them. Nothing in `docs/`, `AUDIT.md` or the Cline upstream contract
+      indicates it is needed for a request to succeed, and `AUDIT_REPORT.md` records the
+      method as "tests only" without a demonstrated failure from its absence. Wiring it
+      would also require a codec change (no inbound-header path into `RequestContext`
+      exists — `forward_headers` is allowlisted to `anthropic-beta` only), so it is a
+      feature, not a fix. Left as-is: test-pinned, no production caller, no user-visible
+      defect. Revisit only if a real Cline request is observed to fail without it.
 - [x] `DBSink.invalidate_cache` — kept and now **called** from `write_requests`/`write_audit`,
       so a freshly logged request is immediately visible to `/admin/stats/*` and
       `/admin/logs/*` instead of for up to 5 s.
@@ -76,27 +87,40 @@ All four were deliberately **kept** this round, so these test files need no edit
 
 ## 5. Product decisions left open
 
-- [ ] **`log_requests` / `header_allowlist`** — both config fields were **deleted** this
-      round as dead (nothing read either). The docs in §3 still describe them and must be
-      updated.
+- [x] **`log_requests` / `header_allowlist`** — both config fields were **deleted** as dead
+      (nothing read either). **Verified this round**: `grep -rn "log_requests\|header_allowlist"
+      docs/ wiwi.yaml.example README.md` returns no hits, so no documentation describes them.
 - [x] **`excluded_providers`** — the dead disjunct was removed this round (the set was
       declared and read but never populated, so `pname in excluded_providers` was always
       `False`); the surviving cadence still works through `provider_consec`.
 - [x] **Audit log surface** — `DBSink.read_audit()` + `LoggingSubsystem.read_audit()` and the
       `/admin/logs/audit` route now exist and are verified live (200 with rows for a master
       bearer, 401 anonymously). Only a **UI page** remains undecided.
-- [ ] **`POST /admin/cline/oauth/auto-connect`** is implemented but unreachable from the
-      SPA (both Cline UIs use the paste-code flow deliberately). Wire it or drop it.
-- [ ] **31 unimported `web/src` modules** (~6.8k LOC of an abandoned `llmgateway.io` port).
-      Deleted, or kept as reference?
+- [x] **`POST /admin/cline/oauth/auto-connect`** — **KEPT as dormant (decision round 85).**
+      It is implemented and tested (5 tests in `tests/test_admin_cline_oauth.py`), and the
+      route is correct; it simply cannot complete end-to-end today because Cline's Google
+      OAuth ignores the `callback_url` parameter, so the redirect never carries the `?code=`
+      back. Both Cline UIs therefore drive the paste-code flow deliberately
+      (`web/src/api/client.ts:432-435` documents this at the call site). Kept rather than
+      deleted because it needs no maintenance and becomes live the moment Cline honours
+      `callback_url` — at which point it is the better UX (no copy-paste). No UI is wired to
+      it. If Cline never fixes it, deleting is a one-commit change.
+- [x] **31 unimported `web/src` modules** — **RESOLVED (verified round 85).** An import
+      sweep over all 74 `web/src` `.ts`/`.tsx` files finds **0** modules whose basename is
+      referenced by no other file: the abandoned `llmgateway.io` port has already been
+      cleaned out. Nothing to delete; the item was stale. (`bun run build` compiles 2394
+      modules and `bun run lint` reports 0 errors, so nothing is orphaned.)
 
 ## 6. Environment
 
-- [ ] **`import wiwi` outside the repo root resolves to a stale checkout** at
-      `/teamspace/studios/this_studio/Fionn` — the editable install points there. Reinstall
-      from this checkout (`pip install -e .`) or export
-      `PYTHONPATH=/teamspace/studios/this_studio/wiwia` in your shell profile. Until then,
-      any ad-hoc script run from elsewhere exercises different code.
+- [x] **`import wiwi` outside the repo root resolves to a stale checkout** — **FIXED
+      (round 85).** The editable install (`_editable_impl_wiwi.pth`) pointed at
+      `/teamspace/studios/this_studio/Fionn`, whose last commit was 2026-09-03. Reinstalled
+      from this checkout with `uv pip install -e . --no-deps` (plain `pip` fails here:
+      `hatchling.build` is not installed in the env, so `--no-build-isolation` cannot work
+      either). Verified from `/tmp` and from the repo root: both now resolve to
+      `/teamspace/studios/this_studio/wiwia/wiwi/__init__.py`. The Fionn checkout is dormant
+      (no writes in 7 days) and was left untouched, so this is reversible.
 
 ## 7. Verify before you commit
 
@@ -108,12 +132,16 @@ cd web && bun run build && bun run lint
 ```
 
 The pre-existing baseline was **1672 passed, ruff clean**. After this round's fixes the
-suite is **1733 passed, ruff clean** — the increase is the 61 new regressions in
-`tests/test_fix_round55.py`, not a relaxed gate. Anything below 1733 is a regression;
-`AUDIT_REPORT.md`'s verification log records what each finding looked like before the fix.
+suite is **2264 passed, ruff clean** — the increase is the new `test_fix_round68/75-84`
+regressions plus the round-69-74 files, not a relaxed gate. Anything below 2264 is a
+regression; `AUDIT_REPORT.md`'s verification log records what each finding looked like
+before the fix.
 
-`bun run build` was verified green this round (tsc strict + vite, 2394 modules). `bun run
-lint` was not run.
+`bun run build` was verified green this round (tsc strict + vite, 2394 modules) and
+`bun run lint` reports **0 errors** (20 pre-existing warnings, none on changed lines). The
+six web findings (#205-#210) are verified in real Chromium by
+`.verify/webconsole/redgreen.py` — **29/29 checks pass on the fixed bundle** and the
+discriminating subset fails on a pre-fix build.
 
 ## 8. Console lag at 24h+ ranges (reported 2026-09-15, fixed)
 
@@ -153,6 +181,26 @@ and discarding 99%. Adding `minutes` / `offset` parameters to
 `/admin/logs/requests` (the sink already takes `limit`) would cut the payload from
 5.46 MB to a few KB and remove the client-side window filter entirely. That touches
 the endpoint, `read_requests`, and six call sites; it is a separate change.
+
+**DONE (round 85).** `GET /admin/logs/requests` now takes `minutes` (0 = all-time, the
+same convention as `/admin/stats/*`) and `offset`, passed through `read_requests` /
+`_read_requests_uncached` and applied to the ring fallback too, so both paths agree.
+Both are clamped at the endpoint (`minutes = max(0, minutes)`, likewise `offset`), and
+the query cache keys on them — without that, two windows would have served each other's
+rows. The zero-argument call is byte-identical to before, so all six existing callers
+keep today's behaviour.
+
+`Usage.tsx` was migrated: every consumer of its rows already derived from the same
+`l.ts >= now - range*60` predicate the server now applies, so the switch is provably
+equivalent (the client-side filter is kept as a guard for the placeholder window while a
+new range loads). **`RequestLogs.tsx` was deliberately NOT migrated** — its unfiltered
+set feeds three non-time-filtered surfaces (the model/provider/surface dropdowns via
+`distinctOptions`, the two distinct empty states, and the footer total), so windowing the
+fetch would silently shrink all three. That page keeps the full fetch.
+
+Verified live: all-time 10 rows, `minutes=10` → 5, `offset=2` → 3, negative values clamp
+to the no-op, and `offset` returns a strict suffix of the unlimited query.
+`tests/test_fix_round86.py` (10).
 
 ## 9. Request-log storage cap (implemented)
 
