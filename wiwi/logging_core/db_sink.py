@@ -1049,13 +1049,20 @@ class DBSink:
         return out
 
     async def read_requests(self, limit: int = 200,
-                            key_ids: list[str] | None = None) -> list[dict]:
+                            key_ids: list[str] | None = None,
+                            minutes: int = 0,
+                            offset: int = 0) -> list[dict]:
         """Newest-first rows shaped like public_dict(LogEvent) so the admin UI
         can treat ring-backed and DB-backed entries identically.
 
         Ordered by ts DESC (id DESC tiebreak) so the result is deterministic by
         event time regardless of insertion order — the frontend renders this
         array directly without re-sorting.
+
+        *minutes* is a lookback window ending at ``time.time()``.
+        ``minutes == 0`` means all-time (no ts cutoff), matching
+        :meth:`read_overview`. *offset* skips the first N rows of that same
+        ordered set (paging).
 
         *key_ids* scoping semantics:
         - ``None`` → admin / unfiltered (all rows).
@@ -1067,27 +1074,39 @@ class DBSink:
         """
         if key_ids is not None and not key_ids:
             return []
-        ckey = ("read_requests", int(limit), tuple(key_ids) if key_ids else None)
+        # The window and offset are part of the cache identity: without them
+        # a bounded read and an all-time read of the same (limit, key_ids)
+        # collide and serve each other's rows (the classic bug in this file).
+        ckey = ("read_requests", int(limit), tuple(key_ids) if key_ids else None,
+                int(minutes), int(offset))
         cached = self._cache_get(ckey)
         if cached is not None:
             return cached
-        result = await self._read_requests_uncached(limit, key_ids)
+        result = await self._read_requests_uncached(limit, key_ids, minutes, offset)
         if result:
             self._cache_put(ckey, result)
         return result
 
     async def _read_requests_uncached(self, limit: int,
-                                      key_ids: list[str] | None) -> list[dict]:
+                                      key_ids: list[str] | None,
+                                      minutes: int = 0,
+                                      offset: int = 0) -> list[dict]:
         if key_ids is not None and not key_ids:
             return []
         cols = ", ".join(_COLS)
-        params: dict = {"l": int(limit)}
-        where = ""
+        params: dict = {"l": int(limit), "o": int(offset)}
+        # Same cutoff convention as read_overview: minutes == 0 → no ts
+        # predicate at all (all-time), otherwise ts >= time.time() - minutes*60.
+        clauses: list[str] = []
+        if minutes > 0:
+            params["cutoff"] = time.time() - minutes * 60
+            clauses.append("ts >= :cutoff")
         if key_ids:
-            where = "WHERE key_id IN :kids"
+            clauses.append("key_id IN :kids")
             params["kids"] = key_ids
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         stmt = sa.text(f"SELECT {cols} FROM request_logs {where}"
-                       " ORDER BY ts DESC, id DESC LIMIT :l")
+                       " ORDER BY ts DESC, id DESC LIMIT :l OFFSET :o")
         if key_ids:
             stmt = stmt.bindparams(sa.bindparam("kids", expanding=True))
         async with self.engine.connect() as conn:

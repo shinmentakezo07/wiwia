@@ -543,6 +543,12 @@ class AppState:
         self.login_throttle = _AttemptThrottle(limit=10, window_s=300.0)
         self.signup_throttle = _AttemptThrottle(limit=5, window_s=3600.0)
         self.auth: AuthService | None = None
+        # Charges ``AuthService.update_spend`` failed to persist (AUDIT #179).
+        # A failed write used to be indistinguishable from a successful one —
+        # the caller was told the charge landed, so a hard budget cap stayed
+        # unenforced with no counter, no /health field and no metric. This is
+        # the process-lifetime counter that makes the loss visible.
+        self.spend_charge_failures = 0
         self.gateways: dict[str, Gateway] = {}
         self.alert_rules: list[dict[str, Any]] = []
         self.config_store: ConfigStore | None = None
@@ -1026,12 +1032,47 @@ def create_app(config: WiwiConfig) -> FastAPI:
         admission check for the rest of its life (AUDIT_REPORT C1). The
         refusal is still reported so the caller refuses *this* response; the
         recorded spend is what makes the *next* request fail admission.
-        Genuine accounting errors are suppressed so they cannot mask an
-        otherwise-successful response.
+
+        A *raise* out of ``update_spend`` is a different event: the write path
+        itself is down (SQLite ``database is locked``, Postgres failover, pool
+        exhaustion), so the charge was neither rejected nor recorded. That used
+        to return True from a bare ``except`` — indistinguishable from a
+        successful charge — so a hard budget cap silently stopped being
+        enforced, with no counter, no /health field and no metric (AUDIT #179).
+        The exception is now loud (an ``error`` log with the key id and cost,
+        plus the ``spend_charge_failures`` counter in /health and /metrics) and
+        the charge is retried through ``apply_spend_trueup``, which records it
+        regardless of the cap — so a transient failure loses no money and the
+        cap stays enforced for the next request.
+
+        Only if that second, unconditional attempt *also* fails is the charge
+        genuinely unrecorded, and only then does this return False. That is the
+        one case where reporting success would be the fail-open the audit
+        describes: the money is gone and the cap will not stop the next
+        request. Note what is deliberately *not* refused — a write failure the
+        true-up repaired. The upstream has already served and billed the
+        request, so turning a repaired accounting blip into an error would be
+        the AUDIT #24 defect (a 500/402 after a successful completion) wearing
+        a different status code.
         """
         try:
             recorded = await state.auth.update_spend(key_id, cost)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001 — accounting must never 500 a served turn
+            state.spend_charge_failures += 1
+            import structlog as _sl
+            _log = _sl.get_logger("wiwi.spend")
+            _log.error("spend_charge_failed", key_id=key_id, cost=cost,
+                       error=type(e).__name__, detail=str(e))
+            # Unconditional retry. Unlike the False path below this cannot be
+            # an over-budget crossing (a crossing returns False, it never
+            # raises), so the cap test does not apply and recording the charge
+            # is the honest accounting: the money was really spent.
+            try:
+                await state.auth.apply_spend_trueup(key_id, cost)
+            except Exception as e2:  # noqa: BLE001
+                _log.error("spend_charge_unrecorded", key_id=key_id, cost=cost,
+                           error=type(e2).__name__, detail=str(e2))
+                return False
             return True
         if not recorded:
             with contextlib.suppress(Exception):
@@ -1268,6 +1309,28 @@ def create_app(config: WiwiConfig) -> FastAPI:
                                 or state_.journals.is_expired(replay_id)):
                             return
 
+                # A replay is a request like any other and is subject to the
+                # same two rules as the cache-hit path above (AUDIT #120):
+                #
+                # 1. It must appear in the request log. This branch returns
+                #    before the logging call further down, so reconnects were
+                #    invisible to /admin/stats and to every rollup built on
+                #    it — a client reconnecting in a loop could serve
+                #    arbitrarily many requests that never showed up. The row
+                #    is written with ctx.usage unset and ctx.cost 0: the
+                #    journal replay consumed nothing upstream, and billing
+                #    the caller for it would be the opposite error.
+                # 2. It must refund the admission-time reservation.
+                #    ``enforce_rate_limit`` reserved an RPM event and an
+                #    estimated TPM event in both the key and global scopes
+                #    before this branch was reached; the replay makes no
+                #    upstream call, so those reservations are pure phantom.
+                #    Left in place they throttle unrelated traffic for the
+                #    full 60 s window — and because round 66 made refunds
+                #    strictly identity-matched, nothing else can reclaim them
+                #    afterwards, so each reconnect burns a slot for good.
+                state_.logs.log_request(build_log_event(ctx))
+                await _release_tpm_reservation(info, ctx)
                 return StreamingResponse(
                     _replay_iter(),
                     media_type="text/event-stream",
@@ -1493,7 +1556,15 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 if store_prompts:
                     _capture_delta(first, ctx, stream_text, stream_thinking,
                                    stream_tools)
-                chunk = encoder.feed(first)
+                # A raw ``bytes`` item is a pre-framed SSE keep-alive from the
+                # gateway pump, not an IR delta: the encoders' ``feed``
+                # isinstance-checks on delta classes only, so passing it there
+                # returned None and the frame was silently discarded — the
+                # configured ``stream_ping_interval_s`` was a no-op and an idle
+                # proxy/ALB still reaped a long thinking turn (AUDIT #177). It
+                # still goes through ``_emit`` so it is journaled with a
+                # sequence id like every other frame.
+                chunk = first if isinstance(first, bytes) else encoder.feed(first)
                 if chunk:
                     async for t in _emit(chunk):
                         yield t
@@ -1505,7 +1576,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 if store_prompts:
                     _capture_delta(d, ctx, stream_text, stream_thinking,
                                    stream_tools)
-                chunk = encoder.feed(d)
+                # Same keep-alive passthrough as the ``first`` block above.
+                chunk = d if isinstance(d, bytes) else encoder.feed(d)
                 if chunk:
                     async for t in _emit(chunk):
                         yield t
@@ -1648,9 +1720,51 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     @app.get("/health")
     async def health():
-        return {"status": "ok", "groups": len(app.state.wiwi.router.groups),
-                "providers": len(app.state.wiwi.router.providers),
-                "dropped_request_logs": app.state.wiwi.logs.dropped_request_logs}
+        """Liveness + readiness in one body, but only liveness in the status.
+
+        ``status`` used to be the constant ``"ok"`` (AUDIT #183), so a gateway
+        that could not serve a single request — zero providers, or every
+        group's deployments cooled/unhealthy — still reported healthy, and the
+        Docker ``HEALTHCHECK`` (which only probes for a 200) kept such a
+        container in rotation indefinitely. It is now derived from the router:
+        ``degraded`` when there is no provider at all or no group has an
+        available deployment.
+
+        The HTTP status stays 200 either way: the container probe and any load
+        balancer must be able to tell "the process is up" from "the process can
+        route", and a 503 here would make an orchestrator kill and restart a
+        process that is running perfectly well but merely has no usable key
+        configured.
+        """
+        router = app.state.wiwi.router
+        logs = app.state.wiwi.logs
+        groups = len(router.groups)
+        providers = len(router.providers)
+        available_groups = sum(
+            1 for deps in router.groups.values()
+            if any(d.available for d in deps))
+        return {
+            "status": "ok" if providers and available_groups else "degraded",
+            "groups": groups,
+            "providers": providers,
+            # The field that explains a ``degraded`` status: a group exists but
+            # every deployment in it is cooling or has no usable key.
+            "available_groups": available_groups,
+            # Loss counters. Each is process-lifetime and monotonic, and none
+            # can be derived from the request-log ring — a dropped or failed
+            # event is by definition absent from it (AUDIT #171/#173). Without
+            # them a saturated log queue or a failing log DB was invisible
+            # except as a missing row.
+            "dropped_request_logs": logs.dropped_request_logs,
+            "failed_request_log_writes": logs.failed_request_log_writes,
+            "dropped_proxy_logs": logs.dropped_proxy_logs,
+            "failed_audit_log_writes": logs.failed_audit_log_writes,
+            "dropped_log_events": logs.dropped_log_events,
+            # Charges the spend write path failed to persist (AUDIT #179). A
+            # non-zero value means the budget cap was not enforced for that
+            # many requests, which is an accounting incident, not a warning.
+            "spend_charge_failures": app.state.wiwi.spend_charge_failures,
+        }
 
     # -- metrics ---------------------------------------------------------------
     if config.router_settings.prometheus_enabled:
@@ -1663,10 +1777,19 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 return _err(401, "authentication_error", "master key required",
                             request, "chat")
             events = [e for _, e in await state.logs.sse.replay("request", 0)]
-            # A dropped event is absent from the ring by definition, so the
-            # queue-full counter has to be passed in; without it a saturated
-            # log queue would silently under-report every counter below.
-            text = render_metrics(events, state.logs.dropped_request_logs)
+            # The loss counters and the process-lifetime totals cannot be
+            # derived from the ring: a dropped event is absent from it by
+            # definition, and a ring-derived total decreases on every eviction
+            # (AUDIT #180), which makes PromQL read each eviction as a process
+            # restart. Both are passed in from the subsystem that owns them.
+            text = render_metrics(
+                events,
+                state.logs.dropped_request_logs,
+                state.logs.totals,
+                state.logs.failed_request_log_writes,
+                state.logs.dropped_proxy_logs,
+                state.logs.failed_audit_log_writes,
+                state.spend_charge_failures)
             return PlainTextResponse(text, media_type="text/plain; version=0.0.4")
 
     # -- admin -------------------------------------------------------------------
@@ -1751,7 +1874,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
         return ORJSONResponse({"key_id": key_id, "disabled": disabled})
 
     @app.get("/admin/logs/requests")
-    async def admin_request_logs(request: Request, limit: int = 10000):
+    async def admin_request_logs(request: Request, limit: int = 10000,
+                                 minutes: int = 0, offset: int = 0):
         actor = await current_user(request)
         if actor is None:
             return _err(401, "authentication_error", "authentication required", request)
@@ -1759,23 +1883,35 @@ def create_app(config: WiwiConfig) -> FastAPI:
         # product limit — the Usage page trusts the DB-backed overview for
         # the headline number and only uses this endpoint for the row table.
         limit = max(1, min(limit, 50000))
+        # minutes == 0 means all-time (same convention as /admin/stats/*). A
+        # negative window would push the cutoff into the future and hide every
+        # row; a negative OFFSET is invalid SQL. Clamp both to their no-op.
+        minutes = max(0, minutes)
+        offset = max(0, offset)
         kids: list[str] | None = None
         if actor.role != "admin":
             kids = [k["id"] for k in await state.auth.list_keys_for_owner(actor.id)]
         sink = state.logs.db_sink
         if sink is not None:
             return ORJSONResponse(
-                {"logs": await sink.read_requests(limit, key_ids=kids)},
+                {"logs": await sink.read_requests(limit, key_ids=kids,
+                                                  minutes=minutes, offset=offset)},
                 headers={"Cache-Control": "no-store"},
             )
-        # Ring fallback: deque is oldest→newest, so slice the newest N then
-        # reverse to newest-first — matching the DB path contract.
+        # Ring fallback: deque is oldest→newest, so reverse to newest-first
+        # first, then apply the SAME ts window and offset the DB path uses —
+        # the two paths must agree for a given query.
         ring = list(await state.logs.sse.replay("request", 0))
         evs = [e for _, e in ring]
         if kids is not None:
             evs = [e for e in evs if e.key_id in kids]
+        newest_first = list(reversed(evs))
+        if minutes > 0:
+            cutoff = time.time() - minutes * 60
+            newest_first = [e for e in newest_first if e.ts >= cutoff]
+        page = newest_first[offset:offset + limit]
         return ORJSONResponse(
-            {"logs": [public_dict(e) for e in reversed(evs[-limit:])]},
+            {"logs": [public_dict(e) for e in page]},
             headers={"Cache-Control": "no-store"},
         )
 
@@ -2018,8 +2154,15 @@ def create_app(config: WiwiConfig) -> FastAPI:
             key.weight = weight
             diff["weight"] = weight
         if body.get("reset_status"):
-            key.status = "active"
-            key.cooldown_until = 0.0
+            # The operator's explicit "this key is fine now". Clearing only
+            # ``status``/``cooldown_until`` left ``err_count`` at its
+            # retirement value, so ``on_result``'s
+            # ``err_count >= key_max_consecutive_fails`` re-retired the key on
+            # the very next non-200 — the reset silently reverted (AUDIT #199).
+            # ``recover(force=True)`` is the same revival the healer uses: it
+            # revives a terminal ``invalid`` too and clears the fail streak and
+            # the WRR deficit, which is what "reset" has to mean here.
+            key.recover(force=True)
             diff["reset_status"] = True
         if state.config_store:
             await state.config_store.update_key(
@@ -2181,6 +2324,17 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         f"provider still referenced by groups: "
                         f"{', '.join(referencing)} — remove those deployments first",
                         request)
+        # Persist FIRST, then mutate in-memory routing — the same order
+        # ``POST /admin/providers`` and ``DELETE /admin/keys/...`` already use.
+        # This path used to delete from ``router.providers`` (and the alias and
+        # price-scope maps) *before* the DB write, so a failed write answered
+        # 500 while having already taken effect in memory: the operator
+        # retried, the DB row and its plaintext key survived, and the provider
+        # came back on the next restart. ``log_audit`` was never reached
+        # either, so the mutation left no trace (AUDIT #181).
+        if state.config_store:
+            await state.config_store.delete_provider(name)
+            await state.config_store.delete_setting(_cline_oauth_setting_key(name))
         # drop any alias_id entry that points at this provider
         for k, v in list(state.router.alias_to_provider.items()):
             if v == name:
@@ -2193,9 +2347,6 @@ def create_app(config: WiwiConfig) -> FastAPI:
         for _entry in state.cost.prices.values():
             (_entry.get("providers") or {}).pop(name, None)
         del state.router.providers[name]
-        if state.config_store:
-            await state.config_store.delete_provider(name)
-            await state.config_store.delete_setting(_cline_oauth_setting_key(name))
         await state.logs.log_audit(actor="master", action="provider.delete", target=name)
         return ORJSONResponse({"deleted": True, "name": name})
 
@@ -2212,6 +2363,16 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return jerr
         diff: dict[str, Any] = {}
         new_name: str | None = None
+        # Validation only — nothing below mutates ``acct`` or the router maps
+        # until the DB write has succeeded (AUDIT #181). The PATCH path used to
+        # apply the rename (and the provider_type/base_url/round_robin edits)
+        # in memory first and persist afterwards, so a failed write answered
+        # 500 while the running process already routed and billed under a name
+        # the DB had never heard of, and the audit row was never written. A
+        # restart silently reverted it.
+        new_ptype: str | None = None
+        new_base_url: str | None = None
+        new_round_robin: bool | None = None
         if "name" in body:
             new_name = str(body["name"]).strip()
             if not new_name:
@@ -2230,31 +2391,29 @@ def create_app(config: WiwiConfig) -> FastAPI:
                             f" provider", request)
             diff["name"] = new_name
         if "provider_type" in body:
-            ptype = str(body["provider_type"])
-            if ptype not in PROVIDER_TYPES:
+            new_ptype = str(body["provider_type"])
+            if new_ptype not in PROVIDER_TYPES:
                 return _err(400, "invalid_request_error",
-                            f"unsupported provider type '{ptype}'", request)
-            acct.provider_type = ptype
-            diff["provider_type"] = ptype
+                            f"unsupported provider type '{new_ptype}'", request)
+            diff["provider_type"] = new_ptype
         if "base_url" in body:
             raw_url = _interpolate(body["base_url"])
             if not isinstance(raw_url, str):
                 return _err(400, "invalid_request_error",
                             "base_url must be a string", request)
-            base_url = raw_url.strip()
-            if not base_url:
+            new_base_url = raw_url.strip()
+            if not new_base_url:
                 return _err(400, "invalid_request_error",
                             "base_url must be non-empty", request)
-            acct.base_url = base_url
-            diff["base_url"] = base_url
+            diff["base_url"] = new_base_url
         if "round_robin" in body:
             # Same real-bool requirement as the key path (AUDIT #82):
             # bool("false") is True and would store the opposite.
             if not isinstance(body["round_robin"], bool):
                 return _err(400, "invalid_request_error",
                             "round_robin must be a boolean", request)
-            acct.round_robin = body["round_robin"]
-            diff["round_robin"] = acct.round_robin
+            new_round_robin = body["round_robin"]
+            diff["round_robin"] = new_round_robin
         alias_change: tuple[str | None, bool] | None = None
         if "alias_id" in body:
             alias_raw = body["alias_id"]
@@ -2271,6 +2430,28 @@ def create_app(config: WiwiConfig) -> FastAPI:
                             f"alias_id '{new_alias}' already used by provider"
                             f" '{prior}'", request)
             alias_change = (new_alias, True)
+        # Persist first, mutate second (AUDIT #181): a failed DB write must
+        # leave the running gateway's routing state exactly as it was, so the
+        # operator's retry is idempotent instead of racing a half-applied
+        # rename. This matches ``POST /admin/providers`` and
+        # ``DELETE /admin/keys/...``.
+        if state.config_store:
+            update_kwargs: dict[str, Any] = {
+                "provider_type": new_ptype,
+                "base_url": new_base_url,
+                "round_robin": new_round_robin,
+                "new_name": new_name,
+            }
+            if alias_change is not None:
+                update_kwargs["alias_id"] = alias_change[0]
+                update_kwargs["alias_id_set"] = True
+            await state.config_store.update_provider(name, **update_kwargs)
+        if new_ptype is not None:
+            acct.provider_type = new_ptype
+        if new_base_url is not None:
+            acct.base_url = new_base_url
+        if new_round_robin is not None:
+            acct.round_robin = new_round_robin
         # apply rename last so identity-based deployment refs stay valid
         if new_name is not None and new_name != name:
             acct.name = new_name
@@ -2308,17 +2489,6 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 state.router.alias_to_provider[new_alias] = acct.name
             acct.alias_id = new_alias
             diff["alias_id"] = new_alias
-        if state.config_store:
-            update_kwargs: dict[str, Any] = {
-                "provider_type": diff.get("provider_type"),
-                "base_url": diff.get("base_url"),
-                "round_robin": diff.get("round_robin"),
-                "new_name": new_name,
-            }
-            if alias_change is not None:
-                update_kwargs["alias_id"] = alias_change[0]
-                update_kwargs["alias_id_set"] = True
-            await state.config_store.update_provider(name, **update_kwargs)
         await state.logs.log_audit(actor="master", action="provider.update",
                                    target=target, diff=diff)
         mono, wall = time.monotonic(), time.time()

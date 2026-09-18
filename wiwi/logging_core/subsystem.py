@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 
 import orjson
 import structlog
@@ -97,14 +97,79 @@ class SSEBroadcastSink:
                 pass  # slow admin client: drop rather than backpressure the gateway
 
 
+@dataclass
+class RequestTotals:
+    """Process-lifetime monotonic totals over the request stream.
+
+    Prometheus counters must not be derived from the 500-event ring: every
+    eviction would read as a counter reset, so ``rate()``/``increase()``
+    returned negative or wildly wrong values (AUDIT #180). These totals are
+    accumulated as each request event is accepted, and ``render_metrics``
+    renders them verbatim for the series declared ``counter``. The
+    per-scrape-only families (quantile summaries, status/provider
+    breakdowns, the cache hit rate) stay window-derived and are declared
+    ``gauge``/``summary``, which is what the ring can honestly serve.
+
+    The predicates below must stay identical to the ring-side ones in
+    ``render_metrics``: the two agree exactly until the first eviction.
+    """
+
+    requests: int = 0
+    tok_in: int = 0
+    tok_out: int = 0
+    tok_cached: int = 0
+    tok_cache_creation: int = 0
+    tok_reasoning: int = 0
+    cost: float = 0.0
+    cache_hits: int = 0
+    response_cache_hits: int = 0
+    usage_estimated: int = 0
+    stream_errors: int = 0
+
+    def add(self, evt: LogEvent) -> None:
+        """Fold one served request event into the lifetime totals."""
+        self.requests += 1
+        self.tok_in += evt.tok_in
+        self.tok_out += evt.tok_out
+        self.tok_cached += evt.tok_cached
+        self.tok_cache_creation += evt.tok_cache_creation
+        self.tok_reasoning += evt.tok_reasoning
+        self.cost += evt.cost
+        if evt.cache_hit or evt.tok_cached > 0:
+            self.cache_hits += 1
+        if evt.response_cache_hit:
+            self.response_cache_hits += 1
+        if evt.usage_estimated:
+            self.usage_estimated += 1
+        if evt.status >= 500 and evt.was_stream:
+            self.stream_errors += 1
+
+
 class LoggingSubsystem:
     def __init__(self) -> None:
         self.sse = SSEBroadcastSink()
         self._request_q: asyncio.Queue[LogEvent | None] = asyncio.Queue(maxsize=REQUEST_QUEUE_SIZE)
         self._proxy_q: asyncio.Queue[LogEvent | None] = asyncio.Queue(maxsize=PROXY_QUEUE_SIZE)
+        # Process-lifetime counters of lost log events, one per stream and
+        # loss mode. They are kept apart rather than merged into a single
+        # counter because the causes (and therefore the operator's remedy)
+        # differ: a queue-full drop means the log pipeline is saturated,
+        # while a failed write means the DB is unavailable while the
+        # requests themselves succeeded. ``dropped_log_events`` sums them
+        # for a single "is anything being lost?" alert.
         self.dropped_request_logs = 0
+        self.failed_request_log_writes = 0
+        self.dropped_proxy_logs = 0
+        self.failed_audit_log_writes = 0
+        self.totals = RequestTotals()
         self._tasks: list[asyncio.Task] = []
         self._db_sink = None  # set by server when DB is available
+
+    @property
+    def dropped_log_events(self) -> int:
+        """Every log event lost on any stream, by any loss mode."""
+        return (self.dropped_request_logs + self.failed_request_log_writes
+                + self.dropped_proxy_logs + self.failed_audit_log_writes)
 
     def set_db_sink(self, sink) -> None:
         self._db_sink = sink
@@ -115,6 +180,10 @@ class LoggingSubsystem:
 
     # -- producers (called from request path; never block) --------------------
     def log_request(self, event: LogEvent) -> None:
+        # Accumulate the process-lifetime totals at accept time, before the
+        # queue can drop the event: a Prometheus counter must count what the
+        # gateway served, not what survived the ring buffer (AUDIT #180).
+        self.totals.add(event)
         try:
             self._request_q.put_nowait(event)
         except asyncio.QueueFull:
@@ -126,7 +195,9 @@ class LoggingSubsystem:
         try:
             self._proxy_q.put_nowait(evt)
         except asyncio.QueueFull:
-            pass
+            # A saturated proxy queue silently lost the event; count it so
+            # /health and /metrics can report the loss (AUDIT #173).
+            self.dropped_proxy_logs += 1
         getattr(log, level if level != "warn" else "warning")(message, request_id=request_id, **kw)
 
     async def log_audit(self, actor: str, action: str, target: str,
@@ -142,6 +213,11 @@ class LoggingSubsystem:
                 await self._db_sink.write_audit(evt)
                 return
             except Exception:
+                # The mutation this audit row describes has already been
+                # applied, so losing the durable row is unrecoverable: the
+                # capped ring copy is the only remaining trace. Count it
+                # (AUDIT #173).
+                self.failed_audit_log_writes += 1
                 log.warning("audit_write_failed", actor=actor, action=action,
                             target=target, exc_info=True)
                 return
@@ -212,6 +288,11 @@ class LoggingSubsystem:
             try:
                 await self._db_sink.write_requests(batch)
             except Exception as e:  # noqa: BLE001 — logging must never crash the gateway
+                # The batch is discarded and request_logs is the only durable
+                # copy, so count every lost row: without this the drop counter
+                # stayed at 0 and a DB outage reported itself as healthy
+                # (AUDIT #171).
+                self.failed_request_log_writes += len(batch)
                 log.error("request_log_db_write_failed", error=str(e), count=len(batch))
 
 
