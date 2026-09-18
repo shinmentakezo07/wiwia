@@ -30,6 +30,19 @@ from wiwi.providers.openai_adapter import OpenAIAdapter
 from wiwi.streaming import deltas as dl
 
 
+def _token_count(value: Any) -> int:
+    """A usage counter as the ``int`` the IR/deltas require.
+
+    ``.get(k, 0)`` defaults only a *missing* key: a JSON ``null`` (or any
+    typed-wrong value) passed straight through, and the poisoned count reached
+    ``core/gateway.py``'s ``u.prompt + u.output`` and ``u.cached > 0`` — both
+    of which raise, mid-stream, after the client already had a 200 (AUDIT
+    #194). A ``bool`` is not a token count, so ``ir.coerce_int``'s rejection
+    is kept.
+    """
+    return ir.coerce_int(value) or 0
+
+
 class OpenRouterAdapter(OpenAIAdapter):
     """OpenRouter: extends OpenAI adapter with OpenRouter-specific translations.
 
@@ -182,16 +195,22 @@ class OpenRouterAdapter(OpenAIAdapter):
                 continue
             rtype = rd.get("type", "")
             if rtype == "reasoning.text":
+                # ``rd.get("text", "")`` defaults only a *missing* key: a null
+                # text decoded to ``ThinkingPart(text=None)``, and on replay
+                # ``OpenAIAdapter._role_parts_to_content`` does
+                # ``reasoning += p.text`` and raises — a 500 on the NEXT turn
+                # of the conversation, on all six Chat-wire adapters
+                # (AUDIT #197). Same for ``summary``/``data``.
                 turn.thinking.append(ir.ThinkingPart(
-                    rd.get("text", ""),
+                    rd.get("text") or "",
                     signature=rd.get("signature")))
             elif rtype == "reasoning.summary":
-                turn.thinking.append(ir.ThinkingPart(rd.get("summary", "")))
+                turn.thinking.append(ir.ThinkingPart(rd.get("summary") or ""))
             elif rtype == "reasoning.encrypted":
                 # Encrypted reasoning — preserve as-is with the data as text
                 # so it round-trips if echoed back to OpenRouter.
                 turn.thinking.append(ir.ThinkingPart(
-                    rd.get("data", ""),
+                    rd.get("data") or "",
                     signature=rd.get("id")))
 
         for tc in message.get("tool_calls") or []:
@@ -235,10 +254,10 @@ class OpenRouterAdapter(OpenAIAdapter):
         details_p = (u.get("prompt_tokens_details") or {})
         details_c = (u.get("completion_tokens_details") or {})
         turn.usage = ir.Usage(
-            prompt_tokens=u.get("prompt_tokens", 0),
-            completion_tokens=u.get("completion_tokens", 0),
-            cached_tokens=details_p.get("cached_tokens", 0),
-            reasoning_tokens=details_c.get("reasoning_tokens", 0),
+            prompt_tokens=_token_count(u.get("prompt_tokens")),
+            completion_tokens=_token_count(u.get("completion_tokens")),
+            cached_tokens=_token_count(details_p.get("cached_tokens")),
+            reasoning_tokens=_token_count(details_c.get("reasoning_tokens")),
         )
         return turn
 
@@ -277,7 +296,11 @@ class OpenRouterAdapter(OpenAIAdapter):
         top_error = chunk.get("error") if isinstance(chunk.get("error"), dict) else None
         choices = chunk.get("choices") or []
         if top_error:
-            msg = top_error.get("message", "OpenRouter stream error")
+            # ``top_error.get("message", ...)`` defaults only a *missing* key,
+            # so a null message reached the client as a contract-invalid
+            # ``"message": null`` frame. Coerce like ClineAdapter's arm
+            # (AUDIT #200).
+            msg = str(top_error.get("message") or "OpenRouter stream error")
             out: list[dl.IRStreamDelta] = [dl.StreamError(message=msg, kind="status")]
             if choices and isinstance(choices[0], dict) \
                     and choices[0].get("finish_reason") == "error":
@@ -294,15 +317,21 @@ class OpenRouterAdapter(OpenAIAdapter):
 
         out: list[dl.IRStreamDelta] = []
 
-        # usage may ride in ANY chunk
+        # usage may ride in ANY chunk. ``if u:`` alone let a truthy non-dict
+        # (a string, a list) reach ``u.get`` and raise AttributeError out of
+        # the decoder, where its siblings gate with ``isinstance(u, dict)``
+        # (AUDIT #197).
         u = chunk.get("usage")
-        if u:
-            dp = u.get("prompt_tokens_details") or {}
-            dc = u.get("completion_tokens_details") or {}
+        if isinstance(u, dict):
+            dp = u.get("prompt_tokens_details")
+            dp = dp if isinstance(dp, dict) else {}
+            dc = u.get("completion_tokens_details")
+            dc = dc if isinstance(dc, dict) else {}
             out.append(dl.UsageFinal(
-                prompt=u.get("prompt_tokens", 0), cached=dp.get("cached_tokens", 0),
-                reasoning=dc.get("reasoning_tokens", 0),
-                output=u.get("completion_tokens", 0)))
+                prompt=_token_count(u.get("prompt_tokens")),
+                cached=_token_count(dp.get("cached_tokens")),
+                reasoning=_token_count(dc.get("reasoning_tokens")),
+                output=_token_count(u.get("completion_tokens"))))
 
         if not choices:
             return out
@@ -333,12 +362,18 @@ class OpenRouterAdapter(OpenAIAdapter):
                 continue  # malformed entry (AUDIT #110)
             rtype = rd.get("type", "")
             if rtype == "reasoning.text":
-                text = rd.get("text", "")
+                # ``rd.get("text", "")`` defaults only a *missing* key: a null
+                # text decoded to ``ThinkingPart(text=None)``, and on replay
+                # ``OpenAIAdapter._role_parts_to_content`` does
+                # ``reasoning += p.text`` and raises — a 500 on the NEXT turn
+                # of the conversation, on all six Chat-wire adapters
+                # (AUDIT #197).
+                text = rd.get("text") or ""
                 sig = rd.get("signature")
                 if text:
                     out.append(dl.ThinkingDelta(text, signature=sig))
             elif rtype == "reasoning.summary":
-                summary = rd.get("summary", "")
+                summary = rd.get("summary") or ""
                 if summary:
                     out.append(dl.ThinkingDelta(summary))
             elif rtype == "reasoning.encrypted":

@@ -15,6 +15,19 @@ from wiwi.streaming import deltas as dl
 
 log = structlog.get_logger("wiwi.anthropic_adapter")
 
+
+def _token_count(value: Any) -> int:
+    """A usage counter as the ``int`` the IR/deltas require.
+
+    ``.get(k, 0)`` defaults only a *missing* key: a JSON ``null`` (or any
+    typed-wrong value) passed straight through, and the poisoned count reached
+    ``core/gateway.py``'s ``u.prompt + u.output`` and ``u.cached > 0`` — both
+    of which raise, mid-stream, after the client already had a 200 (AUDIT
+    #194). A ``bool`` is not a token count, so ``ir.coerce_int``'s rejection
+    is kept.
+    """
+    return ir.coerce_int(value) or 0
+
 DEFAULT_MAX_TOKENS = 4096
 MIN_THINKING_BUDGET = 1024  # Anthropic API minimum for budget_tokens
 
@@ -632,11 +645,11 @@ class AnthropicAdapter:
         # reasoning tokens (newer API); fall back to 0 when absent.
         out_details = u.get("output_tokens_details") or {}
         turn.usage = ir.Usage(
-            prompt_tokens=u.get("input_tokens", 0),
-            completion_tokens=u.get("output_tokens", 0),
-            cached_tokens=u.get("cache_read_input_tokens", 0),
-            cache_creation_tokens=u.get("cache_creation_input_tokens", 0),
-            reasoning_tokens=out_details.get("thinking_tokens", 0),
+            prompt_tokens=_token_count(u.get("input_tokens")),
+            completion_tokens=_token_count(u.get("output_tokens")),
+            cached_tokens=_token_count(u.get("cache_read_input_tokens")),
+            cache_creation_tokens=_token_count(u.get("cache_creation_input_tokens")),
+            reasoning_tokens=_token_count(out_details.get("thinking_tokens")),
         )
         return turn
 
@@ -663,9 +676,10 @@ class AnthropicAdapter:
             m = m if isinstance(m, dict) else {}
             u = m.get("usage")
             u = u if isinstance(u, dict) else {}
-            self._pending_prompt = u.get("input_tokens", 0)
-            self._pending_cached = u.get("cache_read_input_tokens", 0)
-            self._pending_cache_creation = u.get("cache_creation_input_tokens", 0)
+            self._pending_prompt = _token_count(u.get("input_tokens"))
+            self._pending_cached = _token_count(u.get("cache_read_input_tokens"))
+            self._pending_cache_creation = _token_count(
+                u.get("cache_creation_input_tokens"))
             # Anthropic reports prompt/cache usage HERE, before any content,
             # and Claude Code drives its context meter and auto-compact
             # decision off this value. Carry it on StreamStart so the encoder
@@ -728,8 +742,16 @@ class AnthropicAdapter:
             elif dtype == "signature_delta":
                 out.append(dl.ThinkingDelta("", signature=d.get("signature")))
             elif dtype == "input_json_delta":
-                out.append(dl.ToolCallArgsDelta(index=payload.get("index", 0),
-                                                args_fragment=d.get("partial_json", "")))
+                # ``d.get("partial_json", "")`` defaults only a *missing* key:
+                # a JSON ``null`` (or any typed-wrong value) passed straight
+                # into the delta, whose ``args_fragment`` is contractually
+                # ``str``. The gateway folds fragments with ``"".join()``, so
+                # a null raised mid-stream after the client already had a 200
+                # (AUDIT #160). Gate exactly like the sibling arms above.
+                frag = d.get("partial_json")
+                out.append(dl.ToolCallArgsDelta(
+                    index=payload.get("index", 0),
+                    args_fragment=frag if isinstance(frag, str) else ""))
         elif etype == "content_block_stop":
             # only tool_use blocks close a tool call; text/thinking stops are not
             # tool-call lifecycle events
@@ -749,8 +771,8 @@ class AnthropicAdapter:
                 prompt=getattr(self, "_pending_prompt", 0),
                 cached=getattr(self, "_pending_cached", 0),
                 cache_creation=getattr(self, "_pending_cache_creation", 0),
-                reasoning=out_details.get("thinking_tokens", 0),
-                output=u.get("output_tokens", 0)))
+                reasoning=_token_count(out_details.get("thinking_tokens")),
+                output=_token_count(u.get("output_tokens"))))
             out.append(dl.Finish(_STOP_REASON_IN.get(sr, "stop"),
                                  stop_sequence=d.get("stop_sequence")))
         elif etype == "message_stop":

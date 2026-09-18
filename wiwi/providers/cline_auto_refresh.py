@@ -11,6 +11,13 @@ concurrent refreshes for the same provider. A simple circuit breaker backs
 off exponentially on repeated failures (cap 4h). Unrecoverable errors
 (``invalid_grant`` / ``invalid_request``) stop further retries until the
 user re-connects.
+
+The on-demand 401 hook (:func:`refresh_for_provider`) resolves the *same*
+worker instance the sweeper uses (see :func:`_worker_for`), so both paths
+share one lock and one circuit — without that, a sweeper tick and a client
+401 landing in the same lead window would both present the same
+single-use refresh token and the loser's ``invalid_grant`` would mark the
+provider permanently dead (AUDIT #169).
 """
 
 from __future__ import annotations
@@ -43,6 +50,10 @@ class ClineAutoRefresh:
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._locks: dict[str, asyncio.Lock] = {}
+        # Successful-rotation counter per provider. Both the sweeper and the
+        # on-demand 401 hook share one worker, so this is how the loser of a
+        # lock race learns the winner already rotated (AUDIT #169).
+        self._generations: dict[str, int] = {}
         self._circuit = CircuitBreaker(base_s=CIRCUIT_BASE_S, cap_s=CIRCUIT_CAP_S,
                                        clock=time.time)
 
@@ -101,46 +112,89 @@ class ClineAutoRefresh:
 
     async def _check_provider(self, name: str, record: dict[str, Any]) -> None:
         """Refresh one provider's token if it's about to expire."""
-        # Circuit breaker: skip if in backoff window.
-        if self._circuit.blocked(name):
-            return
-
         expires_epoch = cline_oauth.parse_expires_at(record.get("expires_at"))
         if expires_epoch is None or not cline_oauth.expires_within_lead(expires_epoch):
             return  # not due for refresh
+        await self._refresh_locked(name, require_due=True)
 
+    async def refresh_now(self, name: str) -> bool:
+        """On-demand refresh for the gateway's 401 hook.
+
+        The upstream rejected the access token, so the stored expiry is
+        irrelevant — rotate unconditionally, under the same lock and circuit
+        breaker the sweeper uses. Returns True when the stored record is
+        fresh afterwards (rotated here, or rotated by the sweeper while this
+        call waited for the lock), so the caller may retry with it.
+        """
+        return await self._refresh_locked(name, require_due=False)
+
+    async def _refresh_locked(self, name: str, *, require_due: bool) -> bool:
+        """Serialize a refresh for ``name`` through the shared lock + circuit.
+
+        The sweep (``require_due=True``) and the on-demand 401 hook
+        (``require_due=False``) funnel through here so both share one lock and
+        one circuit breaker. Cline's refresh tokens are single-use, so the
+        record is re-read *under* the lock: a rotation that landed while we
+        waited is honored instead of being repeated with the token it just
+        consumed (AUDIT #169).
+
+        Returns True when the stored record is fresh afterwards (we rotated
+        it, or another caller did while we waited), False when nothing was
+        rotated — circuit-blocked, no stored refresh token, not due, or the
+        refresh failed.
+        """
         lock = self._locks.setdefault(name, asyncio.Lock())
+        generation = self._generations.get(name, 0)
         async with lock:
-            # Re-check expiry under the lock (another caller may have refreshed).
-            record = await self._state.config_store.get_setting(f"cline_oauth:{name}")
+            # Circuit state is read under the lock so a failure that landed
+            # while we waited (a sibling refresh tripping it) is honored.
+            if self._circuit.blocked(name):
+                return False
+            if self._generations.get(name, 0) != generation:
+                # Someone rotated while we waited for the lock: the record is
+                # already fresh, and the refresh_token we would present has
+                # been consumed by that rotation.
+                return True
+            cs = self._state.config_store
+            if cs is None:
+                return False
+            record = await cs.get_setting(f"cline_oauth:{name}")
             if not record or not record.get("refresh_token"):
-                return
-            expires_epoch = cline_oauth.parse_expires_at(record.get("expires_at"))
-            if expires_epoch is not None and not cline_oauth.expires_within_lead(expires_epoch):
-                return
-            await self._do_refresh(name, record)
+                return False
+            if require_due:
+                expires_epoch = cline_oauth.parse_expires_at(record.get("expires_at"))
+                if expires_epoch is None or not cline_oauth.expires_within_lead(
+                        expires_epoch):
+                    return False
+            return await self._do_refresh(name, record)
 
-    async def _do_refresh(self, name: str, record: dict[str, Any]) -> None:
-        """Call the refresh endpoint and persist the result."""
+    async def _do_refresh(self, name: str, record: dict[str, Any]) -> bool:
+        """Call the refresh endpoint and persist the result.
+
+        Callers must hold ``self._locks[name]``. Returns True when the tokens
+        were rotated and stored.
+        """
         result = await cline_oauth.refresh_token(record["refresh_token"])
         if result is None:
             self._trip_circuit(name)
             log.warning("cline_auto_refresh_transient", provider=name)
-            return
+            return False
         if result.get("error") == "unrecoverable_refresh_error":
             # Stop refreshing — the user must re-login.
             self._circuit.mark_dead(name)
             log.error("cline_auto_refresh_unrecoverable", provider=name,
                       code=result.get("code"))
-            return
+            return False
         # Success — write new tokens.
         await self._update_secret(name, result["access_token"])
         record["refresh_token"] = result["refresh_token"]
         if result.get("expires_at"):
             record["expires_at"] = result["expires_at"]
         await self._state.config_store.set_setting(f"cline_oauth:{name}", record)
+        self._generations[name] = self._generations.get(name, 0) + 1
         self._circuit.clear(name)
         log.info("cline_auto_refreshed", provider=name)
+        return True
 
     async def _update_secret(self, provider: str, secret: str) -> None:
         """Update every pool key's secret in memory + DB for a Cline provider.
@@ -165,56 +219,41 @@ class ClineAutoRefresh:
 
 
 def refresh_for_provider(state) -> callable:
-    """Build a synchronous-callable hook for on-demand Cline token refresh.
+    """Build the async hook the gateway calls when a Cline request 401s.
 
-    Returns an async function ``hook(provider_name, key_label) -> bool`` that:
+    Returns ``hook(provider_name, key_label) -> bool``: True when the stored
+    access token was rotated and the caller should retry, False when nothing
+    was rotated (caller surfaces the original 401).
 
-    1. Checks the circuit breaker (in case a recent refresh failed) — returns
-       False if the provider is in backoff so the caller surfaces the
-       original 401 instead of looping.
-    2. Reads ``cline_oauth:<provider>`` from the config store to get the
-       current ``refresh_token``.
-    3. Calls Cline's ``/auth/refresh`` endpoint, persists the new tokens,
-       and updates the in-memory ``ProviderKey.secret`` + DB so the next
-       request uses the fresh access token.
-    4. Updates the circuit breaker on success / failure.
-
-    Returns True when the secret was rotated (caller should retry), False
-    otherwise (caller should surface the original error).
+    The hook delegates to :func:`_worker_for` — the *same* worker the
+    background sweeper uses — so both paths share one per-provider lock and
+    one circuit breaker. Cline's refresh tokens are single-use, so a sweeper
+    tick and a client 401 landing in the same lead window must not both POST
+    the same token: the loser's ``invalid_grant`` would mark the provider
+    permanently dead until a human re-authenticates (AUDIT #169).
 
     The hook is injected into ``Gateway._on_demand_cline_refresh`` at app
     startup so the gateway can call it without depending on the full
     AppState — see ``wiwi.server.app`` for the wiring.
     """
-    worker = ClineAutoRefresh(state)
-
     async def hook(provider_name: str, key_label: str) -> bool:
-        # Circuit breaker: skip if the last refresh attempt is in backoff.
-        if worker._circuit.blocked(provider_name):
-            return False
-
-        cs = state.config_store
-        if cs is None:
-            return False
-        record = await cs.get_setting(f"cline_oauth:{provider_name}")
-        if not record or not record.get("refresh_token"):
-            return False
-
-        result = await cline_oauth.refresh_token(record["refresh_token"])
-        if result is None:
-            worker._trip_circuit(provider_name)
-            return False
-        if result.get("error") == "unrecoverable_refresh_error":
-            worker._circuit.mark_dead(provider_name)
-            return False
-
-        # Success — persist new tokens and update the in-memory key.
-        await worker._update_secret(provider_name, result["access_token"])
-        record["refresh_token"] = result["refresh_token"]
-        if result.get("expires_at"):
-            record["expires_at"] = result["expires_at"]
-        await cs.set_setting(f"cline_oauth:{provider_name}", record)
-        worker._circuit.clear(provider_name)
-        return True
+        return await _worker_for(state).refresh_now(provider_name)
 
     return hook
+
+
+_workers: dict[int, ClineAutoRefresh] = {}
+
+
+def _worker_for(state: AppState) -> ClineAutoRefresh:
+    """Resolve the shared worker for *state*.
+
+    The lifespan-owned ``state.cline_refresh`` wins when set, so the
+    background sweeper, the gateway 401 hook, and any other caller share one
+    lock and one circuit breaker. Fallback (tests, pre-lifespan use): a
+    lazily cached instance.
+    """
+    shared = getattr(state, "cline_refresh", None)
+    if shared is not None:
+        return shared
+    return _workers.setdefault(id(state), ClineAutoRefresh(state))

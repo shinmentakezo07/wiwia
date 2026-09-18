@@ -15,6 +15,19 @@ from wiwi.streaming import deltas as dl
 log = structlog.get_logger("wiwi.openai_adapter")
 
 
+def _token_count(value: Any) -> int:
+    """A usage counter as the ``int`` the IR/deltas require.
+
+    ``.get(k, 0)`` defaults only a *missing* key: a JSON ``null`` (or any
+    typed-wrong value) passed straight through, and the poisoned count reached
+    ``core/gateway.py``'s ``u.prompt + u.output`` and ``u.cached > 0`` — both
+    of which raise, mid-stream, after the client already had a 200 (AUDIT
+    #194). A ``bool`` is not a token count, so ``ir.coerce_int``'s rejection
+    is kept.
+    """
+    return ir.coerce_int(value) or 0
+
+
 def _role_parts_to_content(
     messages: list[ir.Message],
     *,
@@ -399,10 +412,10 @@ class OpenAIAdapter:
         details_p = (u.get("prompt_tokens_details") or {})
         details_c = (u.get("completion_tokens_details") or {})
         turn.usage = ir.Usage(
-            prompt_tokens=u.get("prompt_tokens", 0),
-            completion_tokens=u.get("completion_tokens", 0),
-            cached_tokens=details_p.get("cached_tokens", 0),
-            reasoning_tokens=details_c.get("reasoning_tokens", 0),
+            prompt_tokens=_token_count(u.get("prompt_tokens")),
+            completion_tokens=_token_count(u.get("completion_tokens")),
+            cached_tokens=_token_count(details_p.get("cached_tokens")),
+            reasoning_tokens=_token_count(details_c.get("reasoning_tokens")),
         )
         return turn
 
@@ -478,6 +491,22 @@ class OpenAIAdapter:
             # (AUDIT #110).
             return []
         out: list[dl.IRStreamDelta] = []
+        # Mid-stream error frame: some OpenAI-compatible upstreams report a
+        # failure in-band as ``{"error": {...}}`` with no ``choices`` at all.
+        # Dropping it left the stream with no terminal delta, so the gateway's
+        # ``finish is None`` branch synthesized a generic "stream ended without
+        # completion" AND called ``_note_stream_failure`` — cooling a healthy
+        # deployment and feeding the key's retirement ladder for an error the
+        # upstream had reported cleanly. OpenRouter already mapped this shape
+        # (AUDIT #110 class).
+        err = chunk.get("error")
+        if isinstance(err, dict):
+            out.extend(self._flush_open_tools())
+            out.append(dl.StreamError(
+                message=str(err.get("message") or "upstream stream error"),
+                kind="status",
+                etype=err.get("type") if isinstance(err.get("type"), str) else None))
+            return out
         choices = chunk.get("choices") or []
         # usage may ride in ANY chunk — OpenAI/OpenRouter put it in the same
         # final chunk as choices+finish_reason. Parse it whenever present;
@@ -489,9 +518,10 @@ class OpenAIAdapter:
             dc = u.get("completion_tokens_details")
             dc = dc if isinstance(dc, dict) else {}
             out.append(dl.UsageFinal(
-                prompt=u.get("prompt_tokens", 0), cached=dp.get("cached_tokens", 0),
-                reasoning=dc.get("reasoning_tokens", 0),
-                output=u.get("completion_tokens", 0)))
+                prompt=_token_count(u.get("prompt_tokens")),
+                cached=_token_count(dp.get("cached_tokens")),
+                reasoning=_token_count(dc.get("reasoning_tokens")),
+                output=_token_count(u.get("completion_tokens"))))
         if not choices:
             return out
         c = choices[0]

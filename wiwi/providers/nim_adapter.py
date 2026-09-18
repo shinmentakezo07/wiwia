@@ -71,6 +71,19 @@ _NIM_EFFORT_BUDGETS: dict[str, int] = {
 _NIM_DEFAULT_BUDGET = 1024  # fallback for unknown effort levels
 
 
+def _token_count(value: Any) -> int:
+    """A usage counter as the ``int`` the deltas require.
+
+    ``.get(k, 0)`` defaults only a *missing* key: a JSON ``null`` (or any
+    typed-wrong value) passed straight through, and the poisoned count reached
+    ``core/gateway.py``'s ``u.prompt + u.output`` and ``u.cached > 0`` — both
+    of which raise, mid-stream, after the client already had a 200 (AUDIT
+    #194). A ``bool`` is not a token count, so ``ir.coerce_int``'s rejection
+    is kept.
+    """
+    return ir.coerce_int(value) or 0
+
+
 class NimAdapter(OpenAIAdapter):
     """NVIDIA NIM: extends OpenAI adapter with NIM-specific translations."""
 
@@ -295,6 +308,22 @@ class NimAdapter(OpenAIAdapter):
 
         out: list[dl.IRStreamDelta] = []
 
+        # Mid-stream error frame: an upstream may report a failure in-band as
+        # ``{"error": {...}}`` with no ``choices``. Dropping it left the stream
+        # with no terminal delta, so the gateway synthesized a generic "stream
+        # ended without completion" and cooled a healthy deployment for an
+        # error the upstream had reported cleanly (mirrors OpenAIAdapter and
+        # OpenRouter's ordering: the error is returned *before* any usage parse,
+        # so a failed frame cannot contribute a partial token count to cost).
+        err = chunk.get("error")
+        if isinstance(err, dict):
+            out.extend(self._flush_open_tools())
+            out.append(dl.StreamError(
+                message=str(err.get("message") or "upstream stream error"),
+                kind="status",
+                etype=err.get("type") if isinstance(err.get("type"), str) else None))
+            return out
+
         # Usage may ride in any chunk.
         u = chunk.get("usage")
         if isinstance(u, dict):
@@ -303,9 +332,10 @@ class NimAdapter(OpenAIAdapter):
             dc = u.get("completion_tokens_details")
             dc = dc if isinstance(dc, dict) else {}
             out.append(dl.UsageFinal(
-                prompt=u.get("prompt_tokens", 0), cached=dp.get("cached_tokens", 0),
-                reasoning=dc.get("reasoning_tokens", 0),
-                output=u.get("completion_tokens", 0)))
+                prompt=_token_count(u.get("prompt_tokens")),
+                cached=_token_count(dp.get("cached_tokens")),
+                reasoning=_token_count(dc.get("reasoning_tokens")),
+                output=_token_count(u.get("completion_tokens"))))
 
         choices = chunk.get("choices") or []
         if not choices:
@@ -382,6 +412,20 @@ class NimAdapter(OpenAIAdapter):
                                 args_fragment=coerce_args_fragment(fn["arguments"])))
                     continue
                 if idx in self._open_tool_indices:
+                    # The superseded call's Open may still be deferred (id
+                    # seen, args not yet). Flush it before closing, or the
+                    # stream carries a Close for an index that never opened:
+                    # the Anthropic encoder drops the close entirely and the
+                    # client is left with a ``content_block_start`` whose name
+                    # is "", undispatchable. Mirrors OpenAIAdapter's branch
+                    # (AUDIT #196).
+                    if idx in self._pending_opens:
+                        cid, cname = self._pending_opens.pop(idx)
+                        out.append(dl.ToolCallOpen(index=idx, id=cid, name=cname))
+                    # Buffered (aliased) args belong to the superseded call, so
+                    # they drain before the Close and while ``_tool_names[idx]``
+                    # still holds that call's name — the alias lookup below
+                    # keys on it.
                     self._flush_buffered_args(idx, out)
                     out.append(dl.ToolCallClose(index=idx))
                 self._open_tool_indices.add(idx)

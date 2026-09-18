@@ -12,21 +12,50 @@ table and the ``models.dev`` ``opencode`` provider entry, whose base
 
 The adapter routes by model prefix, delegates chat/messages/gemini to the
 existing adapters, and implements a minimal Responses upstream (text +
-reasoning + function tools) for the responses family. Auth is a Zen API key
-as ``Authorization: Bearer`` plus a live ``User-Agent: opencode/<version>``
-— Cloudflare returns ``403 error code: 1010`` without a browser-like UA, so
-the version is read live from :mod:`wiwi.providers.opencode_version` (5-min
-TTL background refresh, no restart needed).
+reasoning + function tools) for the responses family.
 
-Every request also carries the official client's metadata headers exactly as
-the opencode CLI sends them (``packages/opencode/src/session/llm/request.ts``):
+Auth follows the **wire**, not the adapter: each of Zen's four front ends reads
+its own credential scheme, and a credential sent in the wrong one is simply not
+read — Zen answers ``401 AuthError "Missing API key."`` ("Missing", not
+"Invalid": the credential never arrived)::
+
+    chat / responses   Authorization: Bearer <key>   (OpenAI wire)
+    messages           x-api-key: <key>              (Anthropic wire)
+    gemini             x-goog-api-key: <key>         (Gemini wire)
+
+All three verified live 2026-09-17 against a real ``sk-…`` Zen key: the correct
+scheme on each route advances the request to the *next* gate
+(``401 CreditsError "No payment method"``), while every wrong scheme — and the
+no-credential case — return the identical ``AuthError``. Per-route probe
+matrices live in ``tests/test_fix_round72.py`` (messages) and
+``tests/test_fix_round73.py`` (gemini). The Gemini route does **not** use the
+querystring: ``?key=`` probes identically to sending no credential at all, and
+``wiwi/core/recovery.py:build_url`` appends a querystring key only when
+``provider_type == "gemini"`` — this adapter's type is ``"opencode"``, so
+nothing was ever appended there.
+
+Every request also carries a live
+``User-Agent: opencode/<version>`` — Cloudflare returns ``403 error code:
+1010`` without a browser-like UA, so the version is read live from
+:mod:`wiwi.providers.opencode_version` (5-min TTL background refresh, no
+restart needed).
+
+Every request also carries the official client's metadata headers
+(``packages/opencode/src/session/llm/request.ts``):
 ``x-opencode-session`` + ``x-opencode-request`` (per-request ids, stable
 across header rebuilds within one request), ``x-opencode-client: cli``, and
-``x-opencode-project`` (the CLI's global fallback). Free models 400
-``MissingSessionID`` ("OpenCode's free tier can only be used in OpenCode")
-without them — verified live 2026-09-16 on union-alpha. The edge consumes
-them for metrics/sticky routing on every model, so they ride all traffic;
-the previous free-only gating sent paid models out without a session id.
+``x-opencode-project: global`` (the CLI's fallback when no workspace is
+bound). The edge reads them for metrics/sticky routing on every model, so
+they ride all traffic. Live probes 2026-09-17: a request with a bearer
+(whether real or placeholder) clears the session gate and reaches the auth
+gate (``401 AuthError`` for a bad key), proving the spoof still passes; a
+keyless request to any ``*-free`` model is rejected with ``403 FreeTierError``
+("OpenCode's free tier can only be used from within OpenCode") on all three
+free routes (chat, responses, messages). Keyless anonymous free-tier access
+(which returned 200 until 2026-09-16) is therefore retired upstream — free
+models now require a valid ``OPENCODE_API_KEY``. ``anthropic-version`` rides
+the messages route only; ``HTTP-Referer``/``X-Title`` are referral
+attribution, not part of the CLI fingerprint.
 """
 
 from __future__ import annotations
@@ -60,6 +89,17 @@ _GEMINI_PREFIXES = ("gemini-",)
 # free-tier setup declares itself with this literal sentinel and the
 # adapter omits Authorization entirely for it.
 ANONYMOUS_KEY_SENTINEL = "anonymous"
+
+# Each Zen front end reads its own credential header, and a credential sent in
+# any other one is invisible to it (see the module docstring for the live probe
+# matrix). The value here is the *header name*; "Authorization" additionally
+# needs the "Bearer " prefix, applied at the write site.
+_CREDENTIAL_HEADER: dict[Route, str] = {
+    "messages": "x-api-key",
+    "gemini": "x-goog-api-key",
+    "chat": "Authorization",
+    "responses": "Authorization",
+}
 
 
 def route_for_model(model_id: str) -> Route:
@@ -119,21 +159,40 @@ class OpencodeAdapter:
             "User-Agent": build_user_agent(),
             "HTTP-Referer": "https://opencode.ai/",
             "X-Title": "opencode",
-            "anthropic-version": "2023-06-01",
         }
-        # Anonymous sentinel: free models serve keyless traffic, but the
-        # config schema requires non-empty keys — so a keyless setup
-        # declares itself with the literal `anonymous`. Omit Authorization
-        # entirely; a placeholder bearer would be 401 Invalid API key.
+        # Anthropic's API version names its own Messages endpoint: it rides
+        # the messages route only (genuine Anthropic wire via _msg, or Zen's
+        # /messages). The Responses/Chat/Gemini endpoints never need it.
+        if self._last_route == "messages":
+            h["anthropic-version"] = "2023-06-01"
+        # Anonymous sentinel: omits every credential (a placeholder bearer
+        # would be 401 Invalid API key). NOTE (2026-09-17): Zen retired
+        # keyless free-tier access — anonymous requests to *-free models now
+        # get 403 FreeTierError on every route, so free models need a valid
+        # OPENCODE_API_KEY. The sentinel stays for setups that probe paid
+        # models' auth gate without a key on file.
         if key.secret.strip().lower() != ANONYMOUS_KEY_SENTINEL:
-            h["Authorization"] = f"Bearer {key.secret.strip()}"
-        # Official-client fingerprint, on every model exactly as the
-        # opencode CLI does (packages/opencode/src/session/llm/request.ts):
+            # Scheme follows the route; see _CREDENTIAL_HEADER and the module
+            # docstring. `_last_route` is written by build_url()/encode_request()
+            # ahead of headers() on every hot path; a cold call defaults to
+            # "chat" (the OpenAI-wire scheme). The debug line names route and
+            # scheme — a wrong scheme is silently unread upstream, so this is
+            # what turns that into a one-line diagnosis. Never logs the key.
+            scheme = _CREDENTIAL_HEADER.get(self._last_route, "Authorization")
+            value = key.secret.strip()
+            h[scheme] = value if scheme != "Authorization" else f"Bearer {value}"
+            log.debug("opencode_credential_scheme", route=self._last_route,
+                      scheme=scheme, label=key.label)
+        else:
+            log.debug("opencode_credential_omitted", route=self._last_route,
+                      reason="anonymous_sentinel", label=key.label)
+        # Official-client fingerprint, on every model, mirroring the
+        # opencode CLI (packages/opencode/src/session/llm/request.ts):
         # per-request session + request ids, client tag, and project id
-        # (the CLI's global fallback when no workspace is bound). Union Alpha
-        # (and every free model) 400s MissingSessionID without the session
-        # header; ids stay stable per adapter instance across the 401-refresh
-        # retry path's header rebuilds and rotate on reset()/fresh instance.
+        # (the CLI's global fallback when no workspace is bound). The edge
+        # reads them for metrics/sticky routing; ids stay stable per adapter
+        # instance across the 401-refresh retry path's header rebuilds and
+        # rotate on reset()/fresh instance.
         if self._spoof_session is None:
             self._spoof_session = f"ses_{uuid.uuid4().hex[:24]}"
         if self._spoof_request is None:

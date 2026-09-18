@@ -140,18 +140,44 @@ def _alias_unsafe_params(parameters: dict[str, Any]) -> dict[str, Any]:
     Walks the ``properties`` map and ``required`` list, replacing unsafe names
     with ``_nim_arg_<name>``.  Returns the modified parameters dict.
     """
-    aliases: dict[str, str] = {}  # alias → original
-    return _alias_in_node(parameters, set(), aliases, {})
+    return _alias_in_node(parameters)
 
 
-def _alias_in_node(
-    value: Any,
-    reserved: set[str],
-    alias_to_orig: dict[str, str],
-    orig_to_alias: dict[str, str],
-) -> Any:
+def _renames_for_node(props: dict[str, Any]) -> dict[str, str]:
+    """``{original: alias}`` for every property of one ``properties`` map.
+
+    A property must move when its name is unsafe (it collides with a JSON
+    Schema keyword) or when another property's alias already occupies its name
+    — a tool declaring both a ``type`` parameter and a literal
+    ``_nim_arg_type`` one. Previously the alias of the first was written
+    straight over the second, so the model was told there is ONE parameter
+    instead of two and ``required`` named it twice (AUDIT #201).
+
+    Every alias is exactly ``_ALIAS_PREFIX`` + the original name, because that
+    is the only shape ``collect_nim_tool_aliases`` can reverse (it strips one
+    prefix). A suffixed fallback like ``_nim_arg_type_2`` would strip back to
+    ``type_2`` — a name the tool never declared, silently mis-keying the
+    model's arguments — so a collision is resolved by displacing the *literal*
+    one prefix further instead. Displacing can collide again (``type`` +
+    ``_nim_arg_type`` + ``_nim_arg__nim_arg_type``), so propagate to a fixed
+    point; each step moves strictly outward and the map is finite, so it
+    terminates.
+    """
+    moved = {name for name in props
+             if isinstance(name, str) and name in _UNSAFE_PARAM_NAMES}
+    while True:
+        # Any property whose name is now taken by an alias must move too.
+        occupied = {f"{_ALIAS_PREFIX}{name}" for name in moved} & set(props)
+        fresh = occupied - moved
+        if not fresh:
+            break
+        moved |= fresh
+    return {name: f"{_ALIAS_PREFIX}{name}" for name in moved}
+
+
+def _alias_in_node(value: Any) -> Any:
     if isinstance(value, list):
-        return [_alias_in_node(v, reserved, alias_to_orig, orig_to_alias) for v in value]
+        return [_alias_in_node(v) for v in value]
     if not isinstance(value, dict):
         return value
 
@@ -159,19 +185,14 @@ def _alias_in_node(
     out: dict[str, Any] = {}
     props = value.get("properties")
     if isinstance(props, dict):
+        renamed = _renames_for_node(props)
         aliased_props: dict[str, Any] = {}
         for name, schema in props.items():
-            aliased = _alias_in_node(schema, reserved, alias_to_orig, orig_to_alias)
-            if isinstance(name, str) and name in _UNSAFE_PARAM_NAMES:
-                alias = orig_to_alias.get(name)
-                if alias is None:
-                    alias = _make_alias(name, reserved)
-                    alias_to_orig[alias] = name
-                    orig_to_alias[name] = alias
-                local_aliases[name] = alias
-                aliased_props[alias] = aliased
-            else:
-                aliased_props[name] = aliased
+            aliased = _alias_in_node(schema)
+            final = renamed.get(name, name) if isinstance(name, str) else name
+            if isinstance(name, str) and final != name:
+                local_aliases[name] = final
+            aliased_props[final] = aliased
         out["properties"] = aliased_props
 
     for key, item in value.items():
@@ -180,19 +201,8 @@ def _alias_in_node(
         if key == "required" and isinstance(item, list):
             out[key] = [local_aliases.get(r, r) if isinstance(r, str) else r for r in item]
             continue
-        out[key] = _alias_in_node(item, reserved, alias_to_orig, orig_to_alias)
+        out[key] = _alias_in_node(item)
     return out
-
-
-def _make_alias(name: str, reserved: set[str]) -> str:
-    candidate = f"{_ALIAS_PREFIX}{name}"
-    alias = candidate
-    suffix = 2
-    while alias in reserved:
-        alias = f"{candidate}_{suffix}"
-        suffix += 1
-    reserved.add(alias)
-    return alias
 
 
 def collect_nim_tool_aliases(tools: list[dict[str, Any]]) -> dict[str, dict[str, str]]:

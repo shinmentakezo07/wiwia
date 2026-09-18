@@ -34,15 +34,28 @@ RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504, 529}
 def status_for_key_pool(e: WiwiError) -> int | None:
     """HTTP status a WiwiError should report to the key pool, if any.
 
-    Returns the status that key-pool accounting cares about (429, 401/403,
-    and other retryable upstream failures), or ``None`` for statuses that
-    say nothing about the key's health (e.g. a caller-side 400). Shared by
-    the router's retry loop and the gateway's stream pump/resume path.
+    Returns the status that key-pool accounting cares about (429, 401/403
+    *credential* failures, and other retryable upstream failures), or ``None``
+    for statuses that say nothing about the key's health.
+
+    A 401/403 is only a key-health signal when it is a credential rejection.
+    Some upstreams use 401/403 for an entitlement/policy decision that applies
+    equally to every key on the account — e.g. OpenCode Zen's ``FreeTierError``
+    ("free tier can only be used from within OpenCode"), which arrives as 403
+    even with a valid key. ``error_from_provider_status`` classifies those as
+    ``permission_error``; reporting them to the pool retired healthy keys two
+    at a time (err_count += 2) until the whole account was cooled off, turning
+    one policy rejection into a self-inflicted outage. They return ``None`` so
+    the key is left alone; the request still fails over to another
+    deployment/provider because the error stays retryable.
+
+    Shared by the router's retry loop and the gateway's stream pump/resume
+    path.
     """
     if e.status == 429:
         return 429
     if e.status in (401, 403):
-        return e.status
+        return None if e.etype == "permission_error" else e.status
     if e.status in RETRYABLE_STATUS:
         return e.status
     return None
@@ -91,9 +104,115 @@ def _extract_error_message(body_text: str) -> str:
     return body_text[:500]
 
 
+def _extract_error_type(body_text: str) -> str:
+    """Extract an upstream error's machine ``type``/``code`` marker.
+
+    Zen/Anthropic use ``{"type":"error","error":{"type":"FreeTierError"}}``;
+    OpenAI-style bodies put it at ``error.type`` or ``error.code``. Returns
+    ``""`` when the body is not an object or carries no marker.
+    """
+    try:
+        data = orjson.loads(body_text)
+    except (json.JSONDecodeError, ValueError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    err = data.get("error")
+    if isinstance(err, dict):
+        for key in ("type", "code"):
+            val = err.get(key)
+            if isinstance(val, str) and val:
+                return val
+    for key in ("type", "code"):
+        val = data.get(key)
+        if isinstance(val, str) and val and val != "error":
+            return val
+    return ""
+
+
+# Account/entitlement error markers: the upstream accepted the credential but
+# refused the *request* on a policy or billing ground. These apply to every
+# key on the account, so they must never be charged to key health. Billing
+# refusals are reported as 402 so a client does not render them as "re-enter
+# your API key" (Cline, for one, classes every 401/403 as an auth error);
+# policy refusals stay 403 but keep the non-auth ``permission_error`` etype.
+_BILLING_ERROR_TYPES = frozenset({
+    "FreeTierError",        # OpenCode Zen: "free tier can only be used from within OpenCode"
+    "CreditsError",         # no payment method / insufficient balance
+    "MonthlyLimitError",    # workspace monthly spend cap
+    "UserLimitError",       # member monthly spend cap
+    "FreeUsageLimitError",
+    "GoUsageLimitError",
+    "BlackUsageLimitError",
+})
+
+_POLICY_ERROR_TYPES = frozenset({
+    "RegionError",          # model not available in the caller's country
+    "DataPolicyError",      # model requires explicit training opt-in
+    "ModelError",           # model unsupported / disabled for this workspace
+})
+
+# Phrase fallbacks for upstreams that send a refusal without a type marker
+# (the deployed Console variant emits these in the human message).
+_BILLING_MESSAGE_MARKERS = (
+    "free tier can only be used",
+    "no payment method",
+    "insufficient balance",
+    "spending limit",
+    "usage limit reached",
+    "subscription quota exceeded",
+)
+
+_POLICY_MESSAGE_MARKERS = (
+    "not available in your country",
+    "requires explicit opt in",
+    "model is disabled",
+    "model is not supported",
+)
+
+
+def _entitlement_kind(body_text: str, msg: str) -> str | None:
+    """Classify a 401/403 as an account-level refusal, else ``None``.
+
+    Returns ``"billing"`` (payment/credit/quota) or ``"policy"`` (region,
+    data, model access) when the body names an account-wide condition rather
+    than a bad credential; ``None`` means it is a genuine auth failure.
+    """
+    etype = _extract_error_type(body_text)
+    if etype in _BILLING_ERROR_TYPES:
+        return "billing"
+    if etype in _POLICY_ERROR_TYPES:
+        return "policy"
+    low = msg.lower()
+    if any(marker in low for marker in _BILLING_MESSAGE_MARKERS):
+        return "billing"
+    if any(marker in low for marker in _POLICY_MESSAGE_MARKERS):
+        return "policy"
+    return None
+
+
 def error_from_provider_status(status: int, body_text: str, provider: str) -> WiwiError:
     msg = _extract_error_message(body_text) or f"{provider} returned HTTP {status}"
     if status == 401 or status == 403:
+        # Distinguish a rejected credential from an account-level refusal.
+        # Both arrive as 401/403, but only the former says anything about the
+        # key: a ``FreeTierError``/``CreditsError`` applies to the whole
+        # account, so classifying it as ``authentication_error`` retired every
+        # healthy key in the pool (err_count += 2 each) and turned one policy
+        # rejection into an outage. Entitlement refusals become
+        # ``permission_error`` (so ``status_for_key_pool`` leaves the key
+        # alone) and billing ones carry 402 so clients do not tell the user to
+        # re-enter a working key; the request still fails over because the
+        # error stays retryable.
+        kind = _entitlement_kind(body_text, msg)
+        if kind == "billing":
+            return WiwiError(402, "permission_error",
+                             f"{provider} requires billing ({status}): {msg}",
+                             retryable=True)
+        if kind == "policy":
+            return WiwiError(403, "permission_error",
+                             f"{provider} denied access ({status}): {msg}",
+                             retryable=True)
         # Preserve the auth-failure status so the router can invalidate the key
         # (ProviderKey.mark_invalid); retryable stays True so the request fails
         # over to the next key in the pool instead of hard-failing the client.

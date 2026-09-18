@@ -16,6 +16,19 @@ from wiwi.streaming import deltas as dl
 log = structlog.get_logger("wiwi.gemini_adapter")
 
 
+def _token_count(value: Any) -> int:
+    """A Gemini usage counter as the ``int`` the IR requires.
+
+    ``usageMetadata`` is typed-wrong more often than one expects: Gemini 2.5
+    and Vertex attach it to *every* chunk, and a proxy or a SAFETY-truncated
+    candidate can serialize a counter as ``null``. The unguarded
+    ``candidatesTokenCount + thoughtsTokenCount`` sum raised ``TypeError`` out
+    of the decoder itself (AUDIT #195), unlike its sibling reads. A ``bool`` is
+    not a token count, so ``ir.coerce_int``'s rejection is kept.
+    """
+    return ir.coerce_int(value) or 0
+
+
 class GeminiAdapter:
     provider_type = "gemini"
 
@@ -23,12 +36,16 @@ class GeminiAdapter:
         self._started = False
         self._saw_function_call = False
         self._tool_seq = 0
+        # A stream's terminal tail (UsageFinal + Finish + StreamEnd) may be
+        # emitted exactly once (AUDIT #161).
+        self._saw_tail = False
 
     def reset(self) -> None:
         """Drop per-stream state so the adapter can serve another stream."""
         self._started = False
         self._saw_function_call = False
         self._tool_seq = 0
+        self._saw_tail = False
 
     def headers(self, key: ProviderKeyRef) -> dict[str, str]:
         return {}  # key goes in querystring
@@ -250,11 +267,11 @@ class GeminiAdapter:
                 turn.stop_reason = "tool_call"
         u = data.get("usageMetadata") or {}
         turn.usage = ir.Usage(
-            prompt_tokens=u.get("promptTokenCount", 0),
-            completion_tokens=(u.get("candidatesTokenCount", 0)
-                               + u.get("thoughtsTokenCount", 0)),
-            cached_tokens=u.get("cachedContentTokenCount", 0),
-            reasoning_tokens=u.get("thoughtsTokenCount", 0),
+            prompt_tokens=_token_count(u.get("promptTokenCount")),
+            completion_tokens=(_token_count(u.get("candidatesTokenCount"))
+                               + _token_count(u.get("thoughtsTokenCount"))),
+            cached_tokens=_token_count(u.get("cachedContentTokenCount")),
+            reasoning_tokens=_token_count(u.get("thoughtsTokenCount")),
         )
         return turn
 
@@ -303,17 +320,19 @@ class GeminiAdapter:
             self._started = True
             self._saw_function_call = False
             self._tool_seq = 0
+            self._saw_tail = False
         if block_reason:
             u = payload.get("usageMetadata")
             if isinstance(u, dict):
                 out.append(dl.UsageFinal(
-                    prompt=u.get("promptTokenCount", 0),
-                    cached=u.get("cachedContentTokenCount", 0),
-                    reasoning=u.get("thoughtsTokenCount", 0),
-                    output=(u.get("candidatesTokenCount", 0)
-                            + u.get("thoughtsTokenCount", 0))))
+                    prompt=_token_count(u.get("promptTokenCount")),
+                    cached=_token_count(u.get("cachedContentTokenCount")),
+                    reasoning=_token_count(u.get("thoughtsTokenCount")),
+                    output=(_token_count(u.get("candidatesTokenCount"))
+                            + _token_count(u.get("thoughtsTokenCount")))))
             out.append(dl.Finish("content_filter"))
             out.append(dl.StreamEnd())
+            self._saw_tail = True
             return out
         cand = cands[0] if isinstance(cands, list) and cands else {}
         content = cand.get("content")
@@ -349,14 +368,14 @@ class GeminiAdapter:
             # #154); treat it as absent.
             u = None
         finish = cand.get("finishReason")
-        if finish:
+        if finish and not self._saw_tail:
             if u:
                 out.append(dl.UsageFinal(
-                    prompt=u.get("promptTokenCount", 0),
-                    cached=u.get("cachedContentTokenCount", 0),
-                    reasoning=u.get("thoughtsTokenCount", 0),
-                    output=(u.get("candidatesTokenCount", 0)
-                            + u.get("thoughtsTokenCount", 0))))
+                    prompt=_token_count(u.get("promptTokenCount")),
+                    cached=_token_count(u.get("cachedContentTokenCount")),
+                    reasoning=_token_count(u.get("thoughtsTokenCount")),
+                    output=(_token_count(u.get("candidatesTokenCount"))
+                            + _token_count(u.get("thoughtsTokenCount")))))
             # A real function call in this response wins over the mapped finish
             # reason — never sniff the serialized candidate text for "tool".
             if self._saw_function_call:
@@ -370,7 +389,8 @@ class GeminiAdapter:
                                       "SPII": "content_filter",
                                       }.get(finish, "stop")))
             out.append(dl.StreamEnd())
-        elif u and not (cand.get("content") or {}).get("parts"):
+            self._saw_tail = True
+        elif u and not self._saw_tail and not (cand.get("content") or {}).get("parts"):
             # Usage without finishReason: emitted on some SAFETY-truncated and
             # mid-stream-cut responses. Treat it as a clean completion — the
             # pump otherwise reports `upstream stream ended without completion`
@@ -383,16 +403,25 @@ class GeminiAdapter:
             # consumer broke on StreamEnd and the rest of the answer was
             # silently truncated at HTTP 200 (AUDIT #134). A genuine terminal
             # frame carries no content parts, so require that as well.
+            #
+            # ``_saw_tail`` makes the tail exactly-once across BOTH arms: this
+            # one fires on a parts-less usage-bearing intermediate frame, and
+            # the ``finish`` frame that follows would otherwise emit a second
+            # UsageFinal/Finish/StreamEnd — every consumer keeps the last
+            # value, so the stream was billed on the intermediate frame's
+            # counts and the client saw a terminal frame mid-stream
+            # (AUDIT #161).
             out.append(dl.UsageFinal(
-                prompt=u.get("promptTokenCount", 0),
-                cached=u.get("cachedContentTokenCount", 0),
-                reasoning=u.get("thoughtsTokenCount", 0),
-                output=(u.get("candidatesTokenCount", 0)
-                        + u.get("thoughtsTokenCount", 0))))
+                prompt=_token_count(u.get("promptTokenCount")),
+                cached=_token_count(u.get("cachedContentTokenCount")),
+                reasoning=_token_count(u.get("thoughtsTokenCount")),
+                output=(_token_count(u.get("candidatesTokenCount"))
+                        + _token_count(u.get("thoughtsTokenCount")))))
             if self._saw_function_call:
                 out.append(dl.Finish("tool_call"))
             else:
                 out.append(dl.Finish("stop"))
             out.append(dl.StreamEnd())
+            self._saw_tail = True
         return out
 

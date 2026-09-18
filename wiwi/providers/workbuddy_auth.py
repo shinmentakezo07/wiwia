@@ -175,7 +175,23 @@ def parse_expires_at(value: Any) -> int | None:
 
 
 def expires_within_lead(expires_epoch: int, lead_s: float = REFRESH_LEAD_S) -> bool:
-    return expires_epoch <= 0 or time.time() + lead_s >= expires_epoch
+    """True when a *known* expiry falls inside the refresh lead window.
+
+    An unknown expiry (``expires_epoch <= 0`` — :func:`parse_auth` defaults a
+    missing/non-numeric ``expiresAt`` to 0) is NOT due. WorkBuddy refresh
+    tokens rotate on use, so "unknown" must never mean "refresh on every
+    sweep": that burns one rotation plus one DB write per ``TICK_S``,
+    indefinitely, and calls ``mark_dead`` on a key that never expired
+    (AUDIT #170). This mirrors the Cline sweeper, which skips a record whose
+    ``expires_at`` is absent or unparseable.
+
+    The admin listing keeps the opposite, Go-compatible convention via
+    :meth:`WorkBuddyAuth.needs_refresh` (unknown = due), so an operator still
+    sees an account with no recorded expiry flagged for attention.
+    """
+    if expires_epoch <= 0:
+        return False
+    return time.time() + lead_s >= expires_epoch
 
 
 def _common_headers(origin: str) -> dict[str, str]:
