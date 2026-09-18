@@ -3,7 +3,7 @@
 // with a totals footer.
 
 import { useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import {
   Activity,
   ArrowDownToLine,
@@ -301,8 +301,12 @@ export function UsagePage() {
     refetchInterval: 10_000,
   });
   const logsQuery = useQuery({
-    queryKey: ["usage-logs"],
-    queryFn: getRequestLogs,
+    // Keyed by range: the server applies the window, so a different range is a
+    // different request/result. keepPreviousData holds the old rows while the
+    // new window loads, so switching range does not flash the page empty.
+    queryKey: ["usage-logs", range],
+    queryFn: () => getRequestLogs({ minutes: range }),
+    placeholderData: keepPreviousData,
     refetchInterval: 15_000,
   });
 
@@ -310,6 +314,11 @@ export function UsagePage() {
   // request lands, instead of waiting up to 15s for the next poll.
   const connected = useLiveInvalidation(["overview", "tps-ts", "usage-logs"]);
 
+  // The server already applies the range window (`minutes=range`), so this
+  // filter is a belt-and-braces guard: it keeps the client's own clock the
+  // authoritative boundary (identical to the pre-change client-side filter)
+  // and covers the placeholderData window right after a range switch, when the
+  // held rows may belong to a wider range than the one now selected.
   const allLogs = useMemo(() => {
     const all = logsQuery.data?.logs ?? [];
     if (range === 0) return all; // all-time: no cutoff

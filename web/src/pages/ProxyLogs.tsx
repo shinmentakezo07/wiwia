@@ -52,6 +52,16 @@ const LEVEL_BAR: Record<Level, string> = {
 
 const EMPTY: ProxyLogEntry[] = [];
 
+/** Identity for a proxy row that survives the live tail's prepend.
+ *
+ * `ts` is a float `time.time()` (microsecond resolution) so distinct events
+ * never share one; `level`, `request_id` and `message` disambiguate the
+ * pathological case and keep the key meaningful in a React list. The array
+ * index is deliberately absent — it is exactly what the prepend invalidates. */
+function proxyRowKey(l: ProxyLogEntry): string {
+  return `${l.ts}:${l.level}:${l.request_id ?? ""}:${l.message}`;
+}
+
 function asProxyEntry(data: unknown): ProxyLogEntry | null {
   if (typeof data !== "object" || data === null) return null;
   const d = data as Record<string, unknown>;
@@ -181,7 +191,13 @@ export function ProxyLogsPage() {
         <Card>
           <LogsTable head={["Time", "Level", "Message", "Request ID"]} maxHeight={640}>
             {filtered.map((l, i) => {
-              const key = `${l.ts}:${l.message}:${i}`;
+              // Stable identity, NOT the array index. The live tail PREPENDS
+              // (`[evt, ...old]`), which shifts every index by one, so an
+              // index-bearing key invalidated every stored key on every new
+              // event — and with the repeated identical lines a proxy log
+              // emits, the shifted key could match a *different* physical row,
+              // re-attaching the panel to another event's detail (AUDIT #208).
+              const key = proxyRowKey(l);
               const isOpen = expanded.has(key);
               const hasExtra = !!(l.request_id || l.message.length > 120);
               return (

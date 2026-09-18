@@ -301,8 +301,29 @@ export const getTimeseries = (metric: TimeseriesMetric, minutes: number) =>
     `/admin/stats/timeseries?bucket=minute&metric=${metric}&minutes=${minutes}`,
   );
 
-export const getRequestLogs = () =>
-  api<{ logs: RequestLogEntry[] }>("/admin/logs/requests?limit=10000");
+/** Request-log rows, newest-first.
+ *
+ *  The zero-argument call keeps its exact historical request
+ *  (`/admin/logs/requests?limit=10000`) so existing callers are unchanged.
+ *  Pass `minutes` to push the lookback window server-side (0 = all-time) and
+ *  `offset` to page; both are only appended when actually provided.
+ *
+ *  `signal` is react-query's `QueryFunctionContext.signal`, forwarded so a
+ *  superseded query (a fast range switch) aborts its in-flight fetch instead of
+ *  racing the newer one to populate the cache. */
+export const getRequestLogs = (opts?: {
+  minutes?: number;
+  offset?: number;
+  signal?: AbortSignal;
+}) => {
+  const params = new URLSearchParams({ limit: "10000" });
+  if (opts?.minutes !== undefined) params.set("minutes", String(opts.minutes));
+  if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
+  return api<{ logs: RequestLogEntry[] }>(
+    `/admin/logs/requests?${params.toString()}`,
+    { signal: opts?.signal },
+  );
+};
 
 export const getPricing = () =>
   api<{ models: ModelPrice[] }>("/admin/pricing");

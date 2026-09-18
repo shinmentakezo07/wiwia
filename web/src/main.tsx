@@ -1,6 +1,6 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { BrowserRouter, Navigate, Route, Routes, useParams } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useParams } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AuthProvider, useAuth } from "@/api/auth";
 import { AdminStreamProvider } from "@/api/stream";
@@ -72,14 +72,30 @@ const queryClient = new QueryClient({
   },
 });
 
+// Legacy redirects must carry the query string and hash across.
+//
+// `<Navigate to="/console/providers" />` DROPS both: a string `to` is run
+// through `parsePath`, which only splits off a `search`/`hash` that is present
+// *in that string*. A deep link such as `/providers?type=openrouter` (the
+// Built-in Providers "Add account" button) therefore arrived at
+// `/console/providers` with no query at all, so Providers' `?type=` preset —
+// the whole purpose of that link — never applied (AUDIT #206).
+function legacyTarget(pathname: string, loc: { search: string; hash: string }) {
+  return { pathname, search: loc.search, hash: loc.hash };
+}
+
 // Legacy redirect: /app/* → /console/* (and bare /app → /console).
 function LegacyAppRedirect() {
   const { "*": rest } = useParams();
-  return <Navigate to={rest ? `/console/${rest}` : "/console"} replace />;
+  const loc = useLocation();
+  return <Navigate to={legacyTarget(rest ? `/console/${rest}` : "/console", loc)} replace />;
 }
 
 function AppRoutes() {
   const { user, loading } = useAuth();
+  // Legacy flat paths are redirects, and a redirect must not drop the query
+  // string a deep link arrived with (AUDIT #206).
+  const loc = useLocation();
   if (loading) return null;
   return (
     <Routes>
@@ -231,18 +247,20 @@ function AppRoutes() {
       {/* legacy /app/* → /console/* redirect (old admin base path) */}
       <Route path="/app/*" element={<LegacyAppRedirect />} />
 
-      {/* legacy flat-path redirects */}
-      <Route path="/keys" element={<Navigate to="/console/keys" replace />} />
-      <Route path="/providers" element={<Navigate to="/console/providers" replace />} />
-      <Route path="/models-config" element={<Navigate to="/console/models" replace />} />
-      <Route path="/request-logs" element={<Navigate to="/console/request-logs" replace />} />
-      <Route path="/usage" element={<Navigate to="/console/usage" replace />} />
-      <Route path="/analytics" element={<Navigate to="/console/analytics" replace />} />
-      <Route path="/budgets" element={<Navigate to="/console/budgets" replace />} />
-      <Route path="/settings" element={<Navigate to="/console/settings" replace />} />
-      <Route path="/proxy-logs" element={<Navigate to="/console/proxy-logs" replace />} />
-      <Route path="/builtin-providers" element={<Navigate to="/console/builtin-providers" replace />} />
-      <Route path="/dashboard" element={<Navigate to="/console" replace />} />
+      {/* legacy flat-path redirects — a redirect must not drop the query
+          string a deep link arrived with, e.g. /providers?type=openrouter
+          from the Built-in Providers "Add account" button (AUDIT #206). */}
+      <Route path="/keys" element={<Navigate to={legacyTarget("/console/keys", loc)} replace />} />
+      <Route path="/providers" element={<Navigate to={legacyTarget("/console/providers", loc)} replace />} />
+      <Route path="/models-config" element={<Navigate to={legacyTarget("/console/models", loc)} replace />} />
+      <Route path="/request-logs" element={<Navigate to={legacyTarget("/console/request-logs", loc)} replace />} />
+      <Route path="/usage" element={<Navigate to={legacyTarget("/console/usage", loc)} replace />} />
+      <Route path="/analytics" element={<Navigate to={legacyTarget("/console/analytics", loc)} replace />} />
+      <Route path="/budgets" element={<Navigate to={legacyTarget("/console/budgets", loc)} replace />} />
+      <Route path="/settings" element={<Navigate to={legacyTarget("/console/settings", loc)} replace />} />
+      <Route path="/proxy-logs" element={<Navigate to={legacyTarget("/console/proxy-logs", loc)} replace />} />
+      <Route path="/builtin-providers" element={<Navigate to={legacyTarget("/console/builtin-providers", loc)} replace />} />
+      <Route path="/dashboard" element={<Navigate to={legacyTarget("/console", loc)} replace />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

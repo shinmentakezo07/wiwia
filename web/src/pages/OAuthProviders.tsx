@@ -540,8 +540,22 @@ function GlobalDefaultModelCard(props: {
     onError: (e) => props.onError(e.message),
   });
 
-  const removeOne = useMutation({
-    mutationFn: (id: string) => deleteClineDefaultModel(id),
+  // "Clear all" is SERIALIZED, deliberately.
+  //
+  // Every DELETE is an unsynchronized read-modify-write on the one
+  // `cline_settings:default_models` row: the handler reads the list, filters
+  // the id, writes it back. Firing all N in one synchronous loop let each
+  // request read the same pre-state, so the last writer won and N-1 defaults
+  // silently survived while the UI reported success (AUDIT #209). Awaiting
+  // each delete in turn means every read observes the previous write.
+  //
+  // A single PUT of the remaining list is NOT equivalent: `_apply_cline_default_models`
+  // only *adds* deployments, so a PUT cannot drop the `cline:<id>` group the
+  // per-id DELETE does. Serializing keeps the server's semantics exactly.
+  const clearAll = useMutation({
+    mutationFn: async () => {
+      for (const id of savedIds) await deleteClineDefaultModel(id);
+    },
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["cline-settings"] });
       void qc.invalidateQueries({ queryKey: ["models"] });
@@ -679,13 +693,14 @@ function GlobalDefaultModelCard(props: {
             {savedIds.length > 0 && (
               <Button
                 variant="ghost"
-                disabled={removeOne.isPending}
-                onClick={() => {
-                  // Remove all saved defaults one at a time (simple, safe).
-                  for (const id of savedIds) removeOne.mutate(id);
-                }}
+                disabled={clearAll.isPending}
+                onClick={() => clearAll.mutate()}
               >
-                <Trash2 size={12} />
+                {clearAll.isPending ? (
+                  <Loader2 size={12} className="animate-spin" />
+                ) : (
+                  <Trash2 size={12} />
+                )}
                 Clear all
               </Button>
             )}

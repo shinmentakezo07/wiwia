@@ -526,7 +526,13 @@ function ChatSidebar(props: {
                           {relativeTime(c.updated)} · {c.messages.length} msgs
                         </span>
                       </div>
-                      <div className="mt-0.5 flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                      {/* Revealed on hover, keyboard focus, and any coarse
+                          pointer — a hover-only reveal is invisible on touch
+                          (AUDIT #210). The buttons carry the binding 44px
+                          minimum; the negative vertical margin keeps that box
+                          inside the row's own padding so the row does not
+                          grow, and nothing overlaps the neighbouring rows. */}
+                      <div className="-my-1.5 flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100">
                         <button
                           type="button"
                           onClick={(e) => {
@@ -534,7 +540,7 @@ function ChatSidebar(props: {
                             setRenamingId(c.id);
                             setRenameDraft(c.title || "");
                           }}
-                          className="rounded p-1 text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]"
+                          className="flex h-11 w-11 items-center justify-center rounded text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
                           aria-label="Rename chat"
                           title="Rename chat"
                         >
@@ -546,7 +552,7 @@ function ChatSidebar(props: {
                             e.stopPropagation();
                             onDelete(c.id);
                           }}
-                          className="rounded p-1 text-[var(--admin-text-dim)] transition-colors hover:text-red-400"
+                          className="flex h-11 w-11 items-center justify-center rounded text-[var(--admin-text-dim)] transition-colors hover:bg-red-500/10 hover:text-red-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50"
                           aria-label="Delete chat"
                           title="Delete chat"
                         >
@@ -652,8 +658,15 @@ export function PlaygroundPage() {
   // they're tiny strings, and the ref dies with the component.
   const draftsRef = useRef<Record<string, string>>({});
   // The most recent failed request, kept so the error banner can offer a
-  // one-click retry that replays the exact same request.
-  const failedRef = useRef<{ history: Msg[]; userText: string | null } | null>(null);
+  // one-click retry that replays the exact same conversation.
+  //
+  // Only the history is stored. `runStream` already appended the user message
+  // to `messages` (and the failure path below deliberately leaves it there so
+  // the user doesn't lose their text), so re-supplying it as `userText` on the
+  // retry appended a SECOND copy — compounding on every retry and persisting
+  // to localStorage. `history` already carries that one copy, which is what
+  // goes upstream.
+  const failedRef = useRef<Msg[] | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const focusComposer = useCallback(() => {
     // Streamed updates steal focus back constantly if we're eager here; only
@@ -897,6 +910,12 @@ export function PlaygroundPage() {
             model: effectiveModel,
             messages: history.map((m) => ({ role: m.role, content: m.content })),
             stream: true,
+            // OpenAI semantics: a stream carries `usage` only in a final
+            // chunk, and only when the caller opted in. Without this the
+            // gateway's chat encoder emits no usage frame at all
+            // (wire/openai_chat.py: `if self._include_usage`), so the stats
+            // strip below had nothing to render and only `ttft` survived.
+            stream_options: { include_usage: true },
           }),
           signal: controller.signal,
         });
@@ -937,7 +956,10 @@ export function PlaygroundPage() {
           );
         } else {
           setErr(e instanceof Error ? e.message : "request failed");
-          failedRef.current = { history, userText };
+          // The user message stays on screen (it is what failed, and the
+          // retry replays it), so the retry must NOT re-supply it — that is
+          // what duplicated it on every retry.
+          failedRef.current = history;
           setMessages((prev) => prev.filter((m) => m.id !== assistantId));
         }
       } finally {
@@ -995,12 +1017,16 @@ export function PlaygroundPage() {
 
   // One-click retry of the last failed request: clears the banner and
   // replays the exact same conversation state through runStream.
+  //
+  // `userText` is null: the failed attempt's user message is still in
+  // `messages`, and `failed` is the history that already contains it. Passing
+  // the text again would append a second copy on every retry.
   const retryFailed = useCallback(() => {
     const failed = failedRef.current;
     if (!failed || busy) return;
     failedRef.current = null;
     setErr(null);
-    void runStream(failed.history, failed.userText);
+    void runStream(failed, null);
   }, [busy, runStream]);
 
   // ── regenerate last ───────────────────────────────────────────────────────
@@ -1448,7 +1474,7 @@ function MessageBubble(props: {
             <p className="whitespace-pre-wrap break-words">{msg.content}</p>
           </div>
           {msg.content && (
-            <div className="mt-1 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+            <div className="mt-1 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100">
               <ActionButton onClick={handleCopy} label={copied ? "Copied" : "Copy"}>
                 {copied ? <Check size={13} className="text-emerald-400" /> : <Copy size={13} />}
               </ActionButton>
@@ -1483,7 +1509,9 @@ function MessageBubble(props: {
         {!isStreamingThis && msg.content && (
           <div
             className={`mt-1 flex items-center gap-1 transition-opacity ${
-              isLast ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+              isLast
+                ? "opacity-100"
+                : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100"
             }`}
           >
             <ActionButton onClick={handleCopy} label={copied ? "Copied" : "Copy"}>
@@ -1507,7 +1535,7 @@ function ActionButton(props: { onClick: () => void; label: string; disabled?: bo
       type="button"
       onClick={props.onClick}
       disabled={props.disabled}
-      className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)] disabled:opacity-40"
+      className="flex min-h-11 items-center gap-1 rounded-md px-2 text-[11px] text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50 disabled:opacity-40"
     >
       {props.children}
       {props.label}
