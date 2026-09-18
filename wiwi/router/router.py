@@ -77,7 +77,7 @@ class ProviderKey:
         else:
             self.cooldown_until = 0.0
 
-    def recover(self) -> None:
+    def recover(self, force: bool = False) -> None:
         """Revive a key whose timed cooldown window has elapsed.
 
         A terminal ``invalid`` — ``mark_invalid(None)``, ``cooldown_until ==
@@ -85,7 +85,22 @@ class ProviderKey:
         return to service only through the healer or an admin reset, per
         :meth:`mark_invalid`'s contract (AUDIT #115: pick_key's sweep used to
         resurrect them unconditionally).
+
+        ``force`` is that admin reset — the operator's explicit "this key is
+        fine now". It skips the cooldown gate entirely (reviving a terminal
+        ``invalid`` too) and always clears the failure streak and WRR deficit.
+        Without the streak reset the reset is a no-op in practice: the admin
+        path used to set ``status``/``cooldown_until`` by hand, leaving
+        ``err_count`` at its retirement value, so the very next non-200
+        re-retired the key through ``on_result``'s
+        ``err_count >= key_max_consecutive_fails`` (AUDIT #199).
         """
+        if force:
+            self.status = "active"
+            self.cooldown_until = 0.0
+            self.err_count = 0
+            self.current_weight = 0.0
+            return
         expired = time.monotonic() >= self.cooldown_until
         timed = (self.status == "cooling"
                  or (self.status == "invalid" and self.cooldown_until > 0.0))
@@ -299,12 +314,22 @@ class _DepWindow:
         self.events.append(event)
         self.total += event.tokens
 
-    def find_estimated(self, request_id: str) -> _DepEvent | None:
-        """Newest estimated reservation, preferring an exact request-id match."""
-        if request_id:
-            for e in reversed(self.events):
-                if e.estimated and e.request_id == request_id:
-                    return e
+    def newest_estimated(self) -> _DepEvent | None:
+        """Newest *estimated* reservation — the fallback for id-less callers.
+
+        Deliberately takes no request id. The previous helper here was
+        ``find_estimated(request_id)``, which "preferred an exact request-id
+        match" but silently fell back to the newest estimated event when the
+        id was not found; ``settle_tokens`` called it *first*, so a request
+        whose own reservation had aged out of the window while it was still
+        streaming adopted **another live request's** reservation — overwriting
+        that request's token count and flipping it to confirmed. The window
+        then under-counted (admitting past the cap) and the rightful owner
+        became unrefundable (AUDIT #190). Callers that carry an id must resolve
+        it with :meth:`find_event` and, when that misses, *append* — never
+        reach for another request's estimate. Mirrors
+        :meth:`wiwi.ratelimit.memory.RateLimiter._newest_estimated`.
+        """
         for e in reversed(self.events):
             if e.estimated:
                 return e
@@ -446,6 +471,15 @@ class Deployment:
         """Mark this request complete: replace the tpm estimate with actual
         usage and stop either slot from being refundable.
 
+        The reservation is resolved strictly by identity — ``id`` → any event
+        carrying that id → **append** — so a request whose own reservation has
+        already aged out of the 60 s window while it was still streaming writes
+        its real usage as a new event instead of adopting a different in-flight
+        request's estimate. The lenient newest-estimated arm is reachable only
+        for id-less callers, where at most one request per deployment can be in
+        flight (AUDIT #190; mirrors
+        :meth:`wiwi.ratelimit.memory.RateLimiter.record_tokens`).
+
         Idempotent for repeated settles of the same request: the pump prices a
         completed stream and can then be cancelled while blocking on the
         output queue, and its cancellation handler prices the same request
@@ -458,22 +492,21 @@ class Deployment:
         if self.tpm:
             w = self._window(True)
             w.prune(now)
-            target = w.find_estimated(request_id)
+            target = w.find_event(request_id) if request_id else None
+            if target is None and not request_id:
+                target = w.newest_estimated()
             if target is not None:
                 w.total += max(0, tokens) - target.tokens
                 target.tokens = max(0, tokens)
                 target.estimated = False
             else:
-                existing = w.find_event(request_id)
-                if existing is not None:
-                    w.total += max(0, tokens) - existing.tokens
-                    existing.tokens = max(0, tokens)
-                else:
-                    # No reservation found (e.g. a resume attempt on a
-                    # deployment that never admitted the original request):
-                    # record the actual usage so it is still accounted for.
-                    w.add(_DepEvent(ts=now, tokens=max(0, tokens),
-                                    request_id=request_id))
+                # No reservation for this id (its own aged out of the window,
+                # or this is a resume attempt on a deployment that never
+                # admitted the original request): record the actual usage as a
+                # new event so the window still accounts for tokens the
+                # provider really billed.
+                w.add(_DepEvent(ts=now, tokens=max(0, tokens),
+                                request_id=request_id))
         if self.rpm:
             # Settle the rpm event too, so the completed request holds its
             # slot until it ages out rather than being refundable.
@@ -1233,15 +1266,30 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                     group_first_err = e
                 last_err = e
                 status = _status_of(e)
-                await dep.provider.on_result_locked(key, status, e.retry_after,
-                                                    failover_mode=failover_mode,
-                                                    key_max_consecutive_fails=key_max_fails)
                 # any error: clear this key/provider's cycle credit so the
                 # rotation cadence doesn't shield a flapping key from being
                 # re-picked.
                 key_consec.pop((dep.provider.name, key.label), None)
                 provider_consec.pop(dep.provider.name, None)
+                # `status` is the *key-pool* signal, not the HTTP status: an
+                # entitlement refusal (FreeTierError/CreditsError → 402/403
+                # permission_error) returns None so the key is left alone,
+                # but the operator still needs the warn line — it is the only
+                # trace of WHY the request failed over when the pool is never
+                # touched. The pool charge itself is gated on the same signal:
+                # a None means the error says nothing about key health, so
+                # feeding it to the pool would be the AUDIT #174 regression.
                 if status is not None:
+                    await dep.provider.on_result_locked(key, status, e.retry_after,
+                                                        failover_mode=failover_mode,
+                                                        key_max_consecutive_fails=key_max_fails)
+                if e.etype == "permission_error" and e.status in (401, 402, 403):
+                    # Account-level refusal (billing/policy): the pool was not
+                    # charged, so say so and give the operator the real cause.
+                    _proxy("warn",
+                           f"{dep.provider.name} refused {dep.group}/{dep.model_id} "
+                           f"[{key.label}] — account entitlement ({e.status}): {e.message}")
+                elif status is not None:
                     _proxy("warn",
                            f"upstream {status} on {dep.group}/{dep.model_id} "
                            f"[{dep.provider.name}/{key.label}]: {e.message}")

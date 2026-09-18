@@ -5,8 +5,10 @@ hashed, plaintext shown once at creation. Cache TTL 60s; admin mutations
 evict actively.
 """
 
+import asyncio
 import hmac
 import time
+import weakref
 from dataclasses import dataclass, field
 
 import sqlalchemy as sa
@@ -16,6 +18,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from wiwi.auth.keys import generate_virtual_key, hash_key
 from wiwi.auth.users import USERS_DDL
 
+# Scalar key limits where 0 must be REJECTED rather than stored. Kept as one
+# named set so the rule cannot drift between the create and update paths, and
+# so the fields that legitimately accept 0 stay visibly outside it.
+_ZERO_IS_NOT_A_CAP = frozenset({"rpm", "tpm", "ttl_seconds"})
+
 
 def _coerce_limit(value: object, name: str) -> float | None:
     """Validate a numeric key limit.
@@ -23,7 +30,8 @@ def _coerce_limit(value: object, name: str) -> float | None:
     Rejects negatives and non-numeric input up front. A stored negative rpm/tpm
     made the rate limiter read an empty window and raise IndexError, returning
     HTTP 500 for every request on that key — and a negative budget would let
-    spend run backwards.
+    spend run backwards. Names in :data:`_ZERO_IS_NOT_A_CAP` also reject 0,
+    because every consumer treats a falsy limit as "no limit at all".
     """
     if value is None:
         return None
@@ -40,6 +48,21 @@ def _coerce_limit(value: object, name: str) -> float | None:
         raise ValueError(f"{name} must be a finite number")
     if num < 0:
         raise ValueError(f"{name} must be >= 0")
+    if num == 0 and name in _ZERO_IS_NOT_A_CAP:
+        # A zero scalar cap on a virtual key is not a cap, it is a *skipped*
+        # cap: the rate limiter guards each scope with ``if key_rpm:`` /
+        # ``if key_tpm:`` and the caller's truthy guard does the same, so a
+        # stored 0 means "unlimited" — the opposite of what an operator
+        # parking a key by setting it to zero intends (AUDIT #163).
+        # ``DeploymentParams`` rejects ``rpm <= 0`` for exactly this reason;
+        # the two boundaries now agree. ``ttl_seconds`` joins them for the
+        # same shape of ambiguity: 0 is falsy on create (no expiry) and
+        # non-None on update (expire now), so no single meaning is safe
+        # (AUDIT #202). ``max_budget`` is deliberately NOT here — a budget of
+        # 0 is a meaningful "spend nothing" cap that the limiter's budget
+        # check reads with ``is not None``, and ``expires_at`` is an absolute
+        # epoch where 0 already means "long expired".
+        raise ValueError(f"{name} must be > 0")
     return num
 
 
@@ -109,10 +132,28 @@ class AuthService:
         self.master_hash = hash_key(master_key_plaintext)
         self._cache: dict[str, tuple[AuthInfo | None, float]] = {}
         self._ttl = 60.0
+        # Bumped by every cache eviction. authenticate() compares the value it
+        # read before its DB lookup against the current one, so a revocation
+        # landing mid-lookup cannot be undone by the late store (AUDIT #162).
+        self._evict_gen = 0
         self._is_pg = engine.dialect.name == "postgresql"
         # Ceiling on live keys per owner. Admins mint keys with owner_id=None
         # and are exempt; the check below only fires for a real owner.
         self.max_keys_per_user = max_keys_per_user
+        # authenticate()'s lookup→store pair is made safe against a concurrent
+        # revocation by ``_evict_gen``, not by a lock — see that method.
+        #
+        # Serializes create_key's count→insert pair per owner. count_keys
+        # awaits, so concurrent creates all read the same pre-insert count and
+        # every one of them passed the cap (5 concurrent creates against
+        # max_keys_per_user=1 minted 3-5 keys). The cap is what stops a user
+        # rotating around per-key budgets and rate limits (AUDIT #198).
+        #
+        # Per owner, not global: two users creating keys concurrently must not
+        # serialize. Weak references so an unbounded stream of owner ids
+        # cannot grow the map — the lock is only needed while someone holds it.
+        self._owner_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+            weakref.WeakValueDictionary())
         # Hard ceiling on cached lookups. Entries are removed on create/
         # delete/update, but a scan of nonexistent keys inserts negative
         # entries that nothing ever removes, so the read path also bounds it.
@@ -179,6 +220,9 @@ class AuthService:
             return AuthInfo(key_id="master", key_type="master", alias="master")
         h = hash_key(plaintext)
         now = time.monotonic()
+        # Snapshot the eviction generation BEFORE the DB read, so an eviction
+        # that lands after this point is detectable at the store below.
+        gen = self._evict_gen
         hit = self._cache.get(h)
         if hit and now - hit[1] < self._ttl:
             # Budget-bound keys must always reflect the latest spend so a
@@ -198,6 +242,9 @@ class AuthService:
                 return None
             if info.max_budget is None and not self._expired(info):
                 return info
+        # The cached hit above mutates nothing, so it is served with no
+        # synchronisation at all — the miss path below is the only one that can
+        # race a revocation.
         info = await self._lookup_db(h)
         if info is not None and self._expired(info):
             # An expired credential must not authenticate no matter how it
@@ -207,6 +254,29 @@ class AuthService:
             # authoritative for every caller instead of only for the request
             # path that happens to re-check expires_at itself.
             info = None
+        # Only the miss path can race a revocation, and the generation counter
+        # is what closes it. A revocation landing between this lookup and the
+        # store below used to be erased by that store: every revocation path
+        # *evicts*, which is a no-op on an entry that is absent — exactly the
+        # state an in-flight lookup leaves behind (AUDIT #162). Comparing the
+        # generation read above with the current one turns that eviction into a
+        # signal to re-read, so the store can only ever publish info read after
+        # the last eviction. The loop (rather than a single re-read) covers a
+        # revocation whose commit lands while the re-read's query is already
+        # executing: that iteration's result predates the revocation, so it is
+        # discarded and retried.
+        #
+        # No lock is needed. asyncio runs one task at a time and there is no
+        # await between the generation check and the dict store, so an
+        # eviction either happened before the check (and is retried) or lands
+        # after the store (and removes what was stored). A lock here would only
+        # add contention to a path the cached branch deliberately keeps free of
+        # round trips.
+        while self._evict_gen != gen:
+            gen = self._evict_gen
+            info = await self._lookup_db(h)
+            if info is not None and self._expired(info):
+                info = None
         self._sweep_cache(now)
         self._cache[h] = (info, now)
         return info
@@ -247,7 +317,20 @@ class AuthService:
         )
 
     def evict(self, plaintext: str) -> None:
-        self._cache.pop(hash_key(plaintext), None)
+        self._drop_cached(hash_key(plaintext))
+
+    def _drop_cached(self, h: str) -> None:
+        """Drop *h*'s cached entry and record that an eviction happened.
+
+        The generation bump is what makes eviction meaningful against an
+        in-flight :meth:`authenticate` (AUDIT #162): the lookup compares the
+        generation it started with against the current one before storing, so
+        an eviction that lands mid-lookup invalidates the info that lookup
+        read. Bumped even when *h* was not cached — an absent entry is exactly
+        the state an in-flight lookup leaves behind.
+        """
+        self._cache.pop(h, None)
+        self._evict_gen += 1
 
     # -- CRUD ------------------------------------------------------------------
     async def create_key(self, alias: str, models: list[str] | None = None,
@@ -264,16 +347,45 @@ class AuthService:
         tpm = _coerce_limit(tpm, "tpm")
         max_budget = _coerce_limit(max_budget, "max_budget")
         ttl_seconds = _coerce_limit(ttl_seconds, "ttl_seconds")
-        # Cap live keys per owner. Without this a user mints unbounded keys
-        # and rotates around any per-key budget or rate limit. Admins pass
-        # owner_id=None (unowned keys) and are exempt.
-        if owner_id is not None and await self.count_keys(owner_id) >= self.max_keys_per_user:
-            raise ValueError(
-                f"key limit reached ({self.max_keys_per_user} live keys); "
-                f"delete or expire an existing key first")
         kid = "k" + secrets_hex()
         now = time.time()
-        expires = now + ttl_seconds if ttl_seconds else None
+        # ``ttl_seconds is not None`` (not a truthy test): 0 is rejected by
+        # _coerce_limit, and None is the documented "no expiry" value, so the
+        # create path and the update path now spell the same rule the same way
+        # (AUDIT #202).
+        expires = now + ttl_seconds if ttl_seconds is not None else None
+        if owner_id is None:
+            # Admins mint unowned keys and are exempt from the cap.
+            await self._insert_key(kid, plaintext, alias, models, max_budget,
+                                   rpm, tpm, expires, owner_id, now)
+        else:
+            # Cap live keys per owner. Without this a user mints unbounded keys
+            # and rotates around any per-key budget or rate limit.
+            #
+            # The count and the insert must not be separable: count_keys
+            # awaits, so concurrent creates all read the same pre-insert count
+            # and every one of them passed the cap — 5 concurrent creates
+            # against max_keys_per_user=1 minted 3 (AUDIT #198). The lock is
+            # held across both, so the row a holder inserts is visible to the
+            # next holder's count. Per owner rather than per service, so two
+            # users creating keys at the same time still run concurrently.
+            async with self._owner_lock(owner_id):
+                if await self.count_keys(owner_id) >= self.max_keys_per_user:
+                    raise ValueError(
+                        f"key limit reached ({self.max_keys_per_user} live keys); "
+                        f"delete or expire an existing key first")
+                await self._insert_key(kid, plaintext, alias, models, max_budget,
+                                       rpm, tpm, expires, owner_id, now)
+        # a failed guess of this plaintext may sit in the negative cache for the
+        # TTL; evict so the freshly created key authenticates immediately
+        self._drop_cached(hash_key(plaintext))
+        return plaintext, kid
+
+    async def _insert_key(self, kid: str, plaintext: str, alias: str,
+                          models: list[str] | None, max_budget: float | None,
+                          rpm: float | None, tpm: float | None,
+                          expires: float | None, owner_id: str | None,
+                          now: float) -> None:
         async with self.engine.begin() as conn:
             try:
                 await conn.execute(
@@ -287,10 +399,20 @@ class AuthService:
                 )
             except IntegrityError as e:
                 raise ValueError("custom key already exists") from e
-        # a failed guess of this plaintext may sit in the negative cache for the
-        # TTL; evict so the freshly created key authenticates immediately
-        self._cache.pop(hash_key(plaintext), None)
-        return plaintext, kid
+
+    def _owner_lock(self, owner_id: str) -> asyncio.Lock:
+        """The per-owner create lock, created on first use.
+
+        Weak-valued so a long-lived process serving many distinct owner ids
+        does not accumulate a lock per id: the only strong reference is the one
+        the create holding it keeps. The dict cannot hand out a *different*
+        lock to a concurrent caller, because a lock is only dropped once no
+        create holds a reference to it.
+        """
+        lock = self._owner_locks.get(owner_id)
+        if lock is None:
+            lock = self._owner_locks[owner_id] = asyncio.Lock()
+        return lock
 
     async def delete_key(self, key_id: str) -> bool:
         # fetch the hash first so the cache entry can be evicted; a deleted key
@@ -301,7 +423,7 @@ class AuthService:
         async with self.engine.begin() as conn:
             res = await conn.execute(sa.text("DELETE FROM vkeys WHERE id=:id"), {"id": key_id})
         if row is not None:
-            self._cache.pop(row[0], None)
+            self._drop_cached(row[0])
         return res.rowcount > 0
 
     async def get_key(self, key_id: str) -> dict | None:
@@ -333,7 +455,11 @@ class AuthService:
                 val = __import__("json").dumps(_coerce_models(val) or [])
             elif name == "ttl_seconds":
                 # Relative duration -> absolute epoch; ttl_seconds is not a
-                # DB column, it maps to expires_at.
+                # DB column, it maps to expires_at. ``is not None`` matches
+                # create_key, and 0 never reaches here — _coerce_limit rejects
+                # it, because 0 could only mean "expire now" on this path while
+                # it meant "never expires" on create (AUDIT #202). None remains
+                # the documented way to clear an expiry.
                 if val is not None:
                     sets["expires_at"] = time.time() + _coerce_limit(val, "ttl_seconds")
                 else:
@@ -364,7 +490,7 @@ class AuthService:
         async with self.engine.begin() as conn:
             await conn.execute(sa.text(f"UPDATE vkeys SET {cols}, updated_at=:now"
                                        " WHERE id=:id"), params)
-        self._cache.pop(row[0], None)
+        self._drop_cached(row[0])
         return await self.get_key(key_id)
 
     async def set_disabled(self, key_id: str, disabled: bool) -> bool:
@@ -383,7 +509,7 @@ class AuthService:
                 sa.text("UPDATE vkeys SET disabled=:d, updated_at=:now WHERE id=:id"),
                 {"d": int(disabled), "id": key_id, "now": time.time()},
             )
-        self._cache.pop(row[0], None)
+        self._drop_cached(row[0])
         return True
 
     async def update_spend(self, key_id: str, add_cost: float) -> bool:
@@ -523,7 +649,7 @@ class AuthService:
                             " updated_at = :now WHERE id = :id"),
                     {"now": now, "id": row[0]})
         for row in stale:
-            self._cache.pop(row[1], None)
+            self._drop_cached(row[1])
         return len(stale)
 
     async def key_owner(self, key_id: str) -> str | None:

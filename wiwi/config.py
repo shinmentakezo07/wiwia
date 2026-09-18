@@ -6,9 +6,12 @@ import os
 from pathlib import Path
 from typing import Any, Literal
 
+import structlog
 import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+log = structlog.get_logger("wiwi.config")
 
 
 class ConfigError(Exception):
@@ -218,6 +221,31 @@ class RouterSettings(BaseModel):
     # Prometheus /metrics endpoint
     prometheus_enabled: bool = False
     prometheus_path: str = "/metrics"
+
+    @field_validator("prometheus_path")
+    @classmethod
+    def _prometheus_path_is_literal(cls, v: str) -> str:
+        """Reject a path FastAPI cannot register as a literal route.
+
+        ``create_app`` mounts this value with ``@app.get(metrics_path)``, so a
+        non-literal path (a path parameter such as ``/metrics/{job}``, a
+        duplicate param, an unknown convertor) or one without a leading slash
+        (``metrics``, registered as a *host* pattern by Starlette) either
+        raises at route registration — the whole gateway fails to boot on a
+        config typo — or silently serves something other than ``/metrics``.
+        Validate here, where the operator still gets a readable error naming
+        the offending value (AUDIT #172).
+        """
+        if not v.startswith("/"):
+            raise ConfigError(
+                f"router_settings.prometheus_path must start with '/': {v!r} "
+                "(e.g. \"/metrics\"); FastAPI cannot register it as a route")
+        if "{" in v or "}" in v:
+            raise ConfigError(
+                f"router_settings.prometheus_path must be a literal path with "
+                f"no path parameters: {v!r}")
+        return v
+
     # Cycle rotation: every N successful requests served by the same provider
     # or the same key, force the WRR cursor to advance so traffic actually
     # rotates, not just spreads by weight.  Set to 0 to disable the cadence
@@ -398,8 +426,35 @@ def load_config_from_string(raw_yaml: str) -> WiwiConfig:
     return _validate(raw)
 
 
+def _key_env_vars(raw: dict) -> dict[str, list[str]]:
+    """Env var names referenced by each provider's ``keys[].key``, by provider.
+
+    Captured *before* interpolation: ``_interpolate`` replaces
+    ``os.environ/NAME`` with the resolved value, so the name is gone by the
+    time the empty-key filter runs. This is what lets the filter name the
+    variable an operator mistyped (AUDIT #182).
+    """
+    out: dict[str, list[str]] = {}
+    providers = raw.get("providers")
+    if not isinstance(providers, list):
+        return out
+    for p in providers:
+        if not isinstance(p, dict):
+            continue
+        keys = p.get("keys")
+        if not isinstance(keys, list):
+            continue
+        names = [k["key"][len("os.environ/"):] for k in keys
+                 if isinstance(k, dict) and isinstance(k.get("key"), str)
+                 and k["key"].startswith("os.environ/")]
+        if names:
+            out[str(p.get("name", ""))] = names
+    return out
+
+
 def _validate(raw: dict) -> WiwiConfig:
     try:
+        key_envs = _key_env_vars(raw)
         data = _interpolate(raw)
         # Filter out providers whose keys resolved to empty strings (env vars
         # not set) and model entries that reference those removed providers.
@@ -407,6 +462,14 @@ def _validate(raw: dict) -> WiwiConfig:
         # provider API keys are absent — only providers with real keys activate.
         # Providers explicitly declared with keys: [] still raise a validation
         # error — only keys that were present but resolved to "" are filtered.
+        #
+        # The filter stays lenient (the shipped wiwi.yaml.example declares
+        # eleven optional providers), but it is no longer SILENT: a dropped
+        # provider — and the env var each of its keys resolved from — is
+        # logged, because a one-character typo in an ``os.environ/NAME``
+        # reference otherwise deletes the provider and every model it served,
+        # and the resulting ``404 model not found`` reads as a routing problem
+        # rather than a config one (AUDIT #182).
         providers = data.get("providers", [])
         if isinstance(providers, list):
             survivors: list[dict] = []
@@ -429,6 +492,10 @@ def _validate(raw: dict) -> WiwiConfig:
                     survivors.append(p)
                 else:
                     removed_names.add(pname)
+                    log.warning("provider_dropped_no_key",
+                                provider=pname,
+                                env_vars=key_envs.get(pname, []),
+                                reason="every key resolved to an empty value")
             data["providers"] = survivors
             model_list = data.get("model_list", [])
             if isinstance(model_list, list):

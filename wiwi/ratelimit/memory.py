@@ -122,9 +122,21 @@ class RateLimiter:
                 checks.append((self._window("global:rpm"), self.global_rpm))
             if self.global_tpm:
                 checks.append((self._window("global:tpm", is_token=True), self.global_tpm))
-            if key_rpm:
+            # Key-scoped limits are tested with ``is not None``, not for
+            # truthiness. A stored ``rpm: 0`` used to skip its scope entirely,
+            # so an operator parking a key by zeroing it silently got an
+            # *unlimited* key — the opposite of the intent (AUDIT #163).
+            # ``_coerce_limit`` now rejects 0 at the admin boundary, so the
+            # only way to see one here is a row written before that; reading it
+            # as "no requests allowed" fails closed, and the ``limit <= 0``
+            # guard below already implements exactly that refusal.
+            #
+            # The global scopes keep the truthy test: ``global_rpm``/
+            # ``global_tpm`` are config-level knobs where 0 has always meant
+            # "cap off", and they are not settable through the key API.
+            if key_rpm is not None:
                 checks.append((self._window(f"{key_id}:rpm"), key_rpm))
-            if key_tpm:
+            if key_tpm is not None:
                 checks.append((self._window(f"{key_id}:tpm", is_token=True), key_tpm))
 
             for w, limit in checks:
@@ -183,22 +195,40 @@ class RateLimiter:
         """
         async with self._lock:
             now = time.monotonic()
+            actual = max(0, tokens)
             for scope in ("global:tpm", f"{key_id}:tpm"):
                 w = self._windows.get(scope)
                 if w is None or not w.is_token:
                     continue
                 self._prune(w, now)
-                # Match by request_id first so concurrent same-key requests
-                # each reconcile their own reservation. Fall back to the
-                # newest estimated reservation for backward compatibility.
-                target = self._find_reservation(w, request_id)
+                # With an id: match *only* that id (AUDIT #32). The lenient
+                # newest-estimated fallback was written for id-less callers,
+                # but on the id-carrying path it fires for a different reason —
+                # the caller's own reservation aged out of the 60 s window
+                # while the request was still streaming. Adopting another
+                # request's estimate then overwrites a *live* reservation and
+                # flips it to confirmed, which both under-counts the window
+                # (admitting past the cap) and makes the rightful owner
+                # unrefundable, since release() never removes confirmed usage.
+                # When the id's own reservation is gone, append the actual
+                # usage instead: the window must still account for tokens the
+                # provider really billed. Mirrors Deployment.settle_tokens,
+                # which resolves id -> any event for that id -> append and
+                # never adopts a different request's estimate.
+                target = self._find_event(w, request_id) if request_id else None
+                if target is None and not request_id:
+                    target = self._newest_estimated(w)
                 if target is not None:
-                    w.total += max(0, tokens) - target.tokens
-                    target.tokens = max(0, tokens)
+                    w.total += actual - target.tokens
+                    target.tokens = actual
                     target.estimated = False
                 else:
-                    w.events.append(_Event(ts=now, tokens=max(0, tokens)))
-                    w.total += max(0, tokens)
+                    # Tagged with the id when we have one, so a repeated
+                    # reconcile of the same request adjusts this event rather
+                    # than appending a second copy.
+                    w.events.append(_Event(ts=now, tokens=actual,
+                                           request_id=request_id))
+                    w.total += actual
 
     async def release(self, key_id: str, request_id: str = "") -> None:
         """Refund a reservation whose upstream call never consumed tokens.
@@ -235,14 +265,18 @@ class RateLimiter:
             # under-counted and admission let requests past the configured cap
             # (round 66).
             #
-            # An empty key_id would build the literal scopes ":rpm"/":tpm",
-            # which are real dict keys: a caller admitting with "" creates them
-            # and a later release would touch them. No caller does today
-            # (``authenticate`` always supplies a key id), but guarding here
-            # makes "no phantom window" structural rather than incidental.
-            if not key_id:
-                return
-            for scope in ("global:tpm", f"{key_id}:tpm"):
+            # An empty key_id must not build the literal scopes ``":rpm"``/
+            # ``":tpm"`` — they are real dict keys a later release would touch
+            # (round 66). But the GLOBAL windows must still be refunded:
+            # ``check("")`` reserves in them, and an early return leaked one of
+            # every ``global_rpm``/``global_tpm`` slot for the window (round
+            # 70). The key-scoped lookups are skipped when there is no id;
+            # ``.get`` never creates windows, so the global loops are safe.
+            key_tpm_scope = f"{key_id}:tpm" if key_id else None
+            key_rpm_scope = f"{key_id}:rpm" if key_id else None
+            for scope in ("global:tpm", key_tpm_scope):
+                if scope is None:
+                    continue
                 w = self._windows.get(scope)
                 if w is None or not w.is_token:
                     continue
@@ -250,7 +284,9 @@ class RateLimiter:
                 target = self._find_refund(w, request_id)
                 if target is not None:
                     self._drop(w, target)
-            for scope in (f"{key_id}:rpm", "global:rpm"):
+            for scope in (key_rpm_scope, "global:rpm"):
+                if scope is None:
+                    continue
                 w = self._windows.get(scope)
                 if w is None:
                     continue
@@ -260,19 +296,32 @@ class RateLimiter:
                     self._drop(w, target)
 
     @staticmethod
-    def _find_reservation(w: _Window, request_id: str) -> _Event | None:
-        """Newest *estimated* reservation for reconciliation by
-        :meth:`record_tokens`, preferring an exact request-id match.
+    def _find_event(w: _Window, request_id: str) -> _Event | None:
+        """The event belonging to *request_id*, estimated or confirmed.
 
-        The newest-estimated fallback is right here: ``record_tokens`` is
-        *replacing* an estimate with the real count for a request that did
-        succeed, so attributing it to another in-flight estimate keeps the
-        total correct.
+        Mirrors ``Deployment.settle_tokens``: id -> any event for that id.
+        The ``estimated`` flag is deliberately ignored here — ``record_tokens``
+        may run twice for one request (e.g. a resume followed by the pump's
+        final settle), and the second call must *adjust* the first call's
+        already-confirmed event rather than append a second copy of the usage.
+        Callers that intend to *remove* capacity must use ``_find_refund``
+        instead, which is strict about the estimate flag.
         """
-        if request_id:
-            for e in reversed(w.events):
-                if e.estimated and e.request_id == request_id:
-                    return e
+        for e in reversed(w.events):
+            if e.request_id == request_id:
+                return e
+        return None
+
+    @staticmethod
+    def _newest_estimated(w: _Window) -> _Event | None:
+        """Newest *estimated* event — the fallback for callers that predate
+        request ids, where at most one request per key can be in flight.
+
+        Never reached when an id was supplied: on the id-carrying path the
+        newest estimate may belong to a different, still-in-flight request,
+        and adopting it both under-counts the window and makes the rightful
+        owner unrefundable (AUDIT #32).
+        """
         for e in reversed(w.events):
             if e.estimated:
                 return e

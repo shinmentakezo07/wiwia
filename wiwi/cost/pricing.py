@@ -86,10 +86,23 @@ class CostEngine:
 
         ``provider_type``/``provider_name`` select a scoped rate (see
         :meth:`resolve`); omitted, the all-providers base rate applies.
+
+        Every token count is clamped at zero first. A provider (or a broken
+        upstream count) can report a negative ``completion_tokens`` or a
+        negative cache count, and an unclamped term turns that into a
+        *negative* charge — a credit. ``record_spend`` then drops it on the
+        floor (``add_cost <= 0`` is an early return in
+        ``auth/service.py``), so the row logs a negative cost while
+        ``spend_to_date`` never moves: the budget silently over-serves
+        (AUDIT #203).
         """
         p = self._lookup(model_id, provider_type, provider_name)
         if not p:
             return CostState(cost=0.0, unpriced=True)
+        prompt_tokens = max(0, prompt_tokens)
+        completion_tokens = max(0, completion_tokens)
+        cached_tokens = max(0, cached_tokens)
+        cache_creation_tokens = max(0, cache_creation_tokens)
         if prompt_includes_cached:
             uncached_prompt = max(0, prompt_tokens - cached_tokens)
         else:
