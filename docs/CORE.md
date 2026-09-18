@@ -63,7 +63,7 @@ web/                      # React 19 + Vite 6 + Tailwind 4 SPA (admin console + 
 
 The single mutable holder passed through every stage. Fields:
 
-`surface` (`chat | responses | messages`), `ir_req`, `started`, `request_id`, `auth`, `raw_body_bytes`, `group`, `deployment`, `provider_key`, `attempts: list[AttemptRecord]`, `first_token_at`, `last_token_at`, `usage`, `cost`, `cache_hit`, `stop_reason`, `status`, `error`, `log_buffer`, `metadata`, `cancel: asyncio.Event`, `_defer_key_credit`.
+`surface` (`chat | responses | messages`), `ir_req`, `started`, `request_id`, `auth`, `group`, `deployment`, `provider_key`, `attempts: list[AttemptRecord]`, `first_token_at`, `last_token_at`, `usage`, `cost`, `est_tokens`, `cache_hit`, `stop_reason`, `status`, `error`, `metadata`, `forward_headers`, `cancel: asyncio.Event`, `_defer_key_credit`.
 
 - `metadata` accumulates advisory notes (e.g. `tool_args_violations`).
 - `_defer_key_credit` marks the streaming path: `execute_with_retries` must NOT credit the key at connect time; the pump credits once output actually flows.
@@ -126,7 +126,9 @@ Exact-match, non-streaming only, no builtin tools. Key = normalized IR + group +
 `CostEngine` resolves tokens → USD from DB-backed `model_prices` (`server/config_store.py`) with a bundled fallback table; `estimate_tokens_async` provides the chars/4-style estimate when usage is missing (`UsageFinal.estimated=True`).
 
 ### Logging (`logging_core/`)
-`LogEvent` streams: **request** (DB + SSE to the UI), **proxy** (stdout JSON + SSE), **audit** (sync DB for admin mutations). The in-memory ring buffer feeds `/admin/stats/*` and `/metrics`; long ranges (7d/30d/all-time) come from DB aggregates.
+`LogEvent` streams: **request** (DB + SSE to the UI), **proxy** (stdout JSON + SSE), **audit** (sync DB for admin mutations). The in-memory ring buffer feeds `/admin/stats/*`; long ranges (7d/30d/all-time) come from DB aggregates. `/metrics` splits the two: process-lifetime monotonic counters (`RequestTotals`, folded in at accept time so a queue drop cannot under-report) carry the `counter` families, while the windowed gauges and quantile summaries come from the ring.
+
+Every loss mode is counted, because each one means durable accounting is missing rows: `dropped_request_logs` (request queue full), `failed_request_log_writes` (the batch write raised and the rows were discarded), `dropped_proxy_logs`, `failed_audit_log_writes`. `dropped_log_events` sums them; all four plus the sum are exposed on `/health` and `/metrics`.
 
 ### Server plumbing (`server/`)
 `app.py`: pure-ASGI `RequestIdMiddleware` (request id, body-size guard incl. chunked/HTTP2, latency headers — replaces BaseHTTPMiddleware so shutdown cancellation can't kill stream pumps), `ORJSONResponse`, `run_chat_like` pipeline, lifespan (DB init, refresh services, healer, journal store), `_SPAStaticFiles` mount at `/admin/ui`. `config_store.py`: DB-backed runtime config. `stats.py`/`metrics.py`: shared nearest-rank percentile so admin rollups and Prometheus cannot drift.

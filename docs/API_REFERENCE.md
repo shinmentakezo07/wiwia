@@ -75,8 +75,8 @@ Stream journals are ON by default (`.wiwi/journals/`, 600 s TTL, 1 MiB cap): a c
 
 | Endpoint | Description |
 |---|---|
-| `GET /health` | Liveness. Returns 200 when the process is up. Used by Docker healthcheck. |
-| `GET /metrics` (default; path configurable) | Prometheus text exposition: `wiwi_requests_total`, `wiwi_request_duration_ms`, `wiwi_tokens_total{type=in\|out\|cached\|reasoning}`, `wiwi_cost_total`, `wiwi_ttft_ms`, `wiwi_tps`, `wiwi_stream_errors_total`, `wiwi_provider_cooldowns`. Computed from the in-memory LogEvent ring buffer. |
+| `GET /health` | Liveness. Always HTTP 200 when the process is up (the Docker healthcheck probes it). `status` is derived, not constant: `ok` when at least one provider is configured and at least one group has an available deployment, else `degraded`. Also reports `groups`, `available_groups`, `providers`, and the log-loss counters: `dropped_request_logs` (queue full), `failed_request_log_writes` (DB write failed), `dropped_proxy_logs`, `failed_audit_log_writes`, `dropped_log_events` (their sum), plus `spend_charge_failures`. A non-zero loss counter means durable accounting is missing rows. |
+| `GET /metrics` (default; path configurable) | Prometheus text exposition: `wiwi_requests_total`, `wiwi_request_duration_ms`, `wiwi_tokens_total{type=in\|out\|cached\|reasoning}`, `wiwi_cost_total`, `wiwi_ttft_ms`, `wiwi_tps`, `wiwi_stream_errors_total`, `wiwi_prompt_cache_hits_total`, `wiwi_response_cache_hits_total`, `wiwi_request_logs_dropped_total`, `wiwi_spend_charge_failures_total`. Process-lifetime counters (requests/tokens/cost/cache hits) are monotonic across scrapes; the windowed gauges and the three quantile families come from the in-memory LogEvent ring. `wiwi_request_duration_ms`/`wiwi_ttft_ms`/`wiwi_tps` are `summary` (percentiles computed at scrape time — no `_bucket`/`_sum`/`_count` series, so `histogram_quantile()` does not apply). |
 
 ---
 
@@ -118,7 +118,7 @@ Stream journals are ON by default (`.wiwi/journals/`, 600 s TTL, 1 MiB cap): a c
 | `/admin/cline/settings/default-models/{model_id}` | DELETE | Remove a default-model mapping. |
 | `/admin/cline/oauth/login-url` | POST | Get OAuth login URL. |
 | `/admin/cline/oauth/connect` | POST | Complete OAuth connect. |
-| `/admin/cline/oauth/auto-connect` | POST | Connect via stored credentials. |
+| `/admin/cline/oauth/auto-connect` | POST | Initiate the redirect-based connect. **Dormant:** Cline's Google OAuth ignores `callback_url`, so the redirect never returns a `?code=`; both Cline UIs use the paste-code flow (`login-url` + `connect`) instead. The route works and is tested; it becomes usable if Cline honours `callback_url`. |
 | `/admin/cline/oauth/status` | GET | Connection/refresh state. |
 | `/admin/cline/oauth/refresh` | POST | Force token refresh. |
 | `/admin/cline/oauth/disconnect` | DELETE | Disconnect account. |

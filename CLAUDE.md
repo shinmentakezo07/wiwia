@@ -64,7 +64,7 @@ wire codec (inbound) ──decode──► IR ──adapter.encode_request──
 wire encoder (inbound) ◄──IRStreamDelta/IRResponse◄──adapter.decode─── provider
 ```
 
-Adding an inbound surface = one new module in `wiwi/wire/`; adding a provider = one new adapter in `wiwi/providers/` + a branch in `registry.get_adapter()` (or a documented entry in `_OPENAI_WIRE_TYPES`). Core code (`core/gateway.py`) never branches on dialect or provider name. Request flow end-to-end is best traced through `server/app.py:run_chat_like` (decode → auth → rate limit → journal replay check → router retries/fallbacks → gateway complete/stream) and back out through the wire encoders; `core/context.py:RequestContext` (63 lines) is the single mutable holder threaded through all of it.
+Adding an inbound surface = one new module in `wiwi/wire/`; adding a provider = one new adapter in `wiwi/providers/` + a branch in `registry.get_adapter()` (or a documented entry in `_OPENAI_WIRE_TYPES`). Core code (`core/gateway.py`) never branches on dialect or provider name. Request flow end-to-end is best traced through `server/app.py:run_chat_like` (decode → auth → rate limit → journal replay check → router retries/fallbacks → gateway complete/stream) and back out through the wire encoders; `core/context.py:RequestContext` (~83 lines) is the single mutable holder threaded through all of it.
 
 Inbound surfaces: `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages`, `POST /v1/messages/count_tokens`; plus `GET /v1/models`, `GET /public/models`, `GET /health`, a configurable Prometheus metrics path (`server/metrics.py`), `/admin/*` (master key), `/auth/*` (user sessions), `/cline/oauth/callback`.
 
@@ -76,18 +76,18 @@ Inbound surfaces: `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/m
 |---|---|
 | `wire/` | Inbound codecs: `openai_chat.py`, `openai_responses.py`, `anthropic_messages.py` — each owns `decode_request`, `encode_response`, a `StreamEncoder`, and `error_body` |
 | `providers/` | Outbound adapters: openai, anthropic, gemini, openrouter, nim, cline, bai, workbuddy, opencode (+ `cline_oauth.py`/`cline_auto_refresh.py`/`cline_version.py`, `workbuddy_auth.py`/`workbuddy_auto_refresh.py`, `opencode_version.py`, `nim_tool_schema.py`, `nim_native_tools.py`), plus `base.py` + `registry.py` |
-| `core/` | Engine: `gateway.py` (~1294 lines), `context.py` (RequestContext), `recovery.py` (Backoff, CircuitBreaker, ProbeVerdict, HealthHealer) |
+| `core/` | Engine: `gateway.py` (~1.8k lines), `context.py` (RequestContext), `recovery.py` (Backoff, CircuitBreaker, ProbeVerdict, HealthHealer) |
 | `ir/` | Internal representation (`types.py`, `builtin_tools.py`) |
-| `streaming/` | `IRStreamDelta` taxonomy (98 lines) + `sse.py` / `coalesce.py` / `resume.py` / `tape_store.py` (durable journals) / `partial_json.py` / `loopdetect.py` / `validation.py` — the contract between adapters and encoders |
+| `streaming/` | `IRStreamDelta` taxonomy (~140 lines, `deltas.py`) + `sse.py` / `coalesce.py` / `resume.py` / `tape_store.py` (durable journals) / `partial_json.py` / `loopdetect.py` / `validation.py` — the contract between adapters and encoders |
 | `router/` | Key pools, weighted round-robin, retries, cooldowns, fallbacks, probation |
 | `auth/` | Virtual keys, budgets, users (`keys.py`, `service.py`, `users.py`) |
 | `ratelimit/` | Sliding-window rpm/tpm (memory default + redis) |
 | `cache/` | Opt-in exact-match response cache (`CacheSettings`, off by default) |
 | `cost/` | Token/cost calculation (`pricing.py`) |
 | `logging_core/` | Three-stream logger: request (DB+SSE), proxy (stdout+SSE), audit (sync DB) |
-| `server/` | FastAPI app (`app.py`, ~4k lines), admin API, `stats.py` rollups, `metrics.py` (Prometheus), `config_store.py`, static SPA serving |
-| `web/` | Admin UI + public site (React 19 + TypeScript + Vite 6 + Tailwind 4), 53 page components in `src/pages/` |
-| `tests/` | Pytest suite — 79 files: thematic regressions plus numbered `test_fix_roundN.py` |
+| `server/` | FastAPI app (`app.py`, ~4.5k lines), admin API, `stats.py` rollups, `metrics.py` (Prometheus), `config_store.py`, static SPA serving |
+| `web/` | Admin UI + public site (React 19 + TypeScript + Vite 6 + Tailwind 4), ~50 page components in `src/pages/` |
+| `tests/` | Pytest suite — 100+ files: thematic regressions plus numbered `test_fix_roundN.py` |
 | `docs/` | Design specs (intentionally run ahead of implementation) + `docs/superpowers/{plans,specs}` |
 
 Two adapters carry provider-specific quirks that live in `providers/` (never in `core/`):
@@ -160,7 +160,13 @@ Error bodies are dialect-correct per surface (OpenAI `{"error":{…}}` vs Anthro
 
 ## Import Rules (binding)
 
-1. **No dialect or provider imports outside `wiwi/wire/` and `wiwi/providers/`.** `core/`, `router/`, `auth/`, `streaming/`, `cache/`, `cost/`, `logging_core/`, and `ir/` must never import symbols from `wiwi.wire` or `wiwi.providers`. Violating this leaks dialect/provider branching into modules that must stay generic. The registry's import-time assert will not catch this — it catches missing branches, not out-of-place ones.
+1. **No dialect or provider imports outside `wiwi/wire/` and `wiwi/providers/`** — with one carve-out for the *generic provider contracts*. `core/`, `router/`, `auth/`, `streaming/`, `cache/`, `cost/`, `logging_core/`, and `ir/` must never import:
+   - anything from `wiwi.wire` (all of it is dialect-specific), or
+   - any **concrete adapter** — `wiwi.providers.<name>_adapter` — since those carry per-provider branching.
+
+   **Allowed:** `wiwi.providers.base` and `wiwi.providers.registry`. These hold only generic contracts — `WiwiError`, `ProviderKeyRef`, `error_from_provider_status`, `status_for_key_pool`, and `fresh_adapter`/`get_adapter` — with no provider-specific logic, and `core/gateway.py`, `core/recovery.py` and `router/router.py` depend on them. `docs/CORE.md` states the same narrower rule for `recovery.py` ("must never import router/gateway to avoid a cycle").
+
+   The carve-out is not a licence for provider branching in `core/`: `core/gateway.py` importing `providers.opencode_adapter.route_for_model` (function-local, for the Messages-route check) is a real violation of the spirit of this rule and is tracked in `AUDIT.md`. The registry's import-time assert will not catch any of this — it catches missing branches, not out-of-place ones.
 2. **Import from the module that owns the symbol, not from a re-export layer.** If `wiwi.foo` re-exports `Bar` from `wiwi.foo.internal`, import `Bar` from `wiwi.foo`, not from `wiwi.foo.internal`. Re-export layers exist for a reason; bypassing them couples callers to internal layout.
 3. **Never add a new top-level import path without updating `registry.py`'s coverage assert.** Adding a provider type or an inbound wire dialect without the corresponding branch in `get_adapter()` or the matching wire module will be caught at import time — but only if the assert is kept honest. Any new entry in `PROVIDER_TYPES` or any new inbound route must have its branch.
 4. **Prefer existing module APIs over inventing new ones.** If a helper already exists in the owning module, use it. Do not create a parallel utility with the same job under a different name. "Second convention beside existing is prohibited."
@@ -181,7 +187,7 @@ Every UI or UX change — in `web/` or in any admin-facing HTML/template surface
 
 ## Where to start reading
 
-`server/app.py` is ~4k lines and `core/gateway.py` ~1294 — don't read either top to bottom. For a request's full path, start at `run_chat_like` in `server/app.py` (and `create_app`/`AppState` above it) and follow the pipeline it names; `RequestContext` (`core/context.py`, 63 lines) is the single mutable object threaded through every stage, so reading its fields tells you what the pipeline carries. For streaming, read `streaming/deltas.py` (98 lines, the whole contract) before any adapter. `docs/QUICKSTART.md`, `docs/API_REFERENCE.md`, `docs/CONFIG.md`, `docs/PROVIDERS.md`, and `docs/STREAMING.md` are the practical companion docs; `detailed.md` is a code-derived technical reference.
+`server/app.py` is ~4.5k lines and `core/gateway.py` ~1.8k — don't read either top to bottom. For a request's full path, start at `run_chat_like` in `server/app.py` (and `create_app`/`AppState` above it) and follow the pipeline it names; `RequestContext` (`core/context.py`, ~83 lines) is the single mutable object threaded through every stage, so reading its fields tells you what the pipeline carries. For streaming, read `streaming/deltas.py` (~140 lines, the whole contract) before any adapter. `docs/QUICKSTART.md`, `docs/API_REFERENCE.md`, `docs/CONFIG.md`, `docs/PROVIDERS.md`, and `docs/STREAMING.md` are the practical companion docs; `detailed.md` is a code-derived technical reference.
 
 ## Docs vs. code
 

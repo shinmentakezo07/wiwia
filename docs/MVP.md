@@ -23,7 +23,7 @@ Teams using more than one LLM provider face: per-provider SDKs and payload forma
 
 | # | Feature | Acceptance criteria |
 |---|---|---|
-| F1 | Three native API surfaces | `POST /v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `POST /v1/responses`, `POST /v1/messages`, `GET /v1/models` all live. Official `openai` SDK (chat + responses clients), official `anthropic` SDK, and raw curl succeed against each respective surface |
+| F1 | Three native API surfaces | `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages`, `GET /v1/models` live. Official `openai` SDK (chat + responses clients), official `anthropic` SDK, and raw curl succeed against each respective surface. **`/v1/completions` and `/v1/embeddings` are NOT implemented** — no route is registered for either; tracked as AUDIT #213 |
 | F2 | Cross-dialect translation | Any surface reaches any provider: Claude Code (`ANTHROPIC_BASE_URL=wiwi`) completes sessions backed by OpenAI models; Codex CLI (wiwi as model provider) completes sessions backed by Anthropic models; tool calls/results translate correctly in both directions |
 | F3 | Streaming in caller's dialect | `"stream": true` yields correct SSE per surface: `chat.completion.chunk` frames, Anthropic `message_start`/`content_block_delta`/`message_stop` sequences, Responses `response.output_*`/`response.completed` events; tool-call argument deltas stream in all three; final frame carries usage |
 | F4 | Config-driven models | `wiwi.yaml` `model_list` with `model_name` + `wiwi_params`; same-name entries form a load-balanced group; `os.environ/` interpolation everywhere |

@@ -67,7 +67,7 @@ Runtime dependencies: 13. That count is a feature.
 
 **SQLAlchemy async without Alembic.** Schema is created via inline `CREATE TABLE IF NOT EXISTS` at startup — migrations are additive DDL, and the schema surface is small (keys, users, logs, config store, prices). Alembic would be ceremony without payoff at this size.
 
-**No msgspec / tiktoken.** orjson covers hot-path serialization; provider-reported usage is authoritative for billing with a chars/4 estimate fallback (`cost/estimate_tokens_async`) instead of a tiktoken dependency.
+**No msgspec; tiktoken is a declared dependency.** orjson covers hot-path serialization. Provider-reported usage is authoritative for billing, but when upstream omits usage the fallback estimator (`cost/estimate_tokens_async`) uses tiktoken for OpenAI-family models and the chars/4 heuristic for everything else. tiktoken was originally *not* declared, which meant a clean `uv sync` silently dropped to chars/4 and degraded cost/budget accounting — the fallback is now a deliberate choice rather than an accident of what happened to be installed.
 
 **In-memory defaults, Redis opt-in.** Sliding-window rate limiting and the exact-match response cache run in-process by default (single-instance self-hosting target); the `[redis]` extra enables multi-instance correctness.
 
@@ -88,8 +88,9 @@ Runtime dependencies: 13. That count is a feature.
 | Rejected | Why |
 |---|---|
 | Alembic | Additive-DDL schema, small surface; inline DDL at startup |
-| tiktoken | Provider usage is authoritative; heuristic fallback suffices |
 | msgspec | orjson meets the latency budget; one JSON lib to reason about |
+| sse-starlette | Declared for a time but never used: its `EventSourceResponse` stalls behind `BaseHTTPMiddleware` on this stack, so the gateway serves plain `StreamingResponse`. Now removed from dependencies. |
+| pydantic-settings | Declared for a time but never used: config is hand-rolled on `pydantic.BaseModel` with a custom loader (`wiwi/config.py`). Now removed from dependencies. |
 | celery / task queue | Background tasks + lifespan services cover spend/log/refresh work |
 | heavyweight UI kit (shadcn/MUI) | Hand-rolled Tailwind components; bundle stays small |
 | mypy / pyright | Untyped Python by choice; TS side is strict-typed instead |

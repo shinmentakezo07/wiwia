@@ -35,7 +35,6 @@ general_settings:
   port: 4000                             # default: 4000
   log_level: info                        # default: info (structlog)
   db_url: sqlite+aiosqlite:///wiwi.db    # default: SQLite in repo root
-  admin_ui_dir: wiwi/server/static       # where built SPA lives
   max_request_body_mb: 10               # default: 10
 ```
 
@@ -47,7 +46,13 @@ general_settings:
 | `port` | `4000` | Bind port. |
 | `log_level` | `info` | structlog level: `debug`, `info`, `warning`, `error`. |
 | `db_url` | `sqlite+aiosqlite:///wiwi.db` | SQLAlchemy URL. Postgres: `postgresql+asyncpg://...`. `DATABASE_URL` env overrides. |
-| `admin_ui_dir` | `wiwi/server/static` | Path to built SPA. Set to empty to disable the `/admin/ui` mount. |
+| `max_request_body_mb` | `10` | Max request body size in MB. Honored for both `Content-Length` and chunked/HTTP2 bodies. |
+
+> **No `admin_ui_dir` field.** Earlier revisions of this doc listed one. The
+> built SPA is located from the `WIWI_STATIC_DIR` environment variable, falling
+> back to `Path(__file__).parent / "static"` (`wiwi/server/app.py`); there is no
+> config key. The SPA is also mounted at **`/`** with history fallback, not at
+> `/admin/ui`.
 | `max_request_body_mb` | `10` | Max request body size in MB. Honored for both `Content-Length` and chunked/HTTP2 bodies. |
 
 ## `router_settings`

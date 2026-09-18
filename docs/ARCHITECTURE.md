@@ -72,14 +72,14 @@ The design mirrors LiteLLM's mental model (config-driven `model_list`, model gro
 | IR | `wiwi/ir/types.py`, `ir/builtin_tools.py` | `Part` union (`TextPart`, `ImagePart`, `ToolUsePart`, `ToolResultPart`, `ThinkingPart`, `AudioPart`, `DocumentPart`), `Message`, `Tool`, `ToolChoice*`, `ResponseFormat`, `GenParams`, `Request`, `Usage`, `AssistantTurn`, `Response`; hosted-tool registry |
 | Router | `wiwi/router/router.py` | Groups/deployments/keys, WRR picking, alias chains, `execute_with_retries`, health scoring (EWMA latency + success rate), adaptive cooldowns |
 | Gateway | `wiwi/core/gateway.py` | Executes one IR request router → adapter → httpx; pumps deltas; TTFT/TPS timing; partial billing; stream-failure accounting |
-| Context | `wiwi/core/context.py` | `RequestContext` (surface, ir_req, auth, group, deployment, provider_key, attempts, usage, cost, stop_reason, status, error, log_buffer, metadata, cancel, …) |
+| Context | `wiwi/core/context.py` | `RequestContext` (surface, ir_req, auth, group, deployment, provider_key, attempts, usage, cost, est_tokens, stop_reason, status, error, metadata, forward_headers, cancel, …) |
 | Recovery | `wiwi/core/recovery.py` | Shared `Backoff`, `CircuitBreaker`, `parse_retry_after`, `build_url`; opt-in `HealthHealer` (1-token probes, graduated probation recovery). Used by router retries, Cline/WorkBuddy refresh services, healer. Imports nothing from router/gateway (cycle safety) |
 | Streaming | `wiwi/streaming/` | `deltas.py` taxonomy, `sse.py` parse/encode, `resume.py` StreamTape, `tape_store.py` JournalStore, `partial_json.py`, `validation.py`, `coalesce.py`, `loopdetect.py` — see [STREAMING.md](STREAMING.md) |
 | Cache | `wiwi/cache/` | Opt-in exact-match response cache (`CacheSettings`, off by default): non-streaming only, keyed on normalized IR + group + surface + key id; bypass via `x-wiwi-no-cache`; memory or Redis backend |
 | Rate limit | `wiwi/ratelimit/` | Sliding-window rpm/tpm; `memory.py` default, `redis.py` for multi-instance |
 | Auth | `wiwi/auth/` | `service.py` AuthService, `keys.py` virtual keys (hashed), `users.py` user accounts + PBKDF2 passwords + signed cookies |
 | Cost | `wiwi/cost/` | Token → USD engine; per-model prices from the DB (`config_store`) with bundled fallback |
-| Logging | `wiwi/logging_core/` | Three-stream logger: request (DB + SSE), proxy (stdout + SSE), audit (sync DB); `LogEvent` ring buffer feeds stats/metrics |
+| Logging | `wiwi/logging_core/` | Three-stream logger: request (DB + SSE), proxy (stdout + SSE), audit (sync DB); `LogEvent` ring buffer feeds stats and the windowed metrics, process-lifetime `RequestTotals` carries the monotonic counters; every drop/failure mode is counted and surfaced on `/health` |
 | Config | `wiwi/config.py` | Pydantic v2 models, `load_config`/`load_env`, `PROVIDER_TYPES`, `os.environ/NAME` interpolation |
 | Config store | `wiwi/server/config_store.py` | DB-backed providers/keys/deployments/settings/model_prices (runtime-mutable) |
 | Stats/Metrics | `wiwi/server/stats.py`, `server/metrics.py` | Admin rollups (ring buffer for short ranges, DB aggregates for 7d/30d/all-time) and Prometheus `/metrics` |
