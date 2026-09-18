@@ -7,6 +7,8 @@ __pycache__/
 # Project-local tooling
 .omo/
 .codegraph/
+# Local agent-tool settings (machine-specific permission allowlists).
+.qoder/
 
 # Live config & secrets (tracked template: wiwi.yaml.example)
 wiwi.yaml
