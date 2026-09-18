@@ -18,6 +18,36 @@ class DialectError(ValueError):
     pass
 
 
+def _str_or_empty(raw: Any) -> str:
+    """Coerce a decoded text field to ``str``, mapping junk to ``""``.
+
+    ``TextPart.text`` is typed ``str`` and every downstream consumer
+    concatenates it: the streaming fallback estimator's ``" ".join`` raises
+    TypeError on an int, which surfaces as an ``internal gateway error`` 500
+    *after* the upstream was billed (AUDIT #184). Mirrors the coercion
+    ``anthropic_messages.py`` already applies to its text blocks.
+    """
+    return raw if isinstance(raw, str) else ""
+
+
+def _stop_list(raw: Any) -> list[str]:
+    """Normalize a decoded ``stop`` field to the ``list[str]`` the IR types.
+
+    ``GenParams.stop`` is typed ``list[str]``, but ``(body.get("stop") or [])``
+    passed any truthy non-list straight through — ``{"stop": true}`` became
+    ``stop=True`` and was forwarded to the upstream, which 400s with an error
+    naming nothing the caller sent (AUDIT #185). Mirrors the Anthropic codec's
+    filter, including its treatment of a bare string as ONE sequence rather
+    than one per character; non-string items inside a list are dropped
+    (AUDIT #127).
+    """
+    if isinstance(raw, str):
+        return [raw]
+    if isinstance(raw, list):
+        return [s for s in raw if isinstance(s, str)]
+    return []
+
+
 def decode_request(body: dict[str, Any]) -> ir.Request:
     if not isinstance(body.get("model"), str) or not body["model"]:
         raise DialectError("'model' is required")
@@ -40,6 +70,15 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
             # OpenAI's newer name for system-level instructions; unify so
             # non-OpenAI upstreams fold it into the system prompt once.
             role = "system"
+        if role not in ("system", "user", "assistant", "tool"):
+            # A non-string role (7, ["user"], {"a": 1}, null) has no wire
+            # representation, and it was forwarded upstream verbatim — the
+            # ``# type: ignore[arg-type]`` on the append below is the tell.
+            # The upstream then 400s with an error naming nothing the caller
+            # sent (AUDIT #166). Coerce to the known role set, defaulting to
+            # "user", exactly as anthropic_messages.py's ``normalized`` line
+            # does.
+            role = "user"
         content = m.get("content")
         parts: list[ir.Part] = []
         raw_tool_calls = m.get("tool_calls")
@@ -127,7 +166,8 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                     # arguments like `"foo"` or `[]` parse fine but are not
                     # an object; ToolUsePart.args is typed dict.
                     args = {}
-            parts.append(ir.ToolUsePart(id=tc.get("id", ""), name=fn.get("name", ""),
+            parts.append(ir.ToolUsePart(id=tc.get("id", ""),
+                                        name=_str_or_empty(fn.get("name")),
                                         args=args, raw_args=raw_args))
         if role == "tool":
             # OpenAI spec: tool message content is a string. Defensively coerce
@@ -174,7 +214,7 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                                        images=tool_images)]
         if not parts and role != "assistant":
             parts = [ir.TextPart("")]
-        messages.append(ir.Message(role=role, parts=parts))  # type: ignore[arg-type]
+        messages.append(ir.Message(role=role, parts=parts))
 
     tools: list[ir.Tool] = []
     raw_tools = body.get("tools")
@@ -190,9 +230,16 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         if not isinstance(fn, dict):
             continue
         raw_params = fn.get("parameters")
+        raw_name = fn.get("name")
+        raw_desc = fn.get("description")
         tools.append(ir.Tool(
-            name=fn.get("name", ""),
-            description=fn.get("description", ""),
+            # An explicit JSON `null` passes `fn.get("name", "")` — the default
+            # only covers a MISSING key — and the null was forwarded upstream,
+            # where the provider 400s naming no offending block and the tool
+            # stays invisible to the model (AUDIT #186). Same class as the
+            # non-string case (AUDIT #184): coerce both at the boundary.
+            name=(raw_name if isinstance(raw_name, str) else ""),
+            description=(raw_desc if isinstance(raw_desc, str) else ""),
             # A non-dict schema ("oops") is stored verbatim otherwise, and the
             # stream pump's validate_tool_args then raises on it — cooling a
             # healthy deployment for a caller-controlled shape. Coerce to the
@@ -214,7 +261,12 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         tool_choice = ir.ToolChoiceRequired()
     elif isinstance(tc_raw, dict) and tc_raw.get("type") == "function":
         tc_fn = tc_raw.get("function")
-        tool_choice = (ir.ToolChoiceNamed(tc_fn.get("name", ""))
+        # A non-string (or explicit-null) name reaches ToolChoiceNamed.name,
+        # typed str, and every adapter renders it straight onto the wire
+        # (`{"function":{"name":null}}`) — the upstream 400 names nothing the
+        # caller sent (AUDIT #184/#186). Same coercion as a MISSING name,
+        # which already lands on "".
+        tool_choice = (ir.ToolChoiceNamed(_str_or_empty(tc_fn.get("name")))
                        if isinstance(tc_fn, dict) else None)
 
     g = ir.GenParams(
@@ -223,7 +275,7 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         max_tokens=(ir.coerce_int(body.get("max_tokens"))
                     if body.get("max_tokens") is not None
                     else ir.coerce_int(body.get("max_completion_tokens"))),
-        stop=[body["stop"]] if isinstance(body.get("stop"), str) else (body.get("stop") or []),
+        stop=_stop_list(body.get("stop")),
         seed=body.get("seed"),
         n=body.get("n") or 1,
         parallel_tool_calls=body.get("parallel_tool_calls"),

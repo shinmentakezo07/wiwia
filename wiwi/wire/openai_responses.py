@@ -19,7 +19,7 @@ from wiwi.ir import types as ir
 from wiwi.streaming import deltas as dl
 from wiwi.streaming.partial_json import _repair_truncated_json
 from wiwi.streaming.sse import sse_frame
-from wiwi.wire.openai_chat import DialectError
+from wiwi.wire.openai_chat import DialectError, _stop_list, _str_or_empty
 
 log = structlog.get_logger()
 
@@ -56,6 +56,13 @@ def _decode_image(url: Any) -> ir.ImagePart | None:
     """
     if not isinstance(url, str):
         return None
+    if not url:
+        # An absent or empty `image_url` (the callers pass `c.get(...) or ""`)
+        # is not a reference to anything: returning an ImagePart for it sent a
+        # 4-byte "image" (`data:image/png;base64,None`) upstream, which the
+        # provider rejects with no indication of which block was junk
+        # (AUDIT #168). Drop the block instead.
+        return None
     if url.startswith("data:"):
         header, _, b64 = url.partition(",")
         mime = header[5:].split(";")[0] or "image/png"
@@ -68,12 +75,17 @@ def _decode_document(c: dict[str, Any]) -> ir.DocumentPart | None:
     raw = c.get("file_data") or c.get("file_url") or ""
     if not isinstance(raw, str) or not raw:
         return None  # non-string file ref: skip rather than 500
+    # `name` is typed `str | None` and the fallback estimator appends it to a
+    # " ".join: a non-string filename (5, a list) was a 500 there (AUDIT
+    # #184). The field is optional, so junk becomes absent rather than "".
+    raw_name = c.get("filename")
+    name = raw_name if isinstance(raw_name, str) else None
     if raw.startswith("data:"):
         header, _, b64 = raw.partition(",")
         return ir.DocumentPart(b64=b64,
                                mime=header[5:].split(";")[0] or "application/pdf",
-                               name=c.get("filename"))
-    return ir.DocumentPart(url=raw, name=c.get("filename"))
+                               name=name)
+    return ir.DocumentPart(url=raw, name=name)
 
 
 def _item_text(item: dict[str, Any]) -> str:
@@ -131,18 +143,27 @@ def _decode_tool(t: dict[str, Any]) -> ir.Tool:
         ttype = None
     if ttype == "function":
         raw_params = t.get("parameters")
-        return ir.Tool(name=t.get("name", ""),
-                       description=t.get("description", ""),
-                       # A non-dict schema is otherwise stored verbatim and
-                       # crashes validate_tool_args inside the stream pump,
-                       # cooling a healthy deployment for a caller-controlled
-                       # shape. Same empty-object default as the missing case.
-                       parameters_json_schema=(raw_params if isinstance(raw_params, dict)
-                                               else {"type": "object"}),
-                       strict=t.get("strict"),
-                       # Responses defers a function by the same field name the
-                       # Anthropic surface uses, so it round-trips unchanged.
-                       defer_loading=t.get("defer_loading"))
+        raw_name = t.get("name")
+        raw_desc = t.get("description")
+        return ir.Tool(
+            # A non-string or explicit-null `name`/`description` reaches the IR
+            # typed as str: the null is forwarded upstream, where the provider
+            # 400s naming no offending block and the tool stays invisible to
+            # the model (AUDIT #186), and the non-string crashes the fallback
+            # estimator's " ".join with a 500 (AUDIT #184). `t.get(k, "")`
+            # defaults only a MISSING key, so coerce both at the boundary.
+            name=_str_or_empty(raw_name),
+            description=_str_or_empty(raw_desc),
+            # A non-dict schema is otherwise stored verbatim and
+            # crashes validate_tool_args inside the stream pump,
+            # cooling a healthy deployment for a caller-controlled
+            # shape. Same empty-object default as the missing case.
+            parameters_json_schema=(raw_params if isinstance(raw_params, dict)
+                                    else {"type": "object"}),
+            strict=t.get("strict"),
+            # Responses defers a function by the same field name the
+            # Anthropic surface uses, so it round-trips unchanged.
+            defer_loading=t.get("defer_loading"))
     canonical = bt.canonical_for("openai_responses", ttype)
     if canonical is not None:
         # Hosted builtin (web_search family). OpenAI nests domain filters
@@ -156,8 +177,13 @@ def _decode_tool(t: dict[str, Any]) -> ir.Tool:
         return ir.Tool(name=canonical, builtin=canonical, builtin_config=config)
     # Unknown hosted tool (file_search, computer, ...): keep it
     # builtin-shaped so no surface mangles it into a function tool;
-    # providers that can't host it drop it with a warning.
-    return ir.Tool(name=t.get("name") or ttype, builtin=ttype,
+    # providers that can't host it drop it with a warning. Both operands of
+    # `name or ttype` can be a non-string (an explicit null name, or a
+    # non-string type that the guard above turned into None), and `Tool.name`
+    # is typed str — a null there crashes the fallback estimator's " ".join
+    # (AUDIT #184/#186).
+    return ir.Tool(name=(_str_or_empty(t.get("name")) or _str_or_empty(ttype)),
+                   builtin=ttype,
                    builtin_config={bt.WIRE_TYPE_KEY: ttype})
 
 
@@ -171,7 +197,11 @@ def _decode_tool_choice(tc_raw: Any) -> ir.ToolChoice | None:
     if isinstance(tc_raw, dict):
         ttype = tc_raw.get("type")
         if ttype == "function":
-            return ir.ToolChoiceNamed(tc_raw.get("name", ""))
+            # A non-string (or explicit-null) name reaches
+            # ToolChoiceNamed.name, typed str, and every adapter renders it
+            # straight onto the wire (AUDIT #184/#186). Same coercion as a
+            # MISSING name, which already lands on "".
+            return ir.ToolChoiceNamed(_str_or_empty(tc_raw.get("name")))
         if ttype == "allowed_tools":
             # 2025 form: {"type": "allowed_tools", "mode": ..., "tools": [...]}.
             # Responses has no allowed-list concept in the IR; keep the mode.
@@ -242,7 +272,13 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                         continue  # malformed block: skip rather than 500 on .get
                     ctype = c.get("type", "output_text" if role == "assistant" else "input_text")
                     if ctype in ("input_text", "output_text", "text"):
-                        parts.append(ir.TextPart(c.get("text", "")))
+                        # A non-string `text` (5, null, a list) reaches the IR
+                        # typed as str and later crashes the fallback
+                        # estimator's " ".join — an `internal gateway error`
+                        # 500 on the success path, after the upstream was
+                        # billed (AUDIT #184). Coerce at the boundary, as
+                        # anthropic_messages.py does for its text blocks.
+                        parts.append(ir.TextPart(_str_or_empty(c.get("text"))))
                     elif ctype in ("input_image", "image"):
                         img = _decode_image(c.get("image_url") or "")
                         if img is not None:
@@ -272,9 +308,17 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
             if isinstance(raw_args, dict):
                 raw_args = json.dumps(raw_args)  # args-as-object gateways
             else:
+                if not isinstance(raw_args, str):
+                    # A truthy scalar (5, true, ["a"]) is not a JSON argument
+                    # string: `raw_args or "{}"` kept it, and `raw_args` is
+                    # typed `str | None` — the fallback estimator's " ".join
+                    # then raised TypeError (AUDIT #184). Same guard the chat
+                    # codec applies to the identical field (AUDIT #124).
+                    raw_args = ""
                 raw_args = raw_args or "{}"
             messages.append(ir.Message(role="assistant", parts=[
-                ir.ToolUsePart(id=item.get("call_id", ""), name=item.get("name", ""),
+                ir.ToolUsePart(id=item.get("call_id", ""),
+                               name=_str_or_empty(item.get("name")),
                                args=_load_args(raw_args), raw_args=raw_args)]))
         elif itype == "function_call_output":
             # Images in a tool result (computer-use screenshots) ride
@@ -310,10 +354,16 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         top_p=body.get("top_p"),
         max_tokens=ir.coerce_int(body.get("max_output_tokens")),
         # stop is not a documented Responses param, but clients that send it
-        # mean the same thing; accept a bare string or a list.
-        stop=[stop_raw] if isinstance(stop_raw, str) else (stop_raw or []),
+        # mean the same thing; accept a bare string or a list. Anything else
+        # (true, 7, {"a": 1}) is not a stop sequence — `(stop_raw or [])`
+        # forwarded it verbatim and the upstream 400'd naming nothing the
+        # caller sent (AUDIT #185).
+        stop=_stop_list(stop_raw),
         seed=body.get("seed"),
-        top_k=body.get("top_k"),
+        # Same class as `max_output_tokens` on the line above: a non-int
+        # `top_k` ('7', true, {}) was forwarded upstream verbatim (AUDIT #187).
+        # The Chat and Anthropic decoders both coerce their equivalents.
+        top_k=ir.coerce_int(body.get("top_k")),
         parallel_tool_calls=body.get("parallel_tool_calls"),
         disable_parallel_tool_use=(True if body.get("parallel_tool_calls") is False else None),
         reasoning_effort=((body.get("reasoning") or {}).get("effort")
@@ -388,14 +438,41 @@ def _function_call_item(item_id: str, call_id: str, name: str,
             "name": name, "arguments": arguments}
 
 
-def _builtin_call_item(item_id: str, query: str) -> dict[str, Any]:
-    """A1 carve-out: a hosted builtin call is a self-contained web_search_call.
+def _builtin_is_tool_search(builtin: str | None) -> bool:
+    """True when a hosted builtin is a tool search rather than a web search.
+
+    The registry is the source of truth: both ``tool_search_bm25`` and
+    ``tool_search_regex`` map onto the Responses surface's generic
+    ``tool_search`` wire type, while ``web_search`` maps onto ``web_search``.
+    Accepts either the canonical name or the Anthropic wire spelling, since
+    ``ToolCallOpen.builtin`` carries whatever the provider named the block.
+    """
+    if not builtin:
+        return False
+    canonical = bt.canonical_for("anthropic", builtin) or builtin
+    return bt.wire_type_for("openai_responses", canonical) == "tool_search"
+
+
+def _builtin_call_item(item_id: str, query: str,
+                       builtin: str | None = None) -> dict[str, Any]:
+    """A1 carve-out: a hosted builtin call is a self-contained item.
 
     The Responses protocol has no separate result item for hosted tools, so
     replay needs no pairing. Takes the query already extracted — the sync path
     reads a parsed args dict while the stream path parses a raw JSON string,
     and the two are not interchangeable (see _builtin_query).
+
+    A tool search is a *different item type* from a web search. The OpenAI SDK
+    models them separately — ``ResponseToolSearchCall`` declares
+    ``type: "tool_search_call"`` with ``arguments``/``execution``, whereas
+    ``ResponseFunctionWebSearch`` declares ``type: "web_search_call"`` with
+    ``action.query``. Labelling a tool-search step as a web search told the
+    client a search that never happened had run, and hid the real one.
     """
+    if _builtin_is_tool_search(builtin):
+        return {"type": "tool_search_call", "id": item_id, "status": "completed",
+                "execution": "server", "call_id": None,
+                "arguments": {"query": query}}
     return {"type": "web_search_call", "id": item_id, "status": "completed",
             "action": {"type": "search", "query": query}}
 
@@ -406,6 +483,13 @@ def _builtin_query(arguments: str) -> str:
         args = orjson.loads(arguments) if arguments else {}
     except orjson.JSONDecodeError:
         args = {}
+    # A well-formed JSON *scalar* or array parses cleanly but has no .get: an
+    # upstream that streamed `[1]`, `5` or `"abc"` as the arguments crashed
+    # the encoder mid-stream, after content had already been sent (AUDIT
+    # #165). The sync path above reads a parsed dict and needs no guard; only
+    # a JSON object can carry a query.
+    if not isinstance(args, dict):
+        return ""
     return args.get("query", "")
 
 
@@ -438,7 +522,8 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
             # Keyed on the flag, not the name (AUDIT #156).
             # Read the parsed dict, not raw_args: providers set both, but a
             # raw_args that failed to parse must not blank an available query.
-            output.append(_builtin_call_item(t.id, t.args.get("query", "")))
+            output.append(_builtin_call_item(t.id, t.args.get("query", ""),
+                                             t.builtin))
         else:
             output.append(_function_call_item(f"fc_{req_id}_{out_id}", t.id, t.name,
                                               t.raw_args or json.dumps(t.args)))
@@ -504,7 +589,8 @@ class ResponsesStreamEncoder:
         if t.get("builtin"):
             # Stream path has only the accumulated raw argument string.
             item = _builtin_call_item(t["call_id"] or f"ws_{self.req_id}_{n}",
-                                      _builtin_query(t["args"]))
+                                      _builtin_query(t["args"]),
+                                      t.get("builtin"))
             return [self._item_done(idx, item)]
         item_id = f"fc_{self.req_id}_{n}"
         item = _function_call_item(item_id, t["call_id"], t["name"], t["args"])
@@ -615,14 +701,21 @@ class ResponsesStreamEncoder:
                               "call_id": d.id, "args": "", "output_index": oi,
                               "builtin": d.builtin}
             self._open_tool = n
-            # A1 carve-out: hosted builtin calls open as self-contained
-            # web_search_call items (replay-safe: no separate result item
-            # exists in this protocol).
+            # A1 carve-out: hosted builtin calls open as self-contained items
+            # (replay-safe: no separate result item exists in this protocol).
+            # A tool search opens as its own item type, not a web search.
             if d.builtin is not None:
-                item: dict[str, Any] = {"type": "web_search_call",
-                                        "id": d.id or f"ws_{self.req_id}_{n}",
-                                        "status": "in_progress",
-                                        "action": {"type": "search", "query": ""}}
+                if _builtin_is_tool_search(d.builtin):
+                    item: dict[str, Any] = {
+                        "type": "tool_search_call",
+                        "id": d.id or f"ts_{self.req_id}_{n}",
+                        "status": "in_progress", "execution": "server",
+                        "call_id": None, "arguments": {}}
+                else:
+                    item = {"type": "web_search_call",
+                            "id": d.id or f"ws_{self.req_id}_{n}",
+                            "status": "in_progress",
+                            "action": {"type": "search", "query": ""}}
             else:
                 item = _function_call_item(f"fc_{self.req_id}_{n}", d.id, d.name, "")
             out.append(self._evt("response.output_item.added", {
@@ -663,7 +756,16 @@ class ResponsesStreamEncoder:
             # caller emits response.completed via _completed() after the loop
             return b"".join(self._close_item())
         if isinstance(d, dl.StreamError):
-            return self._evt("response.failed", {
+            # Close every open output item before the failure, exactly as the
+            # success path does in _completed() (AUDIT #111). Without this a
+            # client that already saw response.output_item.added never gets the
+            # matching output_item.done and the item stays in_progress forever;
+            # the Anthropic encoder closes its blocks on the same path
+            # (AUDIT #212's sibling asymmetry).
+            closing = b"".join(self._close_item())
+            for idx in sorted(self._tools):
+                closing += b"".join(self._close_tool(idx))
+            return closing + self._evt("response.failed", {
                 "response": {"id": f"resp_{self.req_id}", "status": "failed",
                              "error": {"code": "api_error", "message": d.message}}})
         return None

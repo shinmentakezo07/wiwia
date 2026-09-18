@@ -14,6 +14,16 @@ from wiwi.streaming import deltas as dl
 from wiwi.streaming.sse import sse_frame
 from wiwi.wire.openai_chat import DialectError
 
+# Cap on text/thinking buffered while a tool_use block is open (see
+# AnthropicStreamEncoder._deferred). Anthropic content blocks are strictly
+# sequential, so interleaved text cannot be emitted inline and must be held —
+# but a stream that interleaves unboundedly behind one long-open tool block
+# would grow the buffer without limit. Same unbounded-growth class that
+# MAX_TOOL_ARGS_BYTES (streaming/validation.py) and the coalescer's max_bytes
+# already guard. On overflow the OLDEST entries are dropped, keeping the most
+# recent content — what the model is saying now is what the client still needs.
+MAX_DEFERRED_CHARS = 256 * 1024
+
 
 def decode_request(body: dict[str, Any]) -> ir.Request:
     if not isinstance(body.get("model"), str) or not body["model"]:
@@ -66,36 +76,74 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                         # non-string btype guard above rather than 500.
                         continue
                     if src.get("type") == "base64":
+                        raw_b64 = src.get("data")
+                        if not isinstance(raw_b64, str) or not raw_b64:
+                            # A base64 source with no payload is junk, not an
+                            # image: it used to be re-emitted upstream as
+                            # ``"data": null`` — a 400 that names no offending
+                            # block (AUDIT #168). Drop it, like the other
+                            # malformed blocks in this loop.
+                            continue
+                        raw_mime = src.get("media_type")
                         parts.append(ir.ImagePart(
-                            b64=src.get("data"),
-                            mime=src.get("media_type", "image/png"),
+                            b64=raw_b64,
+                            # An explicit ``"media_type": null`` passed the
+                            # dict.get default and reached the upstream as
+                            # null (AUDIT #187).
+                            mime=(raw_mime if isinstance(raw_mime, str)
+                                  else "image/png"),
                             cache_control=b.get("cache_control")))
                     elif src.get("type") == "url":
+                        raw_url = src.get("url")
+                        if not isinstance(raw_url, str) or not raw_url:
+                            continue  # no URL to fetch: same junk as above
                         parts.append(ir.ImagePart(
-                            url=src.get("url"),
+                            url=raw_url,
                             cache_control=b.get("cache_control")))
                     elif src.get("type") == "file":
+                        raw_fid = src.get("file_id")
+                        if not isinstance(raw_fid, str) or not raw_fid:
+                            # With no file_id the part has no source at all and
+                            # the adapters re-render it as a base64 image with
+                            # ``data: null`` — the same bogus media block
+                            # (AUDIT #168).
+                            continue
                         parts.append(ir.ImagePart(
-                            file_id=src.get("file_id"),
+                            file_id=raw_fid,
                             cache_control=b.get("cache_control")))
                 elif btype == "document":
                     src = b.get("source") or {}
                     if not isinstance(src, dict):
                         continue  # same non-dict source guard as the image arm
                     if src.get("type") == "base64":
+                        raw_b64 = src.get("data")
+                        if not isinstance(raw_b64, str) or not raw_b64:
+                            continue  # no payload: same junk as the image arm
+                        raw_mime = src.get("media_type")
                         parts.append(ir.DocumentPart(
-                            b64=src.get("data"),
-                            mime=src.get("media_type", "application/pdf"),
+                            b64=raw_b64,
+                            mime=(raw_mime if isinstance(raw_mime, str)
+                                  else "application/pdf"),
                             name=b.get("title"), context=b.get("context"),
                             cache_control=b.get("cache_control")))
                     elif src.get("type") == "url":
+                        raw_url = src.get("url")
+                        if not isinstance(raw_url, str) or not raw_url:
+                            continue
                         parts.append(ir.DocumentPart(
-                            url=src.get("url"), name=b.get("title"),
+                            url=raw_url, name=b.get("title"),
                             context=b.get("context"),
                             cache_control=b.get("cache_control")))
                 elif btype == "tool_use":
-                    parts.append(ir.ToolUsePart(id=b.get("id", ""), name=b.get("name", ""),
-                                                args=b.get("input") or {}))
+                    raw_name = b.get("name")
+                    parts.append(ir.ToolUsePart(
+                        id=b.get("id", ""),
+                        # ``b.get("name", "")`` defaults only a MISSING key:
+                        # an explicit JSON null passed straight through and was
+                        # re-emitted upstream as ``"name": null`` (AUDIT #186).
+                        # Coerce like the text fields above.
+                        name=raw_name if isinstance(raw_name, str) else "",
+                        args=b.get("input") or {}))
                 elif btype == "server_tool_use" or btype == "mcp_tool_use":
                     # Server-side tools (web_search, code_execution, mcp, ...):
                     # the PROVIDER executes these, so tag them builtin — the
@@ -104,10 +152,12 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                     # ``mcp_tool_use`` paired with an ``mcp_tool_result`` must
                     # go back as ``mcp_tool_use`` or the result is unpaired and
                     # Anthropic rejects the history (AUDIT #156).
+                    raw_name = b.get("name")
+                    name = raw_name if isinstance(raw_name, str) else ""
                     parts.append(ir.ToolUsePart(
-                        id=b.get("id", ""), name=b.get("name", ""),
+                        id=b.get("id", ""), name=name,
                         args=b.get("input") or {},
-                        builtin=(b.get("name") or "server_tool"),
+                        builtin=name or "server_tool",
                         block_type=btype))
                 elif btype in ("search_result", "container_upload",
                                "tool_reference"):
@@ -152,17 +202,30 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                                 if not isinstance(src, dict):
                                     continue  # non-dict source: skip, don't 500
                                 if src.get("type") == "base64":
+                                    raw_b64 = src.get("data")
+                                    if not isinstance(raw_b64, str) or not raw_b64:
+                                        # No payload: the part re-encodes as
+                                        # ``"data": null`` (AUDIT #168). Drop it.
+                                        continue
+                                    raw_mime = src.get("media_type")
                                     images.append(ir.ImagePart(
-                                        b64=src.get("data"),
-                                        mime=src.get("media_type", "image/png"),
+                                        b64=raw_b64,
+                                        mime=(raw_mime if isinstance(raw_mime, str)
+                                              else "image/png"),
                                         cache_control=blk.get("cache_control")))
                                 elif src.get("type") == "url":
+                                    raw_url = src.get("url")
+                                    if not isinstance(raw_url, str) or not raw_url:
+                                        continue  # no URL: same junk as above
                                     images.append(ir.ImagePart(
-                                        url=src.get("url"),
+                                        url=raw_url,
                                         cache_control=blk.get("cache_control")))
                                 elif src.get("type") == "file":
+                                    raw_fid = src.get("file_id")
+                                    if not isinstance(raw_fid, str) or not raw_fid:
+                                        continue  # no file_id: no source at all
                                     images.append(ir.ImagePart(
-                                        file_id=src.get("file_id"),
+                                        file_id=raw_fid,
                                         cache_control=blk.get("cache_control")))
                                 continue
                             # Blocks with no IR representation but real meaning
@@ -219,6 +282,14 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
             # user (AUDIT #156).
             normalized = role if role in ("user", "assistant", "system") else "user"
             messages.append(ir.Message(role=normalized, parts=parts))
+        elif role == "assistant":
+            # ``content: null`` is legal Anthropic input — it is what the API
+            # itself emits for a tool-use-only turn, and Claude Code replays it
+            # verbatim. Dropping the turn (there was no ``elif`` arm) collapsed
+            # two consecutive user turns into one, corrupting turn alternation
+            # on replayed history (AUDIT #167). Append an empty-parts assistant
+            # message, exactly as the Chat codec does.
+            messages.append(ir.Message(role="assistant", parts=[]))
 
     tools: list[ir.Tool] = []
     raw_tools = body.get("tools")
@@ -237,8 +308,14 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         if ttype in (None, "custom", "function"):
             # Plain function tool (Anthropic function tools may omit "type").
             raw_schema = t.get("input_schema")
+            raw_name = t.get("name")
+            raw_desc = t.get("description")
             tools.append(ir.Tool(
-                name=t.get("name", ""), description=t.get("description", ""),
+                # An explicit JSON null is not a missing key: dict.get returned
+                # the null and it reached the upstream verbatim, so the model
+                # saw a nameless tool (AUDIT #186). Coerce like the text fields.
+                name=raw_name if isinstance(raw_name, str) else "",
+                description=raw_desc if isinstance(raw_desc, str) else "",
                 # A non-dict input_schema is otherwise stored verbatim and
                 # crashes validate_tool_args inside the stream pump, cooling a
                 # healthy deployment for a caller-controlled shape. Coerce to
@@ -277,7 +354,12 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         if tc_type == "any":
             tool_choice = ir.ToolChoiceRequired()
         elif tc_type == "tool":
-            tool_choice = ir.ToolChoiceNamed(tc_raw.get("name", ""))
+            raw_tc_name = tc_raw.get("name")
+            # Same explicit-null trap as the tool blocks: ``.get(k, "")``
+            # defaults only a missing key, so ``"name": null`` reached the
+            # upstream as null (AUDIT #186).
+            tool_choice = ir.ToolChoiceNamed(
+                raw_tc_name if isinstance(raw_tc_name, str) else "")
         elif tc_type == "auto":
             tool_choice = ir.ToolChoiceAuto()
         elif tc_type == "none":
@@ -605,6 +687,46 @@ class AnthropicStreamEncoder:
             return self._server_calls.pop(next(iter(self._server_calls)))
         return None
 
+    def _defer(self, kind: str, text: str, sig: str | None) -> None:
+        """Buffer interleaved content, evicting the oldest past the cap.
+
+        See ``MAX_DEFERRED_CHARS``. Evicts from the front so the newest content
+        survives, and trims the boundary entry from its head rather than
+        dropping it whole — so the buffer always ends up within the cap, even
+        when a single delta is itself larger than the cap.
+        """
+        self._deferred.append((kind, text, sig))
+        total = sum(len(t) for _, t, _ in self._deferred)
+        while total > MAX_DEFERRED_CHARS and self._deferred:
+            k, t, s = self._deferred.pop(0)
+            total -= len(t)
+            if total < MAX_DEFERRED_CHARS:
+                # This pop overshot the cap: put back the entry's TAIL (the
+                # newest part of it) so the buffer lands exactly at the cap
+                # instead of losing content it had room for.
+                keep = MAX_DEFERRED_CHARS - total
+                if keep > 0 and t:
+                    self._deferred.insert(0, (k, t[-keep:], s))
+                    total += keep
+                break
+        # A fully-evicted entry leaves nothing to emit; drop empties so the
+        # flush loop never opens a block with no content.
+        self._deferred = [e for e in self._deferred if e[1]]
+
+    def _drain_deferred(self) -> list[bytes]:
+        """Flush buffered interleaved content AND close the block it opened.
+
+        ``_flush_deferred`` deliberately leaves its last block open (a later
+        text/thinking delta continues in it, and ``final_frame`` stops it).
+        A caller about to emit a WHOLE block of its own must not inherit that
+        state: the block would never be stopped, and the new block's start
+        would reuse the open block's index — one index with two stops and one
+        with none (AUDIT #178).
+        """
+        if not self._deferred:
+            return []
+        return self._flush_deferred() + self._close_block()
+
     def _emit_server_call(self, call: dict[str, Any]) -> list[bytes]:
         """Emit a buffered provider call as a complete content block.
 
@@ -617,8 +739,11 @@ class AnthropicStreamEncoder:
         out: list[bytes] = []
         if self._open_block is not None:
             out.extend(self._close_block())
-        if self._deferred:
-            out.extend(self._flush_deferred())
+        # Deferred content drains BEFORE the call's own block opens: draining
+        # opens a text/thinking block and bumps ``_block_idx``, so leaving it
+        # open made the start/stop below reuse that block's index and left it
+        # unstopped (AUDIT #178).
+        out.extend(self._drain_deferred())
         raw = "".join(call["args"])
         out.append(self._evt("content_block_start", {
             "type": "content_block_start", "index": self._block_idx,
@@ -679,7 +804,7 @@ class AnthropicStreamEncoder:
             # model's own prose invisible to both the user and itself
             # (AUDIT #156).
             if self._open_block == "tool":
-                self._deferred.append(("text", d.text, None))
+                self._defer("text", d.text, None)
                 return None
             out = []
             if self._open_block != "text":
@@ -725,7 +850,7 @@ class AnthropicStreamEncoder:
             # interleaved text. It is part of the model's reasoning, and the
             # client replays thinking blocks on the next turn (AUDIT #156).
             if self._open_block == "tool":
-                self._deferred.append(("thinking", d.text, d.signature))
+                self._defer("thinking", d.text, d.signature)
                 return None
             out = []
             if self._open_block != "thinking":
@@ -824,8 +949,10 @@ class AnthropicStreamEncoder:
                 out.extend(self._emit_server_call(call))
             if self._open_block is not None:
                 out.extend(self._close_block())
-            if self._deferred:
-                out.extend(self._flush_deferred())
+            # Same hazard as ``_emit_server_call`` (AUDIT #178): flushing
+            # leaves the text/thinking block it opened still open, so the
+            # result block below would reuse its index and leave it unstopped.
+            out.extend(self._drain_deferred())
             out.append(self._evt("content_block_start", {
                 "type": "content_block_start", "index": self._block_idx,
                 "content_block": d.block}))
