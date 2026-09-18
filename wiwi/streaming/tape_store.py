@@ -6,7 +6,10 @@ the journal, ``_stream_response`` appends every encoded SSE chunk (post
 id-injection, base64) to ``<dir>/<request_id>.jsonl``; a reconnecting client
 sends ``x-wiwi-stream-id: <request_id>`` + ``Last-Event-ID: <chunk seq>`` and
 the same surface replays chunks > last_event_id from the journal, then tails
-the file if the original request is still streaming.
+the file if the original request is still streaming. ``path_for`` owns that
+id → file mapping and is injective: the id every client reads back in its
+``x-wiwi-request-id`` header must never name another stream's journal, or the
+per-key scoping below would be defeatable by a crafted id (AUDIT #191).
 
 Line schema (one JSON object per line):
     {"seq": <int>, "ts": <unix seconds>, "data": "<base64 SSE chunk>",
@@ -30,11 +33,20 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hashlib
+import re
 import time
 from pathlib import Path
 
 import orjson
 import structlog
+
+# Request ids the journal directory may name directly. ``RequestContext``
+# generates ``uuid4().hex[:16]``; a client-supplied ``x-wiwi-stream-id`` is
+# adopted verbatim when a reconnect misses the replay gate (AUDIT #117), so
+# this alphabet is the gate that keeps a crafted id out of another stream's
+# file (AUDIT #191).
+_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
 class StreamJournal:
@@ -114,8 +126,26 @@ class JournalStore:
         self._sweeper: asyncio.Task | None = None
 
     def path_for(self, request_id: str) -> Path:
-        safe = "".join(c for c in request_id if c.isalnum() or c in "-_")
-        return self.dir / f"{safe}.jsonl"
+        """Journal file for *request_id*.
+
+        Injective (AUDIT #191). Stripping disallowed characters mapped
+        ``'a/b'``, ``'a.b'``, ``'a b'`` and ``'a!b'`` all onto ``ab.jsonl``,
+        so appending one stripped character to the request id every client
+        sees in its ``x-wiwi-request-id`` header aliased the victim's exact
+        journal — satisfying the #67 owner gate by varying only the stripped
+        characters. A conforming id keeps the historical ``<id>.jsonl``
+        name; anything else is hashed, so distinct ids never share a file
+        and no crafted id can name a real journal. The ``h`` prefix pushes
+        the hashed name (65 chars) outside the conforming alphabet, so the
+        hashed and plain spaces cannot collide either.
+        """
+        if _ID_RE.fullmatch(request_id):
+            return self.dir / f"{request_id}.jsonl"
+        # ``surrogatepass``: the digest must stay injective over *every* str,
+        # and the default handler folds distinct lone surrogates onto U+FFFD.
+        digest = hashlib.sha256(
+            request_id.encode("utf-8", "surrogatepass")).hexdigest()
+        return self.dir / f"h{digest}.jsonl"
 
     def is_active(self, request_id: str) -> bool:
         """True when a journal for *request_id* is open in THIS process.

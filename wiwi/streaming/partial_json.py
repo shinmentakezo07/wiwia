@@ -94,20 +94,35 @@ def _repair_truncated_json(text: str) -> str:
         # args killed the user's turn with a 500. Strip the dangling escape
         # instead — a partial pair is unusable either way, and dropping it
         # leaves valid, encodable JSON (AUDIT #139).
-        m = re.search(r'\\u([0-9a-fA-F]{4})$', text)
-        if m:
-            code = int(m.group(1), 16)
+        #
+        # Escape-aware, exactly like the partial-escape strip above: only an
+        # ODD backslash run before the ``u`` means that backslash opens a real
+        # escape. An even run is complete escaped-backslash pairs and the
+        # trailing ``uXXXX`` is literal text (``"C:\\uD83D`` is a literal
+        # ``\uD83D``), so stripping it left a dangling backslash and lost the
+        # whole argument object (AUDIT #193).
+        m = re.search(r'(\\+)u([0-9a-fA-F]{4})$', text)
+        if m and len(m.group(1)) % 2 == 1:
+            # Drop only the one fresh backslash that opens the escape; the
+            # complete escaped pairs before it stay (``"a\\\uD83D`` decodes
+            # to one literal backslash, not to nothing).
+            keep = m.group(1)[:-1]
+            code = int(m.group(2), 16)
             if 0xD800 <= code <= 0xDBFF:
                 # High surrogate: its low half would follow it, so a high
                 # surrogate at the tail is always dangling.
-                text = text[:m.start()]
+                text = text[:m.start()] + keep
             elif 0xDC00 <= code <= 0xDFFF:
                 # Low surrogate: only valid when a high surrogate escape
                 # immediately precedes it. A bare low surrogate is as
-                # unencodable as a bare high one.
-                prev = re.search(r'\\u([0-9a-fA-F]{4})$', text[:m.start()])
-                if not (prev and 0xD800 <= int(prev.group(1), 16) <= 0xDBFF):
-                    text = text[:m.start()]
+                # unencodable as a bare high one. The predecessor must be a
+                # *real* escape too — an even run before its ``u`` makes it
+                # literal text, and treating it as the pair's high half kept
+                # the lone low surrogate alive (AUDIT #193).
+                prev = re.search(r'(\\+)u([0-9a-fA-F]{4})$', text[:m.start()])
+                if not (prev and len(prev.group(1)) % 2 == 1
+                        and 0xD800 <= int(prev.group(2), 16) <= 0xDBFF):
+                    text = text[:m.start()] + keep
         suffix += _QUOTE
     # Close open containers in reverse order.
     suffix += "".join(reversed(stack))

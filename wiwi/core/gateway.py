@@ -116,6 +116,14 @@ def _decode_response_guarded(adapter, status_code: int, content: bytes,
 # or the configured grace is silently truncated (AUDIT #99).
 _PUMP_CANCEL_GRACE_S = 1.0
 
+# Bound on a pump's `queue.put` when the consumer's queue is genuinely full.
+# The terminal frame must reach the client: `put_nowait` is tried first (it is
+# the only form that cannot hang), and this only covers the case where the
+# consumer is so far behind that the 4096-slot queue has no room. Dropping the
+# terminal frame there would hang the client exactly as an unguarded handler
+# does (AUDIT #211).
+_QUEUE_PUT_TIMEOUT_S = 5.0
+
 
 def pump_cancel_grace(grace_drain_s: float) -> float:
     """Cancel grace for the stream consumer: at least 1 s, and never shorter
@@ -216,6 +224,53 @@ def accumulated_stream_usage(ctx: RequestContext) -> dl.UsageFinal | None:
                 # estimated tokens is itself an estimate (AUDIT #131).
                 estimated=total.estimated or u.estimated)
     return total
+
+
+async def usage_fallback(ctx: RequestContext, dep: Deployment,
+                         real: dl.UsageFinal,
+                         text_len: int) -> dl.UsageFinal:
+    """Usage to bill/report when the provider sent no prompt count.
+
+    The prompt is estimated locally, keeping any output/cache counts the
+    provider *did* report. Binary media is added separately because
+    :func:`flatten_request_text` cannot represent it (AUDIT #156).
+
+    An attempt's own opening ``StreamStart`` wins over the estimate when it
+    carried provider-reported prompt/cache numbers (Anthropic's
+    ``message_start``): the consumer folds a resumed attempt's StreamStart into
+    the single opening frame rather than re-emitting it (AUDIT #159), so those
+    numbers are only reachable here — and an attempt that dies before its
+    ``message_delta`` would otherwise be billed as an estimate it never made.
+
+    Never raises: this runs on the stream pump's failure path, where a fault
+    would leave the client with no terminal frame (AUDIT #211).
+    """
+    reported = getattr(ctx, "_stream_start_usage", None)
+    if reported is not None and reported.prompt <= 0:
+        # A `message_start` that carried no (or a zero) input count is not a
+        # provider report — treating it as one would bill $0.00 and present the
+        # gap as fact, the mislabelling class of AUDIT #131. Fall through to the
+        # local estimate, which is what "the provider told us nothing" means.
+        reported = None
+    est_prompt = 0
+    if reported is None:
+        with contextlib.suppress(Exception):
+            est_prompt = (await estimate_tokens_async(
+                flatten_request_text(ctx), dep.model_id) + media_tokens(ctx))
+    return dl.UsageFinal(
+        prompt=reported.prompt if reported is not None else est_prompt,
+        # The provider's own output/cache counts always win over an estimate:
+        # the local estimate only exists to fill a gap the provider left.
+        cached=real.cached or (reported.cached if reported else 0),
+        reasoning=real.reasoning,
+        output=real.output or max(1, text_len // 4),
+        cache_creation=(real.cache_creation
+                        or (reported.cache_creation if reported else 0)),
+        # Unchanged from the pre-existing fallback: reaching this path at all
+        # means the provider sent no usable usage, so the frame is reported as
+        # an estimate even when the prompt count came from the attempt's own
+        # opening frame (the output count is still synthesized).
+        estimated=True)
 
 
 class Gateway:
@@ -607,20 +662,21 @@ class Gateway:
         # usage on the path their non-streaming callers take: a zero prompt is
         # the NORMAL case, not an anomaly. Pricing those zeros billed $0.00 and
         # reported `estimated=False`, presenting the gap as provider-reported
-        # fact (AUDIT_REPORT H3, the AUDIT #131 mislabelling class). Mirror the
-        # stream pump's fallback, keeping any real output/cache counts the
-        # provider did report.
+        # fact (AUDIT_REPORT H3, the AUDIT #131 mislabelling class). Shared with
+        # the stream pump so the two fallbacks cannot drift apart.
         if turn.usage.prompt_tokens == 0:
+            u = await usage_fallback(
+                ctx, dep,
+                dl.UsageFinal(prompt=turn.usage.prompt_tokens,
+                              cached=turn.usage.cached_tokens,
+                              reasoning=turn.usage.reasoning_tokens,
+                              output=turn.usage.completion_tokens,
+                              cache_creation=turn.usage.cache_creation_tokens),
+                len(text))
             turn.usage = ir.Usage(
-                prompt_tokens=(await estimate_tokens_async(
-                    flatten_request_text(ctx), dep.model_id)
-                    + media_tokens(ctx)),
-                completion_tokens=(turn.usage.completion_tokens
-                                   or max(1, len(text) // 4)),
-                cached_tokens=turn.usage.cached_tokens,
-                reasoning_tokens=turn.usage.reasoning_tokens,
-                cache_creation_tokens=turn.usage.cache_creation_tokens,
-                estimated=True)
+                prompt_tokens=u.prompt, completion_tokens=u.output,
+                cached_tokens=u.cached, reasoning_tokens=u.reasoning,
+                cache_creation_tokens=u.cache_creation, estimated=u.estimated)
         self._price(ctx, dep, turn.usage)
         return turn
 
@@ -723,11 +779,27 @@ class Gateway:
                         yield ping_frame
                         continue
                 if isinstance(d, dl.StreamStart):
-                    yield dl.StreamStart(model=ctx.ir_req.model,
-                                         group=ctx.group or "",
-                                         prompt=d.prompt, cached=d.cached,
-                                         cache_creation=d.cache_creation)
-                    started = True
+                    if not started:
+                        yield dl.StreamStart(model=ctx.ir_req.model,
+                                             group=ctx.group or "",
+                                             prompt=d.prompt, cached=d.cached,
+                                             cache_creation=d.cache_creation)
+                        started = True
+                    # A resumed attempt runs on a NEW adapter instance, whose
+                    # own ``message_start`` emits a second StreamStart. It is
+                    # NOT re-emitted: the contract allows exactly one
+                    # StreamStart first, and an Anthropic client reads a second
+                    # ``message_start`` as a NEW message — it re-initialises its
+                    # context meter and accumulator and that attempt's usage
+                    # *replaces* the opening usage instead of adding to it
+                    # (AUDIT #159). Nor are the counts added to the frame above:
+                    # the continuation replays the original prompt plus the
+                    # partial output, so summing would bill the client's own
+                    # meter twice for the same tokens. The numbers are not lost
+                    # — the pump holds each attempt's opening usage on its own
+                    # context, and every attempt's tokens still reach the client
+                    # summed into the single terminal UsageFinal
+                    # (`accumulated_stream_usage`).
                     continue
                 if not started:
                     # Adapter emitted no StreamStart (contract violation, but
@@ -944,7 +1016,31 @@ class Gateway:
         # this pump finishes, not merely until the connection opens.
         dep.inflight += 1
         try:
-            await self._pump_once(dep, key, ctx, queue, ready, err_box)
+            try:
+                await self._pump_once(dep, key, ctx, queue, ready, err_box)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                # Backstop for the pump's *pre-connect* region — the code that
+                # runs before `_pump_once`'s own try (adapter construction, key
+                # lookup, params assembly). The caller is parked on
+                # `await ready.wait()`, so an exception escaping there leaves
+                # the event unset forever and strands the caller with no
+                # terminal frame and no timeout — the same never-completing
+                # shape AUDIT #211 describes for the mid-stream handler.
+                #
+                # Deliberately nothing to do once `ready` IS set: `_pump_once`
+                # owns every exit after that point (it converts a fault into a
+                # terminal frame, idempotently, and re-raises CancelledError),
+                # so queueing anything here could only add a *second* terminal
+                # to a stream that already has one.
+                if not ready.is_set():
+                    if err_box[0] is None:
+                        err_box[0] = WiwiError(
+                            502, "api_connection_error",
+                            f"stream pump error: {type(e).__name__}: {e}",
+                            retryable=True)
+                    ready.set()
         finally:
             dep.inflight -= 1
             # The admission reservation made by `pick_deployment` is settled by
@@ -986,11 +1082,16 @@ class Gateway:
                 adapter.set_tool_context(body)
             headers = self._headers(adapter, key, dep, ctx)
         except Exception as e:  # noqa: BLE001
-            ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
-                             key.label, "encode_error", 0, model_id=dep.model_id)
-            _log_attempt(self.router, ctx, dep, key, "encode_error", 0)
+            # Box + event first: `call_one` parks on `ready.wait()`, so a fault
+            # in the bookkeeping below would strand it with a dead pump
+            # (AUDIT #211).
             err_box[0] = WiwiError(400, "invalid_request_error",
                                    f"failed to encode request: {e}")
+            with contextlib.suppress(Exception):
+                ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
+                                 key.label, "encode_error", 0,
+                                 model_id=dep.model_id)
+                _log_attempt(self.router, ctx, dep, key, "encode_error", 0)
             ready.set()
             return
         t0 = time.monotonic()
@@ -999,6 +1100,10 @@ class Gateway:
         text_len = 0
         started = False
         saw_terminal = False
+        # Set once a terminal frame (StreamEnd | StreamError) has been queued,
+        # so a fault raised after it cannot emit a second one (the contract
+        # allows exactly one; see `_fail_stream`).
+        terminal_sent = False
         # Tool-call arg validation (streaming/validation.py): buffer each
         # open call's raw args so they can be checked against the request's
         # declared tool schema at ToolCallClose. Violations are logged and
@@ -1030,6 +1135,61 @@ class Gateway:
                     with contextlib.suppress(Exception):
                         await resp_cm.__aexit__(None, None, None)
 
+        async def _put_frame(d: dl.IRStreamDelta) -> None:
+            """Queue one delta without any chance of killing the pump.
+
+            ``queue.put`` is an await, and it is where the terminal frame used
+            to be lost: the failure handler's three awaits had no guard, so a
+            fault in the accounting ahead of them left the consumer parked on
+            ``await queue.get()`` with no terminal frame and no timeout
+            (AUDIT #211). ``put_nowait`` cannot fault at all — it is the same
+            call whenever there is room, which is every case a live consumer
+            can still observe — and the bounded fallback below covers the one
+            case it cannot: a consumer so slow that the 4096-slot queue is
+            genuinely full, where dropping the terminal frame would hang the
+            client just as surely.
+            """
+            try:
+                queue.put_nowait(d)
+                return
+            except asyncio.QueueFull:
+                pass
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(queue.put(d),
+                                       timeout=_QUEUE_PUT_TIMEOUT_S)
+
+        async def _fail_stream(message: str, kind: str, *,
+                               note: bool = True, price: bool = True) -> None:
+            """Terminate the stream with a StreamError, whatever else goes wrong.
+
+            Every await on the failure path — ``_note_stream_failure``,
+            ``_price_partial``, the queue put — is a place the pump can die
+            *before* the terminal frame is queued, and nothing would notice: the
+            consumer is parked on ``await queue.get()`` and its own ``finally``
+            only runs once it exits, which it never does. Accounting is
+            best-effort; the terminal frame is not, so each step is guarded
+            independently and the frame is queued last (AUDIT #211).
+
+            Idempotent: a fault *after* a terminal frame already went out (a
+            key-pool write on the success path) must not emit a second one —
+            the contract allows exactly one ``StreamEnd`` xor ``StreamError``.
+            """
+            nonlocal terminal_sent
+            if terminal_sent:
+                return
+            if note:
+                with contextlib.suppress(Exception):
+                    await self._note_stream_failure(dep, real_key, ctx)
+            if price:
+                with contextlib.suppress(Exception):
+                    await self._price_partial(ctx, dep, usage_final, text_len)
+            await _put_frame(dl.StreamError(message, kind))
+            # Marked only once the frame is actually queued: if the put itself
+            # could not complete, a later attempt may still succeed, and the
+            # flag's purpose is only to stop a *second* terminal frame — never
+            # to suppress the first one.
+            terminal_sent = True
+
         try:
             try:
                 cm = self._client.stream("POST", url, json=body, headers=headers,
@@ -1038,16 +1198,21 @@ class Gateway:
                 resp = await cm.__aenter__()
                 resp_cm = cm
             except httpx.TransportError as e:
-                ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
-                                 key.label, type(e).__name__,
-                                 int((time.monotonic() - t0) * 1000), model_id=dep.model_id)
-                _log_attempt(self.router, ctx, dep, key, type(e).__name__,
-                             int((time.monotonic() - t0) * 1000))
+                # err_box + ready first: the caller parks on `ready.wait()`, so
+                # a fault in the attempt bookkeeping below would strand it with
+                # a dead pump (AUDIT #211's shape, on the pre-connect path).
                 err_box[0] = WiwiError(
                     504 if "Timeout" in type(e).__name__ else 502,
                     "timeout" if "Timeout" in type(e).__name__
                     else "api_connection_error",
                     f"upstream {type(e).__name__}", retryable=True)
+                with contextlib.suppress(Exception):
+                    ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
+                                     key.label, type(e).__name__,
+                                     int((time.monotonic() - t0) * 1000),
+                                     model_id=dep.model_id)
+                    _log_attempt(self.router, ctx, dep, key, type(e).__name__,
+                                 int((time.monotonic() - t0) * 1000))
                 ready.set()
                 return
             if resp.status_code != 200:
@@ -1084,12 +1249,13 @@ class Gateway:
                             resp = await cm.__aenter__()
                             resp_cm = cm
                         except httpx.TransportError as e:
-                            _log_attempt(self.router, ctx, dep, key,
-                                         type(e).__name__,
-                                         int((time.monotonic() - t0) * 1000))
                             err_box[0] = WiwiError(
                                 502, "api_connection_error",
                                 f"upstream {type(e).__name__}", retryable=True)
+                            with contextlib.suppress(Exception):
+                                _log_attempt(self.router, ctx, dep, key,
+                                             type(e).__name__,
+                                             int((time.monotonic() - t0) * 1000))
                             ready.set()
                             return
                         refreshed = True
@@ -1115,17 +1281,22 @@ class Gateway:
                                 err.retry_after = ra
                 if not refreshed or resp.status_code != 200:
                     # on_result is called by execute_with_retries' except
-                    # handler — don't double-count key errors here.
-                    ctx.note_attempt(f"{dep.group}/{dep.model_id}",
-                                     dep.provider.name, key.label,
-                                     f"http_{resp.status_code}",
-                                     int((time.monotonic() - t0) * 1000), model_id=dep.model_id)
-                    _log_attempt(self.router, ctx, dep, key,
-                                 f"http_{resp.status_code}",
-                                 int((time.monotonic() - t0) * 1000))
+                    # handler — don't double-count key errors here. The box and
+                    # the event go first for the same reason as the arms above:
+                    # a fault in the bookkeeping must not strand the caller on
+                    # `ready.wait()` (AUDIT #211).
                     err_box[0] = err
                     ready.set()
-                    await resp_cm.__aexit__(None, None, None)
+                    with contextlib.suppress(Exception):
+                        ctx.note_attempt(f"{dep.group}/{dep.model_id}",
+                                         dep.provider.name, key.label,
+                                         f"http_{resp.status_code}",
+                                         int((time.monotonic() - t0) * 1000),
+                                         model_id=dep.model_id)
+                        _log_attempt(self.router, ctx, dep, key,
+                                     f"http_{resp.status_code}",
+                                     int((time.monotonic() - t0) * 1000))
+                    await _close_upstream()
                     return
             # Connection established — signal the caller to start consuming.
             started = True
@@ -1146,6 +1317,17 @@ class Gateway:
                 """Route one decoded event's deltas; returns True = abort pump."""
                 nonlocal text_len, usage_final, finish, saw_terminal
                 for d in deltas:
+                    if isinstance(d, dl.StreamStart):
+                        # Providers that report prompt/cache usage up front
+                        # (Anthropic's ``message_start``) put it here, and
+                        # ``message_delta`` repeats it at the end. Keep the
+                        # opening copy on the attempt's own context: the
+                        # consumer folds a resumed attempt's StreamStart into
+                        # the single opening frame (AUDIT #159) and the closing
+                        # frame may never arrive, so this is the only
+                        # provider-reported prompt count `_price_partial` can
+                        # use for an attempt that dies mid-stream.
+                        ctx._stream_start_usage = d  # type: ignore[attr-defined]
                     if isinstance(d, dl.UsageFinal):
                         usage_final = d
                     elif isinstance(d, dl.Finish):
@@ -1161,11 +1343,9 @@ class Gateway:
                                 # not a provider/key fault: do NOT feed the
                                 # deployment cooldown or the key's err_count, or
                                 # a healthy credential is retired (AUDIT #108).
-                                await self._price_partial(
-                                    ctx, dep, usage_final, text_len)
-                                await queue.put(dl.StreamError(
+                                await _fail_stream(
                                     f"model loop detected ({loop_limit} "
-                                    f"repeating chunks)", "unknown"))
+                                    f"repeating chunks)", "unknown", note=False)
                                 await _close_upstream()
                                 return True
                         elif isinstance(d, dl.ToolCallOpen):
@@ -1189,10 +1369,8 @@ class Gateway:
                 try:
                     line = await asyncio.wait_for(line_iter.__anext__(), timeout=idle_s)
                 except TimeoutError:
-                    await self._note_stream_failure(dep, real_key, ctx)
-                    await self._price_partial(ctx, dep, usage_final, text_len)
-                    await queue.put(dl.StreamError(
-                        f"upstream idle >{idle_s:.0f}s between chunks", "timeout"))
+                    await _fail_stream(
+                        f"upstream idle >{idle_s:.0f}s between chunks", "timeout")
                     await _close_upstream()
                     return
                 except StopAsyncIteration:
@@ -1206,7 +1384,7 @@ class Gateway:
                             # grace_drain_s seconds, not after one line.
                             grace_deadline = time.monotonic() + grace_drain_s
                             continue
-                        await queue.put(dl.StreamError("client disconnected", "cancelled"))
+                        await _put_frame(dl.StreamError("client disconnected", "cancelled"))
                         break
                     else:
                         # Already in grace drain: stop if the deadline passed.
@@ -1241,20 +1419,10 @@ class Gateway:
             real_usage = usage_final or dl.UsageFinal()
             est_usage = real_usage
             if real_usage.prompt == 0:
-                # Provider sent no usable usage: estimate, keeping any real
-                # output / cache counts it did report. Includes binary media,
-                # which flatten_request_text cannot represent (AUDIT #156).
-                est_prompt = (await estimate_tokens_async(
-                    flatten_request_text(ctx), dep.model_id)
-                    + media_tokens(ctx))
-                est_usage = dl.UsageFinal(
-                    prompt=est_prompt,
-                    cached=real_usage.cached, reasoning=real_usage.reasoning,
-                    output=real_usage.output or max(1, text_len // 4),
-                    cache_creation=real_usage.cache_creation, estimated=True)
+                est_usage = await usage_fallback(ctx, dep, real_usage, text_len)
             self._price_stream(ctx, dep, est_usage)
             if not client_gone:
-                await queue.put(est_usage)
+                await _put_frame(est_usage)
                 if finish is None and not saw_terminal:
                     # Ended with no finish_reason and no [DONE]: the body just
                     # stopped. That is a truncation whether or not usage
@@ -1262,9 +1430,9 @@ class Gateway:
                     # a finish_reason for and the key still looks healthy.
                     # [DONE] is the only clean end-of-stream marker that
                     # legitimately replaces a finish_reason (DeepSeek/B.A.I).
-                    await self._note_stream_failure(dep, real_key, ctx)
-                    await queue.put(dl.StreamError(
-                        "upstream stream ended without completion", "connection"))
+                    await _fail_stream(
+                        "upstream stream ended without completion", "connection",
+                        price=False)
                     return
                 if finish is None:
                     # DeepSeek/B.AI and other OpenAI-compatible servers signal
@@ -1273,18 +1441,26 @@ class Gateway:
                     # stream as a clean "stop" so the client's OpenAI SDK sees
                     # a finish_reason instead of a truncated stream.
                     finish = dl.Finish("stop")
-                await queue.put(finish or dl.Finish("stop"))
-                await queue.put(dl.StreamEnd())
+                # The terminal pair goes out together and before any key-pool
+                # bookkeeping: `on_result_locked`/`record_success` touch the
+                # provider's credential store, and a fault there used to leave
+                # the stream with a usage frame and no terminal at all — the
+                # client parked forever on a request that had already
+                # succeeded (AUDIT #211).
+                await _put_frame(finish or dl.Finish("stop"))
+                await _put_frame(dl.StreamEnd())
+                terminal_sent = True
                 # AUDIT #6: credit the key only now that the stream actually
                 # completed. `execute_with_retries` used to record on_result(200)
                 # at *connect* time, which reset err_count to 0 — so a key that
                 # connects and then dies mid-stream never accumulated a
                 # retirement streak and kept getting picked first.
-                await dep.provider.on_result_locked(
-                    real_key, 200, None,
-                    failover_mode=self.router.settings.failover_mode,
-                    key_max_consecutive_fails=(
-                        self.router.settings.key_max_consecutive_fails))
+                with contextlib.suppress(Exception):
+                    await dep.provider.on_result_locked(
+                        real_key, 200, None,
+                        failover_mode=self.router.settings.failover_mode,
+                        key_max_consecutive_fails=(
+                            self.router.settings.key_max_consecutive_fails))
                 # AUDIT #79: execute_with_retries' graduation write is skipped
                 # for streams (`ctx._defer_key_credit` is True), so graduate the
                 # deployment here — otherwise a streaming-only deployment that
@@ -1304,30 +1480,46 @@ class Gateway:
             if started:
                 # Shielded: we are already being cancelled, so an unshielded
                 # await would be interrupted immediately and skip billing.
-                await asyncio.shield(self._price_partial(
-                    ctx, dep, usage_final, text_len))
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(self._price_partial(
+                        ctx, dep, usage_final, text_len))
                 await asyncio.shield(asyncio.wait_for(_close_upstream(), timeout=5.0))
             raise
         except Exception as e:  # noqa: BLE001
             if not started:
-                ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
-                                 key.label, f"error:{type(e).__name__}",
-                                 int((time.monotonic() - t0) * 1000), model_id=dep.model_id)
-                _log_attempt(self.router, ctx, dep, key,
-                             f"error:{type(e).__name__}",
-                             int((time.monotonic() - t0) * 1000))
+                # Set the box and the event before anything that can fail:
+                # `call_one`/`_attempt_resume` park on `await ready.wait()`, so
+                # a fault raised by the bookkeeping below (a proxy-log sink, a
+                # metrics hook) would strand them there with the pump already
+                # dead — the same never-completing shape AUDIT #211 describes
+                # for the mid-stream arm.
                 err_box[0] = WiwiError(502, "api_connection_error",
                                        f"stream pump error: {type(e).__name__}: {e}",
                                        retryable=True)
+                with contextlib.suppress(Exception):
+                    ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
+                                     key.label, f"error:{type(e).__name__}",
+                                     int((time.monotonic() - t0) * 1000),
+                                     model_id=dep.model_id)
+                    _log_attempt(self.router, ctx, dep, key,
+                                 f"error:{type(e).__name__}",
+                                 int((time.monotonic() - t0) * 1000))
                 ready.set()
             else:
                 # Mid-stream error — can't retry; bill partial delivery, feed
-                # health stats, send error to client.
-                await self._note_stream_failure(dep, real_key, ctx)
-                await self._price_partial(ctx, dep, usage_final, text_len)
-                await queue.put(dl.StreamError(str(e),
-                                               "timeout" if "Timeout" in type(e).__name__
-                                               else "connection"))
+                # health stats, send error to client. `_fail_stream` guarantees
+                # the terminal frame even when the accounting awaits raise: an
+                # unguarded fault here killed the pump before it queued
+                # anything, and the consumer — parked on `await queue.get()`
+                # with no timeout — never woke (AUDIT #211).
+                await _fail_stream(
+                    str(e),
+                    "timeout" if "Timeout" in type(e).__name__ else "connection")
+        finally:
+            # Moved out of the two arms above (and out of the happy path's own
+            # explicit call, which is idempotent) so the upstream connection is
+            # released on EVERY exit, including a fault raised by the failure
+            # handler itself (AUDIT #211).
             await _close_upstream()
 
     async def _note_stream_failure(self, dep: Deployment, real_key,
@@ -1408,13 +1600,7 @@ class Gateway:
         """
         u = usage_final or dl.UsageFinal()
         if u.prompt == 0:
-            u = dl.UsageFinal(
-                prompt=(await estimate_tokens_async(
-                    flatten_request_text(ctx), dep.model_id)
-                    + media_tokens(ctx)),
-                cached=u.cached, reasoning=u.reasoning,
-                output=u.output or max(1, text_len // 4),
-                cache_creation=u.cache_creation, estimated=True)
+            u = await usage_fallback(ctx, dep, u, text_len)
         self._price_stream(ctx, dep, u)
 
     def _price(self, ctx: RequestContext, dep: Deployment, u: ir.Usage) -> None:
@@ -1519,7 +1705,18 @@ def flatten_request_text(ctx: RequestContext) -> str:
         out.append(t.description or "")
         if t.parameters_json_schema:
             out.append(orjson.dumps(t.parameters_json_schema).decode())
-    return " ".join(out)
+    # Coerce at the join rather than at each append: a codec that failed to
+    # guard a typed-wrong field (AUDIT #184: a non-string ``text``/``name`` from
+    # a sloppy client) used to make this raise ``TypeError``, and the estimator
+    # is called from the stream pump — so the pump died mid-stream with no
+    # terminal frame and the client hung forever (AUDIT #211). The estimator
+    # must be total: it is the fallback for a provider that omitted usage, i.e.
+    # the normal case for streaming-only upstreams. One pass here covers every
+    # field above (present and future) instead of a guard per append.
+    # ``None`` contributes nothing rather than the literal "None", so an
+    # optional field left unset does not add a phantom token to the estimate.
+    return " ".join(
+        v if isinstance(v, str) else "" if v is None else str(v) for v in out)
 
 
 def media_tokens(ctx: RequestContext) -> int:

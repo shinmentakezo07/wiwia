@@ -75,8 +75,29 @@ def validate_tool_args(
 
     # Check required properties for object type.
     if expected_type == "object" and isinstance(args, dict):
-        required = schema.get("required", [])
-        missing = [r for r in required if r not in args]
+        # The nested keyword reads are caller-controlled shapes too: a
+        # ``required`` that is not a list (null, an int, a string) is not
+        # iterable and ``properties`` that is not a dict has no ``.get``, so
+        # both raised out of the pump's mid-stream handler — the caller's own
+        # stream died with no ``finish_reason`` and the deployment's key was
+        # cooled for every other user. Same seam, same rule as the top-level
+        # guard above: a shape that carries no validation semantics is
+        # skipped, not raised on (AUDIT #192).
+        required = schema.get("required")
+        if not isinstance(required, list):
+            required = []
+        # A member is matched against the args keys with ``in``, which hashes
+        # it: an unhashable one (a nested dict/list, a plausible hand-written
+        # mistake) raised ``TypeError`` on the lookup — the same crash by
+        # another door. It names no property, so it is skipped rather than
+        # raised on; every other member keeps its historical semantics.
+        missing = []
+        for r in required:
+            try:
+                if r not in args:
+                    missing.append(r)
+            except TypeError:
+                continue
         if missing:
             msg = f"tool '{tool_name}': missing required properties: {missing}"
             log.warning("tool_args_missing_required", tool=tool_name, missing=missing)
@@ -85,7 +106,9 @@ def validate_tool_args(
         # Per-property types. Without this the declared types were never
         # enforced at all — `_check_type` only ran on the whole args object, so
         # a boolean in a "number" field passed validation untouched.
-        properties = schema.get("properties") or {}
+        properties = schema.get("properties")
+        if not isinstance(properties, dict):
+            properties = {}
         for prop, value in args.items():
             spec = properties.get(prop)
             if not isinstance(spec, dict):

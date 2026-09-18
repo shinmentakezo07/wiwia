@@ -2,13 +2,24 @@
 
 Ordering contract (adapters guarantee, encoders rely on):
   exactly one StreamStart first;
-  ToolCallOpen -> ToolCallArgsDelta* -> ToolCallClose strictly nested per index;
+  ToolCallOpen -> ToolCallArgsDelta* -> ToolCallClose, nested per index;
   a ServerToolResultDelta may follow the Close of its own server-tool index;
-  UsageFinal exactly once, after the last content delta;
+  UsageFinal at least once, after content;
   then Finish;
   then exactly one of StreamEnd | StreamError.
 StreamError may terminate at ANY point, replacing everything after the last
 emitted delta — it is the abnormal-path terminal and needs no Finish.
+
+Two places where the real streams are looser than the shape above, both
+absorbed downstream so the client still sees a well-formed stream:
+
+* Parallel tool calls are SIBLINGS, not strictly nested. Adapters may hold
+  several indices open at once and close them in a batch (OpenAI closes every
+  open index at ``finish_reason``; Gemini emits Open/Args/Close per
+  ``functionCall`` part). Encoders must not assume one index at a time.
+* UsageFinal may arrive MORE THAN ONCE and before the last content delta:
+  OpenAI, NIM and Gemini all attach usage to intermediate chunks. Every encoder
+  buffers it last-write-wins and emits once from its terminal frame.
 """
 
 from __future__ import annotations
