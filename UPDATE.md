@@ -2123,3 +2123,731 @@ Claude Code uses to *decide* which tool to reach for.
 discard-everything behaviour and was rewritten to the corrected pairing
 contract; `test_anthropic_client_never_receives_a_half_pair` is its control.
 Full suite 1910 passing, ruff clean.
+
+## Zen free-tier anonymous access retired; `anthropic-version` scoped to Messages (2026-09-17)
+
+**Files**: `wiwi/providers/opencode_adapter.py`, `wiwi.yaml.example`
+
+**Issue**: every keyless (`anonymous`) request to a `*-free` model failed with
+`403 {"type":"error","error":{"type":"FreeTierError","message":"Error from
+provider (Console): OpenCode's free tier can only be used from within
+OpenCode"}}` — reported as "opencode rejected credentials (403)". Live probe
+matrix the same day: anonymous gets that 403 on all three free routes (chat
+`mimo-v2.5-free`, responses `muse-spark-1.3-contributor-free`, messages
+`union-alpha`), with or without the extra attribution headers; the same
+requests with a (fake) bearer clear the session gate and reach `401
+AuthError`. So the `x-opencode-*` spoof still passes — Zen retired anonymous
+keyless free-tier access (which returned 200 until 2026-09-16), and free
+models now need a valid `OPENCODE_API_KEY` like paid ones. Separately,
+`headers()` sent `anthropic-version` on every route although it names
+Anthropic's Messages API version.
+
+**Before**:
+```python
+h = {"User-Agent": ..., "HTTP-Referer": ..., "X-Title": ...,
+     "anthropic-version": "2023-06-01"}  # on chat/responses/gemini too
+```
+
+**After**:
+- `anthropic-version` is added only when `self._last_route == "messages"`
+  (set by `build_url`/`encode_request` before `headers()` on the hot path).
+- Module docstring, sentinel comments, and `wiwi.yaml.example` now record
+  that anonymous free-tier traffic 403s upstream and free models require a
+  real key. No `core/` change: error mapping stays generic per the
+  hub-and-spoke rule.
+
+**Tests**: `tests/test_fix_round71.py` (4) — route table for
+`muse-spark-1.3-contributor-free`, per-route `anthropic-version` presence
+with fingerprint intact, Responses body shape, Responses usage decode
+(prompt/completion/cached/reasoning). Gateway E2E verified live-path via
+mocked `POST /zen/v1/responses` (correct body, spoof headers, usage with
+`cached_tokens`/`reasoning_tokens`); live upstream re-probed post-fix
+(anon → 403 policy, fake key → 401, spoof intact).
+
+## Entitlement 401/403 misclassified as credential failures (2026-09-17)
+
+**Files**: `wiwi/providers/base.py`, `wiwi/providers/opencode_adapter.py`,
+`wiwi.yaml.example`
+
+**Issue**: a request to `muse-spark-1.3-contributor-free` through the `io`
+deployment failed with
+`io rejected credentials (403): Error from provider (Console): OpenCode's free
+tier can only be used from within OpenCode`, and the log showed two pool keys
+(`io/3`, `io/4`) marked rejected by a request that never reached an auth check.
+The wording and the key-pool damage both said "bad key"; the real cause is a
+Zen account policy.
+
+**Root cause (live probe matrix, 2026-09-17):** Zen's Console returns
+`403 FreeTierError` for a free model on *any* request whose workspace has no
+paid entitlement — keyless (`anonymous`) and with a valid bearer alike. A
+bearer only clears the session gate and then hits the billing gate
+(`401 CreditsError: No payment method`, i.e. the key itself is fine). No
+header variation changes this (project id, client tag, `x-zen-model`,
+`x-zen-billing-source`, ULID vs hex ids, stream flag, browser UA: all 403), so
+the `x-opencode-*` client spoof is complete and correct — the free tier is
+simply gated on a paid workspace, and keyless anonymous access (200 until
+2026-09-16) is retired.
+
+The bug wiwi owned: `error_from_provider_status` mapped **every** 401/403 to
+`authentication_error`, so `status_for_key_pool` reported it to the pool and
+`ProviderAccount.on_result` ran `err_count += 2` (retire after
+`key_max_consecutive_fails`). One account-level policy rejection therefore
+burned two healthy keys per attempt and cooled the whole provider — a
+self-inflicted outage on top of the upstream refusal.
+
+**Fix (`wiwi/providers/base.py`):**
+
+- `_extract_error_type()` reads the machine `type`/`code` from Zen/Anthropic
+  (`{"type":"error","error":{"type":"FreeTierError"}}`) and OpenAI-shaped
+  bodies; `_entitlement_kind()` splits account refusals into **billing**
+  (`FreeTierError`, `CreditsError`, `MonthlyLimitError`, `UserLimitError`,
+  usage-limit text) and **policy** (region, data-policy, `ModelError`).
+- `error_from_provider_status` maps billing refusals to **402
+  ``permission_error``** and policy refusals to 403 ``permission_error``, both
+  with `requires billing (…)` / `denied access (…)` wording instead of
+  `authentication_error` / `rejected credentials`. The 402 matters because
+  clients render *every* 401/403 as "re-enter your API key" — Cline's SDK
+  explicitly classes 401/403 as credential rejections — so a working key was
+  being blamed for a billing gap. Retryable stays True so the request still
+  fails over.
+- `status_for_key_pool` returns `None` for a `permission_error` 401/403/402, so
+  the key is never charged. A plain 403 (`forbidden`, no marker) stays an
+  authentication failure, and a genuine `AuthError`/`Invalid API key` body keeps
+  its historical semantics.
+- `opencode_adapter` docstring + `wiwi.yaml.example` record the retired
+  keyless free tier (free models need a real `OPENCODE_API_KEY` *and* a funded
+  workspace).
+
+**Tests**: `tests/test_fix_round71.py` (11) — route/header scoping, Responses
+body/usage, and the entitlement classification: FreeTierError 403 → 402
+`permission_error` + `None` pool status; billing 401 markers → 402; policy
+markers → 403; phrase fallback; plain 403 still auth-classified; real
+credential 401 still marks the key unhealthy. Full suite 1927 passing (13
+pre-existing `ratelimit/memory.py` failures unrelated to this change), ruff
+clean.
+
+## Zen's Messages route needs `x-api-key`, not `Authorization` (AUDIT #176) — 2026-09-17
+
+**File**: `wiwi/providers/opencode_adapter.py` (`headers()`)
+
+Zen serves four wire protocols from one base URL, and they do **not** share an
+auth scheme. `headers()` built a single dict for all of them and always
+emitted `Authorization: Bearer`. That is right for `/chat/completions` and
+`/responses` (OpenAI-wire) and wrong for `/messages`, which is Anthropic-wire
+and reads `x-api-key` — a Bearer token is simply not seen by that front end:
+
+```
+POST /zen/v1/messages  Authorization: Bearer sk-…   {"model":"claude-sonnet-5"}
+-> 401 {"type":"error","error":{"type":"AuthError","message":"Missing API key."}}
+```
+
+"Missing", not "Invalid": the credential never arrived. Verified live
+2026-09-17 with a real Zen key — the same request with `x-api-key` instead
+gets `401 CreditsError "No payment method"`, which is the *next* gate, past
+authentication. So the header swap is what moves the request from "not
+authenticated" to "authenticated, unbilled".
+
+**Fix** — auth follows the wire, not the adapter:
+
+```python
+if self._last_route == "messages":
+    h["x-api-key"] = key.secret.strip()
+else:
+    h["Authorization"] = f"Bearer {key.secret.strip()}"
+```
+
+The `anonymous` sentinel still omits every credential on every route. This
+mirrors `AnthropicAdapter.headers()` (`anthropic_adapter.py:203`), the adapter
+this route already delegates its encode/decode to, and the module docstring now
+says so.
+
+### Follow-up: the Gemini route had the same bug, and the "querystring" story was wrong
+
+Review caught that the first pass documented the Gemini route as keeping "its
+querystring key", and that claim was **false** — while asserting it, the same
+defect was still live on that route.
+
+Zen's Gemini front end reads **`x-goog-api-key`**. Live probe 2026-09-17, real
+Zen key, `gemini-3-flash`:
+
+| credential | result |
+|---|---|
+| `Authorization: Bearer` (what we sent) | 401 `AuthError` "Missing API key." |
+| `x-goog-api-key` | 401 `CreditsError` "No payment method" |
+| `?key=` querystring | 401 `AuthError` "Missing API key." |
+| none | 401 `AuthError` "Missing API key." |
+
+The querystring carried no key either: `wiwi/core/recovery.py:190` appends one
+only when `provider_type == "gemini"` and this deployment's type is
+`"opencode"`, and `OpencodeAdapter.build_url` returns a bare
+`...:generateContent` with no `?key=` placeholder, so the
+`url.endswith(("?key=", "&key="))` branch never fires. `GeminiAdapter.headers()`
+returning `{}` is irrelevant — the opencode adapter never calls it, it builds
+its own dict. So the route sent a credential upstream could not read, and the
+querystring claim compounded the error rather than describing the behavior.
+
+**Fix**: replace the two-branch `if` with a route→header table
+(`_CREDENTIAL_HEADER`), so the scheme is data and a fifth route cannot silently
+inherit the wrong one:
+
+```python
+_CREDENTIAL_HEADER: dict[Route, str] = {
+    "messages": "x-api-key",
+    "gemini": "x-goog-api-key",
+    "chat": "Authorization",
+    "responses": "Authorization",
+}
+...
+scheme = _CREDENTIAL_HEADER.get(self._last_route, "Authorization")
+value = key.secret.strip()
+h[scheme] = value if scheme != "Authorization" else f"Bearer {value}"
+```
+
+Post-fix live check, all three routes with a real key: gemini → `CreditsError`,
+messages → `CreditsError`, chat → `403 FreeTierError` (correct for a free
+model). Every route now clears authentication.
+
+**Also pinned**: a **streaming** messages-route case. Round 72's end-to-end
+coverage used the non-streaming `_call_once` site, but the stream pump builds
+headers at its own site with its own 401-refresh rebuild and is the path every
+Claude Code client takes. The pre-existing streaming messages test
+(`tests/test_fix_round63.py`) used `key="anonymous"`, so it could not catch a
+scheme regression — the exact blind spot that let the original bug ship.
+
+**Tests**: `tests/test_fix_round73.py` (7) — gemini `x-goog-api-key`, cross-route
+scheme isolation in both directions, anonymous sentinel, fingerprint and
+`anthropic-version` scoping, gateway end-to-end on the gemini route (asserting
+the key is absent from the URL too), and the streaming messages case. RED before
+the fix (3 gemini tests failed; the streaming control passed, confirming round
+72 already covered that site); GREEN after.
+
+**Why it hid this long**: every Messages-route test in the suite configured
+`key="anonymous"` (`tests/test_fix_round63.py`), which omits credentials
+entirely — so the wrong-scheme branch was never exercised with a real key.
+Round 71 asserted `anthropic-version` placement on that route but not the auth
+header. It is masked in production too: the `io` account is on an unbilled
+workspace (all six keys → `CreditsError` on paid models) and free models are
+refused `403 FreeTierError` on every route and every live key (9/9 probed), so
+Messages traffic fails today for a *billing* reason and would have gone on
+failing for an *auth* reason once payment was added.
+
+**Not a code bug**: the unbilled workspace and the account-wide free-tier gate
+are upstream account conditions. Paid models stay unreachable until a payment
+method is added; the free tier is not recoverable by any header combination
+(eight variants probed).
+
+**Tests**: `tests/test_fix_round72.py` (8) — per-route auth scheme for
+messages (union-alpha, claude-sonnet-5) with chat/responses/gemini controls
+asserting `x-api-key` is *absent* there, the anonymous-sentinel control, the
+round-29 fingerprint and round-71 `anthropic-version` preservation, and
+end-to-end through `create_app` on both the messages and chat routes. RED
+before the fix (3 messages-route tests failed, 5 controls passed); GREEN
+after. Full suite 1936 passing (same 13 pre-existing `ratelimit/memory.py`
+failures), ruff clean.
+
+## Entitlement refusals must still reach the proxy log (round-74 follow-up to AUDIT #174) — 2026-09-17
+
+**File**: `wiwi/router/router.py` (`execute_with_retries`)
+
+Round 71 made `status_for_key_pool` return `None` for entitlement refusals
+(`FreeTierError`/`CreditsError` → 402/403 `permission_error`) so the key pool
+is never charged. But `execute_with_retries` gated its proxy-log warn on that
+same value (`if status is not None: _proxy("warn", ...)`), so the fix silenced
+the one line that told the operator *why* requests were failing over: an
+operator tailing the proxy log during the free-tier 403 storm saw requests
+fail with no upstream-status line at all.
+
+**Fix**: the key-pool charge stays gated on `status` (a `None` must never
+reach `on_result` — that would be the #174 regression again), but the warn is
+now split:
+
+- `permission_error` on 401/402/403 →
+  `io refused zen/muse-spark-1.3-contributor-free [main] — account entitlement (402): io requires billing (403): ...`
+- everything else keeps the historical
+  `upstream <status> on <group>/<model> [<provider>/<key>]: <message>` shape.
+
+A caller-side 400 (`status_for_key_pool` → None, non-permission) still logs
+nothing, matching the pre-existing contract.
+
+**Tests**: `tests/test_fix_round74.py` (6) — entitlement warn line names
+provider/group/key/cause at warn level for both the 402 billing and 403 policy
+halves; `err_count` stays 0 and the key stays `active` across repeated
+refusals (num_retries=3); genuine `AuthError` keeps the historical shape AND
+the double-count charge; caller 400 stays silent; upstream 5xx keeps the
+historical shape. GREEN; full suite + ruff re-run below.
+
+## Finished the round-70 rate-limiter fix (missing helpers + global refund) — 2026-09-17
+
+**File**: `wiwi/ratelimit/memory.py`
+
+Round 70's `record_tokens` rewrite landed half-applied: it called
+`_find_event` / `_newest_estimated`, which did not exist, so every TPM
+reconciliation raised `AttributeError` (13 failing tests across rounds
+2/6/48/66/69/70 and `test_audit_fixes`). Completed the intended semantics,
+mirroring `Deployment.settle_tokens`:
+
+- `_find_event(w, request_id)` — any event with that id, estimated or
+  confirmed, so a repeated reconcile *adjusts* instead of double-counting.
+- `_newest_estimated(w)` — the lenient fallback, now reachable only from the
+  id-less path.
+- `release("")` no longer returns before the global loops: `check("")`
+  reserves in `global:rpm`/`global:tpm`, so an early return leaked one of every
+  global slot for the window; only the key-scoped `":rpm"`/`":tpm"` lookups are
+  skipped when `key_id` is empty.
+- `test_fix_round70.py`'s admission test claimed a request "must be admitted"
+  when the window was already at cap (300 + 700 == 1000); corrected to assert
+  refusal — the refusal is the behaviour the fix exists to guarantee, and the
+  300-token probe is exactly the one the bug let in.
+
+Full suite: 1964 passed, ruff clean.
+
+## Round 75/76/78 — codec, adapter, and streaming-internals fixes (AUDIT #159-#211) — 2026-09-18
+
+**Files**: `wiwi/wire/anthropic_messages.py`, `wiwi/wire/openai_chat.py`,
+`wiwi/wire/openai_responses.py`, `wiwi/providers/anthropic_adapter.py`,
+`gemini_adapter.py`, `openai_adapter.py`, `openrouter_adapter.py`,
+`nim_adapter.py`, `nim_tool_schema.py`, `wiwi/core/gateway.py`
+
+Eleven findings, one root cause each time: a `.get(key, default)` that defends
+against a *missing* key but not against a JSON `null`, an emission that was
+never made exactly-once, or an unguarded nested read on caller-controlled JSON.
+The poisoned value then surfaced far from its origin — mid-stream after the
+client already had a 200, on the *next* turn of the conversation, or in the wire
+encoder as an undispatchable `tool_use`.
+
+### Anthropic Messages codec (`wiwi/wire/anthropic_messages.py`)
+
+- **#178** `_emit_server_call` closed the wrong content block. When a client
+  `tool_use` block was open and interleaved text/thinking had been deferred,
+  `_flush_deferred()` opened a NEW text block and bumped `_block_idx`, and the
+  server call then used that index for its own start/stop — so the text block
+  was opened and never stopped and the server call received two stops. With
+  thinking, a later `signature_delta` was stamped onto the *result* block.
+  New `_drain_deferred()` flushes and then closes the block the flush opened;
+  the identical sibling in `feed`'s `ServerToolResultDelta` arm (no buffered
+  call) got the same treatment. One start and one stop per index now.
+- **#167** an assistant turn with `content: null` was silently dropped (the
+  `if parts:` guard had no assistant arm), corrupting turn alternation on
+  replayed history — `content: null` is what the API itself emits for a
+  tool-use-only turn. Now appends an empty-parts assistant message, matching
+  `openai_chat.py` exactly.
+- **#168** a malformed image block (`source.type == "base64"` with no `data`)
+  was forwarded upstream as `"data": null` instead of being dropped. All three
+  image decode sites now skip a missing/non-string payload.
+- **#186** explicit JSON `null` for `name`/`description` passed the
+  `get(k, "")` default (which only covers a MISSING key). Coerced at the decode
+  boundary with the file's existing `isinstance` idiom.
+- **#187** typed-wrong `media_type` reached the wire verbatim, and the
+  OpenAI/Gemini adapters interpolate `mime` into a `data:` URL. Now falls back
+  to the documented default.
+
+### OpenAI Chat / Responses codecs (`wiwi/wire/openai_chat.py`, `openai_responses.py`)
+
+Two new module-level helpers carry the policy; `openai_responses.py` imports
+both.
+
+- **`_str_or_empty(raw)`** — applied to `input_text`/`output_text`/`text`
+  blocks, `function_call` names and raw arguments, tool `name`/`description`,
+  both `tool_choice` name sites, `DocumentPart.filename`, and the
+  unknown-hosted-tool fallback. Fixes **#184** (a non-string `text` reached
+  `TextPart.text` typed as `str`, and the fallback estimator's `" ".join`
+  raised a 500 *after* the upstream was billed) and **#186**.
+- **`_stop_list(raw)`** — a bare string becomes one sequence, a list is
+  filtered to its `str` items, anything else becomes `[]`. `(body.get("stop")
+  or [])` let any truthy non-list through, so `{"stop": true}` reached the
+  upstream verbatim (**#185**; AUDIT #127's shape one level up).
+- **#165** `_builtin_query` returns `""` unless `orjson.loads` produced a dict —
+  a well-formed JSON scalar or array parses cleanly but has no `.get`, so a
+  hosted `web_search` call whose upstream streamed `[1]` crashed the encoder
+  mid-stream.
+- **#168** `_decode_image` returns `None` for an empty url, not only a
+  non-string one (an absent `image_url` produced `data:image/png;base64,None`).
+- **#166** the Chat decoder normalizes `role` to the known set, defaulting to
+  `"user"`, mirroring `anthropic_messages.py`.
+- **#187** `top_k` goes through `ir.coerce_int`, matching `max_output_tokens`.
+
+### Provider adapters (`wiwi/providers/`)
+
+- **#160** `AnthropicAdapter`'s `input_json_delta` arm now gates `partial_json`
+  with `isinstance(..., str)` like its `text_delta`/`thinking_delta` siblings; a
+  null fragment became `ToolCallArgsDelta(args_fragment=None)` and the gateway's
+  `"".join()` raised mid-stream.
+- **#161** `GeminiAdapter` gains `_saw_tail`, set on first tail emission in both
+  the `if finish:` and the `elif u and not parts:` arm and cleared in `reset()`.
+  A parts-less usage-bearing intermediate frame followed by a finish frame
+  previously emitted two UsageFinal/Finish/StreamEnd, and every consumer keeps
+  the last value — so the stream was billed on the *intermediate* frame.
+- **#194** a module-level `_token_count()` (built on `ir.coerce_int`, which
+  already rejects bools — `true` is not a token count) is applied at every
+  counter read site in the four adapters, streaming and non-streaming, plus
+  Anthropic's `message_start` counters and `thinking_tokens`. `cline`,
+  `workbuddy` and `bai` inherit the guard through `super()`.
+- **#195** the unguarded `candidatesTokenCount + thoughtsTokenCount` sum in both
+  Gemini decoders now coerces each operand — the strongest instance of #194,
+  where the `TypeError` came out of the decoder itself.
+- **#196** `NimAdapter`'s reused-index branch now flushes the deferred
+  `_pending_opens.pop(idx)` as a `ToolCallOpen` before the `ToolCallClose`,
+  mirroring `OpenAIAdapter`. NIM alone diverged, so `Close(0)` reached the
+  encoder before any `Open(0)` and `AnthropicStreamEncoder` dropped it, leaving
+  `content_block_start` with `name: ""`.
+- **#197** `OpenRouterAdapter`'s streaming `usage` read is `isinstance(u, dict)`
+  -gated like its siblings, and `reasoning_details`' `text`/`summary`/`data`
+  are coerced in both decoders — a null text decoded to `ThinkingPart(text=None)`
+  and the next turn's replay (`reasoning += p.text`) raised on all six Chat-wire
+  adapters.
+- **#200** OpenRouter's mid-stream error message is coerced, matching
+  `ClineAdapter`; a null previously reached the client as `"message": null`.
+- **#201** `nim_tool_schema` resolves alias collisions by fixed-point
+  displacement. A tool declaring both `type` and `_nim_arg_type` lost the second
+  property (the model was told there is ONE parameter; `required` named it
+  twice). Note the suffix form `_nim_arg_type_2` is NOT a valid resolution:
+  `collect_nim_tool_aliases` strips exactly one prefix, so it reverses to
+  `type_2` — a name the tool never declared. Every alias is therefore kept as
+  `_nim_arg_` + its original, which is exactly invertible.
+
+### Gateway (`wiwi/core/gateway.py`)
+
+- **#159** a mid-stream resume emitted a SECOND `StreamStart`: `started` is a
+  local of `Gateway.stream` initialised once before the consumer loop, and the
+  resume branch `continue`s back into it, while the resumed pump runs a new
+  adapter instance that emits its own frame from `message_start`. An Anthropic
+  client reads a second `message_start` as a NEW message. The arm now yields
+  only when `!started`. The resume's counts are deliberately NOT summed into the
+  opening frame — the continuation request replays the original prompt *plus*
+  the partial output, so its prompt count already contains the first attempt's
+  tokens; summing would double-count on the client's context meter. The numbers
+  ride in the single terminal `UsageFinal` via `accumulated_stream_usage`, and
+  the new `usage_fallback()` uses the provider-reported opening counts for
+  billing when an attempt dies before its `message_delta`.
+- **#211 (Critical)** the pump's error handler was unguarded: the mid-stream
+  `except Exception` arm, the idle-timeout arm and the clean-completion usage
+  fallback awaited `_note_stream_failure` / `_price_partial` /
+  `queue.put(StreamError(...))` with no `try/except`, so any fault killed the
+  pump before the terminal frame was queued and the consumer parked on
+  `await queue.get()` **forever** — no terminal frame, no timeout. New
+  `_put_frame` (non-blocking, with a bounded fallback for a genuinely full
+  queue) and `_fail_stream` (guards the accounting awaits independently, queues
+  the terminal frame last, idempotent via `terminal_sent`); `_close_upstream()`
+  moved into a `finally`. The same never-completing shape existed before
+  `_pump_once`'s own try, where a fault stranded `call_one` on
+  `await ready.wait()` — `ready` is now set in every pre-connect arm with a
+  `_pump` backstop. `usage_fallback()` is shared with `_complete_via_stream` so
+  the two fallbacks cannot drift.
+- **#184** `flatten_request_text`'s join now coerces per element (one pass at the
+  join, not a guard per append); `None` maps to `""` so an unset optional field
+  adds no phantom token, and well-formed input is byte-identical.
+
+**Tests**: `tests/test_fix_round75.py` (12), `test_fix_round76.py` (15),
+`test_fix_round77.py` (34 tests / 116 parametrized cases), `test_fix_round78.py`
+(36), `test_fix_round79.py` (34). RED evidence per finding in each agent's
+report; full suite 2259 passed, ruff clean.
+
+## Round 85 follow-up — streaming guards, OAuth rotation, and accounting visibility (AUDIT #162-#211) — 2026-09-18
+
+The remainder of the round-75 sweep: defects outside the codecs but still on the
+translation path (the streaming contract, the OAuth refresh seams, and the
+operator surfaces that report whether any of it worked).
+
+### Streaming contract (`wiwi/streaming/`)
+
+- **#191 (High)** `JournalStore.path_for` sanitized by *stripping* disallowed
+  characters, so distinct ids collided onto one file (`a/b`, `a.b`, `a b`,
+  `a!b` all resolved to `ab.jsonl`). The request id is returned to every client
+  in `x-wiwi-request-id`, so appending a single `.` to a known id resolved to
+  the victim's exact journal path — re-opening the #67 cross-key disclosure
+  through a different door. A conforming id (`[A-Za-z0-9_-]{1,64}`, the
+  `uuid4().hex[:16]` shape) keeps its historical filename so existing on-disk
+  journals stay replayable; anything else is hashed to `h<sha256>.jsonl`, and
+  the `h` prefix keeps the two naming spaces disjoint.
+- **#192 (High)** `validate_tool_args` guarded only the *top-level* schema. A
+  malformed nested keyword — `properties` as a list/string, `required` as a
+  non-list — raised out of the pump's mid-stream handler, which cooled the
+  deployment's key for every other user AND killed the caller's own stream
+  (HTTP 200, some content, then an error frame and no `finish_reason`). Now
+  coerced at the seam, and an unhashable `required` member is skipped rather
+  than raising from the `in` lookup.
+- **#193** `_repair_truncated_json` stripped a `\uXXXX`-shaped tail
+  unconditionally, so an **even** backslash run (a literal escaped backslash)
+  before it lost the entire tool-argument object — a model emitting a Windows
+  path or regex cut mid-string silently degraded to `{}`. The surrogate block
+  is now gated on the same odd-run parity test the partial-escape branch
+  already computed. A second half of the same defect was found and fixed: the
+  low-surrogate branch's predecessor check used an unparity-checked regex, so a
+  literal `uD83D` followed by a real low-surrogate escape kept a lone `U+DE00`
+  that `json.loads` accepts but `orjson.dumps` rejects.
+
+### OAuth refresh seams (`wiwi/providers/`)
+
+- **#169 (High)** Cline's on-demand 401 hook built its OWN `ClineAutoRefresh`
+  worker, so it shared neither the sweeper's per-provider lock nor its circuit.
+  Refresh tokens rotate (each refresh consumes the old one), so a sweeper tick
+  and a client 401 in the same window both read the same token and both POST;
+  the loser's `invalid_grant` maps to `mark_dead`, taking the provider down
+  until a human re-authenticates. Both paths now funnel through one lock-guarded
+  `_refresh_locked` (exposed as `refresh_now`), which re-reads the circuit and
+  the stored record under the lock and checks a per-provider generation counter
+  captured before `acquire()` — a sibling that rotated while this caller waited
+  returns "already fresh, retry" instead of burning the token. The identical
+  defect existed in `workbuddy_auto_refresh.refresh_for_provider` and is fixed
+  the same way.
+- **#170** WorkBuddy's sweeper used `expires_within_lead` as its ONLY due-check,
+  and that predicate returns True for an unknown expiry — so a stored record
+  with no `expiresAt` was refreshed every 60 s forever, one POST and one DB
+  write per minute, each consuming a rotating token, and any transient failure
+  could `mark_dead` a key that had never expired. The lead predicate now
+  returns False for an unknown expiry; the admin listing's `needs_refresh`
+  keeps its "unknown = needs attention" meaning deliberately, so
+  `/admin/workbuddy/accounts` still flags such an account. The Cline and
+  WorkBuddy sweeps now agree.
+
+### Accounting visibility (`wiwi/logging_core/`, `wiwi/server/`)
+
+- **#171 (High)** a failed request-log DB write discarded the batch while
+  `dropped_request_logs` stayed at 0 — so `/health` and `/metrics` reported
+  "healthy" while every durable row was lost. The failure now counts the batch
+  (`failed_request_log_writes`).
+- **#173** proxy-queue-full drops and failed audit writes were uncounted
+  entirely; both now have counters, plus a `dropped_log_events` sum. Four
+  counters rather than one shared one, deliberately: a saturated log pipeline
+  and an unavailable DB need different remedies.
+- **#180** the `counter`-declared Prometheus families were recomputed from a
+  500-event ring each scrape, so they DECREASED as events evicted —
+  `wiwi_cost_total` read 0.5 → 500 → 0.5 across three scrapes while the gateway
+  only ever served more traffic, and `rate()` treats each eviction as a process
+  restart. Process-lifetime `RequestTotals` (folded in at accept time, so a
+  queue drop cannot under-report) now carries every counter family; all
+  documented metric NAMES are unchanged, and the three quantile families stay
+  `summary`.
+- **#179 (High)** `record_spend`'s `except Exception: return True` reported a
+  failed charge as success, so a hard budget cap was unenforced for as long as
+  the write path failed. The failure is now counted (`spend_charge_failures`,
+  on `/health` and `/metrics`), logged, and retried through the unconditional
+  true-up; only when that also fails does it refuse. The upstream already
+  served and billed the request, so refusing on a repairable write failure
+  would be the AUDIT #24 defect with a different status code.
+
+### Server surfaces (`wiwi/server/app.py`)
+
+- **#177 (High)** the Anthropic `ping` keep-alive was yielded by the pump as
+  raw `bytes`, but every consumer routes each item through `encoder.feed(d)`,
+  which type-checks on delta classes only — a `bytes` argument fell through
+  every branch and returned `None`. `stream_ping_interval_s` (default 15 s) was
+  therefore a complete no-op and an idle proxy still reaped long thinking
+  turns. `_stream_response` now passes `bytes` straight to `_emit` (still
+  journaled with a sequence id).
+- **#181** provider delete/rename mutated in-memory routing BEFORE the DB write,
+  so a failed write answered 500 while having taken effect in memory only — the
+  provider and its plaintext key returned after a restart, and `log_audit` was
+  never reached. Both paths now persist first, matching `POST /admin/providers`.
+- **#183** `/health` reported the constant `"ok"` regardless of state, so a
+  container with zero usable providers stayed "healthy" to the Docker
+  HEALTHCHECK. `status` is now derived (`degraded` when there are no providers
+  or no available group); HTTP stays 200 so liveness remains separate from
+  readiness.
+- **#199** the admin `reset_status` cleared status but not `err_count`, so the
+  very next failure re-retired the key; it now calls the router's
+  `recover(force=True)`, which is the operator's unconditional reset.
+
+### Gateway and adapters
+
+- **#159** a mid-stream resume emitted a SECOND `StreamStart` (a second
+  `message_start` to an Anthropic client, which reads it as a NEW message). The
+  resume's counts are deliberately NOT summed into the opening frame — the
+  continuation replays the original prompt *plus* the partial output, so its
+  prompt count already contains the first attempt's tokens.
+- **#211 (Critical)** the pump's error handler was unguarded, so any fault in
+  `_note_stream_failure`/`_price_partial`/`queue.put` killed the pump before the
+  terminal frame and the consumer parked on `await queue.get()` **forever** —
+  no terminal frame, no timeout. Made total, with `_close_upstream()` in a
+  `finally`; the same never-completing shape before `_pump_once`'s try is fixed
+  too.
+- **#160/#161/#194/#195/#196/#197/#200** adapter decode guards: a JSON `null`
+  reaching a typed field, a duplicated terminal tail, and a `ToolCallClose`
+  with no preceding `ToolCallOpen`.
+- **#162 (High)** revoking a credential was undone by an in-flight
+  `authenticate()` re-caching its stale info; an eviction-generation check now
+  discards the stale read.
+- **#163/#198/#202** `rpm: 0` no longer means "unlimited"; the per-owner key cap
+  is no longer a check-then-act race; `ttl_seconds: 0` means the same thing on
+  create and update.
+- **#190 (High)** `Deployment.settle_tokens` adopted another request's
+  reservation, under-counting the per-deployment TPM/RPM cap — the same defect
+  rounds 66/70 removed from `ratelimit/memory.py`. The resolver now mirrors
+  that module.
+
+## Round 68 (2026-09-18) — hosted-item fidelity and the in-band error frame
+
+Two defects on the translation layer, both found by a producer/consumer audit
+of the `IRStreamDelta` taxonomy.
+
+### In-band upstream error frames were dropped on the OpenAI/NIM/B.A.I routes
+
+**Files**: `wiwi/providers/openai_adapter.py`, `wiwi/providers/nim_adapter.py`
+(B.A.I inherits via `class BAIAdapter(OpenAIAdapter)`).
+
+An OpenAI-compatible upstream that reports a mid-stream failure in-band as
+`{"error": {...}}` with **no `choices` array** had that frame discarded:
+`decode_stream_event` built its delta list from `usage` + `choices` only, so the
+frame produced `[]`.
+
+The damage was downstream. With no terminal delta the pump saw
+`finish is None and not saw_terminal` and reported
+`StreamError("upstream stream ended without completion", "connection")` **and**
+called `_note_stream_failure` — cooling a healthy deployment and feeding the
+key's error streak for an error the upstream had reported cleanly. This is the
+same downstream mechanism as AUDIT #76 (Gemini omitting `finishReason`), from a
+different trigger: there the decoder returns `[]` for a shape it does not
+model, here for one it deliberately ignored.
+
+OpenRouter already mapped this shape (`openrouter_adapter.py:277-281`); Gemini,
+Cline and WorkBuddy map their own variants. OpenAI, NIM (its own copy of the
+decode loop, not a delegate) and B.A.I did not.
+
+**Before** (both files, after the `usage` parse):
+
+```python
+choices = chunk.get("choices") or []
+if not choices:
+    return out
+```
+
+**After** — the guard runs *before* the usage parse, matching OpenRouter's
+ordering, so a failed frame cannot contribute a partial token count to cost:
+
+```python
+err = chunk.get("error")
+if isinstance(err, dict):
+    out.extend(self._flush_open_tools())
+    out.append(dl.StreamError(
+        message=str(err.get("message") or "upstream stream error"),
+        kind="status",
+        etype=err.get("type") if isinstance(err.get("type"), str) else None))
+    return out
+```
+
+The provider's own `type` is preserved as `etype` because a mid-stream frame
+carries no HTTP status, so `kind`/`status` alone cannot recover the
+classification a client retries on.
+
+**Tests**: `tests/test_fix_round68.py` —
+`test_openai_adapter_maps_in_band_error_frame_to_stream_error`,
+`test_openai_adapter_in_band_error_preserves_provider_type`,
+`test_nim_adapter_maps_in_band_error_frame_to_stream_error`,
+`test_error_frame_does_not_also_emit_a_usage_final` (pins the ordering), and
+`test_openai_adapter_still_decodes_a_normal_chunk_after_the_error_guard` as the
+control. AUDIT #212.
+
+### A hosted tool-search call was rendered as a web search on the Responses surface
+
+**File**: `wiwi/wire/openai_responses.py`.
+
+`_builtin_call_item` hardcoded `web_search_call` for **every** hosted builtin.
+But the registry maps two distinct canonicals onto the Responses surface —
+`web_search` → `web_search`, and `tool_search_bm25`/`tool_search_regex` →
+`tool_search` — and the OpenAI SDK models these as **separate output items**:
+
+| | web search | tool search |
+|---|---|---|
+| SDK type | `ResponseFunctionWebSearch` | `ResponseToolSearchCall` |
+| wire `type` | `web_search_call` | `tool_search_call` |
+| payload | `action: {type, query}` | `arguments`, `execution`, `call_id` |
+
+So an Anthropic `tool_search_tool_bm25_20251119` step (Claude Code's tool
+search) reached a Responses client labelled as a web search — the client
+rendered a search that never happened and lost the real step entirely.
+
+**Before**:
+
+```python
+def _builtin_call_item(item_id: str, query: str) -> dict[str, Any]:
+    return {"type": "web_search_call", "id": item_id, "status": "completed",
+            "action": {"type": "search", "query": query}}
+```
+
+**After** — the registry decides, so the mapping lives in `builtin_tools.py`
+rather than as a name list here. `_builtin_is_tool_search` accepts either the
+canonical name or the Anthropic wire spelling, since `ToolCallOpen.builtin`
+carries whatever the provider called the block:
+
+```python
+def _builtin_is_tool_search(builtin: str | None) -> bool:
+    if not builtin:
+        return False
+    canonical = bt.canonical_for("anthropic", builtin) or builtin
+    return bt.wire_type_for("openai_responses", canonical) == "tool_search"
+```
+
+All three render sites were updated: the sync `encode_response`, the stream
+`_close_tool`, and the stream `response.output_item.added` (which opens the
+item with its own shape and needs the matching `ts_` id prefix). A real web
+search is unchanged, pinned by a control test.
+
+**Tests**: `tests/test_fix_round68.py` —
+`test_responses_sync_labels_tool_search_as_tool_search_call`,
+`test_responses_web_search_still_renders_as_web_search_call`,
+`test_responses_tool_search_item_matches_the_sdk_shape`. AUDIT #217.
+
+### A mid-stream failure left Responses output items open
+
+**File**: `wiwi/wire/openai_responses.py`.
+
+`_completed()` sweeps every open output item before its terminal event (the
+round-25 fix, AUDIT #111), but the `StreamError` arm emitted `response.failed`
+immediately. A client that had already received `response.output_item.added`
+never got the matching `output_item.done`, leaving the item `in_progress`
+forever. The Anthropic encoder closes its blocks on the same path
+(`anthropic_messages.py`), so this was an asymmetry between the two surfaces.
+
+The error arm now performs the same sweep before emitting `response.failed`.
+
+**Tests**: `tests/test_fix_round68.py` —
+`test_responses_stream_error_closes_open_message_item`,
+`test_responses_stream_error_closes_open_tool_item`. AUDIT #218.
+
+### The Anthropic encoder's deferred buffer was unbounded
+
+**File**: `wiwi/wire/anthropic_messages.py`.
+
+Text/thinking arriving while a `tool_use` block is open is buffered in
+`_deferred` and flushed when the tool closes (the round-64 fix, AUDIT #156) —
+Anthropic content blocks are strictly sequential, so it cannot be emitted
+inline. Nothing capped that list, so a stream interleaving unboundedly behind
+one long-open tool block grew it without limit: the same unbounded-growth class
+that `MAX_TOOL_ARGS_BYTES` (`streaming/validation.py`) and the coalescer's
+`max_bytes` already guard.
+
+Added `MAX_DEFERRED_CHARS = 256 * 1024` and a `_defer()` helper that both
+append sites route through. On overflow it evicts from the **front** (the newest
+content is what the client still needs), trims the boundary entry from its head
+so the buffer lands exactly at the cap, and drops any fully-emptied entries so
+the flush loop never opens a block with no content. A single delta larger than
+the cap is trimmed too, rather than slipping past the guard.
+
+**Tests**: `tests/test_fix_round68.py` —
+`test_anthropic_deferred_buffer_is_bounded`,
+`test_anthropic_deferred_keeps_the_newest_content_when_capped`,
+`test_anthropic_deferred_caps_a_single_oversized_delta`. AUDIT #219.
+
+### Documentation corrected to match the shipped contract
+
+`docs/STREAMING.md` and the `streaming/deltas.py` docstring both claimed a
+clean `Finish` on loop detection, "strictly nested per index" tool calls, and
+`UsageFinal` exactly once after the last content delta. None matched the code:
+
+- **Loop detection terminates with `StreamError`**, deliberately, and does
+  **not** call `_note_stream_failure` so a low-quality model cannot cool a
+  healthy deployment or retire a healthy key (AUDIT #108, pinned by
+  `tests/test_fix_round43.py`). The docs were the stale side.
+- **Parallel tool calls are siblings, not nested.** OpenAI closes every open
+  index in a batch at `finish_reason`; Gemini emits Open/Args/Close per
+  `functionCall` part. Encoders already assume this; the docs said otherwise.
+- **`UsageFinal` arrives more than once** and before the last content delta on
+  OpenAI, NIM and Gemini (Gemini attaches `usageMetadata` to every chunk).
+  Encoders buffer last-write-wins, so the client still sees one figure.
+
+Also corrected: `ping` is emitted by the **gateway pump**, not
+`AnthropicStreamEncoder`; the coalescer's depth threshold is fixed at its
+default of 100 with no config knob; and the P0/P1/P2 claim was narrowed —
+`PartialJSONParser`/`parse_partial` are test-only (incremental argument
+rendering is not shipped) and `StreamTape.replay` has no production caller
+(client-facing replay is served by the journal store).
