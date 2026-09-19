@@ -10,7 +10,7 @@ import structlog
 
 from wiwi.ir import builtin_tools as bt
 from wiwi.ir import types as ir
-from wiwi.providers.base import ProviderKeyRef
+from wiwi.providers.base import ProviderKeyRef, as_dict, as_list
 from wiwi.streaming import deltas as dl
 
 log = structlog.get_logger("wiwi.gemini_adapter")
@@ -230,12 +230,19 @@ class GeminiAdapter:
     def decode_response(self, status: int, body: bytes) -> ir.AssistantTurn:
         data = orjson.loads(body)
         # Check for prompt-level blocking (no candidates returned)
-        pf = data.get("promptFeedback") or {}
+        pf = as_dict(data.get("promptFeedback"))
         block_reason = pf.get("blockReason")
-        cand = (data.get("candidates") or [{}])[0]
-        content = cand.get("content") or {}
+        # ``or [{}]``/``or {}`` default only a *missing* key: an explicit null
+        # or a string candidate raised AttributeError on the next read, which
+        # the gateway wraps as a retryable 502 and charges to key health
+        # (AUDIT #247).
+        _cands = as_list(data.get("candidates"))
+        cand = as_dict(_cands[0]) if _cands else {}
+        content = as_dict(cand.get("content"))
         turn = ir.AssistantTurn(raw=data)
-        for ti, part in enumerate(content.get("parts") or []):
+        for ti, part in enumerate(as_list(content.get("parts"))):
+            if not isinstance(part, dict):
+                continue
             if part.get("thought") and "text" in part:
                 # Gemini 2.5 thinking models return CoT as a text part flagged
                 # ``thought: true``. Emitting it as visible text leaked the
@@ -250,7 +257,7 @@ class GeminiAdapter:
                 # otherwise valid candidate).
                 turn.text += part["text"] or ""
             elif "functionCall" in part:
-                fc = part["functionCall"]
+                fc = as_dict(part["functionCall"])
                 turn.tool_calls.append(ir.ToolUsePart(
                     id=f"call_{fc.get('name', 'x')}_{ti}", name=fc.get("name", ""),
                     args=fc.get("args") or {}))
@@ -265,7 +272,7 @@ class GeminiAdapter:
                                 }.get(finish, "stop")
             if turn.tool_calls:
                 turn.stop_reason = "tool_call"
-        u = data.get("usageMetadata") or {}
+        u = as_dict(data.get("usageMetadata"))
         turn.usage = ir.Usage(
             prompt_tokens=_token_count(u.get("promptTokenCount")),
             completion_tokens=(_token_count(u.get("candidatesTokenCount"))

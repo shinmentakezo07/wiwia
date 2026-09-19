@@ -172,7 +172,11 @@ Import accounts via `/admin/workbuddy/import` or the admin UI.
 OpenCode Zen (`opencode.ai/zen`) — a multi-protocol gateway: the same base URL serves **four upstream wire formats, chosen per model** (see the Zen endpoints table). The adapter:
 
 - Routes each model to its correct upstream protocol.
-- Refreshes its `opencode/<version>` User-Agent live (`opencode_version.py`) so the upstream sees a current client version.
+- Declares `force_stream` (the same `transport.forceStream: true` OpenCode's own provider entry carries): Zen answers as an event stream, so every upstream request asks for SSE and a non-streaming caller's reply is reassembled by the gateway's pump — like `cline` and `workbuddy`. The `gemini` route selects its wire from the URL (`:streamGenerateContent?alt=sse`), so its body carries no `stream` field.
+- Satisfies the **free-tier admission gate**. A `*-free` (and the stealth `big-pickle`) request returns `403 FreeTierError` unless it streams, carries a CLI-shaped `x-opencode-session` (`ses_` + 12 hex + 14 base62, **reused per credential** — free quota is accounted per session), and includes the CLI's `bash`/`read` decoy tools; the adapter supplies all three and forces `stream_options.include_usage` so an aggregated chat turn prices on real usage. Only on free models, and a real client tool of the same name is never replaced.
+- Keeps those decoys **invisible to clients**: a model may still *call* `bash`/`read` (probed live), and the caller has no such tool, so the adapter drops any tool call aimed at a name it injected itself — on both the streaming and the aggregated path — and corrects the finish reason when that call was the only one.
+- The gate is **not a credential check**: free models answer `200` keyless (the `anonymous` sentinel omits `Authorization`) and `429 FreeUsageLimitError` once a real account's free quota is spent. Paid models still need a real `OPENCODE_API_KEY`.
+- Refreshes its `opencode/<version>` User-Agent live (`opencode_version.py`) so the upstream sees a current client version (pre-1.17 is `426 UpgradeRequired`).
 
 ```yaml
 providers:

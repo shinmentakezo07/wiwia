@@ -649,6 +649,12 @@ export function PlaygroundPage() {
   const keyAttempts = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
 
+  // Abort any in-flight completion when the page unmounts. Without this the
+  // fetch and SSE reader kept running against a component that was gone: the
+  // upstream finished, the virtual key was charged for output nobody would
+  // ever see, and setMessages fired on an unmounted component (AUDIT #256).
+  useEffect(() => () => abortRef.current?.abort(), []);
+
   // ── Chat history state ───────────────────────────────────────────────────
   const [chats, setChats] = useState<Conversation[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);

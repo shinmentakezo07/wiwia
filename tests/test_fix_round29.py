@@ -22,8 +22,10 @@ These tests pin:
 
 - every model gets the four metadata headers, anonymous key or real key
 - the ids are stable across header rebuilds within one request (the
-  401-refresh retry path rebuilds headers) and fresh per request instance
-- ``reset()`` rotates both ids
+  401-refresh retry path rebuilds headers)
+- the session id is reused per credential (free-tier quota is accounted per
+  session) while the request id is fresh per request; `reset()` rotates only
+  the request id
 - the gateway end-to-end sends them upstream, streaming included
 """
 
@@ -116,26 +118,42 @@ def test_ids_stable_across_header_rebuilds():
     assert first == second
 
 
-def test_ids_fresh_per_request_instance():
-    # Each request gets its own fresh adapter (fresh_adapter on the hot path);
-    # a bad Zen replica must never be sticky across requests.
+def test_session_is_reused_per_credential_and_the_request_id_is_fresh():
+    # Each request gets its own fresh adapter (fresh_adapter on the hot path),
+    # but the *session* must survive them: Zen accounts free-tier quota per
+    # session, so re-minting it per request spreads the traffic over new
+    # buckets and returns 429 FreeUsageLimitError with growing reset-after
+    # delays. The CLI keeps one long-lived session per identity and so do we.
+    # The request id is per-request, exactly as the CLI mints it.
     a1 = OpencodeAdapter()
     a1.encode_request(_chat_req(), "mimo-v2.5-free", {})
     a2 = OpencodeAdapter()
     a2.encode_request(_chat_req(), "mimo-v2.5-free", {})
-    assert (a1.headers(_key())["x-opencode-session"]
-            != a2.headers(_key())["x-opencode-session"])
-    assert (a1.headers(_key())["x-opencode-request"]
-            != a2.headers(_key())["x-opencode-request"])
+    s1, s2 = a1.headers(_key()), a2.headers(_key())
+    assert s1["x-opencode-session"] == s2["x-opencode-session"]
+    assert s1["x-opencode-request"] != s2["x-opencode-request"]
 
 
-def test_reset_rotates_both_ids():
+def test_a_different_credential_gets_its_own_session():
+    # Sessions bucket by credential (provider:label:secret), so two keys never
+    # share a free-tier quota bucket.
+    a1 = OpencodeAdapter()
+    a1.encode_request(_chat_req(), "mimo-v2.5-free", {})
+    a2 = OpencodeAdapter()
+    a2.encode_request(_chat_req(), "mimo-v2.5-free", {})
+    assert (a1.headers(_key("sk-one"))["x-opencode-session"]
+            != a2.headers(_key("sk-two"))["x-opencode-session"])
+
+
+def test_reset_rotates_the_request_id_and_keeps_the_session():
+    # reset() serves another request on a shared adapter: the per-request id
+    # must not be sticky, while the per-credential session must be.
     a = OpencodeAdapter()
     a.encode_request(_chat_req(), "mimo-v2.5-free", {})
     before = _metadata(a.headers(_key()))
     a.reset()
     after = _metadata(a.headers(_key()))
-    assert after["x-opencode-session"] != before["x-opencode-session"]
+    assert after["x-opencode-session"] == before["x-opencode-session"]
     assert after["x-opencode-request"] != before["x-opencode-request"]
 
 

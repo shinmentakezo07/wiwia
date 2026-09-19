@@ -25,7 +25,7 @@ import orjson
 
 from wiwi.ir import builtin_tools as bt
 from wiwi.ir import types as ir
-from wiwi.providers.base import ProviderKeyRef, coerce_args_fragment
+from wiwi.providers.base import ProviderKeyRef, as_dict, as_list, coerce_args_fragment
 from wiwi.providers.openai_adapter import OpenAIAdapter
 from wiwi.streaming import deltas as dl
 
@@ -176,8 +176,13 @@ class OpenRouterAdapter(OpenAIAdapter):
 
     def decode_response(self, status: int, body: bytes) -> ir.AssistantTurn:
         data = orjson.loads(body)
-        choice = (data.get("choices") or [{}])[0]
-        message = choice.get("message", {})
+        # ``or [{}]`` / ``.get(k, {})`` default only a *missing* key, so an
+        # explicit null or a typed-wrong value raised AttributeError on the
+        # next read — a retryable 502 charged to key/deployment health for a
+        # frame carrying no semantics (AUDIT #247).
+        _choices = as_list(data.get("choices"))
+        choice = as_dict(_choices[0]) if _choices else {}
+        message = as_dict(choice.get("message"))
         turn = ir.AssistantTurn(text=message.get("content") or "", raw=data)
 
         # OpenRouter returns reasoning in ``reasoning`` (string) or
@@ -188,7 +193,7 @@ class OpenRouterAdapter(OpenAIAdapter):
         if reasoning_str:
             turn.thinking.append(ir.ThinkingPart(reasoning_str))
 
-        for rd in message.get("reasoning_details") or []:
+        for rd in as_list(message.get("reasoning_details")):
             if not isinstance(rd, dict):
                 # A malformed reasoning_details entry must be skipped, not
                 # crash the decode (AUDIT #110).
@@ -294,7 +299,11 @@ class OpenRouterAdapter(OpenAIAdapter):
         # finish_reason: "error" in choices.  Emit a StreamError so the
         # gateway surfaces it to the client.
         top_error = chunk.get("error") if isinstance(chunk.get("error"), dict) else None
-        choices = chunk.get("choices") or []
+        choices = chunk.get("choices")
+        if not isinstance(choices, list):
+            # Truthy non-list (``5``/``true``/dict) used to survive ``or []``
+            # and crash on ``choices[0]`` (AUDIT #224).
+            choices = []
         if top_error:
             # ``top_error.get("message", ...)`` defaults only a *missing* key,
             # so a null message reached the client as a contract-invalid

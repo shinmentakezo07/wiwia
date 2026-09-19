@@ -21,8 +21,18 @@ from __future__ import annotations
 from typing import Any
 
 # JSON Schema keys whose *values* are schemas ( recurse into them ).
+# ``items`` belongs here and was missing: it is the single most common schema
+# keyword in real agent tool catalogs (``Edit``'s ``edits: [{old_string,
+# new_string, type}]``). ``_alias_in_node`` recurses over *every* key, so it
+# aliased unsafe params inside ``items`` while ``_collect_aliases_in_node`` and
+# ``_sanitize_schema_node`` — which walk only these sets — never descended, so
+# the alias was never reversed and a boolean subschema survived: both defects
+# the module exists to prevent, and the result was self-inconsistent (AUDIT
+# #246). ``items`` may hold a schema or a list of schemas; both walkers handle
+# either shape.
 _SCHEMA_VALUE_KEYS = frozenset(
-    {"additionalProperties", "not", "contains", "propertyNames", "if", "then", "else"}
+    {"additionalProperties", "not", "contains", "propertyNames", "if", "then",
+     "else", "items"}
 )
 # JSON Schema keys whose *values* are lists of schemas.
 _SCHEMA_LIST_KEYS = frozenset({"allOf", "anyOf", "oneOf", "prefixItems"})

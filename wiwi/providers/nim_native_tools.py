@@ -28,6 +28,7 @@ from enum import Enum
 from typing import Any
 
 from wiwi.ir import types as ir  # noqa: F401  (re-exported for convenience)
+from wiwi.providers.nim_tool_schema import unalias_nim_tool_args
 from wiwi.streaming import deltas as dl
 
 # -- markers (exact Unicode from the reference implementation) ----------------
@@ -203,18 +204,16 @@ def parse_tool_block(
         tool_aliases = aliases.get(name, {})
         arguments = _parse_arguments(body, schema)
         if tool_aliases:
-            arguments = _unalias_args(arguments, tool_aliases)
+            # Delegate to the recursive implementation. The local copy below
+            # used to be flat, so an aliased key at any depth (a nested object
+            # property named ``type``) was never restored and the client
+            # received ``_nim_arg_type`` — a key its tool schema never declared
+            # (AUDIT #248). One implementation, not two.
+            arguments = unalias_nim_tool_args(arguments, tool_aliases)
         calls.append(NativeToolCall(index=len(calls), name=name, arguments=arguments))
     if not calls:
         raise NimToolProtocolError("empty native tool block")
     return tuple(calls)
-
-
-def _unalias_args(args: dict[str, Any], aliases: dict[str, str]) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    for k, v in args.items():
-        out[aliases.get(k, k)] = v
-    return out
 
 
 def _parse_invoke(text: str, cursor: int) -> tuple[str, str, int]:

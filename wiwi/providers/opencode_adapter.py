@@ -14,6 +14,16 @@ The adapter routes by model prefix, delegates chat/messages/gemini to the
 existing adapters, and implements a minimal Responses upstream (text +
 reasoning + function tools) for the responses family.
 
+The transport declares ``force_stream`` (OpenCode's own provider entry carries
+``transport.forceStream: true``): Zen answers as an event stream, so every
+upstream request asks for SSE — ``encode_request`` forces ``stream: true`` on
+the bodies that carry the field — and a non-streaming caller's reply is
+pumped and reassembled into one ``AssistantTurn`` by
+``Gateway._complete_via_stream``, exactly as for the streaming-only Cline and
+WorkBuddy upstreams. The Gemini route is the exception: its wire is selected
+by the URL (``:streamGenerateContent?alt=sse``), so its body carries no
+``stream`` field and none is added.
+
 Auth follows the **wire**, not the adapter: each of Zen's four front ends reads
 its own credential scheme, and a credential sent in the wrong one is simply not
 read — Zen answers ``401 AuthError "Missing API key."`` ("Missing", not
@@ -41,27 +51,48 @@ Every request also carries a live
 restart needed).
 
 Every request also carries the official client's metadata headers
-(``packages/opencode/src/session/llm/request.ts``):
-``x-opencode-session`` + ``x-opencode-request`` (per-request ids, stable
-across header rebuilds within one request), ``x-opencode-client: cli``, and
-``x-opencode-project: global`` (the CLI's fallback when no workspace is
-bound). The edge reads them for metrics/sticky routing on every model, so
-they ride all traffic. Live probes 2026-09-17: a request with a bearer
-(whether real or placeholder) clears the session gate and reaches the auth
-gate (``401 AuthError`` for a bad key), proving the spoof still passes; a
-keyless request to any ``*-free`` model is rejected with ``403 FreeTierError``
-("OpenCode's free tier can only be used from within OpenCode") on all three
-free routes (chat, responses, messages). Keyless anonymous free-tier access
-(which returned 200 until 2026-09-16) is therefore retired upstream — free
-models now require a valid ``OPENCODE_API_KEY``. ``anthropic-version`` rides
-the messages route only; ``HTTP-Referer``/``X-Title`` are referral
-attribution, not part of the CLI fingerprint.
+(``packages/opencode/src/session/llm/request.ts``): ``x-opencode-session`` +
+``x-opencode-request``, ``x-opencode-client``, and ``x-opencode-project`` (the
+CLI's fallback when no workspace is bound). On the **free tier** these are not
+telemetry but an admission gate: probed live 2026-09-19, a ``*-free`` request
+returns ``403 FreeTierError`` unless all of the following hold — and each was
+verified to flip the verdict on its own:
+
+1. ``stream: true`` in the body (see ``force_stream`` above). A `stream:false`
+   request 403s even with a perfect fingerprint.
+2. ``x-opencode-session`` matching the CLI's shape: ``ses_`` + 12 hex + 14
+   more. The pre-fix ``ses_`` + 24 hex tail is two characters short → 403.
+3. The CLI's tool payload: ``bash`` **and** ``read`` both present. No tools, or
+   only user tools, or only ``bash``, each 403. Injected by ``_cloak_*`` — a
+   real client tool of the same name wins and is left in place — and filtered
+   out of the *response* by ``_filter_decoys*``, because a model may still call
+   one and the client has no such tool to execute.
+4. ``User-Agent: opencode/<v>`` at 1.17 or newer — older is
+   ``426 UpgradeRequired``, a bare ``opencode`` is 403.
+
+The credential is NOT part of it: the identical request answers 200 with no
+``Authorization`` at all, 200 with ``Bearer public``, and ``429
+FreeUsageLimitError`` with the account's real Zen keys (their free quota is
+spent). So ``anonymous`` is the working free-tier setup, and an earlier note
+here claiming keyless access was "retired upstream" had the diagnosis
+backwards — it blamed the credential for a request-shape gate. Free quota is
+accounted per session (the CLI reuses one long-lived session per identity, and
+its proxy does the same to stop 429s), so ``x-opencode-session`` is reused per
+credential rather than re-minted per request; minting fresh ids spreads load
+across new buckets and invites ``429 FreeUsageLimitError``.
+
+``anthropic-version`` rides the messages route only; ``HTTP-Referer``/``X-Title``
+are referral attribution, not part of the CLI fingerprint.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
-import uuid
+import random
+import re
+import string
+import time
 from typing import Any, Literal
 
 import orjson
@@ -69,7 +100,7 @@ import structlog
 
 from wiwi.ir import types as ir
 from wiwi.providers.anthropic_adapter import AnthropicAdapter
-from wiwi.providers.base import ProviderKeyRef
+from wiwi.providers.base import ProviderKeyRef, as_dict, as_list
 from wiwi.providers.gemini_adapter import GeminiAdapter
 from wiwi.providers.openai_adapter import OpenAIAdapter
 from wiwi.providers.opencode_version import build_user_agent
@@ -84,6 +115,167 @@ Route = Literal["responses", "messages", "gemini", "chat"]
 _RESPONSES_PREFIXES = ("gpt-", "grok-", "muse-spark-")
 _MESSAGES_PREFIXES = ("claude-", "qwen", "union-alpha")
 _GEMINI_PREFIXES = ("gemini-",)
+
+# The free tier is a request-shape gate, not a credential gate: probed live
+# 2026-09-19, `mimo-v2.5-free` answers 200 keyless and 429 FreeUsageLimitError
+# with a real Zen key. A request is recognised as "from within OpenCode" only
+# when it (a) streams, (b) carries the CLI's decoy tool set, and (c) presents a
+# CLI-shaped session id; every other combination returns 403 FreeTierError.
+_FREE_SUFFIX = "-free"
+# Stealth free models: free upstream with no `-free` suffix in the id.
+_STEALTH_FREE_MODELS = frozenset({"big-pickle"})
+# Models whose Responses tool_choice must collapse to "auto": probed 2026-09-19,
+# the free Muse Spark endpoints reject `required`, `none`, `""` and every named
+# form with 400 invalid_request_error (param `tool_choice`), so the alternative
+# to forcing is a hard failure. Allowlisted per upstream evidence — widen it
+# only with a probe, never by prefix guessing.
+_FORCE_AUTO_TOOL_CHOICE = frozenset({
+    "muse-spark-1.2-contributor-free",
+    "muse-spark-1.3-contributor-free",
+})
+
+
+def is_free_model(model_id: str) -> bool:
+    """True when Zen serves this model from the free tier."""
+    m = (model_id or "").strip().lower()
+    return m.endswith(_FREE_SUFFIX) or m in _STEALTH_FREE_MODELS
+
+
+# -- the CLI fingerprint's shape ----------------------------------------------
+# The edge validates `x-opencode-session` against
+# ``^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`` — the pattern the CLI exports. Measured
+# 2026-09-19 by flipping one property at a time: `ses_` + 12 hex + 14 more
+# returns 200 (even all-hex, so the tail alphabet is not the check), while the
+# pre-fix ``uuid4().hex[:24]`` — a 24-char tail, two short of the required 26 —
+# and an 11-hex-head id both return 403 FreeTierError. `x-opencode-request` is
+# not shape-checked at all (a 6-char id still returns 200), so only the session
+# is load bearing; both are minted in the CLI's form because that is what the
+# client sends.
+_BASE62 = string.digits + string.ascii_uppercase + string.ascii_lowercase
+_SESSION_RE_HEX = 12  # hex chars of the encoded timestamp
+_ID_TAIL = 14         # base62 chars of randomness
+# The edge's own shape, exported so the tests assert against the one pattern
+# the minter and the validator share (mirrors the CLI's OPENCODE_SESSION_RE).
+OPENCODE_SESSION_RE = re.compile(
+    rf"^ses_[0-9a-f]{{{_SESSION_RE_HEX}}}[0-9A-Za-z]{{{_ID_TAIL}}}$")
+OPENCODE_REQUEST_RE = re.compile(
+    rf"^msg_[0-9a-f]{{{_SESSION_RE_HEX}}}[0-9A-Za-z]{{{_ID_TAIL}}}$")
+
+
+def _id_prefix(invert: bool) -> str:
+    # The CLI inverts the session timestamp (newest first when sorted) and
+    # leaves the request timestamp plain. Neither is decoded upstream — the
+    # shape is what is checked — but matching both keeps the fingerprint
+    # byte-honest rather than merely pattern-satisfying.
+    cur = (int(time.time() * 1000) * 0x1000 + 1)
+    if invert:
+        cur = ~cur
+    return "".join(f"{(cur >> (40 - 8 * i)) & 0xFF:02x}" for i in range(_SESSION_RE_HEX // 2))
+
+
+def canonical_session_id() -> str:
+    return ("ses_" + _id_prefix(True)
+            + "".join(random.choice(_BASE62) for _ in range(_ID_TAIL)))
+
+
+def canonical_request_id() -> str:
+    return ("msg_" + _id_prefix(False)
+            + "".join(random.choice(_BASE62) for _ in range(_ID_TAIL)))
+
+
+# Upstream free-tier quota is accounted **per session**. Minting a fresh
+# session for every request spreads the traffic over new buckets and returns
+# 429 FreeUsageLimitError with growing reset-after delays; the real CLI reuses
+# one long-lived session per identity. Bucket by credential (anonymous free
+# setups share one bucket), LRU-capped and TTL-evicted so the map cannot grow
+# with the number of distinct keys ever seen.
+_SESSION_TTL_S = 3600.0
+_MAX_SESSION_BUCKETS = 1000
+_stable_sessions: dict[str, tuple[str, float]] = {}
+
+
+def stable_session_id(bucket: str) -> str:
+    key = hashlib.sha256(bucket.encode()).hexdigest()[:32]
+    now = time.monotonic()
+    hit = _stable_sessions.get(key)
+    if hit is not None and now - hit[1] < _SESSION_TTL_S:
+        _stable_sessions.pop(key)
+        _stable_sessions[key] = (hit[0], now)
+        return hit[0]
+    if len(_stable_sessions) >= _MAX_SESSION_BUCKETS:
+        _stable_sessions.pop(next(iter(_stable_sessions)))
+    session = canonical_session_id()
+    _stable_sessions[key] = (session, now)
+    return session
+
+
+def _reset_stable_sessions_for_tests() -> None:
+    _stable_sessions.clear()
+
+
+# The free tier also requires `bash` and `read` to be present in the tool
+# payload. They are injected as inert decoys — real client tools keep their
+# names and take precedence, and the description tells the model never to call
+# them — so the gate sees its expected set without the phantom becoming an
+# executable call.
+_DECOY_DESCRIPTION = "This tool is currently unavailable and must not be used."
+_DECOY_NAMES = ("bash", "read")
+
+
+def _decoys_chat() -> list[dict[str, Any]]:
+    return [{"type": "function",
+             "function": {"name": n, "description": _DECOY_DESCRIPTION,
+                          "parameters": {"type": "object", "properties": {}}}}
+            for n in _DECOY_NAMES]
+
+
+def _decoys_responses() -> list[dict[str, Any]]:
+    return [{"type": "function", "name": n, "description": _DECOY_DESCRIPTION,
+             "parameters": {"type": "object", "properties": {}}}
+            for n in _DECOY_NAMES]
+
+
+def _cloak_chat_tools(body: dict[str, Any]) -> list[str]:
+    """Add the free tier's decoy tools; return the names actually injected.
+
+    The return value drives the decode-side filter (``_filter_decoys``): a
+    client that declares its own ``bash`` keeps it, and its calls must reach
+    the caller untouched, so only the names *this* function added are dropped.
+    """
+    tools = body.get("tools")
+    if not isinstance(tools, list) or not tools:
+        body["tools"] = _decoys_chat()
+        body.setdefault("tool_choice", "none")
+        return list(_DECOY_NAMES)
+    names = {t.get("function", {}).get("name") or t.get("name")
+             for t in tools if isinstance(t, dict)}
+    added = [n for n in _DECOY_NAMES if n not in names]
+    body["tools"] = tools + [d for d in _decoys_chat()
+                             if d["function"]["name"] in added]
+    return added
+
+
+def _cloak_responses_tools(body: dict[str, Any]) -> list[str]:
+    tools = body.get("tools")
+    tools = tools if isinstance(tools, list) else []
+    names = {t.get("name") or (t.get("function") or {}).get("name")
+             for t in tools if isinstance(t, dict)}
+    added = [n for n in _DECOY_NAMES if n not in names]
+    body["tools"] = tools + [d for d in _decoys_responses() if d["name"] in added]
+    body.setdefault("tool_choice", "auto")
+    return added
+
+
+def _force_auto_tool_choice(body: dict[str, Any], model_id: str) -> None:
+    m = (model_id or "").strip().lower()
+    # Only an allowlisted model: the upstream rejects every other tool_choice
+    # form on it, and a named/required call the client asked for must survive
+    # on all the rest.
+    if m in _FORCE_AUTO_TOOL_CHOICE and body.get("tool_choice") not in (None, "auto"):
+        log.debug("opencode_tool_choice_forced_auto", model=m)
+        body["tool_choice"] = "auto"
+
+
 
 # Config keys are validated non-empty (KeyDef._key_required), so a keyless
 # free-tier setup declares itself with this literal sentinel and the
@@ -122,7 +314,13 @@ class OpencodeAdapter:
     """Multi-protocol Zen adapter with live opencode User-Agent headers."""
 
     provider_type = "opencode"
-    force_stream = False
+    # Zen answers the free tier as an event stream — the request's `stream`
+    # flag is ignored there, so a non-streaming caller's reply arrives as SSE
+    # and the plain JSON decode path reads it as an empty turn. Declared on the
+    # transport (the official client's `forceStream`), so the gateway pumps the
+    # stream and reassembles the deltas into an AssistantTurn instead — exactly
+    # what Cline (`force_stream = True`) and WorkBuddy already do.
+    force_stream = True
 
     def __init__(self) -> None:
         self._chat = OpenAIAdapter()
@@ -140,6 +338,15 @@ class OpencodeAdapter:
         self._resp_next_index = 0
         self._resp_started = False
         self._resp_ended = False
+        # Decoy suppression (round 88): the names `encode_request` injected on
+        # this request and the stream indices they turn out to occupy, so a
+        # model that calls a decoy anyway cannot hand the client a tool call it
+        # has no implementation for (AUDIT #267).
+        self._decoy_names: frozenset[str] = frozenset()
+        # Stream indices whose ToolCallOpen was dropped, so their args/close
+        # deltas go with them, and whether a *real* call survived.
+        self._decoy_indices: set[int] = set()
+        self._kept_real_call = False
 
     def reset(self) -> None:
         self._chat.reset()
@@ -152,6 +359,9 @@ class OpencodeAdapter:
         self._resp_next_index = 0
         self._resp_started = False
         self._resp_ended = False
+        self._decoy_names = frozenset()
+        self._decoy_indices.clear()
+        self._kept_real_call = False
 
     # -- auth / URL ------------------------------------------------------
     def headers(self, key: ProviderKeyRef) -> dict[str, str]:
@@ -165,12 +375,13 @@ class OpencodeAdapter:
         # /messages). The Responses/Chat/Gemini endpoints never need it.
         if self._last_route == "messages":
             h["anthropic-version"] = "2023-06-01"
-        # Anonymous sentinel: omits every credential (a placeholder bearer
-        # would be 401 Invalid API key). NOTE (2026-09-17): Zen retired
-        # keyless free-tier access — anonymous requests to *-free models now
-        # get 403 FreeTierError on every route, so free models need a valid
-        # OPENCODE_API_KEY. The sentinel stays for setups that probe paid
-        # models' auth gate without a key on file.
+        # Anonymous sentinel: omits every credential. Far from being retired,
+        # keyless is the WORKING free-tier path — probed 2026-09-19, the same
+        # correctly-shaped request returns 200 with no Authorization and 429
+        # FreeUsageLimitError with a real Zen key (the account's free quota is
+        # spent). The sentinel is therefore the recommended setup for `-free`
+        # deployments; the 403 that got blamed on "a missing key" is the
+        # request-shape gate below, not a credential gate.
         if key.secret.strip().lower() != ANONYMOUS_KEY_SENTINEL:
             # Scheme follows the route; see _CREDENTIAL_HEADER and the module
             # docstring. `_last_route` is written by build_url()/encode_request()
@@ -187,16 +398,22 @@ class OpencodeAdapter:
             log.debug("opencode_credential_omitted", route=self._last_route,
                       reason="anonymous_sentinel", label=key.label)
         # Official-client fingerprint, on every model, mirroring the
-        # opencode CLI (packages/opencode/src/session/llm/request.ts):
-        # per-request session + request ids, client tag, and project id
-        # (the CLI's global fallback when no workspace is bound). The edge
-        # reads them for metrics/sticky routing; ids stay stable per adapter
-        # instance across the 401-refresh retry path's header rebuilds and
-        # rotate on reset()/fresh instance.
+        # opencode CLI (packages/opencode/src/session/llm/request.ts): session +
+        # request ids, client tag, and project id (the CLI's global fallback
+        # when no workspace is bound).
+        #
+        # The session id is load bearing for the free tier: the edge matches
+        # the CLI's `ses_` + 12 hex + 14 base62 shape, so a uuid-hex id — same
+        # length, wrong alphabet — is rejected with 403 FreeTierError. And the
+        # upstream accounts free quota per session, so it is reused per
+        # credential rather than re-minted per request (429 class). Ids stay
+        # stable on one adapter instance across the 401-refresh retry path's
+        # header rebuilds and rotate on reset()/fresh instance.
         if self._spoof_session is None:
-            self._spoof_session = f"ses_{uuid.uuid4().hex[:24]}"
+            self._spoof_session = stable_session_id(
+                f"{self.provider_type}:{key.label}:{key.secret}")
         if self._spoof_request is None:
-            self._spoof_request = f"msg_{uuid.uuid4().hex[:24]}"
+            self._spoof_request = canonical_request_id()
         h["x-opencode-session"] = self._spoof_session
         h["x-opencode-request"] = self._spoof_request
         h["x-opencode-client"] = "cli"
@@ -222,25 +439,67 @@ class OpencodeAdapter:
                        deployment_params: dict[str, Any]) -> dict[str, Any]:
         route = route_for_model(model_id)
         self._last_route = route
+        free = is_free_model(model_id)
+        # Per-request filter state; cleared up front so the Gemini early return
+        # below cannot leave a previous request's decoys armed.
+        self._decoy_names = frozenset()
+        self._decoy_indices.clear()
+        self._kept_real_call = False
         if route == "messages":
-            return self._msg.encode_request(req, model_id, dict(deployment_params))
-        if route == "gemini":
+            body = self._msg.encode_request(req, model_id, dict(deployment_params))
+        elif route == "gemini":
+            # Gemini picks the wire from the URL (`:streamGenerateContent
+            # ?alt=sse` — see build_url, which the pump already calls with
+            # stream=True), not from a body field; a `stream` key here is an
+            # unknown field the endpoint rejects.
             return self._gem.encode_request(req, model_id, dict(deployment_params))
-        if route == "responses":
-            return _encode_responses_request(req, model_id, deployment_params)
-        params = dict(deployment_params)
-        params["provider_type"] = "openai"
-        return self._chat.encode_request(req, model_id, params)
+        elif route == "responses":
+            body = _encode_responses_request(req, model_id, deployment_params)
+        else:
+            params = dict(deployment_params)
+            params["provider_type"] = "openai"
+            body = self._chat.encode_request(req, model_id, params)
+        # force_stream transport: the declaration above only moves the gateway
+        # onto the pump; the request still has to ask for SSE. The client's own
+        # flag is irrelevant — the pump reassembles either way — so it is
+        # forced here rather than trusted, mirroring Cline/WorkBuddy, whose
+        # encoders overwrite the same field for the same reason. On the free
+        # tier a `stream: false` body is also the 403 FreeTierError trigger.
+        streaming_forced = not req.stream
+        body["stream"] = True
+        if route == "chat" and streaming_forced:
+            # The client never asked for a stream, so it never asked for
+            # `stream_options` either — and without it Zen's chat route omits
+            # the usage chunk, leaving the aggregated turn to be priced on the
+            # estimator. Probed live: Zen accepts the field and answers with a
+            # real usage frame. The Gemini/messages/responses routes carry
+            # usage natively, and only the chat wire has the field.
+            body["stream_options"] = {"include_usage": True}
+        if free:
+            # The free-tier gate wants the CLI's tool payload. `bash` and `read`
+            # ride in as inert decoys; a client tool of the same name wins and
+            # is left untouched — and is therefore not filtered on the way out.
+            # The messages route is not cloaked: its only member seen on the
+            # free tier (`union-alpha`) is retired upstream (`401 ModelError` on
+            # every route, 2026-09-19), so there is no evidence for a tool
+            # shape there, and an OpenAI-format decoy in an Anthropic body would
+            # be an invented field.
+            if route == "responses":
+                self._decoy_names = frozenset(_cloak_responses_tools(body))
+                _force_auto_tool_choice(body, model_id)
+            elif route == "chat":
+                self._decoy_names = frozenset(_cloak_chat_tools(body))
+        return body
 
     # -- response decoding ---------------------------------------------------
     def decode_response(self, status: int, body: bytes) -> ir.AssistantTurn:
         if self._last_route == "responses":
-            return _decode_responses_response(body)
+            return self._filter_decoys_turn(_decode_responses_response(body))
         if self._last_route == "messages":
             return self._msg.decode_response(status, body)
         if self._last_route == "gemini":
             return self._gem.decode_response(status, body)
-        return self._chat.decode_response(status, body)
+        return self._filter_decoys_turn(self._chat.decode_response(status, body))
 
     def decode_stream_event(self, event: str, data: str) -> list[dl.IRStreamDelta]:
         if data == "[DONE]":
@@ -268,8 +527,8 @@ class OpencodeAdapter:
                     # with tool calls, so the stop reason is content-derived.
                     out.append(dl.Finish("tool_call"))
                 out.append(dl.StreamEnd())
-                return out
-            return self._sub().decode_stream_event(event, data)
+                return self._filter_decoys(out)
+            return self._filter_decoys(self._sub().decode_stream_event(event, data))
         if self._last_route == "responses" and self._resp_ended:
             return []
         err = _envelope_stream_error(data)
@@ -278,8 +537,61 @@ class OpencodeAdapter:
                 self._resp_ended = True
             return [err]
         if self._last_route == "responses":
-            return self._decode_responses_stream_event(event, data)
-        return self._sub().decode_stream_event(event, data)
+            return self._filter_decoys(self._decode_responses_stream_event(event, data))
+        return self._filter_decoys(self._sub().decode_stream_event(event, data))
+
+    # -- decoy suppression --------------------------------------------------
+    def _filter_decoys(self, deltas: list[dl.IRStreamDelta]) -> list[dl.IRStreamDelta]:
+        """Drop tool calls aimed at this request's injected decoy tools.
+
+        The free-tier gate demands `bash`/`read` in the tool list, but the model
+        may still *call* one (probed live 2026-09-19: `mimo-v2.5-free` answers
+        "read the file config.py" with a `read` call). The client never declared
+        that tool and cannot execute it, so forwarding the call hands it a
+        guaranteed-failing dispatch. Dropping the Open/Args/Close triple whole
+        is legal at this layer: the wire encoders assign client-visible indices
+        themselves (`anthropic_messages._tool_blocks`) and ignore an ArgsDelta
+        whose block never opened, so a gap in the IR index sequence is invisible
+        downstream. `Finish` is corrected to `stop` when the decoy was the only
+        call — otherwise the client waits for a result that was never sent.
+
+        A client's own tool named `bash` is absent from `_decoy_names` (the
+        cloak kept its entry), so its calls pass through untouched.
+        """
+        if not self._decoy_names:
+            return deltas
+        out: list[dl.IRStreamDelta] = []
+        for d in deltas:
+            if isinstance(d, dl.ToolCallOpen):
+                if d.name in self._decoy_names:
+                    self._decoy_indices.add(d.index)
+                    log.debug("opencode_decoy_call_dropped", tool=d.name,
+                              index=d.index)
+                    continue
+                self._kept_real_call = True
+            elif (isinstance(d, (dl.ToolCallArgsDelta, dl.ToolCallClose))
+                  and d.index in self._decoy_indices):
+                continue
+            elif (isinstance(d, dl.Finish) and d.stop_reason == "tool_call"
+                  and not self._kept_real_call):
+                out.append(dl.Finish("stop", d.stop_sequence))
+                continue
+            out.append(d)
+        return out
+
+    def _filter_decoys_turn(self, turn: ir.AssistantTurn) -> ir.AssistantTurn:
+        """Non-streaming twin of `_filter_decoys` (same rationale)."""
+        if not self._decoy_names or not turn.tool_calls:
+            return turn
+        kept = [c for c in turn.tool_calls if c.name not in self._decoy_names]
+        if len(kept) == len(turn.tool_calls):
+            return turn
+        log.debug("opencode_decoy_calls_dropped",
+                  dropped=len(turn.tool_calls) - len(kept), kept=len(kept))
+        turn.tool_calls = kept
+        if turn.stop_reason == "tool_call" and not kept:
+            turn.stop_reason = "stop"
+        return turn
 
     def _sub(self) -> Any:
         if self._last_route == "messages":
@@ -287,6 +599,7 @@ class OpencodeAdapter:
         if self._last_route == "gemini":
             return self._gem
         return self._chat
+
 
     # -- responses stream decode (stateful) ----------------------------------
     def _decode_responses_stream_event(self, event: str, data: str) -> list[dl.IRStreamDelta]:
@@ -615,17 +928,17 @@ def _decode_responses_response(body: bytes) -> ir.AssistantTurn:
     turn = ir.AssistantTurn(raw=data if isinstance(data, dict) else {})
     if not isinstance(data, dict):
         return turn
-    for item in data.get("output") or []:
+    for item in as_list(data.get("output")):
         if not isinstance(item, dict):
             continue
         itype = item.get("type")
         if itype == "message":
-            for c in item.get("content") or []:
+            for c in as_list(item.get("content")):
                 if isinstance(c, dict) and c.get("type") in (
                         "output_text", "text", "refusal"):
                     turn.text += c.get("text") or c.get("refusal") or ""
         elif itype == "reasoning":
-            for s in item.get("summary") or []:
+            for s in as_list(item.get("summary")):
                 if isinstance(s, dict) and s.get("text"):
                     turn.thinking.append(ir.ThinkingPart(s["text"]))
         elif itype == "function_call":
@@ -651,11 +964,9 @@ def _decode_responses_response(body: bytes) -> ir.AssistantTurn:
         turn.stop_reason = "tool_call"
     else:
         turn.stop_reason = "stop"
-    u = data.get("usage") if isinstance(data.get("usage"), dict) else {}
-    in_det = u.get("input_tokens_details") if isinstance(
-        u.get("input_tokens_details"), dict) else {}
-    out_det = u.get("output_tokens_details") if isinstance(
-        u.get("output_tokens_details"), dict) else {}
+    u = as_dict(data.get("usage"))
+    in_det = as_dict(u.get("input_tokens_details"))
+    out_det = as_dict(u.get("output_tokens_details"))
     turn.usage = ir.Usage(
         prompt_tokens=int(u.get("input_tokens", 0) or 0),
         completion_tokens=int(u.get("output_tokens", 0) or 0),

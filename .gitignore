@@ -68,3 +68,8 @@ wiwi3/bin/
 
 # HAR captures
 *.har
+
+# Local scratch file holding a live production JWT (Kilo). Same class
+# as key.md / code.md: a plaintext credential with no naming convention
+# this file already covers, so `git add -A` would otherwise commit it.
+kye

@@ -10,7 +10,7 @@ import structlog
 
 from wiwi.ir import builtin_tools as bt
 from wiwi.ir import types as ir
-from wiwi.providers.base import ProviderKeyRef
+from wiwi.providers.base import ProviderKeyRef, as_dict, as_list
 from wiwi.streaming import deltas as dl
 
 log = structlog.get_logger("wiwi.anthropic_adapter")
@@ -593,7 +593,11 @@ class AnthropicAdapter:
     def decode_response(self, status: int, body: bytes) -> ir.AssistantTurn:
         data = orjson.loads(body)
         turn = ir.AssistantTurn(raw=data)
-        for block in data.get("content") or []:
+        for block in as_list(data.get("content")):
+            if not isinstance(block, dict):
+                # An explicit null / typed-wrong entry must be skipped, not
+                # crash on ``block.get`` (AUDIT #247).
+                continue
             btype = block.get("type")
             if btype == "text":
                 raw = block.get("text", "")
@@ -640,10 +644,10 @@ class AnthropicAdapter:
         sr = data.get("stop_reason", "end_turn")
         turn.stop_reason = _STOP_REASON_IN.get(sr, "stop")
         turn.stop_sequence = data.get("stop_sequence")
-        u = data.get("usage") or {}
+        u = as_dict(data.get("usage"))
         # output_tokens_details.thinking_tokens is where Anthropic reports
         # reasoning tokens (newer API); fall back to 0 when absent.
-        out_details = u.get("output_tokens_details") or {}
+        out_details = as_dict(u.get("output_tokens_details"))
         turn.usage = ir.Usage(
             prompt_tokens=_token_count(u.get("input_tokens")),
             completion_tokens=_token_count(u.get("output_tokens")),

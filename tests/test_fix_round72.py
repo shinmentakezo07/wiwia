@@ -52,6 +52,7 @@ from __future__ import annotations
 import time
 
 import httpx
+import orjson
 import pytest_asyncio
 import respx
 from asgi_lifespan import LifespanManager
@@ -193,23 +194,43 @@ async def zen_client(monkeypatch):
         yield client
 
 
-_MESSAGES_RESPONSE = {
-    "id": "msg_1", "type": "message", "role": "assistant", "model": "union-alpha",
-    "content": [{"type": "text", "text": "hello"}], "stop_reason": "end_turn",
-    "usage": {"input_tokens": 3, "output_tokens": 2},
-}
+#: Every opencode request now goes upstream as SSE (the transport declares
+#: force_stream), so both routes below answer with a stream — including the
+#: non-streaming client, whose reply the gateway reassembles into one JSON
+#: completion. A JSON mock here would be silently ignored by the pump.
+_MESSAGES_SSE = b"".join(
+    b"event: " + e["type"].encode() + b"\ndata: " + orjson.dumps(e) + b"\n\n"
+    for e in [
+        {"type": "message_start", "message": {
+            "id": "msg_1", "type": "message", "role": "assistant",
+            "model": "union-alpha", "content": [], "stop_reason": None,
+            "usage": {"input_tokens": 3, "output_tokens": 0}}},
+        {"type": "content_block_start", "index": 0,
+         "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "text_delta", "text": "hello"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+         "usage": {"output_tokens": 2}},
+        {"type": "message_stop"},
+    ])
 
-_CHAT_RESPONSE = {
-    "id": "chatcmpl-x", "object": "chat.completion", "model": "m",
-    "choices": [{"index": 0, "message": {"role": "assistant", "content": "hello"},
-                 "finish_reason": "stop"}],
-    "usage": {"prompt_tokens": 5, "completion_tokens": 2},
-}
+_CHAT_SSE = b"".join([
+    (b'data: {"id":"chatcmpl-x","object":"chat.completion.chunk","model":"m",'
+     b'"choices":[{"index":0,"delta":{"role":"assistant","content":"hello"},'
+     b'"finish_reason":null}]}\n\n'),
+    (b'data: {"id":"chatcmpl-x","object":"chat.completion.chunk","model":"m",'
+     b'"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],'
+     b'"usage":{"prompt_tokens":5,"completion_tokens":2}}\n\n'),
+    b"data: [DONE]\n\n"])
+
+_SSE_HEADERS = {"Content-Type": "text/event-stream"}
 
 
 @respx.mock
 async def test_gateway_messages_route_sends_x_api_key(zen_client):
-    route = respx.post(f"{ZEN}/messages").respond(json=_MESSAGES_RESPONSE)
+    route = respx.post(f"{ZEN}/messages").respond(content=_MESSAGES_SSE,
+                                                  headers=_SSE_HEADERS)
     r = await zen_client.post("/v1/chat/completions", json={
         "model": "zen-messages", "messages": [{"role": "user", "content": "hi"}]})
     assert r.status_code == 200, r.text
@@ -217,11 +238,14 @@ async def test_gateway_messages_route_sends_x_api_key(zen_client):
     sent = route.calls[0].request.headers
     assert sent.get("x-api-key") == "sk-zen-real-abc"
     assert "authorization" not in sent
+    # The reassembled stream is handed back as one JSON completion.
+    assert r.json()["choices"][0]["message"]["content"] == "hello"
 
 
 @respx.mock
 async def test_gateway_chat_route_keeps_bearer(zen_client):
-    route = respx.post(f"{ZEN}/chat/completions").respond(json=_CHAT_RESPONSE)
+    route = respx.post(f"{ZEN}/chat/completions").respond(content=_CHAT_SSE,
+                                                          headers=_SSE_HEADERS)
     r = await zen_client.post("/v1/chat/completions", json={
         "model": "zen-chat", "messages": [{"role": "user", "content": "hi"}]})
     assert r.status_code == 200, r.text
@@ -229,3 +253,4 @@ async def test_gateway_chat_route_keeps_bearer(zen_client):
     sent = route.calls[0].request.headers
     assert sent.get("authorization") == "Bearer sk-zen-real-abc"
     assert "x-api-key" not in sent
+    assert r.json()["choices"][0]["message"]["content"] == "hello"

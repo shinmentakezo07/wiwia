@@ -8,6 +8,162 @@ Each finding verified against source by reading the cited lines. Severities: �
 ---
 ## ✅ Fixed
 
+### 268. The free-tier decoy tools answered as tool calls the client cannot execute
+
+**Severity:** 🟠 High (every free-model request; introduced by #267's own fix)
+**Files:** `wiwi/providers/opencode_adapter.py` (`encode_request`, decode paths)
+
+**Trigger:** #267 satisfies the free tier's tool-payload condition by injecting
+`bash` and `read` into the request. The gate only checks that they are
+*offered*, so a model may still *call* one, and the client — which never
+declared that tool — receives a tool call it has no implementation for, plus a
+`tool_calls` finish reason that keeps it waiting for a dispatch that can never
+happen. Probed live 2026-09-19: `mimo-v2.5-free`, asked "Read the file
+config.py.", answered with a `read` call carrying `{"path": "config.py"}`.
+
+The cloak cannot prevent it: the decoys must be *offered* for the gate to
+pass, and clients that send tools (the case the probe hit) keep
+`tool_choice: "auto"` — where a call is always possible. `tool_choice: "none"`
+is set only for toolless requests, and even that is a request, not a guarantee.
+The filter therefore belongs on the response side.
+
+**Fix:** `encode_request` records the names it actually injected
+(`_decoy_names`) — a client tool called `bash` is left in place by the cloak and
+is therefore never filtered — and both decode paths drop the Open/Args/Close
+triple for those names (`_filter_decoys`, `_filter_decoys_turn`), correcting
+`Finish`/`stop_reason` to `stop` when the decoy was the only call. Dropping the
+triple whole is legal here: the wire encoders assign client-visible indices
+themselves (`anthropic_messages._tool_blocks`) and ignore an `ArgsDelta` whose
+block never opened, so the gap in the IR index sequence never reaches a client.
+
+**Status: fixed** — `tests/test_fix_round89.py` (13); 6 of them fail with the
+drop logic neutered. Verified live through the gateway: the same "read the file"
+prompt now returns `finish: stop`, `tool_calls: None`, and text declining the
+tool.
+
+
+### 266. Zen's transport never declared `forceStream`, so a non-streaming caller got an empty turn
+
+**Severity:** 🟠 High (every non-streaming caller of an `opencode`-type provider)
+**Files:** `wiwi/providers/opencode_adapter.py` (`force_stream = False`, pre-fix `encode_request`)
+
+**Trigger:** request any Zen model with `"stream": false` (curl, the OpenAI
+SDK's default, a batch script). Zen answers as an event stream regardless, and
+`Gateway._call_once` handed that SSE body to `adapter.decode_response`, whose
+JSON parse either produced an empty `chat.completion` with zero usage or raised
+— surfacing as `upstream zen returned an undecodable 200 response:
+JSONDecodeError` (the AUDIT #92 wrapper).
+
+OpenCode's own provider entry carries the flag on the transport:
+
+```
+transport: { baseUrl: "https://opencode.ai", forceStream: true, ... }
+```
+
+`OpencodeAdapter` is wiwi's transport for the same gateway and shipped the
+opposite declaration, while Cline and WorkBuddy — streaming-only upstreams for
+the same structural reason — both declare `force_stream = True`.
+
+**Fix:** declare `force_stream = True` and force `body["stream"] = True` in
+`encode_request` for the chat, responses and messages routes. The declaration
+alone is half a fix: `_complete_via_stream` asks `build_url` for the streaming
+URL but encodes the *client's* request, so the body would still have said
+"don't stream" on a connection the gateway parses as SSE. Gemini is excluded
+from the body force — its wire is selected by the URL
+(`:streamGenerateContent?alt=sse`) and a `stream` key in a `generateContent`
+body is an unknown field the endpoint rejects.
+
+**Status: fixed** — `tests/test_fix_round87.py` (12); four existing suites that
+pinned the pre-fix contract were moved to the new one (rounds 27/63/72/73). See
+`UPDATE.md` for the full entry.
+
+**Follow-up (#267):** this fixed the empty-turn half only. The
+`403 FreeTierError` the reporter was actually seeing needed two more
+request-shape factors, and #174's "free models need a funded key" diagnosis
+turned out to be backwards.
+
+### 267. Zen's free tier is a request-shape gate; #174 blamed it on the credential
+
+**Severity:** 🟠 High (every `*-free` deployment — the reported outage)
+**Files:** `wiwi/providers/opencode_adapter.py` (`headers()`, `encode_request`)
+
+**Trigger (user-reported):**
+
+```
+io requires billing (403): OpenCode's free tier can only be used from within OpenCode
+```
+
+AUDIT #174 read this message literally, concluded the free tier was gated on a
+**paid workspace**, and recorded "free models now require a valid
+`OPENCODE_API_KEY`" in the adapter docstring, `wiwi.yaml.example` and
+`UPDATE.md`. It is not. `FreeTierError` means "this request does not look like
+the OpenCode client", and the gate is entirely in the request shape.
+
+**Live matrix 2026-09-19** — `mimo-v2.5-free` on `POST /zen/v1/chat/completions`,
+one factor changed per row, all others identical to the 200 row:
+
+| changed factor | result |
+|---|---|
+| *(none — keyless, stream, CLI session, `bash`+`read`)* | **200 SSE** |
+| `stream: false` | 403 FreeTierError |
+| no tools / user tools only / `bash` without `read` | 403 FreeTierError |
+| `x-opencode-session` = `ses_`+24 hex (wiwi's pre-fix `uuid4().hex[:24]`) | 403 FreeTierError |
+| session head `11 hex + 15 uppercase` | 403 FreeTierError |
+| `User-Agent: opencode` (no version) | 403 FreeTierError |
+| `User-Agent: opencode/1.16.0` | 426 UpgradeRequired |
+| a canonical session two days old | 200 SSE |
+| `Authorization` omitted / `Bearer public` | 200 SSE |
+| **a real account Zen key** | **429 FreeUsageLimitError** |
+
+Two conclusions, both the opposite of the recorded ones:
+
+- **The credential is irrelevant.** Keyless returns 200; the account's six real
+  Zen keys return 429 because *their* free quota is spent. So `anonymous` is
+  the correct setup for a `*-free` deployment, not a deprecated one.
+- **The tail length, not the alphabet, kills the old session id.** `ses_` + 26
+  all-hex passes; `ses_` + 24 fails. `x-opencode-request` is not validated at
+  all (a 6-char id returns 200).
+
+Also corrected: **`union-alpha` is retired upstream.** The live
+`/zen/v1/models` catalog (74 ids, 2026-09-19) no longer lists it, and it answers
+`401 ModelError: Model union-alpha is not supported` on all three routes — so
+its `_MESSAGES_PREFIXES` entry is dead config, and round 63's tests only passed
+because they mocked the endpoint. The Messages **route** itself is very much
+alive: `claude-*` and `qwen*` (paid) still resolve to it.
+
+**Fix** (`opencode_adapter.py`, all of it confined to the adapter):
+
+- `force_stream = True` + forced `body["stream"] = True` (#266).
+- `is_free_model()` — `-free` suffix plus the stealth `big-pickle`.
+- `canonical_session_id()`/`canonical_request_id()` emit the CLI's
+  `^[ses|msg]_[0-9a-f]{12}[0-9A-Za-z]{14}$` shape; the patterns are exported so
+  the tests assert against the minter's own constants.
+- `stable_session_id()` reuses one session per credential (SHA-256 bucketed,
+  LRU-capped, TTL-evicted) because free quota is accounted per session.
+- `_cloak_chat_tools()` / `_cloak_responses_tools()` inject the `bash`/`read`
+  decoys per route shape, never replacing a client tool of the same name, and
+  only on free models.
+- `_force_auto_tool_choice()` collapses `tool_choice` on the allowlisted Muse
+  Spark free models, which 400 on every other form.
+- Forced `stream_options: {include_usage: true}` on chat-route requests a
+  non-streaming client sent: without it Zen omits the usage frame and every
+  aggregated turn prices on the estimator. Probed: Zen accepts it and returns
+  real counts.
+
+**Status: fixed** — `tests/test_fix_round88.py` (21). Verified live through the
+gateway's non-streaming path: `mimo-v2.5-free`, `big-pickle` and
+`muse-spark-1.3-contributor-free` each return 200 with `estimated=False` usage
+(all three were 403 before). `tests/test_fix_round29.py`'s two
+"fresh session per request" tests pinned the *old* behaviour and were rewritten
+to the reuse contract.
+
+**Open, not fixed here:** free-tier traffic now succeeds, so #174's
+entitlement classification (402/403 `permission_error`, key pool untouched) is
+no longer exercised by any real upstream response — the probes that justified it
+were these same misdiagnosed 403s. Worth re-examining whether `FreeTierError`
+should map to *billing* at all now that wiwi can avoid it by shape.
+
+
 ### 176. Zen's Messages and Gemini routes authenticated with the wrong header scheme
 
 **Severity:** 🟡 Medium (latent — masks every Messages-route model the moment the account is funded)
@@ -99,8 +255,9 @@ gemini route, and a **streaming** messages-route case — the stream pump builds
 headers at its own site and round 72 only covered the non-streaming one).
 
 **Not fixed, and not fixable in code:** the `io` account is on an unbilled
-workspace, so paid models stay unreachable until a payment method is added,
-and the free tier is gated account-wide. Both are upstream account conditions.
+workspace, so paid models stay unreachable until a payment method is added.
+That half is an upstream account condition. The free-tier half was wrong —
+see #267: the 403 was a request-shape gate, and keyless free traffic works.
 
 ### 114. Request-log rows older than the poll interval never aged out of the view
 
@@ -4793,6 +4950,14 @@ True so the request still fails over.
 **Status: fixed** — `tests/test_fix_round71.py`; see `UPDATE.md` for the full
 probe matrix.
 
+**Corrected by #267 (2026-09-19):** the *classification* above holds — a 403/401
+that is not a credential failure must not retire pool keys, and the fix stops
+it doing exactly that. What was wrong is the stated cause. `FreeTierError` is
+not an account-wide free-tier gate that "is not recoverable by any header
+combination": it is a request-shape rejection that wiwi can and now does avoid,
+and the keyless path succeeds where a real account key 429s. Read the probe
+matrix in `UPDATE.md` alongside #267 rather than on its own.
+
 **Follow-up (round 74):** the fix also made `status_for_key_pool` return
 `None` for these errors, and `execute_with_retries`' proxy-log line was gated
 on that same value — so the *only* operator-visible trace of why a request
@@ -5946,3 +6111,1345 @@ handles a single delta larger than the cap. Covered by
 `::test_anthropic_deferred_caps_a_single_oversized_delta`.
 
 **Status: fixed** — round 68 (2026-09-18).
+
+---
+
+## 🔴 Critical — round 87 audit sweep: newly confirmed defects (2026-09-18)
+
+Every entry below was **reproduced against the current checkout** (not inferred)
+before being written here. Baseline at time of sweep: `pytest` 2288 passed,
+`ruff` clean, `bun run build` green, `bun run lint` 0 errors — i.e. all of these
+are live defects in a suite-passing tree.
+
+> **Register-health note (read first).** `AUDIT.md`'s `**Status: fixed**` markers
+> have drifted badly out of date. At the time of this sweep only 101 of ~212
+> entries carried the marker, leaving ~111 that *look* open — but a 26-entry
+> spot-check across every module (`app.py`, `auth/`, `gateway.py`,
+> `tape_store.py`, `providers/`, `config.py`, `metrics.py`, `subsystem.py`)
+> found **all 26 already fixed in the code**, each citing its own AUDIT number in
+> a comment (e.g. #12, #25, #54, #71, #72, #73, #90, #94, #95, #103, #104, #106,
+> #109, #122, #126, #171, #173, #182, #183, #191, #211 are all fixed).
+> The reliable signal is the code, not the marker:
+> `grep -rhoE 'AUDIT #?[0-9]+' wiwi/ tests/` returns ~133 addressed entries.
+> The entries below are genuinely new or genuinely-recurring; the stale markers
+> on older entries are a separate cleanup.
+
+### 220. Any non-admin can strip the budget, rate-limit and model-allowlist caps an admin imposed on their own key
+
+**Severity:** 🔴 Critical (privilege escalation; unbounded operator spend)
+**File:** `wiwi/server/app.py:3300-3324` (`admin_patch_key`), reached via
+`wiwi/auth/service.py:435-438` (`UPDATABLE_FIELDS` / `update_key`)
+
+**Trigger:** a user who owns a virtual key PATCHes it with any policy field.
+
+`admin_patch_key` verifies only **ownership** for a non-admin actor, then falls
+through to the **full admin write path**:
+
+```python
+if actor.role != "admin":
+    owner = await state.auth.key_owner(key_id)
+    if owner != actor.id:
+        return _err(403, "permission_error", "not your key", request)
+# ... no role check on the write itself
+fields = {k: body[k] for k in state.auth.UPDATABLE_FIELDS if k in body}
+```
+
+`UPDATABLE_FIELDS` is `("max_budget", "rpm", "tpm", "models", "expires_at",
+"ttl_seconds")` — every control an operator uses to constrain a tenant.
+
+**Reproduced end-to-end** (admin caps a user-owned key, then the user strips it):
+
+```
+admin caps user-owned key -> 200 {'max_budget': 0.0, 'rpm': 1, 'models': ['cheap-only']}
+user strips it            -> 200 {'max_budget': None, 'rpm': None, 'models': []}
+RESULT: ADMIN CAP REMOVED BY NON-ADMIN
+```
+
+Note the sibling case is *not* affected: a key the admin mints themselves has
+`owner_id=None`, so a user PATCHing it still correctly gets 403. The boundary is
+crossed only for keys the user already owns — which is exactly the shape an
+operator uses to cap a tenant.
+
+**Consequence:** total defeat of per-key spend caps, RPM/TPM limits and model
+allowlists — the controls AUDIT #52/#57/#59/#116/#163/#198/#202 spent seven
+rounds hardening. A capped tenant can mint uncapped spend on the operator's
+upstream accounts, and can re-enable a key an admin deliberately parked.
+`tests/test_user_accounts.py::test_user_cannot_patch_others_key_403` only covers
+the *foreign*-key case, so the suite cannot see this.
+
+**Fix:** when `actor.role != "admin"`, restrict the writable set to owner-facing
+fields and reject the policy fields (403); have `AuthService.update_key` take an
+allowlist argument so a second call site cannot forget the boundary.
+
+**Status: fixed** — round 90 (2026-09-19); `tests/test_fix_round90.py`. Reproduced against the live tree before the fix and pinned after it.
+
+### 221. The login and signup throttles are bypassed by concurrency (check-then-act)
+
+**Severity:** 🔴 Critical (brute-force defence and signup cap do not hold)
+**File:** `wiwi/server/app.py:3827` + `:3851-3865` (`auth_login`), `:3738` +
+`:3756` (`auth_signup`), against `_AttemptThrottle.check`/`record_failure` at
+`:245-265`
+
+**Trigger:** any concurrent burst against `/auth/login` or `/auth/signup`.
+
+`check(scope)` and `record_failure(scope)` each take `self._lock` **separately**,
+with the entire credential verification (a 200,000-iteration PBKDF2) running in
+between. `limit` is therefore enforced against the counter *as of the last
+recorded failure*: N requests that all pass `check` before any records a failure
+all get through.
+
+**Reproduced** (limit 5, 20 attempts):
+
+```
+sequential 20 bad logins -> 401:5  429:15
+concurrent 20 bad logins -> 401:20 429:0
+RESULT: THROTTLE BYPASSED BY CONCURRENCY
+```
+
+**Consequence:** the brute-force defence for `/auth/login` — **including the
+`{ip}:master` master-key branch** — is effectively "one burst per window",
+i.e. unbounded guesses per account per 5 minutes. Signup (limit 5/3600 s) is
+likewise over-mintable. Also a PBKDF2 CPU-exhaustion amplifier on unauthenticated
+endpoints.
+
+**Fix:** make admission-and-count atomic — one `try_consume(scope)` that checks
+the window and appends the attempt under a single lock, called *before*
+verification; `reset(scope)` on success.
+
+**Status: fixed** — round 90 (2026-09-19); `tests/test_fix_round90.py`. Reproduced against the live tree before the fix and pinned after it.
+
+### 222. A mid-stream client disconnect aborts the whole teardown tail — request never logged, never charged, TPM never reconciled, journal handle leaked
+
+**Severity:** 🔴 Critical (silent loss of billing and audit on the *normal* abort path)
+**File:** `wiwi/server/app.py:1619-1656` (the `finally` of the streaming driver)
+
+**Trigger:** any client that closes the connection mid-stream — browser tab
+closed, Ctrl-C, proxy timeout, interrupted `curl`. This is the ordinary way a
+long SSE turn ends.
+
+The entire teardown tail lives in one `finally` whose **first** statement is an
+`await`:
+
+```python
+finally:
+    if journal is not None:
+        with contextlib.suppress(Exception):
+            await journal.finish(_seq)      # 1622  <-- cancellation is delivered here
+        state_.journals.release(journal_id)
+    ...
+    state_.logs.log_request(build_log_event(ctx))   # 1646  never reached
+    await _record_tpm_usage(ctx.auth, ctx)          # 1647  never reached
+    if (... and not await record_spend(...)):       # 1649  never reached
+```
+
+`contextlib.suppress(Exception)` does **not** catch `CancelledError` (it derives
+from `BaseException`). Under anyio's level-triggered cancellation the pending
+cancel is re-delivered at that first `await`, so nothing after line 1622 runs.
+
+**Mechanism reproduced** (faithful model, unshielded vs shielded):
+
+```
+unshielded: ['finally-enter', 'ABORT:CancelledError']
+shielded  : ['finally-enter', 'after-first-await', 'log_request']
+```
+
+**Reproduced end-to-end** against a real `uvicorn` server (0.52.4) with a real
+socket peer, comparing a drained stream against an abandoned one:
+
+```
+CONTROL (drained): before=0 after=1 -> LOGGED
+DISCONNECT       : before=1 after=1 -> NOT LOGGED
+```
+
+**Consequence** (four losses, all on the most common abort path): the request
+vanishes from `request_logs` and every rollup built on it (so `/admin/stats`,
+the Prometheus counters and the SSE ring omit it, and a client looping on
+disconnect leaves no trace); the virtual key is never charged, so a key can
+exceed `max_budget` indefinitely by disconnecting early — even though
+`ctx.cost` was already computed; the TPM reservation is never reconciled; and
+`journal.finish`/`release`/`stream.aclose` are skipped, leaking the `_active`
+entry (which makes `is_active()` true forever, so a later reconnect tails a dead
+journal instead of re-dispatching).
+
+**Fix:** wrap the teardown tail in `anyio.CancelScope(shield=True)` and re-raise.
+`asyncio.shield` alone is not sufficient — the `await` on it is itself cancelled;
+the `CancelScope` form works because it defers delivery until exit (verified
+above). Note `core/gateway.py:1475-1487` already shields its equivalent on the
+pump side, so this is the one unguarded sibling.
+
+---
+
+## 🟠 High — round 87 audit sweep (2026-09-18)
+
+### 223. Username enumeration via a ~46 ms timing oracle on `/auth/login`
+
+**Severity:** 🟠 High (unauthenticated account enumeration)
+**File:** `wiwi/auth/users.py:171-182` (`UserService.verify`), from `app.py:3859`
+
+```python
+row = (... WHERE username = :u ...).first()
+if row is None or not verify_password(password, row[1]):
+    return None
+```
+
+Python's `or` short-circuits: a missing user returns after one indexed SELECT,
+while an existing user pays 200,000 PBKDF2 iterations first.
+
+**Reproduced:**
+
+```
+existing user   :   47.59 ms
+nonexistent user:    1.60 ms
+delta           :   45.99 ms  (ratio 29.7x)
+RESULT: ENUMERABLE by timing
+```
+
+**Consequence:** an unauthenticated attacker enumerates the username space with
+near-zero false-positive rate, then aims credential stuffing at confirmed
+accounts. `AUDIT.md` itself names the remediation ("using a dummy password hash
+for unknown users") in the #55 write-up; it was never implemented.
+
+**Fix:** when `row is None`, verify against a module-level dummy
+`pbkdf2_sha256` record and return `None` regardless, so both paths do identical
+work.
+
+**Status: fixed** — round 90 (2026-09-19); `tests/test_fix_round90.py`. Reproduced against the live tree before the fix and pinned after it.
+
+### 224. A truthy non-list `choices` crashes seven adapters — and cools a healthy deployment
+
+**Severity:** 🟠 High (self-inflicted cooldown from an upstream frame the adapter should ignore)
+**File:** `wiwi/providers/openai_adapter.py:510` (`choices = chunk.get("choices") or []`), crash at `:527`; same shape at `openrouter_adapter.py:297`/`:338` and `nim_adapter.py:340`/`:343`
+**Inherited by:** `cline`, `workbuddy`, `bai`, `opencode` (chat route)
+
+**Trigger:** any SSE frame whose `choices` is truthy but not a list. `or []`
+defaults only a *falsy* value, so `5` or `true` survives.
+
+**Reproduced:**
+
+```
+openai     CRASH -> TypeError: 'int' object is not subscriptable
+openrouter CRASH -> TypeError: 'int' object is not subscriptable
+nvidia-nim CRASH -> TypeError: 'int' object is not subscriptable
+cline      CRASH -> TypeError: 'int' object is not subscriptable
+workbuddy  CRASH -> TypeError: 'int' object is not subscriptable
+bai        CRASH -> TypeError: 'int' object is not subscriptable
+opencode   CRASH -> TypeError: 'int' object is not subscriptable
+openai {"choices": true} -> CRASH TypeError: 'bool' object is not subscriptable
+```
+
+The `TypeError` escapes `decode_stream_event` (only `json.JSONDecodeError` is
+caught) into the pump's mid-stream handler (`core/gateway.py:1513-1519`), which
+routes it to `_fail_stream(..., "connection")` → `_note_stream_failure`, **cooling
+a healthy deployment and feeding the key's retirement ladder**.
+
+This is the #110/#136/#153/#154 class one layer up: those fixed the non-dict
+*frame* and the non-dict `choices[0]`, but never a non-list `choices` container.
+No test covers it.
+
+**Fix:** `choices = chunk.get("choices"); if not isinstance(choices, list): choices = []`.
+
+**Status: fixed** — round 90 (2026-09-19); `tests/test_fix_round90.py`. Reproduced against the live tree before the fix and pinned after it.
+
+### 225. `_complete_via_stream`: a truncated non-200 body escapes as a raw `httpx` error, skipping retry, failover and every penalty
+
+**Severity:** 🟠 High (the H2/AUDIT #92 class on an arm the fix missed)
+**File:** `wiwi/core/gateway.py:496` (`raw = await resp.aread()` in the non-200 arm)
+
+**Trigger:** any `force_stream` provider (Cline, WorkBuddy — the only path their
+*non-streaming* callers take) returns a non-200 whose body drops mid-read.
+
+**Reproduced** against a real socket peer sending `502` + `Content-Length: 5000`
++ a truncated body:
+
+```
+status: 502
+RAISES: RemoteProtocolError | is httpx.TransportError: True
+```
+
+`execute_with_retries` catches only `WiwiError` (`router.py:1259`), so the raw
+exception skips retry, failover, key cooldown and `record_fail` entirely, and the
+client gets a generic 500. This `aread()` sits **before** the `try:` at `:545`,
+so it is covered by neither the connect arm (`:485`) nor the read loop (`:610`) —
+both of which were fixed.
+
+**Fix:** wrap `:496` in `try/except httpx.TransportError` → `WiwiError(502,
+"api_connection_error", retryable=True)`, mirroring `:485`.
+
+**Status: fixed** — round 90 (2026-09-19); `tests/test_fix_round90.py`. Reproduced against the live tree before the fix and pinned after it.
+
+### 226. `cycle_every_n` saturates into a permanent no-op — recurrence of #78
+
+**Severity:** 🟠 High (a documented routing guarantee silently stops holding)
+**File:** `wiwi/router/router.py:1189-1197` (exclusion), `:1252-1258` (increment), `:174-178` (`pick_key` fallback); promise at `wiwi/config.py:249-253`
+
+**Trigger:** default config (`cycle_every_n: 3`) on any pool with ≥2 keys.
+
+#78's fix moved the counters to router-level state, which made the cadence
+*reachable* — but `key_consec` is incremented on every success and reset **only
+on error** (`:1272`). Once every key in a pool has served N times, the exclusion
+set contains all of them; `pick_key` then hits its "every key excluded" fallback
+and ignores the exclusion entirely. The counters keep climbing, so the state is
+absorbing: the cadence is dead for the rest of the process lifetime.
+
+**Reproduced through the real `Router`** (weights 10:1):
+
+```
+cycle_every_n=3 picks=  12 -> longest_run=3
+cycle_every_n=3 picks= 300 -> longest_run=10
+cycle_every_n=0 picks= 300 -> longest_run=10     <- indistinguishable from cadence off
+final key_consec: {('p1','strong'): 270, ('p1','weak'): 30}
+```
+
+**Consequence:** on a skewed pool the weak key is starved to its weight share
+exactly as if the cadence were disabled, defeating the operator's reason for
+setting it. The existing regressions cannot see it:
+`test_fix_round41.py::test_cycle_every_n_rotates_under_skewed_weights` runs only
+**4 picks** and asserts merely `len(set(picks)) > 1`; `test_fix_cycle_failover.py`
+runs 12 and asserts "no key 4× in a row" — both of which plain smooth-WRR
+satisfies.
+
+**Fix:** treat `key_consec` as a *rotation* counter — clear a key's credit at the
+point the exclusion is applied, so it cannot saturate.
+
+### 227. OpenCode's Messages route prices Anthropic-shaped usage with the OpenAI formula
+
+**Severity:** 🟠 High (systematic under-billing on the provider's primary use case)
+**File:** `wiwi/core/gateway.py:1613` and `:1652`; `wiwi/providers/opencode_adapter.py:85,239-240`; duplicate arithmetic at `wiwi/logging_core/db_sink.py:731`
+
+**Trigger:** any `opencode` deployment serving a `claude-*` / `qwen*` /
+`union-alpha*` model — the Messages route, i.e. Claude Code pointed at OpenCode
+Zen. `route_for_model` returns `"messages"` for all of those (verified), so
+`OpencodeAdapter` delegates to the Anthropic decoder and usage arrives
+Anthropic-shaped: `input_tokens` **excludes** cached tokens.
+
+The gateway decides the shape from the provider *type*:
+
+```python
+includes_cached = dep.provider.provider_type != "anthropic"   # True for "opencode"
+```
+
+so it takes the OpenAI branch and computes `uncached_prompt = prompt_tokens -
+cached_tokens`, subtracting tokens that were never in `prompt_tokens`.
+
+**Reproduced** with a realistic Claude Code turn (3 fresh input, 60,000 cache
+read, 2,000 cache write, 400 output):
+
+```
+opencode (provider_type!='anthropic') -> True :  cost = $0.031500
+anthropic                            -> False:  cost = $0.031509
+fresh input billed at $0 when includes_cached=True: True
+```
+
+**Consequence:** the fresh-input term vanishes entirely once
+`cache_read > input_tokens`, which is the *normal* state of a long Claude Code
+session, so spend is under-counted and budgets/`max_budget` over-serve. AUDIT #9
+fixed exactly this for `provider_type == "anthropic"`; because the fix keyed on
+provider type rather than on the *wire shape of the usage*, it cannot cover a
+second provider that speaks Messages.
+
+**Fix:** derive the flag from the resolved route/wire shape (Anthropic **or**
+`route_for_model(model) == "messages"`), not from the provider type alone.
+
+**Status: fixed** — round 90 (2026-09-19); `tests/test_fix_round90.py`. Reproduced against the live tree before the fix and pinned after it.
+
+### 228. Quadratic string accumulation in `_complete_via_stream` stalls the event loop
+
+**Severity:** 🟠 High (super-linear loop stall; affects every concurrent request)
+**File:** `wiwi/core/gateway.py:562` and `:564` (`text += d.text`, `thinking += d.text`)
+
+`text`/`thinking` are declared `nonlocal` in `_apply_event`, so they live in a
+closure **cell**, which keeps the intermediate string at refcount 2 and defeats
+CPython's in-place `realloc`. Reachable for Cline/WorkBuddy, whose
+non-streaming callers are reassembled through this path.
+
+**Reproduced:**
+
+```
+n= 20000  closure= 0.202s  plain-local=0.0014s  ratio=  148x
+n= 60000  closure= 3.768s  plain-local=0.0031s  ratio= 1224x
+n=120000  closure=13.425s  plain-local=0.0066s  ratio= 2022x
+```
+
+**Consequence:** the event loop stalls super-linearly with response length,
+freezing all concurrent requests. The pump path is immune (it only tracks
+`text_len += len(d.text)`) and `streaming/resume.py:168-181` already uses
+list-append/join citing AUDIT #104 — this is the one remaining site.
+
+**Fix:** accumulate `list[str]` and `"".join` once, exactly as #104's fix did.
+
+---
+
+## 🟡 Medium — round 87 audit sweep (2026-09-18)
+
+**Status: fixed** — round 90 (2026-09-19); `tests/test_fix_round90.py`. Reproduced against the live tree before the fix and pinned after it.
+
+### 229. A tiktoken special token in the prompt bills $0 — and 500s `count_tokens`
+
+**Severity:** 🟡 Medium (silent $0 billing; one root cause, two symptoms)
+**File:** `wiwi/cost/pricing.py:200` (`enc.encode(text)`); swallowed at
+`wiwi/core/gateway.py:257-259`; unguarded in the `count_tokens` path
+
+**Trigger:** the request text contains a literal tokenizer special token
+(`<|endoftext|>`, `<|fim_prefix|>`, …) — plausible when a prompt quotes
+tokenizer documentation.
+
+**Reproduced:**
+
+```
+estimate_tokens RAISES: ValueError Encountered text corresponding to disallowed special token '<|endoftext|>'.
+with disallowed_special=() -> 13
+RESULT control         -> 200 {"input_tokens":2}
+RESULT special token   -> UNHANDLED ValueError: ...
+```
+
+`usage_fallback` suppresses the failure into `est_prompt = 0`, so the request is
+billed **$0.00** for all prompt tokens and presented as `usage_estimated=True,
+prompt=0` (the AUDIT #131 mislabelling class). The same helper feeds
+`estimate_request_tokens`, which is *not* wrapped, so
+`POST /v1/messages/count_tokens` returns a hard 500 on the same input.
+
+**Fix:** `enc.encode(text, disallowed_special=())` in `pricing.estimate_tokens` —
+one line, fixes both arms.
+
+### 230. The response cache admits sampling requests whenever `temperature` is omitted
+
+**Severity:** 🟡 Medium (the exact failure round-34a set out to prevent)
+**File:** `wiwi/cache/keygen.py:57-60`; enshrined by `tests/test_fix_round34.py:114-118`
+
+```python
+if gp.temperature:   # truthy: rejects >0, admits None and 0/0.0
+    return False
+```
+
+`None` means "the client did not send temperature", **not** "greedy". The adapter
+forwards the field only when set (`openai_adapter.py:234`), so the upstream
+applies *its own* default — OpenAI's is 1.0, i.e. full sampling. `top_p` is not
+consulted either.
+
+**Reproduced:**
+
+```
+{} (temperature omitted)  -> cacheable=True    (provider default = 1.0, sampling ON)
+{top_p: 0.9}              -> cacheable=True    (sampling ON)
+{temperature: 0.0}        -> cacheable=True    (correct)
+{temperature: 1.0}        -> cacheable=False   (correct)
+```
+
+**Consequence:** "a 'write me a poem' endpoint returns one poem forever" is
+reachable through the *default* request shape. It stayed hidden because the
+round-34a verification used explicit `temperature: 0.8/1.0`, which the truthy
+check does catch.
+
+**Fix:** admit only an explicit greedy signal (`temperature == 0` and `top_p`
+unset/`>= 1.0`), treating `None` as unknown ⇒ not cacheable.
+
+### 231. OpenRouter crashes on a truthy non-list `reasoning_details` (stream and non-stream)
+
+**Severity:** 🟡 Medium (cooldown from a malformed upstream frame)
+**File:** `wiwi/providers/openrouter_adapter.py:360` (stream), `:191` (non-stream)
+
+**Trigger:** `{"choices":[{"delta":{"reasoning_details": 5}}]}`.
+
+**Reproduced:** `CRASH -> TypeError: 'int' object is not iterable` (stream). On the
+non-stream path the gateway's `_decode_response_guarded` downgrades it to a
+retryable 502, so only the stream site is a health-accounting bug. AUDIT #110 and
+#197 both fixed the non-dict *element*; neither guards a non-list *container*.
+
+**Fix:** `rds = delta.get("reasoning_details"); for rd in (rds if isinstance(rds, list) else []):`.
+
+### 232. An explicit JSON `null` tool name/id reaches the client as `null`
+
+**Severity:** 🟡 Medium (the agent silently loses a tool call)
+**File:** `wiwi/providers/gemini_adapter.py:255,361`, `wiwi/providers/anthropic_adapter.py:612,629,715` (and 10 similar `.get(k, "")` sites across the adapters)
+
+**Trigger:** an explicit null where a name/id is expected, e.g. Gemini
+`{"functionCall":{"name":null}}`. `dict.get(k, default)` defaults only a
+*missing* key.
+
+**Reproduced** end-to-end to the client frame:
+
+```
+CLIENT FRAME: ...{"tool_calls":[{"index":0,"id":"call_None_0","type":"function",
+  "function":{"name":null,"arguments":""}}]}...
+```
+
+Also: the Gemini id becomes the literal `call_None_0`, and an Anthropic null id is
+coerced by `ToolUsePart.__post_init__` to the plausible-looking string `"None"`.
+
+This is AUDIT #186 one layer out: that fix coerced null names in the **wire
+decoders**; the adapter stream decoders never got the mirror.
+
+**Fix:** coerce at the boundary — `nm = fc.get("name"); name = nm if isinstance(nm, str) else ""`.
+
+### 233. OpenCode's Responses route uses raw `int()` on usage — bypassing the shared coercion
+
+**Severity:** 🟡 Medium (pump cooldown on a malformed usage block)
+**File:** `wiwi/providers/opencode_adapter.py:403-406` (stream), `:660-663` (non-stream)
+
+**Trigger:** `{"type":"response.completed","response":{"usage":{"input_tokens":"abc"}}}`.
+
+**Reproduced** (route set to `responses`):
+
+```
+CRASH -> ValueError invalid literal for int() with base 10: 'abc'
+CRASH -> TypeError int() argument must be ... not 'list'
+```
+
+Every other adapter routes usage through `_token_count` (which cites AUDIT #194);
+`opencode_adapter.py` imports neither helper (verified). AUDIT #197 fixed the
+OpenRouter `usage` *container* gate; this is the same class one layer down, in the
+one adapter that skipped the shared coercion.
+
+**Fix:** reuse `_token_count(u.get("input_tokens"))` rather than raw `int()`.
+
+### 234. Admin provider-key and deployment routes mutate in-memory routing before the DB write, with no rollback
+
+**Severity:** 🟡 Medium (state/DB divergence with no audit trace; admin-only)
+**File:** `wiwi/server/app.py:2209→2211` (key add), `:2230→2232` (key delete), `:3098,3100→3102` (deployment add), `:3146,3150-3151→3153` (deployment delete)
+
+Each mutates `acct.keys` / `state.router` first and persists second, with no
+`except`/rollback. This is the AUDIT #181 class, whose fix was applied only to
+provider DELETE/PATCH. Note #181's own text claims
+`DELETE /admin/providers/{name}/keys/{label}` already persists first — that claim
+is **wrong for the current code** (`:2230` removes from `acct.keys` before
+`:2232` calls `delete_key`), which is why the siblings were left unfixed.
+
+**Consequence:** on a DB failure (SQLite lock, Postgres failover, pool exhaustion)
+the handler 500s while the mutation is live in memory and absent from the DB;
+`log_audit` is never reached, so it leaves no trace, and the next restart
+silently reverts it. For `admin_add_deployment` the in-memory append plus
+`rebuild_cross_provider_pools()` run *before* the persist, so the gateway routes
+to a deployment the DB has never heard of.
+
+**Fix:** persist first, mutate in-memory only on success (the order the corrected
+provider routes already use).
+
+### 235. Cache `ttl_s <= 0` is a silent no-cache on memory and a startup crash on Redis
+
+**Severity:** 🟡 Medium (one config, two opposite behaviours)
+**File:** `wiwi/cache/response_cache.py:17-19` (no validation),
+`wiwi/cache/redis_cache.py:46-47` (raises), `wiwi/config.py:272-281`
+(`CacheSettings` has no validator)
+
+**Trigger:** `cache_settings: {enabled: true, ttl_s: 0}`.
+
+**Verified:**
+
+```
+memory ttl_s=0 -> get: None                 (every write immediately expired: a silent no-op)
+redis  ttl_s=0 -> ValueError ttl_s must be positive  (raised during AppState construction)
+```
+
+**Consequence:** `ttl_s: 0` is the natural way to express "no expiry" and reads as
+valid, but on memory it silently disables the cache the operator just enabled
+(no warning, no metric), and on Redis it refuses to boot with an opaque
+traceback naming no config field.
+
+**Fix:** validate `ttl_s > 0` once in `CacheSettings` so both backends and the
+config loader agree, and fail loudly at config load.
+
+### 236. The middleware's early 413 is hardcoded OpenAI-shaped, so Anthropic callers get the wrong envelope
+
+**Severity:** 🟡 Medium (dialect contract violation)
+**File:** `wiwi/server/app.py:84-95` (middleware) vs `:1131-1135` (handler)
+
+The `Content-Length` fast path builds its body inline as `{"error": {...}}`,
+while the handler-level 413 goes through `_err`/`_surface_for_path` and is
+dialect-correct. The same condition therefore produces two different envelopes
+depending on whether `Content-Length` was present.
+
+**Consequence:** an Anthropic-dialect client (Claude Code) parsing a 413 from the
+oversized-body path finds no `type`/`error.type` field and reports an opaque
+parse failure instead of the real cause.
+
+**Fix:** pick the body by path in the middleware (`am.error_body(...)` for
+`/v1/messages`), or hoist `_surface_for_path` to module scope and call it from
+both places.
+
+### 237. Journal replay still does blocking FS I/O on the event loop and re-reads the whole file per poll — #105's read half is unfixed
+
+**Severity:** 🟡 Medium (event-loop stall proportional to concurrent reconnects)
+**File:** `wiwi/streaming/tape_store.py:233,237` (`path.exists()` / `path.read_bytes()` in `_read_records`), `:180-182` (`mkdir`/`touch` under the async lock); called from `wiwi/server/app.py:1277,1282-1284` and every 50 ms in the tail loop at `:1303-1310`
+
+AUDIT #105 is *not* fixed. The write/sweep paths were routed through
+`asyncio.to_thread` (`append` `:100-101`, `aclose` `:113`, owner record `:195`,
+`sweep` `:304`), but the **read** paths were not: `read_after`/`is_complete`/
+`owner_of` still call sync `Path` methods, and the replay gate calls four of them
+back-to-back on every reconnect while the tail loop re-reads the entire journal
+every 50 ms.
+
+**Measured** on a journal at the 1 MiB per-journal cap:
+
+```
+journal size: 1023 KiB
+synchronous work: 16.1 ms   (one poll: read_after + is_complete)
+largest event-loop gap: 8.2 ms  (baseline tick = 1.0 ms)
+```
+
+**Consequence:** each poll blocks the event loop for the whole read, stalling
+every concurrent request; the tail loop repeats it 20×/second for the journal's
+life. Journalling is **on by default** (`stream_journal_enabled: true`), so this
+is reachable in every deployment.
+
+**Fix:** route the FS calls through `asyncio.to_thread` (as `append` already does)
+and tail incrementally by byte offset instead of re-reading the whole file.
+
+### 238. `probation_weight <= 0` pins a probation key at zero weight forever
+
+**Severity:** 🟡 Medium (the healer restores a key that can never be used)
+**File:** `wiwi/config.py:296` (no validator), `wiwi/router/router.py:205-206` (weight use), `:237-245` (graduation)
+
+`probation_weight` is unvalidated and multiplies the WRR weight. At `0` the key
+accumulates a zero increment each round and can never be selected; since
+graduation is driven by `on_result(key, 200)`, a key that is never picked can
+never graduate. A negative value is worse: the deficit goes negative, actively
+deprioritising the key.
+
+**Reproduced:**
+
+```
+probation_weight=  0.5 -> prob_selected=7/20
+probation_weight=  0.0 -> prob_selected=0/20   <- stuck
+probation_weight= -1.0 -> prob_selected=0/20   <- stuck
+```
+
+**Consequence:** a healer-restored key is restored and then never used, so the
+operator pays for probes that restore nothing — reachable exactly in the
+single-key outage the healer exists to recover from. Mirror of AUDIT #79.
+
+**Fix:** clamp `probation_weight` into `(0, 1]` in a `HealerSettings` validator.
+
+---
+
+## ⚪ Low — round 87 audit sweep (2026-09-18)
+
+### 239. Unauthenticated `/health` exposes topology and accounting-incident counters
+
+**Severity:** ⚪ Low (reconnaissance signal)
+**File:** `wiwi/server/app.py:1721-1767`
+
+`/health` is deliberately unauthenticated (the Docker `HEALTHCHECK` probes it) but
+returns `providers`, `groups`, `available_groups` and five loss counters plus
+`spend_charge_failures`. Anyone who can reach the port learns the deployment
+topology and, from `spend_charge_failures > 0`, that budget enforcement is
+currently failing — a useful signal for timing an abuse attempt. The counters were
+added by the #171/#179 fixes without revisiting this endpoint's exposure.
+
+**Fix:** keep `status` public for the probe and move the counters/topology behind
+an authenticated endpoint or a master-key-gated `?detail=1`.
+
+### 240. `_parse_models_response` raises on a non-standard upstream model listing
+
+**Severity:** ⚪ Low (admin "fetch models" returns an opaque 500)
+**File:** `wiwi/server/app.py:474-483`
+
+`orjson.loads(body)` is unguarded and the comprehensions assume
+`data["models"]`/`data["data"]` are iterable and that gemini's `m["name"]` is a
+string.
+
+**Reproduced:**
+
+```
+{"models":5}              -> RAISES TypeError: 'int' object is not iterable
+{"data":5}                -> RAISES TypeError: 'int' object is not iterable
+{"models":[{"name":123}]} -> RAISES AttributeError: 'int' object has no attribute 'split'
+not json at all           -> RAISES JSONDecodeError
+```
+
+**Fix:** wrap the parse in `try/except (ValueError, TypeError, AttributeError)`
+returning `[]`, and coerce the name with `str(...)`.
+
+### 241. `_put_frame` can silently drop the terminal frame on queue-put timeout
+
+**Severity:** ⚪ Low (re-opens the #211 shape under a wedged consumer)
+**File:** `wiwi/core/gateway.py:1157-1159`
+
+If the 5 s `wait_for` bound expires, the delta — which may be the
+`StreamError`/`StreamEnd` terminal — is discarded with no log, metric or counter.
+#211 built this path to guarantee the terminal frame; this arm quietly re-opens
+"queue full → no terminal" when the consumer is already wedged.
+
+**Fix:** increment a counter and log a warning on the timeout rather than
+suppressing silently.
+
+### 242. OpenRouter's error arm emits `StreamError` without flushing open tool calls
+
+**Severity:** ⚪ Low (IR-contract violation; not currently client-visible)
+**File:** `wiwi/providers/openrouter_adapter.py:298-316`
+
+The tool-flush is gated on `choices[0].get("finish_reason") == "error"` and the
+`StreamError` is appended *before* the close; OpenAI (`:504`) and NIM (`:320`)
+flush unconditionally and before the error.
+
+**Reproduced:**
+
+```
+openai     -> ['ToolCallOpen', 'ToolCallClose', 'StreamError']
+nim        -> ['ToolCallOpen', 'ToolCallClose', 'StreamError']
+openrouter -> ['StreamError']      <- no flush
+```
+
+Not currently client-visible (the Anthropic encoder self-heals on `StreamError`;
+the Chat/Responses encoders do not track block state), so this is latent.
+
+**Fix:** hoist the flush above the `StreamError` append and drop the
+`finish_reason == "error"` gate.
+
+### 243. Anthropic: a repeated `content_block_start` on an open index orphans a block
+
+**Severity:** ⚪ Low (malformed-upstream only; leaves an unterminated client block)
+**File:** `wiwi/providers/anthropic_adapter.py:707` (`self._tool_indices.add(idx)`, no duplicate check), `:714` (unconditional `ToolCallOpen`)
+
+**Reproduced:** two `content_block_start` frames at the same index yield
+`[ToolCallOpen(0), ToolCallOpen(0)]` — the encoder opens client block 0 *and*
+block 1, and the terminal frame closes only index 1, so block 0 never receives
+`content_block_stop` (the AUDIT #111 class). OpenAI (`:576-583`), OpenRouter
+(`:412-420`) and NIM (`:414-430`) all have the "new call on a reused index closes
+the previous one" branch; Anthropic is the one adapter missing it.
+
+**Fix:** `if idx in self._tool_indices: out.append(dl.ToolCallClose(index=idx))`
+before the new `ToolCallOpen`.
+
+### 244. Gemini: a mid-stream `promptFeedback.blockReason` truncates a partially-delivered answer
+
+**Severity:** ⚪ Low (robustness; not observed in the wild)
+**File:** `wiwi/providers/gemini_adapter.py:324-336`
+
+The block arm ignores `_saw_tail` and any content already emitted.
+
+**Reproduced:**
+
+```
+text -> promptFeedback{blockReason: SAFETY} + more text
+  => [StreamStart, TextDelta('partial answer'), Finish('content_filter'), StreamEnd]
+```
+
+The second text part is dropped and the stream terminates cleanly at HTTP 200
+with no truncation signal. Reported as a robustness observation: the normal case
+has `promptFeedback` on the first chunk, so this shape was not confirmed to occur
+in production.
+
+**Fix:** guard the block arm with `not self._saw_tail`, and when content already
+flowed emit `Finish("content_filter")` without discarding the frame's parts.
+
+### 245. An unguarded `finally: await resp_cm.__aexit__()` can mask the real exception
+
+**Severity:** ⚪ Low (fault-injected precondition; one-line fix)
+**File:** `wiwi/core/gateway.py:650-651`
+
+The `_complete_via_stream` teardown awaits `__aexit__` unguarded and unbounded,
+unlike the pump's equivalent (`_close_upstream` suppresses and
+`asyncio.wait_for(..., 5.0)` at `:1486`). If a fault inside the pump body is
+followed by a teardown that also raises, the real retryable `WiwiError` is
+destroyed and replaced by a non-`WiwiError` — which then bypasses retry/failover
+(see #225). Also unbounded, so a wedged transport blocks the caller here
+(AUDIT #16's shape on a site #16 does not cover).
+
+**Fix:** `with contextlib.suppress(Exception): await asyncio.wait_for(
+resp_cm.__aexit__(None, None, None), timeout=5.0)`.
+
+---
+
+## 🔴 Critical — round 87 sweep, adapter tool-schema and sync-decode pass (2026-09-18)
+
+Findings from the same sweep, covering the provider adapters' **non-streaming**
+decode paths and the NIM tool-schema sanitizer. All reproduced against the
+current checkout.
+
+### 246. The NIM tool sanitizer never recurses into `items` — the two defects the module exists to prevent both survive
+
+**Severity:** 🔴 Critical (the module's core purpose silently fails on the most common agent tool shape)
+**File:** `wiwi/providers/nim_tool_schema.py:25,28,31` (the three recursion key-sets), `:249` (`collect_nim_tool_aliases`)
+
+`items` — the single most common schema keyword in real agent tool catalogs
+(`Edit`'s `edits: [{old_string, new_string, type}]`) — is absent from all three
+recursion key-sets:
+
+```python
+_SCHEMA_VALUE_KEYS = frozenset({"additionalProperties", "not", "contains",
+                                "propertyNames", "if", "then", "else"})   # no "items"
+_SCHEMA_LIST_KEYS  = frozenset({"allOf", "anyOf", "oneOf", "prefixItems"})
+_SCHEMA_MAP_KEYS   = frozenset({"properties", "patternProperties", "$defs",
+                                "definitions", "dependentSchemas"})
+```
+
+**Reproduced** with a tool whose `edits.items` carries both an
+`additionalProperties: true` and a parameter named `type`:
+
+```
+items sent upstream: {"additionalProperties": true,
+                      "properties": {"_nim_arg_type": {"type": "string"}, ...},
+                      "type": "object"}
+boolean subschema survived  : True
+unsafe 'type' param survived: False
+alias map collected         : {}
+```
+
+Note the result is **self-inconsistent**, which is what makes it so damaging:
+`_alias_in_node` recurses on every property value (so it *does* alias inside
+`items`), while `_collect_aliases_in_node` only descends through the three
+key-sets (so it *never* collects them). Aliasing happens; reversal does not.
+
+**Consequence — two independent failures, both the exact defects the module
+exists to prevent:**
+
+1. `items.additionalProperties: true` reaches NIM/vLLM, which rejects boolean
+   subschemas — a 400 naming a construct the sanitizer was supposed to strip.
+2. The model is told to send `_nim_arg_type`, and the client receives it back
+   un-restored:
+
+   ```
+   model sent : {"edits": [{"_nim_arg_type": "replace", "old_string": "a"}]}
+   client gets: {"edits": [{"_nim_arg_type": "replace", "old_string": "a"}]}
+   RESULT: the client receives _nim_arg_type, which its tool schema never declared
+   ```
+
+   Claude Code validates args against the declared schema, so the call is
+   undispatchable.
+
+**Fix:** add `"items"` to `_SCHEMA_VALUE_KEYS` (its value is a schema).
+
+**Status: fixed** — round 90 (2026-09-19); `tests/test_fix_round90.py`. Reproduced against the live tree before the fix and pinned after it.
+
+### 247. Every non-streaming `decode_response` crashes on a `null`/non-dict nested field — and the failure is charged to key and deployment health
+
+**Severity:** 🔴 Critical (self-inflicted outage from a frame carrying no semantics)
+**File:** `wiwi/providers/openai_adapter.py:364-365,375,411`; `openrouter_adapter.py:179-180,219,253`; `anthropic_adapter.py:596,643,646`; `gemini_adapter.py:233,235,238,268`; `opencode_adapter.py:654-663`; inherited by `cline`, `workbuddy`, `bai`, `gmicloud`, `openai-compatible`
+
+The streaming decoders were hardened read-by-read in rounds 49/61
+(AUDIT #110/#136/#153/#154). The **sync** decoders were never given the same
+treatment, and use `.get(k, {})` / `or {}`, which default only a *missing* key —
+an explicit JSON `null` passes straight through:
+
+```python
+choice  = (data.get("choices") or [{}])[0]   # {"choices":[null]} -> None
+message = choice.get("message", {})          # {"message":null}   -> None
+u       = data.get("usage") or {}            # {"usage":"x"}      -> "x"
+```
+
+**Reproduced** (all `AttributeError`):
+
+```
+openai      {"choices":[{"message":null}]}   -> AttributeError: 'NoneType' object has no attribute 'get'
+openrouter  {"choices":[null]}               -> AttributeError: 'NoneType' object has no attribute 'get'
+openai      {"choices":[],"usage":"x"}       -> AttributeError: 'str' object has no attribute 'get'
+anthropic   {"content":[null]}               -> AttributeError: 'NoneType' object has no attribute 'get'
+gemini      {"candidates":[{"content":"str"}]} -> AttributeError: 'str' object has no attribute 'get'
+```
+
+**Consequence — worse than a 500.** `_decode_response_guarded`
+(`core/gateway.py:85-108`) converts the `AttributeError` into
+`WiwiError(502, "api_error", retryable=True)`; `status_for_key_pool` returns 502
+(verified), so the router charges the key (`err_count += 1`) **and** calls
+`dep.record_fail(...)` (`router.py:1296-1298`, which matches on
+`status in (408, 500, 502, 503, 504, 529)`). A frame carrying no semantics
+therefore cools a healthy deployment and feeds the key's retirement ladder — the
+same shape AUDIT #174 and the `status_for_key_pool` docstring warn about, on the
+path the streaming hardening does not protect.
+
+**Fix:** mirror the streaming guards per read —
+`choice = choices[0] if choices and isinstance(choices[0], dict) else {}`;
+`message = choice.get("message") if isinstance(choice.get("message"), dict) else {}`;
+`u = data.get("usage") if isinstance(data.get("usage"), dict) else {}`; and
+likewise for `pf`/`cand`/`content`/`out_details`.
+
+---
+
+## 🟠 High — round 87 sweep, adapter tool-schema and sync-decode pass (2026-09-18)
+
+**Status: fixed** — round 90 (2026-09-19); `tests/test_fix_round90.py`. Reproduced against the live tree before the fix and pinned after it.
+
+### 248. `nim_native_tools._unalias_args` is flat while its sibling is recursive — nested aliases leak on the native MiniMax path
+
+**Severity:** 🟠 High (undispatchable tool call on the streaming path)
+**File:** `wiwi/providers/nim_native_tools.py:213-217` (called at `:206`)
+
+```python
+def _unalias_args(args, aliases):
+    out = {}
+    for k, v in args.items():
+        out[aliases.get(k, k)] = v      # no recursion into v
+    return out
+```
+
+`nim_tool_schema.unalias_nim_tool_args` recurses (its docstring at
+`nim_tool_schema.py:67-71` explicitly promises "into nested dicts and lists so
+aliased keys at any depth are restored"). This near-duplicate does not.
+
+**Reproduced:** a tool whose *nested* object property is named `type`, with NIM's
+native markup path:
+
+```
+aliases:            {'Edit': {'_nim_arg_type': 'type'}}
+STREAMED to client: {"op":{"_nim_arg_type":"replace","val":"x"}}   # should be "type"
+```
+
+**Consequence:** the client receives a key its tool schema never declared, on the
+streaming path where it has already had a 200. AUDIT #22 (nested alias
+un-reversal) was applied only to `nim_tool_schema`; this duplicate was missed —
+and two conventions for one job is itself the second defect.
+
+**Fix:** delete `_unalias_args` and delegate to
+`nim_tool_schema.unalias_nim_tool_args`.
+
+---
+
+## 🟡 Medium — round 87 sweep, adapter tool-schema and sync-decode pass (2026-09-18)
+
+**Status: fixed** — round 90 (2026-09-19); `tests/test_fix_round90.py`. Reproduced against the live tree before the fix and pinned after it.
+
+### 249. Non-string `content` / `reasoning_content` is forwarded verbatim on the sync path
+
+**Severity:** 🟡 Medium (contract-invalid 200 body; or a 500 after upstream billing)
+**File:** `wiwi/providers/openai_adapter.py:368-369,372-374`; `openrouter_adapter.py:181,187`; `gemini_adapter.py:244-251`; `opencode_adapter.py:626,630`
+
+The streaming decoders gate every text read with `isinstance(..., str)`
+(AUDIT #154, verified present). The sync decoders do not:
+
+```python
+turn = ir.AssistantTurn(text=message.get("content") or message.get("refusal") or "")
+reasoning = message.get("reasoning_content") or message.get("reasoning")
+if reasoning: turn.thinking.append(ir.ThinkingPart(reasoning))
+```
+
+**Reproduced — two distinct harms:**
+
+```
+turn.text = 5   (field is declared str)
+client message: {"role": "assistant", "content": 5}      <- contract-invalid chunk on a 200
+
+thinking part text: {'a': 1}
+encode RAISES: TypeError sequence item 0: expected str instance, dict found
+```
+
+The second is a 500 on a request the upstream already served and billed. This is
+the class AUDIT #194 fixed for usage counters via `_token_count`; the text fields
+were left out.
+
+**Fix:** `text = message.get("content"); text if isinstance(text, str) else ""`
+and `if isinstance(reasoning, str) and reasoning:`.
+
+### 250. `error_from_provider_status`'s 400 heuristic misclassifies parameter errors as `context_window_exceeded`
+
+**Severity:** 🟡 Medium (wasted billed failover attempts; misleading client error)
+**File:** `wiwi/providers/base.py:229-231`
+
+```python
+if status == 400 and ("context" in msg.lower() or "maximum" in msg.lower()
+                      or "too long" in msg.lower()):
+    return WiwiError(400, "context_window_exceeded", msg)
+```
+
+**Reproduced:**
+
+```
+context_window_exceeded  <- Invalid 'temperature': maximum value is 2            MISCLASSIFIED
+context_window_exceeded  <- maximum number of stop sequences is 4                MISCLASSIFIED
+context_window_exceeded  <- stop sequence is too long (max 4 characters)         MISCLASSIFIED
+context_window_exceeded  <- This model's maximum context length is 128000 tokens (correct)
+```
+
+**Consequence:** the router treats a caller-side parameter error as a context
+overflow and re-dispatches to every group in `context_window_fallbacks`
+(`router.py:1303-1309`, `:1334-1340`) — extra billed attempts against a
+larger-context model that rejects the same bad parameter. The client receives a
+`context_window_exceeded` error whose message is about `temperature`.
+
+Note AUDIT #23's description ("matching `'tokens'`") does not match the shipped
+heuristic; the entry is stale in its specifics but the defect is live.
+
+**Fix:** require a context-specific token (`"context length"`, `"context window"`,
+`"maximum context"`, `"too many tokens"`) and drop the bare `maximum`/`too long`.
+
+### 251. `collect_nim_tool_aliases` matches by prefix — a literal `_nim_arg_foo` parameter is renamed or merged away
+
+**Severity:** 🟡 Medium (silent argument corruption/loss)
+**File:** `wiwi/providers/nim_tool_schema.py:244-246`
+
+```python
+for pname in props:
+    if isinstance(pname, str) and pname.startswith(_ALIAS_PREFIX):
+        aliases[pname] = pname[len(_ALIAS_PREFIX):]
+```
+
+Collection is by *prefix*, with no check that the name was actually minted by
+`_renames_for_node`.
+
+**Reproduced:**
+
+```
+tool declares : _nim_arg_foo
+alias map     : {'t': {'_nim_arg_foo': 'foo'}}
+model sends   : {"_nim_arg_foo": "v"}
+client gets   : {"foo": "v"}          <- the caller's declared name destroyed
+
+both declared : foo + _nim_arg_foo
+model sends   : {"foo": "A", "_nim_arg_foo": "B"}
+client gets   : {"foo": "B"}          <- 'foo' value A is LOST
+```
+
+**Consequence:** silent, total corruption for any tool declaring a parameter
+whose name merely starts with `_nim_arg_`. This is AUDIT #201's shape for the
+*collision* case (fixed round 78); the *prefix* case was left open.
+
+**Fix:** record the minted renames during sanitize (return them from
+`sanitize_nim_tool_schemas`, or re-derive via `_renames_for_node`) and reverse
+only those, rather than pattern-matching the prefix.
+
+### 252. `opencode`'s Responses-route sync decoder has unguarded numeric coercion and non-str text
+
+**Severity:** 🟡 Medium (crash or poisoned turn on a malformed usage/text block)
+**File:** `wiwi/providers/opencode_adapter.py:626,630,660-663`
+
+The Responses route does not inherit the OpenAI base decoder, so it missed both
+the text and the counter hardening:
+
+```python
+turn.text += c.get("text") or c.get("refusal") or ""   # non-str poisons turn.text
+turn.thinking.append(ir.ThinkingPart(s["text"]))        # non-str poisons thinking
+prompt_tokens=int(u.get("input_tokens", 0) or 0),       # "abc" -> ValueError
+```
+
+**Reproduced:**
+
+```
+RAISE <- {"output":[{"type":"message","content":[{"type":"output_text","text":5}]}]}
+         (TypeError: can only concatenate str (not "int") to str)
+OK    <- {"output":[{"type":"reasoning","summary":[{"text":5}]}]}   (silently poisons thinking)
+RAISE <- {"output":[],"usage":{"input_tokens":"abc"}}
+         (ValueError: invalid literal for int())
+```
+
+Every other adapter routes counters through `_token_count`/`ir.coerce_int`, which
+return 0 for unparseable values; this is the one place a garbage counter kills
+the response instead of degrading. The stream sibling at `:403-406` has the same
+pattern and should be fixed together (see #233).
+
+**Fix:** reuse `_token_count` and gate the text reads with `isinstance(..., str)`.
+
+---
+
+## ⚪ Low — round 87 sweep, adapter tool-schema and sync-decode pass (2026-09-18)
+
+### 253. Typed-wrong `temperature` / `top_p` / `seed` are forwarded upstream verbatim
+
+**Severity:** ⚪ Low (upstream 400 naming a type the caller never sent)
+**File:** `wire/openai_chat.py:273-274,279`; `wire/anthropic_messages.py:430-431`; `wire/openai_responses.py:353,362` → sinks `openai_adapter.py:234-241`, `anthropic_adapter.py:463-468`, `gemini_adapter.py:140-146`
+
+`max_tokens` gets `ir.coerce_int`, `stop` gets `_stop_list` and `top_k` gets
+`ir.coerce_int` (AUDIT #187) — but `temperature`, `top_p` and `seed` are stored
+raw, so AUDIT #184/#186/#187's coercion pattern was not extended to them.
+
+**Reproduced** — the same typed-wrong values reach the upstream body across all
+three dialects:
+
+```
+openai    forwards verbatim: ['"temperature": "hot"', '"top_p": [0.5]', '"seed": "42"']
+anthropic forwards verbatim: ['"temperature": "hot"', '"top_p": [0.5]']
+gemini    forwards verbatim: ['"temperature": "hot"', '"topP": [0.5]']
+```
+
+**Fix:** add a numeric coercion helper (rejecting `bool`, per `ir.coerce_int`'s
+documented rule) and apply it to `temperature`/`top_p` in all three decoders and
+`seed` where carried.
+
+### 254. `get_adapter()` / `fresh_adapter()` hot-path discipline — verified clean
+
+**Severity:** ⚪ (no defect; recorded so the next sweep does not re-audit it)
+**File:** `wiwi/providers/registry.py`
+
+Checked because CLAUDE.md flags it as a known hazard: **no hot-path misuse
+exists.** All production call sites use `fresh_adapter` — `core/gateway.py:360`
+(`_call_once`), `:1068` (`_pump_once`), `core/recovery.py:486` (healer probe),
+`server/app.py:2860`/`:2921` (admin model-list fetches, which call `headers()`
+synchronously and hold nothing across an await). `get_adapter` has **zero**
+non-test callers, and the registry's coverage `assert` is honest
+(`_OPENAI_WIRE_TYPES` does include `bai`, so `_unhandled` is empty).
+
+Likewise verified clean in this pass: alias-map injectivity
+(`_renames_for_node` is injective, including over adversarial
+`_nim_arg__nim_arg_type` chains); `headers()` leaks no secret into a URL, log or
+error message; dict-form tool `arguments` are handled on both OpenAI paths; and
+explicit `null` usage counters decode to `0` everywhere via
+`_token_count`/`ir.coerce_int` (AUDIT #194/#195).
+
+---
+
+## 🟠 High — round 87 sweep, admin console (`web/`) pass (2026-09-18)
+
+UI findings from the same sweep. `web/` has no test runner, so each is
+established by reading the source against the binding UI/UX rule; the three that
+most need a browser confirmation (#255, #257, #259) should be checked with
+Playwright under `.verify/` before being marked fixed.
+
+### 255. Request Logs' live tail truncates the *shared* `["request-logs"]` cache
+
+**Severity:** 🟠 High (every other console page silently under-reports)
+**File:** `web/src/pages/RequestLogs.tsx:517-523` (writer), `:508` (key); consumers `Dashboard.tsx:264`, `Analytics.tsx:943`, `BudgetsAlerts.tsx:225`, `Providers.tsx:360`
+
+```ts
+qc.setQueryData<{ logs: RequestLogEntry[] }>(["request-logs"], (old) => {
+  if (!old) return { logs: [evt] };
+  if (old.logs.some((l) => l.request_id === evt.request_id)) return old;
+  return { logs: [evt, ...old.logs].slice(0, 500) };   // <- 500
+});
+```
+
+The query key is byte-identical to the one Dashboard, Analytics, Budgets and
+Providers use, and `getRequestLogs` requests `limit: "10000"`
+(`api/client.ts:319`). So a single live event **replaces the whole 10 000-row
+payload with 500 rows** and leaves it there until the next 15 s poll.
+
+**Trigger:** open `/console/request-logs`, enable **Live tail**, let one request
+complete.
+
+**Consequence:** every other mounted page recomputes its aggregates over 500
+events — the Dashboard sparkline re-seeds (`Dashboard.tsx:294`), Analytics'
+cost/token breakdown and `pulseEvents`, and Budgets' month-end projection
+(`BudgetsAlerts.tsx:230-233`) all under-report. The numbers remain plausible,
+which is what makes it hard to notice.
+
+**Fix:** don't write the truncated ring into the shared key — merge into a
+separate `["request-logs","live"]` key the page reads, or bound the truncation to
+the server's own limit and keep the poll authoritative.
+
+**Status: fixed** — round 90 (2026-09-19); `tests/test_fix_round90.py`. Reproduced against the live tree before the fix and pinned after it.
+
+### 256. Playground never aborts an in-flight stream on unmount
+
+**Severity:** 🟠 High (the upstream completes and the key is charged for output nobody sees)
+**File:** `web/src/pages/Playground.tsx:650` (`abortRef`), aborted only at `:816`, `:859`, `:994`
+
+**Trigger:** send a message, then navigate away (or browser Back) while the
+response is still streaming.
+
+`abortRef.current` is aborted on chat-switch, clear-all and the Stop/Escape
+button only. There is **no unmount cleanup** — verified: `abortRef.current?.abort()`
+appears at 816/859/994 and in no `useEffect` return. The `fetch` at `:890` and
+`streamSSE`'s reader loop keep running against a component that is gone.
+
+**Consequence:** the upstream request is never cancelled, so the gateway finishes
+the completion and the virtual key is charged for output nobody will ever see;
+`setMessages` also fires on an unmounted component. The `AbortError` branch at
+`:950` is dead for this path because nothing aborts.
+
+**Fix:** `useEffect(() => () => abortRef.current?.abort(), [])`.
+
+---
+
+## 🟡 Medium — round 87 sweep, admin console (`web/`) pass (2026-09-18)
+
+**Status: fixed** — round 90 (2026-09-19); `tests/test_fix_round90.py`. Reproduced against the live tree before the fix and pinned after it.
+
+### 257. `Dialog` / `Drawer` declare `aria-modal="true"` but do not trap focus
+
+**Severity:** 🟡 Medium (binding UI/UX rule 3; keyboard users lose their place)
+**File:** `web/src/components/ui.tsx:415-466` (Dialog), `:468-500` (Drawer)
+
+Escape-to-close is implemented (`:422-429`, `:475-482`) — the part usually
+checked — but the modal contract stops there. `grep -rn "inert\|focusTrap\|tabbable"`
+over `web/src` returns **nothing**: no focus trap, no `inert`/`aria-hidden` on
+portal siblings, no initial focus, no focus restore on close.
+
+**Trigger:** open any dialog (e.g. *Add provider*), then press Tab repeatedly.
+
+**Consequence:** focus walks out of the modal into the page behind it — still
+visually obscured by the `bg-black/70` scrim — landing on sidebar nav and page
+buttons that are neither visible nor contextually valid. On close, focus returns
+to `<body>`. Violates binding rule 3 ("Modal/dialog focus trapping … must work on
+desktop"); it is the one of the four modal requirements that is missing.
+
+**Fix:** on open move focus to the panel (`tabIndex={-1}` + `.focus()`), cycle Tab
+within the portal subtree, restore the previously-focused element in cleanup, and
+add `inert` to `#root` while open (React 19 supports `inert` natively).
+
+### 258. Every `<Button>` suppresses the focus ring with no replacement (107 call sites)
+
+**Severity:** 🟡 Medium (binding UI/UX rule 3, on the primary interactive control)
+**File:** `web/src/components/ui.tsx:55-63` (`BTN` map), `web/src/styles.css:500` (`outline: none` in `.admin-btn`)
+
+`.admin-btn` sets `outline: none` and the stylesheet defines **no**
+`.admin-btn:focus-visible` rule — verified: the only focus rules are
+`.admin-input:focus` (`:413`) and `.admin-collapse-btn:focus-visible` (`:990`).
+Author styles beat the UA `:focus-visible` outline, so a focused `Button` is
+visually identical to an unfocused one.
+
+Also verified that no `focus-visible` class reaches a `<Button>`: `FOCUS_RING`
+(`ModelsCatalog.tsx:17`) is applied only to raw `<button>`s, and a scan of all
+107 `<Button …>` openings found none containing `focus`.
+
+**Trigger:** Tab to any primary action (Create / Save / Delete / Sign out).
+
+**Consequence:** binding rule 3 ("do not suppress `outline` without providing an
+equivalent") is violated app-wide.
+
+**Fix:** add `.admin-btn:focus-visible { outline: none; box-shadow: 0 0 0 3px
+rgba(99,102,241,.35); }`, mirroring the `.admin-collapse-btn` treatment already in
+the file.
+
+### 259. Docs code-block copy button is hover-only — invisible and unusable on touch
+
+**Severity:** 🟡 Medium (binding UI/UX rule 2)
+**File:** `web/src/pages/Docs.tsx:99` and `:199`
+
+```
+className="… opacity-0 transition-all hover:text-[…] group-hover:opacity-100"
+```
+
+No `group-focus-within:opacity-100`, no `pointer-coarse:opacity-100`, and no
+`@media (hover: none)` fallback for `.docs-codeblock` in `styles.css`. Because the
+element is `opacity-0` rather than `hidden`, it stays in the tab order while
+giving no visual focus indication.
+
+**Trigger:** open `/docs` on a phone (or any coarse pointer) and try to copy a
+curl example — the control never appears.
+
+**Consequence:** binding rule 2 ("No information or action may be hover-only").
+This is exactly the defect AUDIT #210 fixed in `Playground.tsx`, which now uses
+`group-focus-within:opacity-100 pointer-coarse:opacity-100` at `:535`, `:1477`
+and `:1514`; the identical pattern in `Docs.tsx` was not swept.
+
+**Fix:** append `group-focus-within:opacity-100 pointer-coarse:opacity-100` to
+both class strings.
+
+### 260. `Toggle` renders `role="switch"` with no accessible name
+
+**Severity:** 🟡 Medium (screen readers announce an unidentifiable control)
+**File:** `web/src/components/ui.tsx:168-188`
+
+```tsx
+<button type="button" role="switch" aria-checked={props.checked} … >
+```
+
+No `aria-label`, no `aria-labelledby`, and the component accepts no id/label prop
+(verified: 0 occurrences of `aria-label` in the component). At every call site the
+visible text is a sibling element, never an associated label — `Settings.tsx:184,
+202,220`, `ProviderDetail.tsx:243`, `OAuthProviders.tsx:852`, `logs-shared.tsx:134`,
+`Users.tsx:56`.
+
+**Trigger:** screen reader on Settings → the switches announce as "switch, on"
+with no name; on the Virtual Keys table the per-row enable/disable switch is
+unidentifiable.
+
+**Fix:** add an optional `label?: string` prop rendering `aria-label`, and pass it
+at each call site (or `aria-labelledby` pointing at the existing text node).
+
+### 261. Tap targets below the 44 px minimum (binding rule 2)
+
+**Severity:** 🟡 Medium (touch usability)
+**File:** measured from the class strings; none has a compensating `min-h`/`min-w`
+
+| File:line | Control | Approx. size |
+|---|---|---|
+| `Playground.tsx:1143` | key-mint **Retry** | 22×18 px |
+| `Playground.tsx:1190` | error-banner **Retry** | 26×18 px |
+| `Playground.tsx:432` | sidebar **Collapse** | 28×28 px |
+| `ProviderDetail.tsx:150-156` | key **Reveal/Hide** | 20×20 px |
+| `RequestLogs.tsx:212-220` | drawer **Copy** | 21×21 px |
+| `ModelsCatalog.tsx:123` | copy model id | 25×25 px |
+| `Docs.tsx:121` | `PathCopyBtn` | 19×19 px |
+| `Combos.tsx:583` | inline weight edit | 24×18 px |
+
+**Consequence:** fails the 44×44 (HIG) / 48×48 dp (Material) floor. Note the
+contrast inside the same codebase: Playground's chat-row actions (`:543`, `:555`)
+and `ActionButton` (`:1538`) were deliberately sized to `h-11 w-11` / `min-h-11`
+by the #210 fix — the rule was applied to the reported sites but not swept across
+the rest of the app.
+
+**Fix:** give each control `min-h-11 min-w-11` (or `p-2.5`) plus
+`inline-flex items-center justify-center`.
+
+### 262. Users page: the self-demotion guard is dead code, and role changes can race
+
+**Severity:** 🟡 Medium (advertised client-side guard does not exist)
+**File:** `web/src/pages/Users.tsx:32-47` (`RoleCell`), `:111` (call site)
+
+The file header states the control is disabled client-side for the acting admin,
+and `meId={me?.id}` is threaded into both `RoleCell` (`:111`) and `DisableCell`
+(`:114`). But `props.meId` is read in **neither** — verified: it appears only in
+the two type declarations (`:32`, `:49`) and the two JSX call sites. `RoleCell`
+also has no `patch.isPending` guard, and `Select` (`ui.tsx:132-145`) accepts no
+`disabled` prop at all, so it cannot be disabled.
+
+**Trigger:** an admin changes their own row's role from `admin` to `user`.
+
+**Consequence:** the advertised guard doesn't exist — the demote is submitted and
+the user learns it was refused only from the backend's 400 (and a non-last admin
+demoting themselves simply succeeds, then gets bounced out of `/console/*` by
+`RequireAdmin`). Separately, `onChange={(v) => patch.mutate(v)}` has no in-flight
+guard, so flipping the dropdown twice fires two overlapping
+`PATCH /admin/users/{id}` with no ordering — last-resolved wins, not
+last-requested.
+
+**Fix:** read `meId` in `RoleCell`, add a `disabled` prop to `Select`, disable it
+for `props.u.id === props.meId`, and gate on `patch.isPending`.
+
+---
+
+## ⚪ Low — round 87 sweep, admin console (`web/`) pass (2026-09-18)
+
+### 263. Playground "New chat" silently discards the unsent draft
+
+**Severity:** ⚪ Low (contradicts the component's own stated invariant)
+**File:** `web/src/pages/Playground.tsx:800-809` (`handleNewChat`), contrast `:820` (`handleSelectChat`)
+
+`handleSelectChat` explicitly persists the outgoing composer text before
+switching (`draftsRef.current[activeChatId ?? ""] = draft;` at `:820`).
+`handleNewChat` does not — it calls `setDraft(draftsRef.current[chat.id] ?? "")`
+for the brand-new chat, which is always `""`. Since drafts live only in
+`draftsRef` (never in the persisted payload), the text is gone.
+
+**Trigger:** type a half-written message, click **New chat**, then click back to
+the previous conversation.
+
+**Consequence:** contradicts the invariant the component states at `:656-658`
+("Unsent composer text, kept per chat so switching conversations doesn't lose a
+half-written message").
+
+**Fix:** mirror the `:820` line in `handleNewChat` before `setActiveChatId(chat.id)`.
+
+### 264. Analytics / Usage: `pulseEvents` and the sparklines freeze on react-query structural sharing
+
+**Severity:** ⚪ Low (live indicators stop sliding on an idle console)
+**File:** `web/src/pages/Analytics.tsx:1154-1167`, `:1258-1263`; `web/src/pages/Usage.tsx:568-573`
+
+```ts
+const pulseEvents = useMemo<PulseEvent[]>(() => {
+  const nowSec = Math.floor(Date.now() / 1000);
+  return logs.filter((l) => l.ts >= nowSec - 60).map(…);
+}, [logs]);
+```
+
+`Date.now()` is read inside the memo but is not a dependency, so the 60-second
+window is recomputed only when `logs` changes identity. TanStack Query's
+structural sharing returns the *referentially identical* array whenever the
+polled payload is unchanged — the steady state.
+
+**Trigger:** leave Analytics or Usage (both 15 s poll) open with no new traffic.
+
+**Consequence:** the pulse meter and the last-hour sparkline stop sliding; the
+window stays pinned at the moment of the last data change and the meter drains to
+empty-looking bars that never re-fill. Verified: `useNow` is used by
+`RequestLogs.tsx` (2 occurrences) but **not** by `Analytics.tsx` or `Usage.tsx`
+(0 each), while both read `Date.now()` inside memos (`Analytics.tsx:1155-1167`,
+`Usage.tsx:569`). This is the identical root cause AUDIT #114 fixed for
+`RequestLogs`.
+
+**Fix:** use `useNow` from `pages/logs-shared.tsx` and add `now` to the dependency
+arrays, exactly as #114 did.
+
+### 265. Console pass — verified clean (recorded so the next sweep does not re-audit)
+
+**Severity:** ⚪ (no defect)
+
+Re-verified as fixed at their cited lines and **not** re-reported: AUDIT
+#27 (Models TDZ), #28 (Settings `<a href>`), #29 (Analytics `endsWith`),
+#43–#47, #205–#211.
+
+Also checked and found clean: every `addEventListener` has a matching
+`removeEventListener` (0 unmatched) and all ten `setInterval`/`setTimeout`
+effect sites clean up; `WiwiStream.close()` aborts its controller and the pump
+loop exits on `this.closed`; the SSE frame parser (`api/sse.ts`) matches the
+server's actual wire format (`subsystem.py:305-308`); no internal `<a href>`
+remains (every one is `https:`/`mailto:` or guarded by an `external` flag); and
+there are 0 uses of `dangerouslySetInnerHTML` (`Markdown.tsx` builds React nodes).

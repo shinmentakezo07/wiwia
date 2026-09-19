@@ -63,6 +63,22 @@ def _speaks_messages(dep: Deployment) -> bool:
     return False
 
 
+def prompt_includes_cached(dep: Deployment) -> bool:
+    """True when ``usage.prompt_tokens`` already *includes* the cached count.
+
+    This decides whether pricing subtracts ``cached`` from ``prompt``. It must
+    be derived from the **wire shape of the usage**, not the provider type: an
+    ``opencode`` deployment serving a ``claude-*`` model speaks Anthropic
+    Messages, so its ``input_tokens`` *excludes* cache reads. Keying on
+    ``provider_type != "anthropic"`` took the OpenAI branch there, computed
+    ``uncached = prompt - cached``, and billed the fresh-input term at $0
+    whenever ``cache_read > input_tokens`` — the normal state of a long Claude
+    Code session (AUDIT #227). AUDIT #9 fixed exactly this for
+    ``provider_type == "anthropic"``; the discriminator was simply too narrow.
+    """
+    return not _speaks_messages(dep)
+
+
 def _log_attempt(router: Router, ctx: RequestContext, dep: Deployment,
                  key: ProviderKeyRef, status: str, latency_ms: int) -> None:
     """Emit a proxy-log line naming the provider and pool key that served an
@@ -493,7 +509,23 @@ class Gateway:
                             else "api_connection_error",
                             f"upstream {type(e).__name__}", retryable=True) from e
         if resp.status_code != 200:
-            raw = await resp.aread()
+            # ``aread()`` sits before the read-loop's own guard, so a body that
+            # drops mid-read raised a raw httpx.TransportError. That is not a
+            # WiwiError, so ``execute_with_retries`` (which catches only
+            # WiwiError) let it escape: no retry, no failover, no key cooldown,
+            # no ``record_fail``, and the client got a generic 500 (AUDIT #225).
+            try:
+                raw = await resp.aread()
+            except httpx.TransportError as e:
+                with contextlib.suppress(Exception):
+                    await resp_cm.__aexit__(None, None, None)
+                ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
+                                 key.label, type(e).__name__,
+                                 int((time.monotonic() - t0) * 1000),
+                                 model_id=dep.model_id)
+                raise WiwiError(502, "api_connection_error",
+                                f"upstream {type(e).__name__}",
+                                retryable=True) from e
             await resp_cm.__aexit__(None, None, None)
             ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
                              f"http_{resp.status_code}",
@@ -544,8 +576,15 @@ class Gateway:
         # Connection OK — pump the SSE stream into an AssistantTurn.
         try:
             parser = LineSSEParser()
-            text = ""
-            thinking = ""
+            # Accumulate text in lists and join once. ``text += d.text`` inside
+            # a closure keeps the intermediate string at refcount 2 (the cell),
+            # which defeats CPython's in-place realloc and makes the total
+            # O(n^2): measured 157x/952x/2206x slower than a plain local at
+            # 20k/60k/120k fragments, stalling the event loop for every
+            # concurrent request (AUDIT #228). The pump path only tracks a
+            # length, and resume.py already uses this pattern (#104).
+            text_parts: list[str] = []
+            thinking_parts: list[str] = []
             tool_calls: list[ir.ToolUsePart] = []
             open_calls: dict[int, ir.ToolUsePart] = {}
             # Accumulate arg fragments in a list and join once at Close:
@@ -556,12 +595,12 @@ class Gateway:
             stop_reason: ir.StopReason = "stop"
 
             def _apply_event(evt: SSEEvent) -> None:
-                nonlocal text, thinking, usage, stop_reason
+                nonlocal usage, stop_reason
                 for d in adapter.decode_stream_event(evt.event, evt.data):
                     if isinstance(d, dl.TextDelta):
-                        text += d.text
+                        text_parts.append(d.text)
                     elif isinstance(d, dl.ThinkingDelta):
-                        thinking += d.text
+                        thinking_parts.append(d.text)
                     elif isinstance(d, dl.ToolCallOpen):
                         open_calls[d.index] = ir.ToolUsePart(
                             id=d.id, name=d.name, args={}, raw_args="")
@@ -654,8 +693,9 @@ class Gateway:
                          "ok", latency, model_id=dep.model_id)
         _log_attempt(self.router, ctx, dep, key, "ok", latency)
         dep.latencies.append(latency)
-        turn = ir.AssistantTurn(text=text, tool_calls=tool_calls,
+        turn = ir.AssistantTurn(text="".join(text_parts), tool_calls=tool_calls,
                                 stop_reason=stop_reason, usage=usage)
+        thinking = "".join(thinking_parts)
         if thinking:
             turn.thinking.append(ir.ThinkingPart(text=thinking))
         # Cline and WorkBuddy pop `stream_options`, so the upstream never sends
@@ -672,7 +712,7 @@ class Gateway:
                               reasoning=turn.usage.reasoning_tokens,
                               output=turn.usage.completion_tokens,
                               cache_creation=turn.usage.cache_creation_tokens),
-                len(text))
+                len(turn.text))
             turn.usage = ir.Usage(
                 prompt_tokens=u.prompt, completion_tokens=u.output,
                 cached_tokens=u.cached, reasoning_tokens=u.reasoning,
@@ -1610,7 +1650,7 @@ class Gateway:
         # provider-reported usage, so one request is charged once against the
         # cap, not estimate + actual (AUDIT #101).
         dep.settle_tokens(ctx.request_id, u.prompt_tokens + u.completion_tokens)
-        includes_cached = dep.provider.provider_type != "anthropic"
+        includes_cached = prompt_includes_cached(dep)
         state = self.cost.cost_with_status(
             model_key, u.prompt_tokens, u.completion_tokens, u.cached_tokens,
             u.cache_creation_tokens, includes_cached,
@@ -1649,7 +1689,7 @@ class Gateway:
         # Settle the deployment's admission-time estimate against actual usage
         # (AUDIT #101) — see `_price`.
         dep.settle_tokens(ctx.request_id, u.prompt + u.output)
-        includes_cached = dep.provider.provider_type != "anthropic"
+        includes_cached = prompt_includes_cached(dep)
         state = self.cost.cost_with_status(
             model_key, u.prompt, u.output, u.cached, u.cache_creation,
             includes_cached,

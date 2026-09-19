@@ -728,7 +728,23 @@ class DBSink:
                                              per_token_in)
                 per_token_cache_creation = entry.get(
                     "cache_creation_input_cost_per_token", per_token_in)
-                uncached_prompt = max(0, tok_in - tok_cached)
+                # Mirror gateway.prompt_includes_cached: the flag follows the
+                # *wire shape of the usage*, not the provider type. An
+                # ``opencode`` row served by a Messages-route model reports
+                # ``input_tokens`` EXCLUDING cache reads, so subtracting
+                # ``cached`` from ``tok_in`` billed the fresh input at $0 on
+                # long Claude Code sessions (AUDIT #227).
+                provider_type = serving.get("provider") or ""
+                model_id = serving.get("model_id") or ""
+                if provider_type == "anthropic":
+                    includes_cached = False
+                elif provider_type == "opencode":
+                    from wiwi.providers.opencode_adapter import route_for_model
+                    includes_cached = route_for_model(model_id) != "messages"
+                else:
+                    includes_cached = True
+                uncached_prompt = (max(0, tok_in - tok_cached)
+                                   if includes_cached else tok_in)
                 new_cost = round(
                     uncached_prompt * per_token_in
                     + tok_cached * per_token_cached

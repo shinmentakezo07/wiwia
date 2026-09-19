@@ -220,24 +220,23 @@ async def zen_client(monkeypatch):
         yield client
 
 
-_GEMINI_RESPONSE = {
-    "candidates": [{"content": {"parts": [{"text": "hello"}]},
-                    "finishReason": "STOP"}],
-    "usageMetadata": {"promptTokenCount": 4, "candidatesTokenCount": 2},
-}
-
-_CHAT_RESPONSE = {
-    "id": "chatcmpl-x", "object": "chat.completion", "model": "m",
-    "choices": [{"index": 0, "message": {"role": "assistant", "content": "hello"},
-                 "finish_reason": "stop"}],
-    "usage": {"prompt_tokens": 5, "completion_tokens": 2},
-}
+# The transport declares force_stream, so a non-streaming client's Gemini call
+# is issued as `:streamGenerateContent?alt=sse` (the body carries no `stream`
+# field — the URL selects the wire) and the gateway reassembles the answer.
+_GEMINI_SSE = b"".join(
+    b"data: " + orjson.dumps(p) + b"\n\n" for p in [
+        {"candidates": [{"content": {"parts": [{"text": "hello"}]}}],
+         "usageMetadata": {"promptTokenCount": 4, "candidatesTokenCount": 0}},
+        {"candidates": [{"content": {"parts": []}, "finishReason": "STOP"}],
+         "usageMetadata": {"promptTokenCount": 4, "candidatesTokenCount": 2}},
+    ])
 
 
 @respx.mock
 async def test_gateway_gemini_route_sends_x_goog_api_key(zen_client):
-    route = respx.post(f"{ZEN}/models/gemini-3-flash:generateContent").respond(
-        json=_GEMINI_RESPONSE)
+    route = respx.post(
+        f"{ZEN}/models/gemini-3-flash:streamGenerateContent?alt=sse").respond(
+        content=_GEMINI_SSE, headers={"Content-Type": "text/event-stream"})
     r = await zen_client.post("/v1/chat/completions", json={
         "model": "zen-gemini", "messages": [{"role": "user", "content": "hi"}]})
     assert r.status_code == 200, r.text
@@ -248,6 +247,7 @@ async def test_gateway_gemini_route_sends_x_goog_api_key(zen_client):
     # The key must not ride the querystring either: recovery.build_url appends
     # one only for provider_type == "gemini", and this deployment is "opencode".
     assert "key=" not in str(route.calls[0].request.url)
+    assert r.json()["choices"][0]["message"]["content"] == "hello"
 
 
 # -- streaming messages path (the site round 72 left uncovered) ----------------

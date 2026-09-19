@@ -9,7 +9,7 @@ import orjson
 import structlog
 
 from wiwi.ir import types as ir
-from wiwi.providers.base import ProviderKeyRef, coerce_args_fragment
+from wiwi.providers.base import ProviderKeyRef, as_dict, as_list, coerce_args_fragment
 from wiwi.streaming import deltas as dl
 
 log = structlog.get_logger("wiwi.openai_adapter")
@@ -361,8 +361,14 @@ class OpenAIAdapter:
     # -- response decoding -----------------------------------------------------
     def decode_response(self, status: int, body: bytes) -> ir.AssistantTurn:
         data = orjson.loads(body)
-        choice = (data.get("choices") or [{}])[0]
-        message = choice.get("message", {})
+        # Every nested read on this path must tolerate an explicit JSON null or
+        # a typed-wrong value. ``or [{}]``/``.get(k, {})`` default only a
+        # *missing* key, so ``{"choices":[null]}`` and ``{"usage":"x"}`` used
+        # to raise AttributeError, which the gateway wraps as a retryable 502
+        # and charges to key/deployment health (AUDIT #247).
+        choice = as_dict(as_list(data.get("choices"))[0] if as_list(
+            data.get("choices")) else {})
+        message = as_dict(choice.get("message"))
         # refusal carries the content-filter explanation when content is null;
         # surface it as the turn text so it survives crossing to other dialects.
         turn = ir.AssistantTurn(text=message.get("content")
@@ -372,8 +378,10 @@ class OpenAIAdapter:
         reasoning = message.get("reasoning_content") or message.get("reasoning")
         if reasoning:
             turn.thinking.append(ir.ThinkingPart(reasoning))
-        for tc in message.get("tool_calls") or []:
-            fn_tc = tc.get("function") or {}
+        for tc in as_list(message.get("tool_calls")):
+            if not isinstance(tc, dict):
+                continue
+            fn_tc = as_dict(tc.get("function"))
             raw_args = fn_tc.get("arguments")
             if isinstance(raw_args, dict):
                 # Args-as-object gateways: use the dict directly instead of
@@ -408,9 +416,9 @@ class OpenAIAdapter:
                             # legacy function_call API: same meaning as tool_calls
                             "function_call": "tool_call",
                             "content_filter": "content_filter"}.get(fr, "stop")
-        u = data.get("usage") or {}
-        details_p = (u.get("prompt_tokens_details") or {})
-        details_c = (u.get("completion_tokens_details") or {})
+        u = as_dict(data.get("usage"))
+        details_p = as_dict(u.get("prompt_tokens_details"))
+        details_c = as_dict(u.get("completion_tokens_details"))
         turn.usage = ir.Usage(
             prompt_tokens=_token_count(u.get("prompt_tokens")),
             completion_tokens=_token_count(u.get("completion_tokens")),
@@ -507,7 +515,13 @@ class OpenAIAdapter:
                 kind="status",
                 etype=err.get("type") if isinstance(err.get("type"), str) else None))
             return out
-        choices = chunk.get("choices") or []
+        choices = chunk.get("choices")
+        if not isinstance(choices, list):
+            # ``or []`` defaulted only a *falsy* value, so a truthy non-list
+            # (``5``, ``true``, a dict) survived and crashed on ``choices[0]``
+            # with a TypeError that escapes the decoder, cooling a healthy
+            # deployment and feeding the key's retirement ladder (AUDIT #224).
+            choices = []
         # usage may ride in ANY chunk — OpenAI/OpenRouter put it in the same
         # final chunk as choices+finish_reason. Parse it whenever present;
         # later cumulative values replace earlier ones.

@@ -81,6 +81,22 @@ def verify_password(password: str, stored: str) -> bool:
     return hmac.compare_digest(computed, expected)
 
 
+# A real PBKDF2 record at the production cost, used to burn the same work for
+# a username that does not exist. Without it ``UserService.verify`` short-
+# circuited on the missing row and returned after one indexed SELECT, while an
+# existing user paid 200k PBKDF2 iterations first — a ~46 ms / 30x difference
+# that let an unauthenticated attacker enumerate the username space and aim
+# credential stuffing at confirmed accounts (AUDIT #223). The password is
+# random and never matches, so the result is always False; only the *cost* is
+# equalized.
+_DUMMY_PASSWORD_HASH = hash_password(_secrets.token_urlsafe(32))
+
+
+def burn_dummy_verify(password: str) -> None:
+    """Spend the same work as a real verify, for a non-existent account."""
+    verify_password(password if isinstance(password, str) else "", _DUMMY_PASSWORD_HASH)
+
+
 # -- session cookie signing ---------------------------------------------------
 
 def _hkdf(ikm: str, length: int = 32) -> bytes:
@@ -176,7 +192,12 @@ class UserService:
                         " FROM users WHERE username = :u"),
                 {"u": uname},
             )).first()
-        if row is None or not verify_password(password, row[1]):
+        if row is None:
+            # Burn the same PBKDF2 work a real account would, so the response
+            # time does not reveal whether the username exists (AUDIT #223).
+            burn_dummy_verify(password)
+            return None
+        if not verify_password(password, row[1]):
             return None
         return UserInfo(id=row[0], username=uname, role=row[2],
                         disabled=bool(row[3]))

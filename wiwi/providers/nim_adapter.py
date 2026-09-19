@@ -337,7 +337,11 @@ class NimAdapter(OpenAIAdapter):
                 reasoning=_token_count(dc.get("reasoning_tokens")),
                 output=_token_count(u.get("completion_tokens"))))
 
-        choices = chunk.get("choices") or []
+        choices = chunk.get("choices")
+        if not isinstance(choices, list):
+            # Truthy non-list (``5``/``true``/dict) used to survive ``or []``
+            # and crash on ``choices[0]`` (AUDIT #224).
+            choices = []
         if not choices:
             return out
         c = choices[0]

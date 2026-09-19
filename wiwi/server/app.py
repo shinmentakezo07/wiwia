@@ -242,6 +242,44 @@ class _AttemptThrottle:
         self._hits: dict[str, list[float]] = {}
         self._lock = asyncio.Lock()
 
+    async def try_consume(self, scope: str) -> tuple[bool, int]:
+        """Atomically admit one attempt, or refuse it.
+
+        Reserving and counting in a *single* lock acquisition is the whole
+        point. The old ``check()`` then ``record_failure()`` pair took the lock
+        twice with the entire credential verification (a 200k-iteration PBKDF2)
+        in between, so N concurrent requests all passed ``check`` before any of
+        them recorded — a burst of 20 against ``limit=5`` admitted all 20
+        (AUDIT #221). Callers reserve *before* verifying and ``reset(scope)`` on
+        success, so only genuine failures consume the window.
+        """
+        async with self._lock:
+            now = time.monotonic()
+            cutoff = now - self.window_s
+            evs = [t for t in self._hits.get(scope, ()) if t > cutoff]
+            if len(evs) >= self.limit:
+                retry = int(max(1.0, self.window_s - (now - evs[0]))) + 1
+                self._hits[scope] = evs
+                return False, retry
+            evs.append(now)
+            self._hits[scope] = evs
+            if len(self._hits) > self.max_keys:
+                self._drop_stale(now)
+            return True, 0
+
+    async def refund(self, scope: str) -> None:
+        """Give back one reservation taken by :meth:`try_consume`.
+
+        Used when the attempt turned out to be legitimate (a successful login)
+        so a busy-but-valid user does not exhaust their own window.
+        """
+        async with self._lock:
+            evs = self._hits.get(scope)
+            if evs:
+                evs.pop()
+                if not evs:
+                    self._hits.pop(scope, None)
+
     async def check(self, scope: str) -> tuple[bool, int]:
         """Return (allowed, retry_after_seconds) for the given scope."""
         async with self._lock:
@@ -1539,6 +1577,50 @@ def create_app(config: WiwiConfig) -> FastAPI:
         stream_text: list[str] = []
         stream_thinking: list[str] = []
         stream_tools: dict[int, dict[str, Any]] = {}
+
+        async def _teardown_tail() -> None:
+            """Bookkeeping that must complete even when the peer disconnects.
+
+            Split out so the caller can ``asyncio.shield`` it (AUDIT #222).
+            """
+            if journal is not None:
+                with contextlib.suppress(Exception):
+                    await journal.finish(_seq)
+                state_.journals.release(journal_id)
+            # Release the gateway pump's upstream connection no matter how we
+            # leave this generator. The body (`encoder.feed(...)`) can raise, and
+            # Starlette's StreamingResponse does NOT aclose our async iterator on
+            # error — an `async for` that raises leaves `stream` abandoned, so
+            # the pump task keeps its upstream socket checked out until GC.
+            # aclose() here drives the pump's own teardown (site-2 `finally`).
+            with contextlib.suppress(Exception):
+                await stream.aclose()
+            if store_prompts:
+                stream_usage = getattr(ctx, "_stream_usage", None)
+                ctx.metadata["response_body"] = {
+                    "text": "".join(stream_text),
+                    "thinking": [{"text": t} for t in stream_thinking],
+                    "tool_calls": [stream_tools[i] for i in sorted(stream_tools)],
+                    "stop_reason": ctx.stop_reason or "stop",
+                    "usage": ({"prompt_tokens": stream_usage.prompt,
+                               "completion_tokens": stream_usage.output,
+                               "cached_tokens": stream_usage.cached,
+                               "reasoning_tokens": stream_usage.reasoning}
+                              if stream_usage else None),
+                    "streamed": True,
+                }
+            state_.logs.log_request(build_log_event(ctx))
+            await _record_tpm_usage(ctx.auth, ctx)
+            if (ctx.usage and ctx.auth and ctx.auth.key_type != "master"
+                    and not await record_spend(ctx.auth.key_id, ctx.cost)):
+                # The response has already been streamed, so a budget breach
+                # can't turn into a 402 here. record_spend still trues up the
+                # charge — the upstream billed it — which is what makes the
+                # *next* request fail admission instead of letting spend run
+                # past the cap forever (AUDIT_REPORT C1).
+                ctx.status = 402
+                ctx.metadata["budget_exceeded"] = True
+
         try:
             async def _emit(chunk: bytes) -> None:
                 nonlocal _seq
@@ -1617,43 +1699,19 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 async for t in _emit(chunk):
                     yield t
         finally:
-            if journal is not None:
-                with contextlib.suppress(Exception):
-                    await journal.finish(_seq)
-                state_.journals.release(journal_id)
-            # Release the gateway pump's upstream connection no matter how we
-            # leave this generator. The body (`encoder.feed(...)`) can raise, and
-            # Starlette's StreamingResponse does NOT aclose our async iterator on
-            # error — an `async for` that raises leaves `stream` abandoned, so
-            # the pump task keeps its upstream socket checked out until GC.
-            # aclose() here drives the pump's own teardown (site-2 `finally`).
-            with contextlib.suppress(Exception):
-                await stream.aclose()
-            if store_prompts:
-                stream_usage = getattr(ctx, "_stream_usage", None)
-                ctx.metadata["response_body"] = {
-                    "text": "".join(stream_text),
-                    "thinking": [{"text": t} for t in stream_thinking],
-                    "tool_calls": [stream_tools[i] for i in sorted(stream_tools)],
-                    "stop_reason": ctx.stop_reason or "stop",
-                    "usage": ({"prompt_tokens": stream_usage.prompt,
-                               "completion_tokens": stream_usage.output,
-                               "cached_tokens": stream_usage.cached,
-                               "reasoning_tokens": stream_usage.reasoning}
-                              if stream_usage else None),
-                    "streamed": True,
-                }
-            state_.logs.log_request(build_log_event(ctx))
-            await _record_tpm_usage(ctx.auth, ctx)
-            if (ctx.usage and ctx.auth and ctx.auth.key_type != "master"
-                    and not await record_spend(ctx.auth.key_id, ctx.cost)):
-                # The response has already been streamed, so a budget breach
-                # can't turn into a 402 here. record_spend still trues up the
-                # charge — the upstream billed it — which is what makes the
-                # *next* request fail admission instead of letting spend run
-                # past the cap forever (AUDIT_REPORT C1).
-                ctx.status = 402
-                ctx.metadata["budget_exceeded"] = True
+            # The whole teardown tail must survive client disconnect. It used
+            # to be a bare sequence whose FIRST statement was an await, so the
+            # pending cancellation was re-delivered there and nothing after it
+            # ran: the request was never logged, never charged, its TPM
+            # reservation never reconciled and the journal handle leaked — on
+            # the ordinary abort path (browser tab closed, Ctrl-C, proxy
+            # timeout). ``contextlib.suppress(Exception)`` does not catch
+            # ``CancelledError`` (BaseException), and Starlette cancels this
+            # generator when the peer goes away (AUDIT #222). Shielding the tail
+            # makes it uncancellable, so bookkeeping completes and the
+            # cancellation is honoured on the next await outside the shield.
+            with contextlib.suppress(BaseException):
+                await asyncio.shield(_teardown_tail())
 
     # -- surfaces ---------------------------------------------------------------
     @app.post("/v1/chat/completions")
@@ -3302,17 +3360,32 @@ def create_app(config: WiwiConfig) -> FastAPI:
         actor = await current_user(request)
         if actor is None:
             return _err(401, "authentication_error", "authentication required", request)
+        # A non-admin may only touch a key they own, and only the owner-facing
+        # fields on it. Ownership alone was the whole check, so a tenant could
+        # PATCH the budget/RPM/TPM/model-allowlist caps an operator had placed
+        # on their own key straight back off (AUDIT #220) — total defeat of the
+        # controls rounds 52/57/59/116/163/198/202 added. The allowlist is
+        # enforced again inside ``update_key`` so no future call site can
+        # reintroduce the gap.
+        allow: tuple[str, ...] | None = None
         if actor.role != "admin":
             owner = await state.auth.key_owner(key_id)
             if owner != actor.id:
                 return _err(403, "permission_error", "not your key", request)
+            allow = state.auth.OWNER_FACING_FIELDS
         body, jerr = await json_body(request)
         if jerr:
             return jerr
         fields = {k: body[k] for k in state.auth.UPDATABLE_FIELDS  # type: ignore[union-attr]
                   if k in body}
+        if allow is not None:
+            refused = [k for k in fields if k not in allow]
+            if refused:
+                return _err(403, "permission_error",
+                            f"field '{refused[0]}' may only be set by an admin",
+                            request)
         try:
-            updated = await state.auth.update_key(key_id, fields)  # type: ignore[union-attr]
+            updated = await state.auth.update_key(key_id, fields, allow)  # type: ignore[union-attr]
         except ValueError as e:
             # Malformed limit/model values used to escape as an uncaught
             # ValueError/TypeError (HTTP 500); report them as a client error.
@@ -3735,7 +3808,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         # otherwise one host can create unlimited accounts (each of which mints
         # a playground key) and exhaust the user table or disk.
         scope = _client_ip(request, config.general_settings.trusted_proxies)
-        allowed, retry_after = await state.signup_throttle.check(scope)
+        allowed, retry_after = await state.signup_throttle.try_consume(scope)
         if not allowed:
             resp = _err(429, "rate_limit_error",
                         f"too many signups from this address, retry in "
@@ -3750,10 +3823,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
             if "already taken" in str(e):
                 return _err(409, "conflict", str(e), request)
             return _err(400, "invalid_request_error", str(e), request)
-        # A successful signup consumes a throttle slot; without this the
-        # _AttemptThrottle only ever counts login failures, so the signup cap
-        # never fires and one IP can mint unlimited accounts (AUDIT #89).
-        await state.signup_throttle.record_failure(scope)
+        # The slot was reserved atomically before creation (AUDIT #221/#89), so
+        # a successful signup consumes it with no further bookkeeping.
         # Mint a fresh playground key when the new user is being logged in so
         # the Playground can use it immediately without a separate call.
         pg_key = ""
@@ -3824,7 +3895,13 @@ def create_app(config: WiwiConfig) -> FastAPI:
         ip = _client_ip(request, config.general_settings.trusted_proxies)
         mk = body.get("master_key")
         scope = f"{ip}:master" if mk else f"{ip}:{norm_user}"
-        allowed, retry_after = await state.login_throttle.check(scope)
+        # Reserve the attempt *before* verifying. Reserving and counting under
+        # one lock is what makes the cap hold under concurrency: the old
+        # check-then-record pair let a burst of 20 all pass `check` before any
+        # recorded a failure, so `limit=5` admitted 20 (AUDIT #221). A
+        # successful login refunds the slot below, so only failures consume the
+        # window.
+        allowed, retry_after = await state.login_throttle.try_consume(scope)
         if not allowed:
             resp = _err(429, "rate_limit_error",
                         f"too many failed login attempts, retry in {retry_after}s",
@@ -3847,24 +3924,24 @@ def create_app(config: WiwiConfig) -> FastAPI:
                      "playground_key": pg_key})
                 _set_session_cookie(resp, "master", "admin",
                                     secure=request.url.scheme == "https")
+                # A successful login is not a failure: hand the reserved slot
+                # back so valid traffic never exhausts the window.
+                await state.login_throttle.reset(scope)
                 return resp
-            await state.login_throttle.record_failure(scope)
             return _err(401, "authentication_error", "invalid master key", request)
         # username/password login
         password = body.get("password", "")
         if not isinstance(password, str):
-            await state.login_throttle.record_failure(scope)
             return _err(401, "authentication_error", "invalid credentials", request)
         try:
             u = await state.users.verify(norm_user, password)
         except ValueError:
             # malformed username charset/length — treat as invalid credentials
-            await state.login_throttle.record_failure(scope)
             return _err(401, "authentication_error", "invalid credentials", request)
         if u is None or u.disabled:
-            await state.login_throttle.record_failure(scope)
             return _err(401, "authentication_error", "invalid credentials", request)
-        # Successful login clears any accumulated failures for this scope.
+        # Successful login clears any accumulated failures for this scope
+        # (including the slot just reserved above).
         await state.login_throttle.reset(scope)
         # Mint a fresh playground key alongside the session cookie so the
         # Playground can use it immediately without a second call.

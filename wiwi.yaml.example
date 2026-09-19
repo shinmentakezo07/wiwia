@@ -46,18 +46,22 @@ providers:
   - name: opencode-zen
     provider: opencode
     base_url: https://opencode.ai/zen/v1
+    # A paid-model deployment carries a real Zen key. A free-tier `*-free`
+    # deployment instead uses the literal sentinel `anonymous` (omit
+    # Authorization entirely): the live catalog lists nine free models (eight
+    # `-free` suffixed plus the stealth `big-pickle`), and on 2026-09-19 all
+    # nine passed the admission gate keyless — seven answered 200, two failed
+    # upstream on their own account (500 / `server_error`). A real account key
+    # instead 429s FreeUsageLimitError once that account's free quota is spent,
+    # so a key is not what unlocks them. The 403 FreeTierError that used to be
+    # blamed on "a missing key" is a request-shape gate (forced SSE, a
+    # CLI-shaped `x-opencode-session`, and the CLI's `bash`/`read` decoy tools)
+    # that the adapter now satisfies on every free-model request. See
+    # opencode_adapter.py and AUDIT #267.
     keys:
       - {label: main, key: os.environ/OPENCODE_API_KEY}
-    # NOTE (2026-09-17): Zen retired keyless free-tier access — anonymous
-    # requests to `*-free` models now get 403 FreeTierError on every route,
-    # so free models need a valid OPENCODE_API_KEY like paid ones. A valid
-    # key still 401s `CreditsError` ("No payment method") on a workspace
-    # without billing, so free models require a funded workspace too (all six
-    # keys in the shipped instance are valid Zen keys on unbilled workspaces).
-    # The literal sentinel `anonymous` (omit Authorization entirely) stays for
-    # keyless auth-gate probes, not for free-model traffic:
-    #   keys:
-    #     - {label: anon, key: anonymous}
+      # free-tier-only setup:
+      # - {label: anon, key: anonymous}
 
 # Model groups: map a model_name clients request to one or more provider
 # deployments. Empty by default — add your own via the admin UI (/models) or

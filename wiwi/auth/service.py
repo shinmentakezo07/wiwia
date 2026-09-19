@@ -435,7 +435,16 @@ class AuthService:
     UPDATABLE_FIELDS = ("max_budget", "rpm", "tpm", "models", "expires_at",
                         "ttl_seconds")
 
-    async def update_key(self, key_id: str, fields: dict) -> dict | None:
+    #: The subset of ``UPDATABLE_FIELDS`` a key's *owner* may change on their
+    #: own key. Every other field is an operator control: ``max_budget``,
+    #: ``rpm``, ``tpm`` and ``models`` are exactly how an operator caps a
+    #: tenant, so letting the tenant clear them defeats the cap (AUDIT #220).
+    #: ``expires_at``/``ttl_seconds`` are excluded for the same reason — an
+    #: owner extending their own expiry defeats a time-boxed grant.
+    OWNER_FACING_FIELDS = ()
+
+    async def update_key(self, key_id: str, fields: dict,
+                         allow: tuple[str, ...] | None = None) -> dict | None:
         """Patch editable fields (absent = unchanged; explicit null = clear).
 
         ``ttl_seconds`` is a relative duration (seconds from now); it is
@@ -443,9 +452,19 @@ class AuthService:
         epoch) is still accepted for backward compatibility. When both are
         present, ``ttl_seconds`` wins.
 
+        ``allow`` restricts the writable set. ``None`` (the admin path) permits
+        every field in ``UPDATABLE_FIELDS``; a tuple permits only those names
+        and *raises* on anything else, so a second call site cannot silently
+        forget the owner/admin boundary (AUDIT #220).
+
         Returns the updated key dict, or None when the id is unknown. Cache is
         evicted so the new limits apply immediately.
         """
+        if allow is not None:
+            refused = [k for k in fields if k not in allow]
+            if refused:
+                raise ValueError(
+                    f"field '{refused[0]}' may not be set by this actor")
         sets: dict[str, object] = {}
         for name in self.UPDATABLE_FIELDS:
             if name not in fields:

@@ -79,7 +79,10 @@ def _assert_messages_request(request, *, stream):
         _request()["tools"][0]["function"]["parameters"]
     )
     assert body["max_tokens"] == 128
-    assert body.get("stream", False) is stream
+    # Zen answers as an event stream, so the transport forces SSE on every
+    # upstream request and the gateway reassembles for a non-streaming caller:
+    # the client's flag no longer decides what goes upstream.
+    assert body["stream"] is True
     headers = request.headers
     assert headers["x-opencode-session"].startswith("ses_")
     assert headers["x-opencode-request"].startswith("msg_")
@@ -90,19 +93,50 @@ def _assert_messages_request(request, *, stream):
     assert "authorization" not in headers
 
 
+#: The Messages stream Zen returns for the weather turn below. Every request
+#: to this provider is answered as SSE, so both tests consume it — one through
+#: the pump, one through the reassembly path a non-streaming client takes.
+_MESSAGES_EVENTS = [
+    {"type": "message_start", "message": {
+        "id": "msg_union", "type": "message", "role": "assistant",
+        "model": "union-alpha", "content": [], "stop_reason": None,
+        "usage": {"input_tokens": 20, "output_tokens": 0},
+    }},
+    {"type": "content_block_start", "index": 0,
+     "content_block": {"type": "text", "text": ""}},
+    {"type": "content_block_delta", "index": 0,
+     "delta": {"type": "text_delta", "text": "Checking the weather."}},
+    {"type": "content_block_stop", "index": 0},
+    {"type": "content_block_start", "index": 1,
+     "content_block": {"type": "tool_use", "id": "toolu_weather",
+                       "name": "weather", "input": {}}},
+    {"type": "content_block_delta", "index": 1,
+     "delta": {"type": "input_json_delta", "partial_json": '{"city":'}},
+    {"type": "content_block_delta", "index": 1,
+     "delta": {"type": "input_json_delta", "partial_json": '"Paris"}'}},
+    {"type": "content_block_stop", "index": 1},
+    {"type": "message_delta", "delta": {
+        "stop_reason": "tool_use", "stop_sequence": None,
+    }, "usage": {"output_tokens": 12}},
+    {"type": "message_stop"},
+]
+
+
+def _messages_sse() -> bytes:
+    return b"".join(
+        b"event: " + event["type"].encode() + b"\ndata: "
+        + orjson.dumps(event) + b"\n\n" for event in _MESSAGES_EVENTS
+    )
+
+
 @respx.mock
 async def test_union_alpha_chat_translates_messages_tool_use(union_client):
-    route = respx.post("https://opencode.ai/zen/v1/messages").respond(json={
-        "id": "msg_union", "type": "message", "role": "assistant",
-        "model": "union-alpha",
-        "content": [
-            {"type": "text", "text": "Checking the weather."},
-            {"type": "tool_use", "id": "toolu_weather", "name": "weather",
-             "input": {"city": "Paris"}},
-        ],
-        "stop_reason": "tool_use", "stop_sequence": None,
-        "usage": {"input_tokens": 20, "output_tokens": 12},
-    })
+    # Non-streaming client, streaming-only upstream: the gateway pumps the SSE
+    # and hands back one aggregated JSON completion.
+    route = respx.post("https://opencode.ai/zen/v1/messages").respond(
+        content=_messages_sse(),
+        headers={"Content-Type": "text/event-stream"},
+    )
     response = await union_client.post("/v1/chat/completions", json=_request())
     assert response.status_code == 200, response.text
     _assert_messages_request(route.calls[0].request, stream=False)
@@ -118,36 +152,8 @@ async def test_union_alpha_chat_translates_messages_tool_use(union_client):
 
 @respx.mock
 async def test_union_alpha_chat_stream_translates_messages_tool_arguments(union_client):
-    events = [
-        {"type": "message_start", "message": {
-            "id": "msg_union", "type": "message", "role": "assistant",
-            "model": "union-alpha", "content": [], "stop_reason": None,
-            "usage": {"input_tokens": 20, "output_tokens": 0},
-        }},
-        {"type": "content_block_start", "index": 0,
-         "content_block": {"type": "text", "text": ""}},
-        {"type": "content_block_delta", "index": 0,
-         "delta": {"type": "text_delta", "text": "Checking the weather."}},
-        {"type": "content_block_stop", "index": 0},
-        {"type": "content_block_start", "index": 1,
-         "content_block": {"type": "tool_use", "id": "toolu_weather",
-                           "name": "weather", "input": {}}},
-        {"type": "content_block_delta", "index": 1,
-         "delta": {"type": "input_json_delta", "partial_json": '{"city":'}},
-        {"type": "content_block_delta", "index": 1,
-         "delta": {"type": "input_json_delta", "partial_json": '"Paris"}'}},
-        {"type": "content_block_stop", "index": 1},
-        {"type": "message_delta", "delta": {
-            "stop_reason": "tool_use", "stop_sequence": None,
-        }, "usage": {"output_tokens": 12}},
-        {"type": "message_stop"},
-    ]
-    content = b"".join(
-        b"event: " + event["type"].encode() + b"\ndata: "
-        + orjson.dumps(event) + b"\n\n" for event in events
-    )
     route = respx.post("https://opencode.ai/zen/v1/messages").respond(
-        content=content, headers={"Content-Type": "text/event-stream"},
+        content=_messages_sse(), headers={"Content-Type": "text/event-stream"},
     )
     response = await union_client.post(
         "/v1/chat/completions", json=_request(stream=True),

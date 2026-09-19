@@ -514,7 +514,12 @@ export function RequestLogsPage() {
     if (!live) return;
     const evt = asRequestEntry(data);
     if (!evt) return;
-    qc.setQueryData<{ logs: RequestLogEntry[] }>(["request-logs"], (old) => {
+    // Write to a page-private key, never the shared ["request-logs"] one.
+    // That key is read by Dashboard, Analytics, Budgets and Providers, and
+    // getRequestLogs requests limit 10000 — so truncating it to 500 here made
+    // every other mounted page recompute its aggregates over 500 events until
+    // the next poll, silently under-reporting (AUDIT #255).
+    qc.setQueryData<{ logs: RequestLogEntry[] }>(["request-logs", "live"], (old) => {
       if (!old) return { logs: [evt] };
       // Dedupe by request_id — the poll will replace this eventually, but
       // avoid showing the same event twice in the meantime.
@@ -523,7 +528,23 @@ export function RequestLogsPage() {
     });
   });
 
-  const all = query.data?.logs ?? EMPTY;
+  // Live events are prepended to the polled page so a new request appears
+  // immediately without the 500-row ring ever touching the shared cache.
+  const liveQuery = useQuery<{ logs: RequestLogEntry[] }>({
+    queryKey: ["request-logs", "live"],
+    queryFn: () => ({ logs: [] }),
+    staleTime: Infinity,
+    enabled: false,
+  });
+
+  const all = useMemo(() => {
+    const polled = query.data?.logs ?? EMPTY;
+    const liveRows = liveQuery.data?.logs ?? EMPTY;
+    if (!liveRows.length) return polled;
+    const seen = new Set(polled.map((l) => l.request_id));
+    const fresh = liveRows.filter((l) => !seen.has(l.request_id));
+    return fresh.length ? [...fresh, ...polled] : polled;
+  }, [query.data, liveQuery.data]);
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();

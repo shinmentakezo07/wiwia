@@ -110,6 +110,58 @@ if [ -z "$WIWI_SRC" ] || [ "$WIWI_SRC" != "$WIWI_WANT" ]; then
 fi
 echo "    backend code: $WIWI_SRC"
 
+# --- 3b. redis for the response cache --------------------------------------
+# Start a Redis container and point the gateway at it so the exact-match
+# response cache is Redis-backed by default (survives restarts, shared across
+# replicas). This uses a dedicated published-port container — NOT the compose
+# `redis` service — because start.sh runs the backend on the host, and the
+# compose service publishes no host port (it is only reachable over the
+# compose network from the containerized wiwi).
+#
+# Redis is advisory for wiwi: if it is unreachable the cache degrades to a
+# permanent miss and requests still succeed. So this section never fails the
+# start — a missing docker daemon, a refused connection, or an image pull
+# problem just logs a warning and lets the backend use the in-memory cache.
+# Opt out with WIWI_DISABLE_REDIS=1 (e.g. to reuse an existing Redis).
+REDIS_PORT="${WIWI_REDIS_PORT:-6379}"
+REDIS_CONTAINER="wiwi-redis"
+
+ensure_redis() {
+    # Bring up $REDIS_CONTAINER and confirm it answers PING. Reuses a
+    # container that already exists so repeated `./start.sh` runs are cheap.
+    if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$REDIS_CONTAINER"; then
+        docker start "$REDIS_CONTAINER" >/dev/null 2>&1 || true
+    else
+        docker run -d --name "$REDIS_CONTAINER" --restart unless-stopped \
+            -p "127.0.0.1:${REDIS_PORT}:6379" redis:7-alpine \
+            redis-server --appendonly no --maxmemory 256mb \
+            --maxmemory-policy allkeys-lru >/dev/null 2>&1 || return 1
+    fi
+    # Bounded readiness wait (~10s): PING inside the container proves the
+    # server is up without depending on the host port being bindable yet.
+    for _ in $(seq 1 20); do
+        docker exec "$REDIS_CONTAINER" redis-cli ping >/dev/null 2>&1 && return 0
+        sleep 0.5
+    done
+    return 1
+}
+
+if [ "${WIWI_DISABLE_REDIS:-0}" = "1" ]; then
+    echo "==> Redis disabled (WIWI_DISABLE_REDIS=1); backend uses the in-memory cache"
+elif ! command -v docker >/dev/null 2>&1; then
+    echo "==> docker not found; backend uses the in-memory response cache" >&2
+else
+    echo "==> Starting Redis in Docker (host port $REDIS_PORT) ..."
+    if ensure_redis; then
+        # Exported before the backend launches; the uvicorn --reload child
+        # inherits it. load_dotenv(override=False) keeps this value over .env.
+        export REDIS_URL="redis://127.0.0.1:${REDIS_PORT}/0"
+        echo "    redis ready; REDIS_URL=$REDIS_URL"
+    else
+        echo "    WARN: redis not reachable; backend falls back to the in-memory cache" >&2
+    fi
+fi
+
 # --- 4. build backend command args -------------------------------------------
 
 CMD_ARGS=(--config "$SCRIPT_DIR/wiwi.yaml" --port "$PROXY_PORT")

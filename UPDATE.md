@@ -2126,6 +2126,16 @@ Full suite 1910 passing, ruff clean.
 
 ## Zen free-tier anonymous access retired; `anthropic-version` scoped to Messages (2026-09-17)
 
+> **Superseded by round 88 (2026-09-19).** The "`anthropic-version` scoped to
+> Messages" half stands. The "anonymous free-tier access retired" half does
+> not: keyless requests return 200 today. The 403 that led to that conclusion
+> is Zen's free-tier **request-shape** gate, and the 2026-09-17 matrix missed
+> it because it varied one factor at a time from a baseline that already failed
+> the others — no `bash`/`read` tool payload, and a session id of the wrong
+> length. All three conditions must hold *simultaneously*, so every row 403'd
+> and each axis under test looked irrelevant, including the stream flag. See
+> round 88 for the matrix that changes them together.
+
 **Files**: `wiwi/providers/opencode_adapter.py`, `wiwi.yaml.example`
 
 **Issue**: every keyless (`anonymous`) request to a `*-free` model failed with
@@ -2187,6 +2197,14 @@ header variation changes this (project id, client tag, `x-zen-model`,
 the `x-opencode-*` client spoof is complete and correct — the free tier is
 simply gated on a paid workspace, and keyless anonymous access (200 until
 2026-09-16) is retired.
+
+> **The last sentence is wrong — see round 88 (2026-09-19).** Keyless free-tier
+> access was never retired; it returns 200 today. Every row of that matrix
+> started from a body that already failed the gate's tool-payload and
+> session-length conditions, so the gate answered 403 no matter which *other*
+> factor was varied — the stream flag and id format included. The
+> classification this entry actually shipped (402/403 `permission_error`, key
+> pool not charged) remains correct and useful.
 
 The bug wiwi owned: `error_from_provider_status` mapped **every** 401/403 to
 `authentication_error`, so `status_for_key_pool` reported it to the pool and
@@ -2331,10 +2349,12 @@ refused `403 FreeTierError` on every route and every live key (9/9 probed), so
 Messages traffic fails today for a *billing* reason and would have gone on
 failing for an *auth* reason once payment was added.
 
-**Not a code bug**: the unbilled workspace and the account-wide free-tier gate
-are upstream account conditions. Paid models stay unreachable until a payment
-method is added; the free tier is not recoverable by any header combination
-(eight variants probed).
+**Not a code bug** for the auth scheme. "The free tier is not recoverable by
+any header combination" is true as stated — none of the eight header variants
+mattered — but the conclusion drawn from it was wrong: what recovers the free
+tier is the request *body* and the session id format, which round 88 supplies.
+Paid models on an unbilled workspace do stay unreachable until a payment method
+is added. See #267.
 
 **Tests**: `tests/test_fix_round72.py` (8) — per-route auth scheme for
 messages (union-alpha, claude-sonnet-5) with chat/responses/gemini controls
@@ -2851,3 +2871,213 @@ default of 100 with no config knob; and the P0/P1/P2 claim was narrowed —
 `PartialJSONParser`/`parse_partial` are test-only (incremental argument
 rendering is not shipped) and `StreamTape.replay` has no production caller
 (client-facing replay is served by the journal store).
+
+## Round 87 — Zen's transport must declare `forceStream` (2026-09-18)
+
+**File**: `wiwi/providers/opencode_adapter.py`
+
+**Issue**: OpenCode's own provider entry for Zen puts one flag on the
+transport that `OpencodeAdapter` never had:
+
+```
+transport: { baseUrl: "https://opencode.ai", forceStream: true, ... }
+```
+
+Zen answers as an event stream, so the reply a non-streaming caller gets is
+SSE. With `force_stream = False` the gateway routed that caller to
+`Gateway._call_once`, whose JSON decode cannot read an SSE body — the request
+ended as an empty completion or `upstream … returned an undecodable 200
+response: JSONDecodeError` (AUDIT #92's wrapper). Cline and WorkBuddy already
+declare the flag for the same reason; Zen's declaration was simply missing.
+
+**Before**:
+```python
+provider_type = "opencode"
+force_stream = False
+…
+def encode_request(self, req, model_id, deployment_params):
+    if route == "messages":
+        return self._msg.encode_request(req, model_id, …)   # stream: req.stream
+```
+
+**After**:
+- `force_stream = True` — the transport declaration. `Gateway._call_once` now
+  sends every non-streaming caller through `_complete_via_stream`, which pumps
+  the SSE and folds the deltas into one `AssistantTurn`; the health healer
+  probes this provider with `stream=True` too (`recovery._probe` reads the
+  same attribute).
+- `encode_request` sets `body["stream"] = True` on the chat, responses and
+  messages routes. The declaration alone would have been half a fix: the pump
+  asks `build_url` for the streaming URL but encodes the *client's* request,
+  so the body would still have said "don't stream" on a connection the gateway
+  parses as SSE. Same shape as `cline_adapter`/`workbuddy_adapter`.
+- The Gemini route is deliberately excluded from the body force: its wire is
+  selected by the URL (`:streamGenerateContent?alt=sse`, from `build_url`), and
+  a `stream` key in a `generateContent` body is an unknown field the endpoint
+  rejects.
+
+**Live status at the time**: not verifiable — the `io` workspace is unbilled, so
+every probe of a free model was refused with `403 FreeTierError` before the
+model was reached (#174). Superseded: see round 88 below. `stream: false`
+turned out to be one of the three things the free tier rejects, so this flag was
+never only an aggregation nicety — for free models it is on the critical path,
+which is why it is forced on every route rather than only the responses one.
+
+**Tests**: `tests/test_fix_round87.py` (12) — the declaration, the per-route
+body force, the Gemini body/URL split, and two gateway reassembly cases
+(free-tier Responses + free chat) with a streaming client as the control. Four
+existing suites pinned the pre-fix contract and were moved to the new one:
+`test_fix_round27.py::test_encode_chat_delegates_to_openai_shape`
+(`stream` is now true), `test_fix_round63.py` (both `union-alpha` cases answer
+with the Messages stream), `test_fix_round72.py` (both gateway cases answer
+with SSE, and now also assert the aggregated content), and
+`test_fix_round73.py::test_gateway_gemini_route_sends_x_goog_api_key` (mocks
+`:streamGenerateContent?alt=sse`). AUDIT #266.
+
+## Round 88 — Zen's free-tier 403 is a request-shape gate (AUDIT #267) — 2026-09-19
+
+**File**: `wiwi/providers/opencode_adapter.py` (+ `wiwi.yaml.example`,
+`docs/PROVIDERS.md`)
+
+**Reported symptom**:
+
+```
+io requires billing (403): OpenCode's free tier can only be used from within OpenCode
+```
+
+Round 87's `force_stream` landed the same day and did **not** clear it, because
+the flag was only one of the three things the gate checks. The error text reads
+like a billing condition, and AUDIT #174 recorded it as one ("free models
+require a valid `OPENCODE_API_KEY` *and* a funded workspace", "not recoverable
+by any header combination"). It is neither. It means *this request does not look
+like the OpenCode client*.
+
+**Why the 2026-09-17 matrix reached the wrong conclusion.** It varied one factor
+at a time — bearer, project id, client tag, `x-zen-model`, id format, stream
+flag, UA — starting from a baseline that already failed two *other* conditions
+(no `bash`/`read` tool payload; a `ses_`+24 hex id where 26 are required). All
+three must hold together, so every row 403'd and each axis looked irrelevant,
+the stream flag included. Changing one thing while two others are wrong proves
+nothing about the one you changed.
+
+**The gate, probed 2026-09-19** (`mimo-v2.5-free`, `POST /zen/v1/chat/completions`,
+each row differing from the 200 row in exactly one property):
+
+| property | verdict |
+|---|---|
+| keyless + stream + `ses_`+12hex+14 + `bash`&`read` | **200 SSE** |
+| `stream: false` | 403 FreeTierError |
+| no tools / user tools only / `bash` without `read` | 403 FreeTierError |
+| `ses_` + 24 hex (right alphabet, two chars short) | 403 FreeTierError |
+| `ses_` + 11 hex head + 15 upper | 403 FreeTierError |
+| `ses_` + 26 all-hex | 200 SSE |
+| missing / wrong `ses_` prefix | 403 FreeTierError |
+| `x-opencode-request` of any shape, or absent | 200 SSE |
+| canonical session two days old | 200 SSE |
+| no `Authorization`, or `Bearer public` | 200 SSE |
+| a real account Zen key | **429 FreeUsageLimitError** |
+| `User-Agent: opencode/1.16.0` | 426 UpgradeRequired |
+
+So: three request-shape conditions (`stream`, session format, tool payload) plus
+the UA version floor; the credential is not part of it, and free quota is
+accounted **per session**, which is why a real key only exhausts its own bucket.
+
+**Fix** (all confined to the adapter):
+
+- `is_free_model()` — `-free` suffix plus the stealth `big-pickle` (the live
+  catalog lists 9 free models: 8 suffixed + `big-pickle`).
+- `canonical_session_id()` / `canonical_request_id()` — the CLI's
+  `^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$` shape, with the patterns exported so the
+  tests assert against the minter's own constants rather than a re-typed regex.
+- `stable_session_id()` — one session per credential (SHA-256 bucket, LRU-capped
+  at 1000, TTL 3600 s). Re-minting per request is what produced the 429 storm.
+- `_cloak_chat_tools()` / `_cloak_responses_tools()` — inject `bash`+`read` per
+  route shape; a client tool with the same name is never replaced, and the
+  decoys are only added on free models.
+- `_force_auto_tool_choice()` — the two Muse Spark free models reject every
+  non-`auto` form with 400, so it collapses on that allowlist only.
+- `stream_options: {include_usage: true}` on chat-route requests the client did
+  not ask to stream — without it Zen sends no usage frame and every aggregated
+  turn prices on the estimator. Probed: Zen accepts the field and returns real
+  counts.
+- The Gemini route is still excluded from the body force, and the Messages route
+  is deliberately **not** cloaked: its only free-tier member was `union-alpha`,
+  now retired upstream, so there is no evidence for a tool shape there and an
+  OpenAI-format decoy in an Anthropic body would be an invented field.
+
+**Also found**: `union-alpha` is gone from the live catalog and answers
+`401 ModelError` on all three routes. Round 63's `_MESSAGES_PREFIXES` entry is
+therefore dead config and its tests pass only against a mocked endpoint; the
+Messages *route* itself remains live for `claude-*`/`qwen*`. Left in place —
+harmless, and removing it is a separate change.
+
+**Tests**: `tests/test_fix_round88.py` (21). `tests/test_fix_round29.py`'s
+"fresh session per request" pair pinned the old behaviour and was rewritten to
+the reuse contract (shared per credential, isolated across credentials, request
+id still per request).
+
+**Verified live end-to-end** through `Gateway.complete` on the non-streaming
+path, keyless: `mimo-v2.5-free` → 200 `"ok"` 500/36 tokens, `big-pickle` → 200
+`"ok"` 387/3, `muse-spark-1.3-contributor-free` → 200 569/48 — all
+`estimated=False`. All three were 403 before this change.
+
+**Open**: #174's entitlement classification is no longer exercised by any real
+upstream response (those probes were these same misread 403s). Whether
+`FreeTierError` should still map to *billing* is worth revisiting now that wiwi
+can avoid it by shape.
+
+## Round 89 — The decoys must not answer as tool calls (AUDIT #268) — 2026-09-19
+
+**File**: `wiwi/providers/opencode_adapter.py`
+
+**Found while verifying round 88 live.** Injecting `bash`/`read` to satisfy the
+free tier's tool-payload condition makes those tools callable, and a model asked
+to do exactly what one of them is named for will oblige. First live probe of the
+`read` case:
+
+```
+[chat] "Read the file config.py." -> tool_calls=['read']  (no text at all)
+```
+
+The client never declared `read`, cannot execute it, and now sits waiting for a
+dispatch — worse than the 403 this whole line of work replaced.
+
+**Why it cannot be fixed on the request side**: the gate requires the tools to be
+*offered*, so they cannot be withheld or removed, and a request carrying client
+tools keeps `tool_choice` at `auto` (only toolless requests get `"none"`). The
+only place the problem can be solved is the response.
+
+**After** (`encode_request` records what it injected; both decode paths act on
+it):
+- `_cloak_chat_tools` / `_cloak_responses_tools` now **return the names they
+  actually added**. A client's own `bash` is left in place by the cloak, so it is
+  not in that set and its calls pass through untouched — name alone never
+  decides, per-`_decoy_names` does.
+- `decode_stream_event` → `_filter_decoys`: drops the
+  Open/Args/Close triple for a decoy index (indices tracked in
+  `_decoy_indices`, so args arriving in later events go with their open) and
+  rewrites `Finish("tool_call")` → `Finish("stop")` when nothing real survived.
+- `decode_response` → `_filter_decoys_turn`: the same rule on the aggregated
+  path, for both the chat and responses decoders.
+- State is cleared at the top of `encode_request`, before the route dispatch, so
+  the Gemini early return cannot leave a previous request's filter armed.
+
+Dropping the triple whole is legal at this layer, and only because it *is* this
+layer: the wire encoders assign client-visible indices themselves
+(`anthropic_messages._tool_blocks`) and drop an `ArgsDelta` whose block never
+opened, so a gap in the IR index sequence is invisible to every client dialect.
+
+**Tests**: `tests/test_fix_round89.py` (13) — the cloak's return value (both
+routes, and the client-owns-`bash` case), filter state reset between requests,
+whole-triple drop with the finish rewrite, a real call surviving beside a decoy,
+the client-owned call passing through, a paid request arming nothing, args
+arriving in a later event than their open, and the aggregated path through both
+`_filter_decoys_turn` and a real `decode_response`. Verified load-bearing:
+neutralising the drop logic fails 6 of the 13.
+
+**Verified live**: the exact prompt that produced the phantom call now returns
+`finish: stop`, `tool_calls: None`, content *"I'm sorry, but I don't currently
+have access to the `read` tool…"* through the gateway's non-streaming path.
+Repeating the probe with `tool_choice: "none"` (toolless request) also answers in
+text, so the request-side hint is respected when the client sends no tools — but
+the response-side filter is what makes the guarantee.

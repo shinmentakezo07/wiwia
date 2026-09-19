@@ -257,6 +257,25 @@ def coerce_args_fragment(value: Any) -> str:
     return ""
 
 
+def as_dict(value: Any) -> dict:
+    """Return *value* when it is a dict, else ``{}``.
+
+    The sync decoders used ``data.get("usage") or {}`` / ``choice.get("message", {})``,
+    which default only a *missing* key: an explicit JSON ``null`` (or a string,
+    list or number) passes straight through and the next ``.get`` raises
+    ``AttributeError``. ``_decode_response_guarded`` turns that into a
+    retryable 502, so the router charges the failure to the key and deployment
+    health — a self-inflicted cooldown from a frame carrying no semantics
+    (AUDIT #247). Use this at every nested read on the sync path.
+    """
+    return value if isinstance(value, dict) else {}
+
+
+def as_list(value: Any) -> list:
+    """Return *value* when it is a list, else ``[]`` (AUDIT #247/#224)."""
+    return value if isinstance(value, list) else []
+
+
 
 class ProviderAdapter(Protocol):
     provider_type: str

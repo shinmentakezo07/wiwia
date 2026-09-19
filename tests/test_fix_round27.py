@@ -214,7 +214,10 @@ def test_encode_chat_delegates_to_openai_shape():
     body = a.encode_request(_chat_req(), "deepseek-v4-pro", {})
     assert body["model"] == "deepseek-v4-pro"
     assert body["messages"][0]["role"] == "user"
-    assert body["stream"] is False
+    # The transport declares forceStream: Zen answers as an event stream, so
+    # the body always asks for SSE and the gateway reassembles for a
+    # non-streaming caller (`stream: false` upstream yields an empty turn).
+    assert body["stream"] is True
 
 
 def test_encode_messages_delegates_to_anthropic_shape():

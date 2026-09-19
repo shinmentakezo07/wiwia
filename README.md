@@ -16,9 +16,9 @@
 </p>
 
 <p>
-  <img alt="Tests" src="https://img.shields.io/badge/tests-1225%20passing-34d399?style=for-the-badge">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-2378%20passing-34d399?style=for-the-badge">
   <img alt="Lint" src="https://img.shields.io/badge/lint-ruff%20clean-9CA3AF?logo=ruff&logoColor=white&style=for-the-badge">
-  <img alt="Test files" src="https://img.shields.io/badge/test%20files-62-7C3AED?style=for-the-badge">
+  <img alt="Test files" src="https://img.shields.io/badge/test%20files-126-7C3AED?style=for-the-badge">
   <img alt="Self-hosted" src="https://img.shields.io/badge/self--hosted-one%20binary-F59E0B?style=for-the-badge">
 </p>
 
@@ -99,7 +99,7 @@
 | Rate-limit pain across many keys | **Smooth weighted round-robin** key pools with per-key cooldowns, `failover_mode`, retries, and per-key cooldown reset. |
 | Reasoning parameters don't line up | Canonical IR collapses `reasoning_effort`, `thinking.budget_tokens`, and OpenRouter's `reasoning{}` into one form. Thinking blocks round-trip — multi-turn survives a mid-conversation model switch. |
 | Provider-hosted tools fragment per dialect | **Builtin tool registry** (`wiwi/ir/builtin_tools.py`): `web_search` renders as `web_search_20250305` (Anthropic), `web_search` (Responses), `google_search` (Gemini), `openrouter:web_search` — one canonical name in the IR. |
-| Want a UI, not just a YAML | Built-in dark admin SPA at `/admin/ui` — keys, providers, key pools, model groups, request logs, live SSE tail, per-request stats (TTFT, TPS, cost, cache savings, retry chain). |
+| Want a UI, not just a YAML | Built-in dark admin console at `/console` (login at `/login`) — keys, providers, key pools, model groups, request logs, live SSE tail, per-request stats (TTFT, TPS, cost, cache savings, retry chain). |
 | Mutating config means a restart | Live `/admin/*` mutations: edit routing weights, add/remove keys, rename providers, attach deployments — without dropping traffic. Everything persists to the DB via `ConfigStore`, **and** every mutation writes an `audit_logs` event. |
 | Costs and budgets | Virtual keys with budget / RPM / TPM / model allowlist / TTL. Per-request cost + token breakdown with aggregate and timeseries rollups. |
 | No idea what's happening right now | `/admin/stream` SSE live tail with `Last-Event-ID` replay, plus an optional Prometheus `/metrics` endpoint. |
@@ -161,7 +161,7 @@
 - Spend / error alert rules (storage; evaluation engine is post-MVP).
 
 ### 🛠️ Admin & operations
-- Dark SPA at `/admin/ui` with **16 console pages** plus a **Playground**.
+- Dark SPA at `/console` with **16 console pages** plus a **Playground**.
 - Master-key- or session-gated REST API at `/admin/*`.
 - Audit trail (`actor` / `action` / `target` / `diff`) for every mutation — *including credential reveals*.
 - SQLite by default; **PostgreSQL built in** (`asyncpg` ships as a core dependency — just set `DATABASE_URL`).
@@ -192,7 +192,7 @@ Client  ◄──  wire encoder  ◄──  IRStreamDelta*  ◄──  adapter.d
 
 The request lifecycle lives in `wiwi/server/app.py:run_chat_like` — **decode → auth → rate limit → router retries/fallbacks → gateway complete/stream** — and back out through the wire encoders. `wiwi/core/context.py:RequestContext` is the single mutable holder threaded through all of it.
 
-> 💡 `server/app.py` is ~3.3k lines and `core/gateway.py` ~970. Don't read either top to bottom. Start at `run_chat_like` and follow the pipeline it names.
+> 💡 `server/app.py` is ~4.5k lines and `core/gateway.py` ~1.9k. Don't read either top to bottom. Start at `run_chat_like` and follow the pipeline it names.
 
 ### 🌊 Streaming pipeline
 
@@ -204,6 +204,7 @@ Everything that touches a stream lives in `wiwi/streaming/` and is intentionally
 | `coalesce.py` | `DeltaCoalescer` — merges consecutive `TextDelta`s under backpressure (queue depth > 100, 8 KiB or 50 ms), bypassing entirely for fast consumers. Never coalesces across control deltas. |
 | `loopdetect.py` | O(1)-per-token repetition detector. Tracks periods 1..8 simultaneously; aborts when the window becomes periodic. Periods above 8 are deliberately uncovered — a genuine period-40 loop isn't the failure mode, and the quadratic scan was what ate the hot path. |
 | `resume.py` | `StreamTape` — 256 KiB ring of content-bearing deltas with monotonic event ids. Two roles: mid-stream failover (Anthropic capture-and-resume) and `Last-Event-ID` replay for reconnecting SSE clients. |
+| `tape_store.py` | Durable stream journal — every encoded SSE chunk is appended to a per-request JSONL file (`<dir>/<request_id>.jsonl`, base64, monotonic `seq`), so `Last-Event-ID` replays survive a gateway restart. Journals record the owning virtual key and expire after `stream_journal_ttl_s`. |
 | `partial_json.py` | Vercel-AI-SDK-style incremental JSON parser for streaming tool-call args. Auto-repairs truncated JSON at close (appends missing `"` / `]` / `}`), never raises on malformed input. |
 | `validation.py` | Tool-call args validated against the declared JSON schema on `ToolCallClose`. Caps payloads at 1 MiB; **never logs raw args** — only length plus the first 16 hex of a SHA-256 fingerprint, so tool payloads containing user secrets don't leak via structlog. |
 | `sse.py` | SSE framing helpers used by the wire encoders. |
@@ -295,7 +296,7 @@ uv venv && uv pip install -e ".[dev]"
 wiwi --config wiwi.yaml               # serves http://0.0.0.0:4000
 ```
 
-Then open **<http://localhost:4000/admin/ui>** and log in with the master key.
+Then open **<http://localhost:4000/login>** and sign in with the master key — the console lives at `/console`.
 
 ### 🐳 Or run with Docker
 
@@ -580,7 +581,7 @@ wiwi_params:
 ## 🗂️ Project structure
 
 ```
-wiwi/                      15.5k lines of Python across 58 modules
+wiwi/                      26k lines of Python across 70 modules
 ├── main.py                CLI entrypoint (wiwi --config …)
 ├── config.py              YAML → pydantic; env interpolation; PROVIDER_TYPES
 ├── ir/                    Canonical IR: types.py (tagged parts, messages,
@@ -591,19 +592,20 @@ wiwi/                      15.5k lines of Python across 58 modules
 ├── core/                  gateway.py (execution engine, pricing, log events)
 │                          context.py (RequestContext)
 ├── streaming/             deltas · coalesce · loopdetect · resume
-│                          partial_json · validation · sse
+│                          partial_json · validation · sse · tape_store
 ├── router/router.py       Model groups, key pools (smooth WRR), cooldowns,
 │                          retries, fallbacks, BUILTIN_PROVIDER_TYPES catalog
 ├── auth/                  keys.py · service.py · users.py
 ├── ratelimit/             memory.py + redis.py sliding-window limits
+├── cache/                 response_cache (memory) · redis_cache · keygen · interface
 ├── cost/pricing.py        Cost engine + token estimation fallback
 ├── logging_core/          events.py · db_sink.py · subsystem.py (ring buffer)
 └── server/                app.py (FastAPI factory, proxy + /admin/*)
                            config_store.py (DB persistence for admin mutations)
                            stats.py (pure rollups) · metrics.py (Prometheus)
 
-web/                       31.7k lines of TS/TSX — 51 page components (97 .tsx total)
-tests/                     62 test files — unit (respx), ASGI e2e, Hypothesis
+web/                       28.5k lines of TS/TSX — 52 page components (74 files under src/, 65 .tsx)
+tests/                     126 test files — unit (respx), ASGI e2e, Hypothesis
 ```
 
 | Path | Role |
@@ -612,7 +614,7 @@ tests/                     62 test files — unit (respx), ASGI e2e, Hypothesis
 | `wiwi/server/config_store.py` | Persists admin-created providers / keys / deployments so they survive restart. **YAML entries are never written to the DB** — they're always reloaded from the file. |
 | `wiwi/server/stats.py` | Pure functions over `LogEvent` lists — unit-testable with no DB. |
 | `bench.py` | Stress / latency / TPS tester for wiwi and any OpenAI-compatible proxy |
-| `docs/` | `ARCHITECTURE` · `CORE` · `ADMIN` · `MVP` · `PLAN` · `TECHSTACK` · `STREAMING_PERFORMANCE_RECOVERY` |
+| `docs/` | `ARCHITECTURE` · `CORE` · `STREAMING` · `ADMIN` · `API_REFERENCE` · `CONFIG` · `PROVIDERS` · `QUICKSTART` · `DEVELOPMENT` · `MVP` · `PLAN` · `TECHSTACK` · `STREAMING_PERFORMANCE_RECOVERY` |
 
 ### 🗄️ Database tables
 
@@ -629,7 +631,7 @@ tests/                     62 test files — unit (respx), ASGI e2e, Hypothesis
 
 ## 🎨 Admin UI
 
-Two surfaces ship from the same `web/` source: a **dark admin console** at `/console/*` and a **31-route public marketing site** at `/` (landing, docs, pricing, blog, model catalog, cost calculators, and more).
+Two surfaces ship from the same `web/` source — 74 files / ~28.5k lines of TS/TSX across 52 page components: a **dark admin console** (16 routes under `/console/*`) and a **33-route public marketing site** at `/`, plus `/login`, `/signup`, and `/playground` outside the shell. The SPA builds to `wiwi/server/static/` and FastAPI mounts it at `/` with history fallback, so every client route survives a hard refresh; API paths (`/admin/*`, `/v1/*`, `/auth/*`, `/public/*`, `/health`) are matched first.
 
 ### 🖥️ Console pages
 
@@ -641,7 +643,11 @@ Two surfaces ship from the same `web/` source: a **dark admin console** at `/con
 | **Admin** | Budgets & Alerts · Proxy Logs · Users · Settings |
 | *(outside shell)* | Playground · Login · Signup · Onboarding |
 
-Providers, Built-in Providers, Proxy Logs, Settings, and Users are **admin-only** — the sidebar appends them only when the current user has the admin role.
+Providers, ProviderDetail, Built-in Providers, OAuth Cline, WorkBuddy, Combos, Proxy Logs, Settings, and Users are **admin-only** — the routes are wrapped in `RequireAdmin`, and the sidebar merges its admin-only sections into the matching titles so admins see each section header exactly once.
+
+### 🌐 Public front
+
+`PublicLayout` wraps every unauthenticated route: a sticky top `Navbar`, the same ambient grid + radial-glow backdrop as the console, and a three-column footer (Product / Resources / Get started). The landing page (`pages/Landing.tsx`) stacks twelve sections: a full-height hero on the animated `HeroBeamBackdrop` (gradient headline, three CTAs, trust checks, six provider chips) → four stat cards → tier-1 feature cards over a dot-grid → the how-it-works beam graph (`GraphSection`) → tabbed code examples (`CodeTabs`) → per-provider uptime/outage bars → testimonials → pricing → comparison table → FAQ → enterprise CTA → final CTA. Every section reveals on scroll (`scroll-reveal`).
 
 ### 🎨 Design system
 
@@ -665,10 +671,10 @@ Brand accent (login page + logo gradient): the `brand-*` Tailwind ramp in `@them
 
 **Layout shell** (`components/Layout.tsx`)
 
-- **Fixed sidebar** (260px, collapses to 72px) on `#0a0a0a`, grouped into Overview / Traffic / Configuration / Admin. Active item gets a blue left-edge bar + `blue-500/[0.06]` tint.
-- **Blurred topbar** (`backdrop-filter: blur(12px)` over `rgba(5,5,5,0.75)`) with page section + title, a live/offline SSE pulse badge, a mono tabular clock, and Sign out.
+- **Sidebar**: a 272px column grouped Overview / Traffic / Configuration / Admin with the logo header; collapses to a 72px icon rail on desktop (⌘/Ctrl+B). Below `lg` it becomes an overlay drawer — dimmed blurred backdrop, Escape closes, body scroll locks, focus moves in and returns to the hamburger. Active item gets a blue left-edge bar + `blue-500/[0.06]` tint. Bottom: identity card (shield avatar, SSE live status dot, masked key, role badge) and a Collapse button with `⌘B` kbd.
+- **Fixed 64px topbar**: `backdrop-filter: blur(12px) saturate(1.2)` over `rgba(5,5,5,0.75)` — section eyebrow + page title, a centered live/offline SSE pulse badge (dot-only on narrow screens), a mono tabular live clock, and Sign out; a blue→violet gradient hairline runs under the header.
 - **Ambient backdrop**: fixed layer with a 64px grid at 2% opacity plus three radial glows (blue top-left, violet bottom-right, purple center).
-- Content scrolls inside `main.admin-scroll` (thin gradient scrollbar), capped at `max-w-[1400px]`, with a staggered fade-up entrance.
+- Content scrolls inside `main.admin-scroll` (thin gradient scrollbar), capped at `max-w-[1400px]`, offset by `--sidebar-w`, with a staggered fade-up entrance.
 
 **Component kit** (`components/ui.tsx`)
 
@@ -676,20 +682,19 @@ Brand accent (login page + logo gradient): the `brand-*` Tailwind ramp in `@them
 |---|---|
 | `Card` / `CardHeader` / `PageHeader` | `admin-card` surfaces, gradient top-line on hover, `admin-stat-highlight` |
 | `Button` | `primary` (blue-tinted soft fill) · `ghost` · `danger` · `outline` |
-| `Input` / `Select` / `Field` | `admin-input` with focus ring `0 0 0 3px rgba(99,102,241,0.08)` |
+| `Input` / `NumberInput` / `Select` / `Field` | `admin-input` with focus ring `0 0 0 3px rgba(99,102,241,0.08)` |
 | `Toggle` | switch with blue glow when on |
 | `Badge` | green / red / amber / gray / blue / violet — uppercase 10px, soft tinted bg |
 | `StatCard` | hero metric with gradient-text value, optional 12-point sparkline, delta chip (`↑/↓ N% vs prev hour`), `waiting` pulse at zero traffic |
 | `Table` / `TD` | sticky headers, uppercase 10px headers, row hover |
 | `Dialog` | portal modal, overlay fade + lift/blur entrance, Escape + click-outside |
-| `CopyButton` · `Spinner` · `EmptyState` · `ErrorText` · `ProgressBar` | |
+| `Drawer` · `CopyButton` · `Spinner` · `LiveBadge` · `EmptyState` · `ErrorText` · `ProgressBar` | |
 
-**Login page** (`pages/Login.tsx`) — the one light/dark screen (the rest is dark-only), centered on a glass card:
+**Login page** (`pages/Login.tsx`) — a dark two-panel shell on pure black:
 
-- **Ambient backdrop**: blueprint grid (`wiwi-grid`, 44px, radial mask), two drifting aurora orbs (violet + fuchsia, 20s `wiwi-drift`), a film-grain noise layer, and a central radial bloom.
-- **Glass card** (`wiwi-card-glow`): `backdrop-blur-xl` over `white/80` (light) / `zinc-900/70` (dark), layered brand box-shadow, gradient light-line across the top edge.
-- **Signature diagram** (`GatewayDiagram`): an SVG of wiwi's real hub-and-spoke routes — three inbound dialects converge into the `w` node and fan out to providers. Inbound paths use a violet gradient stroke with animated dashes (`wiwi-flow`); outbound use fuchsia. The hub has a breathing radial halo (`wiwi-hub-pulse`, 3.2s); endpoint dots pulse on staggered delays.
-- **Form**: master-key input with key icon, show/hide toggle, mono font. Submit has a gradient fill with a shimmer sweep on hover; errors shake (`wiwi-shake`).
+- **Ambient backdrop**: rotated white light streaks (`lg-streaks`), a beam-grid wash, two drifting aurora orbs (blue + violet, 22s `wiwi-drift`), a rotating bloom ring (`lg-bloom`), and an edge vignette to black.
+- **Left showcase** (below `lg` the beam diagram moves inside the card, and hides entirely on short viewports): a "routing live" badge, gradient headline, three inbound-dialect chips, and the `Showcase` panel framed by corner brackets and a hairline divider.
+- **Right credential card**: `wiwi-glass-card` inside a rotating `wiwi-conic-border`, top highlight line, a pointer-following light (cursor position fed to `--mx`/`--my` CSS vars), master-key ↔ username/password mode tabs, show/hide key toggle, mono inputs, gradient submit with shimmer sweep; errors shake (`wiwi-shake`).
 - **Trust footer**: lock icon + "Key stays in this browser — checked once against your gateway."
 
 **Motion language**
@@ -700,12 +705,14 @@ Brand accent (login page + logo gradient): the `brand-*` Tailwind ramp in `@them
 | `admin-pulse-dot` | Live badge pulse | 2s infinite |
 | `admin-skeleton` | Shimmer placeholder | 1.8s infinite |
 | `admin-waiting-pulse` | Zero-traffic stat breathing | 2.4s infinite |
-| `wiwi-enter` | Login card entrance (translateY + blur) | 0.55s |
-| `wiwi-flow` | Diagram dash flow | 1.5s linear infinite |
-| `wiwi-aurora` / `wiwi-drift` | Background orb drift | 20s infinite |
-| `wiwi-hub-pulse` | Hub glow breathing | 3.2s infinite |
+| `wiwi-enter` | Login/Signup card entrance (translateY + blur) | 0.55s |
+| `wiwi-aurora` | Background orb drift (`wiwi-drift` keyframes) | 22s infinite |
+| `wiwi-conic-border` | Login card rotating conic-gradient border | 6s linear infinite |
 | `wiwi-shimmer` | Button hover sweep | 0.7s on hover |
-| `wiwi-shake` | Login error shake | 0.3s |
+| `wiwi-shake` | Login/Signup error shake | 0.3s |
+| `lg-slide-left` / `lg-bloom` | Login showcase slide-in / rotating bloom ring | 0.9s / 14s infinite |
+| `animate-hero-enter` | Landing/models/Playground hero entrance | 0.9s |
+| `scroll-reveal` | Landing/pricing section fade-up | scroll-driven (`animation-timeline: view()`) |
 
 All motion is gated behind `@media (prefers-reduced-motion: no-preference)` and disables cleanly under `reduce`.
 
@@ -882,8 +889,8 @@ curl -X POST localhost:4000/admin/workbuddy/refresh -H "$MK" -d '{"label": "main
 ## 🧪 Tests & lint
 
 ```bash
-python3 -m pytest tests/ -q                                 # 1225 tests, all green
-python3 -m pytest tests/test_fix_round27.py -q              # latest regression file
+python3 -m pytest tests/ -q                                 # 2378 tests, all green
+python3 -m pytest tests/test_fix_round90.py -q              # latest regression file
 python3 -m pytest tests/test_codecs.py -q                   # single file
 python3 -m pytest tests/test_router.py -k cooldown          # single test by name
 
@@ -891,9 +898,9 @@ ruff check wiwi/ tests/                                     # line-length 100, t
 cd web && bun run lint                                      # eslint (web/ is not ruff-covered)
 ```
 
-The suite is **62 test files** mixing **unit tests** (`respx` HTTP mocks), **ASGI end-to-end tests** through the full app, and **Hypothesis property-based round-trips** over the dialect ↔ IR codecs. `pytest-asyncio` runs in `asyncio_mode = "auto"`, so write bare `async def test_…` — no decorator needed.
+The suite is **126 test files** mixing **unit tests** (`respx` HTTP mocks), **ASGI end-to-end tests** through the full app, and **Hypothesis property-based round-trips** over the dialect ↔ IR codecs. `pytest-asyncio` runs in `asyncio_mode = "auto"`, so write bare `async def test_…` — no decorator needed.
 
-Bugfix regressions land in the next thematic `test_fix_roundN.py` file — **`test_fix_round27.py` is the current in-flight one**. Gaps in the numbering (e.g. no `round1`, no `round5`) are real: old numbers were collapsed into `test_bugfix_round5.py` and other thematic files. Find the next unused number with `ls tests/test_fix_round*.py`.
+Bugfix regressions land in the next thematic `test_fix_roundN.py` file — **`test_fix_round90.py` is the current in-flight one**. Gaps in the numbering (e.g. no `round1`, no `round5`) are real: old numbers were collapsed into `test_bugfix_round5.py` and other thematic files. Find the next unused number with `ls tests/test_fix_round*.py`.
 
 ---
 
@@ -905,13 +912,18 @@ Bugfix regressions land in the next thematic `test_fix_roundN.py` file — **`te
 | `AUDIT.md` | Known-bug register: severity, `file:line` citations, one-line fix sketches. Read before starting bugfix work. |
 | `docs/ARCHITECTURE.md` | System design |
 | `docs/CORE.md` | Handlers + streaming flow |
+| `docs/STREAMING.md` | Streaming subsystems internals |
 | `docs/ADMIN.md` | Admin UI/API design |
+| `docs/API_REFERENCE.md` | Endpoint reference |
+| `docs/CONFIG.md` | `wiwi.yaml` key-by-key reference |
+| `docs/PROVIDERS.md` | Per-provider setup guide |
+| `docs/QUICKSTART.md` · `docs/DEVELOPMENT.md` | Getting running · dev workflow |
 | `docs/MVP.md` | Scope + gap register |
 | `docs/PLAN.md` | Build phases |
 | `docs/TECHSTACK.md` | Technology choices |
 | `docs/STREAMING_PERFORMANCE_RECOVERY.md` | Streaming / tool-call / recovery improvement report |
 
-> ⚠️ `ARCHITECTURE.md` and `CORE.md` **intentionally run ahead of the implementation** (handler pipeline, DeltaBus, reasoning/cache subsystems, DB schema, and Postgres/Redis backends are specified but not yet built; their repo-layout sections show planned directories like `wire/openai_chat/` that are actually flat files). When docs and code disagree, **trust the code** — or treat the doc section as the spec for work you're about to do.
+> ⚠️ `ARCHITECTURE.md` and `CORE.md` **partly run ahead of the implementation** — DeltaBus and some handler-pipeline internals are still speculative, and their repo-layout sections show planned directories like `wire/openai_chat/` that are actually flat files. (Postgres and the Redis response cache, by contrast, are now built.) When docs and code disagree, **trust the code** — or treat the doc section as the spec for work you're about to do.
 
 ---
 
