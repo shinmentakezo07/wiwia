@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="340" height="64" viewBox="0 0 340 64">
+  <defs>
+    <linearGradient id="wiwi-brand" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6366f1"/>
+      <stop offset=".55" stop-color="#8b5cf6"/>
+      <stop offset="1" stop-color="#a855f7"/>
+    </linearGradient>
+    <linearGradient id="wiwi-text" x1="96" y1="0" x2="340" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f8fafc"/>
+      <stop offset="1" stop-color="#c4b5fd"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="15" fill="url(#wiwi-brand)"/>
+  <g fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="11,24 19.5,41 28,24 36.5,41 45,24 53,38"/>
+  </g>
+  <g fill="#ffffff">
+    <circle cx="11" cy="24" r="2.6"/>
+    <circle cx="28" cy="24" r="2.6"/>
+    <circle cx="45" cy="24" r="2.6"/>
+    <circle cx="53" cy="38" r="2.6" fill-opacity=".85"/>
+  </g>
+  <g transform="translate(96 46) scale(1.8)" fill="url(#wiwi-text)" fill-rule="evenodd">
+    <path d="M.33 0h3.01l1.56 6.87L6.48 0h3.03l1.56 6.87L12.64 0h3.03l-2.78 10.98h-3.15L11.18 3.74 9.62 10.98H6.6L5.05 3.74 3.48 10.98H.33Z"/>
+    <path d="M17.5 0h3.3v10.98h-3.3Zm.12-3.8h3.06V-.4h-3.06Z"/>
+    <path d="M22.63 0h3.3l3.14 6.99V0h3.09v10.98h-3.16l-3.28-7.15v7.15h-3.09Z"/>
+    <path d="M33.8 0h3.3l3.14 6.99V0h3.09v10.98h-3.16L36.89 3.83v7.15h-3.09Z"/>
+  </g>
+</svg>

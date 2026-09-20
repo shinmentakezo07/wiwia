@@ -1,25 +1,27 @@
 <div align="center">
 
+<img alt="wiwi — one gateway, every dialect, any provider" src="docs/assets/wiwi-hero.svg" width="1280">
+
 # 🌀 wiwi
 
 ### One gateway. Every dialect. Any provider.
 
-**Speak** OpenAI Chat · OpenAI Responses (Codex CLI) · Anthropic Messages (Claude Code) **on the inbound.**
+**Speak** OpenAI Chat · OpenAI Responses (Codex CLI) · Anthropic Messages (Claude Code) **on the inbound.**<br/>
 **Route to** OpenAI · Anthropic · Gemini · OpenRouter · NVIDIA NIM · Cline · WorkBuddy · GMI Cloud · B.AI · OpenCode Zen · any OpenAI-compatible endpoint.
 
 <p>
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-22c55e?style=for-the-badge"></a>
-  <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white&style=for-the-badge">
-  <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white&style=for-the-badge">
-  <img alt="React 19" src="https://img.shields.io/badge/React-19-149eca?logo=react&logoColor=white&style=for-the-badge">
-  <img alt="Vite" src="https://img.shields.io/badge/Vite-646CFF?logo=vite&logoColor=white&style=for-the-badge">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-22c55e?style=for-the-badge&logo=opensourceinitiative&logoColor=white"></a>
+  <a href="#-quickstart"><img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white"></a>
+  <a href="#-quickstart"><img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white"></a>
+  <a href="#-quickstart"><img alt="React 19" src="https://img.shields.io/badge/React_19-Vite_6-149eca?style=for-the-badge&logo=react&logoColor=white"></a>
+  <a href="#-quickstart"><img alt="Self-hosted" src="https://img.shields.io/badge/self--hosted-one%20process-F59E0B?style=for-the-badge&logo=docker&logoColor=white"></a>
 </p>
 
 <p>
-  <img alt="Tests" src="https://img.shields.io/badge/tests-2378%20passing-34d399?style=for-the-badge">
-  <img alt="Lint" src="https://img.shields.io/badge/lint-ruff%20clean-9CA3AF?logo=ruff&logoColor=white&style=for-the-badge">
-  <img alt="Test files" src="https://img.shields.io/badge/test%20files-126-7C3AED?style=for-the-badge">
-  <img alt="Self-hosted" src="https://img.shields.io/badge/self--hosted-one%20binary-F59E0B?style=for-the-badge">
+  <img alt="2442 tests, all green" src="https://img.shields.io/badge/tests-2442%20passing-34d399?style=for-the-badge&logo=pytest&logoColor=white">
+  <img alt="128 test files" src="https://img.shields.io/badge/test%20files-128-7C3AED?style=for-the-badge">
+  <img alt="ruff clean" src="https://img.shields.io/badge/lint-ruff%20clean-9CA3AF?style=for-the-badge&logo=ruff&logoColor=white">
+  <img alt="26k lines Python" src="https://img.shields.io/badge/26k%20Python%20%2B%2028.5k%20TS-54.7k%20LOC-blue?style=for-the-badge">
 </p>
 
 **3 inbound dialects × 11 outbound providers — no pairwise converters, one canonical IR.**
@@ -28,25 +30,47 @@
 
 ---
 
-## The shape of it
+## ✨ Why wiwi?
+
+> **LiteLLM gives you routing. wiwi gives you routing + a live control plane.**
+
+<table>
+<tr>
+<td width="50%">
+
+| 😩 Problem | 💡 wiwi's answer |
+|---|---|
+| One client dialect, many models behind it | **Hub-and-spoke translation.** Any of 3 inbound dialects ↔ any of 11 outbound providers. N×M coverage from N+M modules. |
+| Rate-limit pain across many keys | **Smooth weighted round-robin** key pools, per-key cooldowns, `failover_mode`, retries, per-key cooldown reset. |
+| Reasoning params don't line up | IR collapses `reasoning_effort`, `thinking.budget_tokens`, OpenRouter's `reasoning{}` into one form. Multi-turn survives a mid-conversation model switch. |
+| Provider-hosted tools fragment per dialect | **Builtin tool registry** — one canonical `web_search`, rendered natively per surface. |
+| Want a UI, not just YAML | Built-in dark console at `/console` — keys, providers, pools, groups, live SSE logs, per-request TTFT/TPS/cost. |
+| Mutating config means a restart | Live `/admin/*` mutations persist to DB **and** write an audit event. No dropped traffic. |
+| Costs and budgets | Virtual keys with budget / RPM / TPM / model allowlist / TTL + aggregate & timeseries rollups. |
+| No idea what's happening *now* | `/admin/stream` SSE live tail with `Last-Event-ID` replay, plus opt-in Prometheus `/metrics`. |
+
+</td>
+</tr>
+</table>
+
+---
+
+## 🧠 The shape of it
 
 ```
-      INBOUND (3 dialects)                 CORE                   OUTBOUND (11 providers)
-  ┌────────────────────────┐                                ┌──────────────────────────────┐
-  │ 🟢 OpenAI Chat         │──┐                          ┌──│ openai                       │
-  │    /v1/chat/completions│  │                          │  │ anthropic                    │
-  │                        │  │                          │  │ gemini                       │
-  │ 🟣 OpenAI Responses    │──┼──►  Canonical IR  ──►    ├──│ openrouter                   │
-  │    /v1/responses       │  │     (wiwi/ir)            │  │ nvidia-nim                   │
-  │                        │  │          │               │  │ cline          (OAuth)       │
-  │ 🟠 Anthropic Messages  │──┘          │               │  │ workbuddy      (OAuth)       │
-  │                        │             │               │  │ gmicloud                     │
-  │                        │             │               │  │ bai                          │
-  │                        │             │               │  │ opencode       (Zen)         │
-  │                        │             │               │  │ openai-compatible            │
-  └────────────────────────┘             │               └──────────────────────────────┘
-      │                    ┌──────────────────────────┐
-      │                    │ router   key pools · WRR │
+      INBOUND (3 dialects)                 CORE                    OUTBOUND (11 providers)
+  ┌────────────────────────┐                                 ┌──────────────────────────────┐
+  │ 🟢 OpenAI Chat         │──┐                           ┌──│ openai         openai-compat │
+  │    /v1/chat/completions│  │                           │  │ anthropic      gemini        │
+  │                        │  │                           │  │ openrouter     nvidia-nim    │
+  │ 🟣 OpenAI Responses    │──┼──►  Canonical IR  ──►     ├──│ cline · workbuddy (OAuth)    │
+  │    /v1/responses       │  │     (wiwi/ir)             │  │ gmicloud       bai           │
+  │                        │  │          │                │  │ opencode (Zen)               │
+  │ 🟠 Anthropic Messages  │──┘          ▼                ├──│                              │
+  │    /v1/messages        │             │                │  └──────────────────────────────┘
+  └────────────────────────┘             │                │
+      │                    ┌─────────────┴────────────┐   │
+      │                    │ router   key pools · WRR │   │
       │                    │          retries · cooldown
       │                    │          fallbacks · cycle-N
       │                    ├──────────────────────────┤
@@ -62,47 +86,7 @@
           (Claude Code can be backed by GPT, and never knows)
 ```
 
-**The payoff:** adding an inbound surface is one module in `wiwi/wire/`. Adding an outbound provider is one adapter in `wiwi/providers/` plus a line in the registry. Core code never branches on dialect or provider name.
-
----
-
-## Contents
-
-| | |
-|---|---|
-| [✨ Why wiwi](#-why-wiwi) | the problems it actually solves |
-| [🚀 Features](#-features) | translation · routing · auth · observability · admin |
-| [🧠 How it works](#-how-it-works) | request lifecycle + streaming pipeline |
-| [📥 Surfaces](#-surfaces-inbound) | endpoints + translation matrix |
-| [📤 Providers](#-providers-outbound) | all 11, with default endpoints |
-| [⚡ Quickstart](#-quickstart) | run it in 60 seconds |
-| [🧰 Commands](#-commands) | install · run · benchmark |
-| [🔌 Connecting clients](#-connecting-clients) | Claude Code · Codex · SDK · curl |
-| [⚙️ Configuration](#-configuration-wiwiyaml) | full `wiwi.yaml` reference |
-| [🗂️ Project structure](#-project-structure) | where everything lives |
-| [🎨 Admin UI](#-admin-ui) | design system + console pages |
-| [📡 API reference](#-api-reference) | every endpoint |
-| [🧪 Tests & lint](#-tests--lint) | |
-| [📚 Docs](#-docs) | |
-| [🛡️ Guardrails](#-guardrails) | |
-| [📜 License & terms](#-license--terms) | MIT · [TERMS.md](TERMS.md) |
-
----
-
-## ✨ Why wiwi?
-
-> LiteLLM gives you routing. wiwi gives you **routing + a live control plane**.
-
-| 😩 Problem | 💡 wiwi's answer |
-|---|---|
-| One client dialect, many models behind it | **Hub-and-spoke translation.** Any of 3 inbound dialects ↔ any of 11 outbound providers. N×M coverage from N+M modules. |
-| Rate-limit pain across many keys | **Smooth weighted round-robin** key pools with per-key cooldowns, `failover_mode`, retries, and per-key cooldown reset. |
-| Reasoning parameters don't line up | Canonical IR collapses `reasoning_effort`, `thinking.budget_tokens`, and OpenRouter's `reasoning{}` into one form. Thinking blocks round-trip — multi-turn survives a mid-conversation model switch. |
-| Provider-hosted tools fragment per dialect | **Builtin tool registry** (`wiwi/ir/builtin_tools.py`): `web_search` renders as `web_search_20250305` (Anthropic), `web_search` (Responses), `google_search` (Gemini), `openrouter:web_search` — one canonical name in the IR. |
-| Want a UI, not just a YAML | Built-in dark admin console at `/console` (login at `/login`) — keys, providers, key pools, model groups, request logs, live SSE tail, per-request stats (TTFT, TPS, cost, cache savings, retry chain). |
-| Mutating config means a restart | Live `/admin/*` mutations: edit routing weights, add/remove keys, rename providers, attach deployments — without dropping traffic. Everything persists to the DB via `ConfigStore`, **and** every mutation writes an `audit_logs` event. |
-| Costs and budgets | Virtual keys with budget / RPM / TPM / model allowlist / TTL. Per-request cost + token breakdown with aggregate and timeseries rollups. |
-| No idea what's happening right now | `/admin/stream` SSE live tail with `Last-Event-ID` replay, plus an optional Prometheus `/metrics` endpoint. |
+**The payoff:** adding an inbound surface is one module in `wiwi/wire/`. Adding an outbound provider is one adapter in `wiwi/providers/` plus a line in the registry. Core code *never* branches on dialect or provider name.
 
 ---
 
@@ -125,12 +109,13 @@
 ### 🧭 Routing & resilience
 - Key pools with **smooth weighted round-robin** (per-key `weight`, `enabled`).
 - Cooldowns on failure, `allowed_fails` threshold, configurable `cooldown_time`.
-- `failover_mode: any_error | standard` — rotate on any non-200, or keep historical 429/5xx-only behaviour.
+- `failover_mode: any_error | standard` — rotate on any non-200, or keep 429/5xx-only behavior.
 - `key_max_consecutive_fails` permanently retires a dead key (401/403 count double).
 - Retries with `fallbacks:` plus a separate `context_window_fallbacks:` table for overflow errors.
 - Strategies: `simple-shuffle`, `least-busy`, `latency-based`.
 - `cycle_every_n` forces cursor advancement so traffic actually *rotates*, not just weight-spreads.
-- Rich aliases: `model_group_alias` accepts a plain string or a rich `{target, force_mapping}` entry.
+- Optional scored health model: EWMA latency + success-rate scoring, adaptive cooldowns, opt-in `HealthHealer` that probes sick keys with 1-token requests.
+- Rich aliases: `model_group_alias` accepts a plain string or `{target, force_mapping}`.
 
 </td>
 <td width="50%" valign="top">
@@ -142,35 +127,112 @@
 - `stream_resume: off | content_only | enabled` — mid-stream failover with partial output prepended.
 - `stream_event_ids` — monotonic SSE ids for client-side resumption.
 - `stream_grace_drain_s` — keep pumping upstream after client disconnect for accurate billing.
+- **Durable journals** — every encoded SSE chunk is appended to a per-request JSONL file, so `Last-Event-ID` replays survive a gateway restart.
 
 ### 🔐 Auth, cost, limits
 - Virtual keys (`sk-wiwi-…`), SHA-256-hashed at rest, plaintext shown once at mint. Optional `custom_key` (≥16 chars).
 - Per-key: `max_budget`, `rpm`, `tpm`, model allowlist, TTL, enable/disable.
 - Per-deployment: `max_tokens`, `rpm`, `tpm`, `timeout`, `extra_headers`, `extra_body`.
-- User accounts (`/auth/signup|login|logout|me`) with roles; `max_keys_per_user` caps live keys per owner (admins exempt).
+- User accounts with roles; `max_keys_per_user` caps live keys per owner (admins exempt).
 - `POST /auth/playground-key` mints a scoped session key (24h TTL, 5 per user).
 - Optional global `global_rpm` / `global_tpm` sliding-window caps.
 - Cost engine with an explicit `unpriced` flag so unknown models are logged, not silently $0.
 
 ### 📊 Observability
 - Per-request DB row: input / cached / reasoning / output tokens, TTFT, latency, TPS, cost, cache hit + savings, full retry chain, which key served it.
-- Proxy-level ring-buffer log.
 - `/admin/stream` SSE live tail (`Last-Event-ID` replay, keepalive pings).
 - `/admin/stats/overview` + `/admin/stats/timeseries?bucket=…&metric=…`.
-- Prometheus `/metrics` (opt-in via `prometheus_enabled`) — 8 metric families.
-- Spend / error alert rules (storage; evaluation engine is post-MVP).
+- Prometheus `/metrics` (opt-in) — 8 metric families.
+- Spend / error alert rules (storage; evaluation engine post-MVP).
 
 ### 🛠️ Admin & operations
 - Dark SPA at `/console` with **16 console pages** plus a **Playground**.
 - Master-key- or session-gated REST API at `/admin/*`.
 - Audit trail (`actor` / `action` / `target` / `diff`) for every mutation — *including credential reveals*.
-- SQLite by default; **PostgreSQL built in** (`asyncpg` ships as a core dependency — just set `DATABASE_URL`).
+- SQLite by default; **PostgreSQL built in** (`asyncpg` is a core dependency — just set `DATABASE_URL`).
 - Optional Redis backend for the response cache via the `[redis]` extra (`REDIS_URL`).
 - `--reload` dev mode, `start.sh` wrapper, multi-stage Docker build.
 
 </td>
 </tr>
 </table>
+
+---
+
+## 📥 Surfaces (inbound)
+
+| | Endpoint | Dialect | Works with |
+|---|---|---|---|
+| <img src="docs/assets/inbound/openai-chat.svg" width="26" height="26" alt="OpenAI"> | `/v1/chat/completions` | 🟢 **OpenAI Chat** | openai SDK, LangChain, curl |
+| <img src="docs/assets/inbound/openai-responses.svg" width="26" height="26" alt="Responses"> | `/v1/responses` | 🟣 **OpenAI Responses** | Codex CLI (`base_url` → wiwi) |
+| <img src="docs/assets/inbound/anthropic-messages.svg" width="26" height="26" alt="Anthropic"> | `/v1/messages` | 🟠 **Anthropic Messages** | Claude Code (`ANTHROPIC_BASE_URL` → wiwi), anthropic SDK |
+| <img src="docs/assets/inbound/anthropic-messages.svg" width="26" height="26" alt="count"> | `/v1/messages/count_tokens` | 🟠 Anthropic | token counting, no inference |
+| 📋 | `GET /v1/models` | model list | all |
+| 💚 | `GET /health` | liveness | `{status, groups, providers}` |
+| 📈 | `GET /metrics` | Prometheus | opt-in, master-key gated |
+
+> 🪄 **Response shape always matches the inbound dialect.** OpenAI clients see OpenAI error envelopes (`{"error":{…}}`); Anthropic clients see Anthropic error envelopes (`{"type":"error",…}`). Every response carries `x-wiwi-request-id` and `x-wiwi-latency-ms`; bodies over `max_request_body_mb` (default 50) get a 413.
+
+### 🔁 Dialect × Provider translation matrix
+
+Any inbound dialect works with any outbound provider. The IR handles translation — no pairwise converters.
+
+| ↓ In ╲ Out → | OpenAI | Anthropic | Gemini | OpenRouter | NIM | Cline | B.AI | GMI | WorkBuddy | OpenAI-compat | OpenCode |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| 🟢 **OpenAI Chat**       | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 🟣 **OpenAI Responses**  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 🟠 **Anthropic Messages**| ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+---
+
+## 📤 Providers (outbound)
+
+All 11 types ship in `wiwi/config.py:PROVIDER_TYPES` — the single source of truth. The router catalog, admin validation, and the Pydantic schema all reference it, and import-time `assert`s in `registry.py` and `router.py` fail loudly if a type is added without a matching adapter and catalog card.
+
+<table>
+  <tr>
+    <td align="center" width="120"><img src="docs/assets/providers/openai.svg" width="84" alt="OpenAI"><br/><sub><b>OpenAI</b></sub></td>
+    <td align="center" width="120"><img src="docs/assets/providers/anthropic.svg" width="84" alt="Anthropic"><br/><sub><b>Anthropic</b></sub></td>
+    <td align="center" width="120"><img src="docs/assets/providers/gemini.svg" width="84" alt="Gemini"><br/><sub><b>Gemini</b></sub></td>
+    <td align="center" width="120"><img src="docs/assets/providers/openrouter.svg" width="84" alt="OpenRouter"><br/><sub><b>OpenRouter</b></sub></td>
+    <td align="center" width="120"><img src="docs/assets/providers/nvidia-nim.svg" width="84" alt="NVIDIA NIM"><br/><sub><b>NVIDIA NIM</b></sub></td>
+    <td align="center" width="120"><img src="docs/assets/providers/cline.svg" width="84" alt="Cline"><br/><sub><b>Cline</b></sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/assets/providers/workbuddy.svg" width="84" alt="WorkBuddy"><br/><sub><b>WorkBuddy</b></sub></td>
+    <td align="center"><img src="docs/assets/providers/gmicloud.svg" width="84" alt="GMI Cloud"><br/><sub><b>GMI Cloud</b></sub></td>
+    <td align="center"><img src="docs/assets/providers/bai.svg" width="84" alt="B.AI"><br/><sub><b>B.AI</b></sub></td>
+    <td align="center"><img src="docs/assets/providers/opencode.svg" width="84" alt="OpenCode Zen"><br/><sub><b>OpenCode Zen</b></sub></td>
+    <td align="center"><img src="docs/assets/providers/openai-compatible.svg" width="84" alt="OpenAI-compatible"><br/><sub><b>OpenAI-compat</b></sub></td>
+    <td align="center"><img src="docs/assets/wiwi-mark.svg" width="84" alt="you"><br/><sub><b>+ yours</b></sub></td>
+  </tr>
+</table>
+
+| Type | Adapter | Default endpoint | Notes |
+|---|---|---|---|
+| <img src="docs/assets/providers/openai.svg" width="18"> `openai` | `openai_adapter.py` | `https://api.openai.com/v1` | Chat + Responses; `base_url` configurable |
+| <img src="docs/assets/providers/anthropic.svg" width="18"> `anthropic` | `anthropic_adapter.py` | `https://api.anthropic.com/v1` | thinking + `cache_control` pass through; native `output_config` |
+| <img src="docs/assets/providers/gemini.svg" width="18"> `gemini` | `gemini_adapter.py` | `https://generativelanguage.googleapis.com/v1beta` | multimodal, structured output, function calling |
+| <img src="docs/assets/providers/openrouter.svg" width="18"> `openrouter` | `openrouter_adapter.py` | `https://openrouter.ai/api/v1` | unified `reasoning{}` translation, `reasoning_details` decoding |
+| <img src="docs/assets/providers/nvidia-nim.svg" width="18"> `nvidia-nim` | `nim_adapter.py` | `https://integrate.api.nvidia.com/v1` | **vLLM quirks**: `nim_tool_schema.py` strips boolean JSON-Schema subschemas, aliases params named `type`, restores agent-facing names on the way back |
+| <img src="docs/assets/providers/cline.svg" width="18"> `cline` | `cline_adapter.py` | `https://api.cline.bot/api/v1` | OAuth (WorkOS) with on-demand refresh, cross-account WRR, global default-model list, live npm version fingerprints |
+| <img src="docs/assets/providers/workbuddy.svg" width="18"> `workbuddy` | `workbuddy_adapter.py` | `https://copilot.tencent.com` | WorkBuddy / CodeBuddy (Tencent); nested-JSON auth, stream-only upstream, business errors ride HTTP 200 in `{code,msg,data}` |
+| <img src="docs/assets/providers/gmicloud.svg" width="18"> `gmicloud` | *(openai wire)* | `https://api.gmi-serving.com/v1` | GMI Cloud serving endpoint |
+| <img src="docs/assets/providers/bai.svg" width="18"> `bai` | `bai_adapter.py` | `https://api.b.ai/v1` | B.AI unified gateway — one key across Chat / Responses / Messages; replays `reasoning_content` on tool-call turns |
+| <img src="docs/assets/providers/opencode.svg" width="18"> `opencode` | `opencode_adapter.py` | `https://opencode.ai/zen/v1` | OpenCode Zen — per-model protocol routing (Responses for GPT/Grok, Messages for Claude/Qwen, Gemini for Gemini) with a live `User-Agent` refreshed every 5 min |
+| <img src="docs/assets/providers/openai-compatible.svg" width="18"> `openai-compatible` | *(openai wire)* | *(you supply it)* | any URL — Ollama, vLLM, LM Studio, Together, Groq, DeepSeek |
+
+> 🔐 Provider keys enter as `os.environ/NAME` in YAML. **Nothing is committed to the repo** — `wiwi.yaml`, `wiwi.db`, `.env`, `key.md` are all gitignored.
+
+### 🔧 Provider-hosted builtin tools
+
+Some tools are executed *by the provider* — the model never sees a function schema. `wiwi/ir/builtin_tools.py` holds the canonical registry; per-surface wire types are rendered at the codec/adapter boundaries.
+
+| Canonical | Anthropic | Responses | Gemini | OpenRouter | OpenAI Chat |
+|---|---|---|---|---|---|
+| `web_search` | `web_search_20250305` | `web_search` | `google_search` | `openrouter:web_search` | — *(dropped with a warning)* |
+
+Config subset carried in `Tool.builtin_config`: `max_uses`, `allowed_domains`, `blocked_domains`, `user_location`, `search_context_size`. Surfaces render what they understand and drop the rest. Unmapped builtins (e.g. Anthropic `code_execution_20250522`) stay builtin-shaped in the IR so they survive a round-trip.
 
 ---
 
@@ -196,16 +258,16 @@ The request lifecycle lives in `wiwi/server/app.py:run_chat_like` — **decode �
 
 ### 🌊 Streaming pipeline
 
-Everything that touches a stream lives in `wiwi/streaming/` and is intentionally small. The contract between adapters and encoders is a single tagged union (`IRStreamDelta` in `deltas.py`); the surrounding modules are deterministic transformations on top of it.
+Everything that touches a stream lives in `wiwi/streaming/`. The contract between adapters and encoders is a single tagged union (`IRStreamDelta` in `deltas.py`); surrounding modules are deterministic transformations on top of it.
 
 | Module | Responsibility |
 |---|---|
 | `deltas.py` | The `IRStreamDelta` taxonomy — 10 frozen dataclasses: `StreamStart`, `TextDelta`, `ThinkingDelta`, `ToolCallOpen`, `ToolCallArgsDelta`, `ToolCallClose`, `UsageFinal`, `Finish`, `StreamEnd`, `StreamError`. Adapters guarantee legality; encoders never defend against malformed sequences. |
 | `coalesce.py` | `DeltaCoalescer` — merges consecutive `TextDelta`s under backpressure (queue depth > 100, 8 KiB or 50 ms), bypassing entirely for fast consumers. Never coalesces across control deltas. |
-| `loopdetect.py` | O(1)-per-token repetition detector. Tracks periods 1..8 simultaneously; aborts when the window becomes periodic. Periods above 8 are deliberately uncovered — a genuine period-40 loop isn't the failure mode, and the quadratic scan was what ate the hot path. |
-| `resume.py` | `StreamTape` — 256 KiB ring of content-bearing deltas with monotonic event ids. Two roles: mid-stream failover (Anthropic capture-and-resume) and `Last-Event-ID` replay for reconnecting SSE clients. |
-| `tape_store.py` | Durable stream journal — every encoded SSE chunk is appended to a per-request JSONL file (`<dir>/<request_id>.jsonl`, base64, monotonic `seq`), so `Last-Event-ID` replays survive a gateway restart. Journals record the owning virtual key and expire after `stream_journal_ttl_s`. |
-| `partial_json.py` | Vercel-AI-SDK-style incremental JSON parser for streaming tool-call args. Auto-repairs truncated JSON at close (appends missing `"` / `]` / `}`), never raises on malformed input. |
+| `loopdetect.py` | O(1)-per-token repetition detector. Tracks periods 1..8 simultaneously; aborts when the window becomes periodic. Periods above 8 are deliberately uncovered. |
+| `resume.py` | `StreamTape` — 256 KiB ring of content-bearing deltas with monotonic event ids. Two roles: mid-stream failover (capture-and-resume) and `Last-Event-ID` replay for reconnecting SSE clients. |
+| `tape_store.py` | Durable stream journal — every encoded SSE chunk appended to a per-request JSONL file (`<dir>/<request_id>.jsonl`, base64, monotonic `seq`), so replays survive a gateway restart. Journals record the owning virtual key and expire after `stream_journal_ttl_s`. |
+| `partial_json.py` | Vercel-AI-SDK-style incremental JSON parser for streaming tool-call args. Auto-repairs truncated JSON at close, never raises on malformed input. |
 | `validation.py` | Tool-call args validated against the declared JSON schema on `ToolCallClose`. Caps payloads at 1 MiB; **never logs raw args** — only length plus the first 16 hex of a SHA-256 fingerprint, so tool payloads containing user secrets don't leak via structlog. |
 | `sse.py` | SSE framing helpers used by the wire encoders. |
 
@@ -213,72 +275,16 @@ Everything that touches a stream lives in `wiwi/streaming/` and is intentionally
 
 ---
 
-## 📥 Surfaces (inbound)
-
-| Method | Endpoint | Dialect | Works with |
-|---|---|---|---|
-| `POST` | `/v1/chat/completions` | 🟢 **OpenAI Chat** | openai SDK, LangChain, curl |
-| `POST` | `/v1/responses` | 🟣 **OpenAI Responses** | Codex CLI (`base_url` → wiwi) |
-| `POST` | `/v1/messages` | 🟠 **Anthropic Messages** | Claude Code (`ANTHROPIC_BASE_URL` → wiwi), anthropic SDK |
-| `POST` | `/v1/messages/count_tokens` | 🟠 **Anthropic** | token counting, no inference |
-| `GET` | `/v1/models` | 📋 model list | all |
-| `GET` | `/health` | 💚 liveness | `{status, groups, providers}` |
-| `GET` | `/metrics` | 📈 Prometheus | opt-in, master-key gated |
-
-> 🪄 **Response shape always matches the inbound dialect.** OpenAI clients see OpenAI error envelopes (`{"error":{…}}`); Anthropic clients see Anthropic error envelopes (`{"type":"error",…}`). Every response carries `x-wiwi-request-id` and `x-wiwi-latency-ms`; bodies over `max_request_body_mb` (default 50) get a 413.
-
-### 🔁 Dialect × Provider translation matrix
-
-Any inbound dialect works with any outbound provider. The IR handles translation — no pairwise converters.
-
-| ↓ In  ╲  Out → | OpenAI | Anthropic | Gemini | OpenRouter | NIM | Cline | B.AI | GMI | WorkBuddy | OpenAI-compat |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| 🟢 **OpenAI Chat**       | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 🟣 **OpenAI Responses**  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 🟠 **Anthropic Messages**| ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-
----
-
-## 📤 Providers (outbound)
-
-All 11 types ship in `wiwi/config.py:PROVIDER_TYPES`, which is the single source of truth — the router catalog, admin validation, and the Pydantic schema all reference it, and import-time `assert`s in both `registry.py` and `router.py` fail loudly if a type is added without a matching adapter and catalog card.
-
-| Type | Adapter | Default endpoint | Notes |
-|---|---|---|---|
-| `openai` | `openai_adapter.py` | `https://api.openai.com/v1` | Chat + Responses; `base_url` configurable |
-| `anthropic` | `anthropic_adapter.py` | `https://api.anthropic.com/v1` | thinking + `cache_control` pass through; native `output_config` |
-| `gemini` | `gemini_adapter.py` | `https://generativelanguage.googleapis.com/v1beta` | multimodal, structured output, function calling |
-| `openrouter` | `openrouter_adapter.py` | `https://openrouter.ai/api/v1` | unified `reasoning{}` translation, `reasoning_details` decoding |
-| `nvidia-nim` | `nim_adapter.py` | `https://integrate.api.nvidia.com/v1` | **vLLM-backed quirks**: `nim_tool_schema.py` strips boolean JSON-Schema subschemas and aliases parameters named `type` to `_nim_arg_<name>`, restoring agent-facing names on the way back |
-| `cline` | `cline_adapter.py` | `https://api.cline.bot/api/v1` | OAuth (WorkOS) with on-demand refresh, cross-account WRR, global default-model list, and live npm CLI/core version fingerprints |
-| `workbuddy` | `workbuddy_adapter.py` | `https://copilot.tencent.com` | WorkBuddy / CodeBuddy (Tencent); nested-JSON auth, stream-only upstream, business errors ride HTTP 200 in `{code,msg,data}` envelopes |
-| `gmicloud` | *(openai wire)* | `https://api.gmi-serving.com/v1` | GMI Cloud serving endpoint |
-| `bai` | `bai_adapter.py` | `https://api.b.ai/v1` | B.AI unified gateway — one key across Chat / Responses / Messages protocols; replays `reasoning_content` on tool-call turns |
-| `opencode` | `opencode_adapter.py` | `https://opencode.ai/zen/v1` | OpenCode Zen — per-model protocol routing (Responses for GPT/Grok/Muse-Spark, Messages for Claude/Qwen, Gemini for Gemini, Chat otherwise) with a live `User-Agent: opencode/<version>` refreshed every 5 min (`opencode_version.py`) |
-| `openai-compatible` | *(openai wire)* | *(you supply it)* | any URL — Ollama, vLLM, LM Studio, Together, Groq, DeepSeek |
-
-> 🔐 Provider keys enter as `os.environ/NAME` in YAML. **Nothing is committed to the repo** — `wiwi.yaml`, `wiwi.db`, `.env`, and `key.md` are all gitignored.
-
-### 🔧 Provider-hosted builtin tools
-
-Some tools are executed *by the provider* — the model never sees a function schema. `wiwi/ir/builtin_tools.py` holds the canonical registry; per-surface wire types are rendered at the codec/adapter boundaries.
-
-| Canonical | Anthropic | Responses | Gemini | OpenRouter | OpenAI Chat |
-|---|---|---|---|---|---|
-| `web_search` | `web_search_20250305` | `web_search` | `google_search` | `openrouter:web_search` | — *(dropped with a warning)* |
-
-Config subset carried in `Tool.builtin_config`: `max_uses`, `allowed_domains`, `blocked_domains`, `user_location`, `search_context_size`. Surfaces render what they understand and drop the rest. Unmapped builtins (e.g. Anthropic `code_execution_20250522`) stay builtin-shaped in the IR so they survive a round-trip.
-
----
-
 ## ⚡ Quickstart
 
 ### 📋 Requirements
 
-- 🐍 **Python ≥ 3.11**
-- 📦 **[uv](https://docs.astral.sh/uv/)** (recommended) or pip
-- 🐳 **Docker** (optional)
-- 🥟 **Bun or Node** (only for rebuilding the admin UI)
+<p>
+  <img alt="Python" src="https://img.shields.io/badge/Python-≥3.11-3776AB?logo=python&logoColor=white">
+  <img alt="uv" src="https://img.shields.io/badge/uv-optional-2D2D2D?logo=astral&logoColor=white">
+  <img alt="Docker" src="https://img.shields.io/badge/Docker-optional-2496ED?logo=docker&logoColor=white">
+  <img alt="Bun" src="https://img.shields.io/badge/Bun-only%20for%20UI%20build-f9f1e1?logo=bun&logoColor=000">
+</p>
 
 ### 🚀 Install & run locally
 
@@ -305,57 +311,13 @@ export WIWI_MASTER_KEY=sk-wiwi-master-mysecret
 docker compose up --build
 ```
 
-The compose stack runs **Postgres 16 + wiwi** together (Postgres is a plain service, not a profile), mounts a `wiwi_data` volume, and defaults `DATABASE_URL` to the bundled Postgres. Override with `DATABASE_URL=sqlite+aiosqlite:///…` if you'd rather stay on SQLite. Provider keys pass through from `.env` / your shell.
+The compose stack runs **Postgres 16 + Redis + wiwi** together, mounts a `wiwi_data` volume, and defaults `DATABASE_URL` to the bundled Postgres. Override with `DATABASE_URL=sqlite+aiosqlite:///…` to stay on SQLite. Provider keys pass through from `.env` / your shell.
 
 The image is a three-stage build: `uv` installs Python deps → `bun` builds the SPA → the runtime image runs as non-root `wiwi` (uid 10001).
 
-#### Enabling Redis
+### 🔴 Redis for the response cache
 
-The compose stack includes a `redis:7-alpine` service and passes `REDIS_URL` to `wiwi` automatically:
-
-```bash
-docker compose up --build          # redis + postgres + wiwi
-docker compose up --build wiwi     # already have infra running elsewhere
-```
-
-Redis backs the **response cache** and is off unless you opt in — see [Redis for the response cache](#-redis-for-the-response-cache).
-
-### 🚂 Deploying to Railway
-
-Railway gives you a URL you can't hardcode, so use **variables** rather than a baked-in `wiwi.yaml`.
-
-**1. Add a Redis service.** In your Railway project: *New → Database → Redis*. Railway exposes `REDIS_URL` (a `redis://default:PASSWORD@…:6379` string) to any service in the same project.
-
-**2. Set variables on the wiwi service:**
-
-| Variable | Value |
-|---|---|
-| `WIWI_MASTER_KEY` | a long random secret (`openssl rand -hex 32`) |
-| `REDIS_URL` | `${{Redis.REDIS_URL}}` (reference the service's variable) |
-| `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` if you add Postgres; omit for SQLite |
-| `WIWI_CONFIG` | the YAML below |
-
-**3. Use `WIWI_CONFIG`** — the shipped image boots on `wiwi.yaml.example`, so you cannot set `cache_settings` any other way. This is raw YAML in one env var:
-
-```yaml
-general_settings:
-  master_key: os.environ/WIWI_MASTER_KEY
-  database_url: os.environ/DATABASE_URL
-  redis_url: os.environ/REDIS_URL
-cache_settings:
-  enabled: true
-  ttl_s: 3600
-```
-
-Multi-line values are fine in Railway's variable editor. Quote anything containing a `:` (e.g. `database_url: "sqlite+aiosqlite:///:memory:"`) or YAML will fail to parse.
-
-**4. Verify.** Check the startup log for the backend, then send the same request twice and look for `x-wiwi-cache: HIT` on the second response.
-
-### 🟥 Redis for the response cache
-
-Redis is **optional and off by default**. It stores exact-match responses so they survive a restart and are shared across replicas.
-
-Two conditions must both hold — setting only one does nothing:
+Redis is **optional and off by default**. It stores exact-match responses so they survive a restart and are shared across replicas. Two conditions must both hold:
 
 1. `cache_settings.enabled: true` (default is `false`)
 2. `redis_url` set — via `REDIS_URL` env var (overrides config) or `general_settings.redis_url`
@@ -371,17 +333,42 @@ REDIS_URL=redis://localhost:6379/0     # env var wins; no config file edit neede
 | Shared across replicas | no | yes |
 | Capacity | `max_entries` (256) | bounded by Redis |
 
-**Read this before enabling it:** for a **single instance** Redis is *slower* — `main.py` runs one uvicorn worker, so a dict lookup already beats a network round-trip. Redis earns its keep when you run **2+ replicas**, or when you want a warm cache across deploys. It is not a latency optimisation for one process.
+**Read this before enabling it:** for a **single instance** Redis is *slower* — `main.py` runs one uvicorn worker, so a dict lookup already beats a network round-trip. Redis earns its keep when you run **2+ replicas**, or want a warm cache across deploys. It is not a latency optimisation for one process.
 
-Only **non-streaming, deterministic** requests are cached (`temperature` unset or `0`, `n == 1`). A request with `temperature > 0` is never cached — identical prompts legitimately produce different text, and caching them would pin callers to whichever completion arrived first. Bypass a single call with `X-Wiwi-No-Cache: true`.
-
-Redis is **advisory**: if it is unreachable every operation degrades to a miss and requests keep succeeding. Redis needing a password, TLS, or a database index? Put it in the URL — `rediss://` for TLS, e.g. `rediss://default:PASSWORD@host:6380/0`.
+Only **non-streaming, deterministic** requests are cached (`temperature` unset or `0`, `n == 1`). Bypass a single call with `X-Wiwi-No-Cache: true`. Redis is **advisory**: if it is unreachable, every operation degrades to a miss and requests keep succeeding. Use `rediss://` for TLS.
 
 > Note: `wiwi/ratelimit/redis.py` also exists but is **not wired up** — rate limiting still uses the in-memory limiter regardless of `redis_url`.
 
-### 🔧 Config-loading precedence
+### 🚂 Deploying to Railway
 
-The CLI is explicit about where config comes from (order matters):
+Railway gives you a URL you can't hardcode, so use **variables** rather than a baked-in `wiwi.yaml`.
+
+**1. Add a Redis service.** *New → Database → Redis*. Railway exposes `REDIS_URL` to any service in the same project.
+
+**2. Set variables on the wiwi service:**
+
+| Variable | Value |
+|---|---|
+| `WIWI_MASTER_KEY` | a long random secret (`openssl rand -hex 32`) |
+| `REDIS_URL` | `${{Redis.REDIS_URL}}` |
+| `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` if you add Postgres; omit for SQLite |
+| `WIWI_CONFIG` | the YAML below |
+
+**3. Use `WIWI_CONFIG`** — raw YAML in one env var:
+
+```yaml
+general_settings:
+  master_key: os.environ/WIWI_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+  redis_url: os.environ/REDIS_URL
+cache_settings:
+  enabled: true
+  ttl_s: 3600
+```
+
+**4. Verify.** Check the startup log for the backend, then send the same request twice and look for `x-wiwi-cache: HIT` on the second response.
+
+### 🔧 Config-loading precedence
 
 1. `--config` / `-c` flag on the CLI
 2. `WIWI_CONFIG` env var (raw YAML — useful in containers)
@@ -391,7 +378,16 @@ A `.env` in the cwd is loaded **before** any of the above, so `WIWI_MASTER_KEY`,
 
 > 🧩 Any string value in the YAML may be `os.environ/NAME`. Interpolation is recursive. **Missing env vars resolve to empty strings** — so the example config loads cleanly in a fresh container, and empty-key entries are filtered out by validation rather than crashing startup.
 
-### 🎯 Three ways to connect a client
+---
+
+## 🔌 Connecting clients
+
+<p>
+  <img alt="Claude" src="https://img.shields.io/badge/Claude_Code-D4E28D?logo=claude&logoColor=black">
+  <img alt="Codex" src="https://img.shields.io/badge/Codex_CLI-000000?logo=openai&logoColor=white">
+  <img alt="OpenAI" src="https://img.shields.io/badge/openai_SDK-412991?logo=openai&logoColor=white">
+  <img alt="curl" src="https://img.shields.io/badge/curl-0B462D?logo=curl&logoColor=white">
+</p>
 
 | Client | Set this | Then run |
 |---|---|---|
@@ -399,6 +395,41 @@ A `.env` in the cwd is loaded **before** any of the above, so `WIWI_MASTER_KEY`,
 | ⌨️ **Codex CLI** | `OPENAI_BASE_URL=http://localhost:4000/v1` | `codex --model gpt-4o` |
 | 🐍 **openai SDK** | `base_url="http://localhost:4000/v1"`<br>`api_key="sk-wiwi-..."` | `client.chat.completions.create(...)` |
 | 🌐 **curl** | `Authorization: Bearer sk-wiwi-...` | `curl localhost:4000/v1/models` |
+
+<details>
+<summary><b>🤖 Claude Code — full snippet</b></summary>
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:4000
+export ANTHROPIC_AUTH_TOKEN=sk-wiwi-...        # a virtual key
+claude
+```
+</details>
+
+<details>
+<summary><b>⌨️ Codex CLI / 🐍 openai SDK / 🌐 curl</b></summary>
+
+```bash
+# Codex
+export OPENAI_BASE_URL=http://localhost:4000/v1
+codex --model gpt-4o
+
+# openai SDK
+python3 -c '
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:4000/v1", api_key="sk-wiwi-...")
+print(client.chat.completions.create(model="gpt-4o", messages=[{"role":"user","content":"hi"}]).choices[0].message.content)'
+```
+
+```bash
+# curl — Anthropic dialect in, OpenAI model behind it
+curl http://localhost:4000/v1/messages \
+  -H "x-api-key: $WIWI_VIRTUAL_KEY" -H "anthropic-version: 2023-06-01" \
+  -H "content-type: application/json" \
+  -d '{"model":"gpt-4o","max_tokens":128,
+       "messages":[{"role":"user","content":"hi"}]}'
+```
+</details>
 
 ---
 
@@ -412,17 +443,15 @@ uv venv && uv pip install -e ".[dev]"     # + pytest, pytest-asyncio, respx, asg
 uv pip install -e ".[redis]"              # Redis response-cache backend
 ```
 
-> 📌 **Postgres needs no extra.** `asyncpg` is a core dependency — point `DATABASE_URL` at a Postgres instance and it just works. There is no `[pg]` extra.
+> 📌 **Postgres needs no extra.** `asyncpg` is a core dependency — point `DATABASE_URL` at Postgres and it just works. There is no `[pg]` extra.
 
 ### Run the gateway
 
 ```bash
 wiwi --config wiwi.yaml                             # host/port from wiwi_settings
-wiwi -c wiwi.yaml --host 0.0.0.0 --port 4000        # explicit overrides (-c = --config)
+wiwi -c wiwi.yaml --host 0.0.0.0 --port 4000        # explicit overrides
 wiwi --reload --reload-dir wiwi                     # dev mode: restart on .py changes
 ```
-
-On startup it prints the listen address plus the number of deployments and providers loaded.
 
 `./start.sh` is a dev convenience wrapper: kills anything on the port, installs web deps, then runs the backend and the Vite dev server **together with prefixed, interleaved logs**. Env knobs: `WIWI_PORT`, `WIWI_WEB_PORT`, `WIWI_RELOAD`, `WIWI_RELOAD_DIRS`.
 
@@ -434,49 +463,17 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100
 python3 bench.py --targets wiwi,litellm --no-stream
 ```
 
-Measures TTFT, total latency, tokens, and output TPS per request; aggregates p50/p95, success rate, and throughput per concurrency level. Edit `TARGETS` / `MODEL` at the top of `bench.py` to point at your gateways.
-
----
-
-## 🔌 Connecting clients
-
-**🤖 Claude Code** (backed by any provider):
-
-```bash
-export ANTHROPIC_BASE_URL=http://localhost:4000
-export ANTHROPIC_AUTH_TOKEN=sk-wiwi-...        # a virtual key
-claude
-```
-
-**⌨️ Codex CLI**:
-
-```bash
-export OPENAI_BASE_URL=http://localhost:4000/v1
-codex --model gpt-4o
-```
-
-**🐍 openai SDK**:
-
-```python
-from openai import OpenAI
-client = OpenAI(base_url="http://localhost:4000/v1", api_key="sk-wiwi-...")
-```
-
-**🌐 curl** — Anthropic dialect in, OpenAI model behind it:
-
-```bash
-curl http://localhost:4000/v1/messages \
-  -H "x-api-key: $WIWI_VIRTUAL_KEY" -H "anthropic-version: 2023-06-01" \
-  -H "content-type: application/json" \
-  -d '{"model":"gpt-4o","max_tokens":128,
-       "messages":[{"role":"user","content":"hi"}]}'
-```
+Measures TTFT, total latency, tokens, and output TPS per request; aggregates p50/p95, success rate, and throughput per concurrency level.
 
 ---
 
 ## ⚙️ Configuration (`wiwi.yaml`)
 
 Single LiteLLM-shaped file. **Any string value may be `os.environ/NAME`.**
+
+<details>
+<summary><b>Full annotated config — click to expand</b></summary>
+
 ```yaml
 providers:              # named provider accounts, each with a pool of keyed entries
   - name: openai-main
@@ -498,14 +495,12 @@ providers:              # named provider accounts, each with a pool of keyed ent
     keys: [{label: local, key: "ollama"}]
 
   # Cline and WorkBuddy are OAuth providers — accounts are added at runtime
-  # through the admin UI or the /admin/{cline,workbuddy} OAuth endpoints,
-  # not declared here.
+  # through the admin UI or the /admin/{cline,workbuddy} OAuth endpoints.
 
 model_list:             # model_name clients request → provider account + native model id
   - model_name: gpt-4o
     wiwi_params: {provider: openai-main, model: gpt-4o, weight: 2}
   - model_name: claude-sonnet
-    # per-deployment overrides: max_tokens, rpm, tpm, timeout, extra_headers, extra_body
     wiwi_params: {provider: anthropic-main, model: claude-sonnet-4-20250514,
                   max_tokens: 8192, tpm: 100000}
 
@@ -536,7 +531,7 @@ router_settings:
   prometheus_path: /metrics
   fallbacks:
     claude-sonnet: ["gpt-4o"]
-  # context_window_fallbacks:          # separate table for context-overflow errors
+  # context_window_fallbacks:
   #   long-task: ["claude-sonnet"]
   model_group_alias:
     gpt-4: gpt-4o                      # plain string, or the rich form:
@@ -545,7 +540,7 @@ router_settings:
 general_settings:
   master_key: os.environ/WIWI_MASTER_KEY
   database_url: os.environ/DATABASE_URL   # sqlite+aiosqlite:///wiwi.db (default) or postgres
-  # redis_url: os.environ/REDIS_URL       # response cache backend; needs the [redis] extra
+  # redis_url: os.environ/REDIS_URL       # response cache; needs the [redis] extra
   max_keys_per_user: 50                   # caps live virtual keys per non-admin owner
 
 wiwi_settings:
@@ -560,10 +555,9 @@ wiwi_settings:
   # public_url: https://wiwi.example.com   # pin OAuth callbacks; ignores X-Forwarded-*
 ```
 
-Both log limits roll the rows they remove into `request_rollups` first, so the
-dashboard's totals, token counts, cost and percentiles stay complete — only the
-per-request detail is dropped. `log_max_rows` is what actually bounds storage on a
-busy gateway: a day-based window can still leave millions of rows inside one day.
+</details>
+
+Both log limits roll the rows they remove into `request_rollups` first, so the dashboard's totals, token counts, cost and percentiles stay complete — only the per-request detail is dropped. `log_max_rows` is what actually bounds storage on a busy gateway.
 
 ### 🧩 Extensibility escape hatch
 
@@ -581,20 +575,21 @@ wiwi_params:
 ## 🗂️ Project structure
 
 ```
-wiwi/                      26k lines of Python across 70 modules
+wiwi/                      26k lines of Python across 71 modules
 ├── main.py                CLI entrypoint (wiwi --config …)
 ├── config.py              YAML → pydantic; env interpolation; PROVIDER_TYPES
 ├── ir/                    Canonical IR: types.py (tagged parts, messages,
 │                          tools, params, usage) + builtin_tools.py registry
-├── wire/                  Inbound codecs: openai_chat.py · openai_responses.py
-│                          · anthropic_messages.py
+├── wire/                  Inbound codecs: openai_chat · openai_responses
+│                          · anthropic_messages
 ├── providers/             Outbound adapters + base.py protocol + registry.py
 ├── core/                  gateway.py (execution engine, pricing, log events)
-│                          context.py (RequestContext)
+│                          context.py (RequestContext) · recovery.py (backoff,
+│                          circuit breaker, HealthHealer)
 ├── streaming/             deltas · coalesce · loopdetect · resume
 │                          partial_json · validation · sse · tape_store
 ├── router/router.py       Model groups, key pools (smooth WRR), cooldowns,
-│                          retries, fallbacks, BUILTIN_PROVIDER_TYPES catalog
+│                          retries, fallbacks, builtin provider catalog
 ├── auth/                  keys.py · service.py · users.py
 ├── ratelimit/             memory.py + redis.py sliding-window limits
 ├── cache/                 response_cache (memory) · redis_cache · keygen · interface
@@ -603,9 +598,10 @@ wiwi/                      26k lines of Python across 70 modules
 └── server/                app.py (FastAPI factory, proxy + /admin/*)
                            config_store.py (DB persistence for admin mutations)
                            stats.py (pure rollups) · metrics.py (Prometheus)
+                           static/ (built SPA)
 
-web/                       28.5k lines of TS/TSX — 52 page components (74 files under src/, 65 .tsx)
-tests/                     126 test files — unit (respx), ASGI e2e, Hypothesis
+web/                       28.5k lines of TS/TSX — 65 .tsx files under src/
+tests/                     128 test files — unit (respx), ASGI e2e, Hypothesis
 ```
 
 | Path | Role |
@@ -614,14 +610,14 @@ tests/                     126 test files — unit (respx), ASGI e2e, Hypothesis
 | `wiwi/server/config_store.py` | Persists admin-created providers / keys / deployments so they survive restart. **YAML entries are never written to the DB** — they're always reloaded from the file. |
 | `wiwi/server/stats.py` | Pure functions over `LogEvent` lists — unit-testable with no DB. |
 | `bench.py` | Stress / latency / TPS tester for wiwi and any OpenAI-compatible proxy |
-| `docs/` | `ARCHITECTURE` · `CORE` · `STREAMING` · `ADMIN` · `API_REFERENCE` · `CONFIG` · `PROVIDERS` · `QUICKSTART` · `DEVELOPMENT` · `MVP` · `PLAN` · `TECHSTACK` · `STREAMING_PERFORMANCE_RECOVERY` |
+| `docs/` | `ARCHITECTURE` · `CORE` · `STREAMING` · `ADMIN` · `API_REFERENCE` · `CONFIG` · `PROVIDERS` · `QUICKSTART` · `DEVELOPMENT` · `MVP` · `PLAN` · `TECHSTACK` |
 
 ### 🗄️ Database tables
 
 | Table | Owner | Contents |
 |---|---|---|
 | `request_logs` | `logging_core/db_sink.py` | per-request tokens, TTFT, latency, TPS, cost, cache, retry chain |
-| `request_rollups` | `logging_core/db_sink.py` | hourly aggregates (`key_id`/`model_group`/`provider`) kept permanently for rows pruned from `request_logs` |
+| `request_rollups` | `logging_core/db_sink.py` | hourly aggregates (`key_id`/`model_group`/`provider`) kept permanently for pruned rows |
 | `audit_logs` | `logging_core/db_sink.py` | `actor` / `action` / `target` / `diff` for every admin mutation |
 | `vkeys` | `auth/service.py` | hashed virtual keys + budgets + spend |
 | `users` | `auth/users.py` | user accounts and roles |
@@ -631,7 +627,7 @@ tests/                     126 test files — unit (respx), ASGI e2e, Hypothesis
 
 ## 🎨 Admin UI
 
-Two surfaces ship from the same `web/` source — 74 files / ~28.5k lines of TS/TSX across 52 page components: a **dark admin console** (16 routes under `/console/*`) and a **33-route public marketing site** at `/`, plus `/login`, `/signup`, and `/playground` outside the shell. The SPA builds to `wiwi/server/static/` and FastAPI mounts it at `/` with history fallback, so every client route survives a hard refresh; API paths (`/admin/*`, `/v1/*`, `/auth/*`, `/public/*`, `/health`) are matched first.
+Two surfaces ship from the same `web/` source — 65 `.tsx` files / ~28.5k lines: a **dark admin console** (16 routes under `/console/*`) and a **33-route public site** at `/`, plus `/login`, `/signup`, `/playground`. The SPA builds to `wiwi/server/static/` and FastAPI mounts it at `/` with history fallback.
 
 ### 🖥️ Console pages
 
@@ -643,17 +639,11 @@ Two surfaces ship from the same `web/` source — 74 files / ~28.5k lines of TS/
 | **Admin** | Budgets & Alerts · Proxy Logs · Users · Settings |
 | *(outside shell)* | Playground · Login · Signup · Onboarding |
 
-Providers, ProviderDetail, Built-in Providers, OAuth Cline, WorkBuddy, Combos, Proxy Logs, Settings, and Users are **admin-only** — the routes are wrapped in `RequireAdmin`, and the sidebar merges its admin-only sections into the matching titles so admins see each section header exactly once.
-
-### 🌐 Public front
-
-`PublicLayout` wraps every unauthenticated route: a sticky top `Navbar`, the same ambient grid + radial-glow backdrop as the console, and a three-column footer (Product / Resources / Get started). The landing page (`pages/Landing.tsx`) stacks twelve sections: a full-height hero on the animated `HeroBeamBackdrop` (gradient headline, three CTAs, trust checks, six provider chips) → four stat cards → tier-1 feature cards over a dot-grid → the how-it-works beam graph (`GraphSection`) → tabbed code examples (`CodeTabs`) → per-provider uptime/outage bars → testimonials → pricing → comparison table → FAQ → enterprise CTA → final CTA. Every section reveals on scroll (`scroll-reveal`).
+Providers, ProviderDetail, Built-in Providers, OAuth Cline, WorkBuddy, Combos, Proxy Logs, Settings, and Users are **admin-only** (routes wrapped in `RequireAdmin`).
 
 ### 🎨 Design system
 
-The console is a **dark-only** SPA (React 19 + TypeScript + Vite + Tailwind 4) on a custom design system: near-black surfaces, hairline white borders, a blue primary with violet/fuchsia secondary, tiny uppercase mono labels, tabular numeric values.
-
-**Surfaces & accents** (CSS custom properties under `[data-admin]` in `web/src/styles.css`):
+Dark-only SPA (React 19 + TypeScript + Vite + Tailwind 4): near-black surfaces, hairline white borders, a blue primary with violet/fuchsia secondary, tiny uppercase mono labels, tabular numeric values.
 
 | Token | Value | Use |
 |---|---|---|
@@ -661,58 +651,18 @@ The console is a **dark-only** SPA (React 19 + TypeScript + Vite + Tailwind 4) o
 | `--admin-surface` | `#0a0a0a` | Cards, sidebar, tables |
 | `--admin-surface-elevated` | `#0e0e0e` | Dialogs, dropdowns |
 | `--admin-border` | `rgba(255,255,255,0.04)` | Hairline borders |
-| `--admin-border-hover` | `rgba(255,255,255,0.08)` | Hover border state |
 | `--admin-accent` | `#3b82f6` | Primary blue (links, active nav, focus rings) |
-| `--admin-accent-purple` | `#a855f7` | Purple secondary |
-| `--admin-accent-violet` | `#7c3aed` | Violet tertiary |
+| `--admin-accent-purple` / `-violet` | `#a855f7` / `#7c3aed` | Secondary accents |
 | `--admin-success` / `warning` / `danger` | `#34d399` / `#fbbf24` / `#f87171` | Status semantics |
 
-Brand accent (login page + logo gradient): the `brand-*` Tailwind ramp in `@theme` — an indigo→violet "iris" ramp from `#f3f1ff` (50) to `#291560` (950), with `#8757f7` (500) as primary.
+Brand accent is an indigo→violet "iris" ramp from `#f3f1ff` (50) to `#291560` (950), with `#8757f7` (500) as primary.
 
 **Layout shell** (`components/Layout.tsx`)
+- **Sidebar**: 272px column grouped Overview / Traffic / Configuration / Admin; collapses to a 72px icon rail (⌘/Ctrl+B). Below `lg` it becomes an overlay drawer with focus return. Active item gets a blue left-edge bar + tint. Bottom: identity card (shield avatar, SSE live dot, masked key, role badge).
+- **Fixed 64px topbar**: `backdrop-filter: blur(12px) saturate(1.2)` over `rgba(5,5,5,0.75)` — section eyebrow + page title, centered live/offline SSE pulse badge, mono tabular live clock, Sign out; blue→violet gradient hairline underneath.
+- **Ambient backdrop**: fixed 64px grid at 2% opacity plus three radial glows (blue top-left, violet bottom-right, purple center).
 
-- **Sidebar**: a 272px column grouped Overview / Traffic / Configuration / Admin with the logo header; collapses to a 72px icon rail on desktop (⌘/Ctrl+B). Below `lg` it becomes an overlay drawer — dimmed blurred backdrop, Escape closes, body scroll locks, focus moves in and returns to the hamburger. Active item gets a blue left-edge bar + `blue-500/[0.06]` tint. Bottom: identity card (shield avatar, SSE live status dot, masked key, role badge) and a Collapse button with `⌘B` kbd.
-- **Fixed 64px topbar**: `backdrop-filter: blur(12px) saturate(1.2)` over `rgba(5,5,5,0.75)` — section eyebrow + page title, a centered live/offline SSE pulse badge (dot-only on narrow screens), a mono tabular live clock, and Sign out; a blue→violet gradient hairline runs under the header.
-- **Ambient backdrop**: fixed layer with a 64px grid at 2% opacity plus three radial glows (blue top-left, violet bottom-right, purple center).
-- Content scrolls inside `main.admin-scroll` (thin gradient scrollbar), capped at `max-w-[1400px]`, offset by `--sidebar-w`, with a staggered fade-up entrance.
-
-**Component kit** (`components/ui.tsx`)
-
-| Primitive | Notes |
-|---|---|
-| `Card` / `CardHeader` / `PageHeader` | `admin-card` surfaces, gradient top-line on hover, `admin-stat-highlight` |
-| `Button` | `primary` (blue-tinted soft fill) · `ghost` · `danger` · `outline` |
-| `Input` / `NumberInput` / `Select` / `Field` | `admin-input` with focus ring `0 0 0 3px rgba(99,102,241,0.08)` |
-| `Toggle` | switch with blue glow when on |
-| `Badge` | green / red / amber / gray / blue / violet — uppercase 10px, soft tinted bg |
-| `StatCard` | hero metric with gradient-text value, optional 12-point sparkline, delta chip (`↑/↓ N% vs prev hour`), `waiting` pulse at zero traffic |
-| `Table` / `TD` | sticky headers, uppercase 10px headers, row hover |
-| `Dialog` | portal modal, overlay fade + lift/blur entrance, Escape + click-outside |
-| `Drawer` · `CopyButton` · `Spinner` · `LiveBadge` · `EmptyState` · `ErrorText` · `ProgressBar` | |
-
-**Login page** (`pages/Login.tsx`) — a dark two-panel shell on pure black:
-
-- **Ambient backdrop**: rotated white light streaks (`lg-streaks`), a beam-grid wash, two drifting aurora orbs (blue + violet, 22s `wiwi-drift`), a rotating bloom ring (`lg-bloom`), and an edge vignette to black.
-- **Left showcase** (below `lg` the beam diagram moves inside the card, and hides entirely on short viewports): a "routing live" badge, gradient headline, three inbound-dialect chips, and the `Showcase` panel framed by corner brackets and a hairline divider.
-- **Right credential card**: `wiwi-glass-card` inside a rotating `wiwi-conic-border`, top highlight line, a pointer-following light (cursor position fed to `--mx`/`--my` CSS vars), master-key ↔ username/password mode tabs, show/hide key toggle, mono inputs, gradient submit with shimmer sweep; errors shake (`wiwi-shake`).
-- **Trust footer**: lock icon + "Key stays in this browser — checked once against your gateway."
-
-**Motion language**
-
-| Class | Effect | Duration |
-|---|---|---|
-| `admin-stagger` | Children fade-up, 60ms stagger | 0.5s each |
-| `admin-pulse-dot` | Live badge pulse | 2s infinite |
-| `admin-skeleton` | Shimmer placeholder | 1.8s infinite |
-| `admin-waiting-pulse` | Zero-traffic stat breathing | 2.4s infinite |
-| `wiwi-enter` | Login/Signup card entrance (translateY + blur) | 0.55s |
-| `wiwi-aurora` | Background orb drift (`wiwi-drift` keyframes) | 22s infinite |
-| `wiwi-conic-border` | Login card rotating conic-gradient border | 6s linear infinite |
-| `wiwi-shimmer` | Button hover sweep | 0.7s on hover |
-| `wiwi-shake` | Login/Signup error shake | 0.3s |
-| `lg-slide-left` / `lg-bloom` | Login showcase slide-in / rotating bloom ring | 0.9s / 14s infinite |
-| `animate-hero-enter` | Landing/models/Playground hero entrance | 0.9s |
-| `scroll-reveal` | Landing/pricing section fade-up | scroll-driven (`animation-timeline: view()`) |
+**Component kit** (`components/ui.tsx`): `Card`/`PageHeader` · `Button` (primary/ghost/danger/outline) · `Input`/`NumberInput`/`Select`/`Field` · `Toggle` · `Badge` (6 semantic tints) · `StatCard` (gradient value, optional sparkline, delta chip, `waiting` pulse at zero traffic) · `Table` · `Dialog` · `Drawer` · `CopyButton` · `Spinner` · `LiveBadge` · `EmptyState` · `ErrorText` · `ProgressBar`.
 
 All motion is gated behind `@media (prefers-reduced-motion: no-preference)` and disables cleanly under `reduce`.
 
@@ -728,7 +678,8 @@ cd web && bun run lint                   # eslint src (web/ is NOT covered by ru
 
 All `/admin/*` endpoints require the master key (`Authorization: Bearer …`) or an authenticated admin session.
 
-### 🔑 Virtual keys
+<details>
+<summary><b>🔑 Virtual keys</b></summary>
 
 ```bash
 MK="Authorization: Bearer $WIWI_MASTER_KEY"
@@ -744,8 +695,10 @@ curl -X PATCH  localhost:4000/admin/keys/<id> -H "$MK" -d '{"max_budget": 20}'
 curl -X POST   localhost:4000/admin/keys/<id>/disable -H "$MK"
 curl -X DELETE localhost:4000/admin/keys/<id> -H "$MK"
 ```
+</details>
 
-### 🏢 Providers & key pools
+<details>
+<summary><b>🏢 Providers & key pools</b></summary>
 
 ```bash
 curl localhost:4000/admin/provider-catalog -H "$MK"     # 11 built-in cards + configured?
@@ -765,8 +718,10 @@ curl -X DELETE localhost:4000/admin/providers/<name>/keys/<label> -H "$MK"
 curl localhost:4000/admin/providers/<name>/keys/<label>/secret -H "$MK"  # audit-logged reveal
 curl localhost:4000/admin/providers/<name>/models -H "$MK"   # live upstream model ids
 ```
+</details>
 
-### 🧩 Models, groups, aliases
+<details>
+<summary><b>🧩 Models, groups, aliases</b></summary>
 
 ```bash
 curl localhost:4000/admin/models -H "$MK"
@@ -778,19 +733,17 @@ curl -X DELETE localhost:4000/admin/model-groups/<name>/deployments -H "$MK" -d 
 curl -X POST localhost:4000/admin/aliases -H "$MK" \
   -d '{"set": {"gpt-4": "gpt-4o"}, "unset": ["gpt-3.5"]}'
 ```
+</details>
 
-### 💵 Pricing, logs, stats, users
+<details>
+<summary><b>💵 Pricing, logs, stats, users</b></summary>
 
 ```bash
 curl localhost:4000/admin/pricing -H "$MK"
 curl -X PUT    localhost:4000/admin/pricing/<model_id> -H "$MK" -d '{...}'
-curl -X DELETE localhost:4000/admin/pricing/<model_id> -H "$MK"
-
-# Per-provider prices: add ?provider=<account-or-type> to scope one provider.
-# Without it the PUT sets the base rate that covers every provider.
+# Per-provider prices: add ?provider=<account-or-type>. Omit it to set the base rate.
 curl -X PUT "localhost:4000/admin/pricing/<model_id>?provider=openai-main" -H "$MK" \
   -d '{"input_per_1m": 1.0, "output_per_1m": 2.0}'
-curl -X DELETE "localhost:4000/admin/pricing/<model_id>?provider=openai-main" -H "$MK"
 
 curl localhost:4000/admin/logs/requests -H "$MK"     # DB-backed
 curl localhost:4000/admin/logs/proxy -H "$MK"        # ring buffer
@@ -803,8 +756,10 @@ curl -X PUT localhost:4000/admin/alert-rules -H "$MK" -d '{...}'
 curl localhost:4000/admin/users -H "$MK"
 curl -X PATCH localhost:4000/admin/users/<uid> -H "$MK" -d '{"role": "admin"}'
 ```
+</details>
 
-### 🔐 Session auth
+<details>
+<summary><b>🔐 Session auth</b></summary>
 
 ```bash
 curl -X POST localhost:4000/auth/signup  -d '{"email": "...", "password": "..."}'
@@ -813,8 +768,10 @@ curl -X POST localhost:4000/auth/logout
 curl localhost:4000/auth/me
 curl -X POST localhost:4000/auth/playground-key       # scoped 24h session key
 ```
+</details>
 
-### 🔗 OAuth providers (Cline / WorkBuddy)
+<details>
+<summary><b>🔗 OAuth providers (Cline / WorkBuddy)</b></summary>
 
 ```bash
 # Cline
@@ -829,7 +786,6 @@ curl -X DELETE localhost:4000/admin/cline/oauth/disconnect -H "$MK" -d '{"provid
 curl localhost:4000/admin/cline/models -H "$MK"
 curl -X PUT localhost:4000/admin/cline/settings -H "$MK" \
   -d '{"default_models": ["anthropic/claude-sonnet-4-5", "openai/gpt-4o"]}'
-curl -X DELETE "localhost:4000/admin/cline/settings/default-models/anthropic%2Fclaude-sonnet-4-5" -H "$MK"
 
 # WorkBuddy (CodeBuddy) — parallel API
 curl localhost:4000/admin/workbuddy/accounts -H "$MK"
@@ -837,50 +793,26 @@ curl -X POST localhost:4000/admin/workbuddy/import -H "$MK" -d '{"accounts": [..
 curl localhost:4000/admin/workbuddy/export -H "$MK"
 curl -X POST localhost:4000/admin/workbuddy/refresh -H "$MK" -d '{"label": "main"}'
 ```
+</details>
 
 ### Route map
 
 | Route | Purpose |
 |---|---|
 | **Proxy** | |
-| `POST /v1/chat/completions` · `POST /v1/responses` · `POST /v1/messages` | the three inbound dialects |
+| `POST /v1/chat/completions` · `/v1/responses` · `/v1/messages` | the three inbound dialects |
 | `POST /v1/messages/count_tokens` | token counting without inference |
 | `GET /v1/models` · `GET /health` | discovery · liveness |
 | `GET /metrics` | Prometheus (opt-in, master-key gated) |
 | `GET /public/models` | unauthenticated group + alias listing |
-| **Virtual keys** | |
-| `POST /admin/keys/generate` | mint (budget/RPM/TPM/allowlist/TTL/`custom_key`) |
-| `GET /admin/keys` · `PATCH /admin/keys/{id}` | list · update limits live (cache evicted immediately) |
-| `POST /admin/keys/{id}/disable` · `DELETE /admin/keys/{id}` | disable/enable · revoke |
-| **Providers** | |
-| `GET /admin/provider-catalog` | 11 built-in type cards, each flagged `configured` |
-| `GET /admin/providers` | provider + key-pool status (health, cooldowns, req/err counts) |
-| `POST /admin/providers` · `PATCH /admin/providers/{name}` · `DELETE /admin/providers/{name}` | add · rename/re-type/re-URL · remove (409 if referenced) |
-| `POST /admin/providers/{name}/keys` · `PATCH …/{label}` · `DELETE …/{label}` | pool key CRUD, weight/enabled, cooldown reset |
-| `GET /admin/providers/{name}/keys/{label}/secret` | reveal plaintext — **audit-logged** |
-| `GET /admin/providers/{name}/models` | live upstream model ids |
-| **Models & routing** | |
-| `GET /admin/models` · `PATCH /admin/model-groups/{name}` | inspect · edit routing/weights live |
-| `POST /admin/model-groups/{name}/deployments` · `DELETE …` | attach/detach deployments (POST creates the group) |
-| `POST /admin/aliases` | batch `set` / `unset` model group aliases |
-| `GET /admin/pricing` · `PUT /admin/pricing/{id}` · `DELETE /admin/pricing/{id}` | price overrides (add `?provider=<account-or-type>` to scope one provider; omit for all providers) |
-| **Logs & stats** | |
-| `GET /admin/logs/requests` · `GET /admin/logs/proxy` | DB request logs · ring-buffer proxy logs |
-| `GET /admin/stream` | SSE live tail (`Last-Event-ID` replay, keepalives) |
-| `GET /admin/stats/overview` · `GET /admin/stats/timeseries` | aggregate + time-bucketed |
-| `GET / PUT /admin/alert-rules` | spend/error rules (storage; engine post-MVP) |
-| **Users & sessions** | |
-| `GET /admin/users` · `PATCH /admin/users/{uid}` | user admin |
-| `POST /auth/signup` · `/auth/login` · `/auth/logout` · `GET /auth/me` | session auth |
-| `POST /auth/playground-key` | scoped session key for the Playground |
-| **OAuth providers** | |
-| `GET /admin/cline/models` · `GET/PUT/DELETE /admin/cline/settings` | Cline model catalog + cross-account defaults |
-| `POST /admin/cline/oauth/{login-url,connect,auto-connect}` | start redirect · submit code · background poll |
-| `GET /admin/cline/oauth/status` · `POST /admin/cline/oauth/refresh` · `DELETE /admin/cline/oauth/disconnect` | state · on-demand refresh · disconnect |
-| `GET /cline/oauth/callback` | OAuth redirect target |
-| `GET/POST /admin/workbuddy/accounts` · `POST /admin/workbuddy/import` · `GET /admin/workbuddy/export` · `POST /admin/workbuddy/refresh` | WorkBuddy account CRUD + refresh |
+| **Virtual keys** | `POST /admin/keys/generate` · `GET /admin/keys` · `PATCH/DELETE /admin/keys/{id}` · `POST /admin/keys/{id}/disable` |
+| **Providers** | `GET /admin/provider-catalog` · `GET /admin/providers` · `POST/PATCH/DELETE /admin/providers/{name}` · key-pool CRUD under `/admin/providers/{name}/keys/{label}` · `GET …/secret` (audit-logged) · `GET /admin/providers/{name}/models` |
+| **Models & routing** | `GET /admin/models` · `PATCH /admin/model-groups/{name}` · `POST/DELETE /admin/model-groups/{name}/deployments` · `POST /admin/aliases` · `GET/PUT/DELETE /admin/pricing/{id}` |
+| **Logs & stats** | `GET /admin/logs/{requests,proxy}` · `GET /admin/stream` (SSE, `Last-Event-ID`) · `GET /admin/stats/{overview,timeseries}` · `GET/PUT /admin/alert-rules` |
+| **Users & sessions** | `GET /admin/users` · `PATCH /admin/users/{uid}` · `POST /auth/{signup,login,logout}` · `GET /auth/me` · `POST /auth/playground-key` |
+| **OAuth** | `POST /admin/cline/oauth/{login-url,connect,auto-connect,refresh}` · `GET /admin/cline/oauth/status` · `DELETE …/disconnect` · `GET /cline/oauth/callback` · `GET/PUT/DELETE /admin/cline/settings` · `GET /admin/cline/models` · `GET/POST /admin/workbuddy/accounts` · `POST /admin/workbuddy/{import,refresh}` · `GET /admin/workbuddy/export` |
 
-**Per-request stats tracked:** input / cached / reasoning / output tokens, TPS, TTFT, latency, cost, cache hit + cache savings, retry chain (per-attempt deployment/provider/key/status), and which provider key served it.
+**Per-request stats tracked:** input / cached / reasoning / output tokens, TPS, TTFT, latency, cost, cache hit + savings, retry chain (per-attempt deployment/provider/key/status), and which provider key served it.
 
 **Every admin mutation writes an audit event** (`actor` / `action` / `target` / `diff`) — key lifecycle, provider and pool edits, routing changes, and credential reveals.
 
@@ -889,8 +821,8 @@ curl -X POST localhost:4000/admin/workbuddy/refresh -H "$MK" -d '{"label": "main
 ## 🧪 Tests & lint
 
 ```bash
-python3 -m pytest tests/ -q                                 # 2378 tests, all green
-python3 -m pytest tests/test_fix_round90.py -q              # latest regression file
+python3 -m pytest tests/ -q                                 # 2442 tests, all green
+python3 -m pytest tests/test_fix_round91.py -q              # latest regression file
 python3 -m pytest tests/test_codecs.py -q                   # single file
 python3 -m pytest tests/test_router.py -k cooldown          # single test by name
 
@@ -898,9 +830,9 @@ ruff check wiwi/ tests/                                     # line-length 100, t
 cd web && bun run lint                                      # eslint (web/ is not ruff-covered)
 ```
 
-The suite is **126 test files** mixing **unit tests** (`respx` HTTP mocks), **ASGI end-to-end tests** through the full app, and **Hypothesis property-based round-trips** over the dialect ↔ IR codecs. `pytest-asyncio` runs in `asyncio_mode = "auto"`, so write bare `async def test_…` — no decorator needed.
+The suite is **128 test files** mixing **unit tests** (`respx` HTTP mocks), **ASGI end-to-end tests** through the full app, and **Hypothesis property-based round-trips** over the dialect ↔ IR codecs. `pytest-asyncio` runs in `asyncio_mode = "auto"`, so write bare `async def test_…` — no decorator needed.
 
-Bugfix regressions land in the next thematic `test_fix_roundN.py` file — **`test_fix_round90.py` is the current in-flight one**. Gaps in the numbering (e.g. no `round1`, no `round5`) are real: old numbers were collapsed into `test_bugfix_round5.py` and other thematic files. Find the next unused number with `ls tests/test_fix_round*.py`.
+Bugfix regressions land in the next thematic `test_fix_roundN.py` file — **`test_fix_round91.py` is the current in-flight one**. Gaps in the numbering are real: old numbers were collapsed into thematic files. Find the next unused number with `ls tests/test_fix_round*.py`.
 
 ---
 
@@ -908,8 +840,8 @@ Bugfix regressions land in the next thematic `test_fix_roundN.py` file — **`te
 
 | Doc | What it is |
 |---|---|
-| `UPDATE.md` | **Read this first** for translation issues — changelog for every OpenAI ↔ Anthropic cross-provider fix, the OpenRouter adapter, and multi-turn conversation bugs, with before/after snippets and covering tests |
-| `AUDIT.md` | Known-bug register: severity, `file:line` citations, one-line fix sketches. Read before starting bugfix work. |
+| `UPDATE.md` | **Read this first** for translation issues — changelog for every OpenAI ↔ Anthropic cross-provider fix, the OpenRouter adapter, and multi-turn bugs, with before/after snippets and covering tests |
+| `AUDIT.md` | Known-bug register: severity, `file:line` citations, one-line fix sketches |
 | `docs/ARCHITECTURE.md` | System design |
 | `docs/CORE.md` | Handlers + streaming flow |
 | `docs/STREAMING.md` | Streaming subsystems internals |
@@ -918,12 +850,9 @@ Bugfix regressions land in the next thematic `test_fix_roundN.py` file — **`te
 | `docs/CONFIG.md` | `wiwi.yaml` key-by-key reference |
 | `docs/PROVIDERS.md` | Per-provider setup guide |
 | `docs/QUICKSTART.md` · `docs/DEVELOPMENT.md` | Getting running · dev workflow |
-| `docs/MVP.md` | Scope + gap register |
-| `docs/PLAN.md` | Build phases |
-| `docs/TECHSTACK.md` | Technology choices |
-| `docs/STREAMING_PERFORMANCE_RECOVERY.md` | Streaming / tool-call / recovery improvement report |
+| `docs/MVP.md` · `docs/PLAN.md` · `docs/TECHSTACK.md` | Scope + gap register · build phases · technology choices |
 
-> ⚠️ `ARCHITECTURE.md` and `CORE.md` **partly run ahead of the implementation** — DeltaBus and some handler-pipeline internals are still speculative, and their repo-layout sections show planned directories like `wire/openai_chat/` that are actually flat files. (Postgres and the Redis response cache, by contrast, are now built.) When docs and code disagree, **trust the code** — or treat the doc section as the spec for work you're about to do.
+> ⚠️ `ARCHITECTURE.md` and `CORE.md` **partly run ahead of the implementation** — some handler-pipeline internals are still speculative, and their repo-layout sections show planned directories that are actually flat files. When docs and code disagree, **trust the code**.
 
 ---
 
@@ -947,25 +876,15 @@ Operating a wiwi server is governed by the [Terms of Use](TERMS.md):
 
 - **Personal use — free.** No fee, no registration.
 - **Commercial use — allowed, with conditions.** If you charge money for a wiwi-based service, you accept the [terms](TERMS.md) by doing so (no impersonation, no fraud, honor upstream provider ToS, publish an abuse contact).
-- **No liability.** The author is not responsible for misuse of your deployment — including fraud — and the software ships with no warranty.
+- **No liability.** The author is not responsible for misuse of your deployment — and the software ships with no warranty.
 
-```
-Copyright (c) 2026 wiwi
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software — as long as the copyright notice and this permission
-notice are included in all copies or substantial portions of the Software.
-```
-
-Use it, fork it, ship it commercially — the code carries no strings. If you
-*operate a server for paying customers*, the [Terms of Use](TERMS.md) apply.
+Use it, fork it, ship it commercially — the code carries no strings. If you *operate a server for paying customers*, the [Terms of Use](TERMS.md) apply.
 
 ---
 
 <div align="center">
+
+<img src="docs/assets/wiwi-mark.svg" width="44" alt="wiwi">
 
 <sub>MIT licensed · server operation governed by <a href="TERMS.md">Terms of Use</a> · built with Python 3.11+, FastAPI, React 19, and bun</sub>
 
