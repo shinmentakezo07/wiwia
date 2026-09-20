@@ -131,12 +131,24 @@ def probe_verdict(status: int | None, body: bytes | str | None = None) -> ProbeV
 
 
 def _body_is_error_envelope(body: bytes | str | None) -> bool:
-    """True when a 200 probe body is a business-error envelope, not content.
+    """True when a 200 probe body is an error, not a completion.
 
-    Recognizes the ``{"code": <non-zero>, "msg": …}`` shape some providers
-    (WorkBuddy) use for dead sessions / exhausted credit on an HTTP 200. A
-    force-stream probe receives that envelope inside an SSE ``data:`` frame,
-    so parse SSE payloads when the body is not a bare JSON object.
+    Two families of shape count, because a provider riding a business error on
+    HTTP 200 uses its own dialect's error object, not a shared envelope:
+
+    * the ``{"code": <non-zero>, "msg": …}`` envelope some providers
+      (WorkBuddy) use for dead sessions / exhausted credit, and
+    * the dialect error bodies an Anthropic- or OpenAI-shaped upstream returns —
+      ``{"type": "error", "error": {...}}`` and ``{"error": {...}}``. Those
+      decode into an *empty but successful* turn with no exception, so before
+      AUDIT #269 the healer called such a key HEALTHY and restored it.
+
+    A force-stream probe receives the envelope inside an SSE ``data:`` frame,
+    so SSE payloads are parsed when the body is not a bare JSON object.
+
+    Deliberately shape-based rather than adapter-based: ``probe_verdict`` is a
+    pure classifier and the healer holds no adapter, and recognizing an error
+    *object* cannot misfire on a bare ``{"error": null}``, which is not one.
     """
     if body is None:
         return False
@@ -149,18 +161,32 @@ def _body_is_error_envelope(body: bytes | str | None) -> bool:
             return False
         return code != 0
 
+    def is_error_object(data: object) -> bool:
+        """The Anthropic / OpenAI error-body shapes, by their own markers."""
+        if not isinstance(data, dict):
+            return False
+        if data.get("type") == "error" and isinstance(data.get("error"), dict):
+            return True
+        err = data.get("error")
+        if isinstance(err, dict) and err:
+            # OpenAI's ``{"error": {"message": …, "type": …}}``. Require a
+            # marker so a content body that merely carries an "error" key is
+            # not misread.
+            return any(k in err for k in ("message", "type", "code", "param"))
+        return False
+
     def is_error_payload(payload: str) -> bool:
         try:
             data = json.loads(payload)
         except (ValueError, TypeError):
             return False
-        return is_error(data)
+        return is_error(data) or is_error_object(data)
 
     try:
         data = json.loads(body)
     except (ValueError, TypeError):
         data = None
-    if is_error(data):
+    if is_error(data) or is_error_object(data):
         return True
 
     # force_stream providers return SSE even for HTTP 200 business errors.
@@ -219,10 +245,20 @@ PROBE_MAX_TOKENS = 1
 _PROBE_CONCURRENCY = 4
 
 
-def _probe_request(stream: bool) -> ir.Request:
-    """Minimal 1-token completion request; cheap on every provider."""
+def _probe_request(stream: bool, model_id: str) -> ir.Request:
+    """Minimal 1-token completion request; cheap on every provider.
+
+    ``model_id`` should be the deployment's native model id. Note what it does
+    *not* do: no adapter reads ``ir.Request.model`` for its wire body — each
+    sets the body's model from ``encode_request``'s own ``model_id`` argument,
+    which is what ``_probe`` passes. The field is therefore informational, and
+    filling it correctly is consistency rather than a wire guarantee. (An
+    earlier version of this docstring claimed a placeholder here reached the
+    wire and caused 404/401 misclassification; that was wrong and is retracted
+    in AUDIT #269.)
+    """
     return ir.Request(
-        model="wiwi-health-probe",
+        model=model_id,
         messages=[ir.Message(role="user", parts=[ir.TextPart(text="ping")])],
         gen_params=ir.GenParams(max_tokens=PROBE_MAX_TOKENS),
         stream=stream,
@@ -489,7 +525,8 @@ class HealthHealer:
         params: dict[str, Any] = {"max_tokens": PROBE_MAX_TOKENS,
                                   "extra_body": {}, "drop_params": True,
                                   "provider_type": dep.provider.provider_type}
-        body = adapter.encode_request(_probe_request(stream), dep.model_id, params)
+        body = adapter.encode_request(_probe_request(stream, dep.model_id),
+                                      dep.model_id, params)
         url = build_url(adapter, dep.provider.base_url, dep.model_id,
                         dep.provider.provider_type, stream, key_ref)
         headers = {**adapter.headers(key_ref), **dep.provider.extra_headers,

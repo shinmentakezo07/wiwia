@@ -3081,3 +3081,240 @@ have access to the `read` tool…"* through the gateway's non-streaming path.
 Repeating the probe with `tool_choice: "none"` (toolless request) also answers in
 text, so the request-side hint is respected when the client sends no tools — but
 the response-side filter is what makes the guarantee.
+
+---
+
+## Round 90 — Bidirectional Anthropic ↔ OpenAI translation gets a shared spine (AUDIT #269) — 2026-09-20
+
+**Files**: `wiwi/ir/translation.py` (**new**), `wiwi/core/recovery.py`,
+`wiwi/providers/openai_adapter.py`, `wiwi/providers/anthropic_adapter.py`,
+`wiwi/wire/openai_chat.py`, `wiwi/wire/anthropic_messages.py`
+
+**Scope**: this round deliberately adds *no* new endpoint and *no* new provider
+type. Both directions already existed — Anthropic surface → OpenAI provider
+(`test_integration.py::test_anthropic_surface_to_openai_backend`) and OpenAI
+surface → Anthropic provider. What was missing was a **single spine** underneath
+them: the finish-reason vocabularies were maintained as independent dict
+literals in four modules, with nothing checking that any two agreed. This round
+extracts the shared maps, makes the two Anthropic maps prove they are inverses
+of each other, and hardens the two seams where a value crosses a dialect
+boundary without a total mapping.
+
+### 90.1 The finish-reason maps live in one place
+
+**File**: `wiwi/ir/translation.py` (new), `wiwi/providers/openai_adapter.py`,
+`wiwi/wire/openai_chat.py`
+
+`wiwi/ir/` is the one package that may hold a helper used by both `wire/` and
+`providers/` — anything in either of those two cannot be imported across the
+seam (CLAUDE.md "Import Rules"). The new module therefore imports only
+`wiwi.ir.types` and carries no dialect *logic*: the OpenAI-vocabulary map is
+data, and the Anthropic maps stay where they are.
+
+**Before** — the same four-entry dictionary written out inline, three times in
+`wire/openai_chat.py` alone (the module-level response encoder, the stream
+encoder's `final_frame`, and `decode_response`) plus twice in
+`openai_adapter.py`:
+
+```python
+{"stop": "stop", "length": "length", "tool_call": "tool_calls",
+ "content_filter": "content_filter"}.get(stop, "stop")
+```
+
+**After**:
+
+```python
+from wiwi.ir import translation as tr
+...
+fr = tr.ir_to_openai_finish(turn.stop_reason)   # and .normalize_finish_reason inbound
+```
+
+The inbound direction is deliberately **wider** than the outbound one. Upstreams
+spell a tool-call stop as `tool_calls`, `tool_use`, or `function_call`
+depending on the vendor, and a length stop as `length` or `max_tokens`;
+`normalize_finish_reason` accepts all of them, while `ir_to_openai_finish`
+emits only the canonical OpenAI spelling. An unknown reason is now logged
+(`finish_reason_unmapped`, once per distinct value) instead of being silently
+folded to `"stop"` — the fold is still the behaviour, but it is no longer
+invisible.
+
+### 90.2 The two Anthropic stop-reason maps are proven inverses
+
+**Files**: `wiwi/providers/anthropic_adapter.py`, `wiwi/wire/anthropic_messages.py`
+
+`_STOP_REASON_IN` (provider → IR) and `_STOP_REASON_OUT` (IR → client) each had
+a comment claiming the relationship. A comment is not a check, and a reason that
+survives the outbound trip and comes back as a *different* one is invisible in
+every single-direction test. Both maps are now documented as inverses of each
+other by name and anchored by
+`test_translation_enhancements.py::test_anthropic_stop_reason_maps_are_inverses`,
+which fails on a one-sided edit (AUDIT #156 is the historical instance of this
+class: `pause_turn` and `model_context_window_exceeded` were both folded to
+`stop`, which ended server-tool turns early and hid context overflow from
+auto-compact). No behavioural change here — the maps were already correct.
+
+### 90.3 A redacted-thinking block must not be replayed as OpenAI content
+
+**File**: `wiwi/providers/openai_adapter.py`
+
+`ir.ThinkingPart` carries both ordinary thinking and Anthropic's
+`redacted_thinking` blob. An Anthropic provider answers the OpenAI surface with
+the latter, and the only thing keeping the opaque blob out of an OpenAI-shaped
+upstream was that a redacted block's `text` happens to be empty — an invariant
+of the *other* module, not of this one.
+
+**After** (the `ThinkingPart` arm of the encoder):
+
+```python
+elif isinstance(p, ir.ThinkingPart):
+    if p.block_type == "redacted_thinking":
+        # ... the payload must never reach an OpenAI-shaped upstream as
+        # content, so the block is dropped explicitly rather than by
+        # relying on that emptiness (AUDIT #103).
+        continue
+    reasoning += p.text
+```
+
+Defensive, not load-bearing — `p.text` is always `""` for a redacted block
+today, so the observable behaviour is unchanged. It stops being harmless the
+moment the blob is parked in `text` instead of `data`, which is why the drop is
+explicit.
+
+### 90.4 Dropped inbound params are observable
+
+**File**: `wiwi/wire/anthropic_messages.py`
+
+The Anthropic codec carries extras by **allowlist** (`_PASSTHROUGH_KEYS`) while
+the OpenAI codec uses a **denylist** (`_KNOWN_KEYS`) — the asymmetry is
+deliberate (Anthropic's parameter surface is small and its block schema is not
+forward-compatible; OpenAI's is large and additive), but it means a new
+Anthropic parameter that is neither modelled in the IR nor listed for
+passthrough vanishes with no trace at all. `_note_unmodelled_params` now logs
+`anthropic_params_unmodelled` with the dropped keys, once per distinct key. The
+drop itself is unchanged.
+
+### 90.5 A 200 carrying an Anthropic/OpenAI error body was called HEALTHY (AUDIT #269)
+
+**File**: `wiwi/core/recovery.py`
+
+`_body_is_error_envelope` recognized only WorkBuddy's
+`{"code": <non-zero>, "msg": …}` envelope, so an Anthropic- or OpenAI-shaped
+upstream that answered HTTP 200 with its own dialect's error object was declared
+HEALTHY. The healer's job is to *restore* a credential on a successful probe, so
+it re-armed the very failure it exists to clear. Those bodies are invisible one
+layer down: `decode_response(200, <error envelope>)` returns an empty but
+*successful* `AssistantTurn` with no exception and no signal.
+
+The fix gains the Anthropic (`{"type": "error", "error": {...}}`) and OpenAI
+(`{"error": {"message"|"type"|"code"|"param"}}`) shapes by their own structural
+markers — no `provider_type == …` branch, so no dialect branching enters
+`core/`. An adapter-owned veto hook was considered and rejected: `probe_verdict`
+is a pure synchronous classifier with no adapter in scope, and adding a sixth
+method to the five-method `ProviderAdapter` Protocol for a consumer that does
+not exist is unwarranted.
+
+`_probe_request(stream, model_id)` was also changed to take the deployment's
+model id rather than a placeholder. **That half turned out to be a no-op on
+observable behaviour** and the claim originally made for it is retracted below;
+the signature change was kept only because it makes the function and its call
+site agree about who owns the model name.
+
+**Tests**: `tests/test_fix_round91.py` (17). Verified load-bearing: reverting the
+envelope widening fails all four error-body cases.
+
+> **Retraction, caught in review of this round.** This entry first asserted that
+> the placeholder `model="wiwi-health-probe"` "never reached the wire" only
+> *because* the call site passed `dep.model_id`, and that the two halves
+> "disagreed". Both statements are false, and the tests that "proved" them could
+> not have detected the claim. No adapter reads `ir.Request.model` for the wire
+> body — every one sets it from `encode_request`'s own `model_id` argument
+> (`openai_adapter.py:233`, `anthropic_adapter.py:439`,
+> `opencode_adapter.py:845`, the rest via `super()`), and the pre-fix call site
+> already passed `dep.model_id` as that argument
+> (`git show HEAD:wiwi/core/recovery.py:492`). Encoding the probe request through
+> six provider types with the OLD and NEW `_probe_request` produces
+> **byte-identical wire bodies**, so the placeholder sat in a field nothing
+> reads: a code-clarity defect, not a misclassification. The nine-way
+> parametrized test passed `"real-model-id"` as *both* arguments, so it held even
+> when `_probe_request` discarded its argument entirely, and it failed against
+> pre-fix source only via `TypeError` — a signature mismatch misread as a
+> behavioural catch. The test now passes a *placeholder* to `_probe_request` and
+> a *different* id to `encode_request` and asserts the wire carries the latter,
+> which does fail when the two disagree (verified by making an adapter prefer
+> `req.model`: 8 of 9 cases fail).
+
+**Cross-module tests**: `tests/test_translation_helpers.py` (13) for the shared
+helpers, `tests/test_translation_enhancements.py` (+16) for the four codec and
+adapter changes above, `tests/test_integration.py` (+8) for the reverse
+direction end-to-end (OpenAI Chat surface on an Anthropic deployment:
+non-streaming, the wire body the provider actually received, a tool call, a
+streaming stream with `reasoning_content`, a streamed tool call reassembled from
+`input_json_delta` fragments, an Anthropic 429 reaching an OpenAI client as
+`{"error": {...}}` with the status preserved, a mid-stream error frame, and three
+`hypothesis` invariants asserting on the IR rather than on bytes).
+
+### 90.6 Whole-branch review: three gaps the shared spine exposed or left open
+
+Recorded here because two of them are consequences of *this* round's change, and
+the next agent touching `ir_to_openai_finish` / `normalize_finish_reason` needs
+to know they exist before assuming the spine is closed. All three are
+`AUDIT.md` entries (#270, #271, #272) and none is fixed in this round — each sits
+in a file outside the round's approved scope.
+
+**#271 — the OpenAI surface's streaming encoder emits `tool_calls` with no tool
+call.** `wiwi/wire/openai_chat.py:429-437` applies the A1 downgrade guard only
+when a builtin was suppressed, while the non-streaming encoder on the same
+surface and the Anthropic encoder both guard unconditionally. **This round made
+it reachable:** `normalize_finish_reason` newly accepts the Anthropic spelling
+`tool_use` → IR `tool_call`, which the pre-round-90 inline closures did not, so
+an OpenAI-shaped upstream that reports `tool_use` with zero tool calls now yields
+`finish_reason: "tool_calls"` on a chunk with no `tool_calls` array:
+
+```
+upstream finish_reason='tool_use', zero tool calls
+  IR deltas : ['TextDelta', 'Finish']
+  IR finish : ['tool_call']
+  CLIENT    : finish_reason = 'tool_calls'
+```
+
+The behaviour *was* strictly worse before on the outbound side (#90.1 fixed IR
+`tool_call` mis-spelling as `stop`); the correct fix is to drop the
+`_suppressed_builtin` conjunct so both paths guard the same way.
+
+**#272 — the Responses surface reports `tool_call` with no tool item as
+`completed`.** `openai_responses.py:394` `_INCOMPLETE_REASONS` covers only
+`length` and `content_filter`, so `tool_call`, `pause_turn`, `stop_sequence`,
+`context_window_exceeded`, and `compaction` all encode as a successful
+completion. `context_window_exceeded` is the notable one: the IR carries that
+distinct value specifically because collapsing an overflow into `stop` hid it
+from auto-compact (AUDIT #156), and this map re-collapses it on the Responses
+side. Not a round-90 regression (the old closures never produced those IR values
+from an OpenAI-shaped upstream either), but the round widened the vocabulary that
+can reach it.
+
+**#270 — three adapters keep their own narrower finish-reason map** (`nim`,
+`openrouter` ×2). Pre-existing and unchanged; listed here so the residual set is
+in one place. A NIM/OpenRouter deployment spelling a tool stop `tool_use` still
+reaches the client as `stop`.
+
+### 90.7 The SSE arm of the healer fix (found in the same review)
+
+`_body_is_error_envelope`'s force-stream arm is what carries the #269 fix on
+`cline`/`workbuddy`/`opencode`, all of which set `force_stream` and therefore get
+SSE even on HTTP 200. Verified against the verbatim pre-fix source
+(`git show 365dd2c:wiwi/core/recovery.py`) that this arm *is* covered by the
+change — it is written inside `try/except (ValueError, TypeError)` and
+unconditionally, not `is_error_object`-guarded:
+
+```
+b'event: error\ndata: {"type":"error","error":{"type":"overloaded_error",…}}\n\n'
+  pre-fix  -> False (HEALTHY)      post-fix -> True (UNREACHABLE)
+```
+
+One layer down the same bytes decode to an empty list with no exception — the
+invisible-success shape the whole entry is about. Two residual items are recorded
+in AUDIT #269 rather than fixed: neither arm bounds the size of the body it
+`json.loads`'s (a byte cap on a 1-token probe response would be cheap hardening),
+and this fixes only the *healer's* classification — a 200-carrying-an-error-body
+still reaches a normal request's client as an empty successful turn, which is a
+separate question and is not claimed here.

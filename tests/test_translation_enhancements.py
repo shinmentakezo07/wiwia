@@ -17,6 +17,7 @@ Covers:
 """
 
 import json
+import typing
 
 from wiwi.ir import types as ir
 from wiwi.providers.anthropic_adapter import AnthropicAdapter
@@ -1162,3 +1163,259 @@ def test_openai_adapter_emits_multimodal_tool_result():
     assert kinds == ["text", "image_url"]
     assert tool_msg["content"][0]["text"] == "found a button"
     assert tool_msg["content"][1]["image_url"]["url"] == "data:image/png;base64,aGk="
+
+
+# -- finish_reason fidelity on the OpenAI side (shared canonical map) ----------
+#
+# The mapping used to be an inline dict in three places, each defaulting an
+# unknown spelling to "stop". OpenAI-compatible servers in the wild emit
+# "tool_use", "max_tokens" and "end_turn"; dropping those to "stop" hid a
+# truncation and a tool turn from the caller. The map now lives in
+# wiwi/ir/translation.py and both the adapter and the wire encoder use it.
+
+def test_openai_adapter_maps_nonstandard_finish_reason():
+    """A non-standard finish_reason must reach the IR as its real reason."""
+    ad = OpenAIAdapter()
+    out = []
+    for ev in [
+        json.dumps({"choices": [{"delta": {"content": "x"}}]}),
+        json.dumps({"choices": [{"delta": {}, "finish_reason": "max_tokens"}]}),
+    ]:
+        out.extend(ad.decode_stream_event("", ev))
+    finish = [d for d in out if isinstance(d, dl.Finish)]
+    assert len(finish) == 1
+    assert finish[0].stop_reason == "length"
+
+
+def test_openai_adapter_maps_tool_use_spelling_to_tool_call():
+    ad = OpenAIAdapter()
+    out = ad.decode_stream_event(
+        "", json.dumps({"choices": [{"delta": {}, "finish_reason": "tool_use"}]}))
+    finish = [d for d in out if isinstance(d, dl.Finish)]
+    assert finish and finish[0].stop_reason == "tool_call"
+
+
+def test_openai_adapter_unknown_finish_reason_still_terminates():
+    """Totality: an unknown reason must still produce exactly one Finish."""
+    ad = OpenAIAdapter()
+    out = ad.decode_stream_event(
+        "", json.dumps({"choices": [{"delta": {}, "finish_reason": "wat"}]}))
+    finish = [d for d in out if isinstance(d, dl.Finish)]
+    assert len(finish) == 1
+    assert finish[0].stop_reason == "stop"
+
+
+def test_openai_adapter_sync_decode_uses_the_shared_map():
+    """The sync path carried a second copy of the same inline dict."""
+    body = json.dumps({"choices": [{"index": 0, "finish_reason": "max_tokens",
+                                    "message": {"role": "assistant",
+                                                "content": "x"}}]}).encode()
+    turn = OpenAIAdapter().decode_response(200, body)
+    assert turn.stop_reason == "length"
+
+
+def test_chat_encoder_emits_openai_spelling_for_tool_call():
+    enc = oc.ChatStreamEncoder("gpt-4o", "abc")
+    frames = [enc.feed(d) for d in [dl.Finish("tool_call"), dl.StreamEnd()]]
+    frames.append(enc.final_frame())
+    blob = b"".join(f for f in frames if f).decode()
+    assert "tool_calls" in blob
+    assert '"tool_call"' not in blob  # the IR spelling must not leak out
+
+
+def test_chat_encoder_final_frame_emits_openai_spelling():
+    """final_frame() carried its own copy of the dict, separate from feed()."""
+    enc = oc.ChatStreamEncoder("gpt-4o", "abc")
+    blob = enc.final_frame(stop="tool_call").decode()
+    assert "tool_calls" in blob
+    assert '"tool_call"' not in blob
+
+
+def test_chat_encoder_non_streaming_response_maps_tool_call():
+    turn = ir.AssistantTurn(stop_reason="tool_call")
+    turn.tool_calls.append(ir.ToolUsePart(id="t1", name="f", args={}))
+    out = oc.encode_response(None, turn, "gpt-4o", "abc")
+    assert out["choices"][0]["finish_reason"] == "tool_calls"
+
+
+# -- Anthropic-side stop reason and reasoning fidelity ------------------------
+#
+# The stop-reason vocabulary is the one thing that must survive a full
+# round trip: Anthropic -> IR -> OpenAI -> IR -> Anthropic. Each direction has
+# its own map, so the pair is asserted as inverses rather than trusted.
+
+def test_anthropic_stop_reason_out_covers_the_ir_vocabulary():
+    """EVERY IR StopReason must have an Anthropic spelling.
+
+    Driven off ``typing.get_args(ir.StopReason)`` rather than a hand-written
+    list: an earlier version of this test enumerated six of the eight reasons,
+    so deleting ``context_window_exceeded`` or ``compaction`` from the map left
+    it green while the encoder silently fell back to ``end_turn`` — a client
+    could no longer tell an overflow from a natural end. Deriving the set means
+    a reason added to the IR is covered the moment it exists.
+    """
+    expected = {"stop": "end_turn", "length": "max_tokens",
+                "tool_call": "tool_use", "content_filter": "refusal",
+                "pause_turn": "pause_turn", "stop_sequence": "stop_sequence",
+                "context_window_exceeded": "model_context_window_exceeded",
+                "compaction": "compaction"}
+    for sr in typing.get_args(ir.StopReason):
+        assert sr in am._STOP_REASON_OUT, (
+            f"IR StopReason {sr!r} has no Anthropic spelling; the encoder would "
+            f"fall back to end_turn and misreport it")
+        assert am._STOP_REASON_OUT[sr] == expected[sr]
+    # And the map must not carry reasons the IR does not have.
+    assert set(am._STOP_REASON_OUT) == set(typing.get_args(ir.StopReason))
+
+
+def test_anthropic_stop_reason_maps_are_inverses():
+    """The outbound map and the adapter's inbound map must agree, or a reason
+    survives one trip and returns as a different one.
+
+    Checked in BOTH directions. Iterating only ``_STOP_REASON_OUT`` misses a
+    key *removed* from it: the remaining entries stay mutually inverse while
+    the removed reason silently degrades to ``end_turn``.
+    """
+    from wiwi.providers.anthropic_adapter import _STOP_REASON_IN as BACK
+    for ir_reason, anthropic_reason in am._STOP_REASON_OUT.items():
+        assert BACK[anthropic_reason] == ir_reason, (
+            f"{ir_reason} -> {anthropic_reason} -> {BACK[anthropic_reason]}")
+    # Every Anthropic spelling the adapter can decode must be one this encoder
+    # can produce, or a decoded reason has no way back to the client.
+    for anthropic_reason in BACK:
+        assert anthropic_reason in set(am._STOP_REASON_OUT.values()), (
+            f"the adapter decodes {anthropic_reason!r} but the encoder can "
+            f"never emit it, so that reason cannot round-trip")
+
+
+def test_anthropic_adapter_roundtrips_a_max_tokens_stop():
+    turn = ir.AssistantTurn(text="cut off", stop_reason="length")
+    body = am.encode_response(ctx=None, turn=turn, model="claude", req_id="r")
+    assert body["stop_reason"] == "max_tokens"
+    decoded = AnthropicAdapter().decode_response(200, json.dumps(body).encode())
+    assert decoded.stop_reason == "length"
+
+
+def test_redacted_thinking_survives_anthropic_decode_and_reencode():
+    """A redacted thinking block must replay verbatim and never become text."""
+    data = "EroBCkYIBxgCIkA..."
+    resp = {"id": "m", "type": "message", "role": "assistant", "model": "claude",
+            "stop_reason": "end_turn",
+            "content": [{"type": "redacted_thinking", "data": data},
+                        {"type": "text", "text": "answer"}],
+            "usage": {"input_tokens": 1, "output_tokens": 2}}
+    turn = AnthropicAdapter().decode_response(200, json.dumps(resp).encode())
+    assert turn.thinking[0].block_type == "redacted_thinking"
+    assert turn.thinking[0].data == data
+    assert turn.thinking[0].text == ""
+    out = am.encode_response(ctx=None, turn=turn, model="claude", req_id="r")
+    blocks = {b["type"]: b for b in out["content"]}
+    assert blocks["redacted_thinking"]["data"] == data
+
+
+def test_redacted_thinking_is_not_replayed_as_openai_content():
+    """Routing a redacted-thinking turn to an OpenAI provider must drop the
+    block, not stringify its opaque payload into the conversation."""
+    resp = {"id": "m", "type": "message", "role": "assistant", "model": "claude",
+            "stop_reason": "end_turn",
+            "content": [{"type": "redacted_thinking", "data": "OPAQUE"},
+                        {"type": "text", "text": "answer"}],
+            "usage": {"input_tokens": 1, "output_tokens": 2}}
+    turn = AnthropicAdapter().decode_response(200, json.dumps(resp).encode())
+    req = ir.Request(model="gpt-4o", messages=[
+        ir.Message(role="assistant", parts=[
+            ir.TextPart(text=turn.text), *turn.thinking])])
+    body = OpenAIAdapter().encode_request(req, "gpt-4o", {})
+    assert "OPAQUE" not in json.dumps(body)
+
+
+def test_redacted_thinking_with_a_payload_is_dropped_not_reasoned():
+    """The guard must hold on the payload, not on the empty text.
+
+    ``block_type`` is what marks the block, so a redacted part carrying text
+    (never produced upstream today, but not structurally impossible) must not
+    reach an OpenAI body as ``reasoning_content`` either.
+    """
+    part = ir.ThinkingPart(text="SECRET", block_type="redacted_thinking",
+                           data="OPAQUE")
+    req = ir.Request(model="gpt-4o", messages=[
+        ir.Message(role="assistant",
+                   parts=[ir.TextPart(text="answer"), part])])
+    body = OpenAIAdapter().encode_request(req, "gpt-4o", {})
+    blob = json.dumps(body)
+    assert "SECRET" not in blob
+    assert "OPAQUE" not in blob
+
+
+def test_anthropic_client_thinking_budget_reaches_openai_provider():
+    req = am.decode_request({
+        "model": "o3",
+        "messages": [{"role": "user", "content": "think"}],
+        "thinking": {"type": "enabled", "budget_tokens": 32000},
+        "max_tokens": 100000,
+    })
+    body = OpenAIAdapter().encode_request(req, "o3", {})
+    assert body["reasoning_effort"] == "high"
+
+
+def test_anthropic_thinking_disabled_reaches_openai_provider_as_none():
+    req = am.decode_request({
+        "model": "o3",
+        "messages": [{"role": "user", "content": "quick"}],
+        "thinking": {"type": "disabled"},
+        "max_tokens": 100,
+    })
+    body = OpenAIAdapter().encode_request(req, "o3", {})
+    assert body.get("reasoning_effort") in (None, "none")
+
+
+def test_anthropic_allowlist_drop_is_observable():
+    """An inbound param in neither _READ_KEYS nor _PASSTHROUGH_KEYS must be
+    reported, not silently dropped — that is how ``output_config`` went
+    missing from a routed request."""
+    from structlog.testing import capture_logs
+
+    am._UNMODELLED_LOGGED.clear()
+    # ``capture_logs`` patches structlog's config for the block and restores
+    # it, so this never has to touch the process-global configuration itself.
+    with capture_logs() as captured:
+        am.decode_request({
+            "model": "claude", "max_tokens": 10,
+            "messages": [{"role": "user", "content": "hi"}],
+            "some_future_param": {"x": 1},
+        })
+
+    events = [e for e in captured
+              if e.get("event") == "anthropic_params_unmodelled"]
+    assert events, "the dropped param was silent"
+    assert "some_future_param" in events[-1]["dropped"]
+
+
+def test_anthropic_top_level_response_format_is_now_reported_as_dropped():
+    """``response_format`` is read only as ``output_config.format``, so a
+    TOP-LEVEL one is genuinely dropped — and must therefore be reported.
+
+    Listing it in ``_READ_KEYS`` once made this drop invisible: the param
+    vanished from the request and the observability feature said nothing,
+    which is exactly the failure it was added to catch.
+    """
+    from structlog.testing import capture_logs
+
+    am._UNMODELLED_LOGGED.clear()
+    with capture_logs() as captured:
+        am.decode_request({
+            "model": "claude", "max_tokens": 10,
+            "messages": [{"role": "user", "content": "hi"}],
+            "response_format": {"type": "json_object"},
+        })
+
+    events = [e for e in captured
+              if e.get("event") == "anthropic_params_unmodelled"]
+    assert events, "a top-level response_format was dropped silently"
+    assert "response_format" in events[-1]["dropped"]
+
+
+def test_reading_keys_and_passthrough_keys_agree_on_a_carried_param():
+    """A param carried by ``_PASSTHROUGH_KEYS`` must not also be in
+    ``_READ_KEYS`` — ``metadata`` was, which misstated the set's contract."""
+    assert not (am._READ_KEYS & am._PASSTHROUGH_KEYS)

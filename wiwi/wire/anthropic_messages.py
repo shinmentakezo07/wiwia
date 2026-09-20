@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 import orjson
+import structlog
 
 from wiwi.core.context import RequestContext
 from wiwi.ir import builtin_tools as bt
@@ -13,6 +14,8 @@ from wiwi.ir import types as ir
 from wiwi.streaming import deltas as dl
 from wiwi.streaming.sse import sse_frame
 from wiwi.wire.openai_chat import DialectError
+
+log = structlog.get_logger("wiwi.wire.anthropic_messages")
 
 # Cap on text/thinking buffered while a tool_use block is open (see
 # AnthropicStreamEncoder._deferred). Anthropic content blocks are strictly
@@ -439,11 +442,18 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         disable_parallel_tool_use=disable_parallel,
         response_format=response_format,
     )
+    extras = {k: v for k, v in body.items() if k in _PASSTHROUGH_KEYS}
+    # The allowlist is deliberate — these are the request params the Messages
+    # API accepts — but a *modelled* key missing from it was a silent drop: the
+    # caller's param vanished with no trace, which is how ``output_config``
+    # went missing (see the note at the request_params block above). Log the
+    # unmodelled remainder so the next such gap is visible in a proxy log
+    # rather than in a behaviour difference.
+    _note_unmodelled_params(body, extras)
     return ir.Request(model=body["model"], messages=messages, tools=tools,
                       tool_choice=tool_choice, gen_params=g,
                       stream=bool(body.get("stream")),
-                      extras={k: v for k, v in body.items()
-                              if k in _PASSTHROUGH_KEYS})
+                      extras=extras)
 
 
 # 2026 Anthropic top-level params the IR doesn't model as GenParams fields.
@@ -454,10 +464,54 @@ _PASSTHROUGH_KEYS = {
     "context_management", "fallbacks", "cache_control",
 }
 
+# Top-level keys this codec reads. Anything in the inbound body that is in
+# neither this set nor ``_PASSTHROUGH_KEYS`` is dropped by the allowlist above,
+# and ``_note_unmodelled_params`` reports it.
+#
+# Every name here must be a key ``decode_request`` actually reads at the TOP
+# level, or the set hides the very drop it exists to report. Two names were
+# removed for exactly that reason: ``response_format`` is read only as
+# ``output_config.format`` (never at the top level), so listing it made a
+# client's top-level ``response_format`` vanish silently; and ``metadata`` is
+# carried by ``_PASSTHROUGH_KEYS`` (subtracted from the report anyway), so
+# listing it here misstated this set's own contract.
+_READ_KEYS = {
+    "model", "messages", "system", "tools", "tool_choice", "max_tokens",
+    "temperature", "top_p", "top_k", "stop_sequences", "stream", "thinking",
+    "output_config",
+}
+
+# Distinct dropped param names already logged, so a hot loop cannot flood the
+# proxy log with one line per request. Bounded: these names come from the
+# caller's request body, so an unbounded set is a slow memory leak that a
+# client sending unique junk keys can drive. Past the cap the dedup stops (a
+# few extra log lines) rather than the set growing without limit.
+_UNMODELLED_LOGGED: set[str] = set()
+_UNMODELLED_LOGGED_CAP = 1000
+
+
+def _note_unmodelled_params(body: dict[str, Any], extras: dict[str, Any]) -> None:
+    """Log inbound params that were neither read nor carried through.
+
+    Observability only — the allowlist still decides the request. Once per
+    distinct key name per process, up to ``_UNMODELLED_LOGGED_CAP``.
+    """
+    unmodelled = {k for k in body if k not in _READ_KEYS} - set(extras)
+    new = unmodelled - _UNMODELLED_LOGGED
+    if not new:
+        return
+    if len(_UNMODELLED_LOGGED) < _UNMODELLED_LOGGED_CAP:
+        _UNMODELLED_LOGGED.update(new)
+    log.debug("anthropic_params_unmodelled", dropped=sorted(new))
+
+
 # IR StopReason -> Anthropic stop_reason. The IR now carries Anthropic's own
 # vocabulary (pause_turn, stop_sequence, context_window_exceeded, compaction),
 # so those round-trip unchanged; the remaining IR values come from the narrower
-# dialects and map onto their closest Anthropic spelling.
+# dialects and map onto their closest Anthropic spelling. The counterpart for
+# the OpenAI finish_reason vocabulary is ``ir_to_openai_finish`` in
+# ``wiwi/ir/translation.py`` — the two must stay inverses of each other, and
+# ``_STOP_REASON_IN`` in the Anthropic adapter is the inverse of this map.
 _STOP_REASON_OUT: dict[str, str] = {
     "stop": "end_turn",
     "length": "max_tokens",

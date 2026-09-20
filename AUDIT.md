@@ -6,6 +6,303 @@
 Each finding verified against source by reading the cited lines. Severities: 🔴 critical · 🟠 high · 🟡 medium · ⚪ low.
 
 ---
+
+## 🟡 Low — round 90 (new)
+
+### 270. Three adapters still keep their own finish-reason map, narrower than the shared one
+
+**Severity:** 🟡 Low · **Status: open (found in round-90 review, deferred — outside the approved file scope)**
+
+**Where:** `wiwi/providers/nim_adapter.py:486`, `wiwi/providers/openrouter_adapter.py:254`,
+`wiwi/providers/openrouter_adapter.py:486`.
+
+**What:** Round 90 extracted the finish-reason maps into `wiwi/ir/translation.py`
+(`normalize_finish_reason` inbound, `ir_to_openai_finish` outbound) and rewired
+`openai_adapter.py` and `wire/openai_chat.py` to use them. Three inline copies
+remain, and both flavours are **strictly narrower** than the shared map:
+
+```python
+# openrouter_adapter.py:254 and :486 — adds "error" -> "stop", but handles
+# none of the nonstandard spellings the shared map accepts.
+{"stop": "stop", "length": "length", "tool_calls": "tool_call",
+ "content_filter": "content_filter", "error": "stop"}.get(fr, "stop")
+
+# nim_adapter.py:486 — a plain copy with no local addition at all.
+{"stop": "stop", "length": "length", "tool_calls": "tool_call",
+ "content_filter": "content_filter"}.get(fr, "stop")
+```
+
+**Why it matters:** a NIM- or OpenRouter-backed deployment that spells its
+tool-call stop `tool_use`, `function_call`, or its length stop `max_tokens`
+falls through to the `"stop"` default — the turn's stop reason reaches the
+client as `stop` while the turn carries real tool calls. `normalize_finish_reason`
+already accepts all three spellings, so the fix is a one-line substitution at
+each site, with OpenRouter keeping its local `"error" -> "stop"` addition (which
+the shared map does not carry, and should not: it is OpenRouter-specific).
+
+**One-line fix sketch:** replace each inline `.get(fr, "stop")` with
+`tr.normalize_finish_reason(fr)`, and for OpenRouter special-case `"error"`
+before delegating (it maps to `"stop"`, which the shared map also produces, so
+`normalize_finish_reason` alone is sufficient — `"error"` is not a key the
+shared map knows and the total function returns `"stop"` for it by design).
+
+**Note:** this is a *narrowing* gap, not a live crash — every affected spelling
+degrades to a legal `stop` rather than raising. It was found while verifying the
+round-90 residual doubt about `_synthesized_opens`, and deliberately left
+unfixed: the round-90 approved scope named only `openai_adapter.py` and
+`openai_chat.py` for the shared-map rewiring, and the project rule is that a bug
+found outside the current scope is reported, not silently fixed. The
+`_synthesized_opens` doubt itself resolved **clean** — see the round-90 ledger.
+
+**Related, same shape:** `wiwi/wire/openai_chat.py:356` and `:468` were rewired to
+`ir_to_openai_finish`, which fixes the *outbound* direction — IR `tool_call` no
+longer mis-spells as `stop`. But `wiwi/providers/openai_adapter.py:435`
+(`_OPENAI_FINISH_OUT`) and the `openai_responses.py` `_INCOMPLETE_REASONS` map are
+the only two places the OpenAI vocabularies live; see #271 and #272 below for two
+gaps the shared map *opened* rather than closed.
+
+---
+
+### 271. The OpenAI surface's streaming encoder emits `tool_calls` with no tool call
+
+**Severity:** 🟡 Medium · **Status: open (found in round-90 whole-branch review, outside the approved file scope)**
+
+**Where:** `wiwi/wire/openai_chat.py:429-437` (the `Finish` branch, which guards
+only the suppressed-builtin case) vs `wiwi/wire/openai_chat.py:345-347`
+(non-stream path, which guards unconditionally) and
+`wiwi/wire/anthropic_messages.py:594` (Anthropic path, which guards
+unconditionally).
+
+**What:** the OpenAI surface's streaming path applies the A1 downgrade guard
+**only** when a builtin call was suppressed:
+
+```python
+if (self._stop == "tool_call" and self._suppressed_builtin
+        and not self._saw_tool_calls):
+    self._stop = "stop"
+```
+
+The non-streaming encoder on the *same surface* guards unconditionally
+(`if fr == "tool_calls" and not tool_calls: fr = "stop"`), and so does the
+Anthropic encoder. So a client receives `finish_reason: "tool_calls"` on a chunk
+with no `tool_calls` array — a response that no OpenAI client can act on.
+
+**Round-90 widened the reachable set.** `normalize_finish_reason` newly decodes
+the Anthropic spelling `tool_use` to IR `tool_call`; the pre-round-90 closures in
+`openai_adapter.py` did not accept `tool_use`, so that spelling fell through to
+`stop`. Reproduced end-to-end against a fresh `openai` adapter and the surface
+encoder:
+
+```
+upstream streams finish_reason='tool_use', zero tool calls
+  IR deltas : ['TextDelta', 'Finish']
+  IR finish : ['tool_call']
+  CLIENT    : finish_reason = 'tool_calls'   (zero tool calls)
+```
+
+**Why it matters:** a client that trusts the finish reason to decide whether to
+run tools either stalls waiting for a `tool_calls` array that never arrives, or
+reports a tool turn that produced nothing. This is the same defect class the A1
+guard was written for, on the one path that does not apply it.
+
+**One-line fix sketch:** drop the `self._suppressed_builtin` conjunct so the
+stream guard matches the non-stream one (the flag then only governs the
+`openai_adapter` suppression bookkeeping, which is where it belongs). A
+regression test belongs beside the existing A1 tests, driving
+`ChatStreamEncoder.final_frame()` with `Finish(stop_reason="tool_call")` and no
+`ToolCallOpen`.
+
+**Note:** pre-existing, but *newly reachable* because of this round's own change,
+which is why it is recorded here rather than left as "someone else's bug". Left
+unfixed because `wiwi/wire/openai_chat.py` was in scope only for the
+`ir_to_openai_finish` substitution — widening the fix to the guard is a
+behaviour change the round was not approved for.
+
+---
+
+### 272. The Responses surface reports `tool_call` with no tool item as `completed`
+
+**Severity:** ⚪ Low · **Status: open (found in round-90 whole-branch review, outside the approved file scope)**
+
+**Where:** `wiwi/wire/openai_responses.py:394` (`_INCOMPLETE_REASONS`) and the
+encoder at `:398-418`.
+
+**What:** `_INCOMPLETE_REASONS` maps only `{"length", "content_filter"}`. Every
+other IR reason — including `tool_call`, `pause_turn`, `stop_sequence`,
+`context_window_exceeded`, and `compaction` — encodes as
+`status: "completed"` with no `incomplete_details`. Observed, encoding each IR
+reason through `openai_responses.encode_response` with a text-only turn:
+
+```
+stop                     -> status=completed  incomplete=None
+tool_call                -> status=completed  incomplete=None
+length                   -> status=incomplete {'reason': 'max_output_tokens'}
+content_filter           -> status=incomplete {'reason': 'content_filter'}
+pause_turn               -> status=completed  incomplete=None
+stop_sequence            -> status=completed  incomplete=None
+context_window_exceeded  -> status=completed  incomplete=None
+compaction               -> status=completed  incomplete=None
+```
+
+**Why it matters:** `tool_call` with no tool item is the same invalid shape as
+#271 and gets the same "completed" answer. `context_window_exceeded` is the more
+interesting one: the IR carries it precisely because collapsing an overflow into
+`stop` made Claude Code end turns early and hid the overflow from auto-compact
+(AUDIT #156) — here the Responses surface silently re-collapses it to a
+successful completion for a Responses client.
+
+**Not a round-90 regression:** the pre-round-90 `openai_adapter` closures did not
+produce IR `pause_turn`, `stop_sequence`, `context_window_exceeded`, or
+`compaction` from an OpenAI-shaped upstream either, so this map's coverage was
+already incomplete. Round 90 widened the IR vocabulary that can *reach* it.
+
+**One-line fix sketch:** decide per reason whether the Responses vocabulary can
+express it (`context_window_exceeded` has no `incomplete_details.reason` spelling
+today, so it needs either a new mapping or an explicit documented collapse) and
+extend `_INCOMPLETE_REASONS`, or add an explicit `tool_call`-without-items guard
+mirroring #271. Do not widen this map without checking what a Responses client
+does with each new status.
+
+---
+
+## ✅ Fixed — round 91 (2026-09-20)
+
+### 269. A 200 carrying an Anthropic/OpenAI error body was declared HEALTHY
+
+**Severity:** 🟠 High · **Status: fixed** (second half only — the original first-half claim was retracted in review; see the correction note above)
+
+Fixed in `wiwi/core/recovery.py`: `_body_is_error_envelope` now recognizes the
+Anthropic (`{"type":"error","error":{…}}`) and OpenAI (`{"error":{…}}`) error
+bodies in addition to WorkBuddy's `{"code": N, "msg": …}` envelope — previously
+those 200s decoded into an empty-but-successful turn with no exception and no
+signal, so the healer called a dead key HEALTHY and restored it.
+Regression tests: `tests/test_fix_round91.py`. Gate: `2434 passed`, `ruff` clean.
+
+> **Correction (same round, caught in review).** This entry originally claimed a
+> second, larger half: that `_probe_request()` hardcoded
+> `model="wiwi-health-probe"` and the placeholder "reached the wire", so every
+> probe was rejected 404/401 and the rejection blamed the key or the deployment.
+> **That claim was false.** No adapter reads `ir.Request.model` for the wire
+> body — every adapter sets it from `encode_request`'s own `model_id` argument
+> (`openai_adapter.py:233`, `anthropic_adapter.py:439`,
+> `opencode_adapter.py:845`, and the rest via `super()`), and the pre-fix call
+> site already passed `dep.model_id` as that argument. Encoding the probe
+> request through six provider types with the OLD `_probe_request` and the NEW
+> one produces **byte-identical wire bodies**. The placeholder was in a field
+> nothing reads: a code-clarity defect, not a misclassification.
+> The `_probe_request(stream, model_id)` signature change was kept because it
+> makes the two halves agree about who owns the model name, but it is a no-op
+> on observable behaviour. See "Why the original claim was wrong" below.
+
+**Where:** `wiwi/core/recovery.py:112` (`probe_verdict`) and its helper
+`_body_is_error_envelope` (`wiwi/core/recovery.py:133`).
+
+**What:** `probe_verdict(status, body)` recognized exactly one class of 200
+business error — WorkBuddy's `{"code": <non-zero>, "msg": …}` envelope — and
+nothing else. An Anthropic- or OpenAI-shaped upstream that answers HTTP 200 with
+its own dialect's error object was declared HEALTHY.
+
+Those bodies are invisible one layer down, which is why no existing test caught
+it: `decode_response(200, <error envelope>)` returns an **empty but successful**
+`AssistantTurn` — no exception, no signal, nothing for the caller to notice.
+
+**Evidence (fresh, this session):**
+
+```
+probe_verdict(200, b'{"type":"error","error":{"type":"overloaded_error",…}}')  -> HEALTHY (pre-fix)
+probe_verdict(200, b'{"error":{"message":"…"}}')                              -> HEALTHY (pre-fix)
+probe_verdict(200, b'{"code":1,"msg":"quota"}')                               -> UNREACHABLE (already handled)
+```
+
+**Why it matters:** the healer's whole job is to *restore* a key or deployment
+into rotation when a probe succeeds. A 200-is-error body told it a dead
+credential was alive, so the key was restored and immediately failed again on
+real traffic — the healer re-arming the very failure it exists to clear.
+
+**Why not caught earlier:** `probe_verdict` (#96) and the model-error streak
+rule (#97) were fixed at the classification layer, and
+`tests/test_recovery.py::TestProbeVerdict` covers literal statuses and bodies —
+but only bodies in the shapes that were already handled.
+
+**Fix (as applied):** `_body_is_error_envelope` recognizes the Anthropic
+(`{"type":"error","error":{…}}`) and OpenAI (`{"error":{message|type|code|param}}`)
+shapes by their own structural markers, in addition to WorkBuddy's envelope.
+Deliberately **shape-based rather than adapter-owned**: `probe_verdict` is a
+pure synchronous classifier with no adapter in scope, the shapes are unambiguous
+by their markers, and recognition keys on structure — never on a
+`provider_type == …` branch — so no dialect knowledge is imported into `core/`
+and no sixth method was added to the five-method `ProviderAdapter` Protocol for
+a consumer that does not exist. An adapter-owned veto hook remains a reasonable
+future extension for a provider whose 200 error body is neither shape; none is
+known today, so no seam was added speculatively.
+
+**False-positive surface (reviewed, judged acceptable):** the OpenAI arm
+requires *any* of `message`/`type`/`code`/`param` inside a non-empty
+`{"error": {...}}`, so a CN-style success envelope like
+`{"error": {"code": 0, "message": "ok"}}` would be flagged. That shape is not
+reachable as a success from any provider in `PROVIDER_TYPES`, and the fleet's
+own decoders are *stricter-blind* than this classifier: they treat any
+non-empty `{"error": {...}}` as an error with no marker check at all
+(`openai_adapter.py:520`, `cline_adapter.py:153`, `gemini_adapter.py:298`, which
+reads the inner `code` as a *status*), so a 200 body of that shape already
+becomes a `StreamError` one layer down. Recognition here is therefore narrower
+than what the adapters already do with the same bytes.
+
+**Why the original claim was wrong (recorded so it is not re-made):** the
+finding was produced by a test that passed `"real-model-id"` as *both*
+`_probe_request`'s new argument and `encode_request`'s second argument, then
+asserted the body carried `"real-model-id"`. Because `encode_request` sets the
+body field solely from its own argument, the assertion holds even when
+`_probe_request` discards its argument entirely — verified: a `_probe_request`
+that ignores `model_id` still passes all nine provider cases. The test failed
+against pre-fix source only via `TypeError` (a one-argument function called with
+two), a signature mismatch misread as a behavioural catch. The lesson is
+general: a parametrized assertion is only RED evidence if it can fail for the
+reason claimed.
+
+**Second half of the fix — the SSE frame (found in whole-branch review).** The
+force-stream arm was the difference between the fix working and not working on
+`cline`/`workbuddy`/`opencode`, which all set `force_stream`: their probe
+returns SSE even on HTTP 200, so the error object arrives **inside a `data:`
+line**, not as a bare JSON body. Verified against the verbatim pre-fix source
+(`git show 365dd2c:wiwi/core/recovery.py`), which is unambiguous — the SSE path
+is inside `try/except ValueError, TypeError` and is unconditional, not
+`is_error_object`-guarded, so it *is* covered by this round's change:
+
+```
+body = b'event: error\ndata: {"type":"error","error":{"type":"overloaded_error",…}}\n\n'
+  pre-fix  -> _body_is_error_envelope = False  -> probe_verdict(200, body) = HEALTHY
+  post-fix -> _body_is_error_envelope = True   -> probe_verdict(200, body) = UNREACHABLE
+```
+
+and one layer down the same bytes decode with no exception at all
+(`anthropic_adapter.decode_stream_event(...)` → empty list), which is exactly the
+invisible-success shape this entry is about. **A real defect, but not one this
+round introduced** — it was open before and closed by the same edit; recorded
+here so the fix's true coverage is on the record rather than assumed.
+
+**Residual gap, deliberately left open:** `recovery.py` guards the *bare-JSON*
+arm with `try/except (ValueError, TypeError)` but the SSE arm additionally
+skips `[DONE]`. Neither arm bounds the *size* of what it parses — a hostile or
+broken upstream returning a multi-MB 200 body to a 1-token probe has its whole
+body `json.loads`'d. A 1-token probe response should be small, so a byte cap
+(e.g. refuse to parse past ~64 KiB and classify by status alone) would be a
+cheap hardening; not worth the surface change here, and not a correctness bug.
+
+**Scope caveat, unchanged:** this fixes only the *healer's* classification. A
+200-carrying-an-error-body still reaches a normal request's client as an empty
+successful turn — `probe_verdict` is not on that path. Whether the gateway
+should convert such a body into a dialect-correct error at decode time is a
+separate question, **not** claimed or done here.
+
+Regression tests: `tests/test_fix_round91.py` (the nine-way parametrized class
+is replaced by a divergence test that passes a *placeholder* to
+`_probe_request` and `dep.model_id` to `encode_request`, asserting the wire
+carries `dep.model_id` — which does fail if the two disagree) plus the
+`TestProbeVerdict` shape cases.
+
+---
+
 ## ✅ Fixed
 
 ### 268. The free-tier decoy tools answered as tool calls the client cannot execute

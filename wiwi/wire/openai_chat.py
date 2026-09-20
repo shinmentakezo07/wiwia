@@ -9,6 +9,7 @@ from typing import Any
 import orjson
 
 from wiwi.core.context import RequestContext
+from wiwi.ir import translation as tr
 from wiwi.ir import types as ir
 from wiwi.streaming import deltas as dl
 from wiwi.streaming.sse import sse_frame
@@ -302,7 +303,7 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         model=body["model"], messages=messages, tools=tools, tool_choice=tool_choice,
         gen_params=g, stream=bool(body.get("stream")),
         stream_options_include_usage=bool(stream_opts.get("include_usage", False)),
-        extras={k: v for k, v in body.items() if k not in _KNOWN_KEYS},
+        extras=tr.carry_extras(body, _KNOWN_KEYS),
     )
 
 
@@ -341,8 +342,7 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
         "prompt_tokens_details": {"cached_tokens": u.cached_tokens},
         "completion_tokens_details": {"reasoning_tokens": u.reasoning_tokens},
     }
-    fr = {"stop": "stop", "length": "length", "tool_call": "tool_calls",
-          "content_filter": "content_filter"}.get(turn.stop_reason, "stop")
+    fr = tr.ir_to_openai_finish(turn.stop_reason)
     # A1 downgrade guard: tool_calls finish with every call suppressed is wrong.
     if fr == "tool_calls" and not tool_calls:
         fr = "stop"
@@ -448,8 +448,7 @@ class ChatStreamEncoder:
                     stop: str | None = None) -> bytes:
         u = usage or getattr(self, "_usage", None) or dl.UsageFinal()
         stop = stop or getattr(self, "_stop", "stop")
-        fr = {"stop": "stop", "length": "length", "tool_call": "tool_calls",
-              "content_filter": "content_filter"}.get(stop, "stop")
+        fr = tr.ir_to_openai_finish(stop)
         out = self._shell({}, finish=fr)
         if self._include_usage:
             # OpenAI semantics: usage arrives in a final chunk carrying an

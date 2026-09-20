@@ -56,6 +56,10 @@ _ANTHROPIC_STANDARD = {
 # ``model_context_window_exceeded`` (an overflow, not a completion) into
 # ``stop`` made Claude Code end server-tool turns early and left auto-compact
 # unable to see an overflow (AUDIT #156).
+# The exact inverse of ``_STOP_REASON_OUT`` in ``wiwi/wire/anthropic_messages.py``
+# — both directions must agree, or a reason survives the outbound trip and
+# comes back as a different one. The OpenAI-vocabulary counterpart is
+# ``normalize_finish_reason`` in ``wiwi/ir/translation.py``.
 _STOP_REASON_IN: dict[str, str] = {
     "end_turn": "stop",
     "max_tokens": "length",

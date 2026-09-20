@@ -8,6 +8,7 @@ from typing import Any
 import orjson
 import structlog
 
+from wiwi.ir import translation as tr
 from wiwi.ir import types as ir
 from wiwi.providers.base import ProviderKeyRef, as_dict, as_list, coerce_args_fragment
 from wiwi.streaming import deltas as dl
@@ -133,6 +134,14 @@ def _role_parts_to_content(
                                  "arguments": p.raw_args or json.dumps(p.args)},
                 })
             elif isinstance(p, ir.ThinkingPart):
+                if p.block_type == "redacted_thinking":
+                    # An Anthropic redacted-thinking block is an opaque
+                    # encrypted blob; only Anthropic can read it back. Its
+                    # ``text`` is always empty, so accumulating it is a no-op
+                    # today — but the payload must never reach an OpenAI-shaped
+                    # upstream as content, so the block is dropped explicitly
+                    # rather than by relying on that emptiness (AUDIT #103).
+                    continue
                 reasoning += p.text
             elif isinstance(p, ir.ToolResultPart):
                 if p.block_type != "tool_result":
@@ -411,11 +420,11 @@ class OpenAIAdapter:
             turn.tool_calls.append(ir.ToolUsePart(
                 id=tc.get("id", ""), name=fn_tc.get("name", ""),
                 args=args, raw_args=raw_args))
-        fr = choice.get("finish_reason", "stop")
-        turn.stop_reason = {"stop": "stop", "length": "length", "tool_calls": "tool_call",
-                            # legacy function_call API: same meaning as tool_calls
-                            "function_call": "tool_call",
-                            "content_filter": "content_filter"}.get(fr, "stop")
+        # Shared canonical map (wiwi/ir/translation.py): the non-standard
+        # spellings other OpenAI-shaped servers emit (tool_use, max_tokens,
+        # end_turn) used to collapse to "stop" here, so an Anthropic client
+        # could not tell a truncation or a tool turn from a natural end.
+        turn.stop_reason = tr.normalize_finish_reason(choice.get("finish_reason"))
         u = as_dict(data.get("usage"))
         details_p = as_dict(u.get("prompt_tokens_details"))
         details_c = as_dict(u.get("completion_tokens_details"))
@@ -651,9 +660,6 @@ class OpenAIAdapter:
             # "adopt the real id" branch — emitting ToolCallArgsDelta with no
             # preceding ToolCallOpen, which the encoders drop (AUDIT #129).
             self._synthesized_opens.clear()
-            out.append(dl.Finish({"stop": "stop", "length": "length",
-                                  "tool_calls": "tool_call",
-                                  "function_call": "tool_call",
-                                  "content_filter": "content_filter"}.get(fr, "stop")))
+            out.append(dl.Finish(tr.normalize_finish_reason(fr)))
         return out
 
