@@ -79,11 +79,11 @@ export function PublicLayout() {
             {/* brand */}
             <div className="md:w-52">
               <Link to="/" className="flex items-center gap-2.5">
-                <img src="/wiwi-logo.png" alt="wiwi" className="h-8 w-8 rounded-[8px] object-cover ring-1 ring-white/[0.06] ring-inset" />
+                <img src="/wiwi-logo.png" alt="" className="h-8 w-8 rounded-[8px] object-cover ring-1 ring-white/[0.06] ring-inset" />
                 <span className="text-[14px] font-semibold text-[var(--admin-text)]">wiwi</span>
-                <span className="font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-[var(--admin-text-dim)]">Gateway</span>
+                <span className="font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-[var(--admin-text-muted)]">Gateway</span>
               </Link>
-              <p className="mt-3 text-[12px] leading-relaxed text-[var(--admin-text-dim)]">
+              <p className="mt-3 text-[12px] leading-relaxed text-[var(--admin-text-muted)]">
                 Self-hosted unified LLM gateway. One binary, every model behind a single endpoint.
               </p>
             </div>
@@ -95,7 +95,7 @@ export function PublicLayout() {
                   <ul className="space-y-1.5">
                     {col.links.map((l) => (
                       <li key={l.label}>
-                        <Link to={l.to} className="text-[12px] text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]">
+                        <Link to={l.to} className="text-[12px] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]">
                           {l.label}
                         </Link>
                       </li>
@@ -105,7 +105,7 @@ export function PublicLayout() {
               ))}
             </div>
           </div>
-          <div className="mt-8 border-t border-[var(--admin-border)] pt-6 text-center text-[11px] text-[var(--admin-text-dim)]">
+          <div className="mt-8 border-t border-[var(--admin-border)] pt-6 text-center text-[11px] text-[var(--admin-text-muted)]">
             wiwi · self-hosted LLM gateway · {new Date().getFullYear()}
           </div>
         </div>

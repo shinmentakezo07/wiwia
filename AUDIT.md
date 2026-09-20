@@ -7609,6 +7609,9 @@ and `:1514`; the identical pattern in `Docs.tsx` was not swept.
 **Fix:** append `group-focus-within:opacity-100 pointer-coarse:opacity-100` to
 both class strings.
 
+**Status: fixed** — the docs code copy controls are always visible on coarse pointers
+and expose visible keyboard focus states.
+
 ### 260. `Toggle` renders `role="switch"` with no accessible name
 
 **Severity:** 🟡 Medium (screen readers announce an unidentifiable control)
@@ -7655,6 +7658,10 @@ the rest of the app.
 
 **Fix:** give each control `min-h-11 min-w-11` (or `p-2.5`) plus
 `inline-flex items-center justify-center`.
+
+**Partial fix:** `Docs.tsx` `PathCopyBtn` now uses an `h-11 w-11` inline-flex
+target with a visible keyboard focus ring. The other controls in this finding
+remain open.
 
 ### 262. Users page: the self-demotion guard is dead code, and role changes can race
 
@@ -7750,3 +7757,69 @@ loop exits on `this.closed`; the SSE frame parser (`api/sse.ts`) matches the
 server's actual wire format (`subsystem.py:305-308`); no internal `<a href>`
 remains (every one is `https:`/`mailto:` or guarded by an `external` flag); and
 there are 0 uses of `dangerouslySetInnerHTML` (`Markdown.tsx` builds React nodes).
+
+### 273. Public docs navbar logo has a redundant accessible name
+
+**Severity:** ⚪ Low (accessibility)
+**File:** `web/src/components/landing/Navbar.tsx:260`
+
+**Trigger:** load any public page, including `/docs`, with the navbar logo and
+the adjacent visible `wiwi` link text.
+
+**Consequence:** screen readers announce the brand as `wiwi wiwi` because the
+image alt text duplicates the link text.
+
+**Fix:** make the logo image decorative with `alt=""` and retain the adjacent
+link text as the accessible name.
+
+**Status: fixed** — the navbar logo is now decorative.
+
+### 274. Public docs footer uses low-contrast dim text
+
+**Severity:** 🟡 Medium (WCAG 2 AA / binding UI/UX rule)
+**File:** `web/src/components/PublicLayout.tsx:84-108`
+
+**Trigger:** view the footer on `/docs` or another public page.
+
+**Consequence:** the `#6b7280` dim text on `#050505` measures 4.21:1, below the
+4.5:1 minimum for normal text.
+
+**Fix:** use the existing `--admin-text-muted` token (`#9ca3af`) for footer
+labels, links, and metadata.
+
+**Status: fixed** — footer text now uses the higher-contrast muted token.
+
+### 275. Horizontally scrollable docs code regions are not keyboard-focusable
+
+**Severity:** 🟡 Medium (keyboard accessibility)
+**File:** `web/src/pages/Docs.tsx:197` and `:571`
+
+**Trigger:** Tab through the docs page on desktop or mobile and reach a code
+block whose content overflows horizontally.
+
+**Consequence:** the scrollable `<pre>` is omitted from the tab order, so a
+keyboard user cannot move focus to it and scroll the code horizontally. Axe
+reports `scrollable-region-focusable` for every affected code block.
+
+**Fix:** give each scrollable code region `tabIndex={0}`, `role="group"`, a
+descriptive `aria-label`, and a visible focus ring without introducing duplicate
+landmarks.
+
+**Status: fixed** — docs code regions are keyboard-focusable and visibly
+focusable.
+
+### 276. Mobile docs section selector label has low contrast
+
+**Severity:** 🟡 Medium (WCAG 2 AA / binding UI/UX rule)
+**File:** `web/src/pages/Docs.tsx:684`
+
+**Trigger:** open `/docs` at a narrow mobile viewport and inspect the `On this
+page` label above the section selector.
+
+**Consequence:** the dim text measures 4.21:1 against the page background, below
+the 4.5:1 minimum for normal text.
+
+**Fix:** use the existing `--admin-text-muted` token for the selector label.
+
+**Status: fixed** — the mobile section selector label now uses the
+higher-contrast muted token.

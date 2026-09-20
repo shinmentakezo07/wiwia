@@ -257,7 +257,7 @@ export function Navbar({ sticky = true }: { sticky?: boolean }) {
             <div className="flex w-full items-center justify-between gap-3 lg:w-auto">
               <Link to="/" className="group flex items-center gap-2.5 no-underline outline-none">
                 <span className="relative rounded-full ring-1 ring-inset ring-white/[0.12] transition-shadow duration-300 group-hover:shadow-[0_0_18px_rgba(116,66,237,0.4)]">
-                  <img src="/wiwi-logo.png" alt="wiwi" className="block size-9 rounded-full object-cover" />
+                  <img src="/wiwi-logo.png" alt="" className="block size-9 rounded-full object-cover" />
                 </span>
                 <span className="whitespace-nowrap text-xl font-bold tracking-tight text-[var(--admin-text)]">
                   wiwi

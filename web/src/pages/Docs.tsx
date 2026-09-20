@@ -3,13 +3,6 @@
 // with HTTP method badges, and feature highlights. Matches the dark design
 // system shared with the admin console.
 
-import {
-  AnimatedBeam,
-  AnthropicIcon,
-  GeminiIcon,
-  OpenAIIcon,
-  OpenRouterIcon,
-} from "@/components/AnimatedBeam";
 
 import {
   useCallback,
@@ -24,6 +17,7 @@ import {
   BookOpen,
   Boxes,
   Check,
+  ChevronDown,
   ChevronRight,
   Copy,
   KeyRound,
@@ -31,6 +25,7 @@ import {
   Network,
   Palette,
   RefreshCw,
+  Server,
   Settings2,
   Shield,
   Terminal,
@@ -96,7 +91,7 @@ function CopyBtn(props: { text: string }) {
         setCopied(true);
         timer.current = setTimeout(() => setCopied(false), 1500);
       }}
-      className="absolute right-2.5 top-2.5 flex items-center gap-1 rounded-md border border-white/[0.06] bg-white/[0.02] px-2 py-1 text-[10px] font-medium text-[var(--admin-text-dim)] opacity-0 transition-all hover:text-[var(--admin-text)] group-hover:opacity-100"
+      className="absolute right-2.5 top-2.5 flex h-11 min-w-[72px] items-center justify-center gap-1 rounded-md border border-white/[0.06] bg-white/[0.03] px-2.5 text-[10px] font-medium text-[var(--admin-text-dim)] opacity-100 transition-all hover:border-white/[0.12] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100"
       aria-label="Copy code"
     >
       {copied ? <Check size={11} /> : <Copy size={11} />}
@@ -118,7 +113,7 @@ function PathCopyBtn(props: { text: string }) {
         setCopied(true);
         timer.current = setTimeout(() => setCopied(false), 1500);
       }}
-      className="rounded-md border border-white/[0.06] bg-white/[0.02] p-1 text-[var(--admin-text-dim)] transition-all hover:border-white/[0.12] hover:text-blue-300"
+      className="inline-flex h-11 w-11 items-center justify-center rounded-md border border-white/[0.06] bg-white/[0.02] text-[var(--admin-text-dim)] transition-all hover:border-white/[0.12] hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
       aria-label={`Copy ${props.text}`}
     >
       {copied ? <Check size={11} /> : <Copy size={11} />}
@@ -200,7 +195,13 @@ function CodeBlock(props: { code: string; label?: string; lang?: Lang }) {
           <CopyBtn text={props.code} />
         </div>
       )}
-      <pre className="relative z-10 overflow-x-auto px-3.5 py-3 text-[12px] leading-relaxed" style={{ fontFamily: MONO }}>
+      <pre
+        tabIndex={0}
+        role="group"
+        aria-label={props.label ? `${props.label} code example` : "Code example"}
+        className="relative z-10 overflow-x-auto px-3.5 py-3 text-[12px] leading-relaxed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+        style={{ fontFamily: MONO }}
+      >
         <code className="text-[var(--admin-text-muted)]">{highlight(props.code, lang)}</code>
       </pre>
     </div>
@@ -225,7 +226,7 @@ function TabbedCode(props: {
             className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[11px] font-medium transition-colors ${
               i === idx
                 ? "bg-blue-500/10 text-blue-300"
-                : "text-[var(--admin-text-dim)] hover:bg-white/[0.03] hover:text-[var(--admin-text-muted)]"
+                : "text-[var(--admin-text-muted)] hover:bg-white/[0.03] hover:text-[var(--admin-text)]"
             }`}
           >
             {t.label}
@@ -311,7 +312,7 @@ function FeatureCard(props: { icon: LucideIcon; title: string; body: string; ton
         <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-gradient-to-br ${tone[1]} ${tone[2]} ring-1 ring-white/[0.06]`}>
           <Icon className={`h-3.5 w-3.5 ${tone[0]}`} />
         </span>
-        <h4 className="text-[13px] font-semibold text-[var(--admin-text)]">{props.title}</h4>
+        <h3 className="text-[13px] font-semibold text-[var(--admin-text)]">{props.title}</h3>
       </div>
       <p className="relative z-10 mt-2 text-[12px] leading-relaxed text-[var(--admin-text-muted)]">{props.body}</p>
     </div>
@@ -477,208 +478,162 @@ print(resp.content[0].text)`,
   },
 ];
 
-// ── overview flow diagram ──────────────────────────────────────────────────
+// ── provider ecosystem map ────────────────────────────────────────────────
 
-
-const INBOUND_NODES = [
-  { name: "chat/completions", note: "OpenAI SDK" },
-  { name: "responses", note: "Codex CLI" },
-  { name: "messages", note: "Claude Code" },
+const PROVIDER_ASSETS: { label: string; src?: string; icon?: LucideIcon }[] = [
+  { label: "OpenAI", src: "/logos/openai.png" },
+  { label: "Anthropic", src: "/logos/anthropic.png" },
+  { label: "Gemini", src: "/logos/gemini.png" },
+  { label: "OpenRouter", src: "/logos/openrouter.png" },
+  { label: "OpenAI-compatible", src: "/logos/openai-compatible.png" },
+  { label: "GMI Cloud", src: "/logos/gmicloud.png" },
+  { label: "BAI", src: "/logos/bai.png" },
+  { label: "WorkBuddy", src: "/logos/workbuddy.svg" },
+  { label: "NVIDIA NIM", src: "/logos/nvidia-nim.png" },
+  { label: "OpenCode", src: "/logos/opencode.svg" },
+  { label: "Cline", icon: Boxes },
 ];
 
-const OUTBOUND_NODES = [
-  { name: "openai", Icon: OpenAIIcon },
-  { name: "anthropic", Icon: AnthropicIcon },
-  { name: "gemini", Icon: GeminiIcon },
-  { name: "openrouter", Icon: OpenRouterIcon },
-].map((n) => ({ ...n, label: n.name }));
-
-function FlowNode({
-  ref,
-  children,
-  className = "",
-}: {
-  ref: React.RefObject<HTMLDivElement | null>;
-  children?: React.ReactNode;
-  className?: string;
-}) {
+function ProviderMap() {
   return (
-    <div
-      ref={ref}
-      className={`group relative z-10 flex h-12 w-12 items-center justify-center rounded-full border-2 border-[var(--admin-border)] bg-[var(--admin-surface)] shadow-lg shadow-black/30 backdrop-blur-sm transition-all duration-200 hover:scale-110 hover:border-white/[0.18] ${className}`}
-    >
-      {children}
-    </div>
-  );
-}
-
-function DocsFlowDiagram() {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const centerRef = useRef<HTMLDivElement>(null);
-  const inboundRefs = [useRef<HTMLDivElement>(null), useRef<HTMLDivElement>(null), useRef<HTMLDivElement>(null)];
-  const outboundRefs = [useRef<HTMLDivElement>(null), useRef<HTMLDivElement>(null), useRef<HTMLDivElement>(null), useRef<HTMLDivElement>(null)];
-
-  return (
-    <Card className="mt-5 overflow-hidden p-0">
-      <div ref={containerRef} className="relative h-[300px] w-full sm:h-[340px]">
-        {/* radial glow behind center */}
-        <div className="pointer-events-none absolute left-1/2 top-1/2 h-64 w-64 -translate-x-1/2 -translate-y-1/2 rounded-full bg-[radial-gradient(circle,rgba(139,92,246,0.12)_0%,rgba(59,130,246,0.06)_40%,transparent_70%)] blur-2xl" aria-hidden />
-
-        {/* Left: inbound dialects */}
-        <div className="absolute left-4 top-1/2 flex -translate-y-1/2 flex-col gap-6 z-10 sm:left-6">
-          {INBOUND_NODES.map((d, i) => (
-            <div key={d.name} className="flex items-center gap-2.5">
-              <FlowNode ref={inboundRefs[i]}>
-                <code className="text-[9px] font-bold text-blue-300" style={{ fontFamily: MONO }}>
-                  {d.name.slice(0, 1).toUpperCase()}
-                </code>
-              </FlowNode>
-              <div className="hidden sm:block">
-                <div className="text-[11px] font-mono text-blue-300">{d.name}</div>
-                <div className="text-[10px] text-[var(--admin-text-dim)]">{d.note}</div>
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {/* Center: wiwi IR */}
-        <div className="absolute left-1/2 top-1/2 z-10 -translate-x-1/2 -translate-y-1/2">
-          <FlowNode ref={centerRef} className="!h-16 !w-16 wiwi-gateway-node">
-            <img src="/wiwi-logo.png" alt="wiwi" className="h-9 w-9 rounded-full object-cover" />
-          </FlowNode>
-          <div className="mt-2.5 text-center">
-            <span className="text-[10px] font-medium uppercase tracking-wide text-[var(--admin-text-dim)]">wiwi IR</span>
+    <Card className="mt-6 overflow-hidden p-0">
+      <div className="border-b border-[var(--admin-border)] bg-white/[0.015] px-5 py-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="admin-label">Provider ecosystem</p>
+            <h3 className="mt-1 text-[15px] font-semibold text-[var(--admin-text)]">
+              One IR, every outbound path
+            </h3>
           </div>
+          <span className="inline-flex h-7 items-center rounded-full border border-emerald-400/15 bg-emerald-400/[0.07] px-2.5 text-[10px] font-medium text-emerald-300">
+            11 provider types
+          </span>
         </div>
-
-        {/* Right: outbound providers */}
-        <div className="absolute right-4 top-1/2 flex -translate-y-1/2 flex-col gap-5 z-10 sm:right-6">
-          {OUTBOUND_NODES.map((node, i) => (
-            <div key={node.name} className="flex items-center gap-2.5">
-              <div className="hidden text-right sm:block">
-                <div className="text-[11px] font-mono text-violet-300">{node.name}</div>
-                <div className="text-[10px] text-[var(--admin-text-dim)]">provider</div>
-              </div>
-              <FlowNode ref={outboundRefs[i]} className="hover:!border-blue-500/40">
-                <node.Icon className="h-5 w-5 object-contain" />
-              </FlowNode>
-            </div>
-          ))}
-        </div>
-
-        {/* Animated beams: inbound → center */}
-        {inboundRefs.map((ref, i) => {
-          const hues = [
-            ["#3b82f6", "#8b5cf6"], // chat → blue→violet
-            ["#06b6d4", "#8b5cf6"], // responses → cyan→violet
-            ["#a855f7", "#ec4899"], // messages → purple→pink
-          ];
-          const [g0, g1] = hues[i] ?? ["#3b82f6", "#8b5cf6"];
-          return (
-            <AnimatedBeam
-              key={`in-${i}`}
-              containerRef={containerRef}
-              fromRef={ref}
-              toRef={centerRef}
-              curvature={(i - 1) * 18}
-              delay={i * 0.3}
-              pathWidth={2.5}
-              gradientStart={g0}
-              gradientStop={g1}
-              duration={3 + i * 0.3}
-            />
-          );
-        })}
-
-        {/* Animated beams: center → outbound */}
-        {outboundRefs.map((ref, i) => {
-          const hues = [
-            ["#8b5cf6", "#ec4899"], // openai → violet→pink
-            ["#f59e0b", "#ef4444"], // anthropic → amber→red
-            ["#22c55e", "#3b82f6"], // gemini → green→blue
-            ["#06b6d4", "#8b5cf6"], // openrouter → cyan→violet
-          ];
-          const [g0, g1] = hues[i] ?? ["#8b5cf6", "#ec4899"];
-          return (
-            <AnimatedBeam
-              key={`out-${i}`}
-              containerRef={containerRef}
-              fromRef={centerRef}
-              toRef={ref}
-              curvature={(i - 1.5) * 20}
-              delay={0.5 + i * 0.3}
-              pathWidth={2.5}
-              gradientStart={g0}
-              gradientStop={g1}
-              duration={3 + i * 0.3}
-            />
-          );
-        })}
       </div>
-
-      {/* caption */}
+      <div className="relative p-4 sm:p-5">
+        <div className="pointer-events-none absolute inset-0 opacity-[0.22]" aria-hidden>
+          <div className="docs-provider-grid" />
+        </div>
+        <div className="relative grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-4">
+          {PROVIDER_ASSETS.map((provider) => {
+            const Logo = provider.icon;
+            return (
+              <div
+                key={provider.label}
+                className="docs-provider-item group flex min-h-[78px] flex-col items-center justify-center gap-2 rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] px-2 py-3 transition-all hover:-translate-y-0.5 hover:border-blue-400/25 hover:bg-white/[0.025] hover:shadow-lg hover:shadow-black/20"
+              >
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-white/[0.03] p-1.5 ring-1 ring-white/[0.05]">
+                  {provider.src ? (
+                    <img src={provider.src} alt="" className="h-full w-full object-contain" />
+                  ) : Logo ? (
+                    <Logo className="h-5 w-5 text-[var(--admin-text-muted)] transition-colors group-hover:text-blue-300" />
+                  ) : null}
+                </div>
+                <span className="max-w-full truncate text-[10px] font-medium text-[var(--admin-text-muted)] group-hover:text-[var(--admin-text)]">
+                  {provider.label}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
       <div className="border-t border-[var(--admin-border)] px-5 py-3">
-        <p className="text-center text-[11px] leading-relaxed text-[var(--admin-text-dim)]">
-          Inbound dialect → wiwi canonical IR → outbound provider format · responses flow back through the same path
-        </p>
+        <div className="flex flex-wrap justify-center gap-2">
+          <span className="docs-flow-chip text-blue-300">chat/completions</span>
+          <span className="docs-flow-chip text-cyan-300">responses</span>
+          <span className="docs-flow-chip text-fuchsia-300">messages</span>
+          <span className="docs-flow-arrow" aria-hidden>→</span>
+          <span className="docs-flow-chip text-violet-300">wiwi IR</span>
+          <span className="docs-flow-arrow" aria-hidden>→</span>
+          <span className="docs-flow-chip text-[var(--admin-text-muted)]">provider adapter</span>
+        </div>
       </div>
     </Card>
   );
 }
 
-// ── hero terminal ──────────────────────────────────────────────────────────
+// ── hero request flow ───────────────────────────────────────────────────────
 
-// Fake "live gateway trace" terminal — a streaming curl against the gateway
-// with a routing line, SSE chunks, and a usage footer. Purely decorative.
-function HeroTerminal() {
-  const req = `curl http://localhost:4000/v1/chat/completions \\
-  -H "Authorization: Bearer sk-wiwi-…" \\
-  -d '{"model":"gpt-4o","stream":true,
-       "messages":[{"role":"user","content":"hi"}]}'`;
+function HeroRequestFlow() {
   return (
-    <div className="docs-terminal relative hidden overflow-hidden rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] shadow-2xl shadow-black/40 lg:block">
-      <div className="docs-terminal-glow" aria-hidden />
-      <div className="relative z-10 flex items-center gap-2 border-b border-[var(--admin-border)] bg-white/[0.02] px-3.5 py-2.5">
-        <span className="h-2.5 w-2.5 rounded-full bg-[#ff5f57]" aria-hidden />
-        <span className="h-2.5 w-2.5 rounded-full bg-[#febc2e]" aria-hidden />
-        <span className="h-2.5 w-2.5 rounded-full bg-[#28c840]" aria-hidden />
-        <span className="ml-2 text-[10px] tracking-wide text-[var(--admin-text-dim)]" style={{ fontFamily: MONO }}>
-          wiwi gateway
-        </span>
-        <span className="ml-auto inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[9px] font-medium text-emerald-300">
-          <span className="docs-pulse-dot" aria-hidden /> live
-        </span>
+    <div className="docs-request-flow relative w-full" role="group" aria-label="Gateway request flow">
+      <div className="docs-flow-glow" aria-hidden />
+      <div className="relative z-10 p-4 sm:p-5">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="admin-label">Unified request path</p>
+            <h2 className="mt-1 text-[15px] font-semibold text-[var(--admin-text)]">
+              Any client, any provider
+            </h2>
+          </div>
+          <span className="docs-flow-chip shrink-0 text-emerald-300">
+            <span className="docs-pulse-dot mr-1.5" aria-hidden />
+            gateway ready
+          </span>
+        </div>
+
+        <div className="docs-flow-track mt-5" role="list" aria-label="Request stages">
+          <div className="docs-flow-stage" role="listitem">
+            <div className="docs-flow-stage-icon">
+              <Terminal size={16} />
+            </div>
+            <div className="relative z-10 mt-3">
+              <p className="text-[11px] font-semibold text-[var(--admin-text)]">Any client</p>
+              <p className="mt-1 text-[10px] leading-relaxed text-[var(--admin-text-muted)]">
+                Chat · Responses · Messages
+              </p>
+            </div>
+          </div>
+
+          <div className="docs-flow-connector" aria-hidden>
+            <ArrowRight size={14} />
+          </div>
+
+          <div className="docs-flow-stage" role="listitem">
+            <div className="docs-flow-stage-icon">
+              <Network size={16} />
+            </div>
+            <div className="relative z-10 mt-3">
+              <p className="text-[11px] font-semibold text-[var(--admin-text)]">wiwi IR</p>
+              <p className="mt-1 text-[10px] leading-relaxed text-[var(--admin-text-muted)]">
+                Decode · route · translate
+              </p>
+            </div>
+          </div>
+
+          <div className="docs-flow-connector" aria-hidden>
+            <ArrowRight size={14} />
+          </div>
+
+          <div className="docs-flow-stage" role="listitem">
+            <div className="docs-flow-stage-icon">
+              <Server size={16} />
+            </div>
+            <div className="relative z-10 mt-3">
+              <p className="text-[11px] font-semibold text-[var(--admin-text)]">Any provider</p>
+              <p className="mt-1 text-[10px] leading-relaxed text-[var(--admin-text-muted)]">
+                11 provider types
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-5 border-t border-[var(--admin-border)] pt-4">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {[
+              ["3", "inbound dialects"],
+              ["11", "provider types"],
+              ["1", "canonical IR"],
+              ["SSE", "streaming + journals"],
+            ].map(([value, label]) => (
+              <div className="docs-flow-metric" key={label}>
+                <span className="docs-flow-metric-value">{value}</span>
+                <span className="docs-flow-metric-label">{label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
-      <pre className="relative z-10 min-h-[252px] overflow-x-auto px-4 py-3.5 text-[10.5px] leading-[1.75]" style={{ fontFamily: MONO }}>
-        <code>
-          {highlight(req, "bash")}
-          {"\n"}
-          <span className="text-violet-300">→ routed</span>
-          <span className="text-[var(--admin-text-dim)]"> · openai-prod · </span>
-          <span className="text-sky-300">gpt-4o</span>
-          <span className="text-[var(--admin-text-dim)]"> · key </span>
-          <span className="text-amber-300">pool-1</span>
-          <span className="text-[var(--admin-text-dim)]"> (w3)</span>
-          {"\n\n"}
-          <span className="text-[var(--admin-text-dim)]">data: </span>
-          <span className="text-[var(--admin-text-muted)]">{'{"delta":{"content":"'}</span>
-          <span className="text-emerald-300">Hel</span>
-          <span className="text-[var(--admin-text-muted)]">{'"}'}</span>
-          {"\n"}
-          <span className="text-[var(--admin-text-dim)]">data: </span>
-          <span className="text-[var(--admin-text-muted)]">{'{"delta":{"content":"'}</span>
-          <span className="text-emerald-300">lo, wiwi.</span>
-          <span className="text-[var(--admin-text-muted)]">{'"}'}</span>
-          {"\n"}
-          <span className="text-[var(--admin-text-dim)]">data: </span>
-          <span className="text-[var(--admin-text-muted)]">[DONE]</span>
-          {"\n\n"}
-          <span className="text-emerald-400">✓ 200 OK</span>
-          <span className="text-[var(--admin-text-dim)]"> · 87 tok · 214 tok/s · </span>
-          <span className="text-amber-300">$0.00021</span>
-          <span className="docs-caret" aria-hidden />
-        </code>
-      </pre>
     </div>
   );
 }
@@ -734,7 +689,7 @@ export function DocsPage() {
             </button>
           </div>
           <div className="mt-7 flex flex-wrap items-center gap-x-5 gap-y-1.5 text-[11px] text-[var(--admin-text-dim)]">
-            {["3 inbound dialects", "4+ outbound providers", "1 canonical IR", "SSE streaming"].map(
+            {["3 inbound dialects", "11 provider types", "1 canonical IR", "SSE streaming"].map(
               (s, i) => (
                 <span key={s} className="inline-flex items-center gap-5">
                   {i > 0 && <span className="h-1 w-1 rounded-full bg-white/20" aria-hidden />}
@@ -744,7 +699,27 @@ export function DocsPage() {
             )}
           </div>
         </div>
-        <HeroTerminal />
+        <HeroRequestFlow />
+        </div>
+      </div>
+
+      {/* Mobile jump control */}
+      <div className="docs-mobile-jump mb-6 lg:hidden">
+        <label htmlFor="docs-section-select" className="mb-2 block text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--admin-text-muted)]">
+          On this page
+        </label>
+        <div className="relative">
+          <select
+            id="docs-section-select"
+            value={active}
+            onChange={(event) => handleClick(event.currentTarget.value)}
+            className="docs-section-select h-11 w-full appearance-none rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] px-4 pr-10 text-[13px] text-[var(--admin-text)] shadow-sm focus:border-blue-400/50 focus:outline-none focus:ring-2 focus:ring-blue-400/20"
+          >
+            {SECTIONS.map((section) => (
+              <option key={section.id} value={section.id}>{section.label}</option>
+            ))}
+          </select>
+          <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--admin-text-dim)]" aria-hidden />
         </div>
       </div>
 
@@ -765,7 +740,7 @@ export function DocsPage() {
                   className={`docs-nav-item flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-[12px] transition-colors ${
                     isActive
                       ? "is-active bg-blue-500/[0.06] font-medium text-blue-200"
-                      : "text-[var(--admin-text-dim)] hover:bg-white/[0.02] hover:text-[var(--admin-text-muted)]"
+                      : "text-[var(--admin-text-muted)] hover:bg-white/[0.02] hover:text-[var(--admin-text)]"
                   }`}
                 >
                   <span className="font-mono text-[10px] opacity-50">{String(i + 1).padStart(2, "0")}</span>
@@ -789,7 +764,7 @@ export function DocsPage() {
         {/* Content */}
         <div className="docs-content space-y-16">
           {/* overview */}
-          <section id="overview" className="docs-section scroll-mt-20">
+          <section id="overview" className="docs-section docs-section-card scroll-mt-20">
             <SectionHeading
               index={1}
               icon={BookOpen}
@@ -804,11 +779,11 @@ export function DocsPage() {
               path — the adapter decodes the provider response into IR deltas, and the wire
               encoder re-encodes them in the caller's original dialect.
             </p>
-<DocsFlowDiagram />
+<ProviderMap />
           </section>
 
           {/* quickstart */}
-          <section id="quickstart" className="docs-section scroll-mt-20">
+          <section id="quickstart" className="docs-section docs-section-card scroll-mt-20">
             <SectionHeading
               index={2}
               icon={Terminal}
@@ -841,7 +816,7 @@ curl http://localhost:4000/v1/chat/completions \\
           </section>
 
           {/* authentication */}
-          <section id="authentication" className="docs-section scroll-mt-20">
+          <section id="authentication" className="docs-section docs-section-card scroll-mt-20">
             <SectionHeading
               index={3}
               icon={KeyRound}
@@ -866,7 +841,7 @@ curl http://localhost:4000/v1/chat/completions \\
               <Card className="p-4">
                 <div className="flex items-center gap-2">
                   <Shield size={14} className="text-[var(--admin-accent)]" />
-                  <h4 className="text-[13px] font-semibold text-[var(--admin-text)]">Hashed at rest</h4>
+                  <h3 className="text-[13px] font-semibold text-[var(--admin-text)]">Hashed at rest</h3>
                 </div>
                 <p className="mt-1.5 text-[12px] leading-relaxed text-[var(--admin-text-muted)]">
                   SHA-256 with constant-time compare — the plaintext is shown once at creation.
@@ -875,7 +850,7 @@ curl http://localhost:4000/v1/chat/completions \\
               <Card className="p-4">
                 <div className="flex items-center gap-2">
                   <Wallet size={14} className="text-amber-400" />
-                  <h4 className="text-[13px] font-semibold text-[var(--admin-text)]">Per-key budgets</h4>
+                  <h3 className="text-[13px] font-semibold text-[var(--admin-text)]">Per-key budgets</h3>
                 </div>
                 <p className="mt-1.5 text-[12px] leading-relaxed text-[var(--admin-text-muted)]">
                   Spend ceilings, model allowlists, and RPM/TPM throttles per key.
@@ -884,7 +859,7 @@ curl http://localhost:4000/v1/chat/completions \\
               <Card className="p-4">
                 <div className="flex items-center gap-2">
                   <KeyRound size={14} className="text-violet-400" />
-                  <h4 className="text-[13px] font-semibold text-[var(--admin-text)]">One key, all surfaces</h4>
+                  <h3 className="text-[13px] font-semibold text-[var(--admin-text)]">One key, all surfaces</h3>
                 </div>
                 <p className="mt-1.5 text-[12px] leading-relaxed text-[var(--admin-text-muted)]">
                   The same key works across all three inbound dialects.
@@ -894,7 +869,7 @@ curl http://localhost:4000/v1/chat/completions \\
           </section>
 
           {/* endpoints */}
-          <section id="endpoints" className="docs-section scroll-mt-20">
+          <section id="endpoints" className="docs-section docs-section-card scroll-mt-20">
             <SectionHeading
               index={4}
               icon={Network}
@@ -921,7 +896,7 @@ curl http://localhost:4000/v1/chat/completions \\
           </section>
 
           {/* cross-provider */}
-          <section id="cross-provider" className="docs-section scroll-mt-20">
+          <section id="cross-provider" className="docs-section docs-section-card scroll-mt-20">
             <SectionHeading
               index={5}
               icon={RefreshCw}
@@ -959,7 +934,7 @@ router_settings:
           </section>
 
           {/* streaming */}
-          <section id="streaming" className="docs-section scroll-mt-20">
+          <section id="streaming" className="docs-section docs-section-card scroll-mt-20">
             <SectionHeading
               index={6}
               icon={Zap}
@@ -998,7 +973,7 @@ router_settings:
           </section>
 
           {/* configuration */}
-          <section id="config" className="docs-section scroll-mt-20">
+          <section id="config" className="docs-section docs-section-card scroll-mt-20">
             <SectionHeading
               index={7}
               icon={Settings2}
@@ -1051,7 +1026,7 @@ router_settings:
           </section>
 
           {/* features */}
-          <section id="features" className="docs-section scroll-mt-20">
+          <section id="features" className="docs-section docs-section-card scroll-mt-20">
             <SectionHeading
               index={8}
               icon={Layers}
