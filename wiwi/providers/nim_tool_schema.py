@@ -47,6 +47,54 @@ _UNSAFE_PARAM_NAMES = frozenset({"type"})
 _ALIAS_PREFIX = "_nim_arg_"
 
 
+def _declared_prop_names(value: Any, out: set[str]) -> None:
+    """Collect every ``properties`` key name in a schema, at any depth.
+
+    Used to tell a name the caller *literally declared* (``_nim_arg_foo``)
+    apart from one the sanitizer minted (AUDIT #251).
+    """
+    if isinstance(value, list):
+        for v in value:
+            _declared_prop_names(v, out)
+        return
+    if not isinstance(value, dict):
+        return
+    props = value.get("properties")
+    if isinstance(props, dict):
+        out.update(k for k in props if isinstance(k, str))
+        for schema in props.values():
+            _declared_prop_names(schema, out)
+    for key in _SCHEMA_VALUE_KEYS | _SCHEMA_LIST_KEYS | _SCHEMA_MAP_KEYS:
+        if key in value:
+            _declared_prop_names(value[key], out)
+
+
+def declared_prop_names(tools: list[dict[str, Any]]) -> dict[str, set[str]]:
+    """``{tool_name: {property names the caller declared}}`` for *tools*.
+
+    Computed from the ORIGINAL (pre-sanitize) definitions and handed to
+    :func:`collect_nim_tool_aliases` so a literal ``_nim_arg_*`` parameter is
+    not mistaken for a minted alias (AUDIT #251).
+    """
+    result: dict[str, set[str]] = {}
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        fn = tool.get("function")
+        if not isinstance(fn, dict):
+            continue
+        name = fn.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        params = fn.get("parameters")
+        if not isinstance(params, dict):
+            continue
+        names: set[str] = set()
+        _declared_prop_names(params, names)
+        result[name] = names
+    return result
+
+
 def sanitize_nim_tool_schemas(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Sanitize tool definitions for NIM: strip boolean subschemas and alias unsafe params.
 
@@ -215,11 +263,20 @@ def _alias_in_node(value: Any) -> Any:
     return out
 
 
-def collect_nim_tool_aliases(tools: list[dict[str, Any]]) -> dict[str, dict[str, str]]:
+def collect_nim_tool_aliases(
+    tools: list[dict[str, Any]],
+    declared: dict[str, set[str]] | None = None,
+) -> dict[str, dict[str, str]]:
     """Build a ``{tool_name: {alias: original}}`` map from sanitized tool defs.
 
     Scans the sanitized parameter schemas for aliased property names
-    ( prefixed with ``_nim_arg_`` ) at all nesting levels and reverses them.
+    (prefixed with ``_nim_arg_``) at all nesting levels and reverses them.
+
+    *declared* maps a tool name to the property names the caller literally
+    declared before sanitizing (see :func:`sanitize_nim_tool_schemas`); names
+    in that set are never treated as minted aliases (AUDIT #251). When omitted,
+    the sanitized schemas alone are used — correct for tools whose params do not
+    already start with the alias prefix.
     """
     result: dict[str, dict[str, str]] = {}
     for tool in tools:
@@ -235,27 +292,43 @@ def collect_nim_tool_aliases(tools: list[dict[str, Any]]) -> dict[str, dict[str,
         if not isinstance(params, dict):
             continue
         aliases: dict[str, str] = {}
-        _collect_aliases_in_node(params, aliases)
+        declared_names = (declared or {}).get(name, set())
+        _collect_aliases_in_node(params, aliases, declared_names)
         if aliases:
             result[name] = aliases
     return result
 
 
-def _collect_aliases_in_node(value: Any, aliases: dict[str, str]) -> None:
-    """Recursively collect ``_nim_arg_``-prefixed property names → originals."""
+def _collect_aliases_in_node(
+    value: Any,
+    aliases: dict[str, str],
+    declared: set[str],
+) -> None:
+    """Recursively collect ``alias -> original`` from sanitized ``properties``.
+
+    Collection is by ``_nim_arg_`` prefix, but a name the caller *literally
+    declared* as ``_nim_arg_foo`` is excluded via *declared* — otherwise it was
+    renamed back to ``foo`` (destroying the declared name) or silently merged
+    with a sibling ``foo`` when both were present (AUDIT #251). *declared*
+    holds every property name seen in the ORIGINAL (pre-sanitize) schema, which
+    only the sanitizer can supply: after aliasing, a minted ``_nim_arg_type``
+    and a literal ``_nim_arg_type`` are indistinguishable by shape alone.
+    """
     if isinstance(value, list):
         for v in value:
-            _collect_aliases_in_node(v, aliases)
+            _collect_aliases_in_node(v, aliases, declared)
         return
     if not isinstance(value, dict):
         return
     props = value.get("properties")
     if isinstance(props, dict):
         for pname in props:
-            if isinstance(pname, str) and pname.startswith(_ALIAS_PREFIX):
+            if not isinstance(pname, str) or pname in declared:
+                continue
+            if pname.startswith(_ALIAS_PREFIX):
                 aliases[pname] = pname[len(_ALIAS_PREFIX):]
         for schema in props.values():
-            _collect_aliases_in_node(schema, aliases)
+            _collect_aliases_in_node(schema, aliases, declared)
     for key in _SCHEMA_VALUE_KEYS | _SCHEMA_LIST_KEYS | _SCHEMA_MAP_KEYS:
         if key in value:
-            _collect_aliases_in_node(value[key], aliases)
+            _collect_aliases_in_node(value[key], aliases, declared)

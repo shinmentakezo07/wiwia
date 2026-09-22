@@ -10,6 +10,7 @@ import structlog
 
 from wiwi.core.context import RequestContext
 from wiwi.ir import builtin_tools as bt
+from wiwi.ir import translation as tr
 from wiwi.ir import types as ir
 from wiwi.streaming import deltas as dl
 from wiwi.streaming.sse import sse_frame
@@ -579,11 +580,20 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
         content = [{"type": "text", "text": ""}]
     u = turn.usage
     sr = _STOP_REASON_OUT.get(turn.stop_reason, "end_turn")
-    # A1 downgrade guard: tool_call with every call suppressed is invalid.
-    # A paired ``server_tool_use`` is not a tool_use block, so it does not
-    # satisfy this check either — but such a turn also ends with end_turn
-    # upstream (the provider ran the tool itself), so the guard stands.
-    if sr == "tool_use" and not any(b["type"] == "tool_use" for b in content):
+    # Tool-turn validity (ir/translation.tool_call_finish_is_valid): a
+    # tool_use stop_reason needs a tool block behind it, and a paired
+    # ``server_tool_use`` IS such a block — the provider ran the tool, but the
+    # turn is still a tool turn and Anthropic's upstream reports tool_use for
+    # it. Counting only ``tool_use`` blocks downgraded a complete hosted-tool
+    # turn to end_turn here, exactly as the streaming encoder did before the
+    # same fix.
+    _tool_blocks = sum(1 for b in content if b["type"] == "tool_use")
+    _server_blocks = sum(1 for b in content
+                         if b["type"] in ("server_tool_use", "mcp_tool_use"))
+    if not tr.tool_call_finish_is_valid(
+            turn.stop_reason,
+            emitted_calls=_tool_blocks,
+            emitted_server_calls=_server_blocks):
         sr = "end_turn"
     return {
         "id": f"msg_{req_id}", "type": "message", "role": "assistant",
@@ -612,10 +622,16 @@ class AnthropicStreamEncoder:
         # interleaved parallel tool calls route args to the right block.
         self._tool_blocks: dict[int, int] = {}
         self._open_tool: int | None = None
-        # A1 stop_reason guard: any real (non-builtin) tool_use block emitted?
-        # A suppressed-builtin-only stream must not finish with stop_reason
-        # tool_use — Anthropic rejects a tool_use finish with no tool_use block.
+        # Tool-turn validity: track what this turn actually emitted, so the
+        # Finish arm can ask ``tool_call_finish_is_valid`` whether a
+        # ``tool_use`` stop_reason has anything behind it. Both counts are
+        # needed — Anthropic's own upstream reports ``tool_use`` for a turn
+        # made of provider-hosted calls, and ``_emit_server_call`` is the only
+        # place those reach the client, so a flag set solely in the
+        # client-dispatched path (the old ``_saw_tool_use``) downgraded a
+        # complete server-tool turn to ``end_turn``.
         self._saw_tool_use = False
+        self._saw_server_call = False
         # Provider-executed calls awaiting their result block, keyed by IR
         # index. Held rather than emitted so a call whose result never arrives
         # is dropped (unpaired ``server_tool_use`` is rejected on replay) while
@@ -737,7 +753,15 @@ class AnthropicStreamEncoder:
         for index, call in self._server_calls.items():
             if tid and call["id"] == tid:
                 return self._server_calls.pop(index)
-        if len(self._server_calls) == 1 and not tid:
+        # No buffered call matched. Fall back to the single remaining call when
+        # EITHER the result names no id OR it names one the adapter never saw:
+        # an upstream that rewrites/drops the id still needs its call emitted,
+        # or the result ships UNPAIRED — the exact shape the buffering exists to
+        # prevent, and one Anthropic rejects on replay. (The previous form
+        # guarded only on ``not tid``, so an id mismatch emitted the result
+        # while silently dropping its call at final_frame.) With several calls
+        # buffered there is no safe guess, so the id MUST match.
+        if len(self._server_calls) == 1:
             return self._server_calls.pop(next(iter(self._server_calls)))
         return None
 
@@ -799,6 +823,9 @@ class AnthropicStreamEncoder:
         # unstopped (AUDIT #178).
         out.extend(self._drain_deferred())
         raw = "".join(call["args"])
+        # This call reached the client, so the turn is a tool turn even if no
+        # client-dispatched tool_use ever opened: the Finish arm keys off this.
+        self._saw_server_call = True
         out.append(self._evt("content_block_start", {
             "type": "content_block_start", "index": self._block_idx,
             "content_block": {"type": call["block_type"], "id": call["id"],
@@ -999,7 +1026,21 @@ class AnthropicStreamEncoder:
             # content blocks are strictly sequential.
             out = []
             call = self._take_server_call(d.block)
-            if call is not None:
+            if call is None:
+                # No buffered call to pair this result with — either none was
+                # opened, or several are pending and the result's id names
+                # none of them (ambiguous). Emitting the result alone ships an
+                # UNPAIRED ``*_tool_result`` block, which is the exact shape
+                # the buffering exists to prevent and which Anthropic rejects
+                # when the client replays it on the next turn. Drop the RESULT
+                # BLOCK only; the block-sequencing bookkeeping below still
+                # runs, because the open text/thinking block must be closed
+                # and any deferred interleaved content drained exactly as it
+                # would be for a paired result (AUDIT #178) — the stream must
+                # stay well-formed even when a block is dropped.
+                skipped_result = True
+            else:
+                skipped_result = False
                 out.extend(self._emit_server_call(call))
             if self._open_block is not None:
                 out.extend(self._close_block())
@@ -1007,13 +1048,14 @@ class AnthropicStreamEncoder:
             # leaves the text/thinking block it opened still open, so the
             # result block below would reuse its index and leave it unstopped.
             out.extend(self._drain_deferred())
-            out.append(self._evt("content_block_start", {
-                "type": "content_block_start", "index": self._block_idx,
-                "content_block": d.block}))
-            out.append(self._evt("content_block_stop",
-                                 {"type": "content_block_stop",
-                                  "index": self._block_idx}))
-            self._block_idx += 1
+            if not skipped_result:
+                out.append(self._evt("content_block_start", {
+                    "type": "content_block_start", "index": self._block_idx,
+                    "content_block": d.block}))
+                out.append(self._evt("content_block_stop",
+                                     {"type": "content_block_stop",
+                                      "index": self._block_idx}))
+                self._block_idx += 1
             return b"".join(out)
         if isinstance(d, dl.UsageFinal):
             self._usage = d
@@ -1021,9 +1063,17 @@ class AnthropicStreamEncoder:
         if isinstance(d, dl.Finish):
             self._stop = _STOP_REASON_OUT.get(d.stop_reason, "end_turn")
             self._stop_seq = d.stop_sequence
-            # A1 downgrade guard: suppression may have removed the only tool
-            # call — a tool_use stop_reason with no tool_use block is invalid.
-            if self._stop == "tool_use" and not self._saw_tool_use:
+            # Tool-turn validity (ir/translation.tool_call_finish_is_valid):
+            # a tool_use stop_reason is legal only when a tool block actually
+            # reached the client. Both counts matter — a turn made entirely of
+            # provider-hosted calls emits ``server_tool_use`` blocks and the
+            # upstream reports tool_use for it, so keying only on the
+            # client-dispatched flag downgraded a complete search turn to
+            # end_turn and made Claude Code treat a live tool turn as done.
+            if not tr.tool_call_finish_is_valid(
+                    d.stop_reason,
+                    emitted_calls=1 if self._saw_tool_use else 0,
+                    emitted_server_calls=1 if self._saw_server_call else 0):
                 self._stop = "end_turn"
                 # The matched sequence is only meaningful alongside
                 # stop_reason "stop_sequence"; leaving it set on a downgraded

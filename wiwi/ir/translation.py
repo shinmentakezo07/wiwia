@@ -95,6 +95,49 @@ def ir_to_openai_finish(stop_reason: str) -> str:
         return _OPENAI_FALLBACK_FINISH
     return _IR_TO_OPENAI_FINISH.get(stop_reason, _OPENAI_FALLBACK_FINISH)
 
+# ---------------------------------------------------------------------------
+# Tool-turn validity
+# ---------------------------------------------------------------------------
+# Every surface encodes an IR ``tool_call`` stop reason into its own spelling
+# (OpenAI ``tool_calls``, Anthropic ``tool_use``), and every one of them is
+# invalid if the turn carries no tool call the CLIENT can act on. Clients --
+# OpenAI SDK, Codex CLI, Claude Code -- branch on that reason to decide whether
+# to dispatch tools, so emitting it with an empty tool set either stalls the
+# agent (a ``tool_calls`` array that never arrives) or ends a tool turn early.
+#
+# The rule was re-derived, slightly differently and incompletely, in each
+# encoder: ``openai_chat`` guarded only when a builtin had been suppressed
+# (AUDIT #271), the Responses surface never guarded at all (AUDIT #272), and
+# the Anthropic encoder keyed on a flag that the provider-hosted path never
+# set. One predicate, consulted by all three, is the fix for the class rather
+# than for each instance.
+
+
+def tool_call_finish_is_valid(
+    stop_reason: str,
+    *,
+    emitted_calls: int = 0,
+    emitted_server_calls: int = 0,
+) -> bool:
+    """Is ``stop_reason`` a legal stop for a turn that emitted these calls?
+
+    A ``tool_call`` reason is valid only when at least one tool call reached
+    the client. Count both flavours:
+
+    - ``emitted_calls`` -- client-dispatched ``tool_use`` / ``function_call``
+      items the client will run and answer.
+    - ``emitted_server_calls`` -- provider-hosted items (Anthropic
+      ``server_tool_use`` / ``mcp_tool_use``, Responses ``web_search_call``).
+      Anthropic's own upstream reports ``tool_use`` for a turn made of these,
+      so a surface that emits them must keep the reason.
+
+    Every non-``tool_call`` reason is vacuously valid: this predicate answers
+    only the one question, and callers downgrade on ``False`` alone.
+    """
+    if stop_reason != "tool_call":
+        return True
+    return (emitted_calls + emitted_server_calls) > 0
+
 
 def carry_extras(source: Any, known: frozenset[str]) -> dict[str, Any]:
     """Return the sub-dict of ``source`` whose keys are *not* in ``known``.

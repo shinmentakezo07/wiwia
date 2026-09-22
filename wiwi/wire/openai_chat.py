@@ -371,9 +371,14 @@ class ChatStreamEncoder:
         self._suppressed_builtin = False
         # Any real (non-builtin) tool_calls frame emitted?
         self._saw_tool_calls = False
-        # Tool indices that emitted an Open (legal or suppressed): ArgsDelta
-        # for a suppressed builtin must not emit a phantom args-only frame.
+        # Tool indices that emitted a real Open, so an ArgsDelta can be
+        # routed to the frame that opened it.
         self._tool_indices: set[int] = set()
+        # Indices whose Open was a suppressed builtin. Tracked explicitly so
+        # that call's ArgsDelta/Close is dropped by intent, not by the
+        # incidental fact that no Open registered the index (they are the same
+        # condition as a contract-illegal ArgsDelta today; see the feed arm).
+        self._suppressed_indices: set[int] = set()
         # Chunk skeleton built once: id/object/created/model never change for
         # the life of the stream, so only `choices[0]` is mutated per delta
         # instead of re-allocating the whole chunk dict on every token.
@@ -402,10 +407,19 @@ class ChatStreamEncoder:
         if isinstance(d, dl.ToolCallOpen):
             # A1: provider-hosted builtin calls (web_search) are suppressed —
             # a function tool_calls frame would invite the client to execute
-            # a phantom function. The index stays unregistered so the paired
-            # ArgsDelta drops too (no args-only phantom frame).
+            # a phantom function.
             if d.builtin is not None:
                 self._suppressed_builtin = True
+                # Record the index EXPLICITLY rather than relying on its
+                # absence from _tool_indices. The old code suppressed the
+                # paired ArgsDelta only because no Open had registered that
+                # index; that is the same condition as "contract-illegal
+                # ArgsDelta", so a future change to either rule would silently
+                # start leaking a builtin's arguments as a function frame
+                # (AUDIT #156, the builtin-suppression work). The other two
+                # surfaces track their hosted calls explicitly; this matches
+                # them.
+                self._suppressed_indices.add(d.index)
                 return None
             self._tool_indices.add(d.index)
             # `id` must be a string; some providers return integer ids.
@@ -415,6 +429,8 @@ class ChatStreamEncoder:
                 "index": d.index, "id": tool_id, "type": "function",
                 "function": {"name": d.name, "arguments": ""}}]})
         if isinstance(d, dl.ToolCallArgsDelta):
+            if d.index in self._suppressed_indices:
+                return None  # a hosted call's args never reach the client
             if d.index not in self._tool_indices:
                 # ArgsDelta with no preceding Open: contract-illegal; drop
                 # rather than emit a phantom args-only frame.
@@ -422,17 +438,26 @@ class ChatStreamEncoder:
             return self._shell({"tool_calls": [{
                 "index": d.index, "function": {"arguments": d.args_fragment}}]})
         if isinstance(d, dl.ToolCallClose):
+            self._suppressed_indices.discard(d.index)
             return None
         if isinstance(d, dl.UsageFinal):
             self._usage = d
             return None  # emitted with the Finish frame
         if isinstance(d, dl.Finish):
             self._stop = d.stop_reason
-            # A1 downgrade guard: only when suppression actually removed the
-            # only tool call. A plain tool_call finish with no calls seen is
-            # upstream behavior — pass it through untouched.
-            if (self._stop == "tool_call" and self._suppressed_builtin
-                    and not self._saw_tool_calls):
+            # Tool-turn validity (ir/translation.tool_call_finish_is_valid):
+            # a tool_call finish is legal only when a function tool_calls
+            # frame actually reached the client. The old guard fired only
+            # when a builtin had been suppressed, so an upstream reporting a
+            # tool stop with no tool deltas (e.g. the Anthropic spelling
+            # ``tool_use``, newly decoded by normalize_finish_reason) passed
+            # through and the client got finish_reason "tool_calls" with an
+            # empty array — a turn it can neither run nor complete
+            # (AUDIT #271). The non-streaming encoder on this surface guards
+            # unconditionally; this now matches it.
+            if not tr.tool_call_finish_is_valid(
+                    self._stop,
+                    emitted_calls=1 if self._saw_tool_calls else 0):
                 self._stop = "stop"
             return None  # final_frame() emits finish_reason + usage together
         if isinstance(d, dl.StreamEnd):
@@ -448,6 +473,14 @@ class ChatStreamEncoder:
                     stop: str | None = None) -> bytes:
         u = usage or getattr(self, "_usage", None) or dl.UsageFinal()
         stop = stop or getattr(self, "_stop", "stop")
+        # Authoritative tool-turn guard. `stop` may be supplied by the caller
+        # (a failover/resume path rebuilds the frame from state that never
+        # went through feed(Finish)), so the check cannot live only in feed:
+        # consulting the predicate here covers every path to the finish chunk
+        # (AUDIT #271).
+        if not tr.tool_call_finish_is_valid(
+                stop, emitted_calls=1 if self._saw_tool_calls else 0):
+            stop = "stop"
         fr = tr.ir_to_openai_finish(stop)
         out = self._shell({}, finish=fr)
         if self._include_usage:

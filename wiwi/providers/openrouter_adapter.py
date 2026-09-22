@@ -24,6 +24,7 @@ from typing import Any
 import orjson
 
 from wiwi.ir import builtin_tools as bt
+from wiwi.ir import translation as tr
 from wiwi.ir import types as ir
 from wiwi.providers.base import ProviderKeyRef, as_dict, as_list, coerce_args_fragment
 from wiwi.providers.openai_adapter import OpenAIAdapter
@@ -249,11 +250,11 @@ class OpenRouterAdapter(OpenAIAdapter):
                 args=args, raw_args=raw_args))
 
         fr = choice.get("finish_reason", "stop")
-        # OpenRouter uses "error" for mid-stream failures; map to "stop" so
-        # the client gets a graceful finish (the error was already surfaced).
-        turn.stop_reason = {"stop": "stop", "length": "length", "tool_calls": "tool_call",
-                            "content_filter": "content_filter",
-                            "error": "stop"}.get(fr, "stop")
+        # OpenRouter uses "error" for mid-stream failures; the shared map
+        # already maps it to "stop" (the error was surfaced separately).
+        # AUDIT #270: was an inline map narrower than the shared one, so a
+        # non-standard tool-call spelling fell through to "stop".
+        turn.stop_reason = tr.normalize_finish_reason(fr)
 
         u = data.get("usage") or {}
         details_p = (u.get("prompt_tokens_details") or {})
@@ -366,7 +367,10 @@ class OpenRouterAdapter(OpenAIAdapter):
         if isinstance(reasoning_text, str) and reasoning_text:
             out.append(dl.ThinkingDelta(reasoning_text))
 
-        for rd in delta.get("reasoning_details") or []:
+        # ``or []`` defaults only a *falsy* value, so a truthy non-list
+        # (``5``, ``true``) survived and raised ``TypeError`` mid-stream,
+        # which the pump routes to a provider cooldown (AUDIT #231).
+        for rd in as_list(delta.get("reasoning_details")):
             if not isinstance(rd, dict):
                 continue  # malformed entry (AUDIT #110)
             rtype = rd.get("type", "")
@@ -482,8 +486,7 @@ class OpenRouterAdapter(OpenAIAdapter):
             # inherits that; this override re-implemented the sweep without it
             # (AUDIT #156).
             self._synthesized_opens.clear()
-            out.append(dl.Finish({"stop": "stop", "length": "length",
-                                  "tool_calls": "tool_call",
-                                  "content_filter": "content_filter",
-                                  "error": "stop"}.get(fr, "stop")))
+            # AUDIT #270: shared map (handles the non-standard spellings and
+            # maps OpenRouter's "error" to "stop" as this inline copy did).
+            out.append(dl.Finish(tr.normalize_finish_reason(fr)))
         return out

@@ -784,6 +784,12 @@ class ResponsesStreamEncoder:
         for idx in sorted(self._tools):
             closing += b"".join(self._close_tool(idx))
         u = self._usage or dl.UsageFinal()
+        # NB: the Responses surface does NOT publish a `tool_call` stop reason
+        # — its turn shape is the output item array plus `status`, and
+        # `_response_obj` consults the reason only for the truncation mapping.
+        # Adding a tool-call validity guard here would be inert, so the
+        # #271-class defect simply does not exist on this surface. Left as-is
+        # deliberately rather than shipping a check that changes nothing.
         # Truncation is a DISTINCT terminal event (response.incomplete) with
         # status "incomplete" + incomplete_details — not a completed response.
         incomplete = self._stop == "length"

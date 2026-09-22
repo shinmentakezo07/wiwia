@@ -37,6 +37,7 @@ from typing import Any
 
 import orjson
 
+from wiwi.ir import translation as tr
 from wiwi.ir import types as ir
 from wiwi.providers.base import ProviderKeyRef, coerce_args_fragment
 from wiwi.providers.nim_native_tools import (
@@ -48,6 +49,7 @@ from wiwi.providers.nim_native_tools import (
 )
 from wiwi.providers.nim_tool_schema import (
     collect_nim_tool_aliases,
+    declared_prop_names,
     sanitize_nim_tool_schemas,
     unalias_nim_tool_args,
 )
@@ -171,7 +173,11 @@ class NimAdapter(OpenAIAdapter):
                 chat["reasoning_budget"] = mapped
 
         # Sanitize tool schemas: strip boolean subschemas, alias unsafe params.
+        # Record the caller's literal property names first so a parameter named
+        # `_nim_arg_foo` is not mistaken for a minted alias on the way back
+        # (AUDIT #251); `set_tool_context` reads this off the same instance.
         if body.get("tools"):
+            self._declared_props = declared_prop_names(body["tools"])
             body["tools"] = sanitize_nim_tool_schemas(body["tools"])
 
         return body
@@ -220,6 +226,10 @@ class NimAdapter(OpenAIAdapter):
         self._reasoning_framer = MiniMaxFramer()
         self._tool_schemas: dict[str, dict[str, Any]] = {}
         self._tool_aliases: dict[str, dict[str, str]] = {}
+        # Literal property names per tool, recorded by encode_request so a
+        # caller-declared `_nim_arg_*` param is not reversed as a minted alias
+        # (AUDIT #251).
+        self._declared_props: dict[str, set[str]] = {}
         # Args fragments for tools with aliased params are buffered per
         # index and emitted once (un-aliased) when the call closes.
         self._buffered_args: dict[int, str] = {}
@@ -235,6 +245,7 @@ class NimAdapter(OpenAIAdapter):
         self._reasoning_framer = MiniMaxFramer()
         self._tool_schemas = {}
         self._tool_aliases = {}
+        self._declared_props = {}
         self._buffered_args = {}
         self._synthesized_opens = set()
 
@@ -247,7 +258,8 @@ class NimAdapter(OpenAIAdapter):
         """
         self._tool_schemas = tool_schemas_from_body(body)
         if body.get("tools"):
-            self._tool_aliases = collect_nim_tool_aliases(body["tools"])
+            self._tool_aliases = collect_nim_tool_aliases(
+                body["tools"], self._declared_props)
 
     def _flush_open_tools(self) -> list[dl.IRStreamDelta]:
         """Close every still-open tool call, flushing deferred Opens first.
@@ -482,9 +494,11 @@ class NimAdapter(OpenAIAdapter):
             out.extend(flushed)
             # Close ALL still-open tool calls (parallel tools).
             out.extend(self._flush_open_tools())
-            out.append(dl.Finish({"stop": "stop", "length": "length",
-                                 "tool_calls": "tool_call",
-                                 "content_filter": "content_filter"}.get(fr, "stop")))
+            # AUDIT #270: was an inline map narrower than the shared one, so a
+            # non-standard tool-call spelling (tool_use/function_call) or a
+            # max_tokens length stop fell through to "stop" while the turn
+            # carried real tool calls.
+            out.append(dl.Finish(tr.normalize_finish_reason(fr)))
         return out
 
     def _feed_safely(self, framer: MiniMaxFramer, chunk: str,

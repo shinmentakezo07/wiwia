@@ -10,7 +10,7 @@ import structlog
 
 from wiwi.ir import builtin_tools as bt
 from wiwi.ir import types as ir
-from wiwi.providers.base import ProviderKeyRef, as_dict, as_list
+from wiwi.providers.base import ProviderKeyRef, as_dict, as_list, as_str
 from wiwi.streaming import deltas as dl
 
 log = structlog.get_logger("wiwi.anthropic_adapter")
@@ -616,8 +616,11 @@ class AnthropicAdapter:
                     text="", block_type="redacted_thinking",
                     data=rd if isinstance(rd, str) else ""))
             elif btype == "tool_use":
+                # A JSON null id/name must not reach the client; the id would
+                # otherwise be coerced by ToolUsePart.__post_init__ to the
+                # literal "None" (AUDIT #232).
                 turn.tool_calls.append(ir.ToolUsePart(
-                    id=block.get("id", ""), name=block.get("name", ""),
+                    id=as_str(block.get("id")), name=as_str(block.get("name")),
                     args=block.get("input") or {}))
             elif btype in ("server_tool_use", "mcp_tool_use"):
                 # Provider-executed tools (web_search, code_execution, an MCP
@@ -634,9 +637,9 @@ class AnthropicAdapter:
                 # the sync path did not, so identical upstream output produced
                 # a clean stream and a phantom call depending on `stream`.
                 turn.tool_calls.append(ir.ToolUsePart(
-                    id=block.get("id", ""), name=block.get("name", ""),
+                    id=as_str(block.get("id")), name=as_str(block.get("name")),
                     args=block.get("input") or {},
-                    builtin=(block.get("name") or "server_tool"),
+                    builtin=(as_str(block.get("name")) or "server_tool"),
                     block_type=btype))
             elif isinstance(btype, str) and btype.endswith("_tool_result"):
                 # A provider-executed tool's RESULT block. Carried whole so the
@@ -719,14 +722,16 @@ class AnthropicAdapter:
                 # phantom function call. Any server_tool_use block is
                 # provider-executed by definition, known to the registry or not.
                 is_server = cb.get("type") in ("server_tool_use", "mcp_tool_use")
+                # A JSON null id/name must not reach the client (AUDIT #232).
+                cid = as_str(cb.get("id"))
+                cname = as_str(cb.get("name"))
                 out.append(dl.ToolCallOpen(
-                    index=idx, id=cb.get("id", ""), name=cb.get("name", ""),
-                    builtin=(cb.get("name") or "server_tool") if is_server else None,
+                    index=idx, id=cid, name=cname,
+                    builtin=(cname or "server_tool") if is_server else None,
                     block_type=cb.get("type")))
-                if is_server and cb.get("id"):
+                if is_server and cid:
                     # Remember the pairing: the result block names only the id.
-                    self._tool_names_by_id[str(cb["id"])] = (
-                        cb.get("name") or "server_tool")
+                    self._tool_names_by_id[cid] = cname or "server_tool"
             elif isinstance(cb.get("type"), str) and cb["type"].endswith("_tool_result"):
                 # A provider-executed tool's RESULT block, streamed whole right
                 # after its call. It carries the search hits and the
