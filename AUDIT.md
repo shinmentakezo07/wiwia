@@ -7,11 +7,276 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — round 93 (2026-09-21)
+
+### 285. The streaming pump silently dropped every line from an envelope provider
+
+**Severity:** 🟠 High · **Status: fixed**
+
+**Where:** `wiwi/core/gateway.py` (`_pump_once`, `_complete_via_stream`),
+`wiwi/streaming/sse.py` (`LineSSEParser`), `wiwi/core/recovery.py`
+(`_body_is_error_envelope`).
+
+**Trigger:** a streaming client against Cline or WorkBuddy — both
+`force_stream`, so the envelope shape reaches every streaming caller — or a
+health probe classifying one of their 200 bodies.
+
+**Consequence:** those providers answer a "streaming" request with **one whole
+JSON object per line** rather than framed SSE. `LineSSEParser.feed_line` only
+recognises blank lines, `:` comments, `event:`, and `data:`, so an unprefixed
+line fell through and was discarded. In the pump the effect was total: every
+content delta vanished, so the client received an empty turn and a spurious
+`"upstream stream ended without completion"` error — reproduced end-to-end
+(zero content streamed). #284 fixed the *non-streaming* arm; the streaming pump,
+which is the path those providers actually serve, still had the blind spot, so
+the fix had been applied to the less-used half. `_body_is_error_envelope` shared
+it too, which could classify a 200 error envelope as a healthy probe.
+
+**Fix:** the leniency lives in the parser as an explicit `allow_unframed=True`
+opt-in (default unchanged, so a strict caller still drops a malformed line), and
+the three call sites that parse upstream bodies pass it. Centralising it
+replaced three hand-rolled per-call-site fallbacks — the second-convention
+duplication `AGENTS.md` prohibits — with one mechanism.
+
+**Regression:** `tests/test_fix_round93.py` — opt-in is off by default, the
+unframed line reaches the adapter and yields its `Finish`, and
+`test_all_envelope_call_sites_opt_in` pins *every* call site (verified to fail
+when any one drops the flag).
+
+---
+
+## ✅ Fixed — round 93 (2026-09-21)
+
+### 280. Loop detector missed the commonest runaway shape and all reasoning loops
+
+**Severity:** 🟠 High · **Status: fixed**
+
+**Where:** `wiwi/streaming/loopdetect.py`, call site `wiwi/core/gateway.py`
+(`_pump_once`).
+
+**Trigger:** a model stuck restating the same sentence or paragraph — the
+commonest degenerate loop — or looping inside its reasoning trace.
+
+**Consequence:** three defects, all silent:
+
+1. `MAX_LOOP_PERIOD` was 8, so periods 9..32 were **never detected**. The
+   module docstring justified the cap by claiming "a genuine period-40 loop does
+   not fit the 'same chunk repeatedly' failure mode" — but a restated one-line
+   apology is 10-40 wire chunks, i.e. exactly the class the cap excluded.
+2. `_max_period = min(8, limit // 2)` meant a *smaller* configured
+   `stream_loop_limit` silently narrowed period coverage (`limit=20` could only
+   see periods 1..8) instead of merely raising the repeat count required —
+   backwards from the knob's meaning.
+3. Only `TextDelta` was fed, so a model looping in its thinking trace was
+   invisible while the turn burned to the token limit.
+
+**Fix:** the cap is 32 (covering the restated-sentence class at 32 integer
+compares per chunk, far below the per-chunk JSON work it guards); period
+coverage is independent of the limit, with the threshold floored at 1 so a
+period at or above the limit still needs a confirming repeat; `feed` is
+chunk-type-agnostic and ignores empty chunks (so empty keep-alives cannot trip
+it); the gateway feeds `ThinkingDelta` too.
+
+**Regression:** `tests/test_fix_round93.py` (params 1..32, limit-independence,
+reasoning coverage, empty-chunk immunity, 20k-token false-positive check).
+The performance bound in `test_fix_round10.py` moved 8 us → 32 us with the
+4x-wider window; its flatness assertion (the real invariant) is unchanged.
+
+### 281. A failed mid-stream resume leaked its pump and dropped its partial usage
+
+**Severity:** 🟡 Medium · **Status: fixed**
+
+**Where:** `wiwi/core/gateway.py` — `_attempt_resume`, connect-failure arm.
+
+**Trigger:** `stream_resume != "off"` and a fallback deployment that fails to
+connect, after the failed attempt had already priced a partial delivery.
+
+**Consequence:** `new_pump_task.cancel()` was fire-and-forget, so the pump's
+`finally` (which releases the upstream response) might not run before the loop
+moved to the next candidate — leaving the socket checked out until GC. Worse,
+the failure arm never appended `resume_ctx` to `_pending_resume_ctxs`, so any
+usage that attempt had already priced was charged to nobody while the
+originating request reported only its own pre-failure tokens.
+
+**Fix:** the failure arm retains the context when it carries usage (mirroring
+the success path) and cancels **and awaits** the failed pump under a bounded
+`wait_for`, so teardown completes without one bad fallback stalling the loop.
+
+**Regression:** `tests/test_fix_round93.py::test_resume_failure_path_awaits_pump_teardown`.
+
+### 282. Reconnect tail loop re-read and re-parsed the whole journal every 50 ms
+
+**Severity:** 🟠 High · **Status: fixed**
+
+**Where:** `wiwi/streaming/tape_store.py`, `wiwi/server/app.py` (`_replay_iter`).
+
+**Trigger:** any client reconnecting with `x-wiwi-stream-id` while the original
+stream is still running (or while the process that owned it died mid-flight).
+
+**Consequence:** each 50 ms tick called `read_after` (full `read_bytes` +
+`orjson.loads` of every record) *and* `is_complete` (the same, again). With the
+1 MiB per-journal cap that is a sustained full re-parse — measured 2.67 ms +
+4.86 ms per tick on a 2000-record journal — of event-loop time, per client,
+scaling with journal size, used only to discover nothing new was appended.
+
+**Fix:** `JournalTail`, a byte-offset cursor that reads strictly forward and
+advances only past complete lines (a torn tail is re-read next poll). An idle
+poll is one `stat` + one empty `read`: measured 0.021 ms vs 2.67 ms, ~125x, and
+the removed `is_complete` call was another 4.86 ms. `truncated()` detects the
+one case that would corrupt the cursor (file shrunk by a sweep) so the caller
+falls back.
+
+**Regression:** `tests/test_fix_round93.py` (equivalence with `read_after`,
+incremental append pickup, done-record, ownership skip, torn-line tolerance,
+truncation, and an idle-poll cost bound).
+
+### 283. Multi-frame chunks gave every sub-frame the same SSE id
+
+**Severity:** 🟡 Medium · **Status: fixed**
+
+**Where:** `wiwi/server/app.py` — `_inject_id`.
+
+**Trigger:** `stream_event_ids: true` and a chunk carrying more than one SSE
+frame (which the encoders do routinely), with the client's connection dropping
+between sub-frames.
+
+**Consequence:** every sub-frame in the chunk got the **same** `id:`, so the
+client's `Last-Event-ID` could not name a single frame. On reconnect the server
+replayed `seq > id`, skipping every sub-frame after the first in the chunk the
+client was interrupted on — those frames were silently lost.
+
+**Fix:** `_inject_id` returns `(bytes, last_id)` and assigns each sub-frame its
+own monotonically increasing id; `_emit` threads the returned id into `_seq` and
+the journal records the same numbering, so `Last-Event-ID` means one thing to
+both sides.
+
+**Regression:** `tests/test_fix_round93.py` (distinct increasing ids, the
+reconnect-skip scenario, single-frame and no-frame pass-through).
+
+### 284. The non-streaming arm called a truncated upstream a success
+
+**Severity:** 🟠 High · **Status: fixed**
+
+**Where:** `wiwi/core/gateway.py` — `_complete_via_stream`.
+
+**Trigger:** a `force_stream` provider (Cline, WorkBuddy) whose body ends with
+no `finish_reason` and no `[DONE]` — an abrupt close mid-turn.
+
+**Consequence:** `aiter_lines` ends cleanly on an abrupt close rather than
+raising, so the loop simply exited and the method returned a **200 success**
+whose text was silently truncated. The partial tokens were billed as if the turn
+had completed, and no error reached `execute_with_retries`, so no failover was
+attempted. The streaming arm detects exactly this condition and emits an error;
+this arm had no equivalent. Separately, a failure that *did* raise (idle
+timeout, transport error) never billed its partial delivery — the streaming
+pump's `_price_partial` had no counterpart here.
+
+**Fix:** `saw_terminal` is set on `Finish`/`StreamEnd`; a body ending without
+one bills the partial delivery and raises a retryable
+`api_connection_error` so failover takes over. `CancelledError` and mid-read
+exceptions bill the partial first (the cancel path shielded). Also fixed: a body
+line with no SSE field prefix — how the Cline/WorkBuddy envelope providers
+answer a "streaming" request — was silently dropped by `LineSSEParser` (not a
+comment, `event:`, or `data:`), losing the whole turn; it is now fed to the
+adapter as a data frame, which surfaced as a real regression in
+`test_fix_round36.py`.
+
+**Regression:** `tests/test_fix_round93.py` (unframed-line handling,
+`usage_fallback` contract) plus the pre-existing `test_fix_round36.py`
+envelope-provider tests.
+
+---
+
+## ✅ Fixed — round 92 (2026-09-21)
+
+### 277. A full output queue swallows the terminal frame, hanging the client forever
+
+**Severity:** 🔴 Critical · **Status: fixed**
+
+**Where:** `wiwi/core/gateway.py` — `_put_frame` (the pump's only enqueue path)
+and the `stream()` consumer loop.
+
+**Trigger:** a consumer more than `_QUEUE_PUT_TIMEOUT_S` (5 s) behind on the
+pump's `asyncio.Queue(maxsize=4096)` when the stream terminates — a slow client,
+a stalled proxy, a large final `UsageFinal` burst.
+
+**Consequence:** `_put_frame` enqueued with `put_nowait` and fell back to a
+bounded `wait_for(queue.put(...))` whose `TimeoutError` was **suppressed**. On
+timeout the terminal frame (`StreamEnd`/`StreamError`, and `Finish`) was
+discarded. The consumer is parked on `await queue.get()` with no timeout of its
+own, so the request never terminated: the client hung until its own socket
+timeout, with no error and no stop reason. The docstring justified the
+suppression as covering "one case it cannot" — but that case is precisely the
+one where the frame is silently lost. A dropped *content* frame is recoverable
+backpressure; a dropped *terminal* frame is a hang. `terminal_sent` is set only
+after the put, so nothing retried the first terminal.
+
+**Fix:** terminal frames are recognised by `_is_terminal_delta` and enqueued
+through a reserved-slot guarantee: the consumer calls `_reserve_terminal_slot`
+after each `get()`, keeping one queue slot free so the terminal put always
+succeeds; if a slow consumer races into that slot, the terminal put falls back to
+an unbounded `await queue.put(d)` — waiting for the consumer is strictly better
+than never telling it the stream ended. Content keeps the bounded-wait
+backpressure path.
+
+**Regression:** `tests/test_fix_round92.py` — full-queue terminal delivery, slot
+reservation/re-opening, content shedding past capacity.
+
+### 278. Coalescer never honours its `max_ms` deadline, hoarding every token when the upstream goes quiet
+
+**Severity:** 🟠 High · **Status: fixed**
+
+**Where:** `wiwi/streaming/coalesce.py` — `feed`; consumer loop in
+`wiwi/core/gateway.py`.
+
+**Trigger:** `stream_coalesce: true` (opt-in) with a consumer slow enough to
+push queue depth past the threshold (100), then an upstream that stops sending.
+
+**Consequence:** the `max_ms` flush condition was only *evaluated when the next
+delta arrived*. With no further upstream traffic the buffer — and every token in
+it — was held until a control delta or end-of-stream, so `max_ms` acted as a
+maximum lag only for a delta-tight stream and as an *unbounded* lag otherwise.
+Reproduced: 300 deltas fed at depth 4096 emitted 0 frames; after 200 ms idle the
+buffer was still held. This inverted the feature's purpose — the coalescer exists
+to bound latency for slow consumers, not to add unbounded latency.
+
+**Fix:** `flush_due(now=None)` releases the buffer once its deadline has passed,
+`buffered_s` exposes the hold time, and the consumer's `queue.get()` wait is
+bounded by `_wait_timeout()` — the earliest of the ping interval and the
+coalescer's remaining deadline — so the deadline is honoured against the wall
+clock instead of against upstream traffic.
+
+**Regression:** `tests/test_fix_round92.py` — release with no further `feed()`,
+idempotent flush, `buffered_s` accounting, fast-path passthrough unchanged.
+
+### 279. `_reserve_terminal_slot`'s invariant is not covered by the pump's own tests
+
+**Severity:** ⚪ Low · **Status: fixed**
+
+**Where:** `wiwi/core/gateway.py` — the pump/consumer handshake introduced by
+#277.
+
+**Consequence:** the reserved-slot protocol is split across two coroutines (the
+producer's `_put_frame`, the consumer's post-`get` reserve call). A future edit
+that moved the reserve call before `get()`, or dropped it from the `wait_for`
+timeout arm, would silently reintroduce #277 with the suite still green — the
+kind of split-invariant drift the round-90 review called out elsewhere.
+
+**Fix:** the reserve is exercised directly (`test_reserve_reopens_the_slot_so_terminals_always_fit`,
+`test_reserve_drops_a_content_frame_when_consumer_is_far_behind`,
+`test_reserve_is_a_noop_below_capacity`) and the predicate is pinned for every
+delta type, so the split invariant has an executable specification.
+
+---
+
 ## 🟡 Low — round 90 (new)
 
 ### 270. Three adapters still keep their own finish-reason map, narrower than the shared one
 
-**Severity:** 🟡 Low · **Status: open (found in round-90 review, deferred — outside the approved file scope)**
+**Severity:** 🟡 Low · **Status: fixed** — round 95 (`tests/test_fix_round95.py`).
+All three sites now delegate to `wiwi.ir.translation.normalize_finish_reason`;
+OpenRouter's local `"error" -> "stop"` addition is preserved for free because
+the shared total function produces `"stop"` for that unknown spelling.
 
 **Where:** `wiwi/providers/nim_adapter.py:486`, `wiwi/providers/openrouter_adapter.py:254`,
 `wiwi/providers/openrouter_adapter.py:486`.
@@ -65,7 +330,9 @@ gaps the shared map *opened* rather than closed.
 
 ### 271. The OpenAI surface's streaming encoder emits `tool_calls` with no tool call
 
-**Severity:** 🟡 Medium · **Status: open (found in round-90 whole-branch review, outside the approved file scope)**
+**Severity:** 🟡 Medium · **Status: fixed (2026-09-21)** — both `feed(Finish)`
+and `final_frame` now consult `ir.translation.tool_call_finish_is_valid`
+(see #277 below for the full write-up).
 
 **Where:** `wiwi/wire/openai_chat.py:429-437` (the `Finish` branch, which guards
 only the suppressed-builtin case) vs `wiwi/wire/openai_chat.py:345-347`
@@ -122,7 +389,10 @@ behaviour change the round was not approved for.
 
 ### 272. The Responses surface reports `tool_call` with no tool item as `completed`
 
-**Severity:** ⚪ Low · **Status: open (found in round-90 whole-branch review, outside the approved file scope)**
+**Severity:** ⚪ Low · **Status: resolved (2026-09-21)** — not fixed but
+determined to be non-actionable: the Responses surface publishes no
+`tool_call` stop reason, so the shape cannot arise (see the note at the end of
+the tool-call sweep, #283).
 
 **Where:** `wiwi/wire/openai_responses.py:394` (`_INCOMPLETE_REASONS`) and the
 encoder at `:398-418`.
@@ -6676,7 +6946,7 @@ both of which were fixed.
 
 ### 226. `cycle_every_n` saturates into a permanent no-op — recurrence of #78
 
-**Severity:** 🟠 High (a documented routing guarantee silently stops holding)
+**Severity:** 🟠 High (a documented routing guarantee silently stops holding) · **Status: fixed** — round 95 (`tests/test_fix_round95.py`; `tests/test_fix_cycle_failover.py` updated for the consumption semantics). Each key's credit is now consumed at the point its exclusion is applied, so the counter cannot saturate. 300 picks at `cycle_every_n=3` now cap the longest run at 3 (was 10, identical to the cadence being off).
 **File:** `wiwi/router/router.py:1189-1197` (exclusion), `:1252-1258` (increment), `:174-178` (`pick_key` fallback); promise at `wiwi/config.py:249-253`
 
 **Trigger:** default config (`cycle_every_n: 3`) on any pool with ≥2 keys.
@@ -6842,7 +7112,7 @@ unset/`>= 1.0`), treating `None` as unknown ⇒ not cacheable.
 
 ### 231. OpenRouter crashes on a truthy non-list `reasoning_details` (stream and non-stream)
 
-**Severity:** 🟡 Medium (cooldown from a malformed upstream frame)
+**Severity:** 🟡 Medium (cooldown from a malformed upstream frame) · **Status: fixed** — round 95 (`tests/test_fix_round95.py`). The stream site now routes through the existing `base.as_list` helper; the non-stream site already used `as_list`.
 **File:** `wiwi/providers/openrouter_adapter.py:360` (stream), `:191` (non-stream)
 
 **Trigger:** `{"choices":[{"delta":{"reasoning_details": 5}}]}`.
@@ -6856,7 +7126,7 @@ retryable 502, so only the stream site is a health-accounting bug. AUDIT #110 an
 
 ### 232. An explicit JSON `null` tool name/id reaches the client as `null`
 
-**Severity:** 🟡 Medium (the agent silently loses a tool call)
+**Severity:** 🟡 Medium (the agent silently loses a tool call) · **Status: fixed** — round 95 (`tests/test_fix_round95.py`). A new `wiwi.providers.base.as_str` helper (the `str` mirror of `as_dict`/`as_list`) is now used at the Gemini sync+stream tool-name reads and the Anthropic sync+stream `tool_use`/`server_tool_use` id/name reads.
 **File:** `wiwi/providers/gemini_adapter.py:255,361`, `wiwi/providers/anthropic_adapter.py:612,629,715` (and 10 similar `.get(k, "")` sites across the adapters)
 
 **Trigger:** an explicit null where a name/id is expected, e.g. Gemini
@@ -6880,7 +7150,7 @@ decoders**; the adapter stream decoders never got the mirror.
 
 ### 233. OpenCode's Responses route uses raw `int()` on usage — bypassing the shared coercion
 
-**Severity:** 🟡 Medium (pump cooldown on a malformed usage block)
+**Severity:** 🟡 Medium (pump cooldown on a malformed usage block) · **Status: fixed** — round 95 (`tests/test_fix_round95.py`). Both the stream and sync sites now route through `ir.coerce_int` (rejecting a `bool`, which is not a token count).
 **File:** `wiwi/providers/opencode_adapter.py:403-406` (stream), `:660-663` (non-stream)
 
 **Trigger:** `{"type":"response.completed","response":{"usage":{"input_tokens":"abc"}}}`.
@@ -6993,7 +7263,7 @@ and tail incrementally by byte offset instead of re-reading the whole file.
 
 ### 238. `probation_weight <= 0` pins a probation key at zero weight forever
 
-**Severity:** 🟡 Medium (the healer restores a key that can never be used)
+**Severity:** 🟡 Medium (the healer restores a key that can never be used) · **Status: fixed** — round 95 (`tests/test_fix_round95.py`). A `HealerSettings.probation_weight` validator clamps into `(0, 1]` (`<=0` → `0.01`, `>1` → `1.0`).
 **File:** `wiwi/config.py:296` (no validator), `wiwi/router/router.py:205-206` (weight use), `:237-245` (graduation)
 
 `probation_weight` is unvalidated and multiplies the WRR weight. At `0` the key
@@ -7372,7 +7642,7 @@ for pname in props:
 Collection is by *prefix*, with no check that the name was actually minted by
 `_renames_for_node`.
 
-**Reproduced:**
+**Severity:** 🟡 Medium (silent argument corruption/loss) · **Status: fixed** — round 95 (`tests/test_fix_round95.py`). `sanitize_nim_tool_schemas` now records the caller's literal property names (`declared_prop_names`), `collect_nim_tool_aliases` takes them and excludes them from prefix matching, and `NimAdapter.encode_request` stashes them for `set_tool_context`.
 
 ```
 tool declares : _nim_arg_foo
@@ -7823,3 +8093,182 @@ the 4.5:1 minimum for normal text.
 
 **Status: fixed** — the mobile section selector label now uses the
 higher-contrast muted token.
+
+---
+
+## 🟡 Tool-call correctness sweep — the tool-turn stop reason (2026-09-21)
+
+A tool turn is reported to the client through a stop reason, and every surface
+spells it differently (OpenAI `tool_calls`, Anthropic `tool_use`, Responses a
+`function_call` item). Clients — the OpenAI SDK, Codex CLI, Claude Code —
+branch on it to decide whether to dispatch tools, so emitting it with no
+actionable tool call behind it either stalls the agent or ends a tool turn
+early. The rule was re-derived, slightly differently and incompletely, in each
+encoder; the round consolidates it into one predicate.
+
+### 277. The OpenAI streaming encoder emits `tool_calls` with no tool call
+
+**Severity:** 🟡 Medium · **Status: fixed**
+**File:** `wiwi/wire/openai_chat.py:ChatStreamEncoder.feed` / `final_frame`
+
+**Trigger:** a `Finish("tool_call")` — or a caller-supplied
+`final_frame(stop="tool_call")` — with no `ToolCallOpen` on the stream.
+
+**Consequence:** `finish_reason: "tool_calls"` on a chunk with no `tool_calls`
+array, which no OpenAI client can act on. Round-90 widened the reachable set by
+decoding the Anthropic spelling `tool_use`; the guard fired only when a builtin
+had been *suppressed*, so the plain case passed through. The non-streaming
+encoder on the same surface already guarded unconditionally.
+
+**Fix:** both `feed(Finish)` and `final_frame` now consult
+`ir.translation.tool_call_finish_is_valid`; the latter because `final_frame`
+accepts an explicit `stop=` a failover/resume path builds from state that never
+went through `feed`.
+
+### 278. The Anthropic encoder downgrades a provider-hosted tool turn to `end_turn`
+
+**Severity:** 🟡 Medium · **Status: fixed**
+**File:** `wiwi/wire/anthropic_messages.py` (stream + `encode_response`)
+
+**Trigger:** a turn made only of provider-hosted calls (`server_tool_use` /
+`mcp_tool_use`) whose upstream reports `stop_reason: "tool_use"`.
+
+**Consequence:** the call and its result were emitted, but the stop reason was
+downgraded to `end_turn`, so Claude Code treated a live tool turn as done. The
+flag the guard keyed on was set only in the client-dispatched path; the sync
+encoder had the same gap, and the existing test codified the wrong expectation
+(its own upstream fixture says `tool_use`).
+
+**Fix:** both encoders now count emitted `server_tool_use` blocks as tool
+blocks. A half-pair (call with no result) is still dropped, and the stop
+downgrades with it.
+
+### 279. Tool-args validation flags truncated JSON the sync path repairs
+
+**Severity:** ⚪ Low (advisory signal was wrong ~half the time) · **Status: fixed**
+**File:** `wiwi/streaming/validation.py`
+
+**Fix:** repair with `streaming.partial_json._repair_truncated_json` before
+parsing, exactly as the non-streaming gateway path already does. Only
+unrepairable input is reported.
+
+### 280. Resume tape charges builtin deltas the continuation never replays
+
+**Severity:** ⚪ Low · **Status: fixed**
+**File:** `wiwi/streaming/resume.py:_delta_size`
+
+**Fix:** provider-hosted tool deltas (`ToolCallOpen` with `builtin`,
+`ServerToolResultDelta`) account as zero, matching their exclusion from
+`build_continuation_messages`. A search-heavy stream can no longer evict the
+client-dispatched deltas the continuation needs.
+
+### 281. Gemini synthetic tool ids collide across turns
+
+**Severity:** ⚪ Low · **Status: fixed**
+**File:** `wiwi/providers/gemini_adapter.py`
+
+**Fix:** a process-global counter (`_synthetic_tool_id`) replaces the
+per-stream index in the id, so two turns that call the same tool get distinct
+ids. The IR `index` stays a per-stream ordinal, as the contract requires.
+
+### 282. Builtin suppression on the OpenAI surface is implicit
+
+**Severity:** ⚪ Low (latent) · **Status: fixed**
+**File:** `wiwi/wire/openai_chat.py`
+
+**Fix:** a suppressed builtin's index is tracked in an explicit
+`_suppressed_indices` set rather than relying on its absence from
+`_tool_indices` — the same condition as a contract-illegal `ArgsDelta`.
+
+### 283. `disable_parallel_tool_use` / `strict` drops are invisible to the caller
+
+**Severity:** ⚪ Low · **Status: fixed**
+**Files:** `wiwi/providers/{base,gemini_adapter}.py`,
+`wiwi/core/gateway.py`, `wiwi/logging_core/{events,db_sink}.py`
+
+**Fix:** adapters record advisory `translation_warnings`, the gateway drains
+them onto `ctx.metadata` and into the request `LogEvent`, and the sink persists
+them in a new `translation_warnings` column (with a migration).
+
+### Response surface — no fix needed
+
+The Responses surface publishes turn shape via its output item array plus
+`status`, not a `stop_reason` string, so the #277/#278 defect class does not
+arise there. Recorded so the next sweep does not re-audit.
+
+---
+
+## 🟡 Pipeline sweep — request path, reservation, ordering (2026-09-21)
+
+### 284. A truncated stream hands the client a usage frame and THEN an error
+
+**Severity:** 🟡 Medium · **Status: fixed**
+**File:** `wiwi/core/gateway.py:_pump_once`
+
+**Trigger:** an upstream that ends a stream with no `finish_reason` and no
+`[DONE]` after emitting content and (possibly) usage.
+
+**Consequence:** the pump emitted the terminal `UsageFinal` and *then* decided
+the stream was truncated, so the client received a usage frame — its "N tokens
+delivered" signal, read as the tail of a completed turn — immediately followed
+by a `StreamError`. Two contradictory terminals in a row. Anthropic clients
+also keep the usage frame for the final `message_delta`, so the contradiction
+survives into the rendered turn.
+
+**Fix:** the truncation decision now runs before the usage frame is queued, so
+a truncated stream carries exactly one terminal (`StreamError`). Billing is
+unchanged — the partial delivery is priced either way.
+
+### 285. `authenticate()`'s `reserve=True` branch was dead code — and a leak
+
+**Severity:** ⚪ Low (latent) · **Status: fixed**
+**File:** `wiwi/server/app.py:authenticate`
+
+**What:** the function carried an optional `reserve` parameter defaulting to
+`True` that performed the same `limiter.check` as `enforce_rate_limit`. Every
+caller passed `reserve=False`, so the branch never ran — but had anyone used
+the default, the request would reserve TWO rate-limit slots while only one
+refund path (`_release_tpm_reservation`) exists, permanently leaking the other
+into the 60 s window and throttling unrelated traffic.
+
+**Fix:** the parameter and branch are removed. Authentication and reservation
+are now structurally separate.
+
+### 286. A hosted tool result could ship UNPAIRED (three related defects)
+
+**Severity:** 🟡 Medium · **Status: fixed**
+**File:** `wiwi/wire/anthropic_messages.py`
+
+Provider-hosted tool calls (`server_tool_use`) are *buffered* until their
+result arrives, because an unpaired block is rejected on replay — that is the
+design. Three gaps broke it:
+
+1. `_take_server_call` fell back to the single remaining buffered call only
+   when the result named **no** id (`not tid`), though its own docstring says
+   the fallback exists for "an id the adapter never saw". An upstream that
+   rewrote the id emitted the result while its call stayed buffered — the
+   result shipped alone.
+2. The `ServerToolResultDelta` arm emitted the result block **unconditionally**,
+   so when no call could be paired (zero buffered, or several ambiguous) the
+   client got an unpaired `*_tool_result` and the call was discarded at
+   `final_frame`.
+3. No test covered either: the two existing tests that exercise this path fed
+   a result with **no matching call** and asserted the unpaired block *should*
+   be emitted — encoding the defect.
+
+**Fix:** the single-buffered-call fallback now fires on an id mismatch too;
+when no call can be paired (or several make it ambiguous) the result block is
+dropped while the block-sequencing bookkeeping still runs, so the stream stays
+well-formed (`AUDIT #178`). Both tests were corrected to open the call first.
+
+### 287. Streaming log capture concatenated tool args per fragment (O(n²))
+
+**Severity:** ⚪ Low (performance) · **Status: fixed**
+**File:** `wiwi/server/app.py:_capture_delta`
+
+**What:** `entry["arguments"] += d.args_fragment` per fragment is quadratic in
+total bytes — the exact pattern already fixed for text and tool args in the
+pump (`AUDIT #104`), reintroduced on the log-capture path. It only fires when
+`store_prompts_in_spend_logs` is on, which is why it escaped the earlier sweep.
+
+**Fix:** fragments accumulate in a list, joined once at teardown.
