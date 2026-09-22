@@ -20,9 +20,11 @@ import { AboutPage } from "@/pages/About";
 import { ContactPage } from "@/pages/Contact";
 import { EnterprisePage } from "@/pages/Enterprise";
 import { ComparePage } from "@/pages/Compare";
+import { CompareDetailPage } from "@/pages/CompareDetail";
 import { LegalPage } from "@/pages/Legal";
 import { ChangelogPage } from "@/pages/Changelog";
 import { BlogPage } from "@/pages/Blog";
+import { BlogDetailPage } from "@/pages/BlogDetail";
 import { BrandPage } from "@/pages/Brand";
 import { PartnersPage } from "@/pages/Partners";
 import { ReliabilityPage } from "@/pages/Reliability";
@@ -31,12 +33,15 @@ import { IntegrationsPage } from "@/pages/Integrations";
 import { GuidesPage } from "@/pages/Guides";
 import { GuideDetailPage } from "@/pages/GuideDetail";
 import { MigrationPage } from "@/pages/Migration";
+import { MigrationDetailPage } from "@/pages/MigrationDetail";
 import { OpenSourcePage } from "@/pages/OpenSource";
 import { CopilotCostCalculatorPage } from "@/pages/CopilotCostCalculator";
 import { TokenCostCalculatorPage } from "@/pages/TokenCostCalculator";
 import { TimelinePage } from "@/pages/Timeline";
 import { TemplatesPage } from "@/pages/Templates";
+import { TemplateDetailPage } from "@/pages/TemplateDetail";
 import { AgentsPage } from "@/pages/Agents";
+import { AgentDetailPage } from "@/pages/AgentDetail";
 import { AppsPage } from "@/pages/Apps";
 import { SSOPage } from "@/pages/SSO";
 import { ReferralsPage } from "@/pages/Referrals";
@@ -113,9 +118,11 @@ function AppRoutes() {
         <Route path="/contact" element={<ContactPage />} />
         <Route path="/enterprise" element={<EnterprisePage />} />
         <Route path="/compare" element={<ComparePage />} />
+        <Route path="/compare/:slug" element={<CompareDetailPage />} />
         <Route path="/legal" element={<LegalPage />} />
         <Route path="/changelog" element={<ChangelogPage />} />
         <Route path="/blog" element={<BlogPage />} />
+        <Route path="/blog/:slug" element={<BlogDetailPage />} />
         <Route path="/brand" element={<BrandPage />} />
         <Route path="/partners" element={<PartnersPage />} />
         <Route path="/reliability" element={<ReliabilityPage />} />
@@ -124,12 +131,15 @@ function AppRoutes() {
         <Route path="/guides" element={<GuidesPage />} />
         <Route path="/guides/:slug" element={<GuideDetailPage />} />
         <Route path="/migration" element={<MigrationPage />} />
+        <Route path="/migration/:slug" element={<MigrationDetailPage />} />
         <Route path="/open-source" element={<OpenSourcePage />} />
         <Route path="/copilot-cost-calculator" element={<CopilotCostCalculatorPage />} />
         <Route path="/token-cost-calculator" element={<TokenCostCalculatorPage />} />
         <Route path="/timeline" element={<TimelinePage />} />
         <Route path="/templates" element={<TemplatesPage />} />
+        <Route path="/templates/:slug" element={<TemplateDetailPage />} />
         <Route path="/agents" element={<AgentsPage />} />
+        <Route path="/agents/:slug" element={<AgentDetailPage />} />
         <Route path="/apps" element={<AppsPage />} />
         <Route path="/sso" element={<SSOPage />} />
         <Route path="/referrals" element={<ReferralsPage />} />

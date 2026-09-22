@@ -1,23 +1,21 @@
 // Guides detail — per-tool setup instructions for /guides/:slug. Content is
 // grounded in README's "Connecting clients" table and each tool's official
-// config format (opencode.jsonc verified against the installed CLI).
+// config format (opencode.jsonc verified against the installed CLI). Rendered
+// with the shared detail-page chrome so every public detail surface matches.
 
-import { Link, useParams } from "react-router-dom";
-import { ArrowLeft } from "lucide-react";
-import { Card } from "@/components/ui";
-
-interface GuideStep {
-  title: string;
-  body: string;
-  code?: string;
-  codeLabel?: string;
-}
+import { useParams } from "react-router-dom";
+import {
+  DetailHeader,
+  DetailNotFound,
+  StepList,
+} from "@/components/detail-page";
+import type { DetailStep } from "@/components/detail-page";
 
 interface Guide {
   title: string;
   category: string;
   intro: string;
-  steps: GuideStep[];
+  steps: DetailStep[];
 }
 
 const GUIDES: Record<string, Guide> = {
@@ -34,15 +32,16 @@ const GUIDES: Record<string, Guide> = {
       {
         title: "Point Claude Code at the gateway",
         body: "Claude Code reads its endpoint from environment variables — no config file needed.",
-        code: `export ANTHROPIC_BASE_URL=http://localhost:4000
+        code: {
+          code: `export ANTHROPIC_BASE_URL=http://localhost:4000
 export ANTHROPIC_AUTH_TOKEN=sk-wiwi-…`,
-        codeLabel: "env",
+          label: "env",
+        },
       },
       {
         title: "Run it",
         body: "Start Claude Code as usual. Any model name your wiwi config exposes is selectable.",
-        code: "claude",
-        codeLabel: "terminal",
+        code: { code: "claude", label: "terminal" },
       },
     ],
   },
@@ -59,9 +58,11 @@ export ANTHROPIC_AUTH_TOKEN=sk-wiwi-…`,
       {
         title: "Point Cursor at the gateway",
         body: "Set the base URL to your wiwi deployment's /v1 path and paste a virtual key as the API key.",
-        code: `Base URL:  http://localhost:4000/v1
+        code: {
+          code: `Base URL:  http://localhost:4000/v1
 API Key:   sk-wiwi-…`,
-        codeLabel: "cursor settings",
+          label: "cursor settings",
+        },
       },
       {
         title: "Add models",
@@ -82,10 +83,12 @@ API Key:   sk-wiwi-…`,
       {
         title: "Enter the gateway endpoint",
         body: "Set the base URL and paste a virtual key. Cline sends standard Chat Completions requests.",
-        code: `Base URL:  http://localhost:4000/v1
+        code: {
+          code: `Base URL:  http://localhost:4000/v1
 API Key:   sk-wiwi-…
 Model ID:  gpt-4o   # any model in your wiwi model list`,
-        codeLabel: "cline settings",
+          label: "cline settings",
+        },
       },
       {
         title: "Verify",
@@ -102,20 +105,17 @@ Model ID:  gpt-4o   # any model in your wiwi model list`,
       {
         title: "Point Codex at the gateway",
         body: "Codex reads its endpoint from the environment.",
-        code: "export OPENAI_BASE_URL=http://localhost:4000/v1",
-        codeLabel: "env",
+        code: { code: "export OPENAI_BASE_URL=http://localhost:4000/v1", label: "env" },
       },
       {
         title: "Authenticate",
         body: "Log in with a virtual key as the API key (or set OPENAI_API_KEY).",
-        code: "export OPENAI_API_KEY=sk-wiwi-…",
-        codeLabel: "env",
+        code: { code: "export OPENAI_API_KEY=sk-wiwi-…", label: "env" },
       },
       {
         title: "Run it",
         body: "Pick any model exposed by your wiwi config — the Responses dialect is translated to whatever the backing provider speaks.",
-        code: "codex --model gpt-4o",
-        codeLabel: "terminal",
+        code: { code: "codex --model gpt-4o", label: "terminal" },
       },
     ],
   },
@@ -144,9 +144,11 @@ Model ID:  gpt-4o   # any model in your wiwi model list`,
       {
         title: "Add OpenAI credentials",
         body: "In n8n, create OpenAI credentials with your gateway URL and a virtual key.",
-        code: `Base URL:  http://localhost:4000/v1
+        code: {
+          code: `Base URL:  http://localhost:4000/v1
 API Key:   sk-wiwi-…`,
-        codeLabel: "n8n credentials",
+          label: "n8n credentials",
+        },
       },
       {
         title: "Use the OpenAI node",
@@ -171,7 +173,8 @@ API Key:   sk-wiwi-…`,
       {
         title: "Declare the provider",
         body: "Add a provider block to opencode.json (project root) or ~/.config/opencode/opencode.json. The npm field selects OpenCode's OpenAI-compatible SDK adapter.",
-        code: `{
+        code: {
+          code: `{
   "$schema": "https://opencode.ai/config.json",
   "provider": {
     "wiwi": {
@@ -188,14 +191,17 @@ API Key:   sk-wiwi-…`,
     }
   }
 }`,
-        codeLabel: "opencode.json",
+          label: "opencode.json",
+        },
       },
       {
         title: "Run it",
         body: "Start the TUI and pick a wiwi model, or run one-shot with the provider/model slug.",
-        code: `opencode                       # TUI — select a wiwi model
+        code: {
+          code: `opencode                       # TUI — select a wiwi model
 opencode run -m wiwi/gpt-4o "hi"`,
-        codeLabel: "terminal",
+          label: "terminal",
+        },
       },
       {
         title: "Why it works",
@@ -212,7 +218,8 @@ opencode run -m wiwi/gpt-4o "hi"`,
       {
         title: "Add a provider block",
         body: "In Continue's config, define a provider with the gateway's base URL and a virtual key.",
-        code: `name: wiwi
+        code: {
+          code: `name: wiwi
 version: 1
 models:
   - name: gpt-4o
@@ -220,7 +227,8 @@ models:
     model: gpt-4o
     apiBase: http://localhost:4000/v1
     apiKey: sk-wiwi-…`,
-        codeLabel: "config.yaml",
+          label: "config.yaml",
+        },
       },
       {
         title: "Run it",
@@ -237,9 +245,11 @@ models:
       {
         title: "Add a custom provider",
         body: "In the Copilot app's model settings, add a provider with an OpenAI-compatible endpoint.",
-        code: `Base URL:  http://localhost:4000/v1
+        code: {
+          code: `Base URL:  http://localhost:4000/v1
 API Key:   sk-wiwi-…`,
-        codeLabel: "copilot settings",
+          label: "copilot settings",
+        },
       },
       {
         title: "Select models",
@@ -249,98 +259,24 @@ API Key:   sk-wiwi-…`,
   },
 };
 
-function CodeBlock(props: { code: string; label?: string }) {
-  return (
-    <div className="overflow-hidden rounded-xl border border-[var(--admin-border)] bg-zinc-950">
-      {props.label && (
-        <div className="flex items-center gap-2 border-b border-[var(--admin-border)] bg-white/[0.02] px-4 py-2.5">
-          <span className="h-2.5 w-2.5 rounded-full bg-[#ff5f57]" />
-          <span className="h-2.5 w-2.5 rounded-full bg-[#febc2e]" />
-          <span className="h-2.5 w-2.5 rounded-full bg-[#28c840]" />
-          <span className="ml-1.5 font-mono text-[11px] text-[var(--admin-text-dim)]">
-            {props.label}
-          </span>
-        </div>
-      )}
-      <pre className="overflow-x-auto p-4">
-        <code className="font-mono text-[12.5px] leading-relaxed text-zinc-200">
-          {props.code}
-        </code>
-      </pre>
-    </div>
-  );
-}
-
 export function GuideDetailPage() {
   const { slug } = useParams<{ slug: string }>();
   const guide = slug ? GUIDES[slug] : undefined;
 
   if (!guide) {
-    return (
-      <div className="mx-auto max-w-2xl space-y-6 py-20 text-center">
-        <h1 className="text-2xl font-semibold text-[var(--admin-text)]">
-          Guide not found
-        </h1>
-        <p className="text-[14px] text-[var(--admin-text-muted)]">
-          No guide exists at this address.
-        </p>
-        <Link
-          to="/guides"
-          className="inline-flex items-center gap-1.5 text-[13px] font-medium text-blue-400 hover:text-blue-300"
-        >
-          <ArrowLeft size={14} /> All guides
-        </Link>
-      </div>
-    );
+    return <DetailNotFound backTo="/guides" backLabel="All guides" what="Guide" />;
   }
 
   return (
-    <div className="mx-auto max-w-3xl space-y-8 pb-16">
-      <div>
-        <Link
-          to="/guides"
-          className="inline-flex items-center gap-1.5 text-[13px] font-medium text-[var(--admin-text-dim)] transition-colors hover:text-blue-400"
-        >
-          <ArrowLeft size={14} /> All guides
-        </Link>
-      </div>
-
-      {/* ── header ── */}
-      <header className="space-y-3">
-        <span className="admin-badge admin-badge-gray">{guide.category}</span>
-        <h1 className="text-3xl font-semibold tracking-[-0.02em] text-[var(--admin-text)]">
-          {guide.title}
-        </h1>
-        <p className="max-w-2xl text-[15px] leading-relaxed text-[var(--admin-text-muted)]">
-          {guide.intro}
-        </p>
-      </header>
-
-      {/* ── steps ── */}
-      <ol className="space-y-8">
-        {guide.steps.map((step, i) => (
-          <li key={step.title}>
-            <Card className="p-5">
-              <div className="flex items-start gap-3.5">
-                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[var(--admin-border)] bg-white/[0.03] text-[12px] font-semibold text-blue-300">
-                  {i + 1}
-                </span>
-                <div className="min-w-0 flex-1 space-y-3">
-                  <h2 className="text-[15px] font-semibold text-[var(--admin-text)]">
-                    {step.title}
-                  </h2>
-                  <p className="text-[13.5px] leading-relaxed text-[var(--admin-text-muted)]">
-                    {step.body}
-                  </p>
-                  {step.code && (
-                    <CodeBlock code={step.code} label={step.codeLabel} />
-                  )}
-                </div>
-              </div>
-            </Card>
-          </li>
-        ))}
-      </ol>
+    <div className="mx-auto max-w-3xl space-y-10 pb-16">
+      <DetailHeader
+        backTo="/guides"
+        backLabel="All guides"
+        badge={guide.category}
+        title={guide.title}
+        intro={guide.intro}
+      />
+      <StepList steps={guide.steps} />
     </div>
   );
 }

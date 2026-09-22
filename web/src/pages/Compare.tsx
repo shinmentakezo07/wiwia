@@ -1,13 +1,21 @@
 // Compare — side-by-side feature matrix of wiwi against OpenRouter, LiteLLM,
-// and Portkey. Styled table with checkmarks and dashes. Matches the dark
-// design system shared with the admin console.
+// and Portkey, with a per-competitor deep-dive page for each. Styled table
+// with checkmarks and dashes. Matches the dark design system shared with the
+// admin console.
 
-import { Scale } from "lucide-react";
+import { Link } from "react-router-dom";
+import { ArrowRight, Scale } from "lucide-react";
 import { Card } from "@/components/ui";
 
 const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
 
-const PRODUCTS = ["wiwi", "OpenRouter", "LiteLLM", "Portkey"];
+// Column order matches the values arrays below; slug links to /compare/:slug.
+const PRODUCTS: { name: string; slug?: string }[] = [
+  { name: "wiwi" },
+  { name: "OpenRouter", slug: "openrouter" },
+  { name: "LiteLLM", slug: "litellm" },
+  { name: "Portkey", slug: "portkey" },
+];
 
 const FEATURES: { label: string; values: boolean[] }[] = [
   { label: "Self-hosted", values: [true, false, true, true] },
@@ -67,7 +75,12 @@ export function ComparePage() {
       {/* ── comparison table ── */}
       <section>
         <Card className="overflow-hidden p-0">
-          <div className="overflow-x-auto">
+          <div
+            tabIndex={0}
+            role="region"
+            aria-label="Gateway feature comparison, scrollable"
+            className="overflow-x-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/50"
+          >
             <table className="w-full min-w-[36rem] border-collapse text-left text-[13px]">
               <thead>
                 <tr className="border-b border-[var(--admin-border)] bg-white/[0.02]">
@@ -76,20 +89,26 @@ export function ComparePage() {
                   </th>
                   {PRODUCTS.map((p) => (
                     <th
-                      key={p}
+                      key={p.name}
                       scope="col"
                       className="px-5 py-3.5 text-center"
                     >
-                      <span
-                        className={
-                          p === "wiwi"
-                            ? "font-semibold text-[var(--admin-accent)]"
-                            : "font-medium text-[var(--admin-text)]"
-                        }
-                        style={p === "wiwi" ? { fontFamily: MONO } : undefined}
-                      >
-                        {p}
-                      </span>
+                      {p.slug ? (
+                        <Link
+                          to={`/compare/${p.slug}`}
+                          className="group inline-flex items-center gap-1 font-medium text-[var(--admin-text)] transition-colors hover:text-blue-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+                        >
+                          {p.name}
+                          <ArrowRight size={12} className="opacity-0 transition-opacity group-hover:opacity-100" />
+                        </Link>
+                      ) : (
+                        <span
+                          className="font-semibold text-[var(--admin-accent)]"
+                          style={{ fontFamily: MONO }}
+                        >
+                          {p.name}
+                        </span>
+                      )}
                     </th>
                   ))}
                 </tr>
@@ -118,6 +137,22 @@ export function ComparePage() {
             </table>
           </div>
         </Card>
+      </section>
+
+      {/* ── per-competitor deep dives ── */}
+      <section className="grid gap-3 sm:grid-cols-3">
+        {PRODUCTS.filter((p) => p.slug).map((p) => (
+          <Link
+            key={p.slug}
+            to={`/compare/${p.slug}`}
+            className="group flex items-center justify-between gap-3 rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] px-4 py-3.5 transition-colors hover:border-[var(--admin-border-hover)]"
+          >
+            <span className="text-[13.5px] font-medium text-[var(--admin-text)]">
+              wiwi vs {p.name}
+            </span>
+            <ArrowRight size={14} className="shrink-0 text-blue-400 transition-transform group-hover:translate-x-0.5" />
+          </Link>
+        ))}
       </section>
 
       {/* ── guidance ── */}
