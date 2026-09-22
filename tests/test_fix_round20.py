@@ -89,38 +89,46 @@ def test_sse_parser_flush_joins_multiline_data():
 
 
 # ---------------------------------------------------------------------------
-# _inject_id must preserve SSE frame terminators
+# _inject_id must preserve SSE frame terminators AND give each frame its own id
 # ---------------------------------------------------------------------------
+#
+# These assertions changed with AUDIT #283. The original contract was "tag every
+# frame in the chunk with the SAME id line", which is self-defeating on
+# reconnect: the client can only report one Last-Event-ID, so `seq > id` replay
+# skipped every sub-frame after the first. Each frame now gets its own
+# monotonically increasing id, and the helper returns it so the caller's
+# sequence stays monotonic.
 
 def test_inject_id_preserves_single_frame_terminator():
     """A single SSE frame ending in b'\\n\\n' must keep its terminator so the
     next yielded chunk does not fuse onto it (SSE reconnect framing)."""
-    out = _inject_id(b"data: one\n\n", 1)
+    out, last = _inject_id(b"data: one\n\n", 1)
     assert out == b"id: 1\ndata: one\n\n"
     assert out.endswith(b"\n\n")
+    assert last == 1
 
 
 def test_inject_id_preserves_terminator_across_two_chunks():
     """Two consecutively-yielded chunks each keep their own '\\n\\n' terminator,
     so the client's SSE parser sees two distinct frames (id:1 then id:2)."""
-    chunk1 = _inject_id(b"data: one\n\n", 1)
-    chunk2 = _inject_id(b"data: two\n\n", 2)
+    chunk1, last1 = _inject_id(b"data: one\n\n", 1)
+    chunk2, _last2 = _inject_id(b"data: two\n\n", last1 + 1)
     concat = chunk1 + chunk2
     assert concat.endswith(b"\n\n")
     frames = concat.split(b"\n\n")
     assert frames == [b"id: 1\ndata: one", b"id: 2\ndata: two", b""]
 
 
-def test_inject_id_tags_every_frame_in_multi_frame_chunk():
-    """A chunk already containing two frames (blank-line-joined) tags each with
-    the same id line, keeping each frame terminated."""
+def test_inject_id_gives_every_frame_in_a_multiframe_chunk_its_own_id():
+    """A chunk containing two frames (blank-line-joined) tags each with its OWN
+    id, so a reconnect cursor can name a single frame rather than the chunk."""
     chunk = b"data: one\n\ndata: two\n\n"
-    out = _inject_id(chunk, 7)
+    out, last = _inject_id(chunk, 7)
     assert out.count(b"\n\n") == 2
-    assert out.count(b"id: 7\n") == 2
+    assert out == b"id: 7\ndata: one\n\nid: 8\ndata: two\n\n"
+    assert last == 8
 
 
-# ---------------------------------------------------------------------------
 # Gateway streaming: [DONE]-terminated stream with NO trailing blank line
 # ---------------------------------------------------------------------------
 

@@ -91,9 +91,12 @@ class TestLoopDetector:
                 det.feed(f"tok-{limit + i}")
             results[limit] = (time.perf_counter() - t0) / n
 
-        # Generous bound: 8 us/token is ~250x the measured cost, so this
-        # catches only a regression to window-proportional scanning.
-        assert results[1000] < 8e-6, f"per-token cost {results[1000] * 1e6:.1f} us"
+        # Generous bound, deliberately far above the measured cost so it only
+        # catches a regression to window-proportional scanning. It was 8 us when
+        # MAX_LOOP_PERIOD was 8; the window is now 32 chunks wide (AUDIT #280),
+        # i.e. 4x the comparisons per chunk, so the constant scales with it.
+        # The invariant that actually matters is the flatness check below.
+        assert results[1000] < 32e-6, f"per-token cost {results[1000] * 1e6:.1f} us"
         # Cost must be flat in the limit, not proportional to it.
         assert results[1000] < results[100] * 3, (
             f"cost grows with limit: {results[100] * 1e6:.1f} us vs "

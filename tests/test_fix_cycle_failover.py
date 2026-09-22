@@ -273,15 +273,16 @@ async def test_error_clears_cycle_credit_for_key_and_provider():
         chosen.append((dep.provider.name, key.label))
         return "ok"
 
-    # Drive 2 successful calls on the same key (cycle_every_n=1 forces
-    # rotation; with 2 keys WRR alternates a, b, a, b -> chosen = [(a), (b)]).
+    # Drive 2 successful calls with cycle_every_n=1: the cadence must rotate
+    # off the first key immediately (2 keys -> chosen = [(a), (b)]). The credit
+    # is *consumed* when the exclusion is applied (AUDIT #226): leaving it to
+    # accumulate saturated the pool and made the cadence a no-op.
     await _run(r, ctx, ok)
     await _run(r, ctx, ok)
     pname, klabel = chosen[0]
-    # the FIRST (provider, key) entry was picked once -> counter == 1.
-    # Counters live on the router, not ctx.metadata: a per-request dict reset
-    # before every pick and the cadence never fired (AUDIT #78).
-    assert r._key_consec[(pname, klabel)] == 1
+    assert chosen[1][1] != klabel, (
+        f"cycle_every_n=1 must rotate off {klabel}, got {chosen}")
+    assert r._key_consec.get((pname, klabel), 0) == 0
 
     # now a 500 on the next call
     async def err(dep, key, ctx):

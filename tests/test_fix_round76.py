@@ -134,10 +134,12 @@ def test_server_call_does_not_stamp_signature_on_the_result_block():
         f"signature stamped on the wrong block: {sigs} (blocks: {kinds})")
 
 
-def test_result_without_a_buffered_call_closes_deferred_block():
-    """The same drain feeds the result block's own start/stop: an upstream
-    result whose call was never buffered must not inherit an open text block's
-    index (AUDIT #178)."""
+def test_result_without_a_buffered_call_is_dropped_and_blocks_stay_balanced():
+    """An upstream result whose call was never buffered must not be emitted
+    alone — an unpaired ``*_tool_result`` block is rejected by Anthropic on the
+    next turn, which is the whole reason hosted calls are buffered. The
+    deferred text still drains (AUDIT #178: it must not stay open and collide
+    with the next block's index), and the result is dropped."""
     frames = _render([
         dl.StreamStart("claude-x"),
         dl.ToolCallOpen(0, "toolu_grep", "Grep"),
@@ -152,7 +154,8 @@ def test_result_without_a_buffered_call_closes_deferred_block():
     _assert_blocks_balanced(frames)
     kinds = {f["index"]: f["content_block"]["type"] for f in frames
              if f["type"] == "content_block_start"}
-    assert kinds == {0: "tool_use", 1: "text", 2: "web_search_tool_result"}
+    # The text drained as its own block; the unpaired result did NOT ship.
+    assert kinds == {0: "tool_use", 1: "text"}
     assert [f["delta"]["text"] for f in frames
             if f.get("type") == "content_block_delta"
             and f["delta"]["type"] == "text_delta"] == ["Searching now."]

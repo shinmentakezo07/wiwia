@@ -1215,8 +1215,14 @@ def test_openai_adapter_sync_decode_uses_the_shared_map():
 
 
 def test_chat_encoder_emits_openai_spelling_for_tool_call():
+    # A tool_call finish is only legal alongside a real tool frame (AUDIT
+    # #271): with none, the encoder correctly downgrades to "stop", so the
+    # turn must carry a call for this mapping to be exercised at all.
     enc = oc.ChatStreamEncoder("gpt-4o", "abc")
-    frames = [enc.feed(d) for d in [dl.Finish("tool_call"), dl.StreamEnd()]]
+    frames = [enc.feed(d) for d in [
+        dl.ToolCallOpen(index=0, id="c1", name="f"),
+        dl.ToolCallClose(index=0),
+        dl.Finish("tool_call"), dl.StreamEnd()]]
     frames.append(enc.final_frame())
     blob = b"".join(f for f in frames if f).decode()
     assert "tool_calls" in blob
@@ -1226,6 +1232,7 @@ def test_chat_encoder_emits_openai_spelling_for_tool_call():
 def test_chat_encoder_final_frame_emits_openai_spelling():
     """final_frame() carried its own copy of the dict, separate from feed()."""
     enc = oc.ChatStreamEncoder("gpt-4o", "abc")
+    enc.feed(dl.ToolCallOpen(index=0, id="c1", name="f"))
     blob = enc.final_frame(stop="tool_call").decode()
     assert "tool_calls" in blob
     assert '"tool_call"' not in blob

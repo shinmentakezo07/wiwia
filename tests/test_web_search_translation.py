@@ -853,9 +853,13 @@ async def test_matrix_anthropic_client_receives_suppressed_trace():
     ``web_search_tool_result``), which is the shape the API itself produces and
     the only one that survives turn-2 replay. A half-pair — a call with no
     result, or a result with no call — is rejected, so the encoder buffers the
-    call until its result arrives (AUDIT #158). ``stop_reason`` is end_turn:
-    the provider ran the tool itself, so there is no client-dispatched call for
-    a ``tool_use`` finish to describe."""
+    call until its result arrives (AUDIT #158). ``stop_reason`` stays
+    ``tool_use``: the upstream reported it (its own vocabulary for a turn that
+    called a tool), and the emitted ``server_tool_use`` block IS a tool block
+    to describe. The old expectation of ``end_turn`` was the encoder
+    downgrading a real tool turn, because the flag it keyed on was set only in
+    the client-dispatched path.
+    """
     lm, c = await _matrix_client()
     try:
         route = respx.post("https://api.anthropic.com/v1/messages")
@@ -875,7 +879,9 @@ async def test_matrix_anthropic_client_receives_suppressed_trace():
         assert call["name"] == "web_search"
         assert call["input"] == {"query": "wiwi proxy"}
         assert result["tool_use_id"] == call["id"]  # the pair is intact
-        assert data["stop_reason"] == "end_turn"
+        # The upstream reported tool_use, and a server_tool_use block is
+        # emitted, so the reason must survive rather than downgrade.
+        assert data["stop_reason"] == "tool_use"
         # Turn-2 replay: the client echoes our response back.
         sent = orjson.loads(route.calls[0].request.content)
         assert sent["tools"] == [WS_TOOL_ANTHROPIC]

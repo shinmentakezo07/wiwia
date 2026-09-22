@@ -347,18 +347,26 @@ def test_stream_encoder_still_drops_a_half_pair():
 
 def test_stream_encoder_never_opens_a_block_inside_an_open_text_block():
     """The result block must be preceded by closing whatever was open, or the
-    client sees two content_block_starts for one index."""
+    client sees two content_block_starts for one index.
+
+    The call is opened first: a result with no matching buffered call is
+    dropped rather than emitted alone (an unpaired ``*_tool_result`` is
+    rejected by Anthropic on replay), so the pairing must be legal for this
+    sequencing assertion to be reachable at all.
+    """
     enc = am.AnthropicStreamEncoder("claude-x", "r1")
     enc.feed(dl.StreamStart("claude-x"))
+    enc.feed(dl.ToolCallOpen(0, "s1", "web_search", builtin="web_search",
+                             block_type="server_tool_use"))
+    enc.feed(dl.ToolCallClose(0))
     enc.feed(dl.TextDelta("thinking about it"))
     blob = enc.feed(dl.ServerToolResultDelta(
         index=0, block={"type": "tool_search_tool_result",
                         "tool_use_id": "s1", "content": {}})).decode()
-    # The text block (index 0) closes before the result block (index 1) opens.
-    text_stop = blob.index('{"type":"content_block_stop","index":0}')
+    # The text block closes before the result block opens.
+    text_stop = blob.index('{"type":"content_block_stop","index":1}')
     result_start = blob.index("tool_search_tool_result")
     assert text_stop < result_start
-    assert '"index":1' in blob.replace(" ", "")
 
 
 def test_anthropic_history_replay_preserves_mcp_tool_use_spelling():

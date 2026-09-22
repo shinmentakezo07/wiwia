@@ -102,6 +102,10 @@ def test_capture_delta_sets_stop_reason_on_finish():
     enc.feed(dl.StreamStart(model="model", group=""))
     enc.feed(dl.TextDelta("hello"))
     enc.feed(dl.UsageFinal(prompt=10, output=5))
+    # A tool_call finish needs a tool frame behind it or the encoder
+    # downgrades to "stop" (AUDIT #271), so open a real call first.
+    enc.feed(dl.ToolCallOpen(index=0, id="c1", name="f"))
+    enc.feed(dl.ToolCallClose(index=0))
     enc.feed(dl.Finish("tool_call"))
     final = enc.final_frame()
     assert b"tool_calls" in final  # stop_reason "tool_call" maps to "tool_calls"
