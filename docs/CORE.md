@@ -52,7 +52,9 @@ wiwi/
 ├── cost/
 │   └── pricing.py        # CostEngine: token → USD; estimate_tokens_async fallback
 └── logging_core/
-    └── events.py         # LogEvent (request | proxy | audit); sinks live in server/app wiring
+    ├── events.py         # LogEvent (request | proxy | audit); sinks live in server/app wiring
+    ├── db_sink.py        # DB persistence + rollup/prune + percentile reads
+    └── hist.py           # compact log-scale histograms (percentile rollup merging)
 
 web/                      # React 19 + Vite 6 + Tailwind 4 SPA (admin console + public front)
 ```
@@ -127,6 +129,8 @@ Exact-match, non-streaming only, no builtin tools. Key = normalized IR + group +
 
 ### Logging (`logging_core/`)
 `LogEvent` streams: **request** (DB + SSE to the UI), **proxy** (stdout JSON + SSE), **audit** (sync DB for admin mutations). The in-memory ring buffer feeds `/admin/stats/*`; long ranges (7d/30d/all-time) come from DB aggregates. `/metrics` splits the two: process-lifetime monotonic counters (`RequestTotals`, folded in at accept time so a queue drop cannot under-report) carry the `counter` families, while the windowed gauges and quantile summaries come from the ring.
+
+When `request_logs` is pruned (age or `log_max_rows`), the removed rows are aggregated into `request_rollups` in the same transaction. Percentiles cannot be summed, so each bucket stores a compact log-scale histogram per metric (`hist.py` → the `p95_hist` column) alongside the legacy scalar p95 columns; a read merges the bucket histograms with any surviving raw samples, so a percentile over a window spanning both fresh and rolled-up rows is correct (exact when the window is all raw, within ~3% when the histogram contributes).
 
 Every loss mode is counted, because each one means durable accounting is missing rows: `dropped_request_logs` (request queue full), `failed_request_log_writes` (the batch write raised and the rows were discarded), `dropped_proxy_logs`, `failed_audit_log_writes`. `dropped_log_events` sums them; all four plus the sum are exposed on `/health` and `/metrics`.
 

@@ -557,7 +557,7 @@ wiwi_settings:
 
 </details>
 
-Both log limits roll the rows they remove into `request_rollups` first, so the dashboard's totals, token counts, cost and percentiles stay complete — only the per-request detail is dropped. `log_max_rows` is what actually bounds storage on a busy gateway.
+Both log limits roll the rows they remove into `request_rollups` first, so the dashboard's totals, token counts, cost and percentiles stay complete — only the per-request detail is dropped. `log_max_rows` is what actually bounds storage on a busy gateway. Percentiles survive by keeping a compact log-scale histogram per bucket (the `p95_hist` column), so a percentile over a window spanning both fresh and rolled-up rows merges correctly instead of averaging two quantiles; an all-fresh window is exact and a mixed one is within ~3%.
 
 ### 🧩 Extensibility escape hatch
 
@@ -594,7 +594,7 @@ wiwi/                      26k lines of Python across 71 modules
 ├── ratelimit/             memory.py + redis.py sliding-window limits
 ├── cache/                 response_cache (memory) · redis_cache · keygen · interface
 ├── cost/pricing.py        Cost engine + token estimation fallback
-├── logging_core/          events.py · db_sink.py · subsystem.py (ring buffer)
+├── logging_core/          events.py · db_sink.py · subsystem.py (ring buffer) · hist.py (percentile histograms)
 └── server/                app.py (FastAPI factory, proxy + /admin/*)
                            config_store.py (DB persistence for admin mutations)
                            stats.py (pure rollups) · metrics.py (Prometheus)
@@ -617,7 +617,7 @@ tests/                     128 test files — unit (respx), ASGI e2e, Hypothesis
 | Table | Owner | Contents |
 |---|---|---|
 | `request_logs` | `logging_core/db_sink.py` | per-request tokens, TTFT, latency, TPS, cost, cache, retry chain |
-| `request_rollups` | `logging_core/db_sink.py` | hourly aggregates (`key_id`/`model_group`/`provider`) kept permanently for pruned rows |
+| `request_rollups` | `logging_core/db_sink.py` | hourly aggregates (`key_id`/`model_group`/`provider`) kept permanently for pruned rows, incl. a per-metric percentile histogram (`p95_hist`) |
 | `audit_logs` | `logging_core/db_sink.py` | `actor` / `action` / `target` / `diff` for every admin mutation |
 | `vkeys` | `auth/service.py` | hashed virtual keys + budgets + spend |
 | `users` | `auth/users.py` | user accounts and roles |

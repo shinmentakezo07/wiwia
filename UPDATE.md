@@ -3318,3 +3318,125 @@ in AUDIT #269 rather than fixed: neither arm bounds the size of the body it
 and this fixes only the *healer's* classification — a 200-carrying-an-error-body
 still reaches a normal request's client as an empty successful turn, which is a
 separate question and is not claimed here.
+
+---
+
+# Round 92 — the request-log cap, batch durability, and percentile merging (2026-09-22)
+
+Four defects in `wiwi/logging_core/`, all in the request-logging path. Each was
+reproduced before the fix and re-measured after; all four are behavioural, not
+cosmetic.
+
+## 92.1 The row cap silently stopped trimming under a `ts` tie
+
+**File**: `wiwi/logging_core/db_sink.py` — `enforce_log_cap`, `rollup_and_prune`
+
+**Issue**: `enforce_log_cap` chose its cutoff row with
+`ORDER BY ts DESC, id DESC LIMIT 1 OFFSET :max_rows-1` — an id-tiebroken
+selection — then passed only the raw `ts` to `rollup_and_prune`, whose
+`SELECT`/`DELETE` matched `ts < :cutoff` alone. The id tiebreak was dropped
+between choosing the boundary and enforcing it. When many rows shared the
+boundary `ts` (a saturated `_pump` drain of up to 200 events, a coarse clock, a
+bulk insert), nothing sorted *strictly* below the boundary matched `ts <`, so the
+cap deleted almost nothing — and it did so **silently**: the sweep still logged
+`request_logs_pruned`, and `request_logs` sat over `log_max_rows` indefinitely.
+The in-code comment ("ties on ts keep a few extra rows … the next sweep trims
+them") described the benign case; the dense-tie case kept *all* of them, forever.
+
+Measured on 100 rows sharing one `ts`, cap 50: **deleted 0, 90 remaining** (a
+partial tie of 90+10 deleted only the 10 strictly-older rows).
+
+**After**: `rollup_and_prune` takes an optional `cutoff_id`. The doomed set is
+built once and applied identically to the rollup `SELECT` and the `DELETE`:
+
+```sql
+ts < :cutoff OR (ts = :cutoff AND id < :cut_id)
+```
+
+The age path passes no id and is unchanged. Same 100 rows, cap 50 → **deleted
+50, 50 remaining**; exactness verified (the boundary row is KEPT, the newest N
+survive by id).
+
+**Tests**: `tests/test_fix_db_cap_and_batch.py` (same-`ts`, all-same-`ts`,
+partial-tie, re-enforcement after a blocked sweep, age-path unchanged) and
+`tests/test_fix_db_cap_and_batch_e2e.py::test_e2e_ts_tie_cap_bounds_table_and_overview_survives`.
+
+## 92.2 One malformed row discarded its entire batch
+
+**File**: `wiwi/logging_core/db_sink.py` — `write_requests`
+
+**Issue**: a drain was a single multi-row `INSERT` in one transaction, so a row
+a strict backend rejects (Postgres enforces typed columns where SQLite coerces)
+rolled back **every sibling** — up to 200 good rows. Measured: 199 good + 1
+`NOT NULL`-violating row persisted **0 rows**.
+
+**After**: on failure the batch is retried row-at-a-time, dropping only the
+offending row. An all-bad batch still re-raises, so the caller's
+`failed_request_log_writes` accounting continues to reflect a real loss (a
+DB-unavailable outage must not be mistaken for bad rows). The per-row fallback
+logs a terse `request_log_row_dropped` (error type + request id, no traceback —
+a full traceback per row turns one bad drain into megabytes of log). Measured:
+same batch now persists **199**.
+
+**Tests**: `tests/test_fix_db_cap_and_batch.py` (mixed batch, all-good fast path
+untouched, all-bad still raises, empty batch is a no-op) and
+`tests/test_fix_db_cap_and_batch_e2e.py::test_e2e_bad_row_keeps_siblings_visible_in_the_api`.
+
+## 92.3 Mixed-window percentiles were wrong by up to 45%
+
+**File**: `wiwi/logging_core/hist.py` (new), `wiwi/logging_core/db_sink.py`
+
+**Issue**: `request_rollups` stored **one p95 float per bucket** (`tps_p95`,
+`ttft_p95_ms`, `latency_p95_ms`) and the reader merged it with raw samples by a
+sample-count-weighted mean. A mean of quantiles is not the quantile of the
+union, and the docstring claimed the opposite ("weighting each side's p95 … and
+taking the larger") — the code and its own comment disagreed. Measured on a
+window half fast and half slow: **reported 547 where the true p95 was 1000**.
+
+**After**: each bucket stores a compact **log-scale histogram** per metric
+(10 bins/e-fold, geometric midpoints) in a new `p95_hist` TEXT column — one JSON
+object for all series, so the schema grew by a single column, not one per
+metric. Merging is "add bin counts, then take the percentile", which is
+correct rather than approximately-correct:
+
+- an all-raw window is **exact** (raw samples keep their exact values; only the
+  rolled-up counts are located at their bin midpoints);
+- an all-rolled-up or mixed window is within the bin resolution — measured
+  **3.4%** on the same shape that was 45% off before.
+
+Counts merge across sweeps, so a bucket written by an earlier sweep and one
+written now combine instead of the later overwriting the earlier. Rows written
+before the column existed (blank `p95_hist`) fall back to the legacy scalar
+columns; a garbled value degrades to the same fallback. Verified live through
+the app: 300 rows (150 rolled-up slow + 150 raw fast) → p95 1043.1 vs a true
+1083.5, totals preserved.
+
+**Honest bound**: the residual ~3% is inherent — removing it entirely needs
+every sample kept forever, which is the unbounded growth the rollup exists to
+prevent. `10 bins/decade` is the measured optimum; `20/decade` degrades (float
+precision in the bin search), verified rather than assumed.
+
+**Tests**: `tests/test_hist_percentiles.py` (13).
+
+## 92.4 Adding a percentile metric was easy to get wrong
+
+**File**: `wiwi/logging_core/db_sink.py`, `tests/test_hist_percentiles.py`
+
+**Issue**: the metric set lived implicitly across `_HIST_SERIES`, the legacy
+column names, both DDLs and the migration list. The old note in `REMINDERS.md`
+("if a new percentile metric is added, it needs a column in `request_rollups`
+and a pass in `rollup_and_prune`") was the whole safeguard.
+
+**After**: `_HIST_SERIES` is the single source of truth — the writer, the
+histogram merge and the overview reader all iterate it, and the legacy scalars
+are built from it with `zip(..., strict=True)` so the two cannot disagree.
+`_LEGACY_P95_COLS` names the scalar columns. Two tests fail loudly if the DDL,
+the migration list or the tuples drift:
+`test_rollup_metric_lists_stay_in_sync` and
+`test_both_ddls_and_migration_carry_every_rollup_column` (both verified to fail
+when deliberately broken).
+
+**Whole-branch**: 2598 tests pass, ruff clean; the 4 pre-existing DB suites
+(`test_stats_db`, `round56`, `round57`, `round59`, `round65`, `round85`) are
+unchanged and green, which is the evidence the histogram did not alter any
+reported total.
