@@ -220,15 +220,55 @@ in, so totals, token counts, cost, cache stats and percentiles are unchanged by
 pruning. Verified live: 120 requests, cap 50 → 50 raw rows, `requests=120` and
 `tok_in=1320` still reported.
 
-**Known approximation:** percentiles. p95 cannot be summed, so each rollup row
-stores its own bucket's p95 and reads combine it with raw samples by weighting
-each side by sample count. Exact when a window is entirely raw or entirely
-rolled up (the common cases); approximate in the mixed band. The alternative was
-keeping every sample forever, which is the growth this exists to stop.
+**Percentiles (fixed).** The old scheme stored one p95 float per bucket and
+combined it with raw samples by a sample-count-weighted mean. A mean of
+quantiles is not the quantile of the union: a window half fast and half slow
+was measured reporting 547 where the true p95 was 1000 (a 45% under-report).
+Each bucket now stores a compact log-scale HISTOGRAM per metric
+(`tps`/`ttft_ms`/`latency_ms`) in a new `p95_hist` TEXT column — one JSON
+object, so the schema grew by a single column rather than one per metric.
+Merging is "add bin counts, take the percentile":
 
-**Not done:** the rollup only records `tps`/`ttft_ms`/`latency_ms` percentiles —
-the same three the dashboard shows. If a new percentile metric is added, it needs
-a column in `request_rollups` and a pass in `rollup_and_prune`.
+- a window entirely raw is exact (raw samples keep their exact values);
+- a window entirely rolled up is within the bin resolution (~3% measured);
+- a mixed window is within ~3% (was 45%).
+
+Counts merge across sweeps, so a bucket written by an earlier sweep and one
+written now combine instead of the later overwriting the earlier. Rows written
+before the column existed (blank `p95_hist`) fall back to the legacy scalar
+columns, and a garbled value degrades to the same fallback — never a crash.
+`_HIST_SERIES` is the single source of truth for which metrics exist;
+`tests/test_hist_percentiles.py` pins the accuracy, the merge, the fallback and
+the schema consistency (`test_rollup_metric_lists_stay_in_sync`,
+`test_both_ddls_and_migration_carry_every_rollup_column`).
+
+**Adding a percentile metric:** append its name to `_HIST_SERIES` and the
+matching legacy column to `_LEGACY_P95_COLS`; the writer, merge and reader all
+iterate those tuples. Then add the column to the migration list — the two
+consistency tests fail if any step is missed. (This replaces the old "Not
+done: a new metric needs a column here too" gap, which was easy to miss.)
+
+**Fixed: cap was a no-op under a `ts` tie.** `enforce_log_cap` selected its
+cutoff row by `(ts DESC, id DESC)` but deleted by `ts < cutoff` alone — the id
+tiebreak was dropped. When many rows shared the boundary `ts` (a saturated
+batch drain, a coarse clock, a bulk insert), nothing sorted below the boundary
+matched `ts <`, so the cap deleted almost nothing and `request_logs` sat over
+its bound while every sweep logged success. Reproduced: 100 rows with 90
+sharing one `ts`, cap 50 → deleted 10, left 90 (all-same-`ts`: deleted 0).
+Now `rollup_and_prune` takes an optional `cutoff_id` and the doomed set is
+`ts < cutoff OR (ts = cutoff AND id < cutoff_id)` — the rollup SELECT and the
+DELETE match exactly the rows the cutoff selection chose. The age path passes
+no id and is unchanged. `tests/test_fix_db_cap_and_batch.py` +
+`..._e2e.py` pin it, including the exact-boundary case (the boundary row is
+KEPT, the newest N survive).
+
+**Also hardened: one bad row no longer discards its batch.** `write_requests`
+was a single multi-row INSERT in one transaction, so a row a strict backend
+rejects (Postgres enforces typed columns where SQLite coerces) discarded up to
+200 good rows. On failure it now retries row-at-a-time, dropping only the
+offending row; an all-bad batch still re-raises so `failed_request_log_writes`
+reflects the loss. The per-row fallback logs a terse `request_log_row_dropped`
+(error type + request id, no traceback) per skipped row.
 
 ## 8. New regressions added this round
 

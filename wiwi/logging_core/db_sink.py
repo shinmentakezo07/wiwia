@@ -14,9 +14,13 @@ from typing import Any
 
 import orjson
 import sqlalchemy as sa
+import structlog
 
+from wiwi.logging_core import hist as hist_mod
 from wiwi.logging_core.events import LogEvent
-from wiwi.server.stats import VALID_METRICS, _p95
+from wiwi.server.stats import VALID_METRICS
+
+log = structlog.get_logger("wiwi.db_sink")
 
 # DDL is shared between SQLite and Postgres.  The only difference is the
 # auto-increment syntax, which is resolved at startup time.
@@ -134,6 +138,7 @@ CREATE TABLE IF NOT EXISTS request_rollups (
   tps_p95 REAL DEFAULT 0,
   ttft_p95_ms REAL DEFAULT 0,
   latency_p95_ms REAL DEFAULT 0,
+  p95_hist TEXT DEFAULT '',
   unpriced_requests INTEGER DEFAULT 0,
   unpriced_tok_in INTEGER DEFAULT 0,
   unpriced_tok_cached INTEGER DEFAULT 0,
@@ -166,6 +171,7 @@ CREATE TABLE IF NOT EXISTS request_rollups (
   tps_p95 DOUBLE PRECISION DEFAULT 0,
   ttft_p95_ms DOUBLE PRECISION DEFAULT 0,
   latency_p95_ms DOUBLE PRECISION DEFAULT 0,
+  p95_hist TEXT DEFAULT '',
   unpriced_requests INTEGER DEFAULT 0,
   unpriced_tok_in INTEGER DEFAULT 0,
   unpriced_tok_cached INTEGER DEFAULT 0,
@@ -187,8 +193,28 @@ _ROLLUP_ADDITIVE = ("requests", "errors", "estimated_requests", "cache_hits",
                     "unpriced_requests", "unpriced_tok_in",
                     "unpriced_tok_cached", "unpriced_tok_cache_creation",
                     "unpriced_tok_out")
-_ROLLUP_COLS = _ROLLUP_KEY_COLS + _ROLLUP_ADDITIVE + (
-    "tps_p95", "ttft_p95_ms", "latency_p95_ms")
+# The distributions a rollup bucket carries, keyed by the histogram's series
+# name (each MUST be a real column on ``request_logs`` — that is where the
+# samples come from). ``p95_hist`` stores all of them as one JSON object, so
+# the schema grows by a single column rather than one per metric, and the
+# legacy scalar columns below are still written (cheaply) so a reader on an
+# un-migrated database — or one pinned to the old shape by a test — keeps
+# working.
+#
+# TO ADD A PERCENTILE METRIC: append its name here. That alone threads it
+# through the writer, the histogram merge and the overview reader, which all
+# iterate this tuple. Then add the matching legacy scalar column to
+# ``_LEGACY_P95_COLS`` and both rollup DDLs (SQLite + Postgres) and the
+# migration list, so an existing database is widened. The consistency test
+# ``test_rollup_metric_lists_stay_in_sync`` fails if you miss a step.
+_HIST_SERIES = ("tps", "ttft_ms", "latency_ms")
+# Legacy scalar column per series, in the same order. Kept in lockstep with
+# ``_HIST_SERIES`` by the consistency test.
+_LEGACY_P95_COLS = ("tps_p95", "ttft_p95_ms", "latency_p95_ms")
+
+_ROLLUP_COLS = _ROLLUP_KEY_COLS + _ROLLUP_ADDITIVE + _LEGACY_P95_COLS + (
+    "p95_hist",)
+
 
 # Columns added to request_rollups after its first release. An existing table
 # (CREATE TABLE IF NOT EXISTS is a no-op on it) must be widened in place by
@@ -206,6 +232,7 @@ _ROLLUP_MIGRATE_COLUMNS = (
     ("unpriced_tok_cached", "INTEGER DEFAULT 0"),
     ("unpriced_tok_cache_creation", "INTEGER DEFAULT 0"),
     ("unpriced_tok_out", "INTEGER DEFAULT 0"),
+    ("p95_hist", "TEXT DEFAULT ''"),
 )
 
 
@@ -232,8 +259,8 @@ class _BucketSum:
         # their rows to a peak (MAX(CASE WHEN tps > 0 ...) over the raw rows,
         # MAX(tps_p95) over the rolled-up hour) and the timeseries reader
         # publishes it as the bucket's tps_p95. Summing two maxima reports a
-        # throughput that never occurred — take the larger, as _merge_p95
-        # already does for the percentiles.
+        # throughput that never occurred — take the larger, since a maximum is
+        # the one order statistic that merges by MAX.
         self.tps_max = max(getattr(a, "tps_max", 0) or 0,
                            getattr(b, "tps_max", 0) or 0)
 
@@ -264,27 +291,77 @@ def _shares_model_tail(a: str, b: str) -> bool:
     return a in _slash_tails(b) or b in _slash_tails(a)
 
 
-def _merge_p95(samples: list[float], pairs: list[tuple[float, int]]) -> float:
-    """Combine raw samples with pre-aggregated ``(p95, weight)`` pairs.
+def _hist_payload(series: dict[str, dict[int, int]]) -> str:
+    """Encode the three per-series histograms into one ``p95_hist`` value."""
+    return orjson.dumps(
+        {name: hist_mod.encode(h) for name, h in series.items() if h}
+    ).decode()
 
-    Exact when only one side is populated — the common cases of a window that
-    is entirely raw (recent) or entirely rolled up (old). When both are
-    present, weighting each side's p95 by its sample count and taking the
-    larger is an approximation that is monotone in the data and never reports
-    a percentile below the true median of the combined set; it cannot
-    reconstruct the true p95 without the original samples, which is precisely
-    what the rollup discarded.
+
+def encode_hists(series: dict[str, dict[int, int]],
+                 existing: dict[str, dict[int, int]] | None) -> str:
+    """Merge *series* with a previously stored *existing* set, then encode.
+
+    The merge is the whole point: an upsert that overwrote ``p95_hist`` would
+    drop every sample an earlier sweep had already rolled into the same bucket.
     """
-    weighted: list[tuple[float, int]] = []
-    if samples:
-        weighted.append((_p95(samples), len(samples)))
-    weighted.extend((p, n) for p, n in pairs if n > 0)
-    if not weighted:
-        return 0.0
-    if len(weighted) == 1:
-        return weighted[0][0]
-    total = sum(n for _, n in weighted)
-    return sum(p * n for p, n in weighted) / total if total else 0.0
+    merged: dict[str, dict[int, int]] = {}
+    for name in _HIST_SERIES:
+        parts = [series.get(name) or {}]
+        if existing and existing.get(name):
+            parts.append(existing[name])
+        merged[name] = hist_mod.merge(*parts)
+    return _hist_payload(merged)
+
+
+def _decode_hists(text: str | None) -> dict[str, dict[int, int]]:
+    """Decode a stored ``p95_hist`` into ``{series: {bin: count}}``.
+
+    Tolerant by design: a blank column (a row written before the histogram
+    existed) or a garbled value yields empty series, and the reader falls back
+    to the legacy scalar columns rather than erroring.
+    """
+    if not text:
+        return {}
+    try:
+        raw = orjson.loads(text)
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict[int, int]] = {}
+    for name in _HIST_SERIES:
+        enc = raw.get(name)
+        if isinstance(enc, str) and enc:
+            h = hist_mod.decode(enc)
+            if h:
+                out[name] = h
+    return out
+
+
+def hist_percentile(values: list[float]) -> float:
+    """True p95 of a raw sample list.
+
+    Feeds the legacy scalar ``*_p95`` columns, which a reader on an
+    un-migrated database (or a test pinned to the old shape) still consumes.
+    Kept exact — not binned — so those columns hold the same value this code
+    reported before the histogram existed.
+    """
+    return hist_mod.percentile_with_samples(list(values), None)
+
+
+def merge_percentile(samples: list[float],
+                     series_hist: dict[int, int] | None) -> float:
+    """p95 over raw *samples* plus a rolled-up bucket's histogram.
+
+    The raw samples are kept EXACT (only the rolled-up counts are approximated
+    by their bin midpoints), so a window that is entirely raw — the usual case
+    for a recent range — reports the true percentile. This replaces the old
+    weighted-mean-of-two-p95s, which was measured reporting 547 where the true
+    value was 1000 (a 45% under-report): a mean of quantiles is not the
+    quantile of the union.
+    """
+    return hist_mod.percentile_with_samples(samples, series_hist)
 
 _COLS = ("ts", "request_id", "surface", "key_alias", "key_id", "model_group",
          "provider", "provider_key_label", "status", "error_code", "tok_in",
@@ -394,8 +471,55 @@ class DBSink:
         cutoff = time.time() - retention_days * 86400
         return await self.rollup_and_prune(cutoff)
 
-    async def rollup_and_prune(self, cutoff_ts: float) -> int:
-        """Aggregate ``request_logs`` rows older than *cutoff_ts*, then delete them.
+    async def _existing_histograms(self, conn,
+                                   keys: list[tuple]) -> dict[tuple, dict]:
+        """Read the stored ``p95_hist`` for each rollup key about to be upserted.
+
+        One query over the five-column key tuples (OR-ed equality, which both
+        SQLite and Postgres plan acceptably for the handful of groups a sweep
+        produces). A key with no existing row — the common case on a first
+        rollup — simply does not appear in the result, and the caller encodes
+        the new histogram alone.
+        """
+        if not keys:
+            return {}
+        clauses = []
+        params: dict = {}
+        for i, k in enumerate(keys):
+            clauses.append(
+                f"(bucket_ts = :b{i} AND key_id = :k{i} AND model_group = :g{i}"
+                f" AND provider = :p{i} AND serving_model = :s{i})")
+            params[f"b{i}"], params[f"k{i}"], params[f"g{i}"] = k[0], k[1], k[2]
+            params[f"p{i}"], params[f"s{i}"] = k[3], k[4]
+        rows = (await conn.execute(sa.text(
+            "SELECT bucket_ts, key_id, model_group, provider, serving_model,"
+            " p95_hist FROM request_rollups WHERE " + " OR ".join(clauses)),
+            params)).all()
+        out: dict[tuple, dict] = {}
+        for r in rows:
+            decoded = _decode_hists(r[5])
+            if decoded:
+                out[(r[0], r[1], r[2], r[3], r[4])] = decoded
+        return out
+
+    async def rollup_and_prune(self, cutoff_ts: float,
+                               cutoff_id: int | None = None) -> int:
+        """Aggregate ``request_logs`` rows at/below the cutoff, then delete them.
+
+        The boundary is the half-open range implied by the caller's key:
+
+        * ``cutoff_id is None`` — the age path: everything with
+          ``ts < cutoff_ts`` is doomed (all rows older than the cutoff).
+        * ``cutoff_id`` set — the row-count cap path: the caller selected the
+          boundary row ``(cutoff_ts, cutoff_id)`` as the OLDEST row to KEEP, so
+          the doomed set is ``ts < cutoff_ts OR (ts = cutoff_ts AND id <
+          cutoff_id)``. Ordering by ``(ts DESC, id DESC)`` and deleting by
+          ``ts`` alone silently dropped the id tiebreak: when many rows shared
+          the boundary ``ts`` (a saturated batch drain, a coarse clock, or a
+          bulk insert), nothing below the boundary matched ``ts < cutoff`` and
+          the cap deleted almost nothing — leaving the raw table permanently
+          over its bound. The id break makes the delete exactly the rows the
+          cutoff selection chose — no more, no fewer.
 
         Rows are grouped by ``(hour, key_id, model_group, provider,
         serving_model)`` — the dimensions the console slices by, plus the model
@@ -407,40 +531,52 @@ class DBSink:
         them would otherwise either lose the rows or double-count them on the
         next run.
 
-        Percentiles cannot be summed, so each row stores the p95 of its own
-        bucket (``tps_p95``, ``ttft_p95_ms``, ``latency_p95_ms``) and reads
-        reconstruct a weighted mean. That is exact when a window is entirely
-        raw or entirely rolled up (the normal cases) and approximate in the
-        mixed band; the alternative is keeping every sample forever, which is
-        the growth this exists to stop.
+        Percentiles cannot be summed. Each bucket keeps a compact log-scale
+        HISTOGRAM of its ``tps``/``ttft_ms``/``latency_ms`` distributions in
+        ``p95_hist`` (see ``wiwi.logging_core.hist``), plus the legacy scalar
+        ``*_p95`` columns for compatibility. A reader merges raw samples with
+        the stored histogram by adding bin counts, then takes the percentile
+        of the union — exact up to the bin width (~3% measured, versus the
+        ~45% error a weighted mean of two p95 scalars produced). The histogram
+        is a bounded map, so this does not reintroduce the per-sample growth
+        the rollup exists to stop.
 
         Returns the number of raw rows deleted.
         """
         bucket_s = 3600
         # Per-group accumulators. Keyed by the full five-tuple.
         groups: dict[tuple, dict] = {}
-        # Bounded per-group percentile samples, mirroring the max-5000 window
-        # the overview read uses — unbounded lists here would reintroduce the
-        # memory growth this method removes.
-        samples: dict[tuple, dict[str, list[float]]] = {}
-        max_samples = 5000
+        # Per-group histograms, one per series. Bounded by construction (bin
+        # count, not sample count) — unlike the raw sample lists this replaced,
+        # which needed a max-samples cap to stay bounded.
+        hists: dict[tuple, dict[str, dict[int, int]]] = {}
         batch = 2000
         last_id = -1
+        # The doomed-set predicate, built once so the rollup SELECT and the
+        # DELETE below match EXACTLY the same rows. With an id break, a row is
+        # doomed iff it sorts strictly before the boundary row under
+        # (ts DESC, id DESC): earlier ts, or the same ts with a smaller id.
+        if cutoff_id is None:
+            doomed_where = "ts < :cutoff"
+            doomed_params: dict = {"cutoff": cutoff_ts}
+        else:
+            doomed_where = "ts < :cutoff OR (ts = :cutoff AND id < :cut_id)"
+            doomed_params = {"cutoff": cutoff_ts, "cut_id": cutoff_id}
 
         async with self.engine.begin() as conn:
             # Keyset pagination: immune to offset drift, and bounded memory
             # because only the accumulators grow, not the row list.
             while True:
-                rows = (await conn.execute(sa.text("""
+                rows = (await conn.execute(sa.text(f"""
                     SELECT id, ts, key_id, model_group, provider, status,
                            error_code, attempts, tok_in, tok_cached,
                            tok_cache_creation, tok_reasoning, tok_out, cost,
                            cache_savings, cache_hit, usage_estimated, tps,
                            ttft_ms, latency_ms
                     FROM request_logs
-                    WHERE ts < :cutoff AND id > :last
+                    WHERE ({doomed_where}) AND id > :last
                     ORDER BY id LIMIT :b
-                """), {"cutoff": cutoff_ts, "last": last_id, "b": batch})).all()
+                """), {**doomed_params, "last": last_id, "b": batch})).all()
                 if not rows:
                     break
                 last_id = rows[-1][0]
@@ -462,7 +598,7 @@ class DBSink:
                             "unpriced_tok_cache_creation": 0,
                             "unpriced_tok_out": 0,
                         }
-                        samples[k] = {"tps": [], "ttft_ms": [], "latency_ms": []}
+                        hists[k] = {name: {} for name in _HIST_SERIES}
                     acc["requests"] += 1
                     if (r.status or 0) >= 400 or r.error_code:
                         acc["errors"] += 1
@@ -488,45 +624,56 @@ class DBSink:
                         acc["unpriced_tok_cached"] += r.tok_cached or 0
                         acc["unpriced_tok_cache_creation"] += r.tok_cache_creation or 0
                         acc["unpriced_tok_out"] += r.tok_out or 0
-                    s = samples[k]
-                    for col in ("tps", "ttft_ms", "latency_ms"):
-                        v = getattr(r, col)
-                        if v and len(s[col]) < max_samples:
-                            s[col].append(v)
+                    hk = hists[k]
+                    for name in _HIST_SERIES:
+                        v = getattr(r, name)
+                        if v:
+                            hist_mod.add_value(hk[name], v)
 
             if not groups:
                 return 0
 
             set_add = ", ".join(f"{c} = request_rollups.{c} + excluded.{c}"
                                 for c in _ROLLUP_ADDITIVE)
-            set_pct = ", ".join(
-                f"{c} = excluded.{c}" for c in
-                ("tps_p95", "ttft_p95_ms", "latency_p95_ms"))
+            # Counts add; the scalar percentiles take the new bucket's value
+            # (legacy/compat only — the histogram below is authoritative).
+            set_pct = ", ".join(f"{c} = excluded.{c}" for c in _LEGACY_P95_COLS)
             placeholders = ", ".join(f":{c}" for c in _ROLLUP_COLS)
             cols = ", ".join(_ROLLUP_COLS)
+            # ``p95_hist`` is JSON, so it cannot be summed in SQL. Merge in
+            # Python against whatever the conflicting row already holds, so a
+            # bucket written by an earlier sweep and one written now combine
+            # instead of the later overwriting the earlier (that is what makes
+            # repeated sweeps idempotent). The existing rows are read with one
+            # query over the keys about to be written.
+            existing = await self._existing_histograms(conn, list(groups))
             upsert = sa.text(
                 f"INSERT INTO request_rollups ({cols}) VALUES ({placeholders}) "
                 "ON CONFLICT(bucket_ts, key_id, model_group, provider, "
                 "serving_model) DO UPDATE SET "
-                f"{set_add}, {set_pct}"
+                f"{set_add}, {set_pct}, p95_hist = excluded.p95_hist"
             )
             payload = []
             for k, acc in groups.items():
-                s = samples[k]
+                hk = hists[k]
                 payload.append({
                     "bucket_ts": k[0], "key_id": k[1], "model_group": k[2],
                     "provider": k[3], "serving_model": k[4],
-                    "tps_p95": _p95(s["tps"]),
-                    "ttft_p95_ms": _p95(s["ttft_ms"]),
-                    "latency_p95_ms": _p95(s["latency_ms"]),
+                    # Legacy scalars, built from the same series list as the
+                    # histogram, so the two can never disagree about which
+                    # metrics exist.
+                    **{col: hist_percentile(hk[series])
+                       for col, series in zip(_LEGACY_P95_COLS, _HIST_SERIES,
+                                              strict=True)},
+                    "p95_hist": encode_hists(hk, existing.get(k)),
                     **acc,
                 })
             for i in range(0, len(payload), 500):
                 await conn.execute(upsert, payload[i:i + 500])
 
             result = await conn.execute(
-                sa.text("DELETE FROM request_logs WHERE ts < :cutoff"),
-                {"cutoff": cutoff_ts})
+                sa.text(f"DELETE FROM request_logs WHERE {doomed_where}"),
+                doomed_params)
             deleted = result.rowcount or 0
         self.invalidate_cache()
         return deleted
@@ -546,19 +693,21 @@ class DBSink:
                 sa.text("SELECT COUNT(*) FROM request_logs"))).scalar() or 0
             if total <= max_rows:
                 return 0
-            # The cutoff is the ts of the oldest row we intend to KEEP — index
-            # max_rows-1 in newest-first order — so `ts < cutoff` deletes
-            # exactly the rows beyond the cap. Using offset max_rows would make
-            # the boundary row its own cutoff and keep one row too many.
-            # Ties on ts keep a few extra rows rather than splitting a
-            # same-timestamp group; the next sweep trims them.
+            # The boundary is the oldest row we intend to KEEP — index
+            # max_rows-1 in (ts DESC, id DESC) order. Passing BOTH its ts and
+            # its id to rollup_and_prune keeps the selection and the delete on
+            # one key: the id tiebreak is what makes the cap exact when a
+            # group of rows shares a timestamp. Selecting by id and deleting
+            # by ts alone (the old shape) left every same-ts row at the
+            # boundary undeleted — the cap silently stopped trimming and the
+            # table grew past its bound.
             row = (await conn.execute(sa.text(
-                "SELECT ts FROM request_logs ORDER BY ts DESC, id DESC "
+                "SELECT ts, id FROM request_logs ORDER BY ts DESC, id DESC "
                 "LIMIT 1 OFFSET :off"), {"off": max_rows - 1})).first()
             if row is None:
                 return 0
-            cutoff = row[0]
-        return await self.rollup_and_prune(cutoff)
+            cutoff_ts, cutoff_id = row[0], row[1]
+        return await self.rollup_and_prune(cutoff_ts, cutoff_id)
 
     async def _migrate(self, conn) -> None:
         """Add columns and indexes introduced after the initial schema (idempotent)."""
@@ -663,12 +812,50 @@ class DBSink:
         cols = ", ".join(_COLS)
         vals = ", ".join(f":{c}" for c in _COLS)
         rows = [self._row(e) for e in batch]
-        async with self.engine.begin() as conn:
-            await conn.execute(
-                sa.text(f"INSERT INTO request_logs ({cols}) VALUES ({vals})"), rows)
+        stmt = sa.text(f"INSERT INTO request_logs ({cols}) VALUES ({vals})")
+        try:
+            async with self.engine.begin() as conn:
+                await conn.execute(stmt, rows)
+        except Exception:
+            # The batch is one multi-row INSERT in one transaction, so a single
+            # bad row (a value a strict backend rejects — Postgres enforces
+            # typed columns where SQLite coerces) would discard every sibling
+            # in the drain, up to 200 good rows. Fall back to row-at-a-time so
+            # only the offending row is lost; good rows still reach the DB.
+            # Re-raises only if the cause is not the rows themselves (e.g. the
+            # database is unreachable), preserving the caller's failure path
+            # and its ``failed_request_log_writes`` accounting.
+            written = await self._write_requests_rowwise(stmt, rows)
+            if written == 0 and rows:
+                raise
         # The rows just written must be visible to the very next read; the
         # 5 s TTL would otherwise hide a fresh request from the dashboard.
         self.invalidate_cache()
+
+    async def _write_requests_rowwise(self, stmt, rows: list[dict]) -> int:
+        """Insert *rows* one at a time, skipping any the DB rejects.
+
+        Each row gets its own transaction so a bad row rolls back only itself.
+        Returns the number of rows successfully written. Never raises on a
+        row-level failure — a genuinely unavailable database makes every row
+        fail, and the caller decides whether to propagate that (it does when
+        nothing was written).
+        """
+        written = 0
+        for row in rows:
+            try:
+                async with self.engine.begin() as conn:
+                    await conn.execute(stmt, [row])
+                written += 1
+            except Exception as e:  # noqa: BLE001 — one bad row must not sink the rest
+                # Terse on purpose: a full traceback per dropped row (each up
+                # to a screen of SQLAlchemy frames) turns one malformed drain
+                # into megabytes of log. The error type and message name the
+                # cause; the request id lets an operator find the row.
+                log.warning("request_log_row_dropped",
+                            request_id=row.get("request_id", ""),
+                            error=f"{type(e).__name__}: {e}")
+        return written
 
     async def reprice_unpriced_history(self, match_tail: str,
                                        rate_for) -> dict[str, float]:
@@ -1288,9 +1475,28 @@ class DBSink:
 
         minutes_norm = max(minutes, 1e-9)
         # Rolled-up buckets contribute their exact sample sum/count for the
-        # mean and their stored p95 for the percentile. Mixing raw samples and
-        # bucket-level p95s is an approximation (see rollup_and_prune); it is
-        # exact when the window is entirely rolled up or entirely raw.
+        # mean, and their HISTOGRAM for the percentiles. Binning the raw
+        # samples and adding the stored counts makes the union exact up to the
+        # bin width; the previous weighted mean of two p95 scalars was not a
+        # quantile at all (measured 45% under-report on a mixed window).
+        roll_hist = roll.get("hist") or {}
+        legacy = roll.get("legacy_p95") or {}
+
+        def _pct(samples: list[float], series: str) -> float:
+            """Percentile over raw *samples* unioned with a bucket's histogram.
+
+            When the window has no histogram at all (a database whose rollups
+            predate the column) fall back to the legacy scalar so the panel
+            keeps a number; combine it with raw samples by taking the larger,
+            the old behaviour.
+            """
+            h = roll_hist.get(series)
+            if h:
+                return merge_percentile(samples, h)
+            if samples:
+                return merge_percentile(samples, None)
+            return legacy.get(series, 0.0)
+
         tps_sum = sum(tps_values) + roll["tps_sum"]
         tps_n = len(tps_values) + roll["tps_count"]
         return {
@@ -1309,9 +1515,9 @@ class DBSink:
             "cache_hits": cache_hits,
             "cache_hit_rate": round(cache_hits / requests, 4) if requests else 0.0,
             "tps_avg": round(tps_sum / tps_n, 2) if tps_n else 0.0,
-            "tps_p95": round(_merge_p95(tps_values, roll["tps_p95_pairs"]), 2),
-            "ttft_p95_ms": round(_merge_p95(ttft_values, roll["ttft_p95_pairs"]), 1),
-            "latency_p95_ms": round(_merge_p95(lat_values, roll["latency_p95_pairs"]), 1),
+            "tps_p95": round(_pct(tps_values, "tps"), 2),
+            "ttft_p95_ms": round(_pct(ttft_values, "ttft_ms"), 1),
+            "latency_p95_ms": round(_pct(lat_values, "latency_ms"), 1),
             "cost": round((row.cost or 0) + roll["cost"], 6),
             "cache_savings": round((row.cache_savings or 0) + roll["cache_savings"], 6),
         }
@@ -1320,8 +1526,11 @@ class DBSink:
                                key_ids: list[str] | None) -> dict:
         """Aggregate ``request_rollups`` over the same window as the raw read.
 
-        Returns the additive totals plus the ``(p95, sample_count)`` pairs each
-        percentile needs, so the caller can merge them with the raw samples.
+        Returns the additive totals plus ``hist``: the merged histogram per
+        series, so the caller can bin its raw samples, add these counts and read
+        the percentile off the union. A row written before the histogram
+        existed contributes nothing here; the caller then falls back to the
+        legacy scalar columns (see :meth:`_read_overview_uncached`).
         """
         params: dict = {}
         where = ""
@@ -1344,7 +1553,10 @@ class DBSink:
                    COALESCE(SUM(cost), 0) AS cost,
                    COALESCE(SUM(cache_savings), 0) AS cache_savings,
                    COALESCE(SUM(tps_sum), 0) AS tps_sum,
-                   COALESCE(SUM(tps_count), 0) AS tps_count
+                   COALESCE(SUM(tps_count), 0) AS tps_count,
+                   COALESCE(MAX(tps_p95), 0) AS legacy_tps_p95,
+                   COALESCE(MAX(ttft_p95_ms), 0) AS legacy_ttft_p95,
+                   COALESCE(MAX(latency_p95_ms), 0) AS legacy_latency_p95
             FROM request_rollups
             {where}
         """)
@@ -1352,26 +1564,21 @@ class DBSink:
             stmt = stmt.bindparams(sa.bindparam("kids", expanding=True))
         agg = (await conn.execute(stmt, params)).one()
 
-        pairs: dict[str, list[tuple[float, int]]] = {
-            "tps_p95_pairs": [], "ttft_p95_pairs": [], "latency_p95_pairs": []}
-        for col, out_key in (("tps_p95", "tps_p95_pairs"),
-                             ("ttft_p95_ms", "ttft_p95_pairs"),
-                             ("latency_p95_ms", "latency_p95_pairs")):
-            # Weight by the bucket's sample count so a dense hour counts more
-            # than a sparse one. tps_count covers the tps column; the latency
-            # columns have no per-column count, so requests is the weight.
-            weight_col = "tps_count" if col == "tps_p95" else "requests"
-            pstmt = sa.text(f"""
-                SELECT {col} AS p, {weight_col} AS n FROM request_rollups
-                {where} AND {col} > 0
-            """ if where else f"""
-                SELECT {col} AS p, {weight_col} AS n FROM request_rollups
-                WHERE {col} > 0
-            """)
-            if key_ids:
-                pstmt = pstmt.bindparams(sa.bindparam("kids", expanding=True))
-            for r in (await conn.execute(pstmt, params)).all():
-                pairs[out_key].append((r.p, r.n or 0))
+        # Merge every bucket's histogram by series. FILTER/WHERE keeps blank
+        # rows out; SQLite has no aggregate for JSON, so the merge is in Python
+        # over the (few) rows in the window.
+        hstmt = sa.text(f"""
+            SELECT p95_hist FROM request_rollups
+            {where} AND p95_hist != ''
+        """ if where else """
+            SELECT p95_hist FROM request_rollups WHERE p95_hist != ''
+        """)
+        if key_ids:
+            hstmt = hstmt.bindparams(sa.bindparam("kids", expanding=True))
+        hist: dict[str, dict[int, int]] = {}
+        for r in (await conn.execute(hstmt, params)).all():
+            for name, h in _decode_hists(r[0]).items():
+                hist[name] = hist_mod.merge(hist.get(name, {}), h)
 
         return {
             "requests": agg.requests or 0, "errors": agg.errors or 0,
@@ -1382,7 +1589,15 @@ class DBSink:
             "tok_reasoning": agg.tok_reasoning or 0, "tok_out": agg.tok_out or 0,
             "cost": agg.cost or 0, "cache_savings": agg.cache_savings or 0,
             "tps_sum": agg.tps_sum or 0, "tps_count": agg.tps_count or 0,
-            **pairs,
+            "hist": hist,
+            # Fallbacks for rows written before ``p95_hist`` existed: a window
+            # whose buckets are all legacy still reports a percentile (the max
+            # of the bucket p95s, the old behaviour) instead of snapping to 0.
+            "legacy_p95": {
+                "tps": agg.legacy_tps_p95 or 0.0,
+                "ttft_ms": agg.legacy_ttft_p95 or 0.0,
+                "latency_ms": agg.legacy_latency_p95 or 0.0,
+            },
         }
 
     async def read_timeseries(self, bucket_seconds: int, metric: str,
