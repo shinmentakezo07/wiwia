@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 from typing import Any
 
@@ -10,11 +11,33 @@ import structlog
 
 from wiwi.ir import builtin_tools as bt
 from wiwi.ir import types as ir
-from wiwi.providers.base import ProviderKeyRef, as_dict, as_list
+from wiwi.providers.base import ProviderKeyRef, as_dict, as_list, as_str
 from wiwi.streaming import deltas as dl
 
 log = structlog.get_logger("wiwi.gemini_adapter")
 
+
+# Process-wide, monotonically increasing counter used to make Gemini's
+# synthetic tool-call ids unique ACROSS requests.
+#
+# Gemini's native ``functionCall`` parts carry no id, so one must be
+# synthesized. A per-stream index produced ``call_<name>_<n>`` — and turn 1's
+# ``call_get_weather_0`` was byte-identical to turn 2's, so anything that
+# correlates tool calls by id (a client's own state machine, our logs, a
+# replay tool) silently merged separate calls. A process-wide counter is the
+# cheap fix; ``itertools.count`` is atomic under the GIL for this purpose and
+# needs no lock.
+_TOOL_ID_SEQ = itertools.count()
+
+
+def _synthetic_tool_id(name: str) -> str:
+    """A unique-enough id for a Gemini function input, which carries none.
+
+    Keeps the tool name in the id (so logs and traces stay readable) and
+    appends a process-global counter, so two turns that call the same tool get
+    distinct ids.
+    """
+    return f"call_{name or 'x'}_{next(_TOOL_ID_SEQ)}"
 
 def _token_count(value: Any) -> int:
     """A Gemini usage counter as the ``int`` the IR requires.
@@ -39,6 +62,11 @@ class GeminiAdapter:
         # A stream's terminal tail (UsageFinal + Finish + StreamEnd) may be
         # emitted exactly once (AUDIT #161).
         self._saw_tail = False
+        # Advisory translation warnings for THIS request, drained by the
+        # gateway into ctx.metadata (see base.take_adapter_warnings). Reset
+        # with the rest of the per-request state so a previous request's
+        # warning never rides along on the next one.
+        self.translation_warnings: list[str] = []
 
     def reset(self) -> None:
         """Drop per-stream state so the adapter can serve another stream."""
@@ -46,6 +74,7 @@ class GeminiAdapter:
         self._saw_function_call = False
         self._tool_seq = 0
         self._saw_tail = False
+        self.translation_warnings = []
 
     def headers(self, key: ProviderKeyRef) -> dict[str, str]:
         return {}  # key goes in querystring
@@ -174,6 +203,9 @@ class GeminiAdapter:
             # disable_parallel_tool_use warning below).
             if any(t.strict for t in req.tools if t.builtin is None):
                 log.warning("unsupported_tool_strict", provider="gemini")
+                self.translation_warnings.append(
+                    "tool 'strict' mode has no Gemini equivalent; "
+                    "arguments are unconstrained")
             entries: list[dict[str, Any]] = []
             if decls:
                 entries.append({"functionDeclarations": decls})
@@ -200,10 +232,16 @@ class GeminiAdapter:
             # exposes no knob to forbid it. Warn rather than silently ignoring
             # the caller's constraint — a client that serializes tool calls for
             # correctness (file edits, shell state) would otherwise get
-            # concurrent calls it did not ask for (AUDIT #156).
+            # concurrent calls it did not ask for (AUDIT #156). The warning is
+            # also recorded for the caller, not just the log: the constraint
+            # came from the request, so the response metadata is where the
+            # client can actually see it was dropped.
             if req.gen_params.disable_parallel_tool_use:
                 log.warning("unsupported_disable_parallel_tool_use",
                             provider="gemini")
+                self.translation_warnings.append(
+                    "disable_parallel_tool_use has no Gemini equivalent; "
+                    "parallel tool calls cannot be suppressed")
         return body
 
     @staticmethod
@@ -240,7 +278,7 @@ class GeminiAdapter:
         cand = as_dict(_cands[0]) if _cands else {}
         content = as_dict(cand.get("content"))
         turn = ir.AssistantTurn(raw=data)
-        for ti, part in enumerate(as_list(content.get("parts"))):
+        for part in as_list(content.get("parts")):
             if not isinstance(part, dict):
                 continue
             if part.get("thought") and "text" in part:
@@ -258,9 +296,14 @@ class GeminiAdapter:
                 turn.text += part["text"] or ""
             elif "functionCall" in part:
                 fc = as_dict(part["functionCall"])
+                # An explicit JSON null name must not reach the IR as a
+                # non-str: `.get(k, "")` defaults only a *missing* key, so
+                # `{"name": null}` produced ToolUsePart(name=None) and the
+                # client received `"name": null` (AUDIT #232).
+                fname = as_str(fc.get("name"))
                 turn.tool_calls.append(ir.ToolUsePart(
-                    id=f"call_{fc.get('name', 'x')}_{ti}", name=fc.get("name", ""),
-                    args=fc.get("args") or {}))
+                    id=_synthetic_tool_id(fname),
+                    name=fname, args=fc.get("args") or {}))
         if block_reason:
             turn.stop_reason = "content_filter"
         else:
@@ -362,10 +405,16 @@ class GeminiAdapter:
                     # not crash on ``fc.get`` (AUDIT #154).
                     continue
                 self._saw_function_call = True
+                # `index` must stay a per-stream 0-based ordinal (the IR
+                # contract keys Open/Args/Close on it); the synthetic *id*
+                # comes from the process-global counter so it stays unique
+                # across turns (see _synthetic_tool_id).
                 n = self._tool_seq
                 self._tool_seq += 1
-                tid = f"call_{fc.get('name', 'x')}_{n}"
-                out.append(dl.ToolCallOpen(index=n, id=tid, name=fc.get("name", "")))
+                # A JSON null name must not reach the client (AUDIT #232).
+                fname = as_str(fc.get("name"))
+                out.append(dl.ToolCallOpen(
+                    index=n, id=_synthetic_tool_id(fname), name=fname))
                 out.append(dl.ToolCallArgsDelta(index=n,
                                                 args_fragment=json.dumps(fc.get("args") or {})))
                 out.append(dl.ToolCallClose(index=n))
