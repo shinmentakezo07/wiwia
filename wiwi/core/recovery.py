@@ -192,7 +192,10 @@ def _body_is_error_envelope(body: bytes | str | None) -> bool:
     # force_stream providers return SSE even for HTTP 200 business errors.
     # Parse complete frames (including multiline data and a final frame without
     # a trailing blank line) before classifying the response as healthy.
-    parser = LineSSEParser()
+    # `allow_unframed`: the same providers answer with one JSON object per line
+    # rather than framed SSE, and an error envelope in that shape must not be
+    # classified as a healthy probe (AUDIT #285).
+    parser = LineSSEParser(allow_unframed=True)
     text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else body
     for line in text.splitlines():
         event = parser.feed_line(line)

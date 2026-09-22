@@ -14,6 +14,8 @@ from typing import Any
 
 import structlog
 
+from wiwi.streaming.partial_json import _repair_truncated_json
+
 log = structlog.get_logger(__name__)
 
 # Cap raw tool-arg payloads at 1 MiB to bound memory and JSON-parse time.
@@ -59,11 +61,24 @@ def validate_tool_args(
     try:
         args = json.loads(raw_args)
     except json.JSONDecodeError:
-        msg = f"tool '{tool_name}': arguments are not valid JSON"
-        # Never log raw_args: tool arguments often contain user secrets.
-        log.warning("tool_args_invalid_json", tool=tool_name,
-                    bytes=raw_bytes, fingerprint=_fingerprint(raw_args))
-        return False, msg
+        # A stream truncated mid-args (token limit, client disconnect, a
+        # provider that drops the tail) is the COMMON case, not the
+        # exceptional one — the non-streaming path already repairs it before
+        # parsing (gateway ``_apply_event``). Validating the unrepaired text
+        # here flagged those calls as "not valid JSON" while the very same
+        # payload produced a clean tool call on a non-streaming request, so
+        # the advisory signal was wrong roughly half the time it fired and
+        # operators learned to ignore it. Repair first, exactly like the sync
+        # path; only genuinely unrepairable input is a violation.
+        repaired = _repair_truncated_json(raw_args)
+        try:
+            args = json.loads(repaired)
+        except json.JSONDecodeError:
+            msg = f"tool '{tool_name}': arguments are not valid JSON"
+            # Never log raw_args: tool arguments often contain user secrets.
+            log.warning("tool_args_invalid_json", tool=tool_name,
+                        bytes=raw_bytes, fingerprint=_fingerprint(raw_args))
+            return False, msg
 
     # Basic type checking against the schema.
     expected_type = schema.get("type")

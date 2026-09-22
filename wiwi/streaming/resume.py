@@ -18,8 +18,6 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 
-import orjson
-
 from wiwi.streaming import deltas as dl
 
 # Sentinel for deltas that don't carry client-visible content (control only).
@@ -213,25 +211,32 @@ class StreamTape:
 
 
 def _delta_size(delta: dl.IRStreamDelta) -> int:
-    """Approximate byte size of a delta for tape accounting."""
+    """Approximate byte size of a delta for tape accounting.
+
+    Provider-hosted (builtin) tool deltas account as zero. They are excluded
+    from the continuation prefix (``build_continuation_messages`` filters
+    ``t.builtin is None``) and from the client-visible replay, so charging
+    them against the 256 KiB budget let a server-tool-heavy stream — long
+    ``web_search`` result bodies especially — evict the CLIENT-dispatched
+    tool deltas the continuation actually needs. Accounting and replay now
+    agree on what the tape is for.
+    """
     if isinstance(delta, dl.TextDelta):
         return len(delta.text)
     if isinstance(delta, dl.ThinkingDelta):
         return len(delta.text) + len(delta.signature or "") + len(delta.data or "")
     if isinstance(delta, dl.ToolCallOpen):
+        # A hosted call never re-enters the continuation; see the docstring.
+        if delta.builtin is not None:
+            return 0
         return len(delta.id) + len(delta.name) + 8
     if isinstance(delta, dl.ToolCallArgsDelta):
         return len(delta.args_fragment)
     if isinstance(delta, dl.ToolCallClose):
         return 4
     if isinstance(delta, dl.ServerToolResultDelta):
-        # A whole result block (search hits, tool references) — size it by its
-        # serialized payload so a big search result cannot sit in the tape
-        # unaccounted and defeat the byte bound.
-        try:
-            return len(orjson.dumps(delta.block))
-        except (TypeError, ValueError):
-            return 64
+        # A hosted call's result: same exclusion, same reason.
+        return 0
     if isinstance(delta, dl.UsageFinal):
         return 32
     if isinstance(delta, dl.Finish):

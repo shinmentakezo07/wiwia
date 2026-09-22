@@ -13,11 +13,22 @@ class SSEEvent:
 
 
 class LineSSEParser:
-    """Feed lines from `aiter_lines()`; yields SSEEvent at blank-line boundaries."""
+    """Feed lines from `aiter_lines()`; yields SSEEvent at blank-line boundaries.
 
-    def __init__(self) -> None:
+    ``allow_unframed`` handles providers that answer a "streaming" request with
+    **one whole JSON object per line** instead of framed SSE — Cline and
+    WorkBuddy do this, and they are streaming-only, so the shape reaches every
+    streaming client. Such a line has no ``data:``/``event:``/``:`` prefix, so
+    the strict parser silently discards it; with ``allow_unframed`` it is
+    emitted as an immediate data event instead. Off by default, because a strict
+    caller (one that would rather drop a malformed line than misread it) must
+    keep the old behaviour.
+    """
+
+    def __init__(self, allow_unframed: bool = False) -> None:
         self._event = ""
         self._data: list[str] = []
+        self._allow_unframed = allow_unframed
 
     def feed_line(self, line: str) -> SSEEvent | None:
         line = line.removeprefix("\ufeff").removesuffix("\r")
@@ -34,7 +45,13 @@ class LineSSEParser:
             self._event = line[6:].removeprefix(" ")
         elif line.startswith("data:"):
             self._data.append(line[5:].removeprefix(" "))
+        elif self._allow_unframed:
+            # One self-contained JSON object on its own line; it terminates
+            # itself, so emit immediately rather than buffering for a blank line
+            # that an envelope body never sends.
+            return SSEEvent("", line)
         return None
+
 
     def flush(self) -> SSEEvent | None:
         """Emit a pending frame at end of stream.

@@ -39,6 +39,12 @@ class LogEvent:
     cache_hit: bool = False
     cache_savings: float = 0.0
     response_cache_hit: bool = False
+    # Advisory request-translation warnings: constructs the caller asked for
+    # that this provider cannot honour (Gemini's missing
+    # disable_parallel_tool_use / strict). Logged so an operator — and, via
+    # the response path, the caller — can see a constraint was dropped rather
+    # than silently ignored.
+    translation_warnings: list[str] = field(default_factory=list)
     attempts: list[dict[str, Any]] = field(default_factory=list)
     # prompt/response content (only when store_prompts_in_spend_logs is enabled)
     request_body: dict[str, Any] | list[Any] | None = None

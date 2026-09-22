@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
   cache_savings REAL DEFAULT 0,
   response_cache_hit INTEGER DEFAULT 0,
   attempts TEXT DEFAULT '[]',
+  translation_warnings TEXT DEFAULT '[]',
   request_body TEXT,
   response_body TEXT
 );
@@ -81,6 +82,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
   cache_savings DOUBLE PRECISION DEFAULT 0,
   response_cache_hit INTEGER DEFAULT 0,
   attempts TEXT DEFAULT '[]',
+  translation_warnings TEXT DEFAULT '[]',
   request_body TEXT,
   response_body TEXT
 );
@@ -289,8 +291,8 @@ _COLS = ("ts", "request_id", "surface", "key_alias", "key_id", "model_group",
          "tok_cached", "tok_cache_creation", "tok_reasoning", "tok_out",
          "usage_estimated", "tps",
          "ttft_ms", "latency_ms", "cost", "was_stream", "cache_hit",
-         "cache_savings", "response_cache_hit", "attempts", "request_body",
-         "response_body")
+         "cache_savings", "response_cache_hit", "attempts",
+         "translation_warnings", "request_body", "response_body")
 
 
 class DBSink:
@@ -571,6 +573,7 @@ class DBSink:
                           ("key_id", "TEXT DEFAULT ''"),
                           ("tok_cache_creation", "INTEGER DEFAULT 0"),
                           ("response_cache_hit", "INTEGER DEFAULT 0"),
+                          ("translation_warnings", "TEXT DEFAULT '[]'"),
                           ("usage_estimated", "INTEGER DEFAULT 0")]:
             if col not in cols:
                 await conn.execute(
@@ -647,6 +650,7 @@ class DBSink:
             "cache_hit": int(evt.cache_hit), "cache_savings": evt.cache_savings,
             "response_cache_hit": int(evt.response_cache_hit),
             "attempts": orjson.dumps(evt.attempts).decode(),
+            "translation_warnings": orjson.dumps(evt.translation_warnings).decode(),
             "request_body": (orjson.dumps(evt.request_body).decode()
                               if evt.request_body is not None else None),
             "response_body": (orjson.dumps(evt.response_body).decode()
@@ -1059,7 +1063,8 @@ class DBSink:
                       "tps": 0.0, "ttft_ms": 0.0, "latency_ms": 0.0, "cost": 0.0,
                       "was_stream": False, "cache_hit": False,
                       "cache_savings": 0.0, "response_cache_hit": False,
-                      "attempts": [], "request_body": None, "response_body": None,
+                      "attempts": [], "translation_warnings": [],
+                      "request_body": None, "response_body": None,
                       "level": "info", "message": "", "diff": diff})
             out.append(d)
         return out
@@ -1140,6 +1145,14 @@ class DBSink:
             d["was_stream"] = bool(d["was_stream"])
             d["cache_hit"] = bool(d["cache_hit"])
             d["attempts"] = orjson.loads(d["attempts"])
+            tw = d.get("translation_warnings")
+            # Older rows predate the column (NULL after the migration's
+            # DEFAULT only applies to new inserts on some engines), so a
+            # malformed/absent value decodes to [].
+            try:
+                d["translation_warnings"] = orjson.loads(tw) if tw else []
+            except (ValueError, TypeError):
+                d["translation_warnings"] = []
             rb = d.get("request_body")
             d["request_body"] = orjson.loads(rb) if rb else None
             rsb = d.get("response_body")

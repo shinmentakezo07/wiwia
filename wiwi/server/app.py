@@ -929,19 +929,35 @@ async def lifespan(app: FastAPI):
     await state.shutdown()
 
 
-def _inject_id(chunk: bytes, event_id: int) -> bytes:
-    """Prepend an SSE ``id:`` line to each SSE frame in the chunk.
+def _inject_id(chunk: bytes, first_id: int) -> tuple[bytes, int]:
+    """Prepend an SSE ``id:`` line to each frame in *chunk*.
 
-    A chunk may contain multiple frames (joined by blank-line boundaries).
-    Per the SSE spec, an ``id`` line sets the last-event-id for the NEXT
-    event dispatched.  If we only tag the first frame, the client's
-    Last-Event-ID points at the first sub-event, not the last — causing
-    replay-from-wrong-offset on reconnect.  Tag every frame instead.
+    A chunk may carry several frames (joined by blank-line boundaries), and an
+    ``id`` line sets the last-event-id for the event that follows it. Tagging
+    every sub-frame with the SAME id — the previous behaviour — made a
+    reconnect ambiguous: a client whose connection dropped after sub-frame 1 but
+    before sub-frame 2 reported ``Last-Event-ID`` of the shared id, and the
+    server's ``seq > last_seq`` replay then skipped sub-frame 2 entirely, losing
+    it (AUDIT #283). Giving each frame its own monotonically increasing id makes
+    the cursor land on the right frame.
+
+    Returns ``(tagged_bytes, last_id_assigned)`` so the caller can keep its
+    sequence counter monotonic across chunks; when *chunk* holds no frame the
+    input id is returned unchanged.
+
+    Only complete frames are tagged: a trailing fragment left by a split on
+    ``\\n\\n`` is re-terminated, matching how the frames are written.
     """
-    id_line = f"id: {event_id}\n".encode()
-    frames = chunk.split(b"\n\n")
-    tagged = [id_line + f + b"\n\n" for f in frames if f]
-    return b"".join(tagged)
+    frames = [f for f in chunk.split(b"\n\n") if f]
+    if not frames:
+        return chunk, first_id
+    out: list[bytes] = []
+    event_id = first_id
+    for i, frame in enumerate(frames):
+        if i:
+            event_id += 1
+        out.append(f"id: {event_id}\n".encode() + frame + b"\n\n")
+    return b"".join(out), event_id
 
 
 def create_app(config: WiwiConfig) -> FastAPI:
@@ -995,8 +1011,20 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return False
         return hmac.compare_digest(bearer(request).encode(), mk.encode())
 
-    async def authenticate(request: Request, model: str, surface: str = "chat",
-                           est_tokens: int = 0, reserve: bool = True):
+    async def authenticate(request: Request, model: str, surface: str = "chat"):
+        """Resolve and vet the caller's credential. Does NOT reserve rate-limit
+        slots.
+
+        Reservation is deliberately a separate step (``enforce_rate_limit``),
+        taken only once the model is known to resolve — reserving before a 404
+        burned a window slot on a request that never reached upstream. This
+        function used to carry an optional ``reserve=True`` branch that did the
+        same ``limiter.check``; every caller passed ``reserve=False``, so the
+        branch was dead — and had anyone used the default, the two calls would
+        each reserve a slot while only one refund path existed, leaking the
+        other into the 60 s window permanently. Removed rather than left as a
+        trap.
+        """
         if state.auth is None:
             return None, _err(500, "api_error", "gateway not initialized", request)
         token = bearer(request)
@@ -1024,16 +1052,6 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if info.models and model and model != "*" and model not in info.models:
             return None, _err(403, "permission_error",
                               f"key not allowed for model '{model}'", request, surface)
-        if reserve:
-            allowed, retry_after = await state.limiter.check(info.key_id, info.rpm,
-                                                             info.tpm,
-                                                             est_tokens=est_tokens)
-            if not allowed:
-                resp = _err(429, "rate_limit_error",
-                            f"rate limit exceeded, retry in {retry_after}s",
-                            request, surface)
-                resp.headers["Retry-After"] = str(retry_after)
-                return None, resp
         return info, None
 
     async def enforce_rate_limit(info, est_tokens: int, request: Request,
@@ -1256,8 +1274,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         except (oc.DialectError, ValueError) as e:
             return _err(400, "invalid_request_error", str(e), request, surface)
         est = len(orjson.dumps(body)) // 4 if isinstance(body, dict) else 0
-        info, err_resp = await authenticate(request, ir_req.model, surface,
-                                            est_tokens=est, reserve=False)
+        info, err_resp = await authenticate(request, ir_req.model, surface)
         if err_resp:
             return err_resp
         group, _ = state_.router.resolve_group(ir_req.model)
@@ -1337,14 +1354,20 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     # tail the journal file until the done record lands or
                     # the stream expires.
                     last = replay[-1][0] if replay else replay_after
+                    # Incremental cursor (AUDIT #282): the old loop called
+                    # `read_after` (whole-file re-read + re-parse) and
+                    # `is_complete` (the same, again) every 50 ms, so an idle
+                    # tail burned O(journal size) of event-loop time per tick.
+                    tail = state_.journals.tail_reader(replay_id, last)
                     deadline = time.time() + config.router_settings.stream_journal_ttl_s
                     while time.time() < deadline:
                         await asyncio.sleep(0.05)
-                        for seq, chunk in state_.journals.read_after(replay_id, last):
+                        for seq, chunk, done in tail.read_next():
                             last = seq
+                            if done:
+                                return
                             yield chunk
-                        if (state_.journals.is_complete(replay_id)
-                                or state_.journals.is_expired(replay_id)):
+                        if tail.truncated() or state_.journals.is_expired(replay_id):
                             return
 
                 # A replay is a request like any other and is subject to the
@@ -1539,19 +1562,27 @@ def create_app(config: WiwiConfig) -> FastAPI:
         thinking_buf: list[str],
         tools_map: dict[int, dict[str, Any]],
     ) -> None:
-        """Accumulate streaming deltas into serializable buffers for log capture."""
+        """Accumulate streaming deltas into serializable buffers for log capture.
+
+        Tool arguments accumulate as a LIST joined at teardown, not with
+        ``+=``. Per-fragment concatenation is O(n^2) in total bytes, which the
+        gateway pump already fixed for text and tool args (AUDIT #104) — a
+        multi-MB argument payload streamed in many fragments stalled the event
+        loop here, on every concurrent request, only when prompt capture was
+        enabled (so the fix is easy to miss).
+        """
         from wiwi.streaming import deltas as dl
         if isinstance(d, dl.TextDelta):
             text_buf.append(d.text)
         elif isinstance(d, dl.ThinkingDelta):
             thinking_buf.append(d.text)
         elif isinstance(d, dl.ToolCallOpen):
-            tools_map[d.index] = {"id": d.id, "name": d.name, "arguments": "",
+            tools_map[d.index] = {"id": d.id, "name": d.name, "_args": [],
                                   "builtin": d.builtin}
         elif isinstance(d, dl.ToolCallArgsDelta):
             entry = tools_map.get(d.index)
             if entry is not None:
-                entry["arguments"] += d.args_fragment
+                entry["_args"].append(d.args_fragment)
         elif isinstance(d, dl.UsageFinal):
             ctx._stream_usage = d  # type: ignore[attr-defined]
         elif isinstance(d, dl.Finish):
@@ -1600,7 +1631,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 ctx.metadata["response_body"] = {
                     "text": "".join(stream_text),
                     "thinking": [{"text": t} for t in stream_thinking],
-                    "tool_calls": [stream_tools[i] for i in sorted(stream_tools)],
+                    "tool_calls": [
+                        {"id": tc["id"], "name": tc["name"],
+                         "arguments": "".join(tc["_args"]),
+                         "builtin": tc["builtin"]}
+                        for _, tc in sorted(stream_tools.items())],
                     "stop_reason": ctx.stop_reason or "stop",
                     "usage": ({"prompt_tokens": stream_usage.prompt,
                                "completion_tokens": stream_usage.output,
@@ -1624,8 +1659,16 @@ def create_app(config: WiwiConfig) -> FastAPI:
         try:
             async def _emit(chunk: bytes) -> None:
                 nonlocal _seq
-                _seq += 1
-                tagged = _inject_id(chunk, _seq) if event_ids else chunk
+                if event_ids:
+                    # Each sub-frame takes the next id so a reconnect cursor
+                    # lands on a single frame rather than a whole chunk
+                    # (AUDIT #283). The journal records the same numbering, so
+                    # Last-Event-ID means one thing to both sides.
+                    tagged, last_id = _inject_id(chunk, _seq + 1)
+                    _seq = last_id
+                else:
+                    _seq += 1
+                    tagged = chunk
                 if journal is not None:
                     with contextlib.suppress(Exception):
                         await journal.append(_seq, tagged)
@@ -1747,8 +1790,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             ir_req = am.decode_request(body)
         except (oc.DialectError, ValueError) as e:
             return _err(400, "invalid_request_error", str(e), request, "messages")
-        _, err_resp = await authenticate(request, ir_req.model, "messages",
-                                          reserve=False)
+        _, err_resp = await authenticate(request, ir_req.model, "messages")
         if err_resp:
             return err_resp
         # Count through the same estimator the gateway's streaming fallback
@@ -1768,7 +1810,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     @app.get("/v1/models")
     async def list_models(request: Request):
-        _, err_resp = await authenticate(request, model="*", reserve=False)
+        _, err_resp = await authenticate(request, model="*")
         if err_resp:
             return err_resp
         data = []

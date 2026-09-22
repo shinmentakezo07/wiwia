@@ -27,6 +27,7 @@ from wiwi.providers.base import (
     WiwiError,
     error_from_provider_status,
     status_for_key_pool,
+    take_adapter_warnings,
 )
 from wiwi.providers.registry import fresh_adapter
 from wiwi.router.router import Deployment, Router, execute_with_retries
@@ -43,6 +44,20 @@ log = structlog.get_logger(__name__)
 def _flag(ctx: RequestContext, msg: str) -> None:
     """Record an advisory tool-args violation on the request context."""
     ctx.metadata.setdefault("tool_args_violations", []).append(msg)
+
+
+def _record_translation_warnings(ctx: RequestContext, adapter: Any) -> None:
+    """Move an adapter's advisory translation warnings onto the request ctx.
+
+    A construct the caller asked for but this provider cannot honour (Gemini's
+    missing ``disable_parallel_tool_use``, its lack of ``strict``) is logged by
+    the adapter, which operators see but the CALLER does not. Draining them
+    here puts them where the response can surface them, so an agent that
+    serializes tool calls for correctness learns its constraint was dropped
+    instead of silently getting concurrency it forbade.
+    """
+    for msg in take_adapter_warnings(adapter):
+        ctx.metadata.setdefault("translation_warnings", []).append(msg)
 
 
 def _speaks_messages(dep: Deployment) -> bool:
@@ -139,6 +154,38 @@ _PUMP_CANCEL_GRACE_S = 1.0
 # terminal frame there would hang the client exactly as an unguarded handler
 # does (AUDIT #211).
 _QUEUE_PUT_TIMEOUT_S = 5.0
+
+
+def _is_terminal_delta(d: dl.IRStreamDelta) -> bool:
+    """True for a frame that ends the stream and must never be dropped.
+
+    ``StreamEnd``/``StreamError`` are the two legal terminals; ``Finish`` is
+    not terminal on its own but is the point after which the consumer has a
+    stop reason to report, so it is queued with the same guarantee (AUDIT #277).
+    """
+    return isinstance(d, (dl.Finish, dl.StreamEnd, dl.StreamError))
+
+
+def _reserve_terminal_slot(queue: asyncio.Queue) -> None:
+    """Keep one free slot so a terminal frame can always be enqueued.
+
+    ``_put_frame`` guarantees a terminal frame reaches the consumer, and this
+    is the other half of that guarantee: whenever the consumer takes something
+    off the queue, if the queue has again grown to its full capacity the
+    producer is one put behind — drop one queued content frame so the terminal
+    slot stays open (AUDIT #277). Called by the consumer, so it can never race
+    the producer's own ``put_nowait`` in a way that matters: worst case the
+    reserve is a no-op for one iteration.
+
+    Operates on the ``QueueFull`` boundary only; below capacity nothing is
+    dropped, so the fast path is a single ``full()`` check.
+    """
+    if not queue.full():
+        return
+    try:
+        queue.get_nowait()  # a content frame the consumer is not keeping up with
+    except asyncio.QueueEmpty:  # pragma: no cover — full() implies non-empty
+        return
 
 
 def pump_cancel_grace(grace_drain_s: float) -> float:
@@ -391,6 +438,7 @@ class Gateway:
         body = adapter.encode_request(ctx.ir_req, dep.model_id, params)
         if hasattr(adapter, "set_tool_context"):
             adapter.set_tool_context(body)
+        _record_translation_warnings(ctx, adapter)
         headers = self._headers(adapter, key, dep, ctx)
         t0 = time.monotonic()
         try:
@@ -492,6 +540,7 @@ class Gateway:
         body = adapter.encode_request(ctx.ir_req, dep.model_id, params)
         if hasattr(adapter, "set_tool_context"):
             adapter.set_tool_context(body)
+        _record_translation_warnings(ctx, adapter)
         headers = self._headers(adapter, key, dep, ctx)
         t0 = time.monotonic()
         try:
@@ -573,29 +622,58 @@ class Gateway:
                     raise err
             else:
                 raise err
+        text_parts: list[str] = []
+        thinking_parts: list[str] = []
+        tool_calls: list[ir.ToolUsePart] = []
+        open_calls: dict[int, ir.ToolUsePart] = {}
+        # Accumulate arg fragments in a list and join once at Close:
+        # ``buf = buf + fragment`` is O(n^2) in total bytes and unbounded
+        # for a multi-MB argument payload (AUDIT #104).
+        arg_bufs: dict[int, list[str]] = {}
+        usage = ir.Usage()
+        stop_reason: ir.StopReason = "stop"
+        # Set once the adapter reported a real terminal (Finish or
+        # StreamEnd). An abrupt upstream close without one is a
+        # truncated turn, not a successful one (AUDIT #284).
+        saw_terminal = False
+
+        async def _bill_partial() -> None:
+            """Price the tokens received so far on a mid-read failure.
+
+            Mirrors the streaming arm's ``_price_partial`` so the two cannot
+            drift: the provider's own counts win, and a locally estimated prompt
+            fills the gap a provider leaves (which is the normal case for the
+            ``force_stream`` providers this path exists for, since they pop
+            ``stream_options`` and never send usage). Never raises — it runs on
+            a failure path where a fault would replace the real error.
+            """
+            base = dl.UsageFinal(
+                prompt=usage.prompt_tokens, cached=usage.cached_tokens,
+                reasoning=usage.reasoning_tokens,
+                output=usage.completion_tokens,
+                cache_creation=usage.cache_creation_tokens)
+            text_len = sum(len(p) for p in text_parts)
+            self._price_stream(ctx, dep, await usage_fallback(
+                ctx, dep, base, text_len))
+
+
         # Connection OK — pump the SSE stream into an AssistantTurn.
+        # Accumulation is list-based and joined once: ``text += d.text`` inside a
+        # closure keeps the intermediate string at refcount 2 (the cell), which
+        # defeats CPython's in-place realloc and makes the total O(n^2) —
+        # measured 157x/952x/2206x slower than a plain local at 20k/60k/120k
+        # fragments, stalling the event loop for every concurrent request
+        # (AUDIT #228). The pump path only tracks a length, and resume.py
+        # already uses this pattern (#104).
         try:
-            parser = LineSSEParser()
-            # Accumulate text in lists and join once. ``text += d.text`` inside
-            # a closure keeps the intermediate string at refcount 2 (the cell),
-            # which defeats CPython's in-place realloc and makes the total
-            # O(n^2): measured 157x/952x/2206x slower than a plain local at
-            # 20k/60k/120k fragments, stalling the event loop for every
-            # concurrent request (AUDIT #228). The pump path only tracks a
-            # length, and resume.py already uses this pattern (#104).
-            text_parts: list[str] = []
-            thinking_parts: list[str] = []
-            tool_calls: list[ir.ToolUsePart] = []
-            open_calls: dict[int, ir.ToolUsePart] = {}
-            # Accumulate arg fragments in a list and join once at Close:
-            # ``buf = buf + fragment`` is O(n^2) in total bytes and unbounded
-            # for a multi-MB argument payload (AUDIT #104).
-            arg_bufs: dict[int, list[str]] = {}
-            usage = ir.Usage()
-            stop_reason: ir.StopReason = "stop"
+            # `allow_unframed`: envelope providers (Cline/WorkBuddy) answer a
+            # "streaming" request with one whole JSON object per line rather
+            # than framed SSE, and this arm must see those lines (AUDIT #284).
+            parser = LineSSEParser(allow_unframed=True)
+
 
             def _apply_event(evt: SSEEvent) -> None:
-                nonlocal usage, stop_reason
+                nonlocal usage, stop_reason, saw_terminal
                 for d in adapter.decode_stream_event(evt.event, evt.data):
                     if isinstance(d, dl.TextDelta):
                         text_parts.append(d.text)
@@ -630,6 +708,9 @@ class Gateway:
                         )
                     elif isinstance(d, dl.Finish):
                         stop_reason = d.stop_reason
+                        saw_terminal = True
+                    elif isinstance(d, dl.StreamEnd):
+                        saw_terminal = True
                     elif isinstance(d, dl.StreamError):
                         raise WiwiError(502, "api_error", d.message,
                                         retryable=d.kind != "status")
@@ -686,8 +767,42 @@ class Gateway:
                 else:
                     tc.raw_args = raw
                 tool_calls.append(tc)
+        except asyncio.CancelledError:
+            # Client went away mid-read. Price what was already consumed before
+            # re-raising, exactly as the streaming pump does — otherwise the
+            # upstream's tokens are billed to nobody while the request log shows
+            # nothing (AUDIT #284). Shielded because we are already being
+            # cancelled, so an unshielded await would be interrupted immediately
+            # and skip the pricing it exists to perform.
+            with contextlib.suppress(Exception):
+                await asyncio.shield(_bill_partial())
+            raise
+        except Exception:
+            # Any other mid-read death (idle timeout, transport error, a
+            # malformed frame): the upstream already generated — and charged for
+            # — the tokens received so far, so bill them before surfacing the
+            # failure. The streaming arm has always done this via
+            # `_price_partial` (AUDIT #284); this arm relied on the success path
+            # and lost them whenever the failure was not an exception.
+            with contextlib.suppress(Exception):
+                await _bill_partial()
+            raise
         finally:
             await resp_cm.__aexit__(None, None, None)
+        if not saw_terminal:
+            # The body ended with no Finish and no StreamEnd — an abrupt upstream
+            # close (or a body that just stopped). Nothing raised, so the old
+            # code fell through and reported a *successful* turn whose text was
+            # silently truncated, with the partial tokens billed as if complete.
+            # The streaming arm detects exactly this and emits an error
+            # (see `saw_terminal` in `_pump_once`); this arm now matches it.
+            # Bill the partial delivery first — the upstream charged for it —
+            # then surface a retryable error so failover can take over.
+            with contextlib.suppress(Exception):
+                await _bill_partial()
+            raise WiwiError(502, "api_connection_error",
+                            "upstream stream ended without completion",
+                            retryable=True)
         latency = int((time.monotonic() - t0) * 1000)
         ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
                          "ok", latency, model_id=dep.model_id)
@@ -805,19 +920,59 @@ class Gateway:
         # leaking an encoder concept into the pump.
         ping_frame = (b'event: ping\ndata: {"type": "ping"}\n\n'
                       if ctx.surface == "messages" and ping_s > 0 else None)
+        # The coalescer holds text until the NEXT delta arrives or its deadline
+        # passes, and a quiet upstream is exactly when its deadline must be
+        # honoured (AUDIT #277). Waiting only on the queue would leave that text
+        # stranded, so bound the wait by the coalescer's remaining deadline too
+        # — whichever of ping-interval / coalesce-deadline fires first.
+        coalesce_ms = (self.router.settings.stream_coalesce_max_ms
+                       if coalescer is not None else 0.0)
+
+        def _wait_timeout() -> float | None:
+            """Seconds to wait for the next delta, or None to wait forever.
+
+            ``None`` is the normal case: the pump owns the terminal frame and
+            the consumer has no timer of its own. A finite value is returned
+            only when something must run on the wall clock — the coalescer's
+            pending deadline, the SSE keep-alive, or both.
+            """
+            deadlines: list[float] = []
+            if ping_frame is not None:
+                deadlines.append(ping_s)
+            if coalescer is not None and coalesce_ms > 0:
+                held = coalescer.buffered_s
+                if held:
+                    deadlines.append(max(coalesce_ms / 1000.0 - held, 1e-3))
+            return min(deadlines) if deadlines else None
+
+
         try:
             while True:
-                if ping_frame is None:
+                wait_s = _wait_timeout()
+                if wait_s is None:
                     d = await queue.get()
+                    # Re-open the reserved slot the pump holds for its terminal
+                    # frame, so a client that is falling behind can never make
+                    # the stream un-terminatable (AUDIT #277).
+                    _reserve_terminal_slot(queue)
                 else:
                     try:
-                        d = await asyncio.wait_for(queue.get(), timeout=ping_s)
+                        d = await asyncio.wait_for(queue.get(), timeout=wait_s)
                     except TimeoutError:
-                        # Nothing from the upstream yet: keep the client's
-                        # connection alive. Not counted as content, so the
+                        # Upstream is quiet. If the coalescer is holding text
+                        # past its deadline, release it now rather than waiting
+                        # for a delta that may never come; otherwise keep the
+                        # client's connection alive. Neither is content, so the
                         # first-token timer is untouched.
-                        yield ping_frame
+                        released = coalescer.flush_due() if coalescer else []
+                        if released:
+                            for pending in released:
+                                yield pending
+                            continue
+                        if ping_frame is not None:
+                            yield ping_frame
                         continue
+                    _reserve_terminal_slot(queue)
                 if isinstance(d, dl.StreamStart):
                     if not started:
                         yield dl.StreamStart(model=ctx.ir_req.model,
@@ -886,6 +1041,18 @@ class Gateway:
                     if merged is not None:
                         d = merged
                 if coalescer is not None:
+                    # `feed()` flushes any buffered text ahead of a
+                    # non-mergeable delta at every depth, so ordering is already
+                    # the coalescer's own guarantee. The one thing `feed()`
+                    # cannot see is a *quiet* upstream: its deadline is only
+                    # evaluated when a new delta arrives, so text held for a
+                    # consumer that has stopped receiving data stayed buffered
+                    # until end-of-stream. Release the deadline-expired buffer
+                    # first — the delta in hand is newer than the text waiting
+                    # (AUDIT #277).
+                    if isinstance(d, dl.TextDelta):
+                        for pending in coalescer.flush_due():
+                            yield pending
                     for cd in coalescer.feed(d, queue.qsize()):
                         yield cd
                 else:
@@ -1041,11 +1208,34 @@ class Gateway:
             if status in (408, 500, 502, 503, 504, 529):
                 dep.record_fail(self.router.settings.allowed_fails,
                                 self.router.settings.cooldown_time)
-            # The resume never delivered a token, so refund the slot reserved
-            # above — otherwise one failed resume holds this deployment's cap
-            # for the window (AUDIT #101).
+            # This attempt may still have priced a partial delivery before it
+            # failed (the pump's failure path runs `_price_partial` into
+            # `resume_ctx`). Folding it into `_pending_resume_ctxs` — exactly as
+            # the success path above does — is what gets those tokens into the
+            # merged total the client is shown and the spend log bills. Dropping
+            # the context left the resumed attempt's partial usage charged to
+            # nobody while the originating request reported only its own
+            # pre-failure tokens (AUDIT #281).
+            if getattr(resume_ctx, "usage", None) is not None:
+                pending = getattr(ctx, "_pending_resume_ctxs", None)
+                if pending is None:
+                    pending = []
+                    ctx._pending_resume_ctxs = pending  # type: ignore[attr-defined]
+                pending.append(resume_ctx)
+            # The resume never delivered a token to THIS context's consumer, so
+            # refund the slot reserved above — otherwise one failed resume holds
+            # this deployment's cap for the window (AUDIT #101). A priced
+            # partial delivery settles its own reservation; `release_slot`
+            # refunds estimated events only and is a no-op for a settled one.
             dep.release_slot(resume_ctx.request_id)
+            # Cancel AND await: the pump's `finally` releases the upstream
+            # response, and a fire-and-forget cancel can leave the socket
+            # checked out until GC. `wait_for` bounds a wedged teardown so one
+            # bad fallback cannot stall the whole resume loop.
             new_pump_task.cancel()
+            with contextlib.suppress(BaseException):
+                await asyncio.wait_for(
+                    asyncio.shield(new_pump_task), timeout=_PUMP_CANCEL_GRACE_S)
         return False, None
 
     async def _pump(self, dep: Deployment, key: ProviderKeyRef,
@@ -1120,6 +1310,7 @@ class Gateway:
             body = adapter.encode_request(ctx.ir_req, dep.model_id, params)
             if hasattr(adapter, "set_tool_context"):
                 adapter.set_tool_context(body)
+            _record_translation_warnings(ctx, adapter)
             headers = self._headers(adapter, key, dep, ctx)
         except Exception as e:  # noqa: BLE001
             # Box + event first: `call_one` parks on `ready.wait()`, so a fault
@@ -1176,19 +1367,42 @@ class Gateway:
                         await resp_cm.__aexit__(None, None, None)
 
         async def _put_frame(d: dl.IRStreamDelta) -> None:
-            """Queue one delta without any chance of killing the pump.
+            """Queue one delta without any chance of losing it or killing the pump.
 
-            ``queue.put`` is an await, and it is where the terminal frame used
-            to be lost: the failure handler's three awaits had no guard, so a
-            fault in the accounting ahead of them left the consumer parked on
-            ``await queue.get()`` with no terminal frame and no timeout
-            (AUDIT #211). ``put_nowait`` cannot fault at all — it is the same
-            call whenever there is room, which is every case a live consumer
-            can still observe — and the bounded fallback below covers the one
-            case it cannot: a consumer so slow that the 4096-slot queue is
-            genuinely full, where dropping the terminal frame would hang the
-            client just as surely.
+            Two failure modes are covered here, and they need opposite
+            treatment:
+
+            * A **content** delta may legitimately be dropped when the consumer
+              is hopelessly behind — ``put_nowait`` is the same call whenever
+              there is room, and a bounded ``wait_for`` fallback keeps the pump
+              from blocking forever on a 4096-slot queue. Losing content the
+              client was never keeping up with is the intended backpressure.
+
+            * A **terminal** frame (``StreamEnd``/``StreamError``/``Finish``)
+              must never be dropped. The consumer is parked on
+              ``await queue.get()`` with no timeout, so a suppressed
+              ``TimeoutError`` here left it waiting for a stream that had
+              already ended (AUDIT #277). Terminal frames therefore get the
+              queue's reserved last slot: ``_reserve_terminal_slot`` below keeps
+              one slot free so the terminal put always succeeds immediately,
+              in bounded memory, with no unbounded await.
+
+            A non-``put_nowait`` path is still used for content only, and it is
+            the same bounded wait as before.
             """
+            if _is_terminal_delta(d):
+                # Blocking here would be the hang we are fixing; ``put_nowait``
+                # succeeds because a slot is reserved. If a slow consumer has
+                # raced us into the reserved slot, fall back to an unbounded
+                # put: a terminal frame is worth waiting for, and waiting for
+                # the consumer is strictly better than the client never
+                # learning the stream ended.
+                try:
+                    queue.put_nowait(d)
+                    return
+                except asyncio.QueueFull:
+                    await queue.put(d)
+                    return
             try:
                 queue.put_nowait(d)
                 return
@@ -1351,6 +1565,12 @@ class Gateway:
             # O(1) per token: tracks repetition runs for short periods only,
             # rather than rescanning the whole window every token.
             loop_detector = LoopDetector(loop_limit)
+            # `allow_unframed`: envelope providers (Cline/WorkBuddy) answer with
+            # one whole JSON object per line rather than framed SSE; without
+            # this every content delta vanished and the client saw an empty
+            # turn plus a spurious "ended without completion" (AUDIT #285).
+            parser = LineSSEParser(allow_unframed=True)
+            loop_detector = LoopDetector(loop_limit)
             line_iter = resp.aiter_lines().__aiter__()
 
             async def _apply_delta(deltas: list[dl.IRStreamDelta]) -> bool:
@@ -1376,8 +1596,13 @@ class Gateway:
                         saw_terminal = True
                         continue
                     else:
-                        if isinstance(d, dl.TextDelta):
-                            text_len += len(d.text)
+                        if isinstance(d, (dl.TextDelta, dl.ThinkingDelta)):
+                            if isinstance(d, dl.TextDelta):
+                                text_len += len(d.text)
+                            # Reasoning text is fed too: a model can run away
+                            # inside its thinking trace, and a detector that
+                            # only ever saw visible text reported nothing while
+                            # the turn burned to the token limit (AUDIT #280).
                             if loop_detector.feed(d.text):
                                 # A repetition loop is a model-quality failure,
                                 # not a provider/key fault: do NOT feed the
@@ -1434,7 +1659,8 @@ class Gateway:
                 evt = parser.feed_line(line)
                 if evt is None:
                     continue
-                aborted = await _apply_delta(adapter.decode_stream_event(evt.event, evt.data))
+                aborted = await _apply_delta(
+                    adapter.decode_stream_event(evt.event, evt.data))
                 if aborted:
                     return
             # Flush any frame buffered without a trailing blank line
@@ -1446,6 +1672,13 @@ class Gateway:
                 aborted = await _apply_delta(adapter.decode_stream_event(_flushed.event, _flushed.data))
                 if aborted:
                     return
+            # Any tool call still open here never got its ToolCallClose (a
+            # Finish-only or [DONE]-sentinel tail makes that reachable), so
+            # validate and release it now: the fragment buffers must not
+            # outlive the stream, and the advisory violation signal should
+            # cover the whole turn, not just the calls that closed cleanly.
+            self._validate_leftover_tool_args(
+                ctx, _tool_schemas, _open_tools, _arg_bufs)
             await _close_upstream()
             # upstream closed; on_result(200) already fired in
             # execute_with_retries when the stream started — don't double count.
@@ -1462,7 +1695,15 @@ class Gateway:
                 est_usage = await usage_fallback(ctx, dep, real_usage, text_len)
             self._price_stream(ctx, dep, est_usage)
             if not client_gone:
-                await _put_frame(est_usage)
+                # Decide truncation BEFORE the usage frame goes out. The
+                # usage frame is the client's "this request delivered N
+                # tokens" signal — OpenAI clients read it as the tail of a
+                # completed turn, and the Anthropic encoder keeps it for the
+                # final message_delta. Emitting it and *then* declaring the
+                # stream failed handed the client a contradictory terminal
+                # (usage, then StreamError). Billing is unaffected either
+                # way: the partial delivery was priced just above, and
+                # ``_fail_stream`` carries the same usage into the log.
                 if finish is None and not saw_terminal:
                     # Ended with no finish_reason and no [DONE]: the body just
                     # stopped. That is a truncation whether or not usage
@@ -1474,6 +1715,7 @@ class Gateway:
                         "upstream stream ended without completion", "connection",
                         price=False)
                     return
+                await _put_frame(est_usage)
                 if finish is None:
                     # DeepSeek/B.AI and other OpenAI-compatible servers signal
                     # completion purely with [DONE], omitting a trailing
@@ -1612,12 +1854,27 @@ class Gateway:
         ``ctx.metadata["tool_args_violations"]`` — the tool call still reaches
         the client (validation is advisory; agents handle their own errors).
         Oversize args skip validation and get flagged without parsing.
+
+        State is consumed unconditionally, *before* any early return: a Close
+        for an index that never opened must not leave its fragment buffer
+        behind, or a later call that reuses the index joins the stale
+        fragments into its own args (the adapters' index-reuse path makes
+        that reachable).
         """
         name = open_tools.pop(index, None)
         raw = "".join(arg_bufs.pop(index, []))
         if name is None:
             return  # never opened (or already handled): nothing to validate
-        schema = tool_schemas.get(name)
+        self._check_tool_args(ctx, name, raw, tool_schemas.get(name))
+
+    def _check_tool_args(
+        self,
+        ctx: RequestContext,
+        name: str,
+        raw: str,
+        schema: dict[str, Any] | None,
+    ) -> None:
+        """Validate one tool call's accumulated args; flag, never raise."""
         if not schema:
             return  # undeclared tool / no schema: nothing to check against
         if len(raw.encode("utf-8", "replace")) > MAX_TOOL_ARGS_BYTES:
@@ -1627,6 +1884,25 @@ class Gateway:
         valid, msg = validate_tool_args(name, raw, schema)
         if not valid:
             _flag(ctx, msg)
+
+    def _validate_leftover_tool_args(
+        self,
+        ctx: RequestContext,
+        tool_schemas: dict[str, dict[str, Any]],
+        open_tools: dict[int, str],
+        arg_bufs: dict[int, list[str]],
+    ) -> None:
+        """Validate any tool call still open when the stream ends.
+
+        An adapter is supposed to emit a ``ToolCallClose`` for every open
+        index, but the ``Finish``-only and ``[DONE]``-sentinel paths make a
+        missing Close reachable. Validating here keeps the advisory signal
+        complete and, more importantly, empties both dicts so nothing is
+        retained past the stream.
+        """
+        for index in sorted(open_tools):
+            self._validate_closed_tool_args(
+                ctx, tool_schemas, open_tools, arg_bufs, index)
 
     async def _price_partial(self, ctx: RequestContext, dep: Deployment,
                              usage_final: dl.UsageFinal | None,
@@ -1832,6 +2108,7 @@ def build_log_event(ctx: RequestContext) -> LogEvent:
         cost=ctx.cost, was_stream=ctx.ir_req.stream, cache_hit=ctx.cache_hit,
         cache_savings=ctx.metadata.get("cache_savings", 0.0),
         response_cache_hit=bool(ctx.metadata.get("response_cache_hit")),
+        translation_warnings=ctx.metadata.get("translation_warnings", []),
         attempts=[{"deployment": a.deployment, "provider": a.provider,
                    "key": a.provider_key_label, "status": a.status,
                    "latency_ms": a.latency_ms,

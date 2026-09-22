@@ -49,6 +49,91 @@ import structlog
 _ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
+class JournalTail:
+    """Byte-offset cursor over one journal file, for reconnect tailing.
+
+    ``JournalStore.read_after`` re-reads and re-parses the whole file on every
+    call. The reconnect tail loop polls every 50 ms per client, so with a 1 MiB
+    journal that is a sustained full re-parse of the file — megabytes per second
+    of event-loop time, used only to discover that nothing new was appended.
+    This cursor keeps the offset already consumed and reads strictly forward,
+    so an idle poll costs one ``stat`` and one empty ``read``.
+
+    Only appends are supported (the journal is append-only by construction). A
+    partial trailing line left by a concurrent append is not consumed: the
+    offset is advanced only past complete lines, so the next poll re-reads it
+    whole. ``truncated()`` reports the one case that would silently corrupt the
+    cursor's assumption — the file shrinking (a sweep unlinking it, or the
+    path being reused) — so the caller can fall back to a full read.
+    """
+
+    __slots__ = ("_last_seq", "_offset", "_path")
+
+    def __init__(self, path: Path, last_seq: int) -> None:
+        self._path = path
+        self._offset = 0
+        self._last_seq = last_seq
+
+    @property
+    def last_seq(self) -> int:
+        return self._last_seq
+
+    def truncated(self) -> bool:
+        """True when the file is smaller than what has been consumed."""
+        try:
+            return self._path.stat().st_size < self._offset
+        except OSError:
+            return False
+
+    def read_next(self) -> list[tuple[int, bytes, bool]]:
+        """Consume complete lines appended since the last call.
+
+        Returns ``(seq, chunk, done)`` triples in order. Ownership records
+        (``seq == 0``, no payload) are skipped, matching ``read_after``.
+        """
+        try:
+            with open(self._path, "rb") as fh:
+                fh.seek(self._offset)
+                raw = fh.read()
+        except OSError:
+            return []
+        if not raw:
+            return []
+        # Only consume up to the last complete line; a torn tail is re-read.
+        cut = raw.rfind(b"\n")
+        if cut < 0:
+            return []
+        consumed = raw[: cut + 1]
+        self._offset += len(consumed)
+        out: list[tuple[int, bytes, bool]] = []
+        for line in consumed.split(b"\n"):
+            if not line:
+                continue
+            try:
+                rec = orjson.loads(line)
+            except ValueError:
+                continue
+            seq = rec.get("seq")
+            if not isinstance(seq, int):
+                continue
+            done = bool(rec.get("done", False))
+            if seq == 0 and not done:
+                continue  # ownership record: no client-visible payload
+            # A done record is NEVER filtered by the sequence cursor:
+            # ``StreamJournal.finish(seq)`` writes it with the SAME seq as the
+            # last data record, so by the time it is reached ``_last_seq``
+            # already equals it and a plain ``seq <= _last_seq`` test dropped it
+            # — leaving the tail loop running until the journal TTL expired
+            # instead of terminating on the done record (AUDIT #282).
+            # ``read_after`` never hit this because it filters against the
+            # caller's fixed ``last_seq`` rather than an advancing cursor.
+            if not done and seq <= self._last_seq:
+                continue
+            self._last_seq = max(self._last_seq, seq)
+            out.append((seq, base64.b64decode(rec.get("data", "")), done))
+        return out
+
+
 class StreamJournal:
     """Append-only journal for one request's encoded SSE chunks."""
 
@@ -253,6 +338,23 @@ class JournalStore:
                         bool(rec.get("done", False)),
                         owner if isinstance(owner, str) else None))
         return out
+
+
+    def tail_reader(self, request_id: str, last_seq: int) -> JournalTail:
+        """An incremental reader for the reconnect tail loop (AUDIT #282).
+
+        ``read_after`` re-reads and re-parses the ENTIRE journal on every call,
+        and the tail loop calls it every 50 ms per reconnecting client — with a
+        1 MiB per-journal cap that is ~20 full megabyte-scale parses per second
+        of event-loop time, growing with the journal. The tail cursor instead
+        remembers the byte offset it has consumed, so each poll reads only the
+        bytes appended since the previous one.
+
+        A partial trailing line (a concurrent append caught mid-write) is left
+        unconsumed and re-read next poll, which is the same tolerance
+        ``_read_records`` documents.
+        """
+        return JournalTail(self.path_for(request_id), last_seq)
 
     def is_complete(self, request_id: str) -> bool:
         """True when the journal carries the original stream's done record."""

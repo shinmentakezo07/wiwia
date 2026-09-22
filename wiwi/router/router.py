@@ -1191,10 +1191,19 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                 # successful requests, skip it for this pick so traffic rotates
                 # even when weights are lopsided (AUDIT #78). ``pick_key``
                 # falls back to the full set when this excludes every key.
-                key_exclude |= {
-                    lbl for (pn, lbl), n in key_consec.items()
-                    if pn == dep.provider.name and n >= cycle_n
-                }
+                #
+                # The counter is *consumed* here — cleared for every key the
+                # exclusion covers — rather than left climbing. Left alone it
+                # saturates: once every key in the pool has served cycle_n
+                # times the exclusion set contains all of them, ``pick_key``
+                # hits its "every key excluded" fallback and ignores the
+                # exclusion, and the counters only ever reset on error, so the
+                # cadence was a permanent no-op indistinguishable from
+                # cycle_every_n=0 (AUDIT #226).
+                for (pn, lbl), n in list(key_consec.items()):
+                    if pn == dep.provider.name and n >= cycle_n:
+                        key_exclude.add(lbl)
+                        key_consec.pop((pn, lbl), None)
             key, retry_in = await dep.provider.pick_key(
                 exclude_labels=key_exclude,
                 probation_weight=getattr(router, "probation_weight", 1.0),

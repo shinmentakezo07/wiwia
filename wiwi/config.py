@@ -293,7 +293,22 @@ class HealerSettings(BaseModel):
     probe_backoff_base_s: float = 60.0  # per-target circuit base on failed probes
     probe_backoff_cap_s: float = 3600.0
     probes_to_restore: int = 2      # consecutive healthy probes before restore
-    probation_weight: float = 0.5   # WRR weight multiplier while on probation
+    # WRR weight multiplier applied while a key is on probation. It is
+    # unvalidated-adjective by design *except* for the degenerate range: at `0`
+    # the key accumulates a zero increment every round and can never be picked,
+    # so it can never graduate (graduation is driven by `on_result(key, 200)`);
+    # a negative value is worse and actively deprioritises it. Clamp to (0, 1]
+    # so a healer-restored key is always reachable (AUDIT #238).
+    probation_weight: float = 0.5
+
+    @field_validator("probation_weight")
+    @classmethod
+    def _probation_weight_reachable(cls, v: float) -> float:
+        if not v > 0:
+            return 0.01
+        if v > 1:
+            return 1.0
+        return v
 
 class GeneralSettings(BaseModel):
     master_key: str = ""

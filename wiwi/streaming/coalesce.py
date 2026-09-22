@@ -81,6 +81,31 @@ class DeltaCoalescer:
         self._buf_start = 0.0
         return [merged]
 
+    def flush_due(self, now: float | None = None) -> list[dl.IRStreamDelta]:
+        """Flush the buffer when its ``max_ms`` deadline has passed.
+
+        ``feed()`` only evaluates the deadline when the *next* delta arrives, so
+        a consumer that stops receiving upstream data held the buffer with no
+        timer: ``max_ms`` acted as a maximum lag only for a delta-tight stream
+        and as an unbounded lag whenever the upstream went quiet (AUDIT #277).
+        Callers on the consumer side poll this so the deadline is honoured
+        against the wall clock rather than against upstream traffic, then
+        continue with :meth:`feed` for the delta already in hand.
+        """
+        if not self._buf or self._buf_start == 0.0:
+            return []
+        now = time.monotonic() if now is None else now
+        if (now - self._buf_start) * 1000 >= self._max_ms:
+            return self._flush()
+        return []
+
+    @property
+    def buffered_s(self) -> float:
+        """Seconds the oldest buffered text has been held; 0.0 when empty."""
+        if not self._buf or self._buf_start == 0.0:
+            return 0.0
+        return time.monotonic() - self._buf_start
+
     def drain(self) -> list[dl.IRStreamDelta]:
         """Flush any remaining buffered deltas."""
         return self._flush()
