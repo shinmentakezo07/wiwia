@@ -275,6 +275,17 @@ def as_list(value: Any) -> list:
     """Return *value* when it is a list, else ``[]`` (AUDIT #247/#224)."""
     return value if isinstance(value, list) else []
 
+def as_str(value: Any, default: str = "") -> str:
+    """Return *value* when it is a ``str``, else *default*.
+
+    The mirror of :func:`as_dict`/:func:`as_list` for name/id fields:
+    ``.get(k, "")`` defaults only a *missing* key, so an explicit JSON ``null``
+    reached the IR as ``None`` and the client received ``"name": null`` — or,
+    where the value is coerced to ``str``, the literal ``"None"`` (AUDIT #232).
+    Use at every name/id read on the decode path.
+    """
+    return value if isinstance(value, str) else default
+
 
 
 class ProviderAdapter(Protocol):
@@ -286,3 +297,26 @@ class ProviderAdapter(Protocol):
                        deployment_params: dict[str, Any]) -> dict[str, Any]: ...
     def decode_response(self, status: int, body: bytes) -> AssistantTurn: ...
     def decode_stream_event(self, event: str, data: str) -> list[IRStreamDelta]: ...
+
+
+def take_adapter_warnings(adapter: Any) -> list[str]:
+    """Drain an adapter's advisory translation warnings, if it keeps any.
+
+    Some IR constructs have no representation on a given provider (Gemini has
+    no ``disable_parallel_tool_use`` knob; several providers drop ``strict``).
+    The adapter logs those, which is right for operators but invisible to the
+    CALLER who set the constraint — an agent that serializes tool calls for
+    correctness (file edits, shell state) would never learn it is getting
+    concurrency it forbade.
+
+    Adapters that want to surface such warnings set ``self.translation_warnings``
+    to a list during ``encode_request``; the gateway drains it into
+    ``ctx.metadata["translation_warnings"]`` via this helper, which is total —
+    an adapter without the attribute, or with a non-list, yields ``[]``.
+    """
+    warnings = getattr(adapter, "translation_warnings", None)
+    if not isinstance(warnings, list):
+        return []
+    drained = [w for w in warnings if isinstance(w, str)]
+    warnings.clear()
+    return drained

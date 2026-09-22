@@ -712,11 +712,14 @@ class OpencodeAdapter:
                 u.get("input_tokens_details"), dict) else {}
             out_det = u.get("output_tokens_details") if isinstance(
                 u.get("output_tokens_details"), dict) else {}
+            # Raw int() on a typed-wrong value raised mid-stream and the pump
+            # routed it to a provider cooldown; use the shared coercion every
+            # other adapter uses (AUDIT #194/#233).
             out.append(dl.UsageFinal(
-                prompt=int(u.get("input_tokens", 0) or 0),
-                cached=int(in_det.get("cached_tokens", 0) or 0),
-                reasoning=int(out_det.get("reasoning_tokens", 0) or 0),
-                output=int(u.get("output_tokens", 0) or 0)))
+                prompt=ir.coerce_int(u.get("input_tokens")) or 0,
+                cached=ir.coerce_int(in_det.get("cached_tokens")) or 0,
+                reasoning=ir.coerce_int(out_det.get("reasoning_tokens")) or 0,
+                output=ir.coerce_int(u.get("output_tokens")) or 0))
             for entry in sorted(self._resp_tools.values(), key=lambda e: e["index"]):
                 if not entry.get("closed"):
                     out.append(dl.ToolCallClose(index=entry["index"]))
@@ -967,10 +970,12 @@ def _decode_responses_response(body: bytes) -> ir.AssistantTurn:
     u = as_dict(data.get("usage"))
     in_det = as_dict(u.get("input_tokens_details"))
     out_det = as_dict(u.get("output_tokens_details"))
+    # Shared coercion, not raw int() — a typed-wrong usage value must not
+    # 502 the sync decode (AUDIT #233).
     turn.usage = ir.Usage(
-        prompt_tokens=int(u.get("input_tokens", 0) or 0),
-        completion_tokens=int(u.get("output_tokens", 0) or 0),
-        cached_tokens=int(in_det.get("cached_tokens", 0) or 0),
-        reasoning_tokens=int(out_det.get("reasoning_tokens", 0) or 0),
+        prompt_tokens=ir.coerce_int(u.get("input_tokens")) or 0,
+        completion_tokens=ir.coerce_int(u.get("output_tokens")) or 0,
+        cached_tokens=ir.coerce_int(in_det.get("cached_tokens")) or 0,
+        reasoning_tokens=ir.coerce_int(out_det.get("reasoning_tokens")) or 0,
     )
     return turn
