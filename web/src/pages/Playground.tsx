@@ -754,7 +754,7 @@ export function PlaygroundPage() {
     let timer: number | undefined;
     if (bearer || keyReady) return;
     void (async () => {
-      let key = "";
+      let key: string;
       try {
         key = await ensurePlaygroundKey();
       } catch (e) {

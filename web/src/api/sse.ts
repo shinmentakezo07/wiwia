@@ -87,7 +87,7 @@ export class WiwiStream {
     if (Number.isFinite(id) && id > this.lastId) this.lastId = id;
     const handler = this.handlers[event];
     if (!handler) return;
-    let payload: unknown = null;
+    let payload: unknown;
     const raw = dataLines.join("\n");
     try {
       payload = raw ? JSON.parse(raw) : null;

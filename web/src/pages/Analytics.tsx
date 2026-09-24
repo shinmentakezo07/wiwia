@@ -1746,7 +1746,9 @@ export function AnalyticsPage() {
                       </Pie>
                       <Tooltip
                         contentStyle={TOOLTIP_STYLE}
-                        formatter={(v: number) => donutFmt(v)}
+                        formatter={(value) =>
+                          typeof value === "number" ? donutFmt(value) : String(value ?? "—")
+                        }
                       />
                     </PieChart>
                   </ResponsiveContainer>

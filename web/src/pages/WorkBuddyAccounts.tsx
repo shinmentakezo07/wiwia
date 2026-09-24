@@ -79,7 +79,9 @@ function ImportAccountsDialog(props: {
           throw new Error("expected an auth object ({auth, account}) or an array of them");
         }
       } catch (e) {
-        throw new Error(`Invalid JSON: ${e instanceof Error ? e.message : String(e)}`);
+        throw new Error(`Invalid JSON: ${e instanceof Error ? e.message : String(e)}`, {
+          cause: e,
+        });
       }
       return workbuddyImport(provider.trim() || "workbuddy-main", parsed);
     },
