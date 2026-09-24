@@ -160,7 +160,7 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
 - `pyproject.toml` — deps, entry point, ruff + pytest config.
 - `wiwi.yaml.example` / `.env.example` — config shape and env vars (`WIWI_MASTER_KEY`,
   `DATABASE_URL`, provider keys).
-- `Dockerfile`, `docker-compose.yml`, `start.sh` (legacy npm; runs backend + Vite together),
+- `Dockerfile`, `docker-compose.yml`, `start.sh` (Bun; runs backend + Vite together),
   `bench.py`.
 - `deploy/` — `hf_space.sh` pushes the gateway to the HuggingFace Docker Space
   `shimen/yapapa` (`git archive HEAD` → scratch clone → one commit; the repo's
