@@ -1504,7 +1504,12 @@ export function AnalyticsPage() {
                     <stop offset="100%" stopColor={COLORS.cost} stopOpacity={0.01} />
                   </linearGradient>
                 </defs>
-                <CartesianGrid stroke="#ffffff" strokeOpacity={0.05} vertical={false} />
+                <CartesianGrid
+                  yAxisId="left"
+                  stroke="#ffffff"
+                  strokeOpacity={0.05}
+                  vertical={false}
+                />
                 <XAxis
                   dataKey="label"
                   tick={{ fontSize: 11, fill: "#6b7280" }}
