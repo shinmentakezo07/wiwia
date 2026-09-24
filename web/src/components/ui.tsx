@@ -418,6 +418,14 @@ export function Dialog(props: {
   onClose: () => void;
   children: ReactNode;
   wide?: boolean;
+  /** Max-width for the panel. Defaults to the `wide`-derived size, so omitting
+   *  it (or passing `wide`) keeps the previous behaviour. */
+  size?: "md" | "3xl" | "5xl";
+  /** Cap the dialog to the viewport so a tall form never pushes its own action
+   *  bar off-screen. This also stops the body scrolling, so a `contained` caller
+   *  MUST provide its own `overflow-y-auto` region or its content will be
+   *  clipped and unreachable. */
+  contained?: boolean;
 }) {
   useEffect(() => {
     if (!props.open) return;
@@ -429,9 +437,17 @@ export function Dialog(props: {
   }, [props.open, props]);
 
   if (!props.open) return null;
+  const sizeClass = props.size ?? (props.wide ? "3xl" : "md");
+  const SIZE_CLASS: Record<NonNullable<typeof props.size>, string> = {
+    md: "max-w-md",
+    "3xl": "max-w-3xl",
+    "5xl": "max-w-5xl",
+  };
   return createPortal(
     <div
-      className="admin-overlay-enter fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/70 p-4 pt-[10vh] backdrop-blur-sm"
+      className={`admin-overlay-enter fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/70 backdrop-blur-sm ${
+        props.contained ? "p-3 pt-[6vh] sm:p-4 sm:pt-[8vh]" : "p-4 pt-[10vh]"
+      }`}
       onClick={(e) => {
         if (e.target === e.currentTarget) props.onClose();
       }}
@@ -439,8 +455,8 @@ export function Dialog(props: {
       <div
         role="dialog"
         aria-modal="true"
-        className={`admin-dialog-enter w-full overflow-hidden rounded-2xl border border-white/[0.06] bg-[var(--admin-surface-elevated)] shadow-2xl shadow-black/60 ${
-          props.wide ? "max-w-3xl" : "max-w-md"
+        className={`admin-dialog-enter w-full overflow-hidden rounded-2xl border border-white/[0.06] bg-[var(--admin-surface-elevated)] shadow-2xl shadow-black/60 ${SIZE_CLASS[sizeClass]} ${
+          props.contained ? "flex max-h-[88vh] flex-col" : ""
         }`}
       >
         <div className="flex items-center justify-between gap-4 border-b border-white/[0.04] px-5 py-3.5">
@@ -456,7 +472,12 @@ export function Dialog(props: {
             <X size={16} />
           </button>
         </div>
-        <div className="p-5">{props.children}</div>
+        {/* A contained body deliberately does not scroll: the panel is capped to
+            the viewport, so the consumer owns the single scroll region. A nested
+            scroll here is what makes a tall form feel cramped on short screens. */}
+        <div className={props.contained ? "flex min-h-0 flex-1 flex-col overflow-hidden p-5" : "p-5"}>
+          {props.children}
+        </div>
       </div>
     </div>,
     document.body,
