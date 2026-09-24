@@ -34,6 +34,7 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Badge, Card } from "@/components/ui";
+import { HERO_BEAMS_COMPACT, HeroBeamBackdrop } from "@/components/HeroBeamBackdrop";
 
 const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
 
@@ -650,7 +651,8 @@ export function DocsPage() {
       {/* Hero banner */}
       <div className="docs-hero relative mb-10 overflow-hidden rounded-2xl border border-[var(--admin-border)] px-6 py-10 sm:px-10 sm:py-14">
         <div className="docs-hero-glow" aria-hidden />
-        <div className="docs-hero-aurora" aria-hidden />
+        {/* Shared beam backdrop — same motion language as the Landing/Pricing heroes. */}
+        <HeroBeamBackdrop beams={HERO_BEAMS_COMPACT} />
         <div className="relative z-10 grid items-center gap-10 lg:grid-cols-[1.05fr_0.95fr]">
         <div>
           <div className="mb-3 flex items-center gap-2">

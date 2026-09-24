@@ -1051,6 +1051,15 @@ select.admin-input option {
     linear-gradient(145deg, rgba(255, 255, 255, 0.022), transparent 36%),
     var(--admin-surface);
   box-shadow: 0 22px 60px -42px rgba(0, 0, 0, 0.85);
+  transition: border-color 0.25s ease, box-shadow 0.25s ease;
+}
+.docs-section-card:hover,
+.docs-section-card:focus-within {
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow:
+    0 0 0 1px rgba(96, 165, 250, 0.06),
+    0 26px 66px -40px rgba(59, 130, 246, 0.2),
+    0 22px 60px -42px rgba(0, 0, 0, 0.85);
 }
 .docs-section-card::before {
   content: "";
@@ -1059,9 +1068,11 @@ select.admin-input option {
   height: 1px;
   background: linear-gradient(90deg, transparent, rgba(96, 165, 250, 0.18), transparent);
   pointer-events: none;
+  transition: background 0.25s ease;
 }
-.docs-section-card + .docs-section-card::before {
-  display: none;
+.docs-section-card:hover::before,
+.docs-section-card:focus-within::before {
+  background: linear-gradient(90deg, transparent, rgba(96, 165, 250, 0.34), transparent);
 }
 
 @media (max-width: 768px) {
@@ -1134,17 +1145,6 @@ select.admin-input option {
     radial-gradient(ellipse 480px 230px at 12% 0%, rgba(59, 130, 246, 0.10) 0%, transparent 62%),
     radial-gradient(ellipse 420px 220px at 88% 100%, rgba(168, 85, 247, 0.07) 0%, transparent 62%);
   pointer-events: none;
-}
-.docs-hero-aurora {
-  position: absolute;
-  inset: -22%;
-  z-index: -1;
-  pointer-events: none;
-  background:
-    radial-gradient(420px 240px at 14% 12%, rgba(59, 130, 246, 0.13), transparent 65%),
-    radial-gradient(460px 280px at 86% 88%, rgba(168, 85, 247, 0.11), transparent 65%),
-    radial-gradient(320px 200px at 70% 8%, rgba(34, 211, 238, 0.07), transparent 70%);
-  filter: blur(28px);
 }
 .docs-gradient-text {
   background-size: 200% auto;
@@ -1431,25 +1431,14 @@ select.admin-input option {
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .docs-hero-aurora {
-    animation: docs-aurora-drift 16s ease-in-out infinite alternate;
-  }
   .docs-gradient-text {
-    animation: docs-gradient-pan 7s linear infinite;
+    animation: hero-gradient-pan 6s linear infinite;
   }
   .docs-pulse-dot {
     animation: docs-pulse 1.8s ease-in-out infinite;
   }
 }
 
-@keyframes docs-aurora-drift {
-  0% { transform: translate3d(0, 0, 0) scale(1); }
-  50% { transform: translate3d(3%, -4%, 0) scale(1.06); }
-  100% { transform: translate3d(-3%, 3%, 0) scale(1.03); }
-}
-@keyframes docs-gradient-pan {
-  to { background-position: 200% center; }
-}
 @keyframes docs-pulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.45); }
   50% { opacity: 0.65; box-shadow: 0 0 0 5px rgba(52, 211, 153, 0); }
