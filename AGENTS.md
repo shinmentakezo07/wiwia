@@ -188,8 +188,8 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
   usable `.venv`**; never invoke `.venv/bin/python`.
 - `requires-python = ">=3.11"`; ruff `line-length = 100`, `target-version = "py311"`,
   `ignore = ["EXE002"]` (meaningless +x bits on this mount). Ruff only — no black/isort/mypy.
-- **Bun is authoritative for `web/`.** `web/package-lock.json` and `start.sh`'s npm path are
-  legacy — never mix package managers in one session.
+- **Bun is authoritative for `web/`.** `web/bun.lock` and `start.sh` use Bun; npm is unsupported
+  for this frontend — never mix package managers in one session.
 - Redis is an optional extra (`.[redis]`); without it the response cache silently falls back to
   the in-memory LRU. `asyncpg` (Postgres) is a core dep.
 - Build backend hatchling; entry point `wiwi = "wiwi.main:cli"`.

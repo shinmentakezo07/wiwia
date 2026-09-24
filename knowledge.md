@@ -71,8 +71,8 @@ wiwi --config wiwi.yaml                    # or: wiwi -c wiwi.yaml --host 0.0.0.
   `WIWI_MASTER_KEY`.
 - Admin endpoints need master key; client traffic uses virtual keys (`sk-wiwi-…`, SHA-256 at
   rest, plaintext shown once at mint).
-- `web/` uses **bun** (not npm); `web/bun.lock` + `package-lock.json` both exist (node_modules
-  from npm). `start.sh` still runs npm — stale but functional. `web/` is eslint-only, NOT ruff.
+- `web/` uses **Bun** (not npm); `web/bun.lock` is authoritative and `start.sh` uses Bun.
+  `web/` is eslint-only, NOT ruff.
 - `web/src/pages/` mixes ~15 admin pages with ~30 marketing pages — directory alone doesn't
   tell you if a page is admin-facing.
 - `web/tsconfig.json` + `bun run build` output lands in `wiwi/server/static/` (served at

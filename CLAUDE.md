@@ -36,8 +36,7 @@ ruff check wiwi/ tests/
 cd web && bun install && bun run dev     # dev server (proxies /admin /auth /public /v1 /health → :4000)
 cd web && bun run build                  # tsc -b && vite build → wiwi/server/static/
 cd web && bun run lint                   # eslint src (web/ is NOT covered by ruff)
-./start.sh                               # backend (:4000) + Vite (:5173) together, prefixed logs —
-                                         #   stale: still uses npm, not bun. Functional, not authoritative.
+./start.sh                               # backend (:4000) + Vite (:5173) together, prefixed logs
 
 # docker (Postgres is a plain service with a healthcheck-gated depends_on — there is no --profile pg)
 docker compose up --build
@@ -47,7 +46,7 @@ python3 bench.py                         # async httpx; TTFT, p50/p95, output TP
 python3 bench.py -n 10 -c 1,4,16 --max-tokens 100
 ```
 
-**Bun is authoritative for `web/`; npm is not.** `web/package-lock.json` and `start.sh` are legacy npm paths — don't mix package managers in one session.
+**Bun is authoritative for `web/`; npm is not.** `web/bun.lock` and `start.sh` use Bun; do not mix package managers in one session.
 
 There is **no CI and no pre-commit config**. The manual `pytest` + `ruff` gate is binding: run both, both green, before claiming work done or committing.
 

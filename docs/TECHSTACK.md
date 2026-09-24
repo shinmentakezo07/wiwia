@@ -77,7 +77,7 @@ Runtime dependencies: 13. That count is a feature.
 
 **React + Vite over Next.js.** The admin console is an SPA served same-origin by the gateway process; SSR/routing conventions of a meta-framework buy nothing here. Router is react-router-dom v7; state is TanStack Query over the admin JSON API; charts are Recharts; styling is Tailwind 4 (CSS-first config via the Vite plugin).
 
-**bun over npm.** `web/bun.lock` is authoritative; `web/package-lock.json` is legacy. Build output lands in `wiwi/server/static/` and is served at `/admin/ui`.
+**Bun over npm.** `web/bun.lock` is authoritative, and `start.sh` uses Bun for frontend installs and dev commands. Build output lands in `wiwi/server/static/` and is served at `/admin/ui`.
 
 **Docker multi-stage, non-root.** uv builder → bun SPA build → `python:3.12-slim` runtime; user `wiwi`; healthcheck `GET /health` every 30 s; compose ships Postgres 16 with healthcheck-gated startup.
 
