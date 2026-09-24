@@ -26,7 +26,13 @@ import orjson
 from wiwi.ir import builtin_tools as bt
 from wiwi.ir import translation as tr
 from wiwi.ir import types as ir
-from wiwi.providers.base import ProviderKeyRef, as_dict, as_list, coerce_args_fragment
+from wiwi.providers.base import (
+    ProviderKeyRef,
+    as_dict,
+    as_list,
+    as_str,
+    coerce_args_fragment,
+)
 from wiwi.providers.openai_adapter import OpenAIAdapter
 from wiwi.streaming import deltas as dl
 
@@ -115,6 +121,11 @@ class OpenRouterAdapter(OpenAIAdapter):
 
         # Remove OpenAI-native reasoning_effort; OpenRouter uses ``reasoning``
         body.pop("reasoning_effort", None)
+        if (isinstance(req.tool_choice, ir.ToolChoiceNamed)
+                and any(t.builtin == req.tool_choice.name for t in req.tools)):
+            wire_type = bt.wire_type_for("openrouter", req.tool_choice.name)
+            if wire_type is not None:
+                body["tool_choice"] = {"type": wire_type}
 
         # Strip any per-message reasoning / reasoning_content from history
         # assistant messages. OpenRouter uses ``reasoning_details`` on the
@@ -132,15 +143,15 @@ class OpenRouterAdapter(OpenAIAdapter):
         # of 16 on max_tokens but not max_completion_tokens).
         if "max_tokens" in body:
             body["max_completion_tokens"] = body.pop("max_tokens")
-
         g = req.gen_params
-        reasoning_obj: dict[str, Any] | None = None
+
         # A direct token budget is more precise than a named level, so it wins
         # — OpenRouter can express it exactly as reasoning.max_tokens, whereas
         # an effort name would be rounded through the global effort→budget map.
         # ``effort`` reconciles the named spellings (reasoning_effort and
         # Anthropic's output_config.effort); reading only the raw
         # reasoning_effort dropped an effort-only request (AUDIT #156).
+        reasoning_obj: dict[str, Any] | None = None
         effort = g.effective_reasoning_effort()
 
         if g.thinking_budget == 0:
@@ -157,14 +168,24 @@ class OpenRouterAdapter(OpenAIAdapter):
         elif effort == "none":
             # Explicitly disable reasoning
             reasoning_obj = {"enabled": False}
-        elif effort:
-            # OpenAI-style effort string -> OpenRouter reasoning.effort.
-            # OpenRouter accepts: max, xhigh, high, medium, low, minimal, none.
+        elif isinstance(effort, str) and effort in {
+            "max", "xhigh", "high", "medium", "low", "minimal",
+        }:
+            # OpenRouter documents a closed effort enum. A client typo or a
+            # typed-wrong value must not become an upstream JSON-schema 400.
             reasoning_obj = {"effort": effort}
 
         if reasoning_obj is not None:
             body["reasoning"] = reasoning_obj
 
+        # Reasoning is part of the visible output-token budget. Anthropic
+        # rejects a completion limit that is not strictly above its reasoning
+        # budget; keep the same invariant for OpenRouter's unified parameter.
+        if reasoning_obj is not None and "max_tokens" in reasoning_obj:
+            limit = body.get("max_completion_tokens")
+            budget = reasoning_obj["max_tokens"]
+            if isinstance(limit, int) and limit <= budget:
+                body["max_completion_tokens"] = budget + 1024
         # OpenRouter supports stream_options.include_usage; keep it only if
         # the client explicitly requested it (the OpenAI adapter already guards
         # this, but we double-check here for safety).
@@ -184,16 +205,28 @@ class OpenRouterAdapter(OpenAIAdapter):
         _choices = as_list(data.get("choices"))
         choice = as_dict(_choices[0]) if _choices else {}
         message = as_dict(choice.get("message"))
-        turn = ir.AssistantTurn(text=message.get("content") or "", raw=data)
+        content = message.get("content")
+        if isinstance(content, list):
+            # OpenRouter permits assistant content arrays. The IR carries text
+            # only, so concatenate the text parts and ignore other media/output
+            # types rather than assigning a list to ``AssistantTurn.text``.
+            content = "".join(
+                part.get("text") or ""
+                for part in content
+                if isinstance(part, dict) and part.get("type") in ("text", "output_text")
+                and isinstance(part.get("text"), str)
+            )
+        elif not isinstance(content, str):
+            content = message.get("refusal") if isinstance(message.get("refusal"), str) else ""
+        turn = ir.AssistantTurn(text=content, raw=data)
 
         # OpenRouter returns reasoning in ``reasoning`` (string) or
         # ``reasoning_details`` (array of structured objects).  The string
         # form is the common case; the array form carries encrypted/summary
         # blocks that we flatten into ThinkingPart.
         reasoning_str = message.get("reasoning") or message.get("reasoning_content")
-        if reasoning_str:
+        if isinstance(reasoning_str, str) and reasoning_str:
             turn.thinking.append(ir.ThinkingPart(reasoning_str))
-
         for rd in as_list(message.get("reasoning_details")):
             if not isinstance(rd, dict):
                 # A malformed reasoning_details entry must be skipped, not
@@ -201,53 +234,46 @@ class OpenRouterAdapter(OpenAIAdapter):
                 continue
             rtype = rd.get("type", "")
             if rtype == "reasoning.text":
-                # ``rd.get("text", "")`` defaults only a *missing* key: a null
-                # text decoded to ``ThinkingPart(text=None)``, and on replay
-                # ``OpenAIAdapter._role_parts_to_content`` does
-                # ``reasoning += p.text`` and raises — a 500 on the NEXT turn
-                # of the conversation, on all six Chat-wire adapters
-                # (AUDIT #197). Same for ``summary``/``data``.
+                text = rd.get("text")
+                signature = rd.get("signature")
                 turn.thinking.append(ir.ThinkingPart(
-                    rd.get("text") or "",
-                    signature=rd.get("signature")))
+                    text if isinstance(text, str) else "",
+                    signature=signature if isinstance(signature, str) else None))
             elif rtype == "reasoning.summary":
-                turn.thinking.append(ir.ThinkingPart(rd.get("summary") or ""))
-            elif rtype == "reasoning.encrypted":
-                # Encrypted reasoning — preserve as-is with the data as text
-                # so it round-trips if echoed back to OpenRouter.
+                summary = rd.get("summary")
                 turn.thinking.append(ir.ThinkingPart(
-                    rd.get("data") or "",
-                    signature=rd.get("id")))
+                    summary if isinstance(summary, str) else ""))
+            elif rtype == "reasoning.encrypted":
+                encrypted = rd.get("data")
+                identifier = rd.get("id")
+                turn.thinking.append(ir.ThinkingPart(
+                    encrypted if isinstance(encrypted, str) else "",
+                    signature=identifier if isinstance(identifier, str) else None))
 
-        for tc in message.get("tool_calls") or []:
+        for tc in as_list(message.get("tool_calls")):
             if not isinstance(tc, dict):
                 continue  # malformed entry (AUDIT #110)
-            raw_args = tc.get("function", {}).get("arguments") or "{}"
+            fn = as_dict(tc.get("function"))
+            raw_args = fn.get("arguments") or "{}"
             if isinstance(raw_args, dict):
-                # Args-as-object gateway: some OpenRouter routes return the
-                # arguments as a JSON object. ``json.loads`` on a dict raises
-                # TypeError, which the ``except json.JSONDecodeError`` did not
-                # catch, 500ing every turn that replayed such history
-                # (AUDIT #95). Accept the dict directly.
                 args = raw_args
                 raw_args = json.dumps(raw_args)
             else:
                 if not isinstance(raw_args, str):
-                    # Truthy scalar (`true`, `5`): json.loads raises TypeError,
-                    # not JSONDecodeError — the decode failed the whole
-                    # response (AUDIT #124).
                     raw_args = ""
                 try:
-                    args = json.loads(raw_args)
+                    parsed = json.loads(raw_args)
                 except (json.JSONDecodeError, TypeError):
                     from wiwi.streaming.partial_json import _repair_truncated_json
                     try:
-                        args = json.loads(_repair_truncated_json(raw_args))
+                        parsed = json.loads(_repair_truncated_json(raw_args))
                     except (json.JSONDecodeError, TypeError):
-                        args = {}
+                        parsed = {}
+                args = parsed if isinstance(parsed, dict) else {}
             turn.tool_calls.append(ir.ToolUsePart(
-                id=tc.get("id", ""), name=tc.get("function", {}).get("name", ""),
+                id=as_str(tc.get("id")), name=as_str(fn.get("name")),
                 args=args, raw_args=raw_args))
+
 
         fr = choice.get("finish_reason", "stop")
         # OpenRouter uses "error" for mid-stream failures; the shared map
@@ -256,9 +282,9 @@ class OpenRouterAdapter(OpenAIAdapter):
         # non-standard tool-call spelling fell through to "stop".
         turn.stop_reason = tr.normalize_finish_reason(fr)
 
-        u = data.get("usage") or {}
-        details_p = (u.get("prompt_tokens_details") or {})
-        details_c = (u.get("completion_tokens_details") or {})
+        u = as_dict(data.get("usage"))
+        details_p = as_dict(u.get("prompt_tokens_details"))
+        details_c = as_dict(u.get("completion_tokens_details"))
         turn.usage = ir.Usage(
             prompt_tokens=_token_count(u.get("prompt_tokens")),
             completion_tokens=_token_count(u.get("completion_tokens")),
@@ -372,29 +398,25 @@ class OpenRouterAdapter(OpenAIAdapter):
         # which the pump routes to a provider cooldown (AUDIT #231).
         for rd in as_list(delta.get("reasoning_details")):
             if not isinstance(rd, dict):
-                continue  # malformed entry (AUDIT #110)
+                continue
             rtype = rd.get("type", "")
             if rtype == "reasoning.text":
-                # ``rd.get("text", "")`` defaults only a *missing* key: a null
-                # text decoded to ``ThinkingPart(text=None)``, and on replay
-                # ``OpenAIAdapter._role_parts_to_content`` does
-                # ``reasoning += p.text`` and raises — a 500 on the NEXT turn
-                # of the conversation, on all six Chat-wire adapters
-                # (AUDIT #197).
-                text = rd.get("text") or ""
-                sig = rd.get("signature")
-                if text:
-                    out.append(dl.ThinkingDelta(text, signature=sig))
+                text = rd.get("text")
+                signature = rd.get("signature")
+                if isinstance(text, str) and text:
+                    out.append(dl.ThinkingDelta(
+                        text, signature=signature if isinstance(signature, str) else None))
             elif rtype == "reasoning.summary":
-                summary = rd.get("summary") or ""
-                if summary:
+                summary = rd.get("summary")
+                if isinstance(summary, str) and summary:
                     out.append(dl.ThinkingDelta(summary))
             elif rtype == "reasoning.encrypted":
-                # Encrypted reasoning — preserve as-is so it round-trips if
-                # echoed back to OpenRouter (mirrors non-streaming decode).
-                enc = rd.get("data", "")
-                if enc:
-                    out.append(dl.ThinkingDelta(enc, signature=rd.get("id")))
+                encrypted = rd.get("data")
+                identifier = rd.get("id")
+                if isinstance(encrypted, str) and encrypted:
+                    out.append(dl.ThinkingDelta(
+                        encrypted, signature=identifier if isinstance(identifier, str) else None))
+
 
         tool_calls = delta.get("tool_calls")
         if not isinstance(tool_calls, list):
@@ -404,10 +426,12 @@ class OpenRouterAdapter(OpenAIAdapter):
                 # Malformed entry (null/scalar): skip, not crash (AUDIT #154).
                 continue
             idx = tc.get("index", i)
-            fn = tc.get("function")
-            fn = fn if isinstance(fn, dict) else {}
-            name_fragment = fn.get("name", "")
-            if tc.get("id"):
+            if not isinstance(idx, int) or isinstance(idx, bool):
+                idx = i
+            fn = as_dict(tc.get("function"))
+            name_fragment = as_str(fn.get("name"))
+            call_id = as_str(tc.get("id"))
+            if call_id:
                 if idx in self._synthesized_opens:
                     # The id was missing on the first chunk, so an Open was
                     # synthesized for this index; the real id has now arrived.
@@ -416,7 +440,7 @@ class OpenRouterAdapter(OpenAIAdapter):
                     # encoder emits two tool_use blocks for one call. Mirrors
                     # OpenAIAdapter (AUDIT #135).
                     self._synthesized_opens.discard(idx)
-                    self._tool_names[idx] = name_fragment or ""
+                    self._tool_names[idx] = name_fragment
                     if fn.get("arguments"):
                         out.append(dl.ToolCallArgsDelta(
                             index=idx,
@@ -432,10 +456,10 @@ class OpenRouterAdapter(OpenAIAdapter):
                         out.append(dl.ToolCallOpen(index=idx, id=cid, name=cname))
                     out.append(dl.ToolCallClose(index=idx))
                 self._open_tool_indices.add(idx)
-                self._tool_names[idx] = name_fragment or ""
+                self._tool_names[idx] = name_fragment
                 # Defer emitting ToolCallOpen until the name is complete — the
                 # first args fragment or finish signals name completion.
-                self._pending_opens[idx] = (tc["id"], self._tool_names[idx])
+                self._pending_opens[idx] = (call_id, self._tool_names[idx])
             elif name_fragment and idx in self._open_tool_indices:
                 self._tool_names[idx] = self._tool_names.get(idx, "") + name_fragment
                 if idx in self._pending_opens:

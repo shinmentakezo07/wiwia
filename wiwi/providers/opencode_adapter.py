@@ -819,7 +819,7 @@ def _encode_responses_request(req: ir.Request, model_id: str,
                     continue
                 input_items.append({"type": "function_call",
                                     "call_id": p.id, "name": p.name,
-                                    "arguments": p.raw_args or json.dumps(p.args)})
+                                    "arguments": json.dumps(p.args)})
             elif isinstance(p, ir.ToolResultPart):
                 if p.block_type != "tool_result":
                     # Provider-executed result: fold the payload into the

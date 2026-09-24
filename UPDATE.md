@@ -10,6 +10,44 @@ Each entry below records the before→after state, the exact files and lines cha
 
 ---
 
+## Round 96 — OpenRouter repair fidelity and request-schema guards (2026-09-24)
+
+### 96.1 Repaired tool arguments must cross every wire as parsed IR
+
+OpenRouter can truncate a function-call `arguments` string. The provider decoder
+repairs the canonical `ToolUsePart.args`; the former wire encoders then preferred
+the original `raw_args`, returning or replaying malformed JSON. The OpenAI Chat,
+Responses, and OpenCode outbound encoders now serialize `ToolUsePart.args` only.
+`raw_args` is not a wire-authoritative copy and must never override repaired IR.
+
+### 96.2 OpenRouter response frames are shape-tolerant, not exception-sensitive
+
+Sync and stream decoding now treat `choices`, `usage`, token details, tool
+functions, reasoning detail entries, tool ids/names, and error metadata as
+untrusted shapes. Invalid non-text reasoning is omitted, array assistant content
+is flattened to its text parts, and non-string metadata cannot break error
+message extraction. A malformed optional frame must not become a retryable
+gateway error or penalize provider health.
+
+### 96.3 OpenRouter request parameters follow the provider schema
+
+`reasoning.effort` accepts only the documented string enum; typed-wrong or
+unknown values are omitted rather than causing a local exception or upstream
+schema error. When `reasoning.max_tokens` is not below
+`max_completion_tokens`, the completion limit is raised to budget + 1024. A
+hosted builtin tool choice is encoded as `{"type":"openrouter:web_search"}`;
+a client-defined function with the same name remains an ordinary function
+choice.
+
+Sources:
+https://openrouter.ai/docs/guides/best-practices/reasoning-tokens,
+https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-completion.md,
+https://openrouter.ai/docs/guides/features/server-tools/web-search.
+
+Regression coverage: `tests/test_fix_round96.py`.
+
+---
+
 ## TL;DR
 
 Three rounds of fixes:

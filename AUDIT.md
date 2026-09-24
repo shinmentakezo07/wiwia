@@ -7,6 +7,140 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — combos editor UI (2026-09-24)
+
+Found while redesigning the `/console/combos` create/edit dialog. Both were
+introduced by that redesign and fixed in the same change, so they carry no
+entry number.
+
+### "all selected" ignored the provider when a model_id is aliased
+
+**Severity:** 🟠 High · **Status: fixed**
+
+**Where:** `web/src/pages/Combos.tsx` — the `allOn` computation backing the
+pane header's "all selected" badge and its select-all/clear button.
+
+**Trigger:** a search whose results span a model_id registered under more than
+one provider — real in this data (`glm-5.3-flash` is deployed under `civ`,
+`cov` and `pai`; `cline-free/solar-pro4` under `22`, `3` and `shinm`).
+
+**Consequence:** `allOn` was computed over a flat list of bare `model_id`
+strings, so a single provider's copy satisfied `every()` for every occurrence of
+that id. Ticking only `civ`'s `glm-5.3-flash` lit "all selected" and flipped
+the button to "Deselect", which then cleared the wrong set.
+
+**Fix:** key the check on the full `(provider, model_id)` pair via `depKey`, the
+same identity the selection map and the save path already use.
+
+**Regression:** `.verify/combos_ui.py::check_alias_pair` (desktop pass) — picks
+a live aliased id from `/admin/models`, asserts 1-of-N ticked does not light the
+badge and N-of-N does.
+
+### A providers refetch could wipe in-progress edits in the open dialog
+
+**Severity:** 🟠 High · **Status: fixed**
+
+**Where:** `web/src/pages/Combos.tsx` — the reset `useEffect` that re-initialises
+dialog state on open.
+
+**Trigger:** `props.providerOptions` listed as a dependency. It is a `useMemo`
+over the `/admin/providers` query, so any refetch returning changed data gives it
+a new identity and re-ran the effect, resetting the name field, the selection,
+the search box and the active provider.
+
+**Consequence:** silently discarded a half-typed combo name and every ticked
+model. `refetchOnWindowFocus` is on by default, so a tab switch was enough. This
+also contradicted the page's own comment above `modelsQ` ("background refetches
+never clobber in-dialog selections").
+
+**Fix:** read `providerOptions` through a ref, so the effect depends only on
+`[props.open, props.editing]` — the dialog opening and the edit target, nothing
+else. The active-provider hint still reads the current options at that moment.
+
+**Note:** could not be reproduced under headless Playwright (window-focus
+refetch does not fire there), so this is fixed from source reading, not from a
+failing browser repro.
+
+---
+
+## ✅ Fixed — round 96 (2026-09-24)
+
+### 286. Repaired OpenRouter tool arguments were replaced by truncated JSON
+
+**Severity:** 🟠 High · **Status: fixed**
+
+**Where:** `wiwi/providers/openai_adapter.py::_role_parts_to_content`,
+`wiwi/wire/openai_chat.py::encode_response`,
+`wiwi/wire/openai_responses.py::encode_response`,
+`wiwi/providers/opencode_adapter.py::_encode_responses_request`.
+
+**Trigger:** an OpenRouter response ended mid tool-argument string, for example
+`{"path":"/tmp/notes.txt"`. The decoder repaired the IR `args` to
+`{"path": "/tmp/notes.txt"}`, but every outbound boundary preferred the original
+`raw_args` and sent the truncated text again.
+
+**Consequence:** the caller received malformed function arguments, and replaying
+the assistant turn sent the same malformed string to OpenRouter. This is the
+locally reproduced cross-dialect failure; the stored historical OpenRouter
+failures only prove upstream 404/402 responses and do not establish that they
+used this exact trigger.
+
+**Fix:** all client/upstream wire boundaries now serialize the canonical parsed
+`ToolUsePart.args`. `raw_args` remains diagnostic/provider history only.
+
+**Regression:** `tests/test_fix_round96.py::test_truncated_openrouter_response_round_trips_valid_arguments`.
+
+### 287. Typed-wrong OpenRouter frames escaped the decoder as gateway errors
+
+**Severity:** 🟠 High · **Status: fixed**
+
+**Where:** `wiwi/providers/openrouter_adapter.py::decode_response` and
+`decode_stream_event`; `wiwi/providers/base.py::_extract_error_message`.
+
+**Trigger:** an upstream frame used a valid HTTP 200 with `choices`,
+`usage`, `function`, `reasoning_details`, tool ids/names, or `error.metadata`
+in a typed-wrong shape.
+
+**Consequence:** `.get` on a string/list raised inside decoding, which the guarded
+provider path converted to a retryable gateway error and could charge against
+key/deployment health. Assistant content arrays were also assigned to a
+text-only IR field, and malformed reasoning text could reach a later replay.
+
+**Fix:** nested objects use `as_dict`/`as_list`, text and identifiers use
+string guards, reasoning details are dropped/coerced to text-only IR values,
+array assistant content is flattened, and non-dict error metadata is ignored.
+
+**Regression:** the typed-shape cases in `tests/test_fix_round96.py`.
+
+### 288. Invalid reasoning and hosted tool choices produced bad OpenRouter requests
+
+**Severity:** 🟡 Medium · **Status: fixed**
+
+**Where:** `wiwi/providers/openrouter_adapter.py::encode_request` and
+`wiwi/providers/openai_adapter.py::encode_request`.
+
+**Trigger:** unknown/non-string `reasoning_effort`, an Anthropic thinking budget
+at or above `max_tokens`, or a hosted Responses choice such as
+`tool_choice: {"type":"web_search"}`.
+
+**Consequence:** a list effort could raise `TypeError: unhashable type: 'list'`;
+an unknown string/boolean reached OpenRouter despite its closed effort schema;
+`max_completion_tokens` could be less than or equal to `reasoning.max_tokens`;
+and a hosted choice was encoded as a client function named `web_search`.
+
+**Fix:** the shared encoder accepts only string efforts from its closed set;
+OpenRouter emits only documented effort values, raises completion limit to
+budget + 1024 when required, and maps a named choice to
+`{"type":"openrouter:web_search"}` only when the named tool is actually a
+hosted builtin. A client function named `web_search` remains a function choice.
+
+**Regression:** `tests/test_fix_round96.py` reasoning-effort, budget, and
+hosted-tool-choice cases. Official schemas:
+https://openrouter.ai/docs/guides/best-practices/reasoning-tokens and
+https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-completion.md.
+
+---
+
 ## ✅ Fixed — round 93 (2026-09-21)
 
 ### 285. The streaming pump silently dropped every line from an envelope provider

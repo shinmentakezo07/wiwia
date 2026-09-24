@@ -131,7 +131,9 @@ def _role_parts_to_content(
                 tool_calls.append({
                     "id": p.id, "type": "function",
                     "function": {"name": p.name,
-                                 "arguments": p.raw_args or json.dumps(p.args)},
+                                 # ``args`` is the repaired/validated IR. Replaying the
+                                 # original raw text can resend truncated JSON upstream.
+                                 "arguments": json.dumps(p.args)},
                 })
             elif isinstance(p, ir.ThinkingPart):
                 if p.block_type == "redacted_thinking":
@@ -270,7 +272,8 @@ class OpenAIAdapter:
         # Reading only the first two meant an effort selection was dropped on
         # every non-Anthropic backend (AUDIT #156).
         effort = g.effective_reasoning_effort()
-        if effort and is_native_openai and effort in _VALID_EFFORTS:
+        if (isinstance(effort, str) and effort and is_native_openai
+                and effort in _VALID_EFFORTS):
             # Only forward a KNOWN effort to a NATIVE OpenAI endpoint: a typo or
             # a future level this map has not learned must not reach the
             # upstream (instant 400), and compatible gateways reject the field

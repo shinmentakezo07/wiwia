@@ -526,7 +526,7 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
                                              t.builtin))
         else:
             output.append(_function_call_item(f"fc_{req_id}_{out_id}", t.id, t.name,
-                                              t.raw_args or json.dumps(t.args)))
+                                              json.dumps(t.args)))
         out_id += 1
     u = turn.usage
     return _response_obj(

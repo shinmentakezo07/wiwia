@@ -87,10 +87,15 @@ def _extract_error_message(body_text: str) -> str:
         if isinstance(msg, str) and msg:
             # OpenRouter sometimes wraps a useless top-level message like
             # "Provider returned error" around a more specific metadata.raw.
-            meta = err.get("metadata") or {}
+            meta = err.get("metadata")
+            if not isinstance(meta, dict):
+                return msg
             raw = meta.get("raw")
             if isinstance(raw, str) and raw and raw != msg:
-                return f"{msg} ({meta.get('provider_name', 'upstream')}: {raw})"
+                provider_name = (meta.get("provider_name")
+                                 if isinstance(meta.get("provider_name"), str)
+                                 else "upstream")
+                return f"{msg} ({provider_name}: {raw})"
             return msg
         # Some providers put the message at error level as a string
     elif isinstance(err, str) and err:

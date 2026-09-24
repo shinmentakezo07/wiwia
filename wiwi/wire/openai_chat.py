@@ -327,7 +327,9 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
         message["tool_calls"] = [
             {"id": t.id, "type": "function",
              "function": {"name": t.name,
-                          "arguments": t.raw_args or json.dumps(t.args)}}
+                          # Never forward original truncated raw_args; ``args`` is
+                          # the repaired/validated IR sent to the caller.
+                          "arguments": json.dumps(t.args)}}
             for t in tool_calls
         ]
     # Reasoning models emit a separate reasoning_content field; include it
