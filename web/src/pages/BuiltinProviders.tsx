@@ -2,9 +2,10 @@
 // separate from configured accounts. Each card shows the provider type,
 // default endpoint, and a quick "Add account" shortcut.
 
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowRight, ExternalLink, Plus, RefreshCw, Server } from "lucide-react";
+import { ArrowRight, ExternalLink, Plus, RefreshCw, Search, Server, X } from "lucide-react";
 import { getBuiltinProviders, getProviders } from "@/api/client";
 import type { BuiltinProvider, Provider } from "@/api/types";
 import {
@@ -13,6 +14,7 @@ import {
   Card,
   EmptyState,
   ErrorText,
+  Input,
   PageHeader,
   Spinner,
 } from "@/components/ui";
@@ -202,8 +204,14 @@ export function BuiltinProvidersPage() {
     refetchInterval: 15_000,
   });
 
-  const catalog = catalogQuery.data ?? [];
-  const configured = providersQuery.data?.providers ?? [];
+  const [q, setQ] = useState("");
+
+  const catalog = useMemo(() => catalogQuery.data ?? [], [catalogQuery.data]);
+  // Stable identity so the filter memo below only recomputes on real changes.
+  const configured = useMemo(
+    () => providersQuery.data?.providers ?? [],
+    [providersQuery.data],
+  );
 
   const accountsByType = new Map<string, Provider[]>();
   for (const a of configured) {
@@ -211,6 +219,29 @@ export function BuiltinProvidersPage() {
     if (arr) arr.push(a);
     else accountsByType.set(a.provider_type, [a]);
   }
+
+  // Term-wise AND over what the cards actually show: provider type, label,
+  // description, endpoint, and the names + key labels of the accounts under
+  // that type — so "or-01" or an account name surfaces the catalog entry
+  // holding it, not just a type-name match.
+  const terms = useMemo(
+    () => q.trim().toLowerCase().split(/\s+/).filter(Boolean),
+    [q],
+  );
+  const visibleCatalog = useMemo(() => {
+    if (terms.length === 0) return catalog;
+    return catalog.filter((p) => {
+      const hay = [p.provider_type, p.label, p.description, p.default_base_url]
+        .concat(
+          configured
+            .filter((a) => a.provider_type === p.provider_type)
+            .flatMap((a) => [a.name, ...a.keys.map((k) => k.label)]),
+        )
+        .join(" ")
+        .toLowerCase();
+      return terms.every((t) => hay.includes(t));
+    });
+  }, [catalog, configured, terms]);
 
   const configuredCount = catalog.filter((p) => p.configured).length;
   const totalAccounts = configured.length;
@@ -268,6 +299,45 @@ export function BuiltinProvidersPage() {
         </Card>
       </div>
 
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <div className="relative min-w-0 flex-1 basis-64">
+          <Search
+            size={14}
+            aria-hidden
+            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--admin-text-dim)]"
+          />
+          <Input
+            type="search"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search provider type, name, endpoint, or account…"
+            aria-label="Search built-in providers"
+            spellCheck={false}
+            autoComplete="off"
+            className="min-h-11 pl-9 pr-12"
+          />
+          {q !== "" && (
+            <button
+              type="button"
+              aria-label="Clear search"
+              onClick={() => setQ("")}
+              className="absolute right-1 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-lg text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+            >
+              <X size={14} />
+            </button>
+          )}
+        </div>
+        {terms.length > 0 && (
+          <p
+            className="font-mono text-[11px] tabular-nums text-[var(--admin-text-muted)]"
+            aria-live="polite"
+          >
+            {visibleCatalog.length} of {catalog.length} type
+            {catalog.length === 1 ? "" : "s"}
+          </p>
+        )}
+      </div>
+
       {catalogQuery.error && <ErrorText>{catalogQuery.error.message}</ErrorText>}
 
       {catalogQuery.isLoading ? (
@@ -276,9 +346,22 @@ export function BuiltinProvidersPage() {
         <Card>
           <EmptyState>No built-in providers found.</EmptyState>
         </Card>
+      ) : visibleCatalog.length === 0 ? (
+        <Card>
+          <EmptyState>
+            No provider type matches “{q.trim()}”.{" "}
+            <button
+              type="button"
+              onClick={() => setQ("")}
+              className="rounded text-[var(--admin-text-muted)] underline underline-offset-2 transition-colors hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+            >
+              Clear search
+            </button>
+          </EmptyState>
+        </Card>
       ) : (
         <div className="admin-stagger grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {catalog.map((p) => (
+          {visibleCatalog.map((p) => (
             <ProviderCatalogCard
               key={p.provider_type}
               p={p}

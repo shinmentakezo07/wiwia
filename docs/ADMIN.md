@@ -41,7 +41,8 @@ Admin-facing pages (under the guarded area; the sidebar is role-aware):
 | Page | What it shows / does |
 |---|---|
 | **Dashboard** | Stat cards (requests/min, tok_in/out/cached/reasoning, cache-hit %, avg TPS, p95 TTFT, error rate, spend); stacked area tokens/min; requests & errors lines; live sparklines off SSE `stats.tick`; zero-traffic empty states; refetch holds previous render at reduced opacity |
-| **Providers** | Card per provider; key table (label, masked secret, weight, status badge `active/cooling/invalid/disabled`, req/err counters, last used); add provider/key dialogs; enable/disable keys; per-key delete; provider edit (name/type/base_url) and delete; export/import provider config |
+| **Providers** | Card per provider; search box filtering accounts by name, provider type, base URL, alias, or key label (whitespace-separated terms AND together); key table (label, masked secret, weight, status badge `active/cooling/invalid/disabled`, req/err counters, last used); add provider/key dialogs; enable/disable keys; per-key delete; provider edit (name/type/base_url) and delete; export/import provider config |
+| **Built-in Providers** | Catalog of the provider types that ship with wiwi; search box filtering by type, label, description, endpoint, or configured account/key name |
 | **Provider Detail** | Per-provider account settings, key pool management, live model list (`/admin/providers/{name}/models`) |
 | **Cline / WorkBuddy** | OAuth connect flows (login URL → callback `/cline/oauth/callback`), status/refresh/disconnect, account import/export, per-account settings |
 | **Models** | Model groups + deployments; add/remove deployments; group patching; aliases (`/admin/aliases`) |

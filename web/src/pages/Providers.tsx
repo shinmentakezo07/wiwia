@@ -20,10 +20,12 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  Search,
   Server,
   Sparkles,
   Trash2,
   Upload,
+  X,
   Zap,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -86,6 +88,16 @@ const PROVIDER_TYPE_OPTIONS = [
 
 function providerIcon(type: string): LucideIcon {
   return PROVIDER_ICON[type] ?? Server;
+}
+
+/** Lowercased haystack for the account search box: name, provider type, base
+ *  URL, routing alias id, and every key label. Callers match each
+ *  whitespace-separated term against it so "openrouter or-02" narrows to the
+ *  account holding that key instead of widening the result. */
+function providerHaystack(p: Provider): string {
+  const parts = [p.name, p.provider_type, p.base_url, p.alias_id ?? ""];
+  for (const k of p.keys) parts.push(k.label);
+  return parts.join(" ").toLowerCase();
 }
 
 // -- per-provider stats aggregation from the request-log ring -------------------
@@ -344,6 +356,7 @@ export function ProvidersPage() {
   const [label, setLabel] = useState("default");
   const [secret, setSecret] = useState("");
   const [importing, setImporting] = useState(false);
+  const [q, setQ] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
   // Allow deep-linking from the Built-in Providers catalog: ?type=openrouter
@@ -362,6 +375,26 @@ export function ProvidersPage() {
   const statsByProvider = useMemo(
     () => computeProviderStats(logsQuery.data?.logs ?? []),
     [logsQuery.data],
+  );
+
+  // Case-insensitive, term-wise AND match over name/type/base URL/alias/key
+  // labels. Filtering is client-side over the already-fetched pool list, so it
+  // stays correct while the 15s poll refreshes in the background.
+  const terms = useMemo(
+    () => q.trim().toLowerCase().split(/\s+/).filter(Boolean),
+    [q],
+  );
+  // Stable identities so the filter memo only recomputes on real data changes.
+  const accounts = useMemo(() => query.data?.providers ?? [], [query.data]);
+  const visibleAccounts = useMemo(
+    () =>
+      terms.length === 0
+        ? accounts
+        : accounts.filter((p) => {
+            const hay = providerHaystack(p);
+            return terms.every((t) => hay.includes(t));
+          }),
+    [accounts, terms],
   );
 
   const addProvider_ = useMutation({
@@ -474,6 +507,44 @@ export function ProvidersPage() {
           </Button>
         </div>
       </div>
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <div className="relative min-w-0 flex-1 basis-64">
+          <Search
+            size={14}
+            aria-hidden
+            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--admin-text-dim)]"
+          />
+          <Input
+            type="search"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search accounts by name, type, URL, alias, or key label…"
+            aria-label="Search provider accounts"
+            spellCheck={false}
+            autoComplete="off"
+            className="min-h-11 pl-9 pr-12"
+          />
+          {q !== "" && (
+            <button
+              type="button"
+              aria-label="Clear search"
+              onClick={() => setQ("")}
+              className="absolute right-1 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-lg text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+            >
+              <X size={14} />
+            </button>
+          )}
+        </div>
+        {terms.length > 0 && (
+          <p
+            className="font-mono text-[11px] tabular-nums text-[var(--admin-text-muted)]"
+            aria-live="polite"
+          >
+            {visibleAccounts.length} of {accounts.length} account
+            {accounts.length === 1 ? "" : "s"}
+          </p>
+        )}
+      </div>
       {error && (
         <div className="mb-3">
           <ErrorText>{error}</ErrorText>
@@ -498,7 +569,7 @@ export function ProvidersPage() {
       )}
       {query.error && <ErrorText>{query.error.message}</ErrorText>}
       <div className="admin-stagger space-y-4">
-        {query.data?.providers.map((p) => (
+        {visibleAccounts.map((p) => (
           <ProviderCard
             key={p.name}
             p={p}
@@ -506,9 +577,23 @@ export function ProvidersPage() {
             onError={setError}
           />
         ))}
-        {query.data && query.data.providers.length === 0 && (
+        {query.data && accounts.length === 0 && (
           <Card>
             <EmptyState>No providers configured.</EmptyState>
+          </Card>
+        )}
+        {query.data && accounts.length > 0 && visibleAccounts.length === 0 && (
+          <Card>
+            <EmptyState>
+              No provider account matches “{q.trim()}”.{" "}
+              <button
+                type="button"
+                onClick={() => setQ("")}
+                className="rounded text-[var(--admin-text-muted)] underline underline-offset-2 transition-colors hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+              >
+                Clear search
+              </button>
+            </EmptyState>
           </Card>
         )}
       </div>

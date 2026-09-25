@@ -415,6 +415,22 @@ body {
   box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.08);
 }
 
+/* `type="search"` inputs (Providers / Built-in Providers filters) get Chrome's
+   native clear affordance, which renders as a bright light-theme glyph on our
+   dark surface. Hide it — those inputs ship their own themed clear button —
+   and drop the WebKit search decoration quirks so text sits flush left. */
+input[type="search"].admin-input {
+  -webkit-appearance: none;
+  appearance: none;
+}
+input[type="search"].admin-input::-webkit-search-decoration,
+input[type="search"].admin-input::-webkit-search-cancel-button,
+input[type="search"].admin-input::-webkit-search-results-button {
+  -webkit-appearance: none;
+  appearance: none;
+  display: none;
+}
+
 /* Number-input steppers: hide the glaring browser-default white spinners.
    The form uses a custom themed stepper (admin-number-stepper) instead, so
    the native buttons are removed for a consistent dark look. */
