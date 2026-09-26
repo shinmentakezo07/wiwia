@@ -682,16 +682,6 @@ class Router:
         # alias resolution happens at route(); aliases may point to any group name
 
     def resolve_group(self, requested: str) -> tuple[str | None, list[Deployment]]:
-        # First, see if `requested` is a provider alias_id.  If so, the call
-        # is asking "give me a model that this provider can serve" — return
-        # every deployment whose provider matches.  Empty list means the
-        # alias exists but the provider serves no models in model_list, and
-        # the gateway surface treats that as 404 like any other unknown group.
-        pname = self.alias_to_provider.get(requested)
-        if pname is not None:
-            deps = [d for d in self.groups.values() for d in d
-                    if d.provider.name == pname]
-            return (requested, deps) if deps else (None, [])
         name = requested
         seen: set[str] = {name}
         for _ in range(8):  # bounded walk: aliases may chain, never cycle
@@ -708,7 +698,21 @@ class Router:
             seen.add(nxt)
             name = nxt
         deps = self.groups.get(name, [])
-        return (name, deps) if deps else (None, [])
+        if deps:
+            return name, deps
+        # Last resort: `requested` may be a provider alias_id.  The call then
+        # means "give me a model that this provider can serve" — every
+        # deployment whose provider matches.  This arm runs *after* the group
+        # and model_group_alias lookups so it cannot capture a real group: its
+        # answer pairs the alias name with deployments drawn from unrelated
+        # groups, which made a same-named group unroutable and sent admin
+        # writes addressed by that name to the wrong group (AUDIT #293).
+        pname = self.alias_to_provider.get(requested)
+        if pname is not None:
+            deps = [d for d in self.groups.values() for d in d
+                    if d.provider.name == pname]
+            return (requested, deps) if deps else (None, [])
+        return None, []
 
     def pick_deployment(self, deps: list[Deployment], ctx: RequestContext,
                         exclude: set[int] | None = None) -> Deployment | None:
@@ -833,6 +837,10 @@ class _CrossProviderWRR:
     all cooling must not keep claiming its share of the cursor.
     """
     _state: dict[str, float] = field(default_factory=dict)
+    # Per-(provider, model_id) smooth-WRR cursor for the second level: which
+    # deployment of the chosen provider actually serves.  Without it the
+    # provider's whole share went to its first deployment (AUDIT #295).
+    _dep_cursors: dict[tuple[str, str], float] = field(default_factory=dict)
 
     def pick(self, avail: list[Deployment]) -> Deployment | None:
         # Only consider providers with at least one available deployment.
@@ -848,13 +856,23 @@ class _CrossProviderWRR:
             self._state[pname] = self._state.get(pname, 0.0) + weight
         best = max(avail_providers, key=lambda p: self._state.get(p, 0.0))
         self._state[best] = self._state.get(best, 0.0) - total
-        # Within the chosen provider, pick the first available deployment
-        # for the requested model.  Multi-deployment-per-provider in the
-        # same group is rare; if it happens, fall back to the first match.
-        for d in avail:
-            if d.provider.name == best:
-                return d
-        return None
+        # Second level: rotate across the chosen provider's deployments in
+        # this group by *their* weights, so a provider contributing several
+        # models does not funnel its entire share into the first one.  Same
+        # smooth-WRR as above, keyed per deployment; the cursor is tracked by
+        # (provider, model_id) because a Deployment object may be recreated
+        # when the admin API re-attaches an identical pair.
+        mine = [d for d in avail if d.provider.name == best]
+        if len(mine) == 1:
+            return mine[0]
+        dep_total = sum(d.weight for d in mine)
+        for d in mine:
+            key = (best, d.model_id)
+            self._dep_cursors[key] = self._dep_cursors.get(key, 0.0) + d.weight
+        chosen = max(mine, key=lambda d: self._dep_cursors.get((best, d.model_id), 0.0))
+        self._dep_cursors[(best, chosen.model_id)] = (
+            self._dep_cursors.get((best, chosen.model_id), 0.0) - dep_total)
+        return chosen
 
 
 def _default_base_url(provider_type: str) -> str:

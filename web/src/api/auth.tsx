@@ -38,10 +38,12 @@ interface AuthCtx {
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
   /** Mint a fresh playground key on demand (used by the Playground when
-   * sessionStorage has no cached key). Returns the key, or throws with a
+   * sessionStorage has no cached key). Pass `force` to bypass the cache and
+   * mint unconditionally — required when the caller already knows the cached
+   * key is dead (a 401 on `/v1`). Returns the key, or throws with a
    * `.cause` of `{ auth: true }` on a 401/403 so the caller can stop
    * retrying; throws the underlying error otherwise. */
-  ensurePlaygroundKey: () => Promise<string>;
+  ensurePlaygroundKey: (force?: boolean) => Promise<string>;
 }
 
 const Ctx = createContext<AuthCtx>(null!);
@@ -124,10 +126,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
   }, []);
 
-  const ensurePlaygroundKey = useCallback(async () => {
+  const ensurePlaygroundKey = useCallback(async (force = false) => {
     const cached = loadPlaygroundKey();
-    if (cached) return cached;
+    if (cached && !force) return cached;
     // New tab / first visit with a valid session cookie — mint a fresh key.
+    // `force` skips the cache: the caller is handling a 401 on a key it
+    // already holds, so handing the same cached value back would replay the
+    // identical dead bearer (AUDIT #300).
+    //
     // Propagate a typed failure instead of swallowing it: the caller needs
     // to tell "session expired, stop" (401/403) apart from "try again".
     // Returning "" for both left the Playground stuck on "Creating key…".

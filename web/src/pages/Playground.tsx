@@ -10,15 +10,20 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  Activity,
   AlertCircle,
   ArrowDown,
+  ArrowUpRight,
   Bot,
   Check,
   ChevronDown,
+  CircleDot,
   Clock,
   Copy,
   Eraser,
   Gauge,
+  Layers3,
+  MessageSquare,
   MessageSquarePlus,
   PanelLeftClose,
   PanelLeftOpen,
@@ -34,14 +39,15 @@ import {
   User,
   X,
 } from "lucide-react";
-import { getModels } from "@/api/client";
+import { ApiError, getModels, getPlaygroundMetrics } from "@/api/client";
 import { useAuth } from "@/api/auth";
-import type { ModelGroup } from "@/api/types";
+import type { ModelGroup, PlaygroundMetrics } from "@/api/types";
 import { Link } from "react-router-dom";
 import {
   Spinner,
 } from "@/components/ui";
 import { Markdown } from "@/components/Markdown";
+import { HERO_BEAMS_COMPACT, HeroBeamBackdrop } from "@/components/HeroBeamBackdrop";
 import {
   heroSuggestionGroupNames,
   heroSuggestionGroups,
@@ -61,7 +67,12 @@ import {
 } from "@/lib/chat-store";
 
 type Role = "user" | "assistant";
-type Msg = { id: string; role: Role; content: string };
+/** A turn as the Playground holds it. `reasoning` is the model's thinking
+ *  trace, kept separate from `content` so it can be shown in its own
+ *  collapsed block — some models stream reasoning for tens of seconds before
+ *  the first visible token, and dropping it makes that phase look like a
+ *  hang (the SSE reader used to ignore `reasoning_content` entirely). */
+type Msg = { id: string; role: Role; content: string; reasoning?: string; failed?: boolean };
 
 /** Date group labels for the sidebar chat list, newest first. */
 const SIDEBAR_GROUPS = ["Today", "Yesterday", "Previous 7 days", "Older"] as const;
@@ -83,13 +94,8 @@ const _MAX_KEY_ATTEMPTS = 4;
 
 /** Coalesce localStorage writes to at most one per this many ms. */
 const _PERSIST_DEBOUNCE_MS = 400;
-
-/** Token usage as reported by an OpenAI-shaped streaming response. */
-type Usage = {
-  prompt_tokens: number;
-  completion_tokens: number;
-  total_tokens: number;
-};
+const _METRICS_POLL_DELAY_MS = 100;
+const _METRICS_POLL_ATTEMPTS = 30;
 
 function uid(): string {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -101,33 +107,70 @@ function fmtTokens(n: number | undefined): string {
 }
 
 function fmtMs(ms: number): string {
+  if (ms <= 0) return "—";
   if (ms < 1000) return `${Math.round(ms)}ms`;
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
 function fmtTps(n: number): string {
-  return `${n.toFixed(1)} tok/s`;
+  return n > 0 ? `${n.toFixed(1)} tok/s` : "—";
 }
 
-/** Shared SSE reader. Returns the accumulated text; records first-token time
- * via onFirstToken and honors an AbortController signal. */
+/** Poll the exact request-log row until the async log pump has accepted it. */
+async function waitForMetrics(
+  requestId: string,
+  signal: AbortSignal,
+): Promise<PlaygroundMetrics> {
+  for (let attempt = 0; attempt < _METRICS_POLL_ATTEMPTS; attempt += 1) {
+    try {
+      return await getPlaygroundMetrics(requestId, signal);
+    } catch (error) {
+      const notReady =
+        error instanceof ApiError && (error.status === 404 || error.status === 0);
+      if (!notReady || signal.aborted || attempt === _METRICS_POLL_ATTEMPTS - 1) throw error;
+      await new Promise((resolve, reject) => {
+        const timer = window.setTimeout(resolve, _METRICS_POLL_DELAY_MS);
+        signal.addEventListener(
+          "abort",
+          () => {
+            window.clearTimeout(timer);
+            reject(new DOMException("Aborted", "AbortError"));
+          },
+          { once: true },
+        );
+      });
+    }
+  }
+  throw new Error("request metrics unavailable");
+}
+
+/** Shared SSE reader. Returns the accumulated visible text and honors an abort
+ *  signal.
+ *
+ *  Two frame kinds used to be dropped on the floor:
+ *
+ *  - `reasoning_content` (thinking models). A model can stream reasoning for
+ *    tens of seconds before its first content token, so ignoring it left the
+ *    user staring at typing dots for a turn that was in fact progressing —
+ *    the single biggest contributor to the Playground "taking lots of time".
+ *  - `error` (the gateway's terminal StreamError frame, which is followed by
+ *    connection close rather than `[DONE]`). Ignoring it turned a real
+ *    upstream failure into a silent `"(empty response)"`.
+ *
+ *  Both are surfaced now: reasoning through `setReasoning`, errors by
+ *  throwing so `runStream`'s catch sets the banner. */
 async function streamSSE(
   resp: Response,
   assistantId: string,
   setMessages: React.Dispatch<React.SetStateAction<Msg[]>>,
-  // Narrower than React's Dispatch<SetStateAction<Usage | null>>: this only
-  // ever forwards a decoded usage object (or null), never an updater
-  // function. Passing the full Dispatch type would force every caller to
-  // also accept the function form it never receives.
-  setUsage: (u: Usage | null) => void,
-  opts: { signal?: AbortSignal; startedAt: number; onFirstToken: (ms: number) => void },
+  setReasoning: (text: string) => void,
 ): Promise<string> {
   const reader = resp.body?.getReader();
   if (!reader) throw new Error("no response body");
   const decoder = new TextDecoder();
   let buffer = "";
   let accumulated = "";
-  let firstToken = false;
+  let reasoning = "";
   try {
     while (true) {
       const { done, value } = await reader.read();
@@ -139,31 +182,48 @@ async function streamSSE(
         const trimmedLine = line.trim();
         if (!trimmedLine || !trimmedLine.startsWith("data:")) continue;
         const data = trimmedLine.slice(5).trim();
-        if (!data) continue;
+        if (!data || data === "[DONE]") continue;
         try {
           const parsed = JSON.parse(data) as {
-            choices?: { delta?: { content?: string } }[];
-            usage?: Usage;
+            choices?: { delta?: { content?: string; reasoning_content?: string } }[];
+            error?: { message?: string } | string;
           };
-          const delta = parsed.choices?.[0]?.delta?.content;
-          if (delta) {
-            if (!firstToken) {
-              firstToken = true;
-              opts.onFirstToken(performance.now() - opts.startedAt);
-            }
-            accumulated += delta;
+          // Terminal error frame: the stream ends right after it, so this is
+          // the only signal the turn failed.
+          if (parsed.error) {
+            const msg =
+              typeof parsed.error === "string"
+                ? parsed.error
+                : parsed.error.message ?? "upstream error";
+            throw new Error(msg);
+          }
+          const delta = parsed.choices?.[0]?.delta;
+          // Reasoning must be applied even when it arrives in the same frame
+          // as content — the two fields are independent.
+          if (delta?.reasoning_content) {
+            reasoning += delta.reasoning_content;
+            setReasoning(reasoning);
+          }
+          if (delta?.content) {
+            accumulated += delta.content;
             const snapshot = accumulated;
             setMessages((prev) =>
               prev.map((m) => (m.id === assistantId ? { ...m, content: snapshot } : m)),
             );
           }
-          if (parsed.usage) setUsage(parsed.usage);
-        } catch {
-          // ignore malformed chunks
+        } catch (e) {
+          // A real frame-level failure (our own error throw, above) must
+          // propagate; only malformed JSON is ignorable.
+          if (e instanceof SyntaxError) continue;
+          throw e;
         }
       }
     }
   } catch (e) {
+    // Release the body on the error paths too: a thrown error frame stops
+    // reading mid-stream, and an un-released reader keeps the connection (and
+    // its upstream socket) alive until GC.
+    void reader.cancel().catch(() => {});
     if (e instanceof DOMException && e.name === "AbortError") return accumulated;
     throw e;
   }
@@ -180,7 +240,26 @@ function buildHeroSuggestions(): Record<HeroSuggestionGroup, readonly string[]> 
 
 /** Convert Msg[] to ChatMsg[] for persistence. */
 function toChatMsgs(msgs: Msg[]): ChatMsg[] {
-  return msgs.map((m) => ({ id: m.id, role: m.role, content: m.content }));
+  return msgs.map((m) => ({
+    id: m.id,
+    role: m.role,
+    content: m.content,
+    ...(m.reasoning ? { reasoning: m.reasoning } : {}),
+    ...(m.failed ? { failed: true } : {}),
+  }));
+}
+
+/** Stored conversation → live message state. The inverse of `toChatMsgs`; a
+ *  single mapping keeps every load path (mount, chat switch, delete) from
+ *  dropping fields the others keep. */
+function toMsgs(msgs: ChatMsg[]): Msg[] {
+  return msgs.map((m) => ({
+    id: m.id,
+    role: m.role,
+    content: m.content,
+    ...(m.reasoning ? { reasoning: m.reasoning } : {}),
+    ...(m.failed ? { failed: true } : {}),
+  }));
 }
 
 // ── provider icon (simple text badge) ──────────────────────────────────────
@@ -217,7 +296,10 @@ function ModelSelector(props: {
   const { groups, value, onChange, disabled } = props;
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
+  // Highlighted option for arrow-key navigation (combobox pattern).
+  const [active, setActive] = useState(0);
   const ref = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -225,7 +307,11 @@ function ModelSelector(props: {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") {
+        setOpen(false);
+        // Return focus to the trigger so keyboard users keep their place.
+        triggerRef.current?.focus();
+      }
     };
     document.addEventListener("mousedown", onClick);
     document.addEventListener("keydown", onKey);
@@ -246,16 +332,62 @@ function ModelSelector(props: {
     );
   }, [groups, search]);
 
+  // Opening the menu (or changing the query) puts the highlight on the
+  // currently selected model, or the first result.
+  useEffect(() => {
+    if (!open) return;
+    const idx = filtered.findIndex((g) => g.name === value);
+    setActive(idx >= 0 ? idx : 0);
+  }, [open, search, filtered, value]);
+
+  // Keep the highlighted option in view while arrowing through the list.
+  useEffect(() => {
+    if (!open) return;
+    document
+      .getElementById(`pg-model-opt-${active}`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [active, open]);
+
+  const pickModel = (name: string) => {
+    onChange(name);
+    setOpen(false);
+    setSearch("");
+    triggerRef.current?.focus();
+  };
+
   return (
     <div className="relative" ref={ref}>
       {/* Trigger button */}
       <button
+        ref={triggerRef}
         type="button"
         disabled={disabled}
         onClick={() => setOpen((o) => !o)}
+        onKeyDown={(e) => {
+          // Full combobox keyboard contract: open + move with arrows, commit
+          // with Enter, close with Escape. Without this the menu was
+          // mouse-only no matter how many focus rings it had.
+          if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+            e.preventDefault();
+            if (!open) {
+              setOpen(true);
+              return;
+            }
+            setActive((a) =>
+              e.key === "ArrowDown"
+                ? Math.min(a + 1, filtered.length - 1)
+                : Math.max(a - 1, 0),
+            );
+          } else if (e.key === "Enter" && open) {
+            e.preventDefault();
+            if (filtered[active]) pickModel(filtered[active].name);
+          }
+        }}
         aria-haspopup="listbox"
         aria-expanded={open}
-        className="group flex items-center gap-2 rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] px-3 py-2 text-[13px] transition-colors hover:border-[var(--admin-border-hover)] disabled:opacity-50"
+        aria-controls="pg-model-listbox"
+        aria-label={`Choose model${selected ? `, currently ${selected.name}` : ""}`}
+        className="pg-model-trigger group flex min-h-11 max-w-full items-center gap-2 rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] px-3 py-2 text-[13px] transition-[border-color,background-color,box-shadow] duration-200 hover:border-[var(--admin-border-hover)] hover:bg-white/[0.035] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50 disabled:opacity-50"
       >
         <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-blue-500/10">
           <Terminal className="h-3.5 w-3.5 text-blue-400" />
@@ -278,7 +410,7 @@ function ModelSelector(props: {
 
       {/* Dropdown panel */}
       {open && (
-        <div className="absolute left-0 top-[calc(100%+6px)] z-50 w-[340px] overflow-hidden rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface-elevated)] shadow-2xl shadow-black/50">
+        <div className="pg-model-menu absolute left-0 top-[calc(100%+6px)] z-50 w-[min(360px,calc(100vw-2rem))] overflow-hidden rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface-elevated)] shadow-2xl shadow-black/50">
           {/* Search */}
           <div className="border-b border-[var(--admin-border)] p-2">
             <div className="flex items-center gap-2 rounded-lg bg-white/[0.03] px-2.5 py-1.5">
@@ -287,6 +419,29 @@ function ModelSelector(props: {
                 autoFocus
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
+                onKeyDown={(e) => {
+                  // The search input holds focus while the menu is open, so
+                  // the arrow/Enter contract lives here, not on the trigger.
+                  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setActive((a) =>
+                      e.key === "ArrowDown"
+                        ? Math.min(a + 1, filtered.length - 1)
+                        : Math.max(a - 1, 0),
+                    );
+                  } else if (e.key === "Enter") {
+                    e.preventDefault();
+                    if (filtered[active]) pickModel(filtered[active].name);
+                  }
+                }}
+                role="combobox"
+                aria-expanded
+                aria-haspopup="listbox"
+                aria-controls="pg-model-listbox"
+                aria-activedescendant={
+                  open && filtered[active] ? `pg-model-opt-${active}` : undefined
+                }
+                aria-label="Search models or providers"
                 placeholder="Search models or providers…"
                 className="w-full bg-transparent text-[13px] text-[var(--admin-text)] outline-none placeholder:text-[var(--admin-text-dim)]"
               />
@@ -294,24 +449,37 @@ function ModelSelector(props: {
           </div>
 
           {/* Model list */}
-          <div className="pg-scroll max-h-[360px] overflow-y-auto p-1.5">
+          <div
+            id="pg-model-listbox"
+            className="pg-scroll max-h-[360px] overflow-y-auto p-1.5"
+            role="listbox"
+            aria-label="Available models"
+          >
             {filtered.length === 0 ? (
               <div className="py-8 text-center text-[13px] text-[var(--admin-text-dim)]">No models found</div>
             ) : (
-              filtered.map((g) => {
+              filtered.map((g, idx) => {
                 const isSelected = g.name === value;
                 const available = g.deployments.some((d) => d.available && d.cooldown_remaining_s === 0);
                 return (
                   <button
                     key={g.name}
+                    id={`pg-model-opt-${idx}`}
                     type="button"
-                    onClick={() => {
-                      onChange(g.name);
-                      setOpen(false);
-                      setSearch("");
-                    }}
+                    role="option"
+                    aria-selected={isSelected}
+                    // Keep DOM focus on the trigger; this only moves the
+                    // visual highlight (aria-activedescendant pattern).
+                    onMouseMove={() => setActive(idx)}
+                    onClick={() => pickModel(g.name)}
                     className={`group/item flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors ${
-                      isSelected ? "bg-blue-500/10" : "hover:bg-white/[0.03]"
+                      idx === active
+                        ? isSelected
+                          ? "bg-blue-500/15"
+                          : "bg-white/[0.06]"
+                        : isSelected
+                          ? "bg-blue-500/10"
+                          : "hover:bg-white/[0.03]"
                     }`}
                   >
                     {/* Selection check */}
@@ -394,26 +562,30 @@ function ChatSidebar(props: {
 
   if (collapsed) {
     return (
-      <div className="flex shrink-0 flex-col items-center gap-2 border-r border-[var(--admin-border)] bg-[var(--admin-surface)] py-3 px-2">
+      <aside className="pg-rail flex shrink-0 flex-col items-center gap-2 border-r border-[var(--admin-border)] bg-[var(--admin-surface)] px-2 py-3" aria-label="Conversation shortcuts">
         <button
           type="button"
           onClick={onToggle}
-          className="flex h-9 w-9 items-center justify-center rounded-lg text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)]"
+          className="pg-icon-button flex h-11 w-11 items-center justify-center rounded-lg text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.05] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
           aria-label="Expand sidebar"
           title="Expand sidebar"
         >
           <PanelLeftOpen size={18} />
         </button>
+        <div className="my-1 h-px w-6 bg-[var(--admin-border)]" aria-hidden />
         <button
           type="button"
           onClick={onNew}
-          className="flex h-9 w-9 items-center justify-center rounded-lg text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)]"
+          className="pg-icon-button flex h-11 w-11 items-center justify-center rounded-lg text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.05] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
           aria-label="New chat"
           title="New chat"
         >
           <MessageSquarePlus size={18} />
         </button>
-      </div>
+        <div className="mt-auto flex h-8 w-8 items-center justify-center rounded-full border border-emerald-400/20 bg-emerald-400/[0.07] text-emerald-300" title="Playground session active" aria-label="Playground session active">
+          <CircleDot size={14} />
+        </div>
+      </aside>
     );
   }
 
@@ -423,16 +595,22 @@ function ChatSidebar(props: {
   };
 
   return (
-    <div className="pg-sidebar flex shrink-0 flex-col border-r border-[var(--admin-border)] bg-[var(--admin-surface)]">
+    <aside className="pg-sidebar flex shrink-0 flex-col border-r border-[var(--admin-border)] bg-[var(--admin-surface)]" aria-label="Conversation history">
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-3">
-        <span className="text-[12px] font-semibold uppercase tracking-wider text-[var(--admin-text-dim)]">
-          Chats
-        </span>
+      <div className="pg-sidebar-header flex items-center justify-between px-4 py-4">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <Layers3 size={14} className="text-brand-300" aria-hidden />
+            <span className="text-[12px] font-semibold uppercase tracking-wider text-[var(--admin-text)]">
+              Workspace
+            </span>
+          </div>
+          <span className="mt-1 block truncate text-[11px] text-[var(--admin-text-dim)]">Local conversation history</span>
+        </div>
         <button
           type="button"
           onClick={onToggle}
-          className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)]"
+          className="pg-icon-button flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.05] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
           aria-label="Collapse sidebar"
           title="Collapse sidebar"
         >
@@ -441,22 +619,26 @@ function ChatSidebar(props: {
       </div>
 
       {/* New chat button */}
-      <div className="px-3 pb-2">
+      <div className="px-3 pb-3">
         <button
           type="button"
           onClick={onNew}
-          className="flex w-full items-center gap-2 rounded-lg border border-[var(--admin-border)] bg-white/[0.02] px-3 py-2 text-[13px] font-medium text-[var(--admin-text)] transition-colors hover:border-[var(--admin-border-hover)] hover:bg-white/[0.04]"
+          className="pg-new-chat flex min-h-11 w-full items-center gap-2 rounded-lg border border-[var(--admin-border)] bg-white/[0.025] px-3 py-2 text-[13px] font-medium text-[var(--admin-text)] transition-colors hover:border-brand-400/30 hover:bg-brand-500/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
         >
-          <MessageSquarePlus size={15} className="text-blue-400" />
-          New chat
+          <span className="flex h-7 w-7 items-center justify-center rounded-md bg-brand-500/10 text-brand-300">
+            <MessageSquarePlus size={15} />
+          </span>
+          <span>New conversation</span>
         </button>
       </div>
 
       {/* Search */}
       <div className="px-3 pb-2">
-        <div className="flex items-center gap-2 rounded-lg border border-[var(--admin-border)] bg-white/[0.02] px-2.5 py-1.5 transition-colors focus-within:border-[var(--admin-border-hover)]">
+        <div className="flex items-center gap-2 rounded-lg border border-[var(--admin-border)] bg-white/[0.02] px-2.5 py-1.5 transition-colors focus-within:border-[var(--admin-border-hover)] focus-within:ring-2 focus-within:ring-blue-400/20">
           <Search className="h-3.5 w-3.5 shrink-0 text-[var(--admin-text-dim)]" />
           <input
+            type="search"
+            aria-label="Search conversations"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search chats…"
@@ -513,9 +695,22 @@ function ChatSidebar(props: {
                     <div
                       key={c.id}
                       data-active={c.id === activeId}
+                      role="button"
+                      tabIndex={0}
+                      aria-current={c.id === activeId ? "page" : undefined}
                       onClick={() => onSelect(c.id)}
-                      className="pg-chat-item group flex cursor-pointer items-start gap-2 rounded-lg border border-transparent px-2.5 py-2"
+                      onKeyDown={(e) => {
+                        if (e.target !== e.currentTarget) return;
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          onSelect(c.id);
+                        }
+                      }}
+                      className="pg-chat-item group flex cursor-pointer items-start gap-2.5 rounded-lg border border-transparent px-2.5 py-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
                     >
+                      <span className="pg-chat-item-icon mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--admin-text-dim)]" aria-hidden>
+                        <MessageSquare size={12} />
+                      </span>
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-1.5">
                           <span className={`truncate text-[13px] ${c.id === activeId ? "text-blue-300 font-medium" : "text-[var(--admin-text-muted)]"}`}>
@@ -573,7 +768,7 @@ function ChatSidebar(props: {
         <div className="flex items-center justify-between">
           <Link
             to="/console"
-            className="flex items-center gap-2 text-[12px] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]"
+            className="flex min-h-11 items-center gap-2 text-[12px] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]"
           >
             <Terminal size={12} />
             Dashboard
@@ -586,7 +781,7 @@ function ChatSidebar(props: {
                 window.clearTimeout(clearTimer.current);
                 clearTimer.current = window.setTimeout(() => setConfirmingClear(false), 4000);
               }}
-              className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] text-[var(--admin-text-dim)] transition-colors hover:text-red-400"
+              className="flex min-h-11 items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] text-[var(--admin-text-dim)] transition-colors hover:text-red-400"
               aria-label="Clear all chats"
               title="Clear all chats"
             >
@@ -617,7 +812,31 @@ function ChatSidebar(props: {
           )}
         </div>
       </div>
-    </div>
+    </aside>
+  );
+}
+
+// ── Session status ─────────────────────────────────────────────────────────
+
+type SessionStatusKind = "ready" | "live" | "loading" | "warning";
+
+/** Rendered in the top bar; hides its text label below 640px. The dot + label
+ *  are decorative (aria-hidden): the composer's placeholder and the send
+ *  button's disabled state already convey the same state to assistive tech,
+ *  and a third live region announcing every streaming transition is noise. */
+function SessionStatus(props: {
+  status: SessionStatusKind;
+  label: string;
+  compact?: boolean;
+}) {
+  return (
+    <span
+      className={`pg-status pg-status-${props.status} ${props.compact ? "pg-status-compact" : ""}`}
+      aria-hidden
+    >
+      <span className="pg-status-dot" aria-hidden />
+      <span className="pg-status-label">{props.label}</span>
+    </span>
   );
 }
 
@@ -635,9 +854,8 @@ export function PlaygroundPage() {
   const [busy, setBusy] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [usage, setUsage] = useState<Usage | null>(null);
-  const [ttftMs, setTtftMs] = useState<number | null>(null);
-  const [tps, setTps] = useState<number | null>(null);
+  const [metrics, setMetrics] = useState<PlaygroundMetrics | null>(null);
+  const [metricsPending, setMetricsPending] = useState(false);
   const [keyReady, setKeyReady] = useState(false);
   // Key minting is retried on failure so the UI can't sit on "Creating key…"
   // forever. `keyAttempts` counts tries (a ref, so incrementing it never
@@ -648,12 +866,19 @@ export function PlaygroundPage() {
   const [keyFailed, setKeyFailed] = useState<string | null>(null);
   const keyAttempts = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
+  const metricsAbortRef = useRef<AbortController | null>(null);
+  const activeRunRef = useRef<string | null>(null);
 
   // Abort any in-flight completion when the page unmounts. Without this the
   // fetch and SSE reader kept running against a component that was gone: the
   // upstream finished, the virtual key was charged for output nobody would
   // ever see, and setMessages fired on an unmounted component (AUDIT #256).
-  useEffect(() => () => abortRef.current?.abort(), []);
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+      metricsAbortRef.current?.abort();
+    };
+  }, []);
 
   // ── Chat history state ───────────────────────────────────────────────────
   const [chats, setChats] = useState<Conversation[]>([]);
@@ -686,7 +911,7 @@ export function PlaygroundPage() {
     setChats(loaded);
     if (loaded.length > 0) {
       setActiveChatId(loaded[0]!.id);
-      setMessages(loaded[0]!.messages.map((m) => ({ id: m.id, role: m.role, content: m.content })));
+      setMessages(toMsgs(loaded[0]!.messages));
       setModel(loaded[0]!.model);
     } else {
       // Create initial empty chat
@@ -803,13 +1028,26 @@ export function PlaygroundPage() {
 
   // ── Chat management ───────────────────────────────────────────────────────
 
+  const cancelActiveRun = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    metricsAbortRef.current?.abort();
+    metricsAbortRef.current = null;
+    activeRunRef.current = null;
+    setBusy(false);
+    setStreaming(false);
+    setMetricsPending(false);
+  }, []);
+
   function handleNewChat() {
+    cancelActiveRun();
     const chat = createChat(effectiveModel);
     setChats((prev) => [chat, ...prev]);
     setActiveChatId(chat.id);
     setMessages([]);
     setErr(null);
-    setUsage(null);
+    setMetrics(null);
+    setMetricsPending(false);
     setDraft(draftsRef.current[chat.id] ?? "");
     void setTimeout(() => focusComposer(), 0);
   }
@@ -818,22 +1056,24 @@ export function PlaygroundPage() {
     if (id === activeChatId) return;
     // A stream is bound to the conversation it started in; switching chats
     // mid-stream would otherwise append tokens into the *previous* chat's
-    // storage. Stop the stream rather than let it bleed across chats.
-    abortRef.current?.abort();
+    // storage. Stop both the completion and its late metrics lookup.
+    cancelActiveRun();
     failedRef.current = null;
     const chat = chats.find((c) => c.id === id);
     if (!chat) return;
     draftsRef.current[activeChatId ?? ""] = draft;
     setActiveChatId(id);
-    setMessages(chat.messages.map((m) => ({ id: m.id, role: m.role, content: m.content })));
+    setMessages(toMsgs(chat.messages));
     setModel(chat.model);
     setErr(null);
-    setUsage(null);
+    setMetrics(null);
+    setMetricsPending(false);
     setDraft(draftsRef.current[id] ?? "");
     void setTimeout(() => focusComposer(), 0);
   }
 
   function handleDeleteChat(id: string) {
+    if (id === activeChatId) cancelActiveRun();
     delete draftsRef.current[id];
     const remaining = deleteChat(id);
     setChats(remaining);
@@ -841,8 +1081,10 @@ export function PlaygroundPage() {
       if (remaining.length > 0) {
         const next = remaining[0]!;
         setActiveChatId(next.id);
-        setMessages(next.messages.map((m) => ({ id: m.id, role: m.role, content: m.content })));
+        setMessages(toMsgs(next.messages));
         setModel(next.model);
+        setMetrics(null);
+        setMetricsPending(false);
         setDraft(draftsRef.current[next.id] ?? "");
       } else {
         // Create a fresh empty chat
@@ -851,6 +1093,8 @@ export function PlaygroundPage() {
         setActiveChatId(chat.id);
         setMessages([]);
         setModel(effectiveModel);
+        setMetrics(null);
+        setMetricsPending(false);
         setDraft("");
       }
     }
@@ -862,7 +1106,7 @@ export function PlaygroundPage() {
   }
 
   function handleClearAllChats() {
-    abortRef.current?.abort();
+    cancelActiveRun();
     clearAllChats();
     draftsRef.current = {};
     const chat = createChat(effectiveModel);
@@ -871,7 +1115,8 @@ export function PlaygroundPage() {
     setMessages([]);
     setModel(effectiveModel);
     setErr(null);
-    setUsage(null);
+    setMetrics(null);
+    setMetricsPending(false);
     setDraft("");
   }
 
@@ -881,50 +1126,70 @@ export function PlaygroundPage() {
 
   const runStream = useCallback(
     async (history: Msg[], userText: string | null) => {
+      if (busy) return;
       const assistantId = uid();
-      const assistantMsg: Msg = { id: assistantId, role: "assistant", content: "" };
+      const assistantMsg: Msg = { id: assistantId, role: "assistant", content: "", reasoning: "" };
       const userMsg: Msg | null = userText != null ? { id: uid(), role: "user", content: userText } : null;
       setMessages((prev) => [...prev, ...(userMsg ? [userMsg] : []), assistantMsg]);
       setErr(null);
       setBusy(true);
       setStreaming(true);
-      setUsage(null);
-      setTtftMs(null);
-      setTps(null);
+      setMetrics(null);
+      setMetricsPending(false);
 
+      // A completed turn may still be waiting for its async log row. Do not
+      // let a new turn or a chat switch inherit that old lookup.
+      abortRef.current?.abort();
+      metricsAbortRef.current?.abort();
+      activeRunRef.current = assistantId;
       const controller = new AbortController();
       abortRef.current = controller;
-      const startedAt = performance.now();
-      // `as` keeps the declared union visible to control-flow analysis: a
-      // plain `= null` initializer narrows to `null` at the use site below,
-      // because the real assignment happens inside the captureUsage closure.
-      let lastUsage = null as Pick<Usage, "completion_tokens"> | null;
-      const captureUsage = (u: Usage | null) => {
-        if (u) lastUsage = { completion_tokens: u.completion_tokens };
-        setUsage(u);
+      const finishGeneration = () => {
+        if (activeRunRef.current !== assistantId) return;
+        setBusy(false);
+        setStreaming(false);
+        if (abortRef.current === controller) abortRef.current = null;
       };
 
       try {
-        const resp = await fetch("/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${bearer.trim()}`,
-            Accept: "text/event-stream",
-          },
-          body: JSON.stringify({
-            model: effectiveModel,
-            messages: history.map((m) => ({ role: m.role, content: m.content })),
-            stream: true,
-            // OpenAI semantics: a stream carries `usage` only in a final
-            // chunk, and only when the caller opted in. Without this the
-            // gateway's chat encoder emits no usage frame at all
-            // (wire/openai_chat.py: `if self._include_usage`), so the stats
-            // strip below had nothing to render and only `ttft` survived.
-            stream_options: { include_usage: true },
-          }),
-          signal: controller.signal,
-        });
+        // A playground key is minted on every login, and the per-owner cap
+        // (`_MAX_PLAYGROUND_KEYS_PER_USER = 5`) expires the oldest ones — so a
+        // key cached in sessionStorage goes stale while the tab sits open, and
+        // 401s the next time the user sends. The session cookie is still
+        // perfectly valid, so treat 401 as "my bearer is dead", not as a
+        // terminal error: re-mint once and replay. `retried` bounds this to a
+        // single extra attempt, so a genuinely revoked account (the re-mint
+        // itself 401s) surfaces the real error instead of looping.
+        const post = (key: string) =>
+          fetch("/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${key.trim()}`,
+              Accept: "text/event-stream",
+            },
+            body: JSON.stringify({
+              model: effectiveModel,
+              messages: history.map((m) => ({ role: m.role, content: m.content })),
+              stream: true,
+            }),
+            signal: controller.signal,
+          });
+
+        let retried = false;
+        let resp = await post(bearer);
+        if (resp.status === 401 && !retried) {
+          retried = true;
+          // `true` forces a real mint: without it ensurePlaygroundKey returns
+          // the same dead key from sessionStorage and the retry replays the
+          // identical 401.
+          // A dead session can never mint a key; let that surface below.
+          const fresh = await ensurePlaygroundKey(true);
+          if (fresh) {
+            setBearer(fresh);
+            resp = await post(fresh);
+          }
+        }
 
         if (!resp.ok) {
           const body = await resp.json().catch(() => null);
@@ -936,28 +1201,79 @@ export function PlaygroundPage() {
           throw new Error(msg ?? `HTTP ${resp.status}`);
         }
 
-        const accumulated = await streamSSE(resp, assistantId, setMessages, captureUsage, {
-          signal: controller.signal,
-          startedAt,
-          onFirstToken: setTtftMs,
-        });
+        const requestId = resp.headers.get("x-wiwi-request-id")?.trim() ?? "";
+        // Reasoning is attached to the assistant message as it arrives so the
+        // thinking phase is visible instead of an apparently frozen composer.
+        const setReasoning = (text: string) => {
+          setMessages((prev) =>
+            prev.map((m) => (m.id === assistantId ? { ...m, reasoning: text } : m)),
+          );
+        };
+        const accumulated = await streamSSE(resp, assistantId, setMessages, setReasoning);
         failedRef.current = null;
-        if (lastUsage) {
-          const secs = (performance.now() - startedAt) / 1000;
-          setTps(secs > 0 ? lastUsage.completion_tokens / secs : null);
+
+        // Generation is complete once the last SSE frame is read. The server's
+        // request-log row is written asynchronously, so do not keep the
+        // composer disabled while polling for that row.
+        finishGeneration();
+        if (requestId && !controller.signal.aborted && activeRunRef.current === assistantId) {
+          const metricsController = new AbortController();
+          metricsAbortRef.current = metricsController;
+          setMetricsPending(true);
+          void (async () => {
+            try {
+              const exactMetrics = await waitForMetrics(
+                requestId,
+                metricsController.signal,
+              );
+              if (
+                !metricsController.signal.aborted &&
+                activeRunRef.current === assistantId
+              ) {
+                setMetrics(exactMetrics);
+              }
+            } catch (metricsError) {
+              if (
+                !metricsController.signal.aborted &&
+                activeRunRef.current === assistantId
+              ) {
+                console.warn("Playground request metrics unavailable", metricsError);
+              }
+            } finally {
+              if (
+                !metricsController.signal.aborted &&
+                activeRunRef.current === assistantId
+              ) {
+                setMetricsPending(false);
+              }
+              if (metricsAbortRef.current === metricsController) {
+                metricsAbortRef.current = null;
+              }
+            }
+          })();
         }
 
         if (!accumulated) {
+          // A model can legitimately end a turn having produced only a
+          // reasoning trace (truncated at the token limit). Saying "(empty
+          // response)" there would contradict the thinking block shown right
+          // above it, so distinguish the two cases.
           setMessages((prev) =>
-            prev.map((m) => (m.id === assistantId ? { ...m, content: "(empty response)" } : m)),
+            prev.map((m) =>
+              m.id === assistantId
+                ? { ...m, content: m.reasoning ? "(no answer — reasoning only)" : "(empty response)" }
+                : m,
+            ),
           );
         }
       } catch (e) {
+        // An abort is the user's own stop button: keep whatever streamed.
         if (e instanceof DOMException && e.name === "AbortError") {
-          // user stopped — keep whatever streamed so far, mark it if nothing arrived
           setMessages((prev) =>
             prev.map((m) =>
-              m.id === assistantId && !m.content ? { ...m, content: "(stopped)" } : m,
+              m.id === assistantId && !m.content && !m.reasoning
+                ? { ...m, content: "(stopped)" }
+                : m,
             ),
           );
         } else {
@@ -966,15 +1282,24 @@ export function PlaygroundPage() {
           // retry replays it), so the retry must NOT re-supply it — that is
           // what duplicated it on every retry.
           failedRef.current = history;
-          setMessages((prev) => prev.filter((m) => m.id !== assistantId));
+          // Text or reasoning that already reached the screen is not thrown
+          // away: an error after tens of seconds of streaming used to wipe the
+          // whole bubble. Only an empty placeholder is removed (the retry
+          // re-creates one) — a bubble with content stays and is marked.
+          setMessages((prev) =>
+            prev
+              .filter((m) => m.id !== assistantId || !!m.content || !!m.reasoning)
+              .map((m) => (m.id === assistantId ? { ...m, failed: true } : m)),
+          );
         }
       } finally {
-        setBusy(false);
-        setStreaming(false);
-        abortRef.current = null;
+        finishGeneration();
+        if (activeRunRef.current === assistantId && !metricsAbortRef.current) {
+          setMetricsPending(false);
+        }
       }
     },
-    [bearer, effectiveModel],
+    [bearer, busy, effectiveModel, ensurePlaygroundKey],
   );
 
   const send = useCallback(
@@ -997,8 +1322,8 @@ export function PlaygroundPage() {
   );
 
   const stop = useCallback(() => {
-    abortRef.current?.abort();
-  }, []);
+    cancelActiveRun();
+  }, [cancelActiveRun]);
 
   // Escape aborts an in-flight stream — same as the stop button.
   useEffect(() => {
@@ -1032,6 +1357,11 @@ export function PlaygroundPage() {
     if (!failed || busy) return;
     failedRef.current = null;
     setErr(null);
+    // A failed turn that streamed partial text leaves its bubble behind (it is
+    // kept so the user can read what arrived). Retry appends a fresh
+    // placeholder, so that stale bubble has to go first or each retry would add
+    // another dead one beside the live answer.
+    setMessages((prev) => prev.filter((m) => !m.failed));
     void runStream(failed, null);
   }, [busy, runStream]);
 
@@ -1062,6 +1392,15 @@ export function PlaygroundPage() {
   }, []);
 
   useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    // An empty workbench is intentionally top-aligned. Without this guard the
+    // initial empty render is treated as an "at bottom" conversation and the
+    // long prompt launcher scrolls its own title out of view on phones.
+    if (messages.length === 0) {
+      el.scrollTop = 0;
+      return;
+    }
     if (atBottom) scrollToBottom();
   }, [messages, atBottom, scrollToBottom]);
 
@@ -1079,6 +1418,22 @@ export function PlaygroundPage() {
 
   const isEmpty = messages.length === 0;
   const keyLoading = !keyReady && !bearer;
+  const activeConversation = chats.find((chat) => chat.id === activeChatId);
+  const activeChatTitle = activeConversation?.title || "New conversation";
+  const sessionStatus: SessionStatusKind = streaming
+    ? "live"
+    : keyLoading
+      ? "loading"
+      : keyFailed
+        ? "warning"
+        : "ready";
+  const sessionStatusLabel = streaming
+    ? "Streaming"
+    : keyLoading
+      ? "Connecting"
+      : keyFailed
+        ? "Needs attention"
+        : "Ready";
 
   // Focus the composer once the key is minted (or restored) so the user can
   // type immediately.
@@ -1088,29 +1443,26 @@ export function PlaygroundPage() {
 
   return (
     <div data-admin className="relative z-0 flex h-dvh flex-col overflow-hidden bg-[var(--admin-bg)] text-[var(--admin-text)]">
-      {/* Ambient background */}
-      <div className="pointer-events-none fixed inset-0" style={{ zIndex: 0 }}>
-        <div
-          className="absolute inset-0 opacity-[0.015]"
-          style={{
-            backgroundImage:
-              "linear-gradient(rgba(255,255,255,0.08) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.08) 1px, transparent 1px)",
-            backgroundSize: "64px 64px",
-          }}
-        />
+      {/* Shared site motion language: one restrained beam layer, no ambient glow. */}
+      <div className="pg-atmosphere pointer-events-none fixed inset-0" aria-hidden>
+        <HeroBeamBackdrop beams={HERO_BEAMS_COMPACT} className="pg-workbench-beams" />
       </div>
 
       {/* ══ Top bar ══ */}
-      <header className="admin-topbar relative z-30 shrink-0">
-        <div className="flex h-[52px] items-center gap-4 px-4">
-          <Link to="/" className="flex items-center gap-2.5">
-            <img src="/wiwi-logo.png" alt="wiwi" className="h-7 w-7 shrink-0 rounded-[8px] object-cover ring-1 ring-white/[0.06] ring-inset" />
-            <span className="text-[14px] font-semibold text-[var(--admin-text)]">wiwi</span>
-            <span className="font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-[var(--admin-text-dim)]">Playground</span>
+      <header className="admin-topbar pg-topbar relative z-30 shrink-0">
+        <div className="flex min-h-[60px] flex-wrap items-center gap-x-4 gap-y-2 px-3 py-2 sm:px-5">
+          <Link to="/" className="pg-brand flex min-w-0 items-center gap-2.5 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50">
+            <span className="pg-brand-mark flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px]">
+              <img src="/wiwi-logo.png" alt="wiwi" className="h-7 w-7 rounded-[8px] object-cover ring-1 ring-white/[0.08] ring-inset" />
+            </span>
+            <span className="min-w-0">
+              <span className="block truncate text-[14px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">wiwi</span>
+              <span className="hidden font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-[var(--admin-text-dim)] min-[420px]:block">Playground</span>
+            </span>
           </Link>
 
-          {/* Enhanced model selector — centered in the header */}
-          <div className="mx-auto">
+          {/* Model selector gets the full second row on small screens. */}
+          <div className="order-3 w-full min-w-0 sm:order-none sm:mx-auto sm:w-auto sm:max-w-[420px] sm:flex-1">
             <ModelSelector
               groups={groups}
               value={effectiveModel}
@@ -1119,34 +1471,21 @@ export function PlaygroundPage() {
             />
           </div>
 
-          <div className="flex items-center gap-1">
-            {streaming && (
-              <span className="admin-badge admin-badge-green mr-2">
-                <span className="hero-live-dot text-emerald-400" />
-                live
-              </span>
-            )}
-            {keyLoading && (
-              <span className="mr-2 flex items-center gap-1.5 text-[12px] text-[var(--admin-text-dim)]">
-                <Spinner className="h-3.5 w-3.5" /> creating key…
-              </span>
-            )}
+          <div className="ml-auto flex min-w-0 flex-wrap items-center gap-1 sm:gap-2">
+            <SessionStatus status={sessionStatus} label={sessionStatusLabel} compact />
+            {/* Always rendered: this is the only caller of ``retryKey``, so
+                hiding it below lg left a failed key mint unrecoverable — the
+                composer stays disabled on "Preparing your playground key…"
+                with no way to retry. It takes its own full-width row under
+                lg and sits inline from lg up. */}
             {keyFailed && (
-              <span className="mr-2 flex items-center gap-1.5 text-[12px]">
-                <span
-                  className={
-                    keyFailed.startsWith("auth:")
-                      ? "text-amber-400"
-                      : "text-[var(--admin-text-dim)]"
-                  }
-                >
-                  {keyFailed}
-                </span>
+              <span className="pg-key-notice order-last flex w-full min-w-0 items-center gap-2 rounded-lg border border-amber-400/25 bg-amber-400/[0.07] px-2.5 py-1.5 text-[11px] lg:order-none lg:w-auto lg:max-w-[240px] lg:border-0 lg:bg-transparent lg:px-0 lg:py-0">
+                <span className="min-w-0 flex-1 truncate">{keyFailed}</span>
                 {!keyFailed.startsWith("Retrying") && (
                   <button
                     type="button"
                     onClick={retryKey}
-                    className="rounded-md border border-[var(--admin-border)] px-1.5 py-0.5 text-[11px] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]"
+                    className="min-h-11 shrink-0 rounded-md border border-[var(--admin-border)] px-3 text-[11px] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
                   >
                     Retry
                   </button>
@@ -1155,9 +1494,11 @@ export function PlaygroundPage() {
             )}
             <Link
               to="/console"
-              className="flex items-center rounded-[10px] px-3 py-1.5 text-[13px] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]"
+              className="pg-dashboard-link flex min-h-11 items-center rounded-[10px] px-2.5 text-[12px] text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)] sm:px-3 sm:text-[13px]"
             >
-              Dashboard
+              <Activity size={14} aria-hidden />
+              <span className="ml-2 hidden sm:inline">Dashboard</span>
+              <span className="ml-2 sm:hidden">Console</span>
             </Link>
           </div>
         </div>
@@ -1165,7 +1506,7 @@ export function PlaygroundPage() {
       </header>
 
       {/* ══ Body: sidebar + chat arena ══ */}
-      <div className="relative z-10 flex min-h-0 flex-1">
+      <div className="pg-body relative z-10 flex min-h-0 flex-1">
         {/* Sidebar */}
         <ChatSidebar
           chats={chats}
@@ -1180,13 +1521,30 @@ export function PlaygroundPage() {
         />
 
         {/* Chat arena */}
-        <main className="relative flex min-h-0 flex-1 flex-col">
-          {/* Soft brand ambience behind the top of the arena */}
-          <div className="pg-arena-glow" aria-hidden />
+        <main className="pg-arena relative flex min-h-0 flex-1 flex-col" aria-label="Model workbench">
+          {/* One slim line: the model is already shown in the top bar and the
+              hero card; this bar only carries the chat title. */}
+          <div className="pg-context-bar shrink-0 px-4 pt-2.5 sm:px-6">
+            <div className="mx-auto flex max-w-[820px] items-center justify-between gap-4">
+              <div className="flex min-w-0 items-center gap-2">
+                <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--admin-text-dim)]">Conversation</span>
+                <span className="text-[var(--admin-text-dim)]/50" aria-hidden>/</span>
+                <span className="truncate text-[13px] font-medium text-[var(--admin-text)]">{activeChatTitle}</span>
+              </div>
+              {effectiveModel && (
+                <span
+                  className="hidden max-w-[220px] truncate font-mono text-[10px] text-[var(--admin-text-dim)] sm:block"
+                  title="Routed through"
+                >
+                  → {effectiveModel}
+                </span>
+              )}
+            </div>
+          </div>
 
           {err && (
-            <div className="shrink-0 px-6 py-2">
-              <div className="mx-auto flex max-w-[760px] items-center gap-2 rounded-[10px] border border-red-500/15 bg-red-500/[0.05] px-3 py-2 text-[12px] text-red-400">
+            <div className="shrink-0 px-4 py-2 sm:px-6">
+              <div className="mx-auto flex max-w-[820px] items-center gap-2 rounded-[10px] border border-red-500/15 bg-red-500/[0.05] px-3 py-2 text-[12px] text-red-400">
                 <AlertCircle size={14} className="shrink-0" />
                 <span className="min-w-0 flex-1 break-words">{err}</span>
                 {failedRef.current && !busy && (
@@ -1214,7 +1572,7 @@ export function PlaygroundPage() {
           <div
             ref={scrollRef}
             onScroll={handleScroll}
-            className="pg-scroll min-h-0 flex-1 overflow-y-auto"
+            className="pg-scroll pg-message-scroll min-h-0 flex-1 overflow-y-auto"
             role="log"
             aria-live="polite"
           >
@@ -1228,7 +1586,7 @@ export function PlaygroundPage() {
                 model={effectiveModel}
               />
             ) : (
-              <div className="mx-auto max-w-[760px] px-6 py-6">
+              <div className="pg-message-column mx-auto max-w-[820px] px-4 py-6 sm:px-6 sm:py-8">
                 {messages.map((m, i) => (
                   <MessageBubble
                     key={m.id}
@@ -1250,7 +1608,7 @@ export function PlaygroundPage() {
             <button
               type="button"
               onClick={scrollToBottom}
-              className="pg-scroll-btn absolute bottom-24 left-1/2 z-10 flex h-9 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-[var(--admin-border)] bg-[var(--admin-surface-elevated)] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]"
+              className="pg-scroll-btn absolute bottom-24 left-1/2 z-10 flex h-11 w-11 -translate-x-1/2 items-center justify-center rounded-full border border-[var(--admin-border)] bg-[var(--admin-surface-elevated)] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
               aria-label="Scroll to bottom"
             >
               <ArrowDown size={16} />
@@ -1258,46 +1616,58 @@ export function PlaygroundPage() {
           )}
 
           {/* Response stats */}
-          {(usage || ttftMs != null) && (
-            <div className="pg-stats-enter shrink-0 px-6 pb-1">
-              <div className="mx-auto flex max-w-[760px] flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[11px] text-[var(--admin-text-dim)]">
-                {ttftMs != null && (
-                  <span className="inline-flex items-center gap-1.5" title="Time to first token">
-                    <Clock size={11} className="text-blue-400/80" />
-                    {fmtMs(ttftMs)} <span className="text-[var(--admin-text-dim)]/60">ttft</span>
-                  </span>
-                )}
-                {usage && tps != null && (
-                  <span className="inline-flex items-center gap-1.5" title="Completion speed">
-                    <Gauge size={11} className="text-violet-400/80" />
-                    {fmtTps(tps)}
-                  </span>
-                )}
-                {usage && (
-                  <>
-                    <span className="inline-flex items-center gap-1.5" title="Prompt tokens">
-                      <span className="h-1.5 w-1.5 rounded-full bg-blue-400/70" />
-                      {fmtTokens(usage.prompt_tokens)} in
-                    </span>
-                    <span className="inline-flex items-center gap-1.5" title="Completion tokens">
-                      <span className="h-1.5 w-1.5 rounded-full bg-violet-400/70" />
-                      {fmtTokens(usage.completion_tokens)} out
-                    </span>
-                    <span className="inline-flex items-center gap-1.5" title="Total tokens">
-                      <span className="h-1.5 w-1.5 rounded-full bg-white/30" />
-                      {fmtTokens(usage.total_tokens)} total
-                    </span>
-                  </>
-                )}
+          {(metrics || metricsPending) && (
+            <div className="pg-stats-enter shrink-0 px-4 pb-1 sm:px-6">
+              <div className="pg-metrics mx-auto flex max-w-[820px] items-center gap-3 px-3 py-2">
+                <div className="pg-metrics-label hidden shrink-0 items-center gap-1.5 sm:flex">
+                  <Activity size={12} />
+                  <span>Response</span>
+                </div>
+                <div className="pg-metrics-items flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-[var(--admin-text-dim)]">
+                  {metrics ? (
+                    <>
+                      <span className="pg-metric" title="Server-measured time to first token">
+                        <Clock size={11} className="text-blue-300/90" />
+                        {fmtMs(metrics.ttft_ms)} <span className="pg-metric-label">ttft</span>
+                      </span>
+                      <span className="pg-metric" title="Server-measured generation speed">
+                        <Gauge size={11} className="text-violet-300/90" />
+                        {fmtTps(metrics.tps)}
+                      </span>
+                      <span className="pg-metric" title="Gateway request latency">
+                        <Clock size={11} className="text-emerald-300/90" />
+                        {fmtMs(metrics.latency_ms)} <span className="pg-metric-label">latency</span>
+                      </span>
+                      <span className="pg-metric" title="Provider-reported input tokens">
+                        <span className="h-1.5 w-1.5 rounded-full bg-blue-300/80" />
+                        {fmtTokens(metrics.prompt_tokens)} in
+                      </span>
+                      <span className="pg-metric" title="Provider-reported output tokens">
+                        <span className="h-1.5 w-1.5 rounded-full bg-violet-300/80" />
+                        {fmtTokens(metrics.completion_tokens)} out
+                      </span>
+                      <span className="pg-metric" title="Total tokens">
+                        <span className="h-1.5 w-1.5 rounded-full bg-white/35" />
+                        {fmtTokens(metrics.total_tokens)} total
+                      </span>
+                      {metrics.usage_estimated && (
+                        <span className="text-amber-300/90" title="Token counts were estimated by wiwi">
+                          estimated usage
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    <span className="pg-metrics-loading" role="status" aria-live="polite">Loading server metrics…</span>
+                  )}
+                </div>
               </div>
             </div>
           )}
 
           {/* Composer */}
-          <div className="shrink-0 bg-gradient-to-t from-[var(--admin-bg)] via-[var(--admin-bg)] to-transparent pt-2">
-            <form onSubmit={onSubmit} className="mx-auto max-w-[760px] px-6 pb-4">
+          <div className="pg-composer-region shrink-0 px-4 pb-4 pt-2 sm:px-6">
+            <form onSubmit={onSubmit} className="mx-auto max-w-[820px]">
               <div className="relative">
-                <div className="pointer-events-none absolute -inset-0.5 rounded-2xl bg-gradient-to-r from-blue-500/8 via-transparent to-fuchsia-500/8 opacity-0 transition-opacity focus-within:opacity-100" aria-hidden />
                 <div className="pg-composer relative flex items-end gap-2 rounded-2xl border border-[var(--admin-border)] bg-[var(--admin-surface)] p-2 shadow-lg shadow-black/30">
                   <textarea
                     ref={textareaRef}
@@ -1305,19 +1675,21 @@ export function PlaygroundPage() {
                     onChange={(e) => setDraft(e.target.value)}
                     onKeyDown={onKeyDown}
                     placeholder={keyLoading ? "Preparing your playground key…" : "Message the model…"}
+                    aria-label="Message the model"
+                    aria-describedby="composer-hints"
                     disabled={busy || keyLoading}
                     rows={1}
                     className="pg-textarea flex-1 resize-none bg-transparent px-3 py-2 text-[14px] leading-relaxed text-[var(--admin-text)] outline-none placeholder:text-[var(--admin-text-dim)] disabled:opacity-50"
                   />
                   {streaming ? (
                     <>
-                      <span className="pg-kbd mr-1 shrink-0 self-center" title="Press Escape to stop">
+                      <span className="pg-kbd mr-1 hidden shrink-0 self-center sm:inline-flex" title="Press Escape to stop">
                         Esc
                       </span>
                       <button
                         type="button"
                         onClick={stop}
-                        className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-red-500/25 bg-red-500/10 text-red-400 transition-[background-color,transform] duration-150 hover:bg-red-500/20 active:scale-95"
+                        className="pg-stop-button flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-red-500/25 bg-red-500/10 text-red-300 transition-[background-color,transform] duration-150 hover:bg-red-500/20 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50"
                         aria-label="Stop generating"
                         title="Stop generating"
                       >
@@ -1328,13 +1700,26 @@ export function PlaygroundPage() {
                     <button
                       type="submit"
                       disabled={busy || keyLoading || !draft.trim()}
-                      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-b from-brand-400 to-brand-700 text-white shadow-lg shadow-brand-600/20 transition-[filter,transform] duration-150 hover:brightness-110 active:scale-95 disabled:opacity-40 disabled:grayscale"
+                      className="pg-send-button flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-white transition-[filter,transform] duration-150 hover:brightness-110 active:scale-95 disabled:opacity-40 disabled:grayscale focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300/60"
                       aria-label="Send"
                     >
                       {busy ? <Spinner className="h-4 w-4" /> : <Send size={16} />}
                     </button>
                   )}
                 </div>
+              </div>
+              <div id="composer-hints" className="pg-composer-hints mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-1 text-[11px] text-[var(--admin-text-dim)]">
+                <div className="flex items-center gap-3">
+                  <span className="inline-flex items-center gap-1.5">
+                    <kbd className="pg-kbd">Enter</kbd> send
+                  </span>
+                  <span className="hidden items-center gap-1.5 sm:inline-flex">
+                    <kbd className="pg-kbd">Shift</kbd>+<kbd className="pg-kbd">Enter</kbd> newline
+                  </span>
+                </div>
+                <span className="inline-flex items-center gap-1.5">
+                  <Plug size={11} /> streamed live
+                </span>
               </div>
             </form>
           </div>
@@ -1359,11 +1744,8 @@ function HeroEmptyState(props: {
   const current = suggestions?.[activeGroup] ?? [];
 
   return (
-    <div className="relative flex min-h-full items-center justify-center overflow-hidden">
-      <div className="hero-orb-1 pointer-events-none absolute -left-16 top-0 h-[340px] w-[340px] rounded-full" style={{ background: "radial-gradient(circle, rgba(135,87,247,0.10) 0%, transparent 60%)" }} aria-hidden />
-      <div className="hero-orb-2 pointer-events-none absolute -bottom-20 -right-16 h-[300px] w-[300px] rounded-full" style={{ background: "radial-gradient(circle, rgba(59,130,246,0.08) 0%, transparent 60%)" }} aria-hidden />
-
-      <div className="animate-hero-enter relative w-full max-w-[640px] px-6 text-center">
+    <div className="pg-hero-shell relative flex min-h-full items-center justify-center overflow-hidden px-4 py-10 sm:px-6 sm:py-14">
+      <div className="animate-hero-enter relative w-full max-w-[760px] text-center">
         <div className="mb-5 flex justify-center">
           <div className="pg-hero-badge relative flex h-14 w-14 items-center justify-center rounded-2xl border border-white/[0.08] shadow-xl shadow-brand-900/30">
             {keyReady ? (
@@ -1374,35 +1756,43 @@ function HeroEmptyState(props: {
           </div>
         </div>
 
-        <h2 className="pg-hero-title text-[26px] font-semibold tracking-tight">
-          {keyReady ? "How can I help you?" : "Preparing your playground…"}
+        <h2 className="pg-hero-title text-[30px] font-semibold tracking-[-0.025em]">
+          {keyReady ? "Start a model session" : "Preparing your playground…"}
         </h2>
-        <p className="mx-auto mt-1.5 max-w-md text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
-          {keyReady ? "Pick a suggestion or type your own message below." : "Creating a virtual key for your session."}
+        <p className="mx-auto mt-2 max-w-md text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
+          {keyReady
+            ? "Choose a prompt below or write directly into the workbench. Responses stream here in real time."
+            : "Creating a virtual key for your session."}
         </p>
 
         {keyReady && model && (
-          <div className="mt-4 flex justify-center">
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--admin-border)] bg-[var(--admin-surface)] px-3 py-1 font-mono text-[11px] text-[var(--admin-text-muted)]">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-              {model}
-            </span>
+          <div className="pg-model-card mx-auto mt-6 max-w-[440px] rounded-2xl px-4 py-3">
+            <div className="flex items-center gap-3">
+              <div className="pg-model-card-icon flex h-9 w-9 shrink-0 items-center justify-center rounded-xl">
+                <Terminal size={17} />
+              </div>
+              <div className="min-w-0 flex-1 text-left">
+                <div className="truncate text-[13px] font-medium text-[var(--admin-text)]">{model}</div>
+                <div className="mt-0.5 text-[11px] text-[var(--admin-text-dim)]">Streaming · local session</div>
+              </div>
+            </div>
           </div>
         )}
 
         {keyReady && (
           <>
-            {/* Group tabs */}
-            <div className="mt-6 mb-4 flex justify-center gap-2">
+            <div className="pg-hero-tabs mt-7 inline-flex items-center gap-1 rounded-xl p-1" role="tablist" aria-label="Prompt categories">
               {visible.map((g) => (
                 <button
                   key={g}
                   type="button"
+                  role="tab"
+                  aria-selected={activeGroup === g}
                   onClick={() => onGroupChange(g)}
-                  className={`rounded-full px-4 py-1.5 text-[13px] font-medium transition-colors ${
+                  className={`min-h-11 rounded-lg px-3.5 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50 ${
                     activeGroup === g
-                      ? "bg-brand-500/15 text-brand-300 ring-1 ring-brand-500/25"
-                      : "border border-[var(--admin-border)] bg-[var(--admin-surface)] text-[var(--admin-text-muted)] hover:text-[var(--admin-text)]"
+                      ? "bg-white/[0.09] text-[var(--admin-text)] shadow-sm"
+                      : "text-[var(--admin-text-muted)] hover:text-[var(--admin-text)]"
                   }`}
                 >
                   {g}
@@ -1410,38 +1800,26 @@ function HeroEmptyState(props: {
               ))}
             </div>
 
-            {/* Suggestion cards */}
-            <div className="space-y-2">
+            <div className="pg-suggestion-grid mt-3 grid gap-2 text-left sm:grid-cols-2" role="tabpanel" aria-label={`${activeGroup} prompt suggestions`}>
               {current.map((s, i) => (
                 <button
                   key={s}
                   type="button"
                   onClick={() => onPick(s)}
-                  className="pg-sugg-enter group w-full rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] px-4 py-3 text-left text-[14px] text-[var(--admin-text-muted)] transition-all hover:-translate-y-px hover:border-brand-500/25 hover:bg-white/[0.02] hover:text-[var(--admin-text)] hover:shadow-lg hover:shadow-black/20"
+                  className="pg-sugg-enter pg-suggestion-card group flex min-h-[58px] items-center gap-3 rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] px-3.5 py-3 text-left text-[13px] leading-relaxed text-[var(--admin-text-muted)] transition-[border-color,background-color,color,transform] duration-200 hover:-translate-y-0.5 hover:border-brand-400/30 hover:bg-brand-500/[0.06] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
                   style={{ animationDelay: `${i * 0.04}s` }}
                 >
-                  <div className="flex items-center gap-2.5">
-                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-white/[0.04] transition-colors group-hover:bg-brand-500/15">
-                      <Sparkles className="h-3.5 w-3.5 text-[var(--admin-text-dim)] transition-colors group-hover:text-brand-400" />
-                    </span>
-                    <span>{s}</span>
-                  </div>
+                  <span className="pg-suggestion-icon flex h-8 w-8 shrink-0 items-center justify-center rounded-lg">
+                    <Sparkles className="h-4 w-4" />
+                  </span>
+                  <span className="min-w-0 flex-1">{s}</span>
+                  <ArrowUpRight className="h-4 w-4 shrink-0 text-[var(--admin-text-dim)] opacity-0 transition-opacity group-hover:opacity-100" aria-hidden />
                 </button>
               ))}
             </div>
-
-            {/* Hint row */}
-            <div className="mt-5 flex items-center justify-center gap-4 text-[11px] text-[var(--admin-text-dim)]">
-              <span className="inline-flex items-center gap-1.5">
-                <kbd className="pg-kbd">Enter</kbd> send
-              </span>
-              <span className="inline-flex items-center gap-1.5">
-                <kbd className="pg-kbd">Shift</kbd>+<kbd className="pg-kbd">Enter</kbd> newline
-              </span>
-              <span className="inline-flex items-center gap-1.5">
-                <Plug size={11} /> streamed live
-              </span>
-            </div>
+            {/* Keyboard hints live on the composer, directly beside the keys
+                they describe; repeating them here put two identical rows on
+                screen at once. */}
           </>
         )}
       </div>
@@ -1474,13 +1852,13 @@ function MessageBubble(props: {
 
   if (isUser) {
     return (
-      <div className="pg-msg-enter group flex justify-end gap-3 py-1.5">
-        <div className="flex max-w-[80%] flex-col items-end">
-          <div className="pg-user-bubble rounded-2xl rounded-br-md px-4 py-2.5 text-[14px] leading-relaxed text-white">
+      <div className="pg-msg-enter pg-message pg-message-user group flex justify-end gap-3 py-2">
+        <div className="flex max-w-[86%] flex-col items-end sm:max-w-[78%]">
+          <div className="pg-user-bubble rounded-2xl rounded-br-[6px] px-4 py-2.5 text-[14px] leading-relaxed text-white">
             <p className="whitespace-pre-wrap break-words">{msg.content}</p>
           </div>
           {msg.content && (
-            <div className="mt-1 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100">
+            <div className="pg-message-actions mt-1 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100">
               <ActionButton onClick={handleCopy} label={copied ? "Copied" : "Copy"}>
                 {copied ? <Check size={13} className="text-emerald-400" /> : <Copy size={13} />}
               </ActionButton>
@@ -1495,26 +1873,44 @@ function MessageBubble(props: {
   }
 
   return (
-    <div className="pg-msg-enter group flex gap-3 py-2">
-      <div className="pg-avatar-assistant mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-[var(--admin-border)] bg-[var(--admin-surface-elevated)]">
-        <Bot size={14} className="text-brand-400" />
+    <div className="pg-msg-enter pg-message pg-message-assistant group flex gap-3 py-3">
+      <div className="pg-avatar-assistant mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[var(--admin-border)] bg-[var(--admin-surface-elevated)]">
+        <Bot size={15} className="text-brand-300" />
       </div>
       <div className="min-w-0 flex-1">
-        <div className="mb-1 flex items-center gap-1.5">
-          <span className="font-mono text-[10px] uppercase tracking-wider text-[var(--admin-text-dim)]">
+        <div className="pg-message-heading mb-1.5 flex items-center gap-2">
+          <span className="pg-message-role text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--admin-text-muted)]">Assistant</span>
+          <span className="h-3 w-px bg-[var(--admin-border)]" aria-hidden />
+          <span className="truncate font-mono text-[10px] text-[var(--admin-text-dim)]">
             {model}
           </span>
         </div>
-        <div className="text-[14px] leading-relaxed text-[var(--admin-text)]">
+        <div className="pg-response text-[14px] leading-relaxed text-[var(--admin-text)]">
+          {/* Reasoning goes first: it is what the model produces first, and on
+              a thinking model it is the only visible progress for many seconds
+              (the typing dots alone read as a hung request). */}
+          {msg.reasoning ? (
+            <ReasoningBlock
+              text={msg.reasoning}
+              live={isStreamingThis && !msg.content}
+              caret={isStreamingThis && !msg.content}
+            />
+          ) : null}
           {isStreamingThis && !msg.content ? (
             <TypingDots />
           ) : (
             <Markdown content={msg.content} caret={isStreamingThis && !!msg.content} />
           )}
+          {msg.failed && (
+            <p className="pg-msg-failed mt-2 flex items-center gap-1.5 text-[11px] text-amber-400">
+              <AlertCircle size={12} aria-hidden />
+              Response interrupted — the text above is what arrived.
+            </p>
+          )}
         </div>
-        {!isStreamingThis && msg.content && (
+        {!isStreamingThis && (msg.content || msg.reasoning) && (
           <div
-            className={`mt-1 flex items-center gap-1 transition-opacity ${
+            className={`pg-message-actions mt-1 flex items-center gap-1 transition-opacity ${
               isLast
                 ? "opacity-100"
                 : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100"
@@ -1556,5 +1952,52 @@ function TypingDots() {
       <span className="pg-typing-dot" />
       <span className="pg-typing-dot" />
     </div>
+  );
+}
+
+/** Collapsible model reasoning trace.
+ *
+ *  Thinking models can spend tens of seconds in this phase before their first
+ *  visible token, so it is shown live while it is the only sign of progress and
+ *  collapses once the answer arrives. Native `<details>` gives keyboard and
+ *  screen-reader semantics for free. */
+function ReasoningBlock({ text, live, caret }: { text: string; live: boolean; caret?: boolean }) {
+  // Open follows `live` — open while thinking, collapsed once the answer
+  // arrives — unless the user works the disclosure themselves, after which
+  // their choice wins and later renders leave it alone.
+  const [open, setOpen] = useState(live);
+  const userToggled = useRef(false);
+  useEffect(() => {
+    if (!userToggled.current) setOpen(live);
+  }, [live]);
+  return (
+    <details
+      className="pg-reasoning mb-2"
+      open={open}
+      data-live={live ? "true" : "false"}
+      onToggle={(e) => {
+        // `toggle` also fires for our own programmatic `open` changes, so only
+        // a user-initiated flip may claim control.
+        if (userToggled.current) setOpen(e.currentTarget.open);
+      }}
+    >
+      <summary
+        className="pg-reasoning-summary"
+        onClick={() => {
+          userToggled.current = true;
+        }}
+      >
+        <span className="pg-reasoning-label">
+          <Sparkles size={11} aria-hidden />
+          {live ? "Thinking…" : "Reasoning"}
+        </span>
+      </summary>
+      <div className="pg-reasoning-body">
+        <p className="pg-reasoning-text">
+          {text}
+          {caret && <span className="pg-caret" aria-hidden />}
+        </p>
+      </div>
+    </details>
   );
 }

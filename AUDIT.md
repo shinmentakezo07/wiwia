@@ -7,6 +7,263 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — round 101 (2026-09-26)
+
+Review of the uncommitted round-97…100 batch. The gateway half is recorded in
+#290 (the `resume_mode != "off"` guard was missing, so the shipped default
+resumed mid-stream after content on a rebuilt original request); it is now
+pinned by `tests/test_fix_round101.py`.
+
+### 301. The Playground key-failure notice was hidden below 1024px
+
+**Severity:** 🟡 Medium · **Status: fixed**
+
+**Where:** `web/src/pages/Playground.tsx` — the `keyFailed` notice in the top bar.
+
+**Trigger:** a key mint that fails four times (or returns a non-auth error) on
+any viewport narrower than `lg`, e.g. a phone at 375px.
+
+**Consequence:** the span carried `hidden … lg:flex` and it is the only caller
+of `retryKey`, so neither the message nor the Retry button ever rendered. The
+mint effect had already exhausted its backoff and left no timer, so `bearer` and
+`keyReady` stayed false: the composer, model selector and Send remained disabled
+on "Preparing your playground key…" with no visible cause and no recovery short
+of reloading the page.
+
+**Fix:** the notice is always rendered; under `lg` it takes its own full-width
+row (the top-bar cluster now wraps) and sits inline from `lg` up. Retry is a
+44px target with a focus-visible ring.
+
+**Verification:** headless Chromium at 375×812 against the running dev server,
+with `**/auth/playground-key` routed to 500 — notice visible, 351px wide, Retry
+44px, `scrollWidth` still 375; removing the route and clicking Retry returned
+the composer to `enabled` / "Message the model…". Desktop 1440×900: no
+horizontal overflow. No automated test (this repo has no web test harness);
+`bun run lint` + `bun run build` stay green.
+
+### 302. Playground tap targets, duplicate live region, and label-in-name
+
+**Severity:** ⚪ Low · **Status: fixed**
+
+**Where:** `web/src/pages/Playground.tsx` — empty-state category tabs, the
+scroll-to-bottom button, `SessionStatus`, and the Console link.
+
+**Trigger:** touch at 375px; any screen-reader user; voice control.
+
+**Consequence:** the tabs were `min-h-9` (36px) and the scroll button `h-9 w-9`
+— under the binding 44px floor while every neighbouring control in the same
+patch was raised to 44px. `SessionStatus` emitted a polite live region whose
+label is `display:none` below 640px, so phones announced a state whose text the
+sighted user cannot see, and it duplicated the message log's own live region.
+The Console link carried `aria-label="Open dashboard"` while its visible label
+is "Dashboard" (≥`sm`) / "Console" (<`sm`) — neither matches the accessible name
+(WCAG 2.5.3).
+
+**Fix:** 44px on both controls. `SessionStatus` is a single decorative element
+(`aria-hidden`, no `role`/`aria-live`): the state it shows is already carried by
+the message log, the composer placeholder, and the send button's disabled state.
+The link's `aria-label` is dropped, so its accessible name is its visible text at
+both widths.
+
+**Verification:** measured in the browser at 375×812 and 1440×900 — tabs 44px,
+one `.pg-status` element with `aria-hidden="true"`, no `role=status` wrapper
+around it, Console link `aria-label` null, `scrollWidth == innerWidth` at both
+widths.
+
+---
+
+## ✅ Fixed — playground workbench UI (2026-09-25)
+
+### Mobile empty workbench scrolled its launcher off-screen
+
+**Severity:** ⚪ Low · **Status: fixed**
+
+**Where:** `web/src/pages/Playground.tsx` — the `useLayoutEffect` that keeps a
+conversation pinned to the newest message.
+
+**Trigger:** opening an empty Playground on a short phone viewport, where the
+prompt launcher is taller than the message viewport.
+
+**Consequence:** the initial empty render was treated as an at-bottom
+conversation, so the scroll container jumped to the bottom and hid the title,
+model context, and the first suggestions behind the composer.
+
+**Fix:** an empty message list explicitly resets the scroll position to the
+top; only non-empty conversations follow the existing stick-to-bottom behavior.
+The workbench launcher also top-aligns on phone and short-height layouts.
+
+**Verification:** headless Playwright smoke at 375×812 and 1440×900, including
+the model menu and a mocked streaming response; no horizontal overflow and no
+console errors.
+
+---
+
+## ✅ Fixed — round 98 (2026-09-25)
+
+### 290. A combo could not fail over when OpenRouter's first SSE event was an error
+
+**Severity:** 🟠 High · **Status: fixed**
+
+**Where:** `wiwi/core/gateway.py::Gateway.stream` mid-stream resume branch.
+
+**Trigger:** `stream_resume: enabled` and the selected combo deployment committed
+an HTTP `200`, then OpenRouter sent a valid error event as the first and only SSE
+frame (for example `provider_unavailable` / `JSON error injected into SSE stream`)
+before any content delta reached the client.
+
+**Consequence:** normal pre-connect retries were already unavailable because the
+`200` was committed, while mid-stream resume was gated on `content_flowed`. The
+error reached the client and a healthy sibling deployment in the same combo was
+never called.
+
+**Fix:** `enabled` resume now also runs for a first-event `StreamError`; an empty
+tape rebuilds the unchanged request, so there is no partial response to replay.
+`off` and `content_only` keep their existing behavior. That last sentence needs
+an explicit guard to stay true: the branch carries `resume_mode != "off"`, which
+is the *only* place the setting is enforced — `_attempt_resume` refuses just
+`content_only`, and with the default `off` the tape is never recorded, so
+dropping the guard made the shipped default resume after content on a rebuilt
+original request. The client then received its partial answer followed by a full
+regenerated one, and paid for both.
+
+**Regression:** `tests/test_fix_round98.py::test_openrouter_first_event_error_resumes_healthy_combo_deployment`
+(no-content, `enabled`), `tests/test_fix_round101.py` (content already flowed:
+`off` must not call a fallback; `content_only` still must).
+
+### 291. A failed stream pump could emit a second terminal and be orphaned by resume
+
+**Severity:** 🟠 High · **Status: fixed**
+
+**Where:** `wiwi/core/gateway.py::Gateway._pump_once` and the resume branch in
+`Gateway.stream`.
+
+**Trigger:** an adapter emitted `StreamError` (including OpenRouter's committed-
+`200` error frame) before the upstream body closed, and mid-stream resume then
+selected another deployment.
+
+**Consequence:** the failed pump kept reading and treated the later EOF as a
+second truncation, queueing another `StreamError`. The consumer could terminate
+on that stale error before the fallback produced content. If the body stayed
+open, overwriting the outer pump reference orphaned the old task, retaining its
+upstream connection and deployment inflight count.
+
+**Fix:** the pump routes an adapter `StreamError` through its single guarded
+terminal path, preserves its status/type for client and key-health semantics,
+prices the partial turn, and stops reading. Before the consumer replaces
+`pump_task` with the resumed pump, it registers a completion owner, waits
+for the failed task to finish, and cancels it after the bounded teardown grace.
+This ownership is installed before the first await, so consumer cancellation
+cannot bypass it. A task that suppresses cancellation remains explicitly tracked
+until its cleanup completes, rather than becoming an unowned task with an
+unretrieved exception.
+
+**Regression:** `tests/test_fix_round98.py` covers delayed fallback ordering,
+failed-pump settlement, bounded cancellation cleanup, provider error metadata,
+one logical start/terminal, and disabled resume modes.
+
+---
+
+## ✅ Fixed — round 97 (2026-09-25)
+
+### 289. Playground displayed client-estimated TPS and TTFT instead of server measurements
+
+**Severity:** 🟡 Medium · **Status: fixed**
+
+**Where:** `web/src/pages/Playground.tsx` (`streamSSE`, `runStream`, and the
+response-stat footer).
+
+**Trigger:** a streamed completion with provider/network queueing or a short
+output turn. The page timed the first browser-visible delta and divided output
+tokens by the browser's full request wall time.
+
+**Consequence:** the footer could show values that disagreed with wiwi's request
+log, because it included client transport time and did not use the gateway's
+TTFT, generation-phase TPS, or total request latency. Concurrent chats also had
+no stable request-id correlation in the UI.
+
+**Fix:** the gateway now exposes an authenticated, owner-scoped exact-ID metrics
+lookup at `/admin/logs/requests/{request_id}/metrics`; Playground reads
+`x-wiwi-request-id`, polls that record after the stream, and displays the
+server-recorded token counts, TTFT, TPS, and total latency. The browser-observed
+timing calculation was removed.
+
+**Regression:** `tests/test_fix_round97.py` covers exact ring/DB correlation,
+estimated-usage labeling, authentication, and cross-user isolation.
+
+---
+
+## ✅ Fixed — round 100 (2026-09-25)
+
+### 300. Playground 401s on every send once the account passes the playground-key cap
+
+**Severity:** 🟠 High · **Status: fixed**
+
+**Where:** `web/src/pages/Playground.tsx` — the completion `fetch` inside
+`runStream` (pre-fix, a single inline `fetch` with no status branch), and
+`web/src/api/auth.tsx:ensurePlaygroundKey` (pre-fix, no way to bypass its own
+cache). Server side, unchanged: `wiwi/server/app.py:4021`
+(`_mint_playground_key`, the `_MAX_PLAYGROUND_KEYS_PER_USER = 5` cap at
+`app.py:187`) and `wiwi/auth/service.py:634` (`expire_keys`).
+
+**Trigger:** any account that mints a sixth playground key — five logins is
+enough for the oldest, *currently cached* key to be retired. `sessionStorage`
+keeps that key for the life of the tab, and `bearer` component state pins it
+from then on. Note this is the **cap path**, not the 24h TTL: the DB showed the
+first EXPIRED key at 1.1h old, consistent with the cap evicting on the sixth
+login.
+
+**Consequence:** the Playground was permanently broken with
+`401 {"error":{"message":"invalid API key"}}` on every `/v1/chat/completions`,
+while `/admin/models` returned 200 in the same breath — the session cookie is
+independent of the virtual key, so the UI looked authenticated while every
+completion was rejected. There was no recovery path short of logging out and
+back in, which was the only user-visible workaround.
+
+Reproduced against the live gateway: 7 master-key logins, then the first
+minted key → 401; the newest key → 404 `model not found` (i.e. auth passed,
+routing was the only thing left). With the cap at 5 and `_MAX_KEY_ATTEMPTS`
+retries in the mint effect, an ordinary multi-tab session crossed it easily.
+
+**Fix:** the client half. `runStream` now treats a 401 as "my cached bearer is
+dead" rather than a terminal error: it re-mints through
+`ensurePlaygroundKey(true)` and replays the identical request once, bounded by
+a `retried` flag so a genuinely revoked account (where the re-mint itself 401s)
+surfaces the real error instead of looping. The new key is written back to
+`bearer` so later turns skip the round trip.
+
+`ensurePlaygroundKey` gained a `force` parameter for this. Calling it as before
+returns the cached key — so the first attempt at the fix replayed *the same
+dead bearer* and 401'd again, which is exactly what the browser run below
+caught. A 401 is exactly the evidence that the cache is stale, so the retry
+must skip it.
+
+Not changed, deliberately: the cap and the TTL are correct as designed. They are
+the mitigation for #57 (unbounded playground keys), and a login returning one
+short-lived key is a sound shape — the bug was that nothing on the client
+noticed when that key died.
+
+**Verification:** headless browser against the running dev servers. Sign in,
+open `/playground`, then mint 7 more keys from the same session to push the
+page's cached bearer past the cap. Network trace, before → after:
+
+```
+before:  POST /v1/chat/completions  401
+         POST /v1/chat/completions  401     (same bearer replayed)
+         → error banner "invalid API key", Retry button
+
+after:   POST /v1/chat/completions  401
+         POST /auth/playground-key  200
+         POST /v1/chat/completions  200     → "pong" rendered, no banner
+```
+
+**Regression:** `tests/test_fix_round100.py` — the cap must retire the *oldest*
+live key (the retry depends on the freshly minted one being usable), re-minting
+at the cap must yield a live key, and the client must carry a bounded
+401 → forced re-mint → retry branch (`ensurePlaygroundKey(true)`, not the
+cache-reading form).
+
+---
+
 ## ✅ Fixed — combos editor UI (2026-09-24)
 
 Found while redesigning the `/console/combos` create/edit dialog. Both were
@@ -8406,3 +8663,168 @@ pump (`AUDIT #104`), reintroduced on the log-capture path. It only fires when
 `store_prompts_in_spend_logs` is on, which is why it escaped the earlier sweep.
 
 **Fix:** fragments accumulate in a list, joined once at teardown.
+
+### 293. A provider `alias_id` captured any model group of the same name
+
+**Severity:** 🔴 High · **Status: fixed**
+**File:** `wiwi/router/router.py:resolve_group`
+
+**What:** `resolve_group` consulted the provider-alias map *first*. For a name
+that was both a provider `alias_id` and a real model group, it returned
+`(alias_name, [deployments of the aliased provider drawn from every group])`.
+The group itself therefore had no route: the gateway served the alias's answer
+instead, and `POST /admin/providers`/`PATCH` allowed creating the collision in
+the first place (`alias_id: shared` on p1 while a combo named `shared` existed).
+
+**Fix:** the provider-alias arm now runs *after* the group lookup and the
+`model_group_alias` walk, so it only resolves names the groups table lacks.
+`model_group_alias` keeps its alias-first walk (pinned by
+`test_admin_api.py::test_patch_model_group_weights_and_strategy` and
+`test_fix_round43.py`); the config validator and both admin provider routes now
+reject an `alias_id` that equals another account's *name* (aliasing yourself is
+still legal).
+
+### 294. Admin model-group writes addressed by an alias hit the wrong group
+
+**Severity:** 🔴 High · **Status: fixed**
+**File:** `wiwi/server/app.py:admin_add_deployment`, `admin_delete_deployment`,
+`admin_patch_model_group`
+
+**What:** all three routes resolved the path/body name through the lenient
+`Router.resolve_group` and then wrote to the group *that resolver* returned
+while echoing the requested name. With `alias_id: shared` on p1 and deployments
+`p1/m-a` (group `grpA`) and `p1/m-b` (group `grpB`):
+
+* `DELETE /admin/model-groups/shared/deployments?provider=p1&model_id=m-a`
+  answered 200 `{"group": "shared", …}` and left `grpA` **unchanged**, minting a
+  phantom group `shared` holding `p1/m-b` — and re-keyed the ConfigStore delete
+  against `shared`, so the DB and the running router disagreed.
+* `POST /admin/model-groups/shared/deployments` attached to p1's group and
+  returned 201 for a "group" named `shared`.
+* `PATCH /admin/model-groups/shared {"weights": {"p1/m-b": 9}}` rewrote
+  `grpB`'s weight and answered 200.
+
+**Fix:** a shared `_admin_group` helper walks the literal group first, follows
+`model_group_alias` (intended redirect), and refuses a provider-`alias_id` name
+with an explicit message instead of silently retargeting.
+
+### 295. `_CrossProviderWRR` funnelled a provider's whole share into its first deployment
+
+**Severity:** 🟡 Medium · **Status: fixed**
+**File:** `wiwi/router/router.py:_CrossProviderWRR.pick`
+
+**What:** after choosing a provider, the pool returned *the first available
+deployment* of that provider (`for d in avail: if d.provider.name == best:
+return d`). A combo with two models on one account therefore sent that
+account's entire WRR share to whichever deployment came first in group order —
+the sibling never served a request, and its `weight` (editable in the Combos UI,
+rendered as a weight bar) was silently ignored. Reproduced: `combo` with
+`p1/m-a` (w=1), `p1/m-b` (w=5), `p2/m-c` (w=1) over 600 picks gave
+`m-a 514 / m-c 86 / m-b 0`.
+
+**Fix:** a second smooth-WRR level over the chosen provider's deployments in
+the group, keyed `(provider, model_id)` so re-attaching an identical pair does
+not reset the cursor. Single-deployment providers take the same fast path as
+before; the cross-provider distribution is unchanged.
+
+### 296. Weight edits to a YAML-defined combo were lost on restart
+
+**Severity:** 🟡 Medium · **Status: fixed**
+**File:** `wiwi/server/config_store.py:update_deployment_weight`,
+`wiwi/server/app.py:_load_db_config`
+
+**What:** deployments that come from the YAML `model_list` never get a row in
+the `deployments` table (only admin-attached ones do). `update_deployment_weight`
+issued a bare `UPDATE … WHERE group_name/provider_name/model_id`, so it matched
+zero rows for exactly those deployments; the handler returned 200, routing
+changed in memory, and the next restart rebuilt the group from YAML with the old
+weight. Startup also *skipped* any deployment it already had when a DB row
+existed, so even a row written by another path was discarded.
+
+**Fix:** the weight write upserts (`add_deployment`), and `_load_db_config`
+treats a DB row for an existing deployment as an operator override and applies
+its weight instead of skipping.
+
+### 297. Detaching a YAML-defined deployment undid itself on restart
+
+**Severity:** 🟡 Medium · **Status: fixed**
+**File:** `wiwi/server/config_store.py:delete_deployment`, `load_all`,
+`wiwi/server/app.py:_load_db_config`
+
+**What:** `DELETE /admin/model-groups/{g}/deployments` removed the deployment
+from the router and issued a hard `DELETE` — correct for an admin-added
+deployment, a no-op row-wise for a YAML one, which has no row. The deployment
+reappeared on the next restart, so a detach looked like it worked and then
+silently reverted.
+
+**Fix:** a `detached` tombstone column (added to both DDLs and the `_migrate`
+path for existing installs). Delete records `detached=1`; startup drops
+tombstoned deployments from the router; re-attaching the same triple clears the
+flag and restores the stored weight. `delete_provider` still hard-deletes rows,
+so removing an account cannot leave tombstones behind.
+
+## 🟡 Playground streaming sweep — the invisible thinking phase (2026-09-26)
+
+### 298. The Playground dropped `reasoning_content`, so a thinking turn looked hung
+
+**Severity:** 🟠 High · **Status: fixed**
+**File:** `web/src/pages/Playground.tsx` (`streamSSE`)
+
+**What:** `streamSSE` read only `choices[0].delta.content`. The OpenAI Chat
+encoder emits reasoning on a *separate* field (`openai_chat.py:408`,
+`{"reasoning_content": d.text}`), so every thinking-model turn rendered as
+typing dots for the whole reasoning phase. Measured on the live gateway with
+`bunny`: reasoning began at **0.8 s** and the first `content` token at
+**29.8 s** — 29 seconds in which the request was demonstrably progressing and
+the user saw nothing. On a 400-word prompt the gap was 51 s. This is the
+reported "playground takes lots of time for response".
+
+**Fix:** `streamSSE` accumulates `reasoning_content` into a `Msg.reasoning`
+field and streams it into a `ReasoningBlock` (`<details>`, native keyboard and
+screen-reader semantics, ≥44 px summary target). It is open while it is the only
+sign of progress and collapses to a "Reasoning" summary once the answer starts;
+a user toggle wins over that automatic behaviour. Reasoning is persisted with
+the conversation (`toChatMsgs`/`toMsgs`) so a reload still shows it. Verified
+live: first reasoning text on screen at **2.1 s** instead of ~30 s of blank dots.
+
+### 299. A terminal SSE `error` frame became a silent `"(empty response)"`
+
+**Severity:** 🟡 Medium · **Status: fixed**
+**File:** `web/src/pages/Playground.tsx` (`streamSSE`, `runStream`)
+
+**What:** the gateway terminates a failed stream with
+`data: {"error": {"message": …}}` followed by connection close — no `[DONE]`
+(`openai_chat.py:468`). `streamSSE` only parsed `choices`, so the frame was
+discarded, `accumulated` stayed empty, and the bubble read `"(empty response)"`.
+The actual cause — here `All credentials for model qd/qfmodel are cooling down`
+— never reached the user.
+
+**Fix:** an `error` frame now throws, so `runStream`'s catch sets the error
+banner (with the existing Retry). Malformed JSON is still ignored, and the
+`SyntaxError` check keeps a real error from being swallowed by that same catch.
+
+### 300. An error after partial output deleted everything that had streamed
+
+**Severity:** 🟡 Medium · **Status: fixed**
+**File:** `web/src/pages/Playground.tsx` (`runStream`)
+
+**What:** the non-abort catch unconditionally removed the assistant bubble
+(`filter(m => m.id !== assistantId)`). A turn that had already put tens of
+seconds of text on screen and then failed wiped that text, and 300's silent
+error meant the user could not tell why.
+
+**Fix:** the bubble is kept when it holds content or reasoning and is marked
+with a muted "Response interrupted" note; only an empty placeholder is removed.
+`retryFailed` drops those marked bubbles before replaying, so repeated retries
+cannot accumulate dead ones.
+
+**Not changed:** the pre-header stall itself. When every deployment for a group
+is cooling, the gateway's 502 is only sent once `anext(stream)` returns, and the
+last attempt's cooldown is what makes that slow (`bunny`'s single-deployment
+groups can therefore show a ~37 s wait). Withholding SSE headers until the first
+delta is deliberate — it is what lets a dispatch failure still return a real
+JSON error with a true status code — and the `stream_ping_interval_s` keep-alive
+is gated to the Anthropic surface (`gateway.py:940`). The section-299 banner at
+least makes the failure legible instead of silent. Widening the keep-alive to
+the OpenAI surface is a behaviour change to the wire contract and was left out
+of this fix.

@@ -839,9 +839,28 @@ class Gateway:
     async def stream(self, ctx: RequestContext) -> AsyncIterator[dl.IRStreamDelta]:
         queue: asyncio.Queue[dl.IRStreamDelta | dl.StreamError] = asyncio.Queue(maxsize=4096)
         pump_task: asyncio.Task | None = None
+        retired_pumps: set[asyncio.Task] = set()
         tape = StreamTape()
         resume_mode = self.router.settings.stream_resume
         max_resumes = self.router.settings.stream_resume_max_retries
+
+        def _track_retired_pump(task: asyncio.Task) -> None:
+            """Keep ownership of cancellation-resistant pump cleanup."""
+            retired_pumps.add(task)
+
+            def _reap(done: asyncio.Task) -> None:
+                retired_pumps.discard(done)
+                if done.cancelled():
+                    return
+                exc = done.exception()
+                if exc is not None:
+                    log.warning(
+                        "retired stream pump failed during cleanup",
+                        request_id=getattr(ctx, "request_id", ""),
+                        error=type(exc).__name__)
+
+            task.add_done_callback(_reap)
+
         coalescer = (DeltaCoalescer(
             max_bytes=self.router.settings.stream_coalesce_max_bytes,
             max_ms=self.router.settings.stream_coalesce_max_ms,
@@ -1016,10 +1035,49 @@ class Gateway:
                 # read by _attempt_resume, so recording it is pure waste.
                 if resume_mode != "off":
                     tape.append(d)
-                # Mid-stream failover: if the upstream died after content,
-                # attempt a resume on a fallback deployment.
-                if (isinstance(d, dl.StreamError) and content_flowed
-                        and resume_mode != "off" and max_resumes > 0):
+                # Mid-stream failover: after content, either non-off mode may
+                # resume on a fallback deployment. ``enabled`` also covers a
+                # provider whose first and only SSE event is an error: the HTTP
+                # 200 is already committed, so the normal pre-connect retry path
+                # cannot switch deployments even though no content needs replay.
+                # ``resume_mode != "off"`` is load-bearing, not redundant: with
+                # the default ``off`` the tape is never recorded above, so
+                # ``_attempt_resume`` would rebuild the *original* request and
+                # replay a full second answer after the partial one the client
+                # already received. ``_attempt_resume`` has no ``off`` guard of
+                # its own (only ``content_only``), so this is the one place the
+                # setting is enforced.
+                if (isinstance(d, dl.StreamError)
+                        and resume_mode != "off"
+                        and (content_flowed or resume_mode == "enabled")
+                        and max_resumes > 0):
+                    # The failed pump has queued its one terminal, but it may
+                    # still be closing the upstream response. Settle it before
+                    # overwriting ``pump_task`` with the resumed pump; otherwise
+                    # the old task is orphaned and can retain its deployment
+                    # slot or enqueue stale frames into the shared queue.
+                    failed_pump = pump_task
+                    if failed_pump is not None:
+                        # Register ownership before the first await: cancellation
+                        # of this consumer must not leave the failed task without
+                        # a completion callback.
+                        _track_retired_pump(failed_pump)
+                    if failed_pump is not None and not failed_pump.done():
+                        with contextlib.suppress(TimeoutError):
+                            await asyncio.wait_for(
+                                asyncio.shield(failed_pump),
+                                timeout=_PUMP_CANCEL_GRACE_S)
+                        if not failed_pump.done():
+                            failed_pump.cancel()
+                            await asyncio.wait(
+                                {failed_pump}, timeout=_PUMP_CANCEL_GRACE_S)
+                            if not failed_pump.done():
+                                # asyncio cannot force-kill a task that suppresses
+                                # cancellation. Keep explicit ownership and consume
+                                # its eventual result instead of orphaning it.
+                                log.debug(
+                                    "failed stream pump still cleaning up after resume",
+                                    request_id=getattr(ctx, "request_id", ""))
                     resumed, new_pump = await self._attempt_resume(ctx, tape, queue)
                     if resumed:
                         # Update the outer pump_task reference so the finally
@@ -1413,6 +1471,8 @@ class Gateway:
                                        timeout=_QUEUE_PUT_TIMEOUT_S)
 
         async def _fail_stream(message: str, kind: str, *,
+                               status: int | None = None,
+                               etype: str | None = None,
                                note: bool = True, price: bool = True) -> None:
             """Terminate the stream with a StreamError, whatever else goes wrong.
 
@@ -1433,11 +1493,13 @@ class Gateway:
                 return
             if note:
                 with contextlib.suppress(Exception):
-                    await self._note_stream_failure(dep, real_key, ctx)
+                    await self._note_stream_failure(
+                        dep, real_key, ctx, status=status, etype=etype)
             if price:
                 with contextlib.suppress(Exception):
                     await self._price_partial(ctx, dep, usage_final, text_len)
-            await _put_frame(dl.StreamError(message, kind))
+            await _put_frame(dl.StreamError(
+                message, kind, status=status, etype=etype))
             # Marked only once the frame is actually queued: if the put itself
             # could not complete, a later attempt may still succeed, and the
             # flag's purpose is only to stop a *second* terminal frame — never
@@ -1595,6 +1657,14 @@ class Gateway:
                     elif isinstance(d, dl.StreamEnd):
                         saw_terminal = True
                         continue
+                    elif isinstance(d, dl.StreamError):
+                        # An adapter/provider error is already terminal. Queue
+                        # exactly that one error, account for the partial turn,
+                        # and stop reading before EOF can manufacture a second
+                        # StreamError from the missing finish/[DONE] marker.
+                        await _fail_stream(
+                            d.message, d.kind, status=d.status, etype=d.etype)
+                        return True
                     else:
                         if isinstance(d, (dl.TextDelta, dl.ThinkingDelta)):
                             if isinstance(d, dl.TextDelta):
@@ -1805,20 +1875,39 @@ class Gateway:
             await _close_upstream()
 
     async def _note_stream_failure(self, dep: Deployment, real_key,
-                                   ctx: RequestContext | None = None) -> None:
-        """Mid-stream failures carry no HTTP status; feed deployment cooldowns
-        and the key pool so a provider that keeps dying mid-stream cools off.
+                                   ctx: RequestContext | None = None,
+                                   status: int | None = None,
+                                   etype: str | None = None) -> None:
+        """Feed deployment cooldowns and key health from one stream failure.
 
-        Routing through ``on_result_locked`` (rather than bumping
-        ``err_count`` directly) is what actually rotates traffic: it applies a
-        cooldown window so the next ``pick_key`` skips this key, and retires
-        it outright once it crosses ``key_max_consecutive_fails``.  Streaming
-        attempts already recorded ``on_result(200)`` at connect time, so
-        without the cooldown here a key could die mid-stream indefinitely and
-        still be picked first on every subsequent request.
+        Most transport failures have no HTTP status and retain the historical
+        502 signal. When an adapter preserved a provider type without a numeric
+        status, derive the same classification used by pre-connect failures. The
+        shared ``status_for_key_pool`` policy then decides whether the event says
+        anything about key health at all (for example, entitlement/policy errors
+        must leave the credential alone).
         """
-        dep.record_fail(self.router.settings.allowed_fails,
-                        self.router.settings.cooldown_time)
+        if (isinstance(status, int) and not isinstance(status, bool)
+                and 400 <= status <= 599):
+            health_status = status
+        else:
+            health_status = {
+                "invalid_request_error": 400,
+                "context_window_exceeded": 400,
+                "content_policy_violation": 400,
+                "authentication_error": 401,
+                "permission_error": 403,
+                "not_found_error": 404,
+                "timeout": 504,
+                "rate_limit_error": 429,
+                "service_unavailable": 503,
+                "overloaded_error": 529,
+            }.get(etype or "", 502)
+        pool_status = status_for_key_pool(WiwiError(
+            health_status, etype or "api_error", "stream failure"))
+        if health_status in {408, 500, 502, 503, 504, 529}:
+            dep.record_fail(self.router.settings.allowed_fails,
+                            self.router.settings.cooldown_time)
         self.router.log_proxy(
             "warn",
             f"stream to {dep.group}/{dep.model_id} "
@@ -1833,12 +1922,15 @@ class Gateway:
         # Count it here for that mode only: in "any_error" (default)
         # `on_result` already increments err_count, and doing both would
         # double-count and retire keys at half the configured threshold.
-        if self.router.settings.failover_mode == "standard":
+        if (self.router.settings.failover_mode == "standard"
+                and pool_status is not None
+                and pool_status not in {401, 403, 429}):
             real_key.err_count += 1
-        await dep.provider.on_result_locked(
-            real_key, 502, None,
-            failover_mode=self.router.settings.failover_mode,
-            key_max_consecutive_fails=self.router.settings.key_max_consecutive_fails)
+        if pool_status is not None:
+            await dep.provider.on_result_locked(
+                real_key, pool_status, None,
+                failover_mode=self.router.settings.failover_mode,
+                key_max_consecutive_fails=self.router.settings.key_max_consecutive_fails)
 
     def _validate_closed_tool_args(
         self,

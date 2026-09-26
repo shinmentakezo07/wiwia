@@ -761,6 +761,7 @@ class DBSink:
         for idx in [
             "CREATE INDEX IF NOT EXISTS idx_request_logs_ts ON request_logs(ts)",
             "CREATE INDEX IF NOT EXISTS idx_request_logs_key_id ON request_logs(key_id)",
+            "CREATE INDEX IF NOT EXISTS idx_request_logs_request_id ON request_logs(request_id)",
             "CREATE INDEX IF NOT EXISTS idx_audit_logs_ts ON audit_logs(ts)",
             "CREATE INDEX IF NOT EXISTS idx_rollup_bucket ON request_rollups(bucket_ts)",
             ("CREATE UNIQUE INDEX IF NOT EXISTS idx_rollup_unique ON "
@@ -770,15 +771,14 @@ class DBSink:
             await conn.execute(sa.text(idx))
 
         # Drop indexes an earlier version created for queries that were never
-        # written (no SQL filters key_alias, model_group or request_id — the
-        # only predicates are on ts, key_id, cost and id). CREATE INDEX IF NOT
-        # EXISTS is additive, so an existing database keeps them forever
+        # written (no SQL filters key_alias or model_group — the only
+        # predicates are on ts, key_id, request_id, cost and id). CREATE INDEX
+        # IF NOT EXISTS is additive, so an existing database keeps them forever
         # without this. Idempotent, and a no-op on databases that never had
         # them.
         for idx in [
             "DROP INDEX IF EXISTS idx_request_logs_key_alias",
             "DROP INDEX IF EXISTS idx_request_logs_model_group",
-            "DROP INDEX IF EXISTS idx_request_logs_request_id",
         ]:
             await conn.execute(sa.text(idx))
 
@@ -1321,31 +1321,66 @@ class DBSink:
             rows = (await conn.execute(stmt, params)).all()
         out: list[dict] = []
         for r in rows:
-            d = dict(zip(_COLS, r))
-            d["stream"] = "request"
-            d["level"] = ""
-            d["message"] = ""
-            d["actor"] = ""
-            d["action"] = ""
-            d["target"] = ""
-            d["diff"] = {}
-            d["was_stream"] = bool(d["was_stream"])
-            d["cache_hit"] = bool(d["cache_hit"])
-            d["attempts"] = orjson.loads(d["attempts"])
-            tw = d.get("translation_warnings")
-            # Older rows predate the column (NULL after the migration's
-            # DEFAULT only applies to new inserts on some engines), so a
-            # malformed/absent value decodes to [].
-            try:
-                d["translation_warnings"] = orjson.loads(tw) if tw else []
-            except (ValueError, TypeError):
-                d["translation_warnings"] = []
-            rb = d.get("request_body")
-            d["request_body"] = orjson.loads(rb) if rb else None
-            rsb = d.get("response_body")
-            d["response_body"] = orjson.loads(rsb) if rsb else None
-            out.append(d)
+            out.append(self._request_row(dict(zip(_COLS, r))))
         return out
+
+    async def read_request_by_id(
+        self,
+        request_id: str,
+        key_ids: list[str] | None = None,
+    ) -> dict | None:
+        """Return the newest exact request-log row, optionally owner-scoped.
+
+        ``key_ids is None`` is the administrator/unfiltered contract. An empty
+        list means the caller owns no keys and must see no row, matching
+        :meth:`read_requests`; a non-empty list restricts the lookup to those
+        virtual-key ids.
+        """
+        if key_ids is not None and not key_ids:
+            return None
+        cols = ", ".join(_COLS)
+        clauses = ["request_id = :request_id"]
+        params: dict = {"request_id": request_id}
+        if key_ids is not None:
+            clauses.append("key_id IN :kids")
+            params["kids"] = key_ids
+        stmt = sa.text(
+            f"SELECT {cols} FROM request_logs WHERE {' AND '.join(clauses)}"
+            " ORDER BY ts DESC, id DESC LIMIT 1"
+        )
+        if key_ids is not None:
+            stmt = stmt.bindparams(sa.bindparam("kids", expanding=True))
+        async with self.engine.connect() as conn:
+            row = (await conn.execute(stmt, params)).first()
+        if row is None:
+            return None
+        result = self._request_row(dict(zip(_COLS, row)))
+        result["usage_estimated"] = bool(result["usage_estimated"])
+        return result
+
+    def _request_row(self, d: dict) -> dict:
+        """Add public-log fields to one stored request row."""
+        d["stream"] = "request"
+        d["level"] = ""
+        d["message"] = ""
+        d["actor"] = ""
+        d["action"] = ""
+        d["target"] = ""
+        d["diff"] = {}
+        d["was_stream"] = bool(d["was_stream"])
+        d["cache_hit"] = bool(d["cache_hit"])
+        d["response_cache_hit"] = bool(d.get("response_cache_hit"))
+        d["attempts"] = orjson.loads(d.get("attempts") or "[]")
+        tw = d.get("translation_warnings")
+        try:
+            d["translation_warnings"] = orjson.loads(tw) if tw else []
+        except (ValueError, TypeError):
+            d["translation_warnings"] = []
+        rb = d.get("request_body")
+        d["request_body"] = orjson.loads(rb) if rb else None
+        rsb = d.get("response_body")
+        d["response_body"] = orjson.loads(rsb) if rsb else None
+        return d
 
     async def read_overview(self, minutes: int,
                             key_ids: list[str] | None = None) -> dict:

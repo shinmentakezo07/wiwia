@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS deployments (
   provider_name TEXT NOT NULL,
   model_id TEXT NOT NULL,
   weight INTEGER NOT NULL DEFAULT 1,
+  detached INTEGER NOT NULL DEFAULT 0,
   UNIQUE(group_name, provider_name, model_id)
 );
 """
@@ -75,6 +76,7 @@ CREATE TABLE IF NOT EXISTS deployments (
   provider_name TEXT NOT NULL,
   model_id TEXT NOT NULL,
   weight INTEGER NOT NULL DEFAULT 1,
+  detached INTEGER NOT NULL DEFAULT 0,
   UNIQUE(group_name, provider_name, model_id)
 );
 """
@@ -167,6 +169,14 @@ class ConfigStore:
         if "alias_id" not in cols:
             await conn.execute(sa.text(
                 "ALTER TABLE providers ADD COLUMN alias_id TEXT"))
+        # deployments.detached: a YAML ``model_list`` deployment has no DB row,
+        # so deleting it through the admin API could only remove it from memory
+        # and it reappeared on the next restart. A tombstone row records the
+        # operator's decision so startup skips it (AUDIT #292).
+        dep_cols = await self._table_columns(conn, "deployments")
+        if dep_cols and "detached" not in dep_cols:
+            await conn.execute(sa.text(
+                "ALTER TABLE deployments ADD COLUMN detached INTEGER NOT NULL DEFAULT 0"))
         # cache_creation_input_cost_per_token: the admin PUT accepted and the
         # GET echoed this rate, but there was no column for it, so it lived in
         # memory only and was lost on restart.
@@ -370,16 +380,18 @@ class ConfigStore:
 
     async def add_deployment(self, group_name: str, provider_name: str,
                              model_id: str, weight: int = 1) -> None:
+        # detached=0: re-attaching a deployment must clear any tombstone left
+        # by an earlier detach, or startup would keep skipping it.
         if self._is_pg:
             sql = ("INSERT INTO deployments"
-                   " (group_name, provider_name, model_id, weight)"
-                   " VALUES (:g,:p,:m,:w)"
+                   " (group_name, provider_name, model_id, weight, detached)"
+                   " VALUES (:g,:p,:m,:w,0)"
                    " ON CONFLICT (group_name, provider_name, model_id)"
-                   " DO UPDATE SET weight=EXCLUDED.weight")
+                   " DO UPDATE SET weight=EXCLUDED.weight, detached=0")
         else:
             sql = ("INSERT OR REPLACE INTO deployments"
-                   " (group_name, provider_name, model_id, weight)"
-                   " VALUES (:g,:p,:m,:w)")
+                   " (group_name, provider_name, model_id, weight, detached)"
+                   " VALUES (:g,:p,:m,:w,0)")
         async with self.engine.begin() as conn:
             await conn.execute(sa.text(sql),
                                {"g": group_name, "p": provider_name,
@@ -387,19 +399,39 @@ class ConfigStore:
 
     async def update_deployment_weight(self, group_name: str, provider_name: str,
                                        model_id: str, weight: int) -> None:
-        async with self.engine.begin() as conn:
-            await conn.execute(
-                sa.text("UPDATE deployments SET weight = :w"
-                        " WHERE group_name = :g AND provider_name = :p AND model_id = :m"),
-                {"w": weight, "g": group_name, "p": provider_name, "m": model_id})
+        """Persist a weight for a deployment, creating the row if absent.
+
+        A bare UPDATE silently matched zero rows for every deployment that
+        came from the YAML ``model_list`` (the common case — those never get a
+        DB row), so the weight edit was memory-only and reverted on restart
+        (AUDIT #296). Upserting records the operator's intent for any
+        deployment the admin API can address.
+        """
+        await self.add_deployment(group_name, provider_name, model_id, weight)
 
     async def delete_deployment(self, group_name: str, provider_name: str,
                                 model_id: str) -> None:
+        """Tombstone a deployment so a YAML-sourced one stays detached.
+
+        A hard DELETE only helped admin-added deployments; a deployment from
+        the YAML ``model_list`` has no row, so the delete was memory-only and
+        the deployment came back on restart (AUDIT #297).  Writing
+        ``detached=1`` records the decision for both cases; ``add_deployment``
+        clears it if the operator re-attaches the same triple.
+        """
+        if self._is_pg:
+            sql = ("INSERT INTO deployments"
+                   " (group_name, provider_name, model_id, weight, detached)"
+                   " VALUES (:g,:p,:m,1,1)"
+                   " ON CONFLICT (group_name, provider_name, model_id)"
+                   " DO UPDATE SET detached=1")
+        else:
+            sql = ("INSERT OR REPLACE INTO deployments"
+                   " (group_name, provider_name, model_id, weight, detached)"
+                   " VALUES (:g,:p,:m,1,1)")
         async with self.engine.begin() as conn:
-            await conn.execute(
-                sa.text("DELETE FROM deployments"
-                        " WHERE group_name = :g AND provider_name = :p AND model_id = :m"),
-                {"g": group_name, "p": provider_name, "m": model_id})
+            await conn.execute(sa.text(sql),
+                               {"g": group_name, "p": provider_name, "m": model_id})
 
     # -- model pricing ---------------------------------------------------------
 
@@ -571,7 +603,7 @@ class ConfigStore:
                 "SELECT provider_name, label, secret, weight, enabled"
                 " FROM provider_keys ORDER BY id"))).all()
             dep_rows = (await conn.execute(sa.text(
-                "SELECT group_name, provider_name, model_id, weight"
+                "SELECT group_name, provider_name, model_id, weight, detached"
                 " FROM deployments ORDER BY id"))).all()
         return {
             "providers": [
@@ -587,7 +619,7 @@ class ConfigStore:
             ],
             "deployments": [
                 {"group_name": r[0], "provider_name": r[1], "model_id": r[2],
-                 "weight": r[3]}
+                 "weight": r[3], "detached": bool(r[4])}
                 for r in dep_rows
             ],
         }

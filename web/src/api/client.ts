@@ -103,6 +103,7 @@ import type {
   PoolKey,
   Provider,
   ProxyLogEntry,
+  PlaygroundMetrics,
   PublicModelGroup,
   RequestLogEntry,
   TimeseriesMetric,
@@ -327,6 +328,13 @@ export const getRequestLogs = (opts?: {
 
 export const getPricing = () =>
   api<{ models: ModelPrice[] }>("/admin/pricing");
+
+/** Exact server-recorded metrics for one completed request. */
+export const getPlaygroundMetrics = (requestId: string, signal?: AbortSignal) =>
+  api<PlaygroundMetrics>(
+    `/admin/logs/requests/${encodeURIComponent(requestId)}/metrics`,
+    { signal },
+  );
 
 /** `provider` scopes the price to one provider (an account name or a provider
  *  type). Omit it to write the base rate that covers every provider. */

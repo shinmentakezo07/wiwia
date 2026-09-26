@@ -409,6 +409,16 @@ class WiwiConfig(BaseModel):
                 raise ValueError(
                     f"alias_id {p.alias_id!r} is used by both provider"
                     f" {prior!r} and {p.name!r}")
+            # An alias that equals another provider's *name* would capture it:
+            # ``resolve_group`` resolves a literal group name to the alias
+            # target, and the deps view exposes providers under their own
+            # names, so ``alias_id: p2`` on p1 made p2 unreachable by name.
+            # Aliasing yourself is legal (both spellings mean the same
+            # account).
+            if p.alias_id != p.name and p.alias_id in names:
+                raise ValueError(
+                    f"alias_id {p.alias_id!r} on provider {p.name!r} equals"
+                    f" the name of another provider — rename one of them")
             seen_alias[p.alias_id] = p.name
         for entry in self.model_list:
             if entry.wiwi_params.provider not in names:

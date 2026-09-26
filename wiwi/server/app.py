@@ -760,10 +760,26 @@ class AppState:
             acct = self.router.providers.get(d["provider_name"])
             if acct is None:
                 continue
-            already = any(
-                dep.provider is acct and dep.model_id == d["model_id"]
-                for dep in self.router.groups.get(d["group_name"], []))
-            if already:
+            deps = self.router.groups.get(d["group_name"], [])
+            existing = next(
+                (dep for dep in deps
+                 if dep.provider is acct and dep.model_id == d["model_id"]),
+                None)
+            if d.get("detached"):
+                # Tombstone: the operator detached this deployment from the
+                # admin UI. A YAML-sourced one has no other record, so drop it
+                # here or it silently returns on every restart (AUDIT #297).
+                if existing is not None:
+                    deps.remove(existing)
+                    if not deps:
+                        self.router.groups.pop(d["group_name"], None)
+                continue
+            if existing is not None:
+                # The deployment came from YAML. A DB row for the same triple
+                # is an operator override (e.g. a weight edited in the Combos
+                # page), so apply it rather than discard it — otherwise every
+                # weight edit reverted on the next restart (AUDIT #296).
+                existing.weight = d["weight"]
                 continue
             dep = Deployment(group=d["group_name"], provider=acct,
                              model_id=d["model_id"], weight=d["weight"])
@@ -2015,6 +2031,69 @@ def create_app(config: WiwiConfig) -> FastAPI:
             headers={"Cache-Control": "no-store"},
         )
 
+    def _playground_metrics(event: LogEvent | dict) -> dict:
+        """Project the public request timing/usage contract for Playground.
+
+        ``total_tokens`` follows the OpenAI usage shape used by Playground:
+        prompt plus completion. Cached and reasoning values stored on
+        ``LogEvent`` are subsets of those wire totals, not additional tokens.
+        """
+        if isinstance(event, LogEvent):
+            values = {
+                "request_id": event.request_id,
+                "prompt_tokens": event.tok_in,
+                "completion_tokens": event.tok_out,
+                "tps": event.tps,
+                "ttft_ms": event.ttft_ms,
+                "latency_ms": event.latency_ms,
+                "usage_estimated": bool(event.usage_estimated),
+            }
+        else:
+            values = {
+                "request_id": event["request_id"],
+                "prompt_tokens": event["tok_in"],
+                "completion_tokens": event["tok_out"],
+                "tps": event["tps"],
+                "ttft_ms": event["ttft_ms"],
+                "latency_ms": event["latency_ms"],
+                "usage_estimated": bool(event["usage_estimated"]),
+            }
+        values["total_tokens"] = values["prompt_tokens"] + values["completion_tokens"]
+        return values
+
+    @app.get("/admin/logs/requests/{request_id}/metrics")
+    async def admin_request_metrics(request: Request, request_id: str):
+        """Return exact, tenant-scoped timing and usage for one request.
+
+        The request id is the correlation key returned on every gateway response.
+        Do not substitute a timestamp or newest-row lookup: concurrent Playground
+        requests can otherwise receive another turn's metrics. Non-admin callers
+        are restricted to request events belonging to one of their virtual keys.
+        """
+        actor = await current_user(request)
+        if actor is None:
+            return _err(401, "authentication_error", "authentication required", request)
+        kids: list[str] | None = None
+        if actor.role != "admin":
+            kids = [k["id"] for k in await state.auth.list_keys_for_owner(actor.id)]
+        sink = state.logs.db_sink
+        if sink is not None:
+            row = await sink.read_request_by_id(request_id, key_ids=kids)
+            if row is not None:
+                return ORJSONResponse(
+                    _playground_metrics(row), headers={"Cache-Control": "no-store"}
+                )
+        ring = await state.logs.sse.replay("request", 0)
+        for _seq, event in reversed(ring):
+            if event.request_id != request_id:
+                continue
+            if kids is not None and event.key_id not in kids:
+                continue
+            return ORJSONResponse(
+                _playground_metrics(event), headers={"Cache-Control": "no-store"}
+            )
+        return _err(404, "not_found_error", "request metrics not found", request)
+
     @app.get("/admin/stream")
     async def admin_stream(request: Request):
         # Both credential forms: the SPA streams this with the master key as a
@@ -2381,6 +2460,15 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         f"alias_id '{alias_id}' already used by provider"
                         f" '{state.router.alias_to_provider[alias_id]}'",
                         request)
+        # An alias equal to another account's *name* would capture it in
+        # resolve_group (the alias arm is reached for names the groups table
+        # lacks, and a provider is routable under its own name), making that
+        # account unreachable.  Same rule the config validator enforces.
+        if (alias_id is not None and alias_id != name
+                and alias_id in state.router.providers):
+            return _err(409, "invalid_request_error",
+                        f"alias_id '{alias_id}' is the name of an existing"
+                        " provider — pick a different alias", request)
         state.router.providers[name] = ProviderAccount(
             name=name, provider_type=ptype, base_url=base_url,
             keys=[ProviderKey(label=label, secret=secret)],
@@ -3160,6 +3248,45 @@ def create_app(config: WiwiConfig) -> FastAPI:
                                    diff={"removed_deployments": removed})
         return ORJSONResponse({"deleted": mid, "removed_deployments": removed})
 
+    # -- admin: model groups & routing -------------------------------------------
+    def _admin_group(name: str) -> tuple[str | None, list[Deployment] | str]:
+        """Resolve an admin-supplied group name to ``(real_group, deps)``.
+
+        Follows ``model_group_alias`` (the documented, tested behaviour: a
+        PATCH/DELETE by alias name targets the alias *target* group), but
+        never the provider-``alias_id`` arm.  ``Router.resolve_group`` returns
+        that arm's answer as ``(requested, deps)`` — the alias name paired
+        with deployments drawn from unrelated groups — so using it here meant
+        ``DELETE /admin/model-groups/shared/…`` (with ``alias_id: shared`` on
+        p1) re-keyed p1's deployment under a phantom group ``shared`` while
+        leaving the real owner untouched (AUDIT #294).
+
+        Returns ``(group, deps)`` or ``(None, <error message>)``.
+        """
+        deps = state.router.groups.get(name)
+        if deps:
+            return name, deps
+        conflict = _alias_name_conflict(name)
+        if conflict is not None:
+            return None, conflict
+        gname, adeps = state.router.resolve_group(name)
+        if gname and adeps:
+            return gname, adeps
+        return None, f"unknown model group '{name}'"
+
+    def _alias_name_conflict(name: str) -> str | None:
+        """Explain why ``name`` is an alias rather than a model group, or None.
+
+        Used by the admin model-group routes so an operator who typed an
+        alias into a group-name field gets told which kind of name they used
+        instead of a bare "unknown model group".
+        """
+        prov = state.router.alias_to_provider.get(name)
+        if prov is not None:
+            return (f"'{name}' is a provider alias_id (of provider '{prov}'),"
+                    " not a model group — pick a different group name")
+        return None
+
     @app.post("/admin/model-groups/{name:path}/deployments")
     async def admin_add_deployment(name: str, request: Request):
         """Attach a provider deployment to a model group (creating the group)."""
@@ -3175,6 +3302,14 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if not gname or not pname or not model_id:
             return _err(400, "invalid_request_error",
                         "group, provider and model_id are required", request)
+        # A name that only resolves through a provider alias_id is not a
+        # group: the deployments it returns belong to unrelated groups, so
+        # appending here would attach to the wrong group while the response
+        # claimed ``gname`` (AUDIT #294).
+        if state.router.groups.get(gname) is None:
+            conflict = _alias_name_conflict(gname)
+            if conflict is not None:
+                return _err(400, "invalid_request_error", conflict, request)
         # Model ids are typed by hand in the provider-detail UI now, so guard
         # the one mistake upstreams never forgive: embedded whitespace.
         if any(ch.isspace() for ch in model_id):
@@ -3226,10 +3361,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
         resp = await require_admin_dep(request)
         if resp:
             return resp
-        gname, deps = state.router.resolve_group(name)
-        if gname is None or not deps:
-            return _err(404, "not_found_error", f"unknown model group '{name}'",
-                        request)
+        gname, deps = _admin_group(name)
+        if gname is None:
+            return _err(404, "not_found_error", str(deps), request)
         pname = (request.query_params.get("provider") or "").strip()
         model_id = (request.query_params.get("model_id") or "").strip()
         if not pname or not model_id:
@@ -3297,10 +3431,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return _err(401, "authentication_error", "authentication required", request)
         if actor.role != "admin":
             return _err(403, "permission_error", "admin only", request)
-        gname, deps = state.router.resolve_group(name)
-        if gname is None or not deps:
-            return _err(404, "not_found_error", f"unknown model group '{name}'",
-                        request)
+        gname, deps = _admin_group(name)
+        if gname is None:
+            return _err(404, "not_found_error", str(deps), request)
         body, jerr = await json_body(request)
         if jerr:
             return jerr

@@ -2086,7 +2086,7 @@ select.admin-input option {
   .pg-caret::after { content: none; }
 }
 
-/* Typing loader — three bouncing dots */
+/* Typing loader — three quiet, eased dots */
 .pg-typing-dot {
   display: inline-block;
   width: 6px;
@@ -2094,12 +2094,12 @@ select.admin-input option {
   border-radius: 9999px;
   background: var(--admin-text-muted, #9ca3af);
 }
-@keyframes pg-typing-bounce {
-  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
-  30% { transform: translateY(-6px); opacity: 1; }
+@keyframes pg-typing-pulse {
+  0%, 60%, 100% { transform: scale(0.9); opacity: 0.4; }
+  30% { transform: scale(1.08); opacity: 1; }
 }
 @media (prefers-reduced-motion: no-preference) {
-  .pg-typing-dot { animation: pg-typing-bounce 1.2s ease-in-out infinite; }
+  .pg-typing-dot { animation: pg-typing-pulse 1.2s ease-in-out infinite; }
   .pg-typing-dot:nth-child(2) { animation-delay: 0.15s; }
   .pg-typing-dot:nth-child(3) { animation-delay: 0.3s; }
 }
@@ -2123,7 +2123,7 @@ select.admin-input option {
 .pg-sidebar {
   width: 260px;
   flex-shrink: 0;
-  transition: width 0.2s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.15s ease;
+  transition: opacity 0.15s ease;
   overflow: hidden;
 }
 .pg-sidebar[data-collapsed="true"] {
@@ -2164,15 +2164,6 @@ select.admin-input option {
 }
 .pg-hero-badge {
   background: linear-gradient(135deg, var(--color-brand-500), var(--color-brand-700));
-}
-.pg-hero-badge::before {
-  content: "";
-  position: absolute;
-  inset: -6px;
-  border-radius: 20px;
-  background: radial-gradient(circle, rgba(135, 87, 247, 0.35) 0%, transparent 70%);
-  filter: blur(10px);
-  z-index: -1;
 }
 
 /* Response stats enter */
@@ -2351,25 +2342,11 @@ select.admin-input option {
 
 /* ── Playground: visual polish ────────────────────────────────────────────── */
 
-/* Soft brand glow behind the top of the chat arena */
-.pg-arena-glow {
-  position: absolute;
-  top: -140px;
-  left: 50%;
-  width: 680px;
-  height: 340px;
-  transform: translateX(-50%);
-  background: radial-gradient(ellipse at center, rgba(135, 87, 247, 0.07) 0%, transparent 65%);
-  pointer-events: none;
-}
-
-/* Gradient headline in the hero — white falling off into brand purple */
+/* Hero headline keeps its emphasis in type weight and color, not a
+   decorative text gradient. */
 .pg-hero-title {
-  background: linear-gradient(100deg, var(--admin-text) 35%, var(--color-brand-300) 75%, var(--color-brand-400));
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  color: transparent;
+  color: var(--admin-text);
+  text-wrap: balance;
 }
 
 /* Thin, quiet scrollbars inside the playground */
@@ -2399,7 +2376,7 @@ select.admin-input option {
   left: 0;
   top: 22%;
   bottom: 22%;
-  width: 2px;
+  width: 1px;
   border-radius: 2px;
   background: linear-gradient(180deg, var(--color-brand-400), var(--color-brand-600));
 }
@@ -2413,15 +2390,13 @@ select.admin-input option {
     0 8px 24px -10px rgba(99, 51, 209, 0.5);
 }
 
-/* Composer: brand focus glow replaces the plain border-color change */
+/* Composer: crisp focus state without a colored halo. */
 .pg-composer {
-  transition: border-color 0.15s ease, box-shadow 0.2s ease;
+  transition: border-color 0.15s ease, background-color 0.2s ease;
 }
 .pg-composer:focus-within {
-  border-color: rgba(135, 87, 247, 0.35);
-  box-shadow:
-    0 0 0 1px rgba(135, 87, 247, 0.18),
-    0 8px 32px -12px rgba(135, 87, 247, 0.35);
+  border-color: rgba(129, 140, 248, 0.42);
+  background: linear-gradient(180deg, rgba(28, 28, 34, 0.98), rgba(17, 17, 21, 0.99));
 }
 
 /* Scroll-to-bottom button: gentle float-in */
@@ -2433,6 +2408,432 @@ select.admin-input option {
   .pg-scroll-btn { animation: pg-float-in 0.2s ease both; }
 }
 .pg-scroll-btn { box-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.55); }
+
+/* ── Playground workbench refinement ──────────────────────────────────────── */
+
+/* The workbench borrows the public site's beam language, but keeps the
+   treatment quiet enough for a task surface. */
+.pg-atmosphere {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.pg-workbench-beams {
+  top: 0;
+  bottom: auto;
+  height: 58%;
+  opacity: 0.16;
+  transform: none;
+  transform-origin: center;
+  mix-blend-mode: screen;
+  filter: saturate(0.8);
+  mask-image: linear-gradient(to bottom, #000 0%, rgba(0, 0, 0, 0.82) 54%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, rgba(0, 0, 0, 0.82) 54%, transparent 100%);
+}
+
+.pg-topbar {
+  background: rgba(5, 5, 5, 0.84);
+}
+.pg-brand {
+  min-height: 44px;
+}
+.pg-brand-mark {
+  background: linear-gradient(145deg, rgba(99, 102, 241, 0.2), rgba(124, 58, 237, 0.12));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+}
+.pg-model-trigger {
+  width: 100%;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+}
+.pg-model-menu {
+  box-shadow: 0 22px 60px -24px rgba(0, 0, 0, 0.9), 0 0 0 1px rgba(255, 255, 255, 0.02);
+}
+
+.pg-rail {
+  width: 52px;
+  background: rgba(9, 9, 11, 0.92);
+}
+.pg-icon-button {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+}
+.pg-sidebar {
+  width: 272px;
+  background: rgba(9, 9, 11, 0.88);
+}
+.pg-sidebar-header {
+  min-height: 76px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.045);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent);
+}
+.pg-new-chat {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+}
+.pg-chat-item {
+  min-height: 56px;
+}
+.pg-chat-item:hover {
+  background: rgba(255, 255, 255, 0.035);
+}
+.pg-chat-item[data-active="true"] {
+  background: rgba(99, 102, 241, 0.11);
+  border-color: rgba(129, 140, 248, 0.16);
+}
+.pg-chat-item[data-active="true"] .pg-chat-item-icon {
+  color: #c4b5fd;
+  background: rgba(124, 58, 237, 0.14);
+}
+.pg-chat-item[data-active="true"]::before {
+  width: 1px;
+  background: #a78bfa;
+}
+
+.pg-body {
+  min-width: 0;
+}
+.pg-arena {
+  isolation: isolate;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.012), transparent 28%);
+}
+.pg-context-bar {
+  position: relative;
+  z-index: 1;
+}
+.pg-context-bar::after {
+  content: "";
+  display: block;
+  width: 100%;
+  height: 1px;
+  margin-top: 10px;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.045), transparent);
+}
+.pg-message-scroll {
+  position: relative;
+  z-index: 1;
+}
+.pg-message-column {
+  position: relative;
+}
+.pg-message {
+  position: relative;
+}
+.pg-message-assistant {
+  border-top: 1px solid rgba(255, 255, 255, 0.035);
+  padding-top: 18px;
+}
+.pg-message-assistant:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+.pg-message-heading {
+  min-height: 18px;
+}
+.pg-message-role {
+  letter-spacing: 0.12em;
+}
+.pg-response {
+  min-width: 0;
+}
+
+/* Reasoning trace — a quiet, secondary surface above the answer. Collapsed by
+   default once the answer exists; open while it is the only sign of progress. */
+.pg-reasoning {
+  border: 1px solid var(--admin-border);
+  border-left: 2px solid color-mix(in srgb, var(--admin-accent, #3b82f6) 55%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--admin-surface-elevated) 65%, transparent);
+  font-size: 12.5px;
+}
+.pg-reasoning[data-live="true"] {
+  border-left-color: var(--admin-accent, #3b82f6);
+}
+.pg-reasoning-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* 44px minimum tap target (UI rule) without a visually heavy row. */
+  min-height: 44px;
+  padding: 0 10px;
+  cursor: pointer;
+  list-style: none;
+  color: var(--admin-text-dim);
+  user-select: none;
+}
+.pg-reasoning-summary::-webkit-details-marker { display: none; }
+.pg-reasoning-summary:hover { color: var(--admin-text-muted); }
+.pg-reasoning-summary:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--admin-accent, #3b82f6) 60%, transparent);
+  border-radius: 10px;
+}
+.pg-reasoning-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.pg-reasoning-body {
+  max-height: min(38vh, 320px);
+  overflow-y: auto;
+  padding: 0 10px 10px;
+}
+.pg-reasoning-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--admin-text-muted);
+}
+.pg-msg-failed {
+  line-height: 1.5;
+}
+.pg-message-actions {
+  min-height: 28px;
+}
+.pg-user-bubble {
+  background: linear-gradient(135deg, rgba(109, 76, 224, 0.92), rgba(79, 70, 229, 0.94));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 8px 24px -14px rgba(76, 29, 149, 0.8);
+}
+.pg-avatar-user {
+  background: linear-gradient(145deg, #8b5cf6, #4f46e5);
+  box-shadow: 0 4px 16px -8px rgba(99, 102, 241, 0.8);
+}
+.pg-avatar-assistant {
+  background: linear-gradient(145deg, rgba(124, 58, 237, 0.15), rgba(30, 41, 59, 0.7));
+}
+
+.pg-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  border: 1px solid transparent;
+  border-radius: 9999px;
+  padding: 4px 9px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  line-height: 1;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.pg-status-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 9999px;
+  background: currentColor;
+}
+.pg-status-ready {
+  color: #86efac;
+  border-color: rgba(74, 222, 128, 0.16);
+  background: rgba(34, 197, 94, 0.07);
+}
+.pg-status-live {
+  color: #a5b4fc;
+  border-color: rgba(129, 140, 248, 0.2);
+  background: rgba(99, 102, 241, 0.1);
+}
+.pg-status-live .pg-status-dot {
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
+  animation: pg-status-pulse 1.6s ease-in-out infinite;
+}
+.pg-status-loading {
+  color: #93c5fd;
+  border-color: rgba(96, 165, 250, 0.16);
+  background: rgba(59, 130, 246, 0.07);
+}
+.pg-status-loading .pg-status-dot {
+  animation: pg-status-pulse 1.2s ease-in-out infinite;
+}
+.pg-status-warning {
+  color: #fcd34d;
+  border-color: rgba(251, 191, 36, 0.18);
+  background: rgba(245, 158, 11, 0.08);
+}
+.pg-status-compact {
+  border-color: transparent;
+  background: transparent;
+  padding-inline: 4px;
+}
+.pg-status-compact .pg-status-label {
+  display: none;
+}
+@media (min-width: 640px) {
+  .pg-status-compact {
+    border-color: rgba(255, 255, 255, 0.06);
+    background: rgba(255, 255, 255, 0.025);
+  }
+  .pg-status-compact .pg-status-label {
+    display: inline;
+  }
+}
+@keyframes pg-status-pulse {
+  0%, 100% { opacity: 0.55; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1.15); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pg-status-live .pg-status-dot,
+  .pg-status-loading .pg-status-dot { animation: none; }
+}
+
+.pg-key-notice {
+  color: #fbbf24;
+}
+.pg-dashboard-link {
+  min-height: 44px;
+}
+.pg-dashboard-link:hover {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.045);
+}
+
+.pg-metrics {
+  min-height: 38px;
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.018);
+}
+.pg-metrics-label {
+  color: var(--admin-text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.pg-metric {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+  white-space: nowrap;
+}
+.pg-metric-label {
+  color: rgba(255, 255, 255, 0.45);
+}
+.pg-metrics-loading {
+  color: var(--admin-text-muted);
+  animation: pg-status-pulse 1.3s ease-in-out infinite;
+}
+
+.pg-composer-region {
+  position: relative;
+  z-index: 2;
+  border-top: 1px solid rgba(255, 255, 255, 0.045);
+  background: linear-gradient(180deg, rgba(5, 5, 5, 0.24), rgba(5, 5, 5, 0.96) 30%);
+}
+.pg-composer {
+  background: linear-gradient(180deg, rgba(24, 24, 29, 0.96), rgba(15, 15, 19, 0.98));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025), 0 16px 40px -24px rgba(0, 0, 0, 0.95);
+}
+.pg-composer:focus-within {
+  border-color: rgba(129, 140, 248, 0.42);
+  background: linear-gradient(180deg, rgba(28, 28, 34, 0.98), rgba(17, 17, 21, 0.99));
+}
+.pg-send-button {
+  background: linear-gradient(145deg, #8b5cf6, #4f46e5);
+  box-shadow: 0 8px 22px -12px rgba(99, 102, 241, 0.9), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+.pg-send-button:disabled {
+  box-shadow: none;
+}
+.pg-stop-button {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+.pg-composer-hints {
+  min-height: 18px;
+}
+
+.pg-hero-shell {
+  isolation: isolate;
+}
+.pg-model-card {
+  border: 1px solid rgba(129, 140, 248, 0.16);
+  background: rgba(99, 102, 241, 0.055);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+.pg-model-card-icon {
+  color: #c4b5fd;
+  background: rgba(124, 58, 237, 0.15);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.pg-ready-pill {
+  color: #86efac;
+  background: rgba(34, 197, 94, 0.08);
+  border: 1px solid rgba(74, 222, 128, 0.14);
+}
+.pg-hero-tabs {
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.025);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+}
+.pg-suggestion-card {
+  min-height: 58px;
+}
+.pg-suggestion-icon {
+  color: var(--admin-text-dim);
+  background: rgba(255, 255, 255, 0.045);
+  transition: color 0.2s ease, background-color 0.2s ease;
+}
+.pg-suggestion-card:hover .pg-suggestion-icon {
+  color: #c4b5fd;
+  background: rgba(124, 58, 237, 0.16);
+}
+.pg-hero-hints {
+  min-height: 18px;
+}
+
+@media (max-width: 767px) {
+  .pg-sidebar {
+    width: min(280px, calc(100vw - 52px));
+  }
+  .pg-context-bar {
+    padding-top: 10px;
+  }
+  .pg-context-bar::after {
+    margin-top: 10px;
+  }
+  .pg-workbench-beams {
+    height: 48%;
+    opacity: 0.1;
+    mask-image: linear-gradient(to bottom, #000 0%, rgba(0, 0, 0, 0.72) 52%, transparent 100%);
+    -webkit-mask-image: linear-gradient(to bottom, #000 0%, rgba(0, 0, 0, 0.72) 52%, transparent 100%);
+  }
+  .pg-metrics {
+    align-items: flex-start;
+  }
+  .pg-metrics-items {
+    gap-x: 9px;
+  }
+  .pg-composer-region {
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
+  }
+  .pg-hero-title {
+    font-size: 26px;
+  }
+  .pg-hero-shell {
+    align-items: flex-start;
+  }
+  .pg-hero-shell .animate-hero-enter {
+    margin-top: 4px;
+  }
+}
+
+@media (max-height: 760px) and (min-width: 768px) {
+  .pg-hero-shell {
+    align-items: flex-start;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pg-workbench-beams {
+    display: none;
+  }
+}
 
 /* ── Reliability page: failover diagram + uptime timeline ────────────────── */
 

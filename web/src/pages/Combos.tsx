@@ -133,6 +133,10 @@ function ComboDialog(props: {
   editing: ModelGroup | null; // null = create mode
   providerOptions: ProviderOption[];
   registeredByProvider: Record<string, string[]>;
+  // Every live combo name. Create mode must reject a taken name: POST would
+  // otherwise *merge* the ticked models into the existing combo and report
+  // success, which silently edits a routing group the operator did not open.
+  existingNames: string[];
   onClose: () => void;
 }) {
   const qc = useQueryClient();
@@ -337,6 +341,11 @@ function ComboDialog(props: {
       const gname = name.trim();
       if (!gname) throw new Error("enter a combo name");
       if (/\s/.test(gname)) throw new Error("combo name cannot contain spaces");
+      if (!isEdit && props.existingNames.includes(gname)) {
+        throw new Error(
+          `a combo named “${gname}” already exists — open it and use Edit, or pick another name`,
+        );
+      }
       if (selected.size === 0) throw new Error("tick at least one model");
       const entries = Array.from(selected.values());
       if (isEdit) {
@@ -496,9 +505,13 @@ function ComboDialog(props: {
                     className={`shrink-0 font-mono text-[10px] tabular-nums ${
                       r.chosen > 0 ? "text-blue-300" : "text-[var(--admin-text-dim)]"
                     }`}
-                    title={`${r.chosen} of ${r.total} selected`}
+                    title={
+                      searching
+                        ? `${r.matches} of ${r.total} model ids match`
+                        : `${r.chosen} of ${r.total} selected`
+                    }
                   >
-                    {r.chosen}/{r.total}
+                    {searching ? r.matches : `${r.chosen}/${r.total}`}
                   </span>
                 </button>
               );
@@ -748,14 +761,20 @@ function ComboDetail(props: {
   const remove = useMutation({
     mutationFn: (t: { provider: string; model_id: string }) =>
       deleteDeployment(props.combo.name, t.provider, t.model_id),
-    onSuccess: () => invalidateModels(qc),
+    onSuccess: () => {
+      props.onError("");
+      invalidateModels(qc);
+    },
     onError: (e) => props.onError(e.message),
   });
 
   const setWeight = useMutation({
     mutationFn: (t: { ident: string; weight: number }) =>
       patchModelGroup(props.combo.name, { weights: { [t.ident]: t.weight } }),
-    onSuccess: () => invalidateModels(qc),
+    onSuccess: () => {
+      props.onError("");
+      invalidateModels(qc);
+    },
     onError: (e) => props.onError(e.message),
   });
 
@@ -976,6 +995,7 @@ export function CombosPage() {
 
   // Dialog modes: explicit create, or edit the currently selected combo.
   const openDialog = (mode: "create" | "edit") => {
+    setError(null);
     setEditingGroup(mode === "edit" ? (groups.find((g) => g.name === selectedName) ?? null) : null);
     setDialogOpen(true);
   };
@@ -1132,6 +1152,7 @@ export function CombosPage() {
         editing={editingGroup}
         providerOptions={providerOptions}
         registeredByProvider={registeredByProvider}
+        existingNames={sortedGroups.map((g) => g.name)}
         onClose={() => setDialogOpen(false)}
       />
     </div>

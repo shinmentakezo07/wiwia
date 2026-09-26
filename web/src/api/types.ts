@@ -105,6 +105,18 @@ export interface Attempt {
   latency_ms: number;
 }
 
+/** Authoritative per-request metrics used by the Playground footer. */
+export interface PlaygroundMetrics {
+  request_id: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  tps: number;
+  ttft_ms: number;
+  latency_ms: number;
+  usage_estimated: boolean;
+}
+
 /** public_dict(LogEvent) for the request stream */
 export interface RequestLogEntry {
   stream: "request";

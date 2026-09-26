@@ -6,6 +6,12 @@ export interface ChatMsg {
   id: string;
   role: "user" | "assistant";
   content: string;
+  /** Model reasoning trace, when the turn produced one. Persisted so a reloaded
+   *  conversation still shows the thinking block instead of silently dropping
+   *  it (the streaming path keeps it in its own field, not in `content`). */
+  reasoning?: string;
+  /** Set when the turn ended in an error after partial output arrived. */
+  failed?: boolean;
 }
 
 export interface Conversation {

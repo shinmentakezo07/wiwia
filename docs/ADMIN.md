@@ -68,7 +68,7 @@ Public front pages (unauthenticated, `PublicLayout`): Landing, Models catalog (`
 1. **Add provider**: Providers → Add (type from `/admin/provider-catalog`, name, base_url, credentials) → `POST /admin/providers`. For Cline/WorkBuddy use the OAuth connect flow instead of raw keys.
 2. **Key pool**: add multiple keys per provider with labels + weights; toggle/patch/delete individually; reveal secret (audit-logged).
 3. **Health states**: `active | cooling | invalid | disabled`, updated live from request outcomes; Dashboard/Providers pages reflect cooldowns via SSE.
-4. **Model deployments**: Models → group → add deployment (provider + model_id + weight); WRR and failover pick these up on the next request.
+4. **Model deployments**: Models → group → add deployment (provider + model_id + weight); WRR and failover pick these up on the next request. Edits are durable: weight changes and detaches are written to the `deployments` table (`detached=1` tombstones a detach), and a DB row overrides the YAML `model_list` entry for the same group/provider/model on restart.
 5. **Export/import**: `/admin/providers/export` / `import` for moving provider+key config between installs (secrets masked or included per flag).
 
 ## 6. Stats & data sources
