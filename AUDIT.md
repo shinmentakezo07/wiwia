@@ -7,6 +7,142 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — round 104 (2026-09-27)
+
+Router audit. Every finding below was reproduced against the pre-fix source
+(the whole set fails before the fix and passes after); pinned by
+`tests/test_fix_round104.py`.
+
+### 303. A full `rpm` window reported its horizon from an unrelated stale `tpm` event
+
+**Severity:** 🟠 High · **Status: fixed**
+
+**Where:** `wiwi/router/router.py` — `Deployment.retry_after_s`.
+
+**Trigger:** a deployment with both `rpm` and `tpm` set, where the `rpm` window
+is saturated by requests admitted just now while a cheap request 50 s old is
+still inside the `tpm` window (it is then the globally oldest event).
+
+**Consequence:** the scan took the oldest event across *both* windows, not the
+saturated one. With `rpm: 3, tpm: 10_000` and three just-admitted requests it
+returned **11 s**; the `rpm` window was in fact blocked for the rest of the
+minute. The value is what the caller puts in `retry_after` and what the 429
+message reports, so every client that honoured it retried straight back into
+the cap — a retry storm against a deployment already at its limit.
+
+**Fix:** only a saturated window constrains admission (admission needs *every*
+limited window to have room), so the answer is the **latest** of the saturated
+windows' clears. Unsaturated case returns `1`. The pre-existing
+`wiwi/ratelimit/redis.py:compute_retry_after_seconds` already takes the
+saturated-window view; this brings the in-memory window to parity.
+
+**Verification:** `test_retry_after_uses_rpm_window_not_a_stale_tpm_event`
+(11 → >30), the symmetric `…_tpm_window_when_tpm_is_the_saturated_one`, and
+`test_retry_after_is_one_when_no_window_is_saturated` (60 → 1).
+
+### 304. `resolve_group`'s 8-hop budget truncated legitimate alias chains
+
+**Severity:** 🟡 Medium · **Status: fixed**
+
+**Where:** `wiwi/router/router.py` — `Router.resolve_group`, `for _ in range(8)`.
+
+**Trigger:** `model_group_alias` with 8 or more links — e.g. a provider alias
+whose name is itself an alias that hops onward — where the chain is acyclic and
+resolves to a real group.
+
+**Consequence:** the walk stopped after 8 hops and fell through to the
+provider-alias arm and then to `(None, [])`, so a model the gateway can serve
+returned 404. Cycle detection is `seen`'s job, and it already fails closed
+(`AUDIT #109`), so the budget only ever cut off valid configurations; config
+validation can reject direct cycles but not chained ones.
+
+**Fix:** the loop is now `while True`, terminated by the `seen` cycle guard.
+`test_long_alias_cycle_still_fails_closed` pins that removing the budget does
+not let a long cycle resolve arbitrarily.
+
+**Verification:** `test_long_alias_chain_resolves[7|8|12]` — 8- and 12-hop
+chains go from `(None, [])` to `('real', [1 deployment])`.
+
+### 305. The provider half of `cycle_every_n` was a permanent no-op
+
+**Severity:** 🟠 High · **Status: fixed**
+
+**Where:** `wiwi/router/router.py` — `execute_with_retries`, the
+`provider_consec` exclusion block.
+
+**Trigger:** `cycle_every_n > 0` with lopsided provider weights (e.g. 50:1 or
+20:1) on a multi-provider group, over more than a few requests.
+
+**Consequence:** the key-level cadence consumes its counters (`AUDIT #226`),
+but the provider-level loop only *read* `provider_consec` and never cleared it.
+Each success incremented it, so both providers soon sat at `>= cycle_n`, the
+exclusion set covered every deployment, `pick_deployment` fell back to its
+relaxed pass, and the exclusion was permanently ignored. Measured: max run
+**20 in a row** for the heavy provider with `cycle_every_n=2`, and counters
+reaching `{'pA': 115, 'pB': 5}`; `cycle_every_n` 0 and 3 produced
+*identical* sequences. The setting was indistinguishable from disabled.
+
+**Fix:** pop the provider's credit when its exclusion is applied — the same
+consume-on-use shape as the key-level loop directly below it. The counters now
+bound themselves at `cycle_n` and the run is capped at `cycle_n`.
+
+**Verification:** `test_provider_cycle_cadence_fires_under_skewed_weights`
+(20 → ≤2), `test_provider_cycle_counters_do_not_saturate` (`{pA:115}` → ≤3),
+`test_provider_cadence_is_not_a_no_op`.
+
+### 306. `weight: 0` / negative weights were accepted on keys and deployments
+
+**Severity:** 🟡 Medium · **Status: fixed**
+
+**Where:** `wiwi/config.py` — `KeyDef` and `DeploymentParams`.
+
+**Trigger:** `weight: 0` or a negative value in `wiwi.yaml` (or the admin
+PATCH/build path) for a provider key or a `model_list` deployment.
+
+**Consequence:** smooth WRR *adds* every candidate's weight to its deficit each
+round. `weight: 0` on 2-deployment group handed **100 %** of traffic to the
+zero-weight entry and starved the healthy peer to 0; `weight: -1` starved the
+peer permanently by driving its deficit negative. `rpm`/`tpm` were already
+validated as positive (`AUDIT #101`) and the admin API clamps weight to
+`>= 1`, so the YAML path was the inconsistent one and accepted a config that
+silently destroys the routing it was meant to configure.
+
+**Fix:** `weight` must be `>= 1` on both models; validated at config load with
+a clear `ConfigError` naming the offending path.
+
+**Verification:** `test_nonpositive_key_weight_rejected[0|-1]`,
+`test_nonpositive_deployment_weight_rejected[0|-3]`,
+`test_default_weights_still_accepted` (the default of 1 is unaffected).
+
+### 307. Duplicate `(provider, model)` pairs in one group starved the second entry
+
+**Severity:** 🟡 Medium · **Status: fixed**
+
+**Where:** `wiwi/router/router.py` — `_CrossProviderWRR.pick`, `_dep_cursors`.
+
+**Trigger:** a multi-provider model group whose `model_list` lists the *same*
+provider and model twice (with different weights, or as two identical rows).
+The YAML path permits it; only the admin attach endpoint rejects an exact
+duplicate.
+
+**Consequence:** the second-level cursor was keyed by `(provider, model_id)`,
+so both `Deployment` objects added their weight to **one** shared deficit and
+then raced for the same `max`. The first object in list order always won the
+tie and the second could never be selected — with weights 3:1 inside provider
+`pA`, the 3-weight entry took 160 of 200 picks and the 1-weight entry took
+**0**, instead of the intended 150/50. Silent, permanent starvation of a
+configured deployment.
+
+**Fix:** the cursor is keyed by the live `Deployment` object (`id`).
+`rebuild_cross_provider_pools` recreates the cursor whenever the admin API
+changes a group's provider set, and `_build` constructs it after all
+deployments exist, so the keys stay valid for the object's lifetime.
+
+**Verification:** `test_duplicate_provider_model_pair_rotates` — the starved
+entry goes from 0 → ~40 picks of 200 (3:1 split holds).
+
+---
+
 ## ✅ Fixed — round 101 (2026-09-26)
 
 Review of the uncommitted round-97…100 batch. The gateway half is recorded in

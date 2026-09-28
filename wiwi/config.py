@@ -79,6 +79,20 @@ class KeyDef(BaseModel):
             raise ValueError("provider key entry needs a non-empty 'key'")
         return v
 
+    @field_validator("weight")
+    @classmethod
+    def _weight_positive(cls, v: int) -> int:
+        """Reject a non-positive weight. Smooth WRR adds every candidate's
+        weight to its deficit each round, so a ``0`` or negative entry turns a
+        whole pool's traffic into "whoever the max lands on" — at ``weight: -1``
+        the healthy peer's deficit goes *negative* and it is starved forever
+        while the negative key absorbs 100 % of traffic (AUDIT #306). The admin
+        API already clamps to ``>= 1``; the config path was the inconsistent
+        one."""
+        if v < 1:
+            raise ValueError("key weight must be >= 1")
+        return v
+
 
 class ProviderDef(BaseModel):
     name: str
@@ -157,6 +171,21 @@ class DeploymentParams(BaseModel):
         """
         if v is not None and v <= 0:
             raise ValueError(f"{info.field_name} must be a positive integer")
+        return v
+
+    @field_validator("weight")
+    @classmethod
+    def _weight_positive(cls, v: int) -> int:
+        """Reject a non-positive deployment weight.
+
+        ``weight`` feeds the same smooth-WRR arithmetic as a key weight: a
+        ``0`` or negative entry does not merely go unserved, it *starves its
+        peers* while absorbing 100 % of the group's traffic (AUDIT #306). The
+        admin Combos API clamps to ``>= 1``; this keeps the YAML path from
+        accepting what the API rejects.
+        """
+        if v < 1:
+            raise ValueError("weight must be >= 1")
         return v
 
 

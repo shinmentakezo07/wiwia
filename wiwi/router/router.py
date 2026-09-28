@@ -538,18 +538,37 @@ class Deployment:
             w.drop_matching(request_id, estimated_only=True)
 
     def retry_after_s(self, now: float | None = None) -> int:
-        """Seconds until the next slot frees, clamped to the window (1..60)."""
+        """Seconds until admission can succeed again, clamped to 1..60.
+
+        Only a *saturated* window constrains the horizon, and admission needs
+        every limited window to have room — so the answer is the latest of the
+        saturated windows' clears. The previous scan took the globally oldest
+        event across both windows, so a full ``rpm`` window whose events had
+        just been admitted reported the expiry of an unrelated cheap ``tpm``
+        event admitted 50 s earlier: the caller told the client "retry in 11 s",
+        the client retried, and the deployment was still at its rpm cap for the
+        rest of the minute (AUDIT #303).
+        """
         now = time.monotonic() if now is None else now
-        oldest: float | None = None
+        horizon = 0.0
+        saturated = False
         for w, limit in ((self._rpm_window, self.rpm), (self._tpm_window, self.tpm)):
             if not limit or w is None:
                 continue
             w.prune(now)
-            if w.events and (oldest is None or w.events[0].ts < oldest):
-                oldest = w.events[0].ts
-        if oldest is None:
+            if w.total < limit:
+                continue  # room left: this window cannot gate admission
+            saturated = True
+            if w.events:
+                horizon = max(horizon, _WINDOW_S - (now - w.events[0].ts))
+            else:
+                # Empty after pruning yet still at the cap: only reachable
+                # with a nonsensical limit; nothing ages out sooner than the
+                # full window.
+                horizon = max(horizon, _WINDOW_S)
+        if not saturated:
             return 1
-        return max(1, min(60, int(_WINDOW_S - (now - oldest)) + 1))
+        return max(1, min(60, int(horizon) + 1))
 
     @property
     def available(self) -> bool:
@@ -684,7 +703,13 @@ class Router:
     def resolve_group(self, requested: str) -> tuple[str | None, list[Deployment]]:
         name = requested
         seen: set[str] = {name}
-        for _ in range(8):  # bounded walk: aliases may chain, never cycle
+        # `seen` already terminates a cycle; the old 8-hop budget cut off
+        # legitimate chains instead — an alias 8 links deep (or a provider
+        # alias whose name is itself a group name) silently resolved to
+        # ``(None, [])`` and the caller got a 404 for a model it could serve
+        # (AUDIT #304). Config validation can only reject direct cycles, so
+        # chained ones still rely on `seen`.
+        while True:
             nxt = _alias_target(self.settings.model_group_alias.get(name))
             if nxt is None or nxt == name:
                 break
@@ -837,10 +862,18 @@ class _CrossProviderWRR:
     all cooling must not keep claiming its share of the cursor.
     """
     _state: dict[str, float] = field(default_factory=dict)
-    # Per-(provider, model_id) smooth-WRR cursor for the second level: which
-    # deployment of the chosen provider actually serves.  Without it the
-    # provider's whole share went to its first deployment (AUDIT #295).
-    _dep_cursors: dict[tuple[str, str], float] = field(default_factory=dict)
+    # Per-deployment smooth-WRR cursor for the second level: which deployment
+    # of the chosen provider actually serves.  Without it the provider's whole
+    # share went to its first deployment (AUDIT #295).  Keyed by the live
+    # object's ``id`` rather than ``(provider, model_id)``: a group may list the
+    # *same* provider/model pair twice (the YAML ``model_list`` path allows it;
+    # only the admin attach endpoint rejects it), and one tuple key made both
+    # entries share a deficit so the second never won the ``max`` — it was
+    # starved while the first served double its share (AUDIT #307).
+    # ``rebuild_cross_provider_pools`` recreates this object whenever the admin
+    # API changes the group's provider set, and ``_build`` creates it after all
+    # deployments exist, so the keys stay valid for the object's lifetime.
+    _dep_cursors: dict[int, float] = field(default_factory=dict)
 
     def pick(self, avail: list[Deployment]) -> Deployment | None:
         # Only consider providers with at least one available deployment.
@@ -859,19 +892,16 @@ class _CrossProviderWRR:
         # Second level: rotate across the chosen provider's deployments in
         # this group by *their* weights, so a provider contributing several
         # models does not funnel its entire share into the first one.  Same
-        # smooth-WRR as above, keyed per deployment; the cursor is tracked by
-        # (provider, model_id) because a Deployment object may be recreated
-        # when the admin API re-attaches an identical pair.
+        # smooth-WRR as above, keyed by the live Deployment object.
         mine = [d for d in avail if d.provider.name == best]
         if len(mine) == 1:
             return mine[0]
         dep_total = sum(d.weight for d in mine)
         for d in mine:
-            key = (best, d.model_id)
+            key = id(d)
             self._dep_cursors[key] = self._dep_cursors.get(key, 0.0) + d.weight
-        chosen = max(mine, key=lambda d: self._dep_cursors.get((best, d.model_id), 0.0))
-        self._dep_cursors[(best, chosen.model_id)] = (
-            self._dep_cursors.get((best, chosen.model_id), 0.0) - dep_total)
+        chosen = max(mine, key=lambda d: self._dep_cursors.get(id(d), 0.0))
+        self._dep_cursors[id(chosen)] = self._dep_cursors.get(id(chosen), 0.0) - dep_total
         return chosen
 
 
@@ -1174,6 +1204,15 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                     pname = d.provider.name
                     if provider_consec.get(pname, 0) >= cycle_n:
                         prefer_exclude.add(id(d))
+                        # Consume the credit, exactly as the key-level cadence
+                        # below does. Left to climb, every provider eventually
+                        # sits at >= cycle_n, the exclusion set contains them
+                        # all, ``pick_deployment`` falls back to the relaxed
+                        # pass, and the provider cadence joins the key cadence
+                        # as a permanent no-op — the AUDIT #226 defect on the
+                        # provider axis (AUDIT #305). Popping here means the
+                        # exclusion is applied once per ``cycle_n`` successes.
+                        provider_consec.pop(pname, None)
             dep = router.pick_deployment(deps, ctx, exclude=prefer_exclude)
             if dep is None:
                 # relax cycle exclusion and try again with just the tried dep set

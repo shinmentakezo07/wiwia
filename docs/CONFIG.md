@@ -134,7 +134,7 @@ model_list:
 | `model_name` | yes | Canonical name clients use. |
 | `wiwi_params.model` | yes | `<provider_type>/<model_id>` or just `<model_id>` for openai. |
 | `wiwi_params.api_key` | no | Overrides the provider's key for this deployment. Uses provider key pool if absent. |
-| `wiwi_params.weight` | no | Default `1`. WRR weight within the group. |
+| `wiwi_params.weight` | no | Default `1`. WRR weight within the group. Must be `>= 1`; a `0` or negative weight starves the group's other deployments. |
 | `wiwi_params.timeout_s` | no | Per-request timeout for this deployment. |
 | `wiwi_params.max_tokens_default` | no | Default `max_tokens` when the client doesn't send one. |
 | `model_aliases` | no | Additional names clients can use to reach this model. |
@@ -283,7 +283,7 @@ providers:
     # + additional keys added via admin API, each with weight, enabled flag
 ```
 
-The key pool concept: a provider can have multiple real API keys with weights. The router picks a key from the pool on each request. Keys can be in states: `active`, `cooling` (cooldown after error), `invalid` (failed auth), `disabled`.
+The key pool concept: a provider can have multiple real API keys with weights (each must be `>= 1`). The router picks a key from the pool on each request. Keys can be in states: `active`, `cooling` (cooldown after error), `invalid` (failed auth), `disabled`.
 
 ## `os.environ/NAME` interpolation
 
