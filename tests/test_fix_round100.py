@@ -107,13 +107,16 @@ async def test_reminted_key_is_live_even_at_the_cap(tmp_path):
     await client.aclose()
 
 
-# -- the client contract -----------------------------------------------------
+# -- the client contract (updated by round 103) ------------------------------
+# The Playground now posts to /v1/playground/completions, which authenticates
+# with the session cookie and resolves the playground key server-side. The
+# bearer/401 re-mint contract is superseded by tests/test_fix_round103.py; the
+# assertions below pin that the client-side key machinery is really gone.
 
 
-def test_playground_re_mints_and_retries_once_on_401():
-    """`runStream` must treat a 401 as "my cached bearer is stale", not as a
-    terminal error: re-mint via `ensurePlaygroundKey`, retry the same
-    request once, and only surface the error if that retry also 401s.
+def test_playground_no_longer_holds_key_material():
+    """The client-side bearer dance is dead: no sessionStorage key, no
+    401 re-mint branch, no ensurePlaygroundKey in the auth context.
 
     `web/` has no test runner (see AUDIT #113), so this asserts the source
     contract rather than running the component.
@@ -124,24 +127,15 @@ def test_playground_re_mints_and_retries_once_on_401():
     playground = (root / "web/src/pages/Playground.tsx").read_text()
     auth = (root / "web/src/api/auth.tsx").read_text()
 
-    assert "resp.status === 401" in playground, (
-        "Playground has no 401 branch: a stale sessionStorage bearer is "
-        "surfaced verbatim to the user"
+    assert "/v1/playground/completions" in playground, (
+        "Playground must use the cookie-authenticated wrapper endpoint"
     )
-    assert "ensurePlaygroundKey" in playground, (
-        "Playground must re-mint a playground key on 401"
+    assert "ensurePlaygroundKey" not in playground and "ensurePlaygroundKey" not in auth, (
+        "ensurePlaygroundKey must be gone once the server owns the key"
     )
-    assert "retried" in playground or "retryOnce" in playground, (
-        "the 401 retry must be explicitly bounded to one attempt"
+    assert "wiwi.playground_key" not in auth, (
+        "sessionStorage must not hold playground key material anymore"
     )
-    # The retry must bypass the cache. `ensurePlaygroundKey()` returns the
-    # cached key, so calling it without the force flag replays the *same*
-    # dead bearer and 401s again — verified in a real browser before this
-    # assertion existed: two identical 401s, no mint.
-    assert "ensurePlaygroundKey(true)" in playground, (
-        "the 401 retry must force a fresh mint, not re-read the dead key "
-        "from sessionStorage"
-    )
-    assert "async (force = false)" in auth, (
-        "ensurePlaygroundKey must accept a force flag that skips the cache"
+    assert 'fetch("/v1/chat/completions"' not in playground, (
+        "Playground must not bypass the wrapper with a raw bearer call"
     )

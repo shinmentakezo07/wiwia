@@ -1027,9 +1027,15 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return False
         return hmac.compare_digest(bearer(request).encode(), mk.encode())
 
-    async def authenticate(request: Request, model: str, surface: str = "chat"):
+    async def authenticate(request: Request, model: str, surface: str = "chat",
+                           bearer_token: str | None = None):
         """Resolve and vet the caller's credential. Does NOT reserve rate-limit
         slots.
+
+        ``bearer_token`` overrides the request's Authorization header: the
+        playground wrapper authenticates the browser session itself and injects
+        the server-held virtual key here, so the rest of the admission path
+        (model allowlist, budget, rate limit) is identical to a bearer call.
 
         Reservation is deliberately a separate step (``enforce_rate_limit``),
         taken only once the model is known to resolve — reserving before a 404
@@ -1043,7 +1049,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         """
         if state.auth is None:
             return None, _err(500, "api_error", "gateway not initialized", request)
-        token = bearer(request)
+        token = bearer_token if bearer_token is not None else bearer(request)
         if not token:
             return None, _err(401, "authentication_error",
                               "missing API key", request, surface)
@@ -1283,14 +1289,16 @@ def create_app(config: WiwiConfig) -> FastAPI:
         }
 
     async def run_chat_like(request: Request, surface: str, body: dict[str, Any],
-                            codec_decode, codec_encode_response):
+                            codec_decode, codec_encode_response,
+                            bearer_token: str | None = None):
         state_ = app.state.wiwi
         try:
             ir_req = codec_decode(body)
         except (oc.DialectError, ValueError) as e:
             return _err(400, "invalid_request_error", str(e), request, surface)
         est = len(orjson.dumps(body)) // 4 if isinstance(body, dict) else 0
-        info, err_resp = await authenticate(request, ir_req.model, surface)
+        info, err_resp = await authenticate(request, ir_req.model, surface,
+                                            bearer_token=bearer_token)
         if err_resp:
             return err_resp
         group, _ = state_.router.resolve_group(ir_req.model)
@@ -1780,6 +1788,40 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return jerr
         return await run_chat_like(request, "chat", body, oc.decode_request,
                                    oc.encode_response)
+
+    @app.post("/v1/playground/completions")
+    async def playground_completions(request: Request):
+        """Playground chat completions — the /v1/chat/completions pipeline
+        behind the browser session instead of a bearer key.
+
+        Same decoder, same encoder, same ``run_chat_like`` execution — the only
+        difference is admission: the ``wiwi_session`` cookie identifies the
+        caller, and the playground virtual key is resolved server-side and
+        injected as the bearer. Key material never reaches the browser, so a
+        key that the per-owner cap expired (the old "401 invalid API key" in a
+        perfectly logged-in tab) can no longer happen.
+        """
+        if state.auth is None:
+            return _err(500, "api_error", "gateway not initialized", request)
+        actor = await current_user(request)
+        if actor is None:
+            return _err(401, "authentication_error", "authentication required",
+                        request)
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        try:
+            pg_bearer = await _playground_bearer(actor)
+        except Exception as e:  # noqa: BLE001 — mint/DB failure is a 500, not a crash
+            import structlog as _sl
+
+            _sl.get_logger("wiwi.playground").error(
+                "playground_bearer_unavailable", user_id=actor.id,
+                error=type(e).__name__, detail=str(e))
+            return _err(500, "api_error",
+                        "could not prepare the playground key", request)
+        return await run_chat_like(request, "chat", body, oc.decode_request,
+                                   oc.encode_response, bearer_token=pg_bearer)
 
     @app.post("/v1/responses")
     async def responses_api(request: Request):
@@ -4045,6 +4087,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
         plaintext, _kid = await service.create_key(  # type: ignore[union-attr]
             alias="playground", owner_id=owner_id,
             ttl_seconds=_PLAYGROUND_KEY_TTL_S)
+        # Register with the wrapper's bearer cache so /v1/playground/completions
+        # reuses exactly the key just handed out (to the signup/login response
+        # or to the back-compat /auth/playground-key) instead of minting a
+        # rival one on its first call.
+        _pg_bearer_cache[owner_id] = plaintext
         return plaintext
 
     @app.post("/auth/login")
@@ -4145,13 +4192,46 @@ def create_app(config: WiwiConfig) -> FastAPI:
         return ORJSONResponse(
             {"user": {"id": u.id, "username": u.username, "role": u.role}})
 
+    # -- playground wrapper -----------------------------------------------------
+    # In-process bearer cache for the playground wrapper, keyed by owner id.
+    # Holding the plaintext here is what removes the browser round-trip
+    # entirely: the SPA calls /v1/playground/completions with only its session
+    # cookie, and the key material never travels to the client. The plaintext
+    # is re-validated through AuthService.authenticate on every resolution, so
+    # a key the per-owner cap expired, a TTL expiry, or a revoke is detected on
+    # the next request and healed by a fresh mint — the exact failure the old
+    # client-side 401 dance existed to paper over. authenticate()'s own TTL
+    # cache makes the repeat validation cheap. Every mint path routes through
+    # _mint_playground_key, which registers its plaintext here, so a key
+    # handed to ANY client (signup response, /auth/playground-key, the
+    # wrapper) is the key the wrapper reuses instead of minting a rival.
+    _pg_bearer_cache: dict[str | None, str] = {}
+
+    async def _playground_bearer(actor: UserInfo) -> str:
+        """Return a live playground virtual key plaintext for *actor*.
+
+        Resolution order: cached plaintext that still authenticates → a fresh
+        capped mint (same per-owner cap and TTL as /auth/playground-key).
+        Raises on a mint failure; the caller converts that into a 500.
+        """
+        service = state.auth
+        if service is None:  # guarded by the caller, kept for type-checking
+            raise RuntimeError("gateway not initialized")
+        owner_id = None if actor.role == "admin" else actor.id
+        plaintext = _pg_bearer_cache.get(owner_id, "")
+        if plaintext and await service.authenticate(plaintext) is not None:
+            return plaintext
+        _pg_bearer_cache.pop(owner_id, None)
+        return await _mint_playground_key(actor)
+
     @app.post("/auth/playground-key")
     async def auth_playground_key(request: Request):
         """Mint a fresh playground key for the current session.
 
-        Used by the Playground when no key is cached in sessionStorage (new
-        tab, first visit, or the cached key was evicted). Requires an
-        authenticated session — anonymous callers get 401.
+        Back-compat fallback for tooling that still wants a bearer: the SPA's
+        Playground no longer calls this — /v1/playground/completions resolves
+        and rotates the key server-side. Requires an authenticated session —
+        anonymous callers get 401.
         """
         actor = await current_user(request)
         if actor is None:

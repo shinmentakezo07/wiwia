@@ -1,14 +1,14 @@
 // Playground — authenticated chat playground with chat history sidebar.
-// Uses the playground key minted at login (stored in sessionStorage by the
-// auth context) as the bearer for /v1/chat/completions. If no key is cached
-// (new tab with a valid session), it mints a fresh one via /auth/playground-key.
+// Talks to /v1/playground/completions, which is /v1/chat/completions behind
+// the logged-in session cookie: the server resolves (and rotates) the
+// playground virtual key itself, so no key material is held in the browser.
 // Enhanced model selector with provider info, availability, and
 // deployment details. Full-page chat arena with SSE streaming (abortable),
 // markdown-rendered replies, per-message actions, hero empty state, latency /
 // throughput stats, and localStorage-backed conversation history.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
   AlertCircle,
@@ -40,12 +40,9 @@ import {
   X,
 } from "lucide-react";
 import { ApiError, getModels, getPlaygroundMetrics } from "@/api/client";
-import { useAuth } from "@/api/auth";
 import type { ModelGroup, PlaygroundMetrics } from "@/api/types";
 import { Link } from "react-router-dom";
-import {
-  Spinner,
-} from "@/components/ui";
+import { Spinner } from "@/components/ui";
 import { Markdown } from "@/components/Markdown";
 import { HERO_BEAMS_COMPACT, HeroBeamBackdrop } from "@/components/HeroBeamBackdrop";
 import {
@@ -88,9 +85,6 @@ function chatDateGroup(updated: number): (typeof SIDEBAR_GROUPS)[number] {
   if (dayDiff <= 7) return "Previous 7 days";
   return "Older";
 }
-
-/** How many times to retry minting a playground key before giving up. */
-const _MAX_KEY_ATTEMPTS = 4;
 
 /** Coalesce localStorage writes to at most one per this many ms. */
 const _PERSIST_DEBOUNCE_MS = 400;
@@ -843,11 +837,8 @@ function SessionStatus(props: {
 // ── Main component ─────────────────────────────────────────────────────────
 
 export function PlaygroundPage() {
-  const qc = useQueryClient();
-  const { ensurePlaygroundKey } = useAuth();
   const modelsQ = useQuery({ queryKey: ["models"], queryFn: getModels });
 
-  const [bearer, setBearer] = useState<string>("");
   const [model, setModel] = useState<string>("");
   const [messages, setMessages] = useState<Msg[]>([]);
   const [draft, setDraft] = useState("");
@@ -856,15 +847,6 @@ export function PlaygroundPage() {
   const [err, setErr] = useState<string | null>(null);
   const [metrics, setMetrics] = useState<PlaygroundMetrics | null>(null);
   const [metricsPending, setMetricsPending] = useState(false);
-  const [keyReady, setKeyReady] = useState(false);
-  // Key minting is retried on failure so the UI can't sit on "Creating key…"
-  // forever. `keyAttempts` counts tries (a ref, so incrementing it never
-  // re-triggers the effect — the backoff timer does that via `keyTick`);
-  // `keyFailed` is display-only and deliberately NOT an effect dep, so
-  // updating the message can't restart the loop.
-  const [keyTick, setKeyTick] = useState(0);
-  const [keyFailed, setKeyFailed] = useState<string | null>(null);
-  const keyAttempts = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
   const metricsAbortRef = useRef<AbortController | null>(null);
   const activeRunRef = useRef<string | null>(null);
@@ -971,62 +953,7 @@ export function PlaygroundPage() {
   const groups: ModelGroup[] = modelsQ.data?.groups ?? [];
   const effectiveModel = model || groups[0]?.name || "";
 
-  // ── Obtain the playground key (cached in sessionStorage by auth context) ──
-  // On mount: use the cached key from login, or mint a fresh one via the
-  // session cookie when sessionStorage is empty (new tab / first visit).
-  useEffect(() => {
-    let cancelled = false;
-    let timer: number | undefined;
-    if (bearer || keyReady) return;
-    void (async () => {
-      let key: string;
-      try {
-        key = await ensurePlaygroundKey();
-      } catch (e) {
-        const authFailure = (e as { cause?: { auth?: boolean } })?.cause?.auth;
-        if (cancelled) return;
-        // A dead session can never succeed on retry — stop and tell the user.
-        if (authFailure) {
-          setKeyFailed("auth: your session expired. Please log in again.");
-          return;
-        }
-        key = "";
-      }
-      if (cancelled) return;
-      if (key) {
-        setBearer(key);
-        setKeyReady(true);
-        setKeyFailed(null);
-        void qc.invalidateQueries({ queryKey: ["keys"] });
-        return;
-      }
-      // Mint failed: retry with capped backoff instead of leaving the UI
-      // stuck on "Creating key…". After the cap, surface a manual retry.
-      const used = keyAttempts.current + 1;
-      keyAttempts.current = used;
-      if (used >= _MAX_KEY_ATTEMPTS) {
-        setKeyFailed("Could not create a playground key. Please log in again.");
-        return;
-      }
-      const delay = Math.min(500 * 2 ** (used - 1), 8000);
-      setKeyFailed(`Retrying in ${Math.round(delay / 1000)}s…`);
-      timer = window.setTimeout(() => setKeyTick((n) => n + 1), delay);
-    })();
-    return () => {
-      cancelled = true;
-      if (timer !== undefined) window.clearTimeout(timer);
-    };
-  }, [bearer, keyReady, keyTick, ensurePlaygroundKey, qc]);
-
-  // Manual retry after key minting gave up: reset the attempt budget and
-  // re-trigger the mint effect.
-  const retryKey = useCallback(() => {
-    keyAttempts.current = 0;
-    setKeyFailed(null);
-    setKeyTick((n) => n + 1);
-  }, []);
-
-  // ── Chat management ───────────────────────────────────────────────────────
+  // ── Chat management ───────────────────────────────────────────────────
 
   const cancelActiveRun = useCallback(() => {
     abortRef.current?.abort();
@@ -1152,44 +1079,25 @@ export function PlaygroundPage() {
       };
 
       try {
-        // A playground key is minted on every login, and the per-owner cap
-        // (`_MAX_PLAYGROUND_KEYS_PER_USER = 5`) expires the oldest ones — so a
-        // key cached in sessionStorage goes stale while the tab sits open, and
-        // 401s the next time the user sends. The session cookie is still
-        // perfectly valid, so treat 401 as "my bearer is dead", not as a
-        // terminal error: re-mint once and replay. `retried` bounds this to a
-        // single extra attempt, so a genuinely revoked account (the re-mint
-        // itself 401s) surfaces the real error instead of looping.
-        const post = (key: string) =>
-          fetch("/v1/chat/completions", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${key.trim()}`,
-              Accept: "text/event-stream",
-            },
-            body: JSON.stringify({
-              model: effectiveModel,
-              messages: history.map((m) => ({ role: m.role, content: m.content })),
-              stream: true,
-            }),
-            signal: controller.signal,
-          });
-
-        let retried = false;
-        let resp = await post(bearer);
-        if (resp.status === 401 && !retried) {
-          retried = true;
-          // `true` forces a real mint: without it ensurePlaygroundKey returns
-          // the same dead key from sessionStorage and the retry replays the
-          // identical 401.
-          // A dead session can never mint a key; let that surface below.
-          const fresh = await ensurePlaygroundKey(true);
-          if (fresh) {
-            setBearer(fresh);
-            resp = await post(fresh);
-          }
-        }
+        // /v1/playground/completions authenticates with the session cookie
+        // (same-origin fetch → credentials included by default). The server
+        // resolves and rotates the playground virtual key itself, so there is
+        // no bearer to manage and no stale-key 401 to retry around: a 401
+        // here means the session itself is gone, which is terminal for this
+        // turn and message-level recoverable via the error banner's Retry.
+        const resp = await fetch("/v1/playground/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "text/event-stream",
+          },
+          body: JSON.stringify({
+            model: effectiveModel,
+            messages: history.map((m) => ({ role: m.role, content: m.content })),
+            stream: true,
+          }),
+          signal: controller.signal,
+        });
 
         if (!resp.ok) {
           const body = await resp.json().catch(() => null);
@@ -1299,17 +1207,13 @@ export function PlaygroundPage() {
         }
       }
     },
-    [bearer, busy, effectiveModel, ensurePlaygroundKey],
+    [busy, effectiveModel],
   );
 
   const send = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
       if (!trimmed || busy) return;
-      if (!bearer.trim()) {
-        setErr("Waiting for playground key to be created…");
-        return;
-      }
       if (!effectiveModel) {
         setErr("No models available. Add a provider with a model group first.");
         return;
@@ -1318,7 +1222,7 @@ export function PlaygroundPage() {
       draftsRef.current[activeChatId ?? ""] = "";
       await runStream([...messages, { id: uid(), role: "user", content: trimmed }], trimmed);
     },
-    [bearer, effectiveModel, busy, messages, runStream, activeChatId],
+    [effectiveModel, busy, messages, runStream, activeChatId],
   );
 
   const stop = useCallback(() => {
@@ -1417,29 +1321,10 @@ export function PlaygroundPage() {
   };
 
   const isEmpty = messages.length === 0;
-  const keyLoading = !keyReady && !bearer;
   const activeConversation = chats.find((chat) => chat.id === activeChatId);
   const activeChatTitle = activeConversation?.title || "New conversation";
-  const sessionStatus: SessionStatusKind = streaming
-    ? "live"
-    : keyLoading
-      ? "loading"
-      : keyFailed
-        ? "warning"
-        : "ready";
-  const sessionStatusLabel = streaming
-    ? "Streaming"
-    : keyLoading
-      ? "Connecting"
-      : keyFailed
-        ? "Needs attention"
-        : "Ready";
-
-  // Focus the composer once the key is minted (or restored) so the user can
-  // type immediately.
-  useEffect(() => {
-    if (keyReady) focusComposer();
-  }, [keyReady, focusComposer]);
+  const sessionStatus: SessionStatusKind = streaming ? "live" : "ready";
+  const sessionStatusLabel = streaming ? "Streaming" : "Ready";
 
   return (
     <div data-admin className="relative z-0 flex h-dvh flex-col overflow-hidden bg-[var(--admin-bg)] text-[var(--admin-text)]">
@@ -1467,31 +1352,11 @@ export function PlaygroundPage() {
               groups={groups}
               value={effectiveModel}
               onChange={setModel}
-              disabled={keyLoading}
             />
           </div>
 
           <div className="ml-auto flex min-w-0 flex-wrap items-center gap-1 sm:gap-2">
             <SessionStatus status={sessionStatus} label={sessionStatusLabel} compact />
-            {/* Always rendered: this is the only caller of ``retryKey``, so
-                hiding it below lg left a failed key mint unrecoverable — the
-                composer stays disabled on "Preparing your playground key…"
-                with no way to retry. It takes its own full-width row under
-                lg and sits inline from lg up. */}
-            {keyFailed && (
-              <span className="pg-key-notice order-last flex w-full min-w-0 items-center gap-2 rounded-lg border border-amber-400/25 bg-amber-400/[0.07] px-2.5 py-1.5 text-[11px] lg:order-none lg:w-auto lg:max-w-[240px] lg:border-0 lg:bg-transparent lg:px-0 lg:py-0">
-                <span className="min-w-0 flex-1 truncate">{keyFailed}</span>
-                {!keyFailed.startsWith("Retrying") && (
-                  <button
-                    type="button"
-                    onClick={retryKey}
-                    className="min-h-11 shrink-0 rounded-md border border-[var(--admin-border)] px-3 text-[11px] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
-                  >
-                    Retry
-                  </button>
-                )}
-              </span>
-            )}
             <Link
               to="/console"
               className="pg-dashboard-link flex min-h-11 items-center rounded-[10px] px-2.5 text-[12px] text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)] sm:px-3 sm:text-[13px]"
@@ -1582,7 +1447,6 @@ export function PlaygroundPage() {
                 onGroupChange={setActiveGroup}
                 suggestions={heroSuggestions}
                 onPick={(s) => void send(s)}
-                keyReady={!!bearer}
                 model={effectiveModel}
               />
             ) : (
@@ -1674,10 +1538,10 @@ export function PlaygroundPage() {
                     value={draft}
                     onChange={(e) => setDraft(e.target.value)}
                     onKeyDown={onKeyDown}
-                    placeholder={keyLoading ? "Preparing your playground key…" : "Message the model…"}
+                    placeholder="Message the model…"
                     aria-label="Message the model"
                     aria-describedby="composer-hints"
-                    disabled={busy || keyLoading}
+                    disabled={busy}
                     rows={1}
                     className="pg-textarea flex-1 resize-none bg-transparent px-3 py-2 text-[14px] leading-relaxed text-[var(--admin-text)] outline-none placeholder:text-[var(--admin-text-dim)] disabled:opacity-50"
                   />
@@ -1699,7 +1563,7 @@ export function PlaygroundPage() {
                   ) : (
                     <button
                       type="submit"
-                      disabled={busy || keyLoading || !draft.trim()}
+                      disabled={busy || !draft.trim()}
                       className="pg-send-button flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-white transition-[filter,transform] duration-150 hover:brightness-110 active:scale-95 disabled:opacity-40 disabled:grayscale focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300/60"
                       aria-label="Send"
                     >
@@ -1736,10 +1600,9 @@ function HeroEmptyState(props: {
   onGroupChange: (g: HeroSuggestionGroup) => void;
   suggestions: Record<HeroSuggestionGroup, readonly string[]> | null;
   onPick: (s: string) => void;
-  keyReady: boolean;
   model: string;
 }) {
-  const { activeGroup, onGroupChange, suggestions, onPick, keyReady, model } = props;
+  const { activeGroup, onGroupChange, suggestions, onPick, model } = props;
   const visible = heroSuggestionGroupNames;
   const current = suggestions?.[activeGroup] ?? [];
 
@@ -1748,24 +1611,18 @@ function HeroEmptyState(props: {
       <div className="animate-hero-enter relative w-full max-w-[760px] text-center">
         <div className="mb-5 flex justify-center">
           <div className="pg-hero-badge relative flex h-14 w-14 items-center justify-center rounded-2xl border border-white/[0.08] shadow-xl shadow-brand-900/30">
-            {keyReady ? (
-              <Sparkles className="relative h-6 w-6 text-white" />
-            ) : (
-              <Spinner className="relative h-5 w-5" />
-            )}
+            <Sparkles className="relative h-6 w-6 text-white" />
           </div>
         </div>
 
         <h2 className="pg-hero-title text-[30px] font-semibold tracking-[-0.025em]">
-          {keyReady ? "Start a model session" : "Preparing your playground…"}
+          Start a model session
         </h2>
         <p className="mx-auto mt-2 max-w-md text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
-          {keyReady
-            ? "Choose a prompt below or write directly into the workbench. Responses stream here in real time."
-            : "Creating a virtual key for your session."}
+          Choose a prompt below or write directly into the workbench. Responses stream here in real time.
         </p>
 
-        {keyReady && model && (
+        {model && (
           <div className="pg-model-card mx-auto mt-6 max-w-[440px] rounded-2xl px-4 py-3">
             <div className="flex items-center gap-3">
               <div className="pg-model-card-icon flex h-9 w-9 shrink-0 items-center justify-center rounded-xl">
@@ -1779,7 +1636,7 @@ function HeroEmptyState(props: {
           </div>
         )}
 
-        {keyReady && (
+        {model && (
           <>
             <div className="pg-hero-tabs mt-7 inline-flex items-center gap-1 rounded-xl p-1" role="tablist" aria-label="Prompt categories">
               {visible.map((g) => (

@@ -410,14 +410,6 @@ export const loginMaster = (body: { master_key: string }) =>
 export const logoutSession = () =>
   api<{ ok: true }>("/auth/logout", { method: "POST", credentials: "include" });
 
-/** Mint a fresh playground key for the current session (fallback when
- * sessionStorage has no cached key — e.g. opened in a new tab). */
-export const mintPlaygroundKey = () =>
-  api<{ key: string }>("/auth/playground-key", {
-    method: "POST",
-    credentials: "include",
-  });
-
 export const getUsers = () =>
   api<{ users: (User & { disabled: boolean; created_at: number })[] }>(
     "/admin/users",

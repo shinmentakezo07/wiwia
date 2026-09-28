@@ -4,30 +4,25 @@
 // keep a bearer token in localStorage (loginWithMaster → setToken) so the
 // bearer-only /admin/stream SSE and any legacy /admin/* call continue to work.
 //
-// Playground key: a fresh virtual key is minted on every login/signup and
-// stored in sessionStorage (survives refresh, clears on tab close). The
-// Playground uses it as the bearer for /v1/chat/completions. When missing
-// (new tab with a valid session cookie), the Playground mints a fresh one
-// via /auth/playground-key instead of the old /admin/keys/generate path,
-// which created an orphaned key on every page load.
+// Playground: the Playground posts to /v1/playground/completions, which
+// authenticates with the session cookie and resolves the playground virtual
+// key server-side. No key material lives in the browser anymore — the old
+// sessionStorage key + 401 re-mint dance is gone (it existed only because the
+// per-owner key cap kept expiring the cached bearer out from under the tab).
 
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import {
-  ApiError,
   clearToken,
   getMe,
   getToken,
   loginUser,
   loginMaster,
   logoutSession,
-  mintPlaygroundKey,
   setToken,
   signupUser,
 } from "./client";
 import type { User } from "./types";
-
-const PG_KEY_STORAGE = "wiwi.playground_key";
 
 interface AuthCtx {
   user: User | null;
@@ -37,43 +32,10 @@ interface AuthCtx {
   loginWithMaster: (key: string) => Promise<void>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
-  /** Mint a fresh playground key on demand (used by the Playground when
-   * sessionStorage has no cached key). Pass `force` to bypass the cache and
-   * mint unconditionally — required when the caller already knows the cached
-   * key is dead (a 401 on `/v1`). Returns the key, or throws with a
-   * `.cause` of `{ auth: true }` on a 401/403 so the caller can stop
-   * retrying; throws the underlying error otherwise. */
-  ensurePlaygroundKey: (force?: boolean) => Promise<string>;
 }
 
 const Ctx = createContext<AuthCtx>(null!);
 export const useAuth = () => useContext(Ctx);
-
-function storePlaygroundKey(key: string) {
-  if (key) {
-    try {
-      sessionStorage.setItem(PG_KEY_STORAGE, key);
-    } catch {
-      /* sessionStorage may be unavailable (private mode) — caller falls back */
-    }
-  }
-}
-
-function loadPlaygroundKey(): string {
-  try {
-    return sessionStorage.getItem(PG_KEY_STORAGE) ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function clearPlaygroundKey() {
-  try {
-    sessionStorage.removeItem(PG_KEY_STORAGE);
-  } catch {
-    /* ignore */
-  }
-}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
@@ -92,27 +54,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     void refresh();
-  }, [refresh]);
-
-  const signup = useCallback(async (u: string, p: string) => {
-    const { user, playground_key } = await signupUser({ username: u, password: p });
+  }, [refresh]);  const signup = useCallback(async (u: string, p: string) => {
+    const { user } = await signupUser({ username: u, password: p });
     setUser(user);
-    storePlaygroundKey(playground_key ?? "");
   }, []);
 
   const login = useCallback(async (u: string, p: string) => {
-    const { user, playground_key } = await loginUser({ username: u, password: p });
+    const { user } = await loginUser({ username: u, password: p });
     setUser(user);
-    storePlaygroundKey(playground_key ?? "");
   }, []);
 
   const loginWithMaster = useCallback(async (k: string) => {
     // back-compat: keep the master key for bearer-style calls (/admin/stream
     // SSE, which is bearer-only, and any legacy /admin/* fetch).
     setToken(k);
-    const { user, playground_key } = await loginMaster({ master_key: k });
+    const { user } = await loginMaster({ master_key: k });
     setUser(user);
-    storePlaygroundKey(playground_key ?? "");
   }, []);
 
   const logout = useCallback(async () => {
@@ -122,40 +79,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       /* ignore network errors on logout */
     }
     clearToken();
-    clearPlaygroundKey();
     setUser(null);
   }, []);
 
-  const ensurePlaygroundKey = useCallback(async (force = false) => {
-    const cached = loadPlaygroundKey();
-    if (cached && !force) return cached;
-    // New tab / first visit with a valid session cookie — mint a fresh key.
-    // `force` skips the cache: the caller is handling a 401 on a key it
-    // already holds, so handing the same cached value back would replay the
-    // identical dead bearer (AUDIT #300).
-    //
-    // Propagate a typed failure instead of swallowing it: the caller needs
-    // to tell "session expired, stop" (401/403) apart from "try again".
-    // Returning "" for both left the Playground stuck on "Creating key…".
-    try {
-      const { key } = await mintPlaygroundKey();
-      if (!key) throw new Error("empty playground key returned");
-      storePlaygroundKey(key);
-      return key;
-    } catch (e) {
-      const status = e instanceof ApiError ? e.status : 0;
-      const err = new Error(
-        status === 401 || status === 403
-          ? "auth: session expired"
-          : "could not mint playground key",
-        ) as Error & { cause?: { auth: boolean } };
-      err.cause = { auth: status === 401 || status === 403 };
-      throw err;
-    }
-  }, []);
-
   return (
-    <Ctx.Provider value={{ user, loading, signup, login, loginWithMaster, logout, refresh, ensurePlaygroundKey }}>
+    <Ctx.Provider value={{ user, loading, signup, login, loginWithMaster, logout, refresh }}>
       {children}
     </Ctx.Provider>
   );
