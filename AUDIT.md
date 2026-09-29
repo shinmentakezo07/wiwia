@@ -5,6 +5,107 @@
 
 Each finding verified against source by reading the cited lines. Severities: 🔴 critical · 🟠 high · 🟡 medium · ⚪ low.
 
+
+---
+
+## ✅ Fixed — round 105 (2026-09-28)
+
+Playground wrapper (introduced in round 103), plus the Cline auto-connect
+callback URL. Every finding reproduced against the pre-fix source and pinned
+by `tests/test_fix_round105.py`.
+### 308. The playground bearer cache was never cleared and never bounded
+
+`wiwi/server/app.py` — `_pg_bearer_cache` (round 103).
+
+A `dict[str | None, str]` of owner → **plaintext** virtual key, written at
+`_mint_playground_key`, read by `_playground_bearer`, and popped only when its
+own revalidation failed. Nothing dropped an entry on logout
+(`auth_logout` cleared the cookie and nothing else), on the admin
+disable/delete path, or at shutdown, and the dict had no ceiling.
+
+- **Trigger:** N users each use the Playground once and log out → N plaintext
+  keys stay resident for the process lifetime, each still matching a live DB
+  row, and the dict grows monotonically with distinct owner ids.
+- **Fix:** replaced the bare dict with `_PgBearerCache` (bounded LRU, max
+  `_PG_BEARER_CACHE_MAX = 256`, recency refreshed on use so an active owner is
+  not the one evicted), stored on `AppState.pg_bearers`; dropped on logout and
+  on `disabled is True` in the admin user PATCH.
+
+### 309. Every admin shared one playground key, budget, and per-owner cap
+
+`wiwi/server/app.py` — `owner_id = None if actor.role == "admin" else actor.id`
+in both `_mint_playground_key` and `_playground_bearer`.
+
+All admins resolved to `owner_id=None`, so they shared a single virtual key, a
+single spend/budget, the single `_pg_bearer_cache[None]` slot (each mint
+overwrote it), and a single `_MAX_PLAYGROUND_KEYS_PER_USER` count — because
+`_mint_playground_key` counts `count_keys(owner_id=None, alias="playground")`
+across all admins at once.
+
+- **Trigger:** a sixth admin uses the Playground → the cap check fires
+  `expire_keys(owner_id=None, alias="playground", keep_newest=4)`, retiring a
+  key another admin is actively using; that admin's next request fails
+  revalidation and silently re-mints into the shared slot, so the two accounts
+  end up spending from one budget.
+- **Fix:** `_pg_owner_id(actor)` gives every real account — admins included —
+  its own owned key, so the per-owner cap and budget are counted per admin.
+  The synthetic master actor (`UserInfo(id="master")`, no `users` row) keeps an
+  un-owned key deliberately: the auth owner check uses `EXISTS` and fails
+  closed, so an owned master key would never authenticate. Real user ids are
+  `"u" + 16 hex`, so `id == "master"` is an exact, await-free discriminator.
+  Verified this does not newly expose admins to `max_keys_per_user` (default
+  50, versus a playground alias cap of 5 that is trimmed first).
+
+### 311. The Cline OAuth callback URL was built from the untrusted ASGI scheme
+
+**Severity:** 🟡 Medium · **Status: fixed**
+**File:** `wiwi/server/app.py` — `_request_base` (serves `_cline_oauth_auto_connect`)
+
+**What:** `_request_base` composed `f"{request.url.scheme or 'https'}://{host}"`.
+That is the same untrusted input as #310: behind an external TLS terminator
+(uvicorn only maps `X-Forwarded-Proto` for `forwarded_allow_ips`) the scheme is
+http, so the `callback_url` handed to Cline in the auto-connect flow was emitted
+as `http://…` and the authorization code came back over plaintext. `public_url`
+masked it only where the operator had set it; the default path was wrong.
+
+**Fix:** the scheme now comes from `_request_is_https(request,
+config.general_settings.trusted_proxies)` — https, or `X-Forwarded-Proto: https`
+from a trusted peer. `Host` handling is unchanged (`X-Forwarded-Host` stays
+unhonoured — client controlled, AUDIT #73's neighbourhood).
+
+**Verification:** `tests/test_fix_round105.py` — the auto-connect `auth_url`'s
+`callback_url` is `https://…` behind a trusted proxy and `http://…` otherwise.
+
+---
+
+## ✅ Fixed — round 106 (2026-09-28)
+
+Playground wrapper follow-up from the round-105 audit: the session cookie's
+`Secure` flag behind a TLS-terminating proxy. Pinned by
+`tests/test_fix_round106.py`.
+
+### 310. Session cookie lacked `Secure` behind an external TLS terminator
+
+**Severity:** 🟡 Medium · **Status: fixed**
+**File:** `wiwi/server/app.py` (`_set_session_cookie` call sites; new `_request_is_https`)
+
+**What:** all three session-cookie paths (signup, master login, user login) derived
+`secure=request.url.scheme == "https"` from the ASGI scheme alone. Uvicorn maps
+`X-Forwarded-Proto` into the scheme only for `forwarded_allow_ips` (loopback by
+default), so behind an *external* TLS terminator (e.g. the HuggingFace Space's) the
+scheme is http and the cookie was set without `Secure` — any same-host plain-HTTP
+path would then carry the session cookie in cleartext.
+
+**Fix:** `_request_is_https()` — true when the scheme is https, or when
+`X-Forwarded-Proto: https` is presented by a direct peer in
+`general_settings.trusted_proxies` (left-most entry honoured, mirroring
+`_client_ip`'s reading of `X-Forwarded-For`, AUDIT #73). Header injection from an
+untrusted peer stays inert; regressions in `tests/test_fix_round106.py`.
+
+**Not changed:** uvicorn's own `proxy_headers`/`forwarded_allow_ips` handling — an
+operator who prefers native mapping can still set `forwarded_allow_ips`, and
+direct-TLS deployments keep working through the scheme check.
+
 ---
 
 ## ✅ Fixed — round 104 (2026-09-27)

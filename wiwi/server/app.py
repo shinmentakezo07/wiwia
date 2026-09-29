@@ -186,6 +186,83 @@ from wiwi.wire import openai_responses as orp
 _PLAYGROUND_KEY_TTL_S = 24 * 3600.0
 _MAX_PLAYGROUND_KEYS_PER_USER = 5
 
+# The synthetic master actor (``current_user`` mints it for a master bearer or
+# a master session cookie). Real user ids are "u" + 16 hex, so this value can
+# only ever name the synthetic actor, never a row in ``users``.
+_SYNTHETIC_MASTER_ID = "master"
+
+# The wrapper holds a plaintext key per owner, so the map needs a ceiling. It
+# is deliberately far below the number of accounts a deployment can hold: an
+# eviction only costs one extra mint, because the wrapper re-mints and
+# re-caches on the next request.
+_PG_BEARER_CACHE_MAX = 256
+
+
+class _PgBearerCache:
+    """Bounded, explicitly-invalidated owner -> playground key plaintext map.
+
+    Round 103 shipped this as a bare dict that was only ever written, read,
+    and popped by its own revalidation failure. Nothing dropped an entry on
+    logout or on the account being disabled, and nothing bounded it, so a
+    plaintext credential outlived the session that created it and the dict
+    grew monotonically with distinct owner ids (round 105).
+
+    Eviction is LRU on *use*, not on write: an owner actively streaming
+    through the wrapper would otherwise be the one evicted.
+    """
+
+    def __init__(self, max_entries: int = _PG_BEARER_CACHE_MAX):
+        self._max = max_entries
+        self._items: dict[str, str] = {}
+
+    def get(self, key: str) -> str:
+        val = self._items.get(key, "")
+        if val:
+            # Re-insert so dict order tracks recency of use.
+            self._items.pop(key, None)
+            self._items[key] = val
+        return val
+
+    def set(self, key: str, plaintext: str) -> None:
+        self._items.pop(key, None)  # replace, never duplicate
+        self._items[key] = plaintext
+        while len(self._items) > self._max:
+            self._items.pop(next(iter(self._items)))
+
+    def drop(self, key: str) -> None:
+        self._items.pop(key, None)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+
+def _master_actor() -> UserInfo:
+    """The synthetic master admin (no ``users`` row).
+
+    One definition so the session mint in ``/auth/login``, the master-bearer
+    branch of ``current_user``, and their uid check cannot drift apart.
+    """
+    return UserInfo(id=_SYNTHETIC_MASTER_ID, username=_SYNTHETIC_MASTER_ID,
+                    role="admin")
+
+
+def _key_owner_id(actor: UserInfo) -> str | None:
+    """Owner id to mint a virtual key under, or None for an un-owned key.
+
+    Every real account owns its own key, admin included. Sharing one un-owned
+    key across all admins gave them a single budget and a single per-owner
+    cap, so a sixth admin using the Playground retired a key another admin was
+    still using (round 105); the admin key-generate route minted un-owned keys
+    for the same reason and was exempt from ``max_keys_per_user`` (round 107).
+
+    The synthetic master is the one exception. It has no ``users`` row, and
+    ``AuthService._lookup_db``'s owner check fails closed on a missing owner,
+    so an owned master key would never authenticate at all. It also needs no
+    separation: every master-key holder is the same operator behind the same
+    secret.
+    """
+    return None if actor.id == _SYNTHETIC_MASTER_ID else actor.id
+
 
 def _client_ip(request: Request, trusted_proxies: list[str] | None = None) -> str:
     """Best-effort client IP for throttling.
@@ -222,6 +299,33 @@ def _peer_is_trusted(peer: str, trusted_proxies: list[str]) -> bool:
         except ValueError:
             continue
     return False
+
+
+def _request_is_https(request: Request,
+                      trusted_proxies: list[str] | None = None) -> bool:
+    """True when the caller reached wiwi over https.
+
+    The ASGI scheme alone misses TLS that terminated at an *external* proxy:
+    uvicorn only maps ``X-Forwarded-Proto`` into ``request.url.scheme`` for
+    ``forwarded_allow_ips`` (loopback by default), so behind an external TLS
+    terminator the scheme is http and a scheme-derived ``Secure`` cookie flag
+    was silently dropped. The header is believed only when the direct peer is
+    in *trusted_proxies* — the same gate ``_client_ip`` applies to
+    ``X-Forwarded-For`` (AUDIT #73) — so header injection from an untrusted
+    peer cannot mint a Secure (or, worse, hide a real downgraded) context.
+    """
+    if request.url.scheme == "https":
+        return True
+    fwd = request.headers.get("x-forwarded-proto", "")
+    if not fwd or not trusted_proxies:
+        return False
+    peer = request.client.host if request.client else ""
+    if not _peer_is_trusted(peer, trusted_proxies):
+        return False
+    # Left-most entry is the original scheme under a well-behaved chain of
+    # trusted proxies (mirrors _client_ip's reading of X-Forwarded-For).
+    first = fwd.split(",")[0].strip().lower()
+    return first == "https"
 
 
 class _AttemptThrottle:
@@ -571,6 +675,9 @@ class AppState:
         self.router = Router(config)
         self.cost = CostEngine()
         self.logs = LoggingSubsystem()
+        # Playground wrapper key plaintexts, keyed by actor id. Cleared on
+        # logout and when an account is disabled.
+        self.pg_bearers = _PgBearerCache()
         # Router emits gateway-op proxy events (upstream 5xx, key cooldown,
         # retries, fallback switches) into the LoggingSubsystem proxy ring.
         self.router.log_proxy = self.logs.log_proxy
@@ -2229,7 +2336,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         mk = config.general_settings.master_key
         tok = bearer(request)
         if mk and tok and hmac.compare_digest(tok.encode(), mk.encode()):
-            return UserInfo(id="master", username="master", role="admin")
+            return _master_actor()
         # signed session cookie
         cookie = request.cookies.get("wiwi_session")
         if not cookie:
@@ -2238,13 +2345,13 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if parsed is None:
             return None
         uid, _role, _exp = parsed
-        if uid == "master":
+        if uid == _SYNTHETIC_MASTER_ID:
             # Only honour a synthetic master session when a master key is
             # actually configured. Otherwise any cookie signed with whatever
             # secret happened to be in use would mint an admin with no DB row.
             if not config.general_settings.master_key:
                 return None
-            return UserInfo(id="master", username="master", role="admin")
+            return _master_actor()
         if state.users is None:
             return None
         info = await state.users.get(uid)
@@ -3990,6 +4097,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
         revoked = 0
         if disabled is True:
             revoked = await state.auth.expire_keys(owner_id=uid)  # type: ignore[union-attr]
+            # The key rows are expired; drop the wrapper's in-memory plaintext
+            # for the same account, or it would keep being re-minted for a
+            # user who can no longer hold a session (round 105).
+            state.pg_bearers.drop(uid)
         await state.logs.log_audit(actor="master", action="user.update", target=uid,
                                    diff={"role": role, "disabled": disabled,
                                          "revoked_keys": revoked})
@@ -4057,27 +4168,32 @@ def create_app(config: WiwiConfig) -> FastAPI:
         # creating a user via signup should keep their own session.
         if anon:
             _set_session_cookie(resp, u.id, u.role,
-                                secure=request.url.scheme == "https")
+                                secure=_request_is_https(
+                                    request,
+                                    config.general_settings.trusted_proxies))
         return resp
 
     async def _mint_playground_key(actor: UserInfo) -> str:
         """Mint a fresh virtual key for the playground, scoped to the actor.
 
-        Admins get an un-owned key (owner_id=None) for back-compat; regular
-        users get an owner-scoped key so it shows up in their key list and
-        respects role-based filtering.
+        Every real account owns its key (admins included — see
+        ``_key_owner_id``), so it shows up in the owner's key list, respects
+        role-based filtering, and gets its own budget and per-owner cap. Only
+        the synthetic master is un-owned.
         """
-        owner_id = None if actor.role == "admin" else actor.id
+        owner_id = _key_owner_id(actor)
         # Bound the key: a TTL so abandoned keys expire, and a per-owner cap so
         # repeated logins (or repeated /auth/playground-key calls) cannot
         # accumulate unbounded live credentials. Without both, every login
         # minted another never-expiring, unlimited-budget key.
         #
-        # The cap applies to admins too (owner_id=None → unowned keys). Those
-        # were previously exempt twice over: `create_key`'s per-owner limit
-        # skips owner_id=None, and this branch skipped them as well, so admin
-        # playground keys grew without limit. React StrictMode double-invokes
-        # the mint effect in dev, so the leak was 2 keys per mount.
+        # The cap applies to admins too — they now own their key (see
+        # `_key_owner_id`), so the count is per admin rather than across all of
+        # them. Before round 105 admins minted unowned keys and were exempt
+        # twice over: `create_key`'s per-owner limit skips owner_id=None, and
+        # this branch skipped them as well, so admin playground keys grew
+        # without limit. React StrictMode double-invokes the mint effect in
+        # dev, so the leak was 2 keys per mount.
         service = state.auth
         if service is not None:
             active = await service.count_keys(owner_id=owner_id, alias="playground")
@@ -4090,8 +4206,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
         # Register with the wrapper's bearer cache so /v1/playground/completions
         # reuses exactly the key just handed out (to the signup/login response
         # or to the back-compat /auth/playground-key) instead of minting a
-        # rival one on its first call.
-        _pg_bearer_cache[owner_id] = plaintext
+        # rival one on its first call. Keyed by actor id, not owner id: two
+        # actors must never share a cache slot even where they share an owner.
+        state.pg_bearers.set(actor.id, plaintext)
         return plaintext
 
     @app.post("/auth/login")
@@ -4139,13 +4256,16 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 pg_key = ""
                 if state.auth is not None:
                     with contextlib.suppress(Exception):
-                        pg_key = await _mint_playground_key(
-                            UserInfo(id="master", username="master", role="admin"))
+                        pg_key = await _mint_playground_key(_master_actor())
                 resp = ORJSONResponse(
-                    {"user": {"id": "master", "username": "master", "role": "admin"},
+                    {"user": {"id": _SYNTHETIC_MASTER_ID,
+                              "username": _SYNTHETIC_MASTER_ID,
+                              "role": "admin"},
                      "playground_key": pg_key})
-                _set_session_cookie(resp, "master", "admin",
-                                    secure=request.url.scheme == "https")
+                _set_session_cookie(resp, _SYNTHETIC_MASTER_ID, "admin",
+                                    secure=_request_is_https(
+                                        request,
+                                        config.general_settings.trusted_proxies))
                 # A successful login is not a failure: hand the reserved slot
                 # back so valid traffic never exhausts the window.
                 await state.login_throttle.reset(scope)
@@ -4175,11 +4295,19 @@ def create_app(config: WiwiConfig) -> FastAPI:
             {"user": {"id": u.id, "username": u.username, "role": u.role},
              "playground_key": pg_key})
         _set_session_cookie(resp, u.id, u.role,
-                            secure=request.url.scheme == "https")
+                            secure=_request_is_https(
+                                request,
+                                config.general_settings.trusted_proxies))
         return resp
 
     @app.post("/auth/logout")
     async def auth_logout(request: Request):
+        # Drop the cached playground key before ending the session. The
+        # plaintext would otherwise sit in memory for the process lifetime
+        # with nothing left to revalidate or evict it (round 105).
+        who = await current_user(request)
+        if who is not None:
+            state.pg_bearers.drop(who.id)
         resp = ORJSONResponse({"ok": True})
         _clear_session_cookie(resp)
         return resp
@@ -4193,7 +4321,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
             {"user": {"id": u.id, "username": u.username, "role": u.role}})
 
     # -- playground wrapper -----------------------------------------------------
-    # In-process bearer cache for the playground wrapper, keyed by owner id.
+    # The bearer cache lives on AppState (``state.pg_bearers``): it is bounded
+    # by _PgBearerCache and explicitly dropped on logout and on account
+    # disable, so no plaintext key outlives the session that created it.
+    #
     # Holding the plaintext here is what removes the browser round-trip
     # entirely: the SPA calls /v1/playground/completions with only its session
     # cookie, and the key material never travels to the client. The plaintext
@@ -4205,7 +4336,6 @@ def create_app(config: WiwiConfig) -> FastAPI:
     # _mint_playground_key, which registers its plaintext here, so a key
     # handed to ANY client (signup response, /auth/playground-key, the
     # wrapper) is the key the wrapper reuses instead of minting a rival.
-    _pg_bearer_cache: dict[str | None, str] = {}
 
     async def _playground_bearer(actor: UserInfo) -> str:
         """Return a live playground virtual key plaintext for *actor*.
@@ -4217,11 +4347,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
         service = state.auth
         if service is None:  # guarded by the caller, kept for type-checking
             raise RuntimeError("gateway not initialized")
-        owner_id = None if actor.role == "admin" else actor.id
-        plaintext = _pg_bearer_cache.get(owner_id, "")
+        plaintext = state.pg_bearers.get(actor.id)
         if plaintext and await service.authenticate(plaintext) is not None:
             return plaintext
-        _pg_bearer_cache.pop(owner_id, None)
+        state.pg_bearers.drop(actor.id)
         return await _mint_playground_key(actor)
 
     @app.post("/auth/playground-key")
@@ -4421,7 +4550,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
         """Absolute base URL (scheme + host) for building callback URLs.
 
         ``wiwi_settings.public_url`` wins when configured — it is trusted
-        operator config. Otherwise the request's own ``Host`` header is used.
+        operator config. Otherwise the request's own ``Host`` header is used,
+        with the scheme from ``_request_is_https``: behind an external TLS
+        terminator the ASGI scheme is http, so a callback URL built from it
+        would send the authorization code back over plaintext (round 105).
         ``X-Forwarded-Host`` is deliberately NOT honoured: it is client
         controlled, and trusting it let an attacker point an OAuth callback
         (and thus the authorization code) at their own origin.
@@ -4430,7 +4562,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if cfg_url:
             return cfg_url
         host = request.headers.get("host") or "localhost"
-        return f"{request.url.scheme or 'https'}://{host}"
+        scheme = "https" if _request_is_https(
+            request, config.general_settings.trusted_proxies) else "http"
+        return f"{scheme}://{host}"
 
     def _cline_callback_redirect(return_path: str, provider: str,
                                   email: str | None = None,
