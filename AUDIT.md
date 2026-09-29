@@ -8,6 +8,50 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — round 110 (2026-09-29)
+
+### 316. `.env.example` shipped a live-looking `DATABASE_URL` placeholder
+
+**Severity:** 🟡 Medium · **Status: fixed**
+**Files:** `.env.example`
+
+The shipped `.env.example` had `DATABASE_URL` **uncommented** under a block of
+commented examples:
+
+```
+DATABASE_URL=postgresql://user:password@ep-xxx-pooler.c-4.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require
+```
+
+The five comment lines directly above it are the alternatives. So
+`cp .env.example .env` — the documented bootstrap — inherits the placeholder
+as a **real** value, and `init_db` prefers `os.environ["DATABASE_URL"]` over
+`general_settings.database_url` (the SQLite default the YAML ships with):
+
+- Local: startup dies inside the lifespan with
+  `asyncpg.exceptions.InvalidPasswordError: password authentication failed for
+  user 'user'` — every request refused, stack trace on the console.
+- Docker: `docker-compose.yml` sets
+  `DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://wiwi:wiwi@postgres:5432/wiwi}`.
+  Because `env_file: [.env]` loads the placeholder, the `${…:-…}` default never
+  applies, so `docker compose up --build` connects to the Neon host instead of
+  the bundled Postgres service and seeds nothing.
+
+The comment claimed "If unset, defaults to SQLite" — but the file did not leave
+it unset.
+
+- **Fix:** `DATABASE_URL` is commented out, with the placeholder template kept
+  commented (`postgresql+asyncpg://user:password@host:5432/wiwi`, scheme
+  normalized to the async driver) and a note that unset means SQLite / the
+  compose default. Verified by `python3 -c 'from wiwi.config import load_env;
+  load_env(); print(os.environ.get("DATABASE_URL"))'` → `None`, and by an
+  end-to-end `./start.sh` run (`npm ci` → `Application startup complete`,
+  Vite ready).
+
+> A personal `.env` copied before this fix keeps the stale line; delete or
+> comment line 14 there too.
+
+---
+
 ## ✅ Fixed — round 109 (2026-09-29)
 
 Pinned by `tests/test_fix_round109.py` (6 of its 7 tests failed before the fix).
