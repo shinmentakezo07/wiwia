@@ -352,6 +352,7 @@ Railway gives you a URL you can't hardcode, so use **variables** rather than a b
 | `WIWI_MASTER_KEY` | a long random secret (`openssl rand -hex 32`) |
 | `REDIS_URL` | `${{Redis.REDIS_URL}}` |
 | `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` if you add Postgres; omit for SQLite |
+| `WIWI_TRUSTED_PROXIES` | proxy CIDRs, e.g. `10.0.0.0/8` — set when TLS terminates at Railway's edge so the session cookie gets `Secure` and OAuth callbacks use `https` |
 | `WIWI_CONFIG` | the YAML below |
 
 **3. Use `WIWI_CONFIG`** — raw YAML in one env var:
@@ -361,6 +362,7 @@ general_settings:
   master_key: os.environ/WIWI_MASTER_KEY
   database_url: os.environ/DATABASE_URL
   redis_url: os.environ/REDIS_URL
+  trusted_proxies: os.environ/WIWI_TRUSTED_PROXIES
 cache_settings:
   enabled: true
   ttl_s: 3600

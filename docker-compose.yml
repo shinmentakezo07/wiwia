@@ -37,6 +37,11 @@ services:
       # Optional: shared response cache. Leave empty to use the in-memory
       # backend (faster for a single instance). Requires cache_settings.enabled.
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      # Reverse-proxy peers whose X-Forwarded-* wiwi may trust. Set this when
+      # TLS terminates in front of the container (ingress, CDN, PaaS router) so
+      # the session cookie gets `Secure` and OAuth callbacks use https. Comma-
+      # or whitespace-separated CIDRs.
+      WIWI_TRUSTED_PROXIES: ${WIWI_TRUSTED_PROXIES:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}

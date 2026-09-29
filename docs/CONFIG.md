@@ -33,7 +33,7 @@ general_settings:
   database_url: os.environ/DATABASE_URL  # default: SQLite in repo root
   redis_url:                             # optional; needs the [redis] extra
   max_keys_per_user: 50                  # live virtual keys per owner (admins included)
-  trusted_proxies: []                    # reverse-proxy peers whose X-Forwarded-* are trusted
+  trusted_proxies: os.environ/WIWI_TRUSTED_PROXIES  # CSV of proxy CIDRs
 ```
 
 | Field | Default | Notes |
@@ -42,7 +42,7 @@ general_settings:
 | `database_url` | `sqlite+aiosqlite:///wiwi.db` | SQLAlchemy URL. Postgres: `postgresql+asyncpg://...`. `DATABASE_URL` env overrides. |
 | `redis_url` | `""` | Redis for the shared response cache; requires the `[redis]` extra. `REDIS_URL` env overrides. |
 | `max_keys_per_user` | `50` | Ceiling on live virtual keys per owner. Applies to real accounts, admins included; only the synthetic master (no `users` row) mints un-owned keys. |
-| `trusted_proxies` | `[]` | CIDRs of reverse-proxy peers whose `X-Forwarded-For` may key the abuse throttles **and** whose `X-Forwarded-Proto: https` may set the session cookie's `Secure` flag and the Cline OAuth callback scheme. Empty means those headers are never trusted. Put your proxy here when TLS terminates in front of wiwi. |
+| `trusted_proxies` | `[]` | CIDRs of reverse-proxy peers whose `X-Forwarded-For` may key the abuse throttles **and** whose `X-Forwarded-Proto: https` may set the session cookie's `Secure` flag and the Cline OAuth callback scheme. Empty means those headers are never trusted. Put your proxy here when TLS terminates in front of wiwi. `WIWI_TRUSTED_PROXIES` env overrides, comma- or whitespace-separated. |
 
 > **TLS-terminating proxies need `trusted_proxies`.** Uvicorn only maps
 > `X-Forwarded-Proto` into the request scheme for `forwarded_allow_ips`
@@ -350,6 +350,7 @@ DATABASE_URL=postgresql+asyncpg://user:pass@host/db wiwi --config wiwi.yaml
 | `WIWI_MASTER_KEY` | Master key for admin auth. |
 | `DATABASE_URL` | Overrides `general_settings.database_url`. |
 | `REDIS_URL` | Overrides `general_settings.redis_url`. |
+| `WIWI_TRUSTED_PROXIES` | Overrides `general_settings.trusted_proxies`. Comma- or whitespace-separated CIDRs, e.g. `10.0.0.0/8,127.0.0.1/32`. Unset/empty trusts no forwarded header (fail-closed, AUDIT #73). This is the knob to set when TLS terminates at a proxy in front of a container whose `wiwi.yaml` is baked into the image. |
 | `WIWI_SESSION_SECRET` | Session signing key (32-byte hex). Defaults to the master key (the process refuses to start with neither). |
 | `WIWI_STATIC_DIR` | Directory holding the built SPA (default: `wiwi/server/static`). |
 | `WIWI_PORT` | Backend port used by `start.sh` (default 4000). The CLI's own `--port` flag is authoritative when given. |

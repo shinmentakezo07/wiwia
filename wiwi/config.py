@@ -49,16 +49,35 @@ PROVIDER_TYPES: tuple[str, ...] = (
 )
 
 
+def _split_env_list(value: str) -> list[str]:
+    """Split a list-valued env var on commas and/or whitespace."""
+    for sep in (",", " ", "\t", "\n"):
+        value = value.replace(sep, "\x00")
+    return [entry for entry in value.split("\x00") if entry]
+
+
 def _interpolate(value: Any) -> Any:
     """Recursively resolve `os.environ/NAME` strings.
 
     Missing env vars resolve to an empty string rather than crashing, so the
     example config (which references many optional provider keys) can load in
     a fresh container.  Providers with empty keys are filtered out in _validate.
+
+    A *list-typed* target reads ``NAME`` as a comma- or whitespace-separated
+    list (see ``_split_env_list``), so the one list in the config that a
+    container must set for itself — ``general_settings.trusted_proxies``, which
+    turns on the TLS-proxy handling behind a load balancer/ingress/CDN — is
+    settable from the environment instead of only from the YAML file.
     """
     if isinstance(value, str) and value.startswith("os.environ/"):
         var = value[len("os.environ/"):]
         return os.getenv(var, "")
+    # A list whose first element is a single `os.environ/NAME` string is the
+    # list-valued form: `trusted_proxies: [os.environ/WIWI_TRUSTED_PROXIES]`.
+    if (isinstance(value, list) and len(value) == 1
+            and isinstance(value[0], str)
+            and value[0].startswith("os.environ/")):
+        return _split_env_list(os.getenv(value[0][len("os.environ/"):], ""))
     if isinstance(value, dict):
         return {k: _interpolate(v) for k, v in value.items()}
     if isinstance(value, list):
@@ -356,6 +375,21 @@ class GeneralSettings(BaseModel):
     # trusts neither, so an attacker cannot mint a fresh throttle bucket by
     # rotating the header (AUDIT #73).
     trusted_proxies: list[str] = Field(default_factory=list)
+
+    @field_validator("trusted_proxies", mode="before")
+    @classmethod
+    def _proxies_from_string(cls, v: Any) -> Any:
+        """Accept a comma/whitespace-separated string as a list.
+
+        This is how the setting is declared in ``wiwi.yaml.example``
+        (``trusted_proxies: os.environ/WIWI_TRUSTED_PROXIES``), matching every
+        other env-backed scalar, so a container can turn the TLS-proxy
+        handling on without shipping its own config file.  Unset or blank
+        yields ``[]`` — the fail-closed default.
+        """
+        if isinstance(v, str):
+            return _split_env_list(v)
+        return v
 
     @field_validator("max_keys_per_user")
     @classmethod

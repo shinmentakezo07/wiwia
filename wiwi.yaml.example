@@ -142,8 +142,11 @@ general_settings:
   # when TLS terminates in front of wiwi (a load balancer, ingress, or CDN):
   # it gates (a) X-Forwarded-For keying of the login/signup abuse throttles,
   # (b) the session cookie's Secure flag, and (c) the scheme of Cline OAuth
-  # callback URLs. Empty means those headers are never trusted.
-  # trusted_proxies: ["127.0.0.1/32", "10.0.0.0/8"]
+  # callback URLs. Empty means those headers are never trusted. The env var
+  # takes a comma- or whitespace-separated list, e.g.
+  # WIWI_TRUSTED_PROXIES="127.0.0.1/32,10.0.0.0/8" — the usual way to set it
+  # in a container, where there is no config file to edit.
+  trusted_proxies: os.environ/WIWI_TRUSTED_PROXIES
 
 wiwi_settings:
   drop_params: true

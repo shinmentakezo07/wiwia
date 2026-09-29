@@ -8,6 +8,49 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — round 109 (2026-09-29)
+
+Pinned by `tests/test_fix_round109.py` (6 of its 7 tests failed before the fix).
+
+### 315. `trusted_proxies` had no environment override
+
+**Severity:** 🟡 Medium · **Status: fixed**
+**Files:** `wiwi/config.py` (`_interpolate`, `GeneralSettings`), `wiwi.yaml.example`
+
+Round 106 gated the session cookie's `Secure` flag and the Cline OAuth callback
+scheme on `general_settings.trusted_proxies`. That list was settable **only** by
+editing `wiwi.yaml`:
+
+- Every other container-relevant setting has an env override — `DATABASE_URL`,
+  `REDIS_URL`, and the whole `general_settings` block is driven by
+  `os.environ/NAME` in the shipped example. `trusted_proxies` was the one
+  exception.
+- The scalar form could not work: `_interpolate` resolves `os.environ/NAME` to a
+  **string**, and the field is `list[str]`, so
+  `trusted_proxies: os.environ/WIWI_TRUSTED_PROXIES` raised
+  `ConfigError: Input should be a valid list` at load.
+- The consequence is a deployment-shaped hole. A HuggingFace Space (or any PaaS
+  whose image bakes `wiwi.yaml` from the example, as the Dockerfile does) has
+  **no config file to edit** and no volume to mount one from, so it could not —
+  without abandoning the baked config entirely — reach round 106's fixed
+  behaviour: sessions worked, but the cookie was never `Secure`, and OAuth
+  callbacks were built as `http://` behind a TLS-terminating ingress.
+
+- **Fix:** `trusted_proxies` accepts a comma- or whitespace-separated string
+  (a `mode="before"` validator on `GeneralSettings`; the YAML-list form still
+  validates), and `_interpolate` gained a list form so
+  `trusted_proxies: [os.environ/WIWI_TRUSTED_PROXIES]` works too.
+  `wiwi.yaml.example` now declares it as
+  `trusted_proxies: os.environ/WIWI_TRUSTED_PROXIES`, matching the surrounding
+  keys. Unset or blank yields `[]` — the fail-closed default (AUDIT #73) — so
+  the example stays safe shipped unset.
+- **Docs/plumbing:** `WIWI_TRUSTED_PROXIES` documented in `docs/CONFIG.md`,
+  `README.md` (Railway table + `WIWI_CONFIG` snippet), `.env.example`,
+  `docker-compose.yml`, and the Space manifest `deploy/hf-space/README.md`, so
+  the Space can activate the `Secure` flag without publishing `WIWI_MASTER_KEY`.
+
+---
+
 ## ✅ Fixed — round 108 (2026-09-29)
 
 Floats on Postgres were 4 bytes wide. Pinned by `tests/test_fix_round108.py`,

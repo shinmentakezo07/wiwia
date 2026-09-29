@@ -40,6 +40,7 @@ injected as environment variables at runtime, which is exactly how
 |---|---|
 | `WIWI_MASTER_KEY` | Admin API/UI access. **Required and already set.** The gateway refuses to start without it (`no session secret configured … Refusing to start with a default secret, which would allow forged admin sessions`), so a fresh Space reaches `RUNTIME_ERROR` until this secret exists. |
 | `DATABASE_URL` | Already set by the deploy to SQLite under `/data`. Override with a Postgres URL to survive restarts. |
+| `WIWI_TRUSTED_PROXIES` | Comma-separated proxy CIDRs, e.g. `10.0.0.0/8`. Set this to make wiwi trust the Space's ingress' `X-Forwarded-Proto`, which is what turns on the session cookie's `Secure` flag and `https://` OAuth callback URLs behind the Space's TLS terminator. Unset means no forwarded header is trusted (the safe default), so sessions still work — the cookie is just not marked `Secure`. No master key needs to be published to set it. |
 | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, … | Provider keys. Providers whose key is unset are silently filtered out at config load. |
 
 A Space with no provider key still boots and serves `/health`, the admin SPA and
