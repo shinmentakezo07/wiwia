@@ -62,6 +62,31 @@ column `REAL`. SQLite maps `REAL` to an 8-byte float; **PostgreSQL maps it to
   against real Postgres; it skips unless `WIWI_TEST_POSTGRES_URL` is exported,
   so the default gate stays green. Its docstring gives the `docker run` line.
 
+### 314. `delete_deployment` reset a stored weight on SQLite only
+
+**Severity:** ⚪ Low (latent) · **Status: fixed**
+**File:** `wiwi/server/config_store.py` — `delete_deployment`
+
+SQLite's `INSERT OR REPLACE` is a DELETE + INSERT: any column the statement
+does not name is recreated from its `DEFAULT`, not carried over. Postgres'
+`ON CONFLICT … DO UPDATE SET detached=1` touches only `detached`. The tombstone
+statement spelled the placeholder `weight` (1) in both branches, so detaching a
+deployment whose weight was **7** left `weight=7` on Postgres and `weight=1` on
+SQLite. Measured on both dialects.
+
+Not reachable today — `delete_deployment` removes the live deployment from
+`router.groups`, and re-attach goes through `add_deployment` (which always
+restates `weight`), so no reader observes the reset value. Fixed anyway: the
+stored row should not depend on the dialect when the two branches are meant to
+express the same intent. The SQLite arm now carries the existing weight across
+the replace with a correlated `COALESCE((SELECT weight …), 1)`.
+
+Audited the other five `INSERT OR REPLACE` sites for the same class: every one
+of them names **all** columns of its table in both branches (`add_provider`,
+`add_key`, `add_deployment`, `upsert_price`, `upsert_price_scope`,
+`set_setting`), so no other upsert can drop a stored value this way. The
+`providers` table has no `created_at` column, contrary to an earlier note.
+
 ---
 
 ## ✅ Fixed — round 107 (2026-09-29)

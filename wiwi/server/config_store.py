@@ -432,6 +432,12 @@ class ConfigStore:
         ``detached=1`` records the decision for both cases; ``add_deployment``
         clears it if the operator re-attaches the same triple.
         """
+        # ``weight`` is always spelled in the INSERT, but on an existing row the
+        # tombstone must not restate it: SQLite's ``INSERT OR REPLACE`` is a
+        # DELETE + INSERT that would reset a stored weight to the placeholder
+        # here (1) while Postgres' ``DO UPDATE SET detached=1`` preserves it, so
+        # re-attaching the deployment later restored 1 instead of the operator's
+        # value on SQLite only (round 108).
         if self._is_pg:
             sql = ("INSERT INTO deployments"
                    " (group_name, provider_name, model_id, weight, detached)"
@@ -441,7 +447,10 @@ class ConfigStore:
         else:
             sql = ("INSERT OR REPLACE INTO deployments"
                    " (group_name, provider_name, model_id, weight, detached)"
-                   " VALUES (:g,:p,:m,1,1)")
+                   " VALUES (:g,:p,:m,"
+                   "  COALESCE((SELECT weight FROM deployments"
+                   "            WHERE group_name=:g AND provider_name=:p"
+                   "            AND model_id=:m), 1), 1)")
         async with self.engine.begin() as conn:
             await conn.execute(sa.text(sql),
                                {"g": group_name, "p": provider_name, "m": model_id})
