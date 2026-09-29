@@ -48,6 +48,8 @@ import structlog
 # file (AUDIT #191).
 _ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
+log = structlog.get_logger("wiwi.journals")
+
 
 class JournalTail:
     """Byte-offset cursor over one journal file, for reconnect tailing.
@@ -207,6 +209,15 @@ class JournalStore:
         self.ttl_s = max(1.0, ttl_s)
         self.max_bytes = max_bytes
         self._active: dict[str, StreamJournal] = {}
+        # request_id -> (the key id ``open`` tried to record as this journal's
+        # owner, that journal's path). Bounded by the journals on disk:
+        # ``sweep`` drops an entry exactly when it unlinks the file, and the
+        # entry deliberately outlives ``release`` because a finished stream
+        # stays replayable for its whole TTL. It exists only to disambiguate
+        # two states that are identical on disk — a journal that never had an
+        # owner (pre-#67, legacy, readable by anyone) and one whose owner
+        # write was LOST (must be denied). See ``owner_of`` and AUDIT #317.
+        self._owner_intent: dict[str, tuple[str, Path]] = {}
         self._lock = asyncio.Lock()
         self._sweeper: asyncio.Task | None = None
 
@@ -250,6 +261,13 @@ class JournalStore:
         it. It is written as the FIRST record (an internal ownership line
         with ``owner`` set and no client-visible payload); ``read_after``
         ignores it like a done-marker. ``owner_of`` reads it back.
+
+        The intent is recorded in memory *before* the write and independently
+        of its outcome (AUDIT #317). A lost write used to leave the journal
+        ownerless on disk, which the replay gate cannot distinguish from a
+        pre-#67 legacy file — so it failed OPEN and any key could replay any
+        other key's response. ``owner_of`` now consults this map, so a lost
+        write denies replay instead of granting it.
         """
         async with self._lock:
             j = self._active.get(request_id)
@@ -262,9 +280,13 @@ class JournalStore:
                 try:
                     j.path.parent.mkdir(parents=True, exist_ok=True)
                     j.path.touch(exist_ok=True)
-                except OSError:
-                    pass
+                except OSError as e:
+                    log.error("journal_touch_failed", request_id=request_id,
+                              error=f"{type(e).__name__}: {e}")
                 if key_id is not None:
+                    # Recorded first, and unconditionally: this is what makes a
+                    # lost write distinguishable from a legacy journal.
+                    self._owner_intent[request_id] = (key_id, j.path)
                     # Ownership record: seq=0 keeps it out of every data
                     # replay (read_after filters seq > last_seq with
                     # last_seq >= 0, and data records start at seq 1).
@@ -278,24 +300,50 @@ class JournalStore:
 
                     try:
                         await asyncio.to_thread(_write_owner)
-                    except OSError:
-                        pass  # best-effort: replay scoping degrades to none
+                    except OSError as e:
+                        # No longer silent: the operator had no signal that
+                        # replay scoping had degraded on a live stream. The
+                        # gate still fails closed via _owner_intent.
+                        log.error("journal_owner_write_failed",
+                                  request_id=request_id, key_id=key_id,
+                                  error=f"{type(e).__name__}: {e}")
                 self._active[request_id] = j
             return j
 
     def owner_of(self, request_id: str) -> str | None:
-        """The originating key id recorded at open(), or None (unknown or
-        written by a pre-scoping version)."""
+        """The originating key id recorded at open(), or None.
+
+        None means "no owner" and is NOT the same as "any key may read this":
+        the replay gate treats None as legacy-and-open, so a journal whose
+        owner write was lost must not report None. When ``open`` recorded an
+        intent for this id but no owner line made it to disk, the intent is
+        returned instead — the read is then scoped to the real owner and
+        denied to everyone else (AUDIT #317).
+
+        A journal with neither an intent nor an owner line is a pre-#67 file
+        (or one written by a version predating this map) and genuinely
+        reports None, preserving the documented restart-replay compat.
+        """
         for seq, _chunk, _done, owner in self._read_records(request_id, -1):
             if seq == 0 and owner is not None:
                 return owner
-        return None
+        intent = self._owner_intent.get(request_id)
+        return intent[0] if intent is not None else None
 
     def release(self, request_id: str) -> None:
         """Drop *request_id* from the active set (the stream finished or the
         process-local journal holder is gone). The file stays on disk for
         reconnect replay until the TTL sweep removes it. Ownership survives —
-        it is recorded in the file, not memory."""
+        it is recorded in the file, not memory.
+
+        The in-memory *intent* deliberately OUTLIVES the active entry. This
+        is called on every normal stream completion (``server/app.py``), and
+        the file stays replayable for its whole TTL, so dropping the intent
+        here would re-open the #175 hole for the entire replay window — the
+        common case, not the edge case. It is reclaimed by :meth:`sweep`
+        instead, which removes it exactly when the file it describes is
+        unlinked, so the map is bounded by the journals on disk.
+        """
         self._active.pop(request_id, None)
 
     def read_after(self, request_id: str, last_seq: int) -> list[tuple[int, bytes]]:
@@ -372,24 +420,55 @@ class JournalStore:
             return True
 
     def sweep(self, now: float | None = None) -> int:
-        """Delete expired journals. Returns count removed."""
+        """Delete expired journals. Returns count removed.
+
+        Runs on a worker thread (``sweep_forever`` hands it to
+        ``asyncio.to_thread``), so the filesystem work lives in
+        :meth:`_unlink_expired` and only the returned path set crosses back to
+        the event loop. ``_owner_intent`` must not be mutated here: ``open``
+        mutates it on the loop under ``_lock``, and a plain dict has no
+        cross-thread safety, so an unsynchronised sweep could drop a live
+        intent (re-opening the #175 fail-open) or corrupt the dict outright.
+        """
+        return len(self._unlink_expired(now))
+
+    def _reclaim_intent(self, unlinked: set[Path]) -> None:
+        """Drop intents whose journal was just unlinked. Event-loop only."""
+        if not unlinked:
+            return
+        for rid in [r for r, (_k, p) in self._owner_intent.items()
+                    if p in unlinked]:
+            self._owner_intent.pop(rid, None)
+
+    async def sweep_async(self, now: float | None = None) -> int:
+        """Sweep, reclaiming intents back on the event loop."""
+        unlinked = await asyncio.to_thread(self._unlink_expired, now)
+        self._reclaim_intent(unlinked)
+        return len(unlinked)
+
+    def _unlink_expired(self, now: float | None = None) -> set[Path]:
+        """Delete expired journal files on a worker thread. Returns their paths."""
         now = time.time() if now is None else now
-        removed = 0
         try:
             self.dir.mkdir(parents=True, exist_ok=True)
             entries = list(self.dir.iterdir())
         except OSError:
-            return 0
+            return set()
+        unlinked: set[Path] = set()
         for p in entries:
             if not p.name.endswith(".jsonl"):
                 continue
             try:
                 if now - p.stat().st_mtime > self.ttl_s:
                     p.unlink(missing_ok=True)
-                    removed += 1
+                    unlinked.add(p)
             except OSError:
                 continue
-        return removed
+        # Reclaim each intent exactly when the journal it describes is
+        # unlinked, so the map is bounded by the journals still on disk. An
+        # intent whose file is merely *not active* is kept: a finished stream
+        # stays replayable for its TTL and still needs its owner to gate it.
+        return unlinked
 
     async def sweep_forever(self, interval_s: float = 60.0) -> None:
         """Background sweeper body: run :meth:`sweep` every *interval_s*.
@@ -399,11 +478,10 @@ class JournalStore:
         expire its own journals until restart. Prefer :meth:`start` /
         :meth:`stop` for lifecycle management.
         """
-        log = structlog.get_logger("wiwi.journals")
         while True:
             await asyncio.sleep(interval_s)
             try:
-                removed = await asyncio.to_thread(self.sweep)
+                removed = await self.sweep_async()
             except Exception:  # the sweeper must never die
                 log.warning("journal_sweep_failed", exc_info=True)
                 continue

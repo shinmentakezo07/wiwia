@@ -8,6 +8,71 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — round 111 (2026-09-29)
+
+### 317. Journal owner-record write failure failed the #67 replay gate OPEN
+
+**Severity:** 🟠 High · **Status: fixed**
+**Files:** `wiwi/streaming/tape_store.py`, `tests/test_fix_round110.py`
+
+`JournalStore.open` wrote the per-key ownership record best-effort and
+swallowed the error, while the replay gate in `server/app.py` reads
+`owner_of() is None` as "a pre-#67 legacy journal, readable by anyone":
+
+```python
+try:
+    await asyncio.to_thread(_write_owner)
+except OSError:
+    pass  # best-effort: replay scoping degrades to none
+```
+```python
+jowner = state_.journals.owner_of(replay_id)      # server/app.py:1463
+owner_ok = (jowner is None                        # <-- fail-open
+            or caller_kid == jowner
+            or (jowner == "master" and caller_kid == "master"))
+```
+
+The root cause is that **"no owner was ever recorded" and "the owner could not
+be recorded" are the same on-disk state.** A transient write failure —
+ENOSPC on the Space's `/data` volume, EMFILE under fd pressure, a read-only
+mount — produced the same `None` on a brand-new journal as a legacy file does,
+so the gate opened to every caller. Key B could reconnect with
+`x-wiwi-stream-id` set to key A's request and replay **A's full response
+content**: prompt text and tool arguments included.
+
+Two defects, one fix:
+
+1. **Fail-open.** Fixed by recording the ownership *intent* in memory
+   (`_owner_intent`) before the write and independently of its outcome.
+   `owner_of` consults it, so a lost write returns the intended owner instead
+   of `None` — the read is scoped to the real owner and denied to everyone
+   else. A journal with neither intent nor owner line is genuinely pre-#67 and
+   still reports `None`, preserving the documented restart-replay compat.
+2. **Silent.** The `except OSError: pass` gave an operator no signal that
+   scoping had degraded on a live stream. It now logs at `error` with the
+   request id, key id, and error. The same was done for the eagerly-swallowed
+   `mkdir`/`touch` at the top of `open` (double-billing is still avoided —
+   `is_active` reads the in-memory set — but the restart-replay fallback was
+   being lost silently).
+
+The intent map is bounded by the journals on disk: `sweep` drops an entry
+exactly when it unlinks the file it describes. It deliberately **outlives
+`release`** — a first attempt cleared it there, and the round-110 test caught
+that this re-opens the hole for the entire replay window, because `release`
+runs on *every* normal stream completion (`server/app.py:1751`) while the
+journal stays replayable for its TTL. That was the common case, not the edge
+case.
+
+- **Test:** `tests/test_fix_round110.py` — 5 tests, including the legacy
+  compat control, the "real owner can still reconnect" control (failing closed
+  must not brick the legitimate owner's own reconnect), and the
+  intent-outlives-release / sweep-reclaims invariant.
+- **Verified:** repro script pre-fix printed `keyB owner_ok = True`; post-fix
+  prints `False` and logs `journal_owner_write_failed`. Full suite **2727
+  passed, 5 skipped**, ruff clean.
+
+---
+
 ## ✅ Fixed — round 110 (2026-09-29)
 
 ### 316. `.env.example` shipped a live-looking `DATABASE_URL` placeholder
