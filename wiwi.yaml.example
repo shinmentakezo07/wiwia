@@ -138,6 +138,12 @@ general_settings:
   # Redis: entries survive a restart and are shared across replicas.
   # Unset (default) keeps the in-memory LRU, which is faster for one process.
   # redis_url: redis://localhost:6379/0
+  # Reverse-proxy peers whose X-Forwarded-* headers wiwi may trust. Set this
+  # when TLS terminates in front of wiwi (a load balancer, ingress, or CDN):
+  # it gates (a) X-Forwarded-For keying of the login/signup abuse throttles,
+  # (b) the session cookie's Secure flag, and (c) the scheme of Cline OAuth
+  # callback URLs. Empty means those headers are never trusted.
+  # trusted_proxies: ["127.0.0.1/32", "10.0.0.0/8"]
 
 wiwi_settings:
   drop_params: true

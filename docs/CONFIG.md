@@ -29,31 +29,65 @@ providers:           {...}     # providers referenced by model_list
 
 ```yaml
 general_settings:
-  master_key: sk-wiwi-master-test        # required: admin auth key
-  session_secret:                        # optional: session signing key (derived from master_key if unset)
-  host: 0.0.0.0                          # default: 0.0.0.0
-  port: 4000                             # default: 4000
-  log_level: info                        # default: info (structlog)
-  db_url: sqlite+aiosqlite:///wiwi.db    # default: SQLite in repo root
-  max_request_body_mb: 10               # default: 10
+  master_key: sk-wiwi-master-test        # required: admin auth key (WIWI_MASTER_KEY)
+  database_url: os.environ/DATABASE_URL  # default: SQLite in repo root
+  redis_url:                             # optional; needs the [redis] extra
+  max_keys_per_user: 50                  # live virtual keys per owner (admins included)
+  trusted_proxies: []                    # reverse-proxy peers whose X-Forwarded-* are trusted
 ```
 
 | Field | Default | Notes |
 |---|---|---|
 | `master_key` | — | Admin auth. Use `WIWI_MASTER_KEY` env in production instead of hardcoding. |
-| `session_secret` | derived from master_key | 32-byte hex string for signing session cookies. Override for key rotation without master key change. |
-| `host` | `0.0.0.0` | Bind address. |
-| `port` | `4000` | Bind port. |
-| `log_level` | `info` | structlog level: `debug`, `info`, `warning`, `error`. |
-| `db_url` | `sqlite+aiosqlite:///wiwi.db` | SQLAlchemy URL. Postgres: `postgresql+asyncpg://...`. `DATABASE_URL` env overrides. |
-| `max_request_body_mb` | `10` | Max request body size in MB. Honored for both `Content-Length` and chunked/HTTP2 bodies. |
+| `database_url` | `sqlite+aiosqlite:///wiwi.db` | SQLAlchemy URL. Postgres: `postgresql+asyncpg://...`. `DATABASE_URL` env overrides. |
+| `redis_url` | `""` | Redis for the shared response cache; requires the `[redis]` extra. `REDIS_URL` env overrides. |
+| `max_keys_per_user` | `50` | Ceiling on live virtual keys per owner. Applies to real accounts, admins included; only the synthetic master (no `users` row) mints un-owned keys. |
+| `trusted_proxies` | `[]` | CIDRs of reverse-proxy peers whose `X-Forwarded-For` may key the abuse throttles **and** whose `X-Forwarded-Proto: https` may set the session cookie's `Secure` flag and the Cline OAuth callback scheme. Empty means those headers are never trusted. Put your proxy here when TLS terminates in front of wiwi. |
+
+> **TLS-terminating proxies need `trusted_proxies`.** Uvicorn only maps
+> `X-Forwarded-Proto` into the request scheme for `forwarded_allow_ips`
+> (loopback by default), so behind an *external* terminator the scheme is
+> `http` and wiwi would otherwise set the session cookie without `Secure` and
+> build `http://` OAuth callback URLs. Listing the proxy here is what makes
+> those decisions correct (rounds 105/106).
+
+> **`host` / `port` / `max_request_body_mb` are not `general_settings`
+> fields.** They live under `wiwi_settings` (see below). `log_level` is not a
+> config field at all — uvicorn is started with `log_level="info"` and only the
+> `--reload` developer path passes it.
 
 > **No `admin_ui_dir` field.** Earlier revisions of this doc listed one. The
 > built SPA is located from the `WIWI_STATIC_DIR` environment variable, falling
 > back to `Path(__file__).parent / "static"` (`wiwi/server/app.py`); there is no
 > config key. The SPA is also mounted at **`/`** with history fallback, not at
 > `/admin/ui`.
-| `max_request_body_mb` | `10` | Max request body size in MB. Honored for both `Content-Length` and chunked/HTTP2 bodies. |
+
+## `wiwi_settings`
+
+```yaml
+wiwi_settings:
+  host: 0.0.0.0                   # bind address
+  port: 4000                      # bind port
+  public_url: ""                  # absolute base URL; when set it wins over the request Host
+  drop_params: true               # silently drop params the target provider does not support
+  max_request_body_mb: 50         # request body ceiling (Content-Length and chunked/HTTP2)
+  store_prompts_in_spend_logs: false
+  log_retention_days: 30          # prune raw request_logs older than this; 0 = keep forever
+  log_max_rows: 10000             # keep at most N raw rows; 0 = unlimited
+  log_prune_interval_s: 3600      # seconds between prune sweeps; 0 = startup only
+```
+
+| Field | Default | Notes |
+|---|---|---|
+| `host` | `0.0.0.0` | Bind address. |
+| `port` | `4000` | Bind port. |
+| `public_url` | `""` | Absolute base URL used when building OAuth callback URLs. Trusted operator config; when set it takes precedence over the request's `Host`, so a TLS-terminating proxy can pin the external scheme/host without `trusted_proxies`. |
+| `drop_params` | `true` | Drop request params the target provider does not support instead of erroring. |
+| `max_request_body_mb` | `50` | Max request body size in MB. |
+| `store_prompts_in_spend_logs` | `false` | Persist full prompt/response content in spend logs. |
+| `log_retention_days` | `30` | Drop raw `request_logs` rows older than this; 0 keeps forever. Rows are rolled into `request_rollups` first. |
+| `log_max_rows` | `10000` | Cap on raw log rows; 0 = unlimited. |
+| `log_prune_interval_s` | `3600` | Seconds between prune sweeps; 0 = startup only. |
 
 ## `router_settings`
 
@@ -298,7 +332,7 @@ This is the recommended way to keep secrets out of config files.
 
 ## `DATABASE_URL` env override
 
-`DATABASE_URL` overrides `general_settings.db_url` regardless of config file content:
+`DATABASE_URL` overrides `general_settings.database_url` regardless of config file content:
 
 ```bash
 DATABASE_URL=postgresql+asyncpg://user:pass@host/db wiwi --config wiwi.yaml
@@ -312,29 +346,32 @@ DATABASE_URL=postgresql+asyncpg://user:pass@host/db wiwi --config wiwi.yaml
 
 | Variable | Effect |
 |---|---|
-| `WIWI_PORT` | Backend port (default 4000). Overrides config. |
-| `WIWI_CONFIG` | Config file path. Overrides default `wiwi.yaml`. |
+| `WIWI_CONFIG` | Config file path or inline YAML. Overrides the `wiwi.yaml` default. |
 | `WIWI_MASTER_KEY` | Master key for admin auth. |
-| `DATABASE_URL` | Overrides `general_settings.db_url`. |
-| `WIWI_SESSION_SECRET` | Session signing key (32-byte hex). Defaults to SHA-256 of master key. |
-| `WIWI_RELOAD` | Set to enable `--reload` mode. |
+| `DATABASE_URL` | Overrides `general_settings.database_url`. |
+| `REDIS_URL` | Overrides `general_settings.redis_url`. |
+| `WIWI_SESSION_SECRET` | Session signing key (32-byte hex). Defaults to the master key (the process refuses to start with neither). |
+| `WIWI_STATIC_DIR` | Directory holding the built SPA (default: `wiwi/server/static`). |
+| `WIWI_PORT` | Backend port used by `start.sh` (default 4000). The CLI's own `--port` flag is authoritative when given. |
+| `WIWI_RELOAD` | `0` disables `--reload` in `start.sh` (reload is on by default there; the CLI flag is `--reload`). |
 | `WIWI_RELOAD_DIRS` | Comma-separated dirs to watch in reload mode. |
-| `WIWI_BIN` | Path to the wiwi binary (for start.sh). |
+| `WIWI_BIN` | Path to the wiwi binary (for `start.sh`). |
+| `FORWARDED_ALLOW_IPS` | Uvicorn's own trusted-proxy list for `X-Forwarded-*` mapping into the request scheme/client. Independent of `general_settings.trusted_proxies`, which wiwi applies itself. |
 
 ## config.py models
 
 All config is parsed through Pydantic v2 models in `wiwi/config.py`:
 
-- `WiwiConfig` — top-level aggregate
-- `GeneralSettings` — host, port, master_key, db_url, etc.
+- `WiwiConfig` — top-level aggregate (`providers`, `model_list`, `router_settings`, `general_settings`, `wiwi_settings`, `cache_settings`, `healer`)
+- `GeneralSettings` — `master_key`, `database_url`, `redis_url`, `max_keys_per_user`, `trusted_proxies`
+- `WiwiSettings` — `host`, `port`, `public_url`, `drop_params`, `max_request_body_mb`, `store_prompts_in_spend_logs`, `log_retention_days`, `log_max_rows`, `log_prune_interval_s`
 - `RouterSettings` — health_model, ewma_alpha, window, adaptive_cooldown
 - `CacheSettings` — enabled, ttl_s, max_entries, backend
 - `HealerSettings` — enabled, probe_interval_s, etc.
-- `ProviderDef` — per-provider config (base_url, timeout_s, budget_cap, keys)
-- `ModelEntry` — model_list entry (model_name, wiwi_params, aliases)
-- `ModelAliasEntry` — alias → model_name mapping
-- `KeyDef` — virtual key definition
-- `DeploymentParams` — per-deployment overrides
+- `ProviderDef` — per-provider config (`base_url`, `timeout_s`, `extra_headers`, `round_robin`, `keys`, `alias_id`)
+- `KeyDef` — provider key entry (`label`, `key`, `weight`, `enabled`)
+- `DeploymentParams` — per-deployment overrides (`provider`, `model`, `weight`, `max_tokens`, `rpm`, `tpm`, `timeout`, `extra_headers`, `extra_body`, `prompt_cache`, …)
+- `ModelEntry` — model_list entry (`model_name`, `wiwi_params`)
 
 `PROVIDER_TYPES` is a module-level tuple in `config.py` listing all 11 provider types. It is the single source of truth — the router, admin API, and Pydantic schema all reference it.
 

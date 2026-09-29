@@ -133,7 +133,7 @@
 - Virtual keys (`sk-wiwi-…`), SHA-256-hashed at rest, plaintext shown once at mint. Optional `custom_key` (≥16 chars).
 - Per-key: `max_budget`, `rpm`, `tpm`, model allowlist, TTL, enable/disable.
 - Per-deployment: `max_tokens`, `rpm`, `tpm`, `timeout`, `extra_headers`, `extra_body`.
-- User accounts with roles; `max_keys_per_user` caps live keys per owner (admins exempt).
+- User accounts with roles; `max_keys_per_user` caps live keys per owner (real accounts only — the synthetic master key mints un-owned keys).
 - `POST /auth/playground-key` mints a scoped session key (24h TTL, 5 per user).
 - Optional global `global_rpm` / `global_tpm` sliding-window caps.
 - Cost engine with an explicit `unpriced` flag so unknown models are logged, not silently $0.
@@ -541,7 +541,10 @@ general_settings:
   master_key: os.environ/WIWI_MASTER_KEY
   database_url: os.environ/DATABASE_URL   # sqlite+aiosqlite:///wiwi.db (default) or postgres
   # redis_url: os.environ/REDIS_URL       # response cache; needs the [redis] extra
-  max_keys_per_user: 50                   # caps live virtual keys per non-admin owner
+  max_keys_per_user: 50                   # caps live virtual keys per owner (admins included)
+  # trusted_proxies: ["10.0.0.0/8"]       # set when TLS terminates at a reverse proxy:
+                                          # gates X-Forwarded-For throttling, the session
+                                          # cookie's Secure flag, and OAuth callback scheme
 
 wiwi_settings:
   drop_params: true            # silently drop params the target provider doesn't support

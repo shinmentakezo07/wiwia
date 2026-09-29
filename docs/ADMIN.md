@@ -94,7 +94,7 @@ Every admin-UI change must be verified on desktop **and** mobile before it count
 
 ## 8. Ops notes
 
-- Master-key rotation: set a new `WIWI_MASTER_KEY`; session cookies stay valid (separate `session_secret`, derived from the master key unless set explicitly).
+- Master-key rotation: set a new `WIWI_MASTER_KEY` and a fixed `WIWI_SESSION_SECRET` to keep existing session cookies valid; otherwise the signing secret is derived from the master key and rotation invalidates them.
 - `GET /admin/providers/{name}/keys/{label}/secret` is the only secret-reveal path and is audit-logged.
 - Budget enforcement: per-key budgets and spend updates are applied post-response; exceeding a cap yields `402` on subsequent requests.
 - Prometheus scrape: `GET /metrics` (path configurable) — see [API_REFERENCE.md](API_REFERENCE.md) §2.
