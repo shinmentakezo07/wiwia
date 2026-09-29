@@ -137,8 +137,10 @@ class AuthService:
         # landing mid-lookup cannot be undone by the late store (AUDIT #162).
         self._evict_gen = 0
         self._is_pg = engine.dialect.name == "postgresql"
-        # Ceiling on live keys per owner. Admins mint keys with owner_id=None
-        # and are exempt; the check below only fires for a real owner.
+        # Ceiling on live keys per owner. The only un-owned keys are the
+        # synthetic master's (it has no ``users`` row, so an owned key could
+        # never authenticate); those stay exempt and the check below only fires
+        # for a real owner.
         self.max_keys_per_user = max_keys_per_user
         # authenticate()'s lookup→store pair is made safe against a concurrent
         # revocation by ``_evict_gen``, not by a lock — see that method.
@@ -355,7 +357,10 @@ class AuthService:
         # (AUDIT #202).
         expires = now + ttl_seconds if ttl_seconds is not None else None
         if owner_id is None:
-            # Admins mint unowned keys and are exempt from the cap.
+            # Un-owned keys (only the synthetic master mints them) are exempt
+            # from the per-owner cap: ``owner_id=None`` names no account to
+            # count them against. The playground mint bounds the master's keys
+            # separately via the per-alias cap.
             await self._insert_key(kid, plaintext, alias, models, max_budget,
                                    rpm, tpm, expires, owner_id, now)
         else:

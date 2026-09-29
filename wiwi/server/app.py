@@ -2071,7 +2071,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
                                    or not all(isinstance(m, str) for m in models)):
             return _err(400, "invalid_request_error",
                         "'models' must be a list of strings", request)
-        owner_id = None if actor.role == "admin" else actor.id
+        # Owner-scope real admins too (the synthetic master stays un-owned):
+        # an un-owned admin key is exempt from ``max_keys_per_user`` and shares
+        # one owner id with every other admin, which is the round-105 defect on
+        # the Playground path (round 107).
+        owner_id = _key_owner_id(actor)
         try:
             plaintext, kid = await state.auth.create_key(
                 alias=str(body.get("name") or body.get("alias") or ""),

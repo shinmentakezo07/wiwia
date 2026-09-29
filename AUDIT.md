@@ -8,6 +8,48 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — round 107 (2026-09-29)
+
+The admin key-generate route kept the round-105 defect on its own path: real
+admins minted un-owned keys. Pinned by `tests/test_fix_round107.py`.
+
+### 312. Admin-generated keys were un-owned, uncapped, and shared
+
+**Severity:** 🟡 Medium · **Status: fixed**
+**File:** `wiwi/server/app.py` — `/admin/keys/generate` (`owner_id = None if actor.role == "admin" else actor.id`)
+
+**What:** the route resolved `owner_id=None` for every admin, which is the same
+shape round 105 fixed on the Playground path. Two consequences:
+
+- `AuthService.create_key` enforces `max_keys_per_user` only when
+  `owner_id is not None`, so admin-generated keys were exempt from the ceiling
+  the setting exists to provide — a real admin could mint unbounded live
+  credentials, each with its own budget/rate limit to rotate around.
+- every admin shared the single `owner_id=None` owner id, so `count_keys(None)`
+  / `list_keys_for_owner` grouped them together and the keys were
+  indistinguishable from one another and from the synthetic master's.
+
+The docs asserted the behaviour as intent ("Admins are exempt",
+`README.md`/`config.py`), which contradicted round 105's own note that real
+admins now own their keys.
+
+- **Trigger:** promote a real user to admin, call `/admin/keys/generate` past
+  `max_keys_per_user` times → all succeed; the owner column is NULL for each.
+- **Fix:** `owner_id = _key_owner_id(actor)` — the same helper the playground
+  mint uses (renamed from `_pg_owner_id`, since it now serves both mint paths).
+  Real accounts, admins included, own their keys; only the synthetic master
+  (`_SYNTHETIC_MASTER_ID`) stays un-owned, because `AuthService._lookup_db`'s
+  owner check fails closed on a missing owner row and an owned master key would
+  therefore never authenticate.
+- **Docs:** `README.md`, `wiwi/config.py` and `wiwi/auth/service.py` comments
+  no longer claim admins are exempt; `docs/CONFIG.md` gained the missing
+  `trusted_proxies` / `max_keys_per_user` / `wiwi_settings` reference (the
+  `trusted_proxies` entry is load-bearing for round 106's `Secure` flag and
+  round 105's OAuth callback scheme), and its stale `db_url` /
+  `session_secret` / `host`-under-`general_settings` entries were corrected.
+
+---
+
 ## ✅ Fixed — round 105 (2026-09-28)
 
 Playground wrapper (introduced in round 103), plus the Cline auto-connect

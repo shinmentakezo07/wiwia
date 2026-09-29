@@ -343,14 +343,17 @@ class GeneralSettings(BaseModel):
     master_key: str = ""
     database_url: str = "sqlite+aiosqlite:///wiwi.db"
     redis_url: str = ""
-    # Ceiling on live virtual keys per non-admin owner. Without it a user can
-    # mint unbounded keys and rotate around any per-key budget or rate limit,
-    # making those controls advisory. Admins are exempt.
+    # Ceiling on live virtual keys per owner. Without it a user can mint
+    # unbounded keys and rotate around any per-key budget or rate limit, making
+    # those controls advisory. Applies to every real account, admins included;
+    # only the synthetic master (no ``users`` row) mints un-owned keys.
     max_keys_per_user: int = 50
-    # Reverse-proxy peers whose ``X-Forwarded-For`` may be trusted for
-    # rate-limit keying (e.g. ["127.0.0.1/32", "10.0.0.0/8"]). Empty (default)
-    # means XFF is never trusted and the abuse throttles key on the direct peer
-    # address, so an attacker cannot mint a fresh bucket per request by
+    # Reverse-proxy peers whose ``X-Forwarded-*`` headers may be trusted: the
+    # ``X-Forwarded-For`` used to key rate-limit/abuse throttles *and* the
+    # ``X-Forwarded-Proto`` that decides the session cookie's ``Secure`` flag
+    # and the scheme of OAuth callback URLs, for TLS that terminates at an
+    # external proxy (e.g. ["127.0.0.1/32", "10.0.0.0/8"]). Empty (default)
+    # trusts neither, so an attacker cannot mint a fresh throttle bucket by
     # rotating the header (AUDIT #73).
     trusted_proxies: list[str] = Field(default_factory=list)
 
