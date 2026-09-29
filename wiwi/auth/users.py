@@ -39,10 +39,37 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'user',
   disabled INTEGER NOT NULL DEFAULT 0,
-  created_at REAL NOT NULL,
-  updated_at REAL NOT NULL
+  created_at DOUBLE PRECISION NOT NULL,
+  updated_at DOUBLE PRECISION NOT NULL
 );
 """
+
+
+async def widen_pg_floats(conn, table: str, *columns: str) -> None:
+    """Widen 4-byte ``REAL`` columns to ``DOUBLE PRECISION`` on Postgres.
+
+    A DDL shared by both dialects cannot spell a float column ``REAL``: SQLite
+    maps that to an 8-byte float, but Postgres maps it to **float4**. Every
+    ``time.time()`` column is ~1.79e9, where a float4's ULP is 128 s, so all
+    rows created within the same ~2-minute block shared one timestamp and
+    ``ORDER BY created_at DESC`` was arbitrary — ``expire_keys`` could retire
+    the key an owner was actively using. Sums stored in a float4 also floor:
+    ``1000.0 + 20 * 1e-6`` still read back as ``1000.0`` (round 108).
+
+    Only Postgres needs this (SQLite's REAL is already 8 bytes) and only for
+    databases created before the DDL said ``DOUBLE PRECISION`` — the type is
+    read from the catalog first, so an up-to-date table is left alone.
+    """
+    rows = (await conn.execute(sa.text(
+        "SELECT column_name FROM information_schema.columns"
+        " WHERE table_schema = current_schema() AND table_name = :t"
+        " AND data_type = 'real'"), {"t": table})).all()
+    wanted = set(columns)
+    for (col,) in rows:
+        # `col` comes from the catalog, not from caller input.
+        if col in wanted:
+            await conn.execute(sa.text(
+                f"ALTER TABLE {table} ALTER COLUMN {col} TYPE double precision"))
 
 
 def _user_id() -> str:
@@ -157,6 +184,10 @@ class UserService:
             await conn.execute(sa.text(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username"
                 " ON users(username)"))
+            if self._is_pg:
+                # Postgres-only: databases created before USERS_DDL said
+                # DOUBLE PRECISION have these as 4-byte REAL (round 108).
+                await widen_pg_floats(conn, "users", "created_at", "updated_at")
 
     async def create_user(self, username: str, password: str) -> UserInfo:
         uname = _validate_username(username)

@@ -8,6 +8,62 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — round 108 (2026-09-29)
+
+Floats on Postgres were 4 bytes wide. Pinned by `tests/test_fix_round108.py`,
+which runs only when `WIWI_TEST_POSTGRES_URL` is set — the suite had **no**
+real-Postgres fixture, which is why this survived.
+
+### 313. Shared DDL spelled floats `REAL`, which Postgres maps to float4
+
+**Severity:** 🟠 High · **Status: fixed**
+**Files:** `wiwi/auth/users.py` (`USERS_DDL`), `wiwi/auth/service.py`
+(`CREATE_SQL`), `wiwi/server/config_store.py` (`PROVIDER_DDL`,
+`MODEL_PRICES_DDL`, `MODEL_PRICE_SCOPES_DDL`)
+
+The three log tables each have a Postgres DDL variant that says
+`DOUBLE PRECISION`, but the five *shared* DDL constants spelled every float
+column `REAL`. SQLite maps `REAL` to an 8-byte float; **PostgreSQL maps it to
+`float4`**. 16 columns were affected:
+
+- `users`: `created_at`, `updated_at`
+- `vkeys`: `max_budget`, `spend_to_date`, `expires_at`, `created_at`, `updated_at`
+- `providers`: `timeout_s`
+- `model_prices` / `model_price_scopes`: the four `*_cost_per_token` rates
+
+- **Trigger (timestamps).** Every timestamp is `time.time()` ≈ 1.79e9, where a
+  float4's ULP is **128 s**. Measured: five playground-style keys minted
+  seconds apart stored **one** distinct `created_at` value. `expire_keys` then
+  cannot tell them apart, so `ORDER BY created_at DESC … keep_newest` — the
+  per-owner key cap that stops a user rotating around per-key budgets — retired
+  *arbitrary* keys, including one the owner was actively using. Same input on
+  SQLite gave five distinct values.
+- **Trigger (sums).** `spend_to_date` is a sum of per-request costs. Measured
+  on Postgres: `1000.0` plus twenty recorded `1e-6` charges read back as
+  exactly `1000.0` — the increments were below the float4 resolution and
+  vanished, so a budget-bound key never reaches its budget. SQLite accumulated
+  correctly.
+- **Trigger (expiry).** A 0.5 s TTL stored as float4 rounds down by up to 64 s,
+  i.e. into the past: the key was born expired. A second `AuthService` (empty
+  cache, so the value comes from the column) refused to authenticate it.
+
+- **Fix:** all 16 columns spell `DOUBLE PRECISION`, which is portable (SQLite
+  keeps float64 affinity — verified, `typeof` stays `real` and round-trips
+  exactly). `widen_pg_floats()` in `wiwi/auth/users.py` widens an **existing**
+  Postgres database, called from `UserService.startup`, `AuthService.startup`
+  and `ConfigStore._migrate`; it reads `information_schema` and alters only
+  columns still typed `real`, so it is idempotent and a no-op on a fresh or
+  already-correct database. Verified on a legacy-shaped Postgres database with
+  data: 10 `REAL` columns → 0, rows preserved, second startup changed nothing,
+  and spend accumulation worked afterwards. SQLite legacy databases (missing
+  `owner_id` / `cache_creation_input_cost_per_token`, or with those columns
+  added as `REAL`) still migrate cleanly.
+- **Test infra:** `tests/test_fix_round108.py` is the first test that runs
+  against real Postgres; it skips unless `WIWI_TEST_POSTGRES_URL` is exported,
+  so the default gate stays green. Its docstring gives the `docker run` line.
+
+---
+
 ## ✅ Fixed — round 107 (2026-09-29)
 
 The admin key-generate route kept the round-105 defect on its own path: real

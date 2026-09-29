@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from wiwi.auth.keys import generate_virtual_key, hash_key
-from wiwi.auth.users import USERS_DDL
+from wiwi.auth.users import USERS_DDL, widen_pg_floats
 
 # Scalar key limits where 0 must be REJECTED rather than stored. Kept as one
 # named set so the rule cannot drift between the create and update paths, and
@@ -112,15 +112,15 @@ CREATE TABLE IF NOT EXISTS vkeys (
   key_hash TEXT UNIQUE NOT NULL,
   key_alias TEXT NOT NULL DEFAULT '',
   models TEXT NOT NULL DEFAULT '[]',
-  max_budget REAL,
-  spend_to_date REAL NOT NULL DEFAULT 0,
+  max_budget DOUBLE PRECISION,
+  spend_to_date DOUBLE PRECISION NOT NULL DEFAULT 0,
   rpm INTEGER,
   tpm INTEGER,
-  expires_at REAL,
+  expires_at DOUBLE PRECISION,
   disabled INTEGER NOT NULL DEFAULT 0,
   owner_id TEXT,
-  created_at REAL NOT NULL,
-  updated_at REAL NOT NULL
+  created_at DOUBLE PRECISION NOT NULL,
+  updated_at DOUBLE PRECISION NOT NULL
 );
 """
 
@@ -197,13 +197,21 @@ class AuthService:
             if self._is_pg:
                 cols = {r[0] for r in (await conn.execute(sa.text(
                     "SELECT column_name FROM information_schema.columns"
-                    " WHERE table_name = 'vkeys'"))).all()}
+                    " WHERE table_schema = current_schema()"
+                    " AND table_name = 'vkeys'"))).all()}
             else:
                 cols = {r[1] for r in (await conn.execute(
                     sa.text("PRAGMA table_info(vkeys)"))).all()}
             if "owner_id" not in cols:
                 await conn.execute(sa.text(
                     "ALTER TABLE vkeys ADD COLUMN owner_id TEXT"))
+            if self._is_pg:
+                # Postgres-only: databases created before CREATE_SQL said
+                # DOUBLE PRECISION store these as 4-byte REAL, which floors
+                # spend accumulation and collapses rapid created_at values
+                # (round 108).
+                await widen_pg_floats(conn, "vkeys", "max_budget", "spend_to_date",
+                                      "expires_at", "created_at", "updated_at")
             await conn.execute(sa.text(
                 "CREATE INDEX IF NOT EXISTS idx_vkeys_owner ON vkeys(owner_id)"))
 

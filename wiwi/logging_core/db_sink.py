@@ -714,7 +714,8 @@ class DBSink:
         if self._is_pg:
             cols = {r[0] for r in (await conn.execute(sa.text(
                 "SELECT column_name FROM information_schema.columns"
-                " WHERE table_name = 'request_logs'"))).all()}
+                " WHERE table_schema = current_schema()"
+                " AND table_name = 'request_logs'"))).all()}
         else:
             cols = {r[1] for r in (await conn.execute(
                 sa.text("PRAGMA table_info(request_logs)"))).all()}
@@ -736,7 +737,8 @@ class DBSink:
         if self._is_pg:
             rcols = {r[0] for r in (await conn.execute(sa.text(
                 "SELECT column_name FROM information_schema.columns"
-                " WHERE table_name = 'request_rollups'"))).all()}
+                " WHERE table_schema = current_schema()"
+                " AND table_name = 'request_rollups'"))).all()}
         else:
             rcols = {r[1] for r in (await conn.execute(
                 sa.text("PRAGMA table_info(request_rollups)"))).all()}

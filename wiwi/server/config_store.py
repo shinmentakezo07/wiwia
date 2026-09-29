@@ -21,12 +21,14 @@ import orjson
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from wiwi.auth.users import widen_pg_floats
+
 PROVIDER_DDL = """
 CREATE TABLE IF NOT EXISTS providers (
   name TEXT PRIMARY KEY,
   provider_type TEXT NOT NULL,
   base_url TEXT NOT NULL DEFAULT '',
-  timeout_s REAL NOT NULL DEFAULT 120.0,
+  timeout_s DOUBLE PRECISION NOT NULL DEFAULT 120.0,
   extra_headers TEXT NOT NULL DEFAULT '{}',
   round_robin INTEGER NOT NULL DEFAULT 1,
   alias_id TEXT
@@ -91,10 +93,10 @@ CREATE TABLE IF NOT EXISTS settings (
 MODEL_PRICES_DDL = """
 CREATE TABLE IF NOT EXISTS model_prices (
   model_id TEXT PRIMARY KEY,
-  input_cost_per_token REAL NOT NULL DEFAULT 0,
-  output_cost_per_token REAL NOT NULL DEFAULT 0,
-  cache_read_input_cost_per_token REAL,
-  cache_creation_input_cost_per_token REAL,
+  input_cost_per_token DOUBLE PRECISION NOT NULL DEFAULT 0,
+  output_cost_per_token DOUBLE PRECISION NOT NULL DEFAULT 0,
+  cache_read_input_cost_per_token DOUBLE PRECISION,
+  cache_creation_input_cost_per_token DOUBLE PRECISION,
   max_input_tokens INTEGER,
   max_output_tokens INTEGER,
   mode TEXT
@@ -110,10 +112,10 @@ MODEL_PRICE_SCOPES_DDL = """
 CREATE TABLE IF NOT EXISTS model_price_scopes (
   model_id TEXT NOT NULL,
   scope TEXT NOT NULL,
-  input_cost_per_token REAL NOT NULL DEFAULT 0,
-  output_cost_per_token REAL NOT NULL DEFAULT 0,
-  cache_read_input_cost_per_token REAL,
-  cache_creation_input_cost_per_token REAL,
+  input_cost_per_token DOUBLE PRECISION NOT NULL DEFAULT 0,
+  output_cost_per_token DOUBLE PRECISION NOT NULL DEFAULT 0,
+  cache_read_input_cost_per_token DOUBLE PRECISION,
+  cache_creation_input_cost_per_token DOUBLE PRECISION,
   PRIMARY KEY (model_id, scope)
 );
 """
@@ -148,7 +150,8 @@ class ConfigStore:
         if self._is_pg:
             return {r[0] for r in (await conn.execute(sa.text(
                 "SELECT column_name FROM information_schema.columns"
-                " WHERE table_name = :t"), {"t": table})).all()}
+                " WHERE table_schema = current_schema()"
+                " AND table_name = :t"), {"t": table})).all()}
         return {r[1] for r in (await conn.execute(
             sa.text(f"PRAGMA table_info({table})"))).all()}
 
@@ -184,7 +187,17 @@ class ConfigStore:
         if price_cols and "cache_creation_input_cost_per_token" not in price_cols:
             await conn.execute(sa.text(
                 "ALTER TABLE model_prices ADD COLUMN"
-                " cache_creation_input_cost_per_token REAL"))
+                " cache_creation_input_cost_per_token DOUBLE PRECISION"))
+        # Postgres-only: these tables predate their DDL spelling floats as
+        # DOUBLE PRECISION, so an existing database holds 4-byte REAL and
+        # prices/timeouts lose precision (round 108).
+        if self._is_pg:
+            await widen_pg_floats(conn, "providers", "timeout_s")
+            price_float_cols = ("input_cost_per_token", "output_cost_per_token",
+                                "cache_read_input_cost_per_token",
+                                "cache_creation_input_cost_per_token")
+            await widen_pg_floats(conn, "model_prices", *price_float_cols)
+            await widen_pg_floats(conn, "model_price_scopes", *price_float_cols)
         # Indexes on FK columns for cascade-delete performance and lookups:
         # - provider_keys.provider_name: FK join + cascade delete
         # - deployments.provider_name: cascade delete when provider is removed
