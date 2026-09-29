@@ -29,7 +29,7 @@ The stack as shipped (source of truth: `pyproject.toml`, `web/package.json`, `Do
 
 Runtime dependencies: 13. That count is a feature.
 
-### Frontend (`web/package.json`, bun authoritative)
+### Frontend (`web/package.json`, npm authoritative)
 
 | Layer | Pick | Version |
 |---|---|---|
@@ -52,7 +52,7 @@ Runtime dependencies: 13. That count is a feature.
 | App-level harness | asgi-lifespan `LifespanManager` + `httpx.ASGITransport` |
 | Property-based | hypothesis >= 6.100 |
 | Python lint | ruff only (line 100, py311, no black/isort) |
-| Frontend checks | `tsc -b` (in build) + `bun run lint` (ESLint) |
+| Frontend checks | `tsc -b` (in build) + `npm run lint` (ESLint) |
 | Coverage | none (no pytest-cov, not enforced) |
 
 ---
@@ -77,9 +77,9 @@ Runtime dependencies: 13. That count is a feature.
 
 **React + Vite over Next.js.** The admin console is an SPA served same-origin by the gateway process; SSR/routing conventions of a meta-framework buy nothing here. Router is react-router-dom v7; state is TanStack Query over the admin JSON API; charts are Recharts; styling is Tailwind 4 (CSS-first config via the Vite plugin).
 
-**Bun over npm.** `web/bun.lock` is authoritative, and `start.sh` uses Bun for frontend installs and dev commands. Build output lands in `wiwi/server/static/` and is served at `/admin/ui`.
+**npm.** `web/package-lock.json` is authoritative, and `start.sh` (`npm ci`) plus the Dockerfile build stage use npm for frontend installs and dev commands. Build output lands in `wiwi/server/static/` and is served at `/admin/ui`.
 
-**Docker multi-stage, non-root.** uv builder → bun SPA build → `python:3.12-slim` runtime; user `wiwi`; healthcheck `GET /health` every 30 s; compose ships Postgres 16 with healthcheck-gated startup.
+**Docker multi-stage, non-root.** uv builder → npm SPA build → `python:3.12-slim` runtime; user `wiwi`; healthcheck `GET /health` every 30 s; compose ships Postgres 16 with healthcheck-gated startup.
 
 ---
 

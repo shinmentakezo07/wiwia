@@ -260,7 +260,7 @@ router_settings:
     intro:
       "Self-hosting an LLM gateway keeps keys, logs, and billing data on your infrastructure. wiwi ships as one image: FastAPI gateway, React admin console, SQLite by default, Postgres when you want it. This is the short path from empty machine to working gateway.",
     facts: [
-      { label: "Image", value: "Dockerfile (uv + bun multi-stage)" },
+      { label: "Image", value: "Dockerfile (uv + npm multi-stage)" },
       { label: "Database", value: "SQLite default, Postgres via DATABASE_URL" },
       { label: "Admin UI", value: "/console on the same port" },
       { label: "Secret handling", value: "os.environ/NAME in YAML" },

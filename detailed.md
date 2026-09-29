@@ -984,7 +984,7 @@ for ident, w in parsed.items():
 
 **Directory**: `web/`
 
-React 19 + TypeScript + Vite + Tailwind 4, built with bun.
+React 19 + TypeScript + Vite + Tailwind 4, built with npm.
 
 ### Pages
 
@@ -1010,8 +1010,8 @@ Dark-only admin console. Near-black surfaces (`#050505` / `#0a0a0a`), hairline w
 ### Build
 
 ```bash
-cd web && bun install && bun run build   # → wiwi/server/static/
-bun run dev                               # Vite dev server, proxies to :4000
+cd web && npm install && npm run build   # → wiwi/server/static/
+npm run dev                              # Vite dev server, proxies to :4000
 ```
 
 The built SPA is served at `/admin/ui` with SPA history fallback (`SPAStaticFiles` — unknown paths get `index.html`).

@@ -12,11 +12,11 @@ Dev setup, conventions, testing, and the pre-completion gate. The command source
 python3 --version                  # 3.12
 uv pip install -e .[redis]         # optional [redis] extra for the Redis rate limiter/cache
 
-# Frontend — bun is authoritative (web/bun.lock present). Never mix package managers.
-cd web && bun install
+# Frontend — npm is authoritative (web/package-lock.json present). Never mix package managers.
+cd web && npm install
 ```
 
-Tools expected on PATH: `python3` 3.12, `pytest` 9.1.1, `ruff`, `bun`.
+Tools expected on PATH: `python3` 3.12, `pytest` 9.1.1, `ruff`, `npm` (Node 24).
 
 ## 2. Run
 
@@ -32,7 +32,7 @@ uvicorn wiwi.server.app:create_app_from_config_path --factory
 ./start.sh                         # env knobs: WIWI_PORT, WIWI_WEB_PORT, WIWI_RELOAD, WIWI_RELOAD_DIRS, WIWI_BIN
 ```
 
-Frontend dev server (`cd web && bun run dev`) proxies `/admin /v1 /auth /public /health` → `:4000`. Production SPA build: `cd web && bun run build` → `wiwi/server/static/` (served at `/admin/ui`; gitignored — builds produce it).
+Frontend dev server (`cd web && npm run dev`) proxies `/admin /v1 /auth /public /health` → `:4000`. Production SPA build: `cd web && npm run build` → `wiwi/server/static/` (served at `/admin/ui`; gitignored — builds produce it).
 
 Load test: `python3 bench.py` (async httpx; TTFT, p50/p95, TPS, concurrency sweep).
 
@@ -59,7 +59,7 @@ Conventions (binding — copy the surrounding pattern, don't invent a parallel o
 
 ## 4. Lint & the pre-completion gate
 
-Ruff only (no black/isort). `line-length = 100`, `target-version = "py311"`, `EXE002` ignored. `web/` is **not** covered by ruff — it has its own ESLint flat config (`cd web && bun run lint`), and `tsc -b` runs as part of `bun run build`.
+Ruff only (no black/isort). `line-length = 100`, `target-version = "py311"`, `EXE002` ignored. `web/` is **not** covered by ruff — it has its own ESLint flat config (`cd web && npm run lint`), and `tsc -b` runs as part of `npm run build`.
 
 **Both must be green before claiming any work done:**
 

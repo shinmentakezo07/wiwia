@@ -283,7 +283,7 @@ Everything that touches a stream lives in `wiwi/streaming/`. The contract betwee
   <img alt="Python" src="https://img.shields.io/badge/Python-≥3.11-3776AB?logo=python&logoColor=white">
   <img alt="uv" src="https://img.shields.io/badge/uv-optional-2D2D2D?logo=astral&logoColor=white">
   <img alt="Docker" src="https://img.shields.io/badge/Docker-optional-2496ED?logo=docker&logoColor=white">
-  <img alt="Bun" src="https://img.shields.io/badge/Bun-only%20for%20UI%20build-f9f1e1?logo=bun&logoColor=000">
+  <img alt="Node" src="https://img.shields.io/badge/Node-24-5FA04E?logo=nodedotjs&logoColor=fff">
 </p>
 
 ### 🚀 Install & run locally
@@ -313,7 +313,7 @@ docker compose up --build
 
 The compose stack runs **Postgres 16 + Redis + wiwi** together, mounts a `wiwi_data` volume, and defaults `DATABASE_URL` to the bundled Postgres. Override with `DATABASE_URL=sqlite+aiosqlite:///…` to stay on SQLite. Provider keys pass through from `.env` / your shell.
 
-The image is a three-stage build: `uv` installs Python deps → `bun` builds the SPA → the runtime image runs as non-root `wiwi` (uid 10001).
+The image is a three-stage build: `uv` installs Python deps → `npm` builds the SPA → the runtime image runs as non-root `wiwi` (uid 10001).
 
 ### 🔴 Redis for the response cache
 
@@ -672,9 +672,9 @@ Brand accent is an indigo→violet "iris" ramp from `#f3f1ff` (50) to `#291560` 
 All motion is gated behind `@media (prefers-reduced-motion: no-preference)` and disables cleanly under `reduce`.
 
 ```bash
-cd web && bun install && bun run build   # tsc -b && vite build → wiwi/server/static/
-cd web && bun run dev                    # dev server, proxies to a running gateway
-cd web && bun run lint                   # eslint src (web/ is NOT covered by ruff)
+cd web && npm install && npm run build   # tsc -b && vite build → wiwi/server/static/
+cd web && npm run dev                    # dev server, proxies to a running gateway
+cd web && npm run lint                   # eslint src (web/ is NOT covered by ruff)
 ```
 
 ---
@@ -832,7 +832,7 @@ python3 -m pytest tests/test_codecs.py -q                   # single file
 python3 -m pytest tests/test_router.py -k cooldown          # single test by name
 
 ruff check wiwi/ tests/                                     # line-length 100, target py311
-cd web && bun run lint                                      # eslint (web/ is not ruff-covered)
+cd web && npm run lint                                      # eslint (web/ is not ruff-covered)
 ```
 
 The suite is **128 test files** mixing **unit tests** (`respx` HTTP mocks), **ASGI end-to-end tests** through the full app, and **Hypothesis property-based round-trips** over the dialect ↔ IR codecs. `pytest-asyncio` runs in `asyncio_mode = "auto"`, so write bare `async def test_…` — no decorator needed.
@@ -891,6 +891,6 @@ Use it, fork it, ship it commercially — the code carries no strings. If you *o
 
 <img src="docs/assets/wiwi-mark.svg" width="44" alt="wiwi">
 
-<sub>MIT licensed · server operation governed by <a href="TERMS.md">Terms of Use</a> · built with Python 3.11+, FastAPI, React 19, and bun</sub>
+<sub>MIT licensed · server operation governed by <a href="TERMS.md">Terms of Use</a> · built with Python 3.11+, FastAPI, React 19, and npm</sub>
 
 </div>

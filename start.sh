@@ -6,7 +6,7 @@
 # first, so a stale site-packages install or an editable install pointing
 # at a different checkout can never shadow it (that failure mode surfaced
 # as "unsupported provider type 'opencode'" with new code in the tree).
-# Frontend uses Bun, matching web/bun.lock.
+# Frontend uses npm, matching web/package-lock.json.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -83,11 +83,14 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# --- 1. install web deps (bun) -------------------------------------------------
+# --- 1. install web deps (npm) -------------------------------------------------
 
-echo "==> Installing web dependencies (Bun) in $WEB_DIR ..."
-(cd "$WEB_DIR" && bun install --frozen-lockfile)
-DEV_CMD=(bun run dev -- --port "$WEB_PORT")
+# `npm ci` is the frozen-lockfile install: it installs strictly from
+# web/package-lock.json and fails if package.json has drifted, which is
+# exactly what `bun install --frozen-lockfile` used to do here.
+echo "==> Installing web dependencies (npm) in $WEB_DIR ..."
+(cd "$WEB_DIR" && npm ci)
+DEV_CMD=(npm run dev -- --port "$WEB_PORT")
 
 # --- 2. free up the ports ----------------------------------------------------
 

@@ -18,7 +18,7 @@ Browser ──► :4000/admin/ui          (SPA — admin console + public front)
 ```
 
 - FastAPI mounts the built SPA from `wiwi/server/static/` (`/admin/ui` → `index.html`, assets under `/admin/ui/assets`) via a `_SPAStaticFiles` subclass.
-- SPA source lives in `web/`. Build: `cd web && bun install && bun run build` → `wiwi/server/static/` (gitignored; CI/local builds produce it). Dev: `bun run dev` proxies `/admin /v1 /auth /public /health` → `:4000`.
+- SPA source lives in `web/`. Build: `cd web && npm install && npm run build` → `wiwi/server/static/` (gitignored; CI/local builds produce it). Dev: `npm run dev` proxies `/admin /v1 /auth /public /health` → `:4000`.
 - Stack: React 19, TypeScript (strict + `verbatimModuleSyntax` + `noUnusedLocals/Parameters`), Vite 6, Tailwind CSS 4, TanStack Query v5, Recharts, react-router-dom v7, lucide-react. Hand-rolled component set (buttons, cards, tables, dialogs, badges) — no heavyweight UI kit.
 - No CORS work needed — same origin.
 

@@ -125,6 +125,6 @@ A response-cache hit must leave `cache_hit=False` (`wiwi/server/app.py` response
 
 ## 10. Deployment
 
-- **Docker**: 3-stage Dockerfile (uv builder → bun SPA build → python 3.12-slim runtime), non-root user `wiwi`, healthcheck `GET /health` every 30 s; `WIWI_STATIC_DIR=/app/wiwi/server/static`; data in `/app/data` volume. `docker-compose.yml` runs `postgres:16-alpine` + wiwi with healthcheck-gated `depends_on`.
+- **Docker**: 3-stage Dockerfile (uv builder → npm SPA build → python 3.12-slim runtime), non-root user `wiwi`, healthcheck `GET /health` every 30 s; `WIWI_STATIC_DIR=/app/wiwi/server/static`; data in `/app/data` volume. `docker-compose.yml` runs `postgres:16-alpine` + wiwi with healthcheck-gated `depends_on`.
 - **Process model**: single FastAPI/uvicorn process; Redis extras for multi-instance rate limiting and response caching.
 - **Observability**: structlog JSON lines, `/metrics` Prometheus endpoint, `/admin/stream` SSE, request/proxy/audit logs.

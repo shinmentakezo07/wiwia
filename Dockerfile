@@ -9,13 +9,15 @@ COPY wiwi/ /app/wiwi/
 # nothing. Install it so REDIS_URL works in the shipped image.
 RUN uv venv /app/.venv && uv pip install -p /app/.venv/bin/python ".[redis]"
 
-# Stage 2: Build the admin web UI (React + TypeScript → static assets)
-FROM oven/bun:1 AS web-builder
+# Stage 2: Build the admin web UI (React + TypeScript → static assets).
+# Node 24 matches web/package.json `engines` (>=24) and runs the same
+# `npm ci` install path as start.sh and local dev — one package manager.
+FROM node:24-bookworm-slim AS web-builder
 WORKDIR /web
-COPY web/package.json web/bun.lock* ./
-RUN bun install --frozen-lockfile || bun install
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
 COPY web/ ./
-RUN bun run build
+RUN npm run build
 
 # Stage 3: Final runtime image
 FROM python:3.12-slim-bookworm

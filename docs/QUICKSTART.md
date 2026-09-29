@@ -127,7 +127,7 @@ The Vite dev server proxies `/admin`, `/v1`, `/auth`, `/public`, `/health` to th
 ## Frontend build
 
 ```bash
-cd web && bun install && bun run build   # → wiwi/server/static/
+cd web && npm install && npm run build   # → wiwi/server/static/
 ```
 
 The built SPA is served from `wiwi/server/static/` at `/admin/ui`. `wiwi/server/static/` is gitignored — builds produce it locally.

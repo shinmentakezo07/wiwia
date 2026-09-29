@@ -33,9 +33,9 @@ python3 -m pytest tests/test_integration.py::test_chat_completion_happy_path -q 
 ruff check wiwi/ tests/
 
 # admin UI
-cd web && bun install && bun run dev     # dev server (proxies /admin /auth /public /v1 /health → :4000)
-cd web && bun run build                  # tsc -b && vite build → wiwi/server/static/
-cd web && bun run lint                   # eslint src (web/ is NOT covered by ruff)
+cd web && npm install && npm run dev     # dev server (proxies /admin /auth /public /v1 /health → :4000)
+cd web && npm run build                  # tsc -b && vite build → wiwi/server/static/
+cd web && npm run lint                   # eslint src (web/ is NOT covered by ruff)
 ./start.sh                               # backend (:4000) + Vite (:5173) together, prefixed logs
 
 # docker (Postgres is a plain service with a healthcheck-gated depends_on — there is no --profile pg)
@@ -46,7 +46,7 @@ python3 bench.py                         # async httpx; TTFT, p50/p95, output TP
 python3 bench.py -n 10 -c 1,4,16 --max-tokens 100
 ```
 
-**Bun is authoritative for `web/`; npm is not.** `web/bun.lock` and `start.sh` use Bun; do not mix package managers in one session.
+**npm is authoritative for `web/`.** `web/package-lock.json` and `start.sh` use npm; do not mix package managers in one session.
 
 There is **no CI and no pre-commit config**. The manual `pytest` + `ruff` gate is binding: run both, both green, before claiming work done or committing.
 
@@ -118,7 +118,7 @@ Note the one asymmetry in that contract: `StreamError` may terminate at **any** 
 ## Admin web UI
 
 - Source lives in `web/`; production build output lands in `wiwi/server/static/` and the SPA is mounted at **`/`** with history fallback (`SPAStaticFiles`), *after* all API routes so `/admin/*`, `/v1/*`, `/auth/*`, `/public/*`, `/health` still return JSON. Older references to `/admin/ui` are stale. The current admin console is **`/console`**; `/app/*` is a legacy redirect. Built bundles are gitignored.
-- Dev: `cd web && bun install && bun run dev` (Vite dev server proxies to a running gateway); ship: `bun run build`.
+- Dev: `cd web && npm install && npm run dev` (Vite dev server proxies to a running gateway); ship: `npm run build`.
 - Backend rollups live in `wiwi/server/stats.py` (pure functions over LogEvent lists — unit-testable without DB).
 - `web/src/pages/` mixes console pages (Dashboard, Providers, VirtualKeys, RequestLogs, …) with public marketing, user, and documentation pages (Landing, Pricing, Blog, Docs, `docs/*`, …) — **determine ownership from `web/src/main.tsx` route guards, not from the directory**. TypeScript is `strict` with `noUnusedLocals`, `noUnusedParameters`, `verbatimModuleSyntax`, `erasableSyntaxOnly`; the `@/*` path alias maps to `src/`.
 
@@ -144,7 +144,7 @@ Error bodies are dialect-correct per surface (OpenAI `{"error":{…}}` vs Anthro
 
 - Ruff only (`line-length = 100`, target `py311`, ignore `EXE002` only). Pydantic v2 for config and admin schemas; plain `@dataclass(frozen=True)` for IR / streaming hot paths. No mypy/pyright on the Python side; `web/` is `strict` TypeScript checked by `tsc -b` during build.
 - Async throughout (`httpx.AsyncClient`, SQLAlchemy async, `orjson` in hot paths). Never `print` from library code — use `structlog`.
-- Naming: wire modules named after dialect (`openai_chat.py`); adapters `<provider>_adapter.py`; tests `test_<area>.py`. **Bun** is authoritative for `web/` (not npm).
+- Naming: wire modules named after dialect (`openai_chat.py`); adapters `<provider>_adapter.py`; tests `test_<area>.py`. **npm** is authoritative for `web/`.
 - Database: SQLite default, Postgres via `DATABASE_URL`. Schema is created with inline `CREATE TABLE IF NOT EXISTS` at startup — **no Alembic**; there are no migrations to write.
 - Virtual keys are SHA-256-hashed at rest with constant-time compare; provider keys enter via `os.environ/NAME` interpolation in config.
 - **Two different cache-hit flags — do not conflate.** `cache_hit` = provider prompt-cache hit (feeds `wiwi_prompt_cache_hits_total`); `response_cache_hit` = served from wiwi's own exact-match cache (`wiwi/cache/`, `LogEvent.response_cache_hit`). A response-cache hit must leave `cache_hit=False` or prompt-cache metrics inflate. The response cache never stores streaming requests or requests with builtin tools.

@@ -4888,7 +4888,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         for k, v in state.router.settings.model_group_alias.items()},
         })
 
-    # -- admin UI (built SPA; wiwi/server/static produced by `cd web && bun run build`)
+    # -- admin UI (built SPA; wiwi/server/static produced by `cd web && npm run build`)
     static_dir = Path(os.environ.get("WIWI_STATIC_DIR")
                       or Path(__file__).parent / "static")
 

@@ -100,10 +100,10 @@ python3 -m pytest tests/test_integration.py::test_chat_completion_happy_path -q
 ruff check wiwi/ tests/
 python3 -m pytest tests/ -q && ruff check wiwi/ tests/          # run BOTH before claiming done
 
-# admin UI (Bun, NOT npm)
-cd web && bun install && bun run dev        # Vite :5173, proxies /admin /auth /public /v1 /health → :4000
-cd web && bun run build                     # tsc -b && vite build → wiwi/server/static/
-cd web && bun run lint                      # eslint src (web/ is NOT covered by ruff)
+# admin UI (npm)
+cd web && npm install && npm run dev        # Vite :5173, proxies /admin /auth /public /v1 /health → :4000
+cd web && npm run build                     # tsc -b && vite build → wiwi/server/static/
+cd web && npm run lint                      # eslint src (web/ is NOT covered by ruff)
 
 # docker (Postgres + Redis have healthcheck-gated depends_on; no --profile)
 docker compose up --build
@@ -160,7 +160,7 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
 - `pyproject.toml` — deps, entry point, ruff + pytest config.
 - `wiwi.yaml.example` / `.env.example` — config shape and env vars (`WIWI_MASTER_KEY`,
   `DATABASE_URL`, provider keys).
-- `Dockerfile`, `docker-compose.yml`, `start.sh` (Bun; runs backend + Vite together),
+- `Dockerfile`, `docker-compose.yml`, `start.sh` (npm; runs backend + Vite together),
   `bench.py`.
 - `deploy/` — `hf_space.sh` pushes the gateway to the HuggingFace Docker Space
   `shimen/yapapa` (`git archive HEAD` → scratch clone → one commit; the repo's
@@ -188,8 +188,8 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
   usable `.venv`**; never invoke `.venv/bin/python`.
 - `requires-python = ">=3.11"`; ruff `line-length = 100`, `target-version = "py311"`,
   `ignore = ["EXE002"]` (meaningless +x bits on this mount). Ruff only — no black/isort/mypy.
-- **Bun is authoritative for `web/`.** `web/bun.lock` and `start.sh` use Bun; npm is unsupported
-  for this frontend — never mix package managers in one session.
+- **npm is authoritative for `web/`.** `web/package-lock.json` and `start.sh` use npm; do not
+  mix package managers in one session.
 - Redis is an optional extra (`.[redis]`); without it the response cache silently falls back to
   the in-memory LRU. `asyncpg` (Postgres) is a core dep.
 - Build backend hatchling; entry point `wiwi = "wiwi.main:cli"`.

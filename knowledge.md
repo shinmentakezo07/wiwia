@@ -22,7 +22,7 @@ gmicloud, openai-compatible) — always answered back in the caller's dialect.
 | `wiwi/streaming/` | IR stream delta taxonomy, SSE, coalesce, resume, validation |
 | `wiwi/auth/` | Virtual keys (SHA-256 at rest), budgets, users |
 | `wiwi/wire/` quirks | NVIDIA NIM tool-schema sanitizer, Cline OAuth refresh |
-| `web/` | Admin SPA (React 19 + TS + Vite + Tailwind 4, **bun**) |
+| `web/` | Admin SPA (React 19 + TS + Vite + Tailwind 4, **npm**) |
 | `tests/` | pytest suite; bugfix regressions in `test_fix_roundN.py` |
 
 ## Commands (verified in this checkout)
@@ -33,10 +33,10 @@ python3 -m pytest tests/test_codecs.py -q  # single file
 ruff check wiwi/ tests/                    # lint (line-length 100, py311)
 python3 -m pytest tests/ -q && ruff check wiwi/ tests/   # verify before claiming done
 
-# Admin UI (bun, NOT npm)
-cd web && bun install && bun run dev       # Vite dev, proxies /admin /v1 /auth → :4000
-cd web && bun run build                    # tsc -b && vite build → wiwi/server/static/
-cd web && bun run lint                     # eslint (web/ is NOT covered by ruff)
+# Admin UI (npm)
+cd web && npm install && npm run dev       # Vite dev, proxies /admin /v1 /auth → :4000
+cd web && npm run build                    # tsc -b && vite build → wiwi/server/static/
+cd web && npm run lint                     # eslint (web/ is NOT covered by ruff)
 
 # Run the gateway
 wiwi --config wiwi.yaml                    # or: wiwi -c wiwi.yaml --host 0.0.0.0 --port 4000
@@ -71,11 +71,11 @@ wiwi --config wiwi.yaml                    # or: wiwi -c wiwi.yaml --host 0.0.0.
   `WIWI_MASTER_KEY`.
 - Admin endpoints need master key; client traffic uses virtual keys (`sk-wiwi-…`, SHA-256 at
   rest, plaintext shown once at mint).
-- `web/` uses **Bun** (not npm); `web/bun.lock` is authoritative and `start.sh` uses Bun.
+- `web/` uses **npm**; `web/package-lock.json` is authoritative and `start.sh` uses npm.
   `web/` is eslint-only, NOT ruff.
 - `web/src/pages/` mixes ~15 admin pages with ~30 marketing pages — directory alone doesn't
   tell you if a page is admin-facing.
-- `web/tsconfig.json` + `bun run build` output lands in `wiwi/server/static/` (served at
+- `web/tsconfig.json` + `npm run build` output lands in `wiwi/server/static/` (served at
   `/admin/ui`); rebuild after UI changes or the served bundle is stale.
 
 ## Test conventions
