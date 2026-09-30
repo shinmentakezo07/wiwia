@@ -201,3 +201,114 @@ Roles: normal users see only their own keys' usage in `/app/*`; admins see the f
 | Anthropic Messages | `{"type":"error","error":{"type":"<anthropic_error_type>","message":…}}` |
 
 Common status codes: `401` (bad key), `402` (budget cap exceeded), `404` (unknown model/group), `413` (body too large), `429` (rate limit), `502`/`503` (upstream unavailable after retries/failover).
+
+## 7. Worked examples
+
+The tables above are the contract; these are copy-pasteable equivalents.
+
+```bash
+MK="Authorization: Bearer $WIWI_MASTER_KEY"
+```
+
+### Virtual keys
+
+```bash
+# mint — budget / RPM / TPM / model allowlist / TTL / optional custom_key
+curl -X POST localhost:4000/admin/keys/generate -H "$MK" \
+  -d '{"name": "team-a", "max_budget": 10, "rpm": 60, "tpm": 100000,
+       "models": ["gpt-4o"], "ttl_seconds": 86400}'
+# → {"key":"sk-wiwi-...","id":"k...","note":"store this key now..."}
+
+curl localhost:4000/admin/keys -H "$MK"
+curl -X PATCH  localhost:4000/admin/keys/<id> -H "$MK" -d '{"max_budget": 20}'
+curl -X POST   localhost:4000/admin/keys/<id>/disable -H "$MK"
+curl -X DELETE localhost:4000/admin/keys/<id> -H "$MK"
+```
+
+### Providers & key pools
+
+```bash
+curl localhost:4000/admin/provider-catalog -H "$MK"     # 11 built-in cards + configured?
+curl localhost:4000/admin/providers -H "$MK"            # pool status: health + cooldowns
+curl -X POST localhost:4000/admin/providers -H "$MK" \
+  -d '{"name": "openai-backup", "provider_type": "openai",
+       "base_url": "https://api.openai.com/v1", "key": "os.environ/BACKUP_KEY"}'
+curl -X PATCH  localhost:4000/admin/providers/<name> -H "$MK" -d '{"name": "openai-primary"}'
+curl -X DELETE localhost:4000/admin/providers/<name> -H "$MK"   # 409 while groups reference it
+
+# key pool
+curl -X POST  localhost:4000/admin/providers/<name>/keys -H "$MK" \
+  -d '{"label": "extra", "key": "os.environ/EXTRA_KEY", "weight": 2}'
+curl -X PATCH localhost:4000/admin/providers/<name>/keys/<label> -H "$MK" \
+  -d '{"disabled": true, "weight": 5}'          # + reset_status: true clears cooldown
+curl -X DELETE localhost:4000/admin/providers/<name>/keys/<label> -H "$MK"
+curl localhost:4000/admin/providers/<name>/keys/<label>/secret -H "$MK"  # audit-logged reveal
+curl localhost:4000/admin/providers/<name>/models -H "$MK"   # live upstream model ids
+```
+
+### Models, groups, aliases
+
+```bash
+curl localhost:4000/admin/models -H "$MK"
+curl -X PATCH localhost:4000/admin/model-groups/<name> -H "$MK" \
+  -d '{"weights": {"openai-main/gpt-4o": 3}, "strategy": "least-busy"}'
+curl -X POST localhost:4000/admin/model-groups/<name>/deployments -H "$MK" \
+  -d '{"group": "gpt-4o", "provider": "openrouter", "model_id": "openai/gpt-4o", "weight": 1}'
+curl -X DELETE localhost:4000/admin/model-groups/<name>/deployments -H "$MK" -d '{...}'
+curl -X POST localhost:4000/admin/aliases -H "$MK" \
+  -d '{"set": {"gpt-4": "gpt-4o"}, "unset": ["gpt-3.5"]}'
+```
+
+### Pricing, logs, stats, users
+
+```bash
+curl localhost:4000/admin/pricing -H "$MK"
+curl -X PUT    localhost:4000/admin/pricing/<model_id> -H "$MK" -d '{...}'
+# Per-provider prices: add ?provider=<account-or-type>. Omit it to set the base rate.
+curl -X PUT "localhost:4000/admin/pricing/<model_id>?provider=openai-main" -H "$MK" \
+  -d '{"input_per_1m": 1.0, "output_per_1m": 2.0}'
+
+curl localhost:4000/admin/logs/requests -H "$MK"     # DB-backed
+curl localhost:4000/admin/logs/proxy -H "$MK"        # ring buffer
+curl localhost:4000/admin/stats/overview -H "$MK"    # p50/p95/p99, cost, tokens
+curl "localhost:4000/admin/stats/timeseries?bucket=minute&metric=cost&minutes=60" -H "$MK"
+curl localhost:4000/admin/stream -H "$MK"            # SSE live tail
+curl localhost:4000/admin/alert-rules -H "$MK"
+curl -X PUT localhost:4000/admin/alert-rules -H "$MK" -d '{...}'
+
+curl localhost:4000/admin/users -H "$MK"
+curl -X PATCH localhost:4000/admin/users/<uid> -H "$MK" -d '{"role": "admin"}'
+```
+
+### Session auth
+
+```bash
+curl -X POST localhost:4000/auth/signup  -d '{"email": "...", "password": "..."}'
+curl -X POST localhost:4000/auth/login   -d '{"email": "...", "password": "..."}'
+curl -X POST localhost:4000/auth/logout
+curl localhost:4000/auth/me
+curl -X POST localhost:4000/auth/playground-key       # scoped 24h session key
+```
+
+### OAuth providers (Cline / WorkBuddy)
+
+```bash
+# Cline
+curl -X POST localhost:4000/admin/cline/oauth/login-url -H "$MK" -d '{}'   # {auth_url, state}
+curl -X POST localhost:4000/admin/cline/oauth/connect -H "$MK" -d '{"code": "..."}'
+curl -X POST localhost:4000/admin/cline/oauth/auto-connect -H "$MK" -d '{}'
+curl localhost:4000/admin/cline/oauth/status -H "$MK"
+curl -X POST localhost:4000/admin/cline/oauth/refresh -H "$MK" -d '{"provider": "cline-main"}'
+curl -X DELETE localhost:4000/admin/cline/oauth/disconnect -H "$MK" -d '{"provider": "cline-main"}'
+
+# Cline global model list — pick ids once, auto-deploy to every Cline account
+curl localhost:4000/admin/cline/models -H "$MK"
+curl -X PUT localhost:4000/admin/cline/settings -H "$MK" \
+  -d '{"default_models": ["anthropic/claude-sonnet-4-5", "openai/gpt-4o"]}'
+
+# WorkBuddy (CodeBuddy) — parallel API
+curl localhost:4000/admin/workbuddy/accounts -H "$MK"
+curl -X POST localhost:4000/admin/workbuddy/import -H "$MK" -d '{"accounts": [...]}'
+curl -X POST localhost:4000/admin/workbuddy/export -H "$MK"
+curl -X POST localhost:4000/admin/workbuddy/refresh -H "$MK" -d '{"label": "main"}'
+```

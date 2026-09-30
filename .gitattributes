@@ -1,0 +1,7 @@
+# Console screenshots embedded in README.md are LFS-tracked: the HuggingFace
+# Space deploy path rejects a push containing non-LFS binaries, and these are
+# the only new PNGs added since the last `git lfs track "*.png"`.
+#
+# Scoped to this directory on purpose — a global `*.png` rule here would
+# retroactively re-point the already-committed web/public/logos/*.png blobs.
+docs/assets/shots/*.png filter=lfs diff=lfs merge=lfs -text

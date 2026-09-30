@@ -98,3 +98,33 @@ Every admin-UI change must be verified on desktop **and** mobile before it count
 - `GET /admin/providers/{name}/keys/{label}/secret` is the only secret-reveal path and is audit-logged.
 - Budget enforcement: per-key budgets and spend updates are applied post-response; exceeding a cap yields `402` on subsequent requests.
 - Prometheus scrape: `GET /metrics` (path configurable) — see [API_REFERENCE.md](API_REFERENCE.md) §2.
+
+## 9. Design system
+
+Dark-only SPA (React 19 + TypeScript + Vite 6 + Tailwind 4): near-black surfaces, hairline white borders, a blue primary with violet/fuchsia secondary, tiny uppercase mono labels, tabular numeric values.
+
+| Token | Value | Use |
+|---|---|---|
+| `--admin-bg` | `#050505` | App background |
+| `--admin-surface` | `#0a0a0a` | Cards, sidebar, tables |
+| `--admin-surface-elevated` | `#0e0e0e` | Dialogs, dropdowns |
+| `--admin-border` | `rgba(255,255,255,0.04)` | Hairline borders |
+| `--admin-accent` | `#3b82f6` | Primary blue (links, active nav, focus rings) |
+| `--admin-accent-purple` / `-violet` | `#a855f7` / `#7c3aed` | Secondary accents |
+| `--admin-success` / `warning` / `danger` | `#34d399` / `#fbbf24` / `#f87171` | Status semantics |
+
+Brand accent is an indigo→violet "iris" ramp from `#f3f1ff` (50) to `#291560` (950), with `#8757f7` (500) as primary.
+
+**Layout shell** (`components/Layout.tsx`)
+
+- **Sidebar**: 272px column grouped Overview / Traffic / Configuration / Admin; collapses to a 72px icon rail (⌘/Ctrl+B). Below `lg` it becomes an overlay drawer with focus return. Active item gets a blue left-edge bar + tint. Bottom: identity card (shield avatar, SSE live dot, masked key, role badge).
+- **Fixed 64px topbar**: `backdrop-filter: blur(12px) saturate(1.2)` over `rgba(5,5,5,0.75)` — section eyebrow + page title, centered live/offline SSE pulse badge, mono tabular live clock, Sign out; blue→violet gradient hairline underneath.
+- **Ambient backdrop**: fixed 64px grid at 2% opacity plus three radial glows (blue top-left, violet bottom-right, purple center).
+
+**Component kit** (`components/ui.tsx`): `Card`/`PageHeader` · `Button` (primary/ghost/danger/outline) · `Input`/`NumberInput`/`Select`/`Field` · `Toggle` · `Badge` (6 semantic tints) · `StatCard` (gradient value, optional sparkline, delta chip, `waiting` pulse at zero traffic) · `Table` · `Dialog` · `Drawer` · `CopyButton` · `Spinner` · `LiveBadge` · `EmptyState` · `ErrorText` · `ProgressBar`.
+
+All motion is gated behind `@media (prefers-reduced-motion: no-preference)` and disables cleanly under `reduce`.
+
+### Screenshots
+
+`docs/assets/shots/` holds the four console screenshots embedded in the root `README.md` (dashboard, request logs, providers, virtual keys). They were captured from a **scrubbed copy** of a local database — provider account names, base URLs, key labels, and key secrets are replaced with neutral placeholders before capture, so nothing identifying ships with the repo. Regenerate with Playwright against a throwaway DB rather than a live one; `.verify/` is gitignored and is the right scratch space.

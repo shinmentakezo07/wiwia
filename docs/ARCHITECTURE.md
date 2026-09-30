@@ -128,3 +128,20 @@ A response-cache hit must leave `cache_hit=False` (`wiwi/server/app.py` response
 - **Docker**: 3-stage Dockerfile (uv builder → npm SPA build → python 3.12-slim runtime), non-root user `wiwi`, healthcheck `GET /health` every 30 s; `WIWI_STATIC_DIR=/app/wiwi/server/static`; data in `/app/data` volume. `docker-compose.yml` runs `postgres:16-alpine` + wiwi with healthcheck-gated `depends_on`.
 - **Process model**: single FastAPI/uvicorn process; Redis extras for multi-instance rate limiting and response caching.
 - **Observability**: structlog JSON lines, `/metrics` Prometheus endpoint, `/admin/stream` SSE, request/proxy/audit logs.
+
+## 11. Database tables
+
+Schema is created with inline `CREATE TABLE IF NOT EXISTS` at startup — there is no Alembic and no migration files to write.
+
+| Table | Owner | Contents |
+|---|---|---|
+| `request_logs` | `logging_core/db_sink.py` | per-request tokens, TTFT, latency, TPS, cost, cache, retry chain |
+| `request_rollups` | `logging_core/db_sink.py` | hourly aggregates (`key_id`/`model_group`/`provider`) kept permanently for pruned rows, incl. a per-metric percentile histogram (`p95_hist`) |
+| `audit_logs` | `logging_core/db_sink.py` | `actor` / `action` / `target` / `diff` for every admin mutation |
+| `vkeys` | `auth/service.py` | hashed virtual keys + budgets + spend |
+| `users` | `auth/users.py` | user accounts and roles |
+| `providers` · `provider_keys` · `deployments` · `settings` · `model_prices` | `server/config_store.py` | admin-created config that must survive restart |
+
+Both log limits (`log_retention_days`, `log_max_rows`) roll the rows they remove into `request_rollups` first, so dashboard totals, token counts, cost, and percentiles stay complete — only per-request detail is dropped. `log_max_rows` is what actually bounds storage on a busy gateway.
+
+Percentiles survive the rollup by keeping a compact log-scale histogram per bucket (the `p95_hist` column), so a percentile over a window spanning both fresh and rolled-up rows merges correctly instead of averaging two quantiles; an all-fresh window is exact and a mixed one is within ~3%.
