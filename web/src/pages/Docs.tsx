@@ -1,7 +1,7 @@
 // Docs — public API documentation for the gateway. Sticky scroll-tracking
-// sidebar, tabbed code examples with copy buttons, endpoint reference cards
-// with HTTP method badges, and feature highlights. Matches the dark design
-// system shared with the admin console.
+// sidebar with reading-progress rail, tabbed code examples with copy buttons,
+// endpoint reference cards with HTTP method badges, and feature highlights.
+// Matches the dark design system shared with the admin console.
 
 
 import {
@@ -9,17 +9,20 @@ import {
   useEffect,
   useRef,
   useState,
+  type CSSProperties,
   type ReactNode,
 } from "react";
 import { Link } from "react-router-dom";
 import {
   ArrowRight,
+  ArrowUp,
   BookOpen,
   Boxes,
   Check,
   ChevronDown,
   ChevronRight,
   Copy,
+  Hash,
   KeyRound,
   Layers,
   Network,
@@ -76,6 +79,53 @@ function useScrollSpy(ids: string[]) {
 function scrollToId(id: string) {
   const el = document.getElementById(id);
   if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// ── reading progress ───────────────────────────────────────────────────────
+
+function useScrollProgress() {
+  const [progress, setProgress] = useState(0);
+  useEffect(() => {
+    let raf = 0;
+    const measure = () => {
+      const doc = document.documentElement;
+      const max = doc.scrollHeight - window.innerHeight;
+      setProgress(max > 0 ? Math.min(1, Math.max(0, window.scrollY / max)) : 0);
+    };
+    const onScroll = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(measure);
+    };
+    measure();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onScroll);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onScroll);
+    };
+  }, []);
+  return progress;
+}
+
+function BackToTop() {
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    const onScroll = () => setVisible(window.scrollY > 700);
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+  return (
+    <button
+      type="button"
+      aria-label="Back to top"
+      onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+      className={`docs-backtop ${visible ? "is-visible" : ""}`}
+    >
+      <ArrowUp size={16} />
+    </button>
+  );
 }
 
 // ── copy button ───────────────────────────────────────────────────────────
@@ -173,6 +223,14 @@ function langFromLabel(label: string): Lang {
   return "bash";
 }
 
+// Language identity dots for the tab bar: bash/curl emerald, python amber,
+// yaml violet — the same hue family the syntax tokens already speak.
+const LANG_DOT: Record<Lang, string> = {
+  bash: "bg-emerald-400",
+  python: "bg-amber-400",
+  yaml: "bg-violet-400",
+};
+
 // ── code block ─────────────────────────────────────────────────────────────
 
 function CodeBlock(props: { code: string; label?: string; lang?: Lang }) {
@@ -224,12 +282,19 @@ function TabbedCode(props: {
             key={t.label}
             type="button"
             onClick={() => setIdx(i)}
-            className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[11px] font-medium transition-colors ${
+            aria-pressed={i === idx}
+            className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[11px] font-medium transition-all ${
               i === idx
-                ? "bg-blue-500/10 text-blue-300"
+                ? "bg-blue-500/[0.12] text-blue-200 shadow-[inset_0_1px_0_rgba(147,197,253,0.12)] ring-1 ring-blue-400/20"
                 : "text-[var(--admin-text-muted)] hover:bg-white/[0.03] hover:text-[var(--admin-text)]"
             }`}
           >
+            <span
+              className={`h-1.5 w-1.5 rounded-full transition-opacity ${LANG_DOT[langFromLabel(t.label)]} ${
+                i === idx ? "opacity-100" : "opacity-40"
+              }`}
+              aria-hidden
+            />
             {t.label}
           </button>
         ))}
@@ -253,13 +318,14 @@ function EndpointCard(props: {
   path: string;
   desc: string;
   auth?: string;
+  clients?: string[];
   example?: { label: string; code: string }[];
   children?: ReactNode;
 }) {
-  const { method, path, desc, auth, example, children } = props;
+  const { method, path, desc, auth, clients, example, children } = props;
   const ms = METHOD_STYLES[method];
   return (
-    <div className={`rounded-[12px] border border-[var(--admin-border)] border-l-2 ${ms.accent} bg-[var(--admin-surface)] p-4 transition-all hover:-translate-y-px hover:border-[var(--admin-border-hover)] hover:shadow-lg hover:shadow-black/20`}>
+    <div className={`docs-endpoint group/endpoint rounded-[12px] border border-[var(--admin-border)] border-l-2 ${ms.accent} bg-[var(--admin-surface)] p-4 transition-all hover:-translate-y-px hover:border-[var(--admin-border-hover)] hover:shadow-lg hover:shadow-black/20`}>
       <div className="flex flex-wrap items-center gap-2">
         <span className={`docs-method-badge flex h-5 min-w-[48px] items-center justify-center rounded-md px-2 text-[10px] font-bold tracking-wider ${ms.bg} ${ms.text}`}>
           {method}
@@ -268,6 +334,15 @@ function EndpointCard(props: {
           {path}
         </code>
         <PathCopyBtn text={path} />
+        {clients && (
+          <div className="docs-endpoint-clients flex flex-wrap items-center gap-1.5">
+            {clients.map((c) => (
+              <span key={c} className="rounded-full border border-white/[0.06] bg-white/[0.02] px-2 py-0.5 text-[9.5px] font-medium tracking-wide text-[var(--admin-text-dim)] transition-colors group-hover/endpoint:border-white/[0.1] group-hover/endpoint:text-[var(--admin-text-muted)]">
+                {c}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
       <p className="mt-2 text-[12px] leading-relaxed text-[var(--admin-text-muted)]">{desc}</p>
       {auth && (
@@ -334,25 +409,37 @@ const HEADING_TONES: Record<number, { chip: string; icon: string }> = {
   8: { chip: "from-pink-500/20 to-pink-500/[0.04]", icon: "text-pink-300" },
 };
 
-function SectionHeading(props: { icon: LucideIcon; title: string; subtitle?: string; index?: number }) {
+function SectionHeading(props: { id: string; icon: LucideIcon; title: string; subtitle?: string; index?: number }) {
   const Icon = props.icon;
   const tone = HEADING_TONES[props.index ?? 0] ?? {
     chip: "from-blue-500/20 to-blue-500/[0.04]",
     icon: "text-blue-300",
   };
   return (
-    <div className="mb-4 flex items-center gap-3">
+    <div className="docs-heading group mb-4 flex items-center gap-3">
       <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-gradient-to-br ${tone.chip} ring-1 ring-white/[0.06]`}>
         <Icon className={`h-4 w-4 ${tone.icon}`} />
       </span>
       <div>
-        <h2 className="text-[18px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
+        <h2 className="flex items-center gap-1.5 text-[18px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
           {props.index != null && (
-            <span className="mr-2 font-mono text-[12px] font-normal text-[var(--admin-text-dim)]">
+            <span className="font-mono text-[12px] font-normal text-[var(--admin-text-dim)]">
               {String(props.index).padStart(2, "0")}
             </span>
           )}
           {props.title}
+          <a
+            href={`#${props.id}`}
+            aria-label={`Link to ${props.title}`}
+            onClick={(e) => {
+              e.preventDefault();
+              scrollToId(props.id);
+              history.replaceState(null, "", `#${props.id}`);
+            }}
+            className="docs-anchor rounded p-0.5 text-[var(--admin-text-dim)] hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+          >
+            <Hash size={13} />
+          </a>
         </h2>
         {props.subtitle && (
           <p className="mt-0.5 text-[12px] text-[var(--admin-text-dim)]">{props.subtitle}</p>
@@ -368,6 +455,7 @@ const ENDPOINTS = [
   {
     method: "POST" as Method,
     path: "/v1/chat/completions",
+    clients: ["OpenAI SDK", "any compatible client"],
     desc: "The classic OpenAI Chat Completions surface. Every OpenAI-compatible client works out of the box.",
     auth: "Authorization: Bearer sk-wiwi-…",
     example: [
@@ -400,6 +488,7 @@ print(resp.choices[0].message.content)`,
   {
     method: "POST" as Method,
     path: "/v1/responses",
+    clients: ["Codex CLI", "Responses SDK"],
     desc: "The OpenAI Responses surface used by the Codex CLI and the Responses SDK.",
     auth: "Authorization: Bearer sk-wiwi-…",
     example: [
@@ -432,6 +521,7 @@ print(resp.output_text)`,
   {
     method: "POST" as Method,
     path: "/v1/messages",
+    clients: ["Claude Code", "Anthropic SDK"],
     desc: "The Anthropic Messages surface. Point Claude Code or the Anthropic SDK at the gateway and back it with any provider.",
     auth: "x-api-key: sk-wiwi-…",
     example: [
@@ -467,6 +557,7 @@ print(resp.content[0].text)`,
   {
     method: "GET" as Method,
     path: "/v1/models",
+    clients: ["model discovery"],
     desc: "List available models. Returns an OpenAI-compatible list of model objects the caller may request.",
     auth: "Authorization: Bearer sk-wiwi-…",
     example: [
@@ -477,6 +568,15 @@ print(resp.content[0].text)`,
       },
     ],
   },
+];
+
+// ── hero stat chips ────────────────────────────────────────────────────────
+
+const HERO_STATS: [LucideIcon, string][] = [
+  [Layers, "3 inbound dialects"],
+  [Server, "11 provider types"],
+  [Boxes, "1 canonical IR"],
+  [Zap, "SSE streaming"],
 ];
 
 // ── provider ecosystem map ────────────────────────────────────────────────
@@ -525,7 +625,11 @@ function ProviderMap() {
               >
                 <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-white/[0.03] p-1.5 ring-1 ring-white/[0.05]">
                   {provider.src ? (
-                    <img src={provider.src} alt="" className="h-full w-full object-contain" />
+                    <img
+                      src={provider.src}
+                      alt=""
+                      className="h-full w-full object-contain transition-transform duration-200 group-hover:scale-110"
+                    />
                   ) : Logo ? (
                     <Logo className="h-5 w-5 text-[var(--admin-text-muted)] transition-colors group-hover:text-blue-300" />
                   ) : null}
@@ -644,10 +748,25 @@ function HeroRequestFlow() {
 export function DocsPage() {
   const ids = SECTIONS.map((s) => s.id);
   const active = useScrollSpy(ids);
+  const progress = useScrollProgress();
   const handleClick = useCallback((id: string) => { scrollToId(id); }, []);
+
+  // Deep links (/docs#streaming) land on their section once it exists.
+  useEffect(() => {
+    const hash = window.location.hash.slice(1);
+    if (hash && SECTIONS.some((s) => s.id === hash)) {
+      const t = setTimeout(() => scrollToId(hash), 60);
+      return () => clearTimeout(t);
+    }
+  }, []);
 
   return (
     <div className="relative">
+      <div className="docs-progress" aria-hidden>
+        <div className="docs-progress-fill" style={{ "--docs-progress": progress.toFixed(4) } as CSSProperties} />
+      </div>
+      <BackToTop />
+
       {/* Hero banner */}
       <div className="docs-hero relative mb-10 overflow-hidden rounded-2xl border border-[var(--admin-border)] px-6 py-10 sm:px-10 sm:py-14">
         <div className="docs-hero-glow" aria-hidden />
@@ -675,7 +794,7 @@ export function DocsPage() {
             Claude Code, or plain <code style={{ fontFamily: MONO }}>curl</code> — retarget it
             at the gateway, and authenticate with a virtual key.
           </p>
-          <div className="mt-5 flex flex-wrap items-center gap-2">
+          <div className="docs-hero-actions mt-5 flex flex-wrap items-center gap-2">
             <button
               onClick={() => handleClick("quickstart")}
               className="wiwi-shimmer group inline-flex h-10 items-center gap-2 rounded-[10px] bg-gradient-to-b from-brand-500 to-brand-700 px-5 text-[13px] font-medium text-white shadow-lg shadow-brand-600/20 transition-[filter] duration-150 hover:brightness-110"
@@ -690,15 +809,16 @@ export function DocsPage() {
               <Network size={14} /> API reference
             </button>
           </div>
-          <div className="mt-7 flex flex-wrap items-center gap-x-5 gap-y-1.5 text-[11px] text-[var(--admin-text-dim)]">
-            {["3 inbound dialects", "11 provider types", "1 canonical IR", "SSE streaming"].map(
-              (s, i) => (
-                <span key={s} className="inline-flex items-center gap-5">
-                  {i > 0 && <span className="h-1 w-1 rounded-full bg-white/20" aria-hidden />}
-                  {s}
-                </span>
-              ),
-            )}
+          <div className="mt-7 flex flex-wrap gap-2">
+            {HERO_STATS.map(([Icon, label]) => (
+              <span
+                key={label}
+                className="inline-flex items-center gap-1.5 rounded-full border border-white/[0.06] bg-white/[0.02] px-2.5 py-1 text-[11px] text-[var(--admin-text-dim)] transition-colors hover:border-white/[0.1] hover:text-[var(--admin-text-muted)]"
+              >
+                <Icon size={11} className="text-blue-300/70" aria-hidden />
+                {label}
+              </span>
+            ))}
           </div>
         </div>
         <HeroRequestFlow />
@@ -730,7 +850,13 @@ export function DocsPage() {
         {/* Sidebar */}
         <aside className="docs-sidebar">
           <nav className="sticky top-[80px] space-y-0.5">
-            <span className="admin-label mb-2 block px-3">On this page</span>
+            <div className="mb-2 flex items-baseline justify-between px-3">
+              <span className="admin-label">On this page</span>
+              <span className="font-mono text-[9px] tabular-nums text-[var(--admin-text-dim)]">
+                {String(Math.max(1, SECTIONS.findIndex((s) => s.id === active) + 1)).padStart(2, "0")}
+                <span className="opacity-50"> / {String(SECTIONS.length).padStart(2, "0")}</span>
+              </span>
+            </div>
             {SECTIONS.map((s, i) => {
               const Icon = s.icon;
               const isActive = active === s.id;
@@ -752,12 +878,14 @@ export function DocsPage() {
                 </button>
               );
             })}
-            <div className="mt-4 border-t border-[var(--admin-border)] px-3 pt-4">
+            <div className="mt-4 border-t border-[var(--admin-border)] px-1 pt-4">
               <Link
                 to="/playground"
-                className="flex items-center gap-2 text-[12px] text-[var(--admin-text-muted)] transition-colors hover:text-blue-300"
+                className="group/play flex items-center gap-2 rounded-lg border border-white/[0.06] bg-gradient-to-br from-blue-500/[0.08] to-violet-500/[0.04] px-3 py-2.5 text-[12px] font-medium text-[var(--admin-text-muted)] transition-all hover:border-blue-400/25 hover:text-blue-200"
               >
-                <Terminal size={13} /> Open playground
+                <Terminal size={13} className="text-blue-300/80" />
+                <span className="flex-1">Open playground</span>
+                <ArrowRight size={12} className="opacity-0 transition-all group-hover/play:translate-x-0.5 group-hover/play:opacity-100" />
               </Link>
             </div>
           </nav>
@@ -768,6 +896,7 @@ export function DocsPage() {
           {/* overview */}
           <section id="overview" className="docs-section docs-section-card scroll-mt-20">
             <SectionHeading
+              id="overview"
               index={1}
               icon={BookOpen}
               title="Overview"
@@ -787,6 +916,7 @@ export function DocsPage() {
           {/* quickstart */}
           <section id="quickstart" className="docs-section docs-section-card scroll-mt-20">
             <SectionHeading
+              id="quickstart"
               index={2}
               icon={Terminal}
               title="Quickstart"
@@ -820,6 +950,7 @@ curl http://localhost:4000/v1/chat/completions \\
           {/* authentication */}
           <section id="authentication" className="docs-section docs-section-card scroll-mt-20">
             <SectionHeading
+              id="authentication"
               index={3}
               icon={KeyRound}
               title="Authentication"
@@ -873,6 +1004,7 @@ curl http://localhost:4000/v1/chat/completions \\
           {/* endpoints */}
           <section id="endpoints" className="docs-section docs-section-card scroll-mt-20">
             <SectionHeading
+              id="endpoints"
               index={4}
               icon={Network}
               title="Endpoints"
@@ -891,6 +1023,7 @@ curl http://localhost:4000/v1/chat/completions \\
                   path={ep.path}
                   desc={ep.desc}
                   auth={ep.auth}
+                  clients={ep.clients}
                   example={ep.example}
                 />
               ))}
@@ -900,6 +1033,7 @@ curl http://localhost:4000/v1/chat/completions \\
           {/* cross-provider */}
           <section id="cross-provider" className="docs-section docs-section-card scroll-mt-20">
             <SectionHeading
+              id="cross-provider"
               index={5}
               icon={RefreshCw}
               title="Cross-provider routing"
@@ -938,6 +1072,7 @@ router_settings:
           {/* streaming */}
           <section id="streaming" className="docs-section docs-section-card scroll-mt-20">
             <SectionHeading
+              id="streaming"
               index={6}
               icon={Zap}
               title="Streaming"
@@ -977,6 +1112,7 @@ router_settings:
           {/* configuration */}
           <section id="config" className="docs-section docs-section-card scroll-mt-20">
             <SectionHeading
+              id="config"
               index={7}
               icon={Settings2}
               title="Configuration"
@@ -1030,6 +1166,7 @@ router_settings:
           {/* features */}
           <section id="features" className="docs-section docs-section-card scroll-mt-20">
             <SectionHeading
+              id="features"
               index={8}
               icon={Layers}
               title="Features"

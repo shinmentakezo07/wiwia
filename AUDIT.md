@@ -8,6 +8,56 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — docs page touch targets (2026-09-30)
+
+### 318. Heading deep-link anchors were a 17×17 px target on touch
+
+**Severity:** 🟡 Medium · **Status: fixed**
+**Files:** `web/src/pages/Docs.tsx`, `web/src/styles.css`
+
+The `#` deep-link anchor on each docs section heading is a 13 px `Hash`
+glyph in `p-0.5`, which measures **17×17 px** — well under the 44 px touch
+floor that this repo's UI/UX rule makes binding. The `docs-heading:hover`
+reveal and the `@media (hover: none) { opacity: 0.6 }` rule made the anchor
+*visible* on touch, which is what made it look compliant: nothing about it
+signalled that the thing you could see was too small to hit reliably. A
+thumb on a 375 px viewport would miss it most of the time.
+
+Fixed in the same `@media (hover: none)` block that already handled the
+touch reveal — `display: inline-flex` plus `min-height/min-width: 44px`,
+with `margin-block: -10px` pulling the vertical bleed back so the heading
+keeps its existing height. The anchor is the last flex item in the `h2`, so
+the extra width falls into the existing `gap-1.5` and shifts nothing.
+
+The 44 px floor is deliberately **not** applied at fine-pointer widths: on a
+mouse a 17 px anchor with a visible focus ring is the desktop-docs norm, and
+padding it out would put a large invisible box in the heading's text flow.
+
+Three other suspected failures in the same verification pass turned out to be
+**test artifacts, not defects**, and are recorded here so they are not
+"re-fixed" later:
+
+- **Back-to-top appeared not to scroll.** The smooth scroll from ~5000 px
+  takes ~2.5 s; the check slept 900 ms. Fixed by waiting on
+  `window.scrollY < 5` with a timeout instead of a fixed sleep.
+- **Anchors "not revealed on focus".** Programmatic `.focus()` does not set
+  `:focus-visible`, so the reveal CSS correctly did not apply. Fixed by
+  driving real `Tab` presses until `document.activeElement` is the anchor.
+- **Desktop anchor reported as under-size.** That is the intended behaviour
+  described above; the check now asserts on `matchMedia('(hover: none)')` and
+  only enforces 44 px where the pointer is coarse.
+
+- **Test:** no `test_fix_roundN.py` added — the defect is a CSS tap-target
+  that pytest cannot observe, and `web/` has no test runner. The proof is
+  Playwright (`.verify/docs_check.py`, gitignored): 24 checks across 375×812
+  touch and 1440×900 desktop — no horizontal overflow, progress rail advances,
+  back-to-top returns to `y=0`, all 8 anchors Tab-reachable and focus-revealed,
+  anchor hit area 44×44 on touch, navigation works, no page errors. All pass.
+- **Verified:** full suite **2729 passed, 5 skipped**, ruff clean, `tsc -b` +
+  `vite build` clean, `eslint src` 0 errors.
+
+---
+
 ## ✅ Fixed — round 111 (2026-09-29)
 
 ### 317. Journal owner-record write failure failed the #67 replay gate OPEN
