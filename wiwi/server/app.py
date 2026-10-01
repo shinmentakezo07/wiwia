@@ -2038,6 +2038,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
         encoder, style = encoder_pair
         errored = False
         _seq = 0
+        # Capture is needed by the spend log and by the Responses store (spec B);
+        # with neither asking for it the accumulators stay empty and no per-token
+        # string work happens.
+        capture = (config.wiwi_settings.store_prompts_in_spend_logs
+                   or response_store is not None)
         store_prompts = config.wiwi_settings.store_prompts_in_spend_logs
         if journal_id is None:
             journal_id = ctx.request_id
@@ -2158,7 +2163,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     errored = True
                     ctx.status = 502
                     ctx.error = WiwiError(502, "api_error", first.message)
-                if store_prompts:
+                if capture:
                     _capture_delta(first, ctx, stream_text, stream_thinking,
                                    stream_tools)
                 # A raw ``bytes`` item is a pre-framed SSE keep-alive from the
@@ -2178,7 +2183,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     errored = True
                     ctx.status = 502
                     ctx.error = WiwiError(502, "api_error", d.message)
-                if store_prompts:
+                if capture:
                     _capture_delta(d, ctx, stream_text, stream_thinking,
                                    stream_tools)
                 # Same keep-alive passthrough as the ``first`` block above.

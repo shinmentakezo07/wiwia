@@ -1,7 +1,10 @@
 """OpenAI Responses wire codec: /v1/responses decode + stream events (fsm_responses).
 
-Stateless mode: every request is self-contained (Codex sends full history with
-store:false). previous_response_id is rejected with a clear error (post-MVP).
+State lives in ``wiwi/server/response_store.py``: the surface loads a stored
+response's output items, hands them to :func:`decode_request` as
+``previous_output`` (or to :func:`with_history` to rewrite the body), and the
+codec stays the pure translation layer. ``store`` and ``previous_response_id``
+are documented in docs/API_REFERENCE.md; AUDIT #213 tracked the old gap.
 """
 
 from __future__ import annotations
