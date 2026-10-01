@@ -7489,6 +7489,10 @@ codec + IR support + adapter branches + registry coverage), not a doc fix.
 
 **Update 2026-10-01:** `/v1/completions` itself is now built (spec A): `wiwi/wire/openai_completions.py` + `POST /v1/completions`, served through `run_chat_like`. `/v1/embeddings` remains unbuilt by choice.
 
+**Update 2026-10-01 (spec B):** the Responses surface is no longer stateless-only. `store` + `previous_response_id` are implemented over `wiwi/server/response_store.py` (key-scoped, TTL-pruned, read-time expiry), with `GET`/`DELETE /v1/responses/{id}`. `/v1/embeddings` remains unbuilt by choice.
+
+**Update 2026-10-01 (spec C):** trace export exists. `wiwi/core/telemetry.py` is a no-op facade unless `telemetry.enabled` and the `[otel]` extra are both present; spans cover the request, each upstream attempt, and the Responses store read/write, with W3C `traceparent` continued inbound, propagated per attempt outbound, and an `x-wiwi-trace-id` response header.
+
 ### 214. `tiktoken` was imported but undeclared — a clean `uv sync` silently degraded cost/budget accounting
 
 **Severity:** 🟠 High (spend enforcement silently falls back to a heuristic)

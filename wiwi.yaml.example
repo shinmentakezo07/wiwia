@@ -125,6 +125,21 @@ cache_settings:
   # prompt legitimately yields different text when sampling, and caching it
   # would pin callers to whichever completion came back first.
 
+# OTLP trace export (docs/CONFIG.md § Telemetry). Off by default, and free when
+# off: with `enabled: false` the gateway never imports the SDK. Requires the
+# `otel` extra (`uv pip install -e '.[otel]'`) — without it, enabling this logs a
+# warning and stays a no-op rather than failing. One span per request, with a
+# child span per upstream attempt, plus `traceparent` in both directions and an
+# `x-wiwi-trace-id` response header.
+# telemetry:
+#   enabled: false
+#   endpoint: http://localhost:4318/v1/traces   # OTLP/HTTP
+#   service_name: wiwi
+#   sample_ratio: 1.0                           # roots only; callers' choice is kept
+#   export_timeout_s: 10.0                      # bounds one export to a dead collector
+#   headers:                                    # extra headers for the collector
+#     authorization: Bearer <token>
+
 general_settings:
   master_key: os.environ/WIWI_MASTER_KEY
   # Database: SQLite (default) or PostgreSQL.  The DATABASE_URL env var
@@ -152,6 +167,12 @@ wiwi_settings:
   drop_params: true
   port: 4000
   # store_prompts_in_spend_logs: true   # log full request/response content (off by default)
+  # Responses API state: a completed /v1/responses call is stored so the client
+  # can continue it with previous_response_id (and read it back with
+  # GET /v1/responses/{id}). Scoped to the owning virtual key. ttl_s <= 0 keeps
+  # rows forever; expiry is enforced on read and by a background sweeper.
+  store_responses: true
+  response_store_ttl_s: 86400
   # Retention and storage cap for request_logs. Both roll the rows they remove
   # into request_rollups first, so the dashboard's totals, token counts, cost
   # and percentiles stay complete — only per-request detail is dropped.

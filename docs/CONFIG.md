@@ -72,6 +72,10 @@ wiwi_settings:
   drop_params: true               # silently drop params the target provider does not support
   max_request_body_mb: 50         # request body ceiling (Content-Length and chunked/HTTP2)
   store_prompts_in_spend_logs: false
+  # Responses API state (spec B). A completed /v1/responses call is stored and
+  # may be continued with previous_response_id. ttl_s <= 0 keeps rows forever.
+  store_responses: true
+  response_store_ttl_s: 86400
   log_retention_days: 30          # prune raw request_logs older than this; 0 = keep forever
   log_max_rows: 10000             # keep at most N raw rows; 0 = unlimited
   log_prune_interval_s: 3600      # seconds between prune sweeps; 0 = startup only
@@ -85,6 +89,8 @@ wiwi_settings:
 | `drop_params` | `true` | Drop request params the target provider does not support instead of erroring. |
 | `max_request_body_mb` | `50` | Max request body size in MB. |
 | `store_prompts_in_spend_logs` | `false` | Persist full prompt/response content in spend logs. |
+| `store_responses` | `true` | Persist `/v1/responses` state so `previous_response_id` and `GET/DELETE /v1/responses/{id}` work. `false` = stateless like before. |
+| `response_store_ttl_s` | `86400` | TTL for stored responses; enforced on read and by a 300 s sweeper. `0` keeps them forever. |
 | `log_retention_days` | `30` | Drop raw `request_logs` rows older than this; 0 keeps forever. Rows are rolled into `request_rollups` first. |
 | `log_max_rows` | `10000` | Cap on raw log rows; 0 = unlimited. |
 | `log_prune_interval_s` | `3600` | Seconds between prune sweeps; 0 = startup only. |
@@ -145,6 +151,56 @@ healer:
 | `max_concurrent_probes` | `8` | Parallel 1-token probe slots. |
 | `probation_recovery_window_s` | `300` | Window during which a key in probation can be restored. |
 | `health_model` | `none` | Must match `router_settings.health_model`. |
+
+## `telemetry`
+
+OpenTelemetry OTLP/HTTP trace export. **Off by default**, and free when off: with
+`enabled: false` the gateway never imports the SDK. Requires the `otel` extra
+(`uv pip install -e '.[otel]'`); without it, enabling this logs
+`telemetry_extra_missing` and stays a no-op — tracing is never a serving
+dependency, so a missing extra or an unreachable collector cannot fail a request.
+
+```yaml
+telemetry:
+  enabled: false
+  endpoint: http://localhost:4318/v1/traces   # OTLP/HTTP (the /v1/traces path)
+  service_name: wiwi
+  sample_ratio: 1.0
+  export_timeout_s: 10.0
+  headers:
+    authorization: Bearer <token>
+```
+
+| Field | Default | Notes |
+|---|---|---|
+| `enabled` | `false` | Master switch. |
+| `endpoint` | `""` | Collector URL. Enabling without one warns and stays off. |
+| `service_name` | `wiwi` | Becomes the `service.name` resource attribute. |
+| `sample_ratio` | `1.0` | Applied to trace **roots** only (`ParentBased`): a sampling decision already made by the caller is kept, so a sampled inbound request is always recorded. |
+| `export_timeout_s` | `10.0` | Bounds one export attempt. The exporter is synchronous and retries a dead collector; without a cap a single unreachable endpoint can stall process shutdown. |
+| `headers` | `{}` | Extra HTTP headers for the collector (e.g. a vendor token). |
+
+**What is emitted.** One `wiwi.request` span per request (`wiwi.surface`,
+`wiwi.request_id`, `wiwi.model`, then `wiwi.status`, `wiwi.cost`,
+`wiwi.errored`, and — for streams — `wiwi.streamed`, `wiwi.chunks`,
+`wiwi.ttft_ms`), with children:
+
+| Span | Meaning |
+|---|---|
+| `wiwi.upstream` | One per upstream attempt (so each retry is its own span): `wiwi.deployment`, `wiwi.provider`, `wiwi.attempt`, `wiwi.attempt_status`, `wiwi.latency_ms`. |
+| `wiwi.retrieve` | A `previous_response_id` transcript read (stateful Responses): `wiwi.found`. |
+| `wiwi.persist` | A stored response write: `wiwi.store_id`. |
+
+Responses carry `x-wiwi-trace-id: <32-hex>` alongside `x-wiwi-request-id` when
+tracing is on, so a caller can quote the exact trace.
+
+**Propagation.** A valid inbound W3C `traceparent` is continued — the request
+span becomes its child and keeps the caller's trace id. Each outbound upstream
+request carries the `traceparent` of **its own attempt span**, so retries appear
+as distinct children rather than duplicates under one hop.
+
+**Never emitted:** prompt or response text. `store_prompts_in_spend_logs`
+governs content capture and writes to the database, not to a collector.
 
 ## `model_list`
 
@@ -365,7 +421,7 @@ All config is parsed through Pydantic v2 models in `wiwi/config.py`:
 
 - `WiwiConfig` — top-level aggregate (`providers`, `model_list`, `router_settings`, `general_settings`, `wiwi_settings`, `cache_settings`, `healer`)
 - `GeneralSettings` — `master_key`, `database_url`, `redis_url`, `max_keys_per_user`, `trusted_proxies`
-- `WiwiSettings` — `host`, `port`, `public_url`, `drop_params`, `max_request_body_mb`, `store_prompts_in_spend_logs`, `log_retention_days`, `log_max_rows`, `log_prune_interval_s`
+- `WiwiSettings` — `host`, `port`, `public_url`, `drop_params`, `max_request_body_mb`, `store_prompts_in_spend_logs`, `store_responses`, `response_store_ttl_s`, `log_retention_days`, `log_max_rows`, `log_prune_interval_s`
 - `RouterSettings` — health_model, ewma_alpha, window, adaptive_cooldown
 - `CacheSettings` — enabled, ttl_s, max_entries, backend
 - `HealerSettings` — enabled, probe_interval_s, etc.
