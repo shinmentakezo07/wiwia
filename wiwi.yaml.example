@@ -147,24 +147,11 @@ general_settings:
   # WIWI_TRUSTED_PROXIES="127.0.0.1/32,10.0.0.0/8" — the usual way to set it
   # in a container, where there is no config file to edit.
   trusted_proxies: os.environ/WIWI_TRUSTED_PROXIES
-  # What a virtual key's max_budget means when a model has no pricing row.
-  # Unpriced models cost $0 in the cost engine, so with the default ("warn")
-  # a budget-capped key can serve an unpriced model forever without the cap
-  # ever tripping — each such request is tagged `unpriced_model` in the
-  # request log instead. "reject" fails closed: budget-capped keys get 503
-  # until an admin adds the price. "admit" restores fully silent behaviour.
-  # unpriced_model_policy: warn
 
 wiwi_settings:
   drop_params: true
   port: 4000
   # store_prompts_in_spend_logs: true   # log full request/response content (off by default)
-  # Responses API state: a completed /v1/responses call is stored so the client
-  # can continue it with previous_response_id (and read it back with
-  # GET /v1/responses/{id}). Scoped to the owning virtual key. ttl_s <= 0 keeps
-  # rows forever; expiry is enforced on read and by a background sweeper.
-  store_responses: true
-  response_store_ttl_s: 86400
   # Retention and storage cap for request_logs. Both roll the rows they remove
   # into request_rollups first, so the dashboard's totals, token counts, cost
   # and percentiles stay complete — only per-request detail is dropped.
