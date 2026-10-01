@@ -652,16 +652,16 @@ export function UsagePage() {
         <StatCard
           featured
           icon={Gauge}
-          label="avg gen tps"
+          label="avg output tok/s"
           value={avgTps.toFixed(1)}
           numeric={avgTps}
           format={(v) => v.toFixed(1)}
           sub={
             o
-              ? `p95 ${o.tps_p95.toFixed(1)} · streaming${
+              ? `p95 ${o.tps_p95.toFixed(1)}${
                   typeof o.tps_sample_ratio === "number"
-                    ? ` ${Math.round(o.tps_sample_ratio * 100)}%`
-                    : " only"
+                    ? ` · ${Math.round(o.tps_sample_ratio * 100)}% of requests`
+                    : " · streaming only"
                 }`
               : undefined
           }
@@ -849,7 +849,7 @@ export function UsagePage() {
       <div className="mt-4 grid gap-4 xl:grid-cols-2">
         <Card>
           <CardHeader
-            title="TPS over time"
+            title="Output throughput over time"
             right={
               <span className="flex items-center gap-3 text-[11px] text-[var(--admin-text-dim)]">
                 <span className="flex items-center gap-1.5">
@@ -1073,7 +1073,7 @@ export function UsagePage() {
                     <th>requests</th>
                     <th>tokens</th>
                     <th>cost</th>
-                    <th>avg tps</th>
+                    <th>avg output tok/s</th>
                     <th>errors</th>
                   </tr>
                 </thead>
@@ -1149,7 +1149,7 @@ export function UsagePage() {
               <SortHeader key="cached" label="cached" k="cached" active={sortKey} dir={sortDir} onSort={onSort} />,
               <SortHeader key="reasoning" label="reasoning" k="reasoning" active={sortKey} dir={sortDir} onSort={onSort} />,
               <SortHeader key="out" label="out" k="out" active={sortKey} dir={sortDir} onSort={onSort} />,
-              <SortHeader key="tps" label="tps" k="tps" active={sortKey} dir={sortDir} onSort={onSort} />,
+              <SortHeader key="tps" label="output tok/s" k="tps" active={sortKey} dir={sortDir} onSort={onSort} />,
               <SortHeader key="ttft" label="ttft" k="ttft" active={sortKey} dir={sortDir} onSort={onSort} />,
               <SortHeader key="latency" label="latency" k="latency" active={sortKey} dir={sortDir} onSort={onSort} />,
               <SortHeader key="cost" label="cost" k="cost" active={sortKey} dir={sortDir} onSort={onSort} />,
