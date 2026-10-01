@@ -80,6 +80,7 @@ OpenAI-style model list of the model groups visible to the authenticated key.
 | Header | Meaning |
 |---|---|
 | `x-wiwi-request-id` | Request ID, echoed on every SSE frame's `id:` field |
+| `x-wiwi-trace-id` | Trace ID (32 hex), only when `telemetry.enabled`. Pair it with the collector to pull the exact trace; see `docs/CONFIG.md` § `telemetry` |
 | `x-wiwi-stream-id` | Stream journal ID — pass back on reconnect to replay |
 | `Last-Event-ID` | SSE standard header; reconnect replays missed frames |
 

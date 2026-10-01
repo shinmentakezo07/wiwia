@@ -24,6 +24,7 @@ The stack as shipped (source of truth: `pyproject.toml`, `web/package.json`, `Do
 | Cache / rate-limit store | in-memory (default) · redis-py asyncio (`[redis]` extra) | redis >= 5 | high |
 | Pricing data | DB-backed `model_prices` + bundled fallback | — | high |
 | Logging | structlog (JSON lines) | >= 24.1 | high |
+| Tracing | optional OTLP/HTTP via `[otel]` extra (`opentelemetry-api`/`-sdk`/`-exporter-otlp-proto-http`); off by default, no-op without the extra | >= 1.20 | medium |
 | Env loading | python-dotenv | >= 1.0 | high |
 | Build backend | hatchling | latest | high |
 
@@ -71,6 +72,11 @@ Runtime dependencies: 13. That count is a feature.
 
 **In-memory defaults, Redis opt-in.** Sliding-window rate limiting and the exact-match response cache run in-process by default (single-instance self-hosting target); the `[redis]` extra enables multi-instance correctness.
 
+**Tracing is an encoder, not a framework.** Spans are opened at seams the request
+already has (`run_chat_like`, the attempt loop, the Responses store) and carry
+attributes the pipeline already computes — no new measurement is added to the hot
+path, and the OTLP export happens on a batch processor off the request path.
+
 **Hand-rolled retry/backoff (~50 lines in `core/recovery.py`).** Shared `Backoff`/`CircuitBreaker` primitives serve the router, OAuth refresh services, and the HealthHealer; a tenacity dependency would not honor `Retry-After` semantics we need.
 
 **structlog JSON lines.** Structured, redaction-friendly, three streams (request/proxy/audit) plus the LogEvent ring that feeds stats and `/metrics`.
@@ -95,3 +101,4 @@ Runtime dependencies: 13. That count is a feature.
 | heavyweight UI kit (shadcn/MUI) | Hand-rolled Tailwind components; bundle stays small |
 | mypy / pyright | Untyped Python by choice; TS side is strict-typed instead |
 | pytest-cov | Coverage not enforced |
+| auto-instrumentation (`opentelemetry-instrumentation-fastapi`/`-httpx`) | Emits one opaque HTTP span per hop and a FastAPI span that flattens exactly the structure worth having (deployments, keys, retries, dialects), and installs middleware of its own. Explicit spans at existing seams model the pipeline correctly in ~40 lines. |

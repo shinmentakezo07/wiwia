@@ -7,7 +7,9 @@ COPY wiwi/ /app/wiwi/
 # [redis] extra: the response cache falls back to the in-memory backend when
 # the package is missing, but then a configured redis_url silently does
 # nothing. Install it so REDIS_URL works in the shipped image.
-RUN uv venv /app/.venv && uv pip install -p /app/.venv/bin/python ".[redis]"
+# [otel] extra: same reasoning for telemetry.enabled — without the SDK a
+# configured collector is silently a no-op, which looks like a broken export.
+RUN uv venv /app/.venv && uv pip install -p /app/.venv/bin/python ".[redis,otel]"
 
 # Stage 2: Build the admin web UI (React + TypeScript → static assets).
 # Node 24 matches web/package.json `engines` (>=24) and runs the same
