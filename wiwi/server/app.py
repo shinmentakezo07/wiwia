@@ -1161,6 +1161,20 @@ def create_app(config: WiwiConfig) -> FastAPI:
         raw = raw.strip()
         return raw[:128] or None
 
+    def _key_priority(raw: object) -> str | None:
+        """Coerce an admin-supplied lane name.
+
+        ``None`` means "no lane declared" and lands on ``default_lane``. A
+        non-string is refused rather than stringified: ``priority: 3`` would
+        otherwise become a lane named "3" that matches nothing.
+        """
+        if raw is None:
+            return None
+        if not isinstance(raw, str):
+            raise TypeError("'priority' must be a string")
+        name = raw.strip()
+        return name or None
+
     def is_admin(request: Request) -> bool:
         mk = config.general_settings.master_key
         if not mk:
@@ -2587,13 +2601,27 @@ def create_app(config: WiwiConfig) -> FastAPI:
         # one owner id with every other admin, which is the round-105 defect on
         # the Playground path (round 107).
         owner_id = _key_owner_id(actor)
+        # A key must not be able to sit in a lane the operator never configured:
+        # an unknown name would silently fall back to ``default_lane`` at
+        # admission, so what the caller asked for would be quietly ignored.
+        # Reject it here, where the caller can see the 400 and fix it.
+        try:
+            priority = _key_priority(body.get("priority"))
+        except TypeError as e:
+            return _err(400, "invalid_request_error", str(e), request)
+        lanes = config.router_settings.priority_lanes
+        if priority is not None and priority not in lanes:
+            return _err(400, "invalid_request_error",
+                        f"unknown priority lane {priority!r}; configured"
+                        f" lanes: {sorted(lanes) or 'none'}", request)
         try:
             plaintext, kid = await state.auth.create_key(
                 alias=str(body.get("name") or body.get("alias") or ""),
                 models=body.get("models"), max_budget=body.get("max_budget"),
                 rpm=body.get("rpm"), tpm=body.get("tpm"),
                 ttl_seconds=body.get("ttl_seconds"),
-                custom_key=body.get("custom_key"), owner_id=owner_id)
+                custom_key=body.get("custom_key"), owner_id=owner_id,
+                priority=priority)
         except ValueError as e:
             return _err(400, "invalid_request_error", str(e), request)
         await state.logs.log_audit(

@@ -379,7 +379,8 @@ class AuthService:
                          max_budget: float | None = None, rpm: int | None = None,
                          tpm: int | None = None, ttl_seconds: float | None = None,
                          custom_key: str | None = None,
-                         owner_id: str | None = None) -> tuple[str, str]:
+                         owner_id: str | None = None,
+                         priority: str | None = None) -> tuple[str, str]:
         """Returns (plaintext, key_id). Custom keys allowed (>=16 chars)."""
         plaintext = custom_key or generate_virtual_key()
         if custom_key and len(custom_key) < 16:
@@ -402,7 +403,7 @@ class AuthService:
             # count them against. The playground mint bounds the master's keys
             # separately via the per-alias cap.
             await self._insert_key(kid, plaintext, alias, models, max_budget,
-                                   rpm, tpm, expires, owner_id, now)
+                                   rpm, tpm, expires, owner_id, now, priority)
         else:
             # Cap live keys per owner. Without this a user mints unbounded keys
             # and rotates around any per-key budget or rate limit.
@@ -420,7 +421,7 @@ class AuthService:
                         f"key limit reached ({self.max_keys_per_user} live keys); "
                         f"delete or expire an existing key first")
                 await self._insert_key(kid, plaintext, alias, models, max_budget,
-                                       rpm, tpm, expires, owner_id, now)
+                                       rpm, tpm, expires, owner_id, now, priority)
         # a failed guess of this plaintext may sit in the negative cache for the
         # TTL; evict so the freshly created key authenticates immediately
         self._drop_cached(hash_key(plaintext))
@@ -430,17 +431,18 @@ class AuthService:
                           models: list[str] | None, max_budget: float | None,
                           rpm: float | None, tpm: float | None,
                           expires: float | None, owner_id: str | None,
-                          now: float) -> None:
+                          now: float, priority: str | None = None) -> None:
         async with self.engine.begin() as conn:
             try:
                 await conn.execute(
                     sa.text("INSERT INTO vkeys (id, key_hash, key_alias, models, max_budget,"
                             " spend_to_date, rpm, tpm, expires_at, disabled, owner_id,"
-                            " created_at, updated_at)"
-                            " VALUES (:id,:h,:a,:m,:b,0,:r,:t,:e,0,:owner,:c,:c)"),
+                            " priority, created_at, updated_at)"
+                            " VALUES (:id,:h,:a,:m,:b,0,:r,:t,:e,0,:owner,:prio,:c,:c)"),
                     {"id": kid, "h": hash_key(plaintext), "a": alias,
                      "m": __import__("json").dumps(models or []), "b": max_budget,
-                     "r": rpm, "t": tpm, "e": expires, "owner": owner_id, "c": now},
+                     "r": rpm, "t": tpm, "e": expires, "owner": owner_id,
+                     "prio": priority, "c": now},
                 )
             except IntegrityError as e:
                 raise ValueError("custom key already exists") from e
@@ -478,7 +480,7 @@ class AuthService:
         return None
 
     UPDATABLE_FIELDS = ("max_budget", "rpm", "tpm", "models", "expires_at",
-                        "ttl_seconds")
+                        "ttl_seconds", "priority")
 
     #: The subset of ``UPDATABLE_FIELDS`` a key's *owner* may change on their
     #: own key. Every other field is an operator control: ``max_budget``,
@@ -486,6 +488,9 @@ class AuthService:
     #: tenant, so letting the tenant clear them defeats the cap (AUDIT #220).
     #: ``expires_at``/``ttl_seconds`` are excluded for the same reason — an
     #: owner extending their own expiry defeats a time-boxed grant.
+    #: ``priority`` is excluded for the same reason: a lane is how an operator
+    #: keeps one tenant's bulk traffic off another's interactive path, so a
+    #: tenant granting itself a lane would defeat the boundary.
     OWNER_FACING_FIELDS = ()
 
     async def update_key(self, key_id: str, fields: dict,
