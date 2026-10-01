@@ -74,6 +74,13 @@ Failure at any step returns a normal HTTP error response, not a WebSocket close
 frame. This is the single most important property of the design: **the client can
 still read the status code and the error body.**
 
+The refusal is written literally (`websocket.http.response.start` + `.body`)
+rather than via `ws.close(code=…)`. Uvicorn answers **403** to *any* close issued
+before `accept`, discarding the code — so the obvious implementation silently
+collapses every refusal into one indistinguishable status, which is precisely the
+outcome this design exists to prevent. *Verified live:* the first cut did exactly
+that, and `401` and `404` both reached the client as `403`.
+
 ### Relay
 
 On success the handler opens the upstream socket with the deployment's key and
@@ -89,7 +96,7 @@ relays both directions:
 
 A Realtime session is billed on tokens, and unlike HTTP there is no single
 response to price. The rule: observe usage-bearing server events, keep the
-**maximum** `total_tokens` reported for the session, and charge that once, at
+**maximum** token count reported for the session, and charge that once, at
 close. Summing would double-count: `response.done` and the preceding
 `response.output_item.done` report overlapping windows of the same conversation,
 and a resumed response restates its input.

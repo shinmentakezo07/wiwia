@@ -145,8 +145,11 @@ async def test_a_relayed_frame_arrives_unchanged():
 Order: authenticate → rate limit → budget → `resolve_group` → `pick_deployment` →
 `pick_key` → `ws.accept()` → open upstream → relay.
 
-Refusals use `await ws.close(code=…)` **before** `accept()`, which Starlette
-turns into a real HTTP `403`/`404`/`429` response the client can read.
+Refusals write a literal `websocket.http.response.start` + `.body` pair
+**before** `accept()`. Writing `await ws.close(code=…)` is the tempting shortcut
+and it is wrong: uvicorn answers 403 to *any* pre-accept close and discards the
+code, so every refusal reaches the client as an identical 403. The literal
+response is what makes a 401 readable.
 
 - [ ] **Step 4: The relay itself**
 
@@ -156,6 +159,7 @@ async def _realtime_relay(client_ws, upstream_ws) -> None:
 
     Frames are passed through byte-for-byte. The session protocol is stateful
     and ordered (session.update mutates state later turns depend on), so
+
     wiwi reads it and never rewrites it.
     """
 ```

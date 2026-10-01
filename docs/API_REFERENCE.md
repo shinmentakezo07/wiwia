@@ -104,6 +104,12 @@ limited, `501` the provider has no realtime surface, `503` every deployment is
 cooling or at its concurrency cap. Once the client sees `101`, a session exists
 upstream and errors arrive as close frames.
 
+The refusal is a literal HTTP response written before the handshake completes,
+not a close frame: uvicorn answers **403** to *any* close issued before accept
+and discards the code, which would make a bad key indistinguishable from an
+unknown model. Writing `websocket.http.response.start` by hand is what preserves
+the status.
+
 Frames pass through byte-for-byte in both directions — the session protocol is
 stateful and ordered, so wiwi relays it and never rewrites it. A session holds
 its deployment's concurrency slot for its whole life, so `max_inflight`,
