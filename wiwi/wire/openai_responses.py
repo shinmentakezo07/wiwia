@@ -233,12 +233,35 @@ def _decode_response_format(text_field: Any) -> ir.ResponseFormat | None:
     return None
 
 
-def decode_request(body: dict[str, Any]) -> ir.Request:
+def with_history(body: dict[str, Any],
+                 previous: list[dict[str, Any]]) -> dict[str, Any]:
+    """Prepend a stored response's output items to this request's ``input``.
+
+    ``previous_response_id`` is dropped: the caller's next hop must carry the
+    literal history, because the upstream never saw our id.
+    """
+    merged = dict(body)
+    merged.pop("previous_response_id", None)
+    items = list(previous)
+    existing = body.get("input")
+    if isinstance(existing, str):
+        items.append({"type": "message", "role": "user", "content": existing})
+    elif isinstance(existing, list):
+        items.extend(existing)
+    merged["input"] = items
+    return merged
+
+
+def decode_request(body: dict[str, Any],
+                   previous_output: list[dict[str, Any]] | None = None) -> ir.Request:
     model = body.get("model")
     if not isinstance(model, str) or not model:
         raise DialectError("'model' is required")
-    if body.get("previous_response_id"):
-        raise DialectError("previous_response_id is not supported yet; send full input")
+    if body.get("previous_response_id") and previous_output is None:
+        # Reachable only when the caller bypasses the store (state disabled, or a
+        # direct codec call). The surface loads and key-checks the row first and
+        # hands the items in as ``previous_output``.
+        raise DialectError("previous_response_id is unknown or expired; send full input")
 
     messages: list[ir.Message] = []
     instructions = body.get("instructions")
@@ -253,6 +276,10 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         items = raw_input
     else:
         items = []
+
+    # Stored history first: the caller's own input is the continuation.
+    if previous_output:
+        items = list(previous_output) + items
 
     for item in items:
         if not isinstance(item, dict):

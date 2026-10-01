@@ -333,3 +333,34 @@ def test_completions_stream_drops_thinking_and_tool_deltas():
     assert enc.feed(dl.ToolCallClose(index=0)) is None
     enc.feed(dl.Finish(stop_reason="tool_calls"))
     assert '"finish_reason":"stop"' in enc.final_frame().decode()
+
+
+def test_responses_previous_output_is_decoded_into_history():
+    out = [{"type": "message", "id": "msg_1", "role": "assistant",
+            "content": [{"type": "output_text", "text": "prior answer"}]},
+           {"type": "function_call", "id": "fc_1", "call_id": "call_1",
+            "name": "lookup", "arguments": "{\"q\": 1}"}]
+    req = orp.decode_request(
+        {"model": "x", "previous_response_id": "resp_old", "input": "next"},
+        previous_output=out)
+    assert req.messages[0].parts[0].text == "prior answer"
+    assert any(m.parts and getattr(m.parts[0], "name", "") == "lookup"
+               for m in req.messages)
+
+
+def test_responses_without_previous_output_still_refuses_the_id():
+    with pytest.raises(oc.DialectError):
+        orp.decode_request({"model": "x", "previous_response_id": "resp_old",
+                            "input": []})
+
+
+def test_with_history_merges_a_string_and_a_list_input():
+    prev = [{"type": "message", "role": "assistant",
+             "content": [{"type": "output_text", "text": "a"}]}]
+    body = orp.with_history({"model": "x", "previous_response_id": "resp_1",
+                             "input": "b"}, prev)
+    assert body["input"][0] is prev[0]
+    assert body["input"][1]["content"] == "b"
+    assert "previous_response_id" not in body
+    body2 = orp.with_history({"model": "x", "input": [{"type": "message"}]}, prev)
+    assert len(body2["input"]) == 2
