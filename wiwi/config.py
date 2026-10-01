@@ -159,6 +159,10 @@ class DeploymentParams(BaseModel):
     max_tokens: int | None = None
     rpm: int | None = None
     tpm: int | None = None
+    # Concurrency ceiling for deployments of this model. Overrides
+    # ``router_settings.max_inflight`` for this model alone, so one expensive
+    # model can be capped harder than its siblings on the same provider.
+    max_inflight: int | None = None
     timeout: float | None = None
     extra_headers: dict[str, str] = Field(default_factory=dict)
     # Extra JSON fields merged into the upstream request body at encode time.
@@ -178,7 +182,7 @@ class DeploymentParams(BaseModel):
     # adapter default (1024).
     prompt_cache_min_tokens: int | None = None
 
-    @field_validator("rpm", "tpm")
+    @field_validator("rpm", "tpm", "max_inflight")
     @classmethod
     def _limits_must_be_positive(cls, v: int | None, info) -> int | None:
         """Reject a non-positive cap instead of silently ignoring it.
@@ -266,6 +270,47 @@ class RouterSettings(BaseModel):
     # Client-gone grace drain: on disconnect, keep pumping upstream for
     # accurate billing. 0 = cancel immediately (current behavior).
     stream_grace_drain_s: float = 0.0
+    # Concurrency ceiling per deployment. None (the default) is uncapped, which
+    # is today's behaviour; a deployment's own ``wiwi_params.max_inflight``
+    # overrides this.
+    max_inflight: int | None = None
+    # Retry-After advertised when every candidate is shedding. Deliberately
+    # short: a slot frees as soon as any in-flight request returns.
+    inflight_retry_after_s: float = 1.0
+    # Lane name -> share of a deployment's concurrency that lane may hold.
+    # Shares partition concurrency, so they must sum to at most 1.0.
+    priority_lanes: dict[str, float] = Field(default_factory=dict)
+    default_lane: str = "bulk"
+    # Pin a client session (x-wiwi-session-id) to the deployment that served it,
+    # so upstream prompt caches stay warm. Per-process, like the in-memory rate
+    # limiter and response cache.
+    session_affinity: bool = False
+    session_affinity_ttl_s: float = 600.0
+
+    @field_validator("priority_lanes")
+    @classmethod
+    def _lane_shares_are_sane(cls, v: dict[str, float]) -> dict[str, float]:
+        """Reject lane shares that partition nothing or over-subscribe.
+
+        A share of 0 or >1 is a typo that would read as "no capacity" or "more
+        than all of it". Shares summing above 1.0 is the more dangerous shape: it
+        reads like a weighting scheme, so every lane would be admitted at full
+        capacity and the lane boundary would silently never bind. Under-
+        subscription is legitimate — it leaves the top lane headroom for burst.
+        """
+        if not v:
+            return v
+        for name, share in v.items():
+            if not name or not 0 < share <= 1:
+                raise ValueError(
+                    f"priority_lanes[{name!r}]={share}: share must be in (0, 1]")
+        total = sum(v.values())
+        if total > 1.0 + 1e-9:
+            raise ValueError(
+                f"priority_lanes shares sum to {total:.3f} > 1.0: lanes partition"
+                " concurrency, they do not create it")
+        return v
+
     # Prometheus /metrics endpoint
     prometheus_enabled: bool = False
     prometheus_path: str = "/metrics"

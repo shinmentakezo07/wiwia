@@ -3,6 +3,8 @@
 import asyncio
 from typing import ClassVar
 
+import pytest
+
 from wiwi.config import (
     DeploymentParams,
     KeyDef,
@@ -168,3 +170,36 @@ def test_exhausted_provider_keys_fall_through_to_sibling_deployment():
 async def _run(r, ctx, call_one):
     from wiwi.router.router import execute_with_retries
     return await execute_with_retries(r, ctx, call_one)
+
+
+def test_router_settings_defaults_leave_routing_uncapped():
+    s = RouterSettings()
+    assert s.max_inflight is None
+    assert s.inflight_retry_after_s == 1.0
+    assert s.priority_lanes == {}
+    assert s.default_lane == "bulk"
+    assert s.session_affinity is False
+
+
+def test_priority_lane_shares_are_validated():
+    # A share outside (0, 1] is a typo: 0 reads as "no capacity", >1 as more than
+    # all of it. Over-subscription reads like a weighting scheme, so every lane
+    # would be admitted at full capacity and the boundary would never bind.
+    with pytest.raises(ValueError):
+        RouterSettings(priority_lanes={"bulk": 0.0})
+    with pytest.raises(ValueError):
+        RouterSettings(priority_lanes={"bulk": 1.5})
+    with pytest.raises(ValueError):
+        RouterSettings(priority_lanes={"": 0.5})
+    with pytest.raises(ValueError):
+        RouterSettings(priority_lanes={"a": 0.7, "b": 0.7})
+    # Under-subscription is legitimate: it leaves the top lane headroom for burst.
+    s = RouterSettings(priority_lanes={"interactive": 0.9, "bulk": 0.1})
+    assert s.priority_lanes == {"interactive": 0.9, "bulk": 0.1}
+
+
+def test_deployment_params_accepts_a_per_model_cap():
+    assert DeploymentParams(provider="p1", model="m", max_inflight=8).max_inflight == 8
+    assert DeploymentParams(provider="p1", model="m").max_inflight is None
+    with pytest.raises(ValueError):
+        DeploymentParams(provider="p1", model="m", max_inflight=0)
