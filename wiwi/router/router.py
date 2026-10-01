@@ -646,17 +646,7 @@ def _alias_target(v: str | ModelAliasEntry) -> str:
     return v
 
 
-def _at_inflight_cap(d: Deployment, settings: RouterSettings) -> bool:
-    """Whether *d* is already holding as many requests as its ceiling allows.
 
-    Module-level and lane-agnostic on purpose: it answers the operator's
-    question ("is this deployment full?") without committing to a lane
-    comparison, so the 503 branch in ``execute_with_retries`` can report a
-    saturated deployment even when this particular request was refused by a
-    lane ceiling well below the deployment's own.
-    """
-    cap = d.effective_max_inflight(settings)
-    return cap is not None and d.inflight >= cap
 
 
 
@@ -845,8 +835,12 @@ class Router:
         if not kept and shed:
             # Everything is above this request's ceiling. Record why, so the
             # caller's 503 names the bound that refused it instead of reporting
-            # the indistinguishable "no healthy deployment".
-            ctx.metadata["shed_reason"] = "inflight"
+            # the indistinguishable "no healthy deployment". Written
+            # tolerantly: ``pick_deployment`` takes whatever context its
+            # caller passes, and a minimal stand-in without a ``metadata``
+            # dict must not turn a routine capacity refusal into an
+            # AttributeError.
+            getattr(ctx, "metadata", {}).setdefault("shed_reason", "inflight")
             return None
         avail = kept or avail
 
@@ -1360,18 +1354,24 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                     # Reporting the cap as 503 told the client to give up on a
                     # deployment that is serving fine (AUDIT #101).
                     now = time.monotonic()
-                    shed = [d for d in deps
-                            if d.available and _at_inflight_cap(d, router.settings)]
+                    # ``shed_reason`` is set by ``pick_deployment`` itself, so it
+                    # is the authority on whether *this* request was refused for
+                    # capacity. Re-deriving it from the deployments' own caps
+                    # would miss a lane refusal, which fires well below the
+                    # deployment's cap — the request would then be reported as
+                    # an outage, telling the client the backend is down when it
+                    # is merely full for this lane.
+                    shed = getattr(ctx, "metadata", {}).pop("shed_reason", None)
                     capped = [d for d in deps
                               if d.available
                               and d.rate_limited(now, getattr(ctx, "est_tokens", 0))]
-                    if shed and (not capped or ctx.metadata.get("shed_reason")):
+                    if shed:
                         # Concurrency saturation is a 503, not a 429: the cap is
                         # a horizon-free "this server is full right now", while
                         # 429 means "this quota is spent, retry in N seconds".
-                        # Reported in that order so a deployment that is both
-                        # token-capped and full reads as full — the client
-                        # action is the same, but the operator's diagnosis is
+                        # Checked before the rpm/tpm branch so a deployment that
+                        # is both full and token-capped reads as full — the
+                        # client action is the same, the operator's diagnosis is
                         # not.
                         retry_after = router.settings.inflight_retry_after_s
                         last_err = WiwiError(

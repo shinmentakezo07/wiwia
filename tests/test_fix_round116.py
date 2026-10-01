@@ -35,18 +35,22 @@ from wiwi.router.router import (
 )
 
 
-def _router(**router_overrides) -> Router:
+def _config(**router_overrides) -> WiwiConfig:
     """A single-deployment group; the deployment factory stays the router's."""
     settings = RouterSettings(num_retries=0, allowed_fails=2, cooldown_time=0.05)
     for key, value in router_overrides.items():
         setattr(settings, key, value)
-    return Router(WiwiConfig(
+    return WiwiConfig(
         providers=[ProviderDef(name="p1", provider="openai",
                                keys=[KeyDef(label="a", key="k1")])],
         model_list=[ModelEntry(model_name="m",
                                wiwi_params=DeploymentParams(provider="p1", model="mm"))],
         router_settings=settings,
-    ))
+    )
+
+
+def _router(**router_overrides) -> Router:
+    return Router(_config(**router_overrides))
 
 
 def _account() -> ProviderAccount:
@@ -348,3 +352,94 @@ def test_a_pinned_deployment_is_still_excluded_after_failing():
     # `b` already failed this request, so it is excluded; stickiness must not
     # send the retry straight back to the deployment that failed.
     assert r.pick_deployment([a, b], Ctx(session_id="s1"), exclude={id(b)}) is a
+
+
+
+async def test_a_key_lane_round_trips_through_authenticate():
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from wiwi.auth.service import AuthService
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    svc = AuthService(engine, master_key_plaintext="master-key-test")
+    await svc.startup()
+    plaintext, _kid = await svc.create_key("lane-key", priority="bulk")
+    info = await svc.authenticate(plaintext)
+    assert info is not None
+    assert info.priority == "bulk"
+    # A key with no lane reads as None, which the router turns into
+    # ``default_lane`` — never a silent capacity grant.
+    plain2, _ = await svc.create_key("no-lane")
+    assert (await svc.authenticate(plain2)).priority is None
+
+
+async def test_minting_a_key_in_an_unknown_lane_is_refused():
+    """An unknown lane silently falls back to default_lane at admission, so the
+    caller's intent would be dropped with no signal. Refuse at mint time."""
+    from asgi_lifespan import LifespanManager
+    from httpx import ASGITransport, AsyncClient
+
+    from wiwi.config import GeneralSettings
+    from wiwi.server import app as app_mod
+
+    master = "sk-wiwi-master-lane-test"
+    cfg = _config(
+        priority_lanes={"interactive": 0.8, "bulk": 0.2}, default_lane="bulk")
+    cfg.general_settings = GeneralSettings(
+        master_key=master, database_url="sqlite+aiosqlite:///:memory:")
+
+    app = app_mod.create_app(cfg)
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport,
+                               base_url="http://test") as c:
+            r = await c.post("/admin/keys/generate",
+                             headers={"Authorization": f"Bearer {master}"},
+                             json={"alias": "k", "priority": "typo-lane"})
+            assert r.status_code == 400
+            assert "typo-lane" in r.json()["error"]["message"]
+
+            r = await c.post("/admin/keys/generate",
+                             headers={"Authorization": f"Bearer {master}"},
+                             json={"alias": "k", "priority": 3})
+            assert r.status_code == 400
+
+            r = await c.post("/admin/keys/generate",
+                             headers={"Authorization": f"Bearer {master}"},
+                             json={"alias": "good", "priority": "interactive"})
+            assert r.status_code == 200
+
+
+async def test_a_lane_refusal_names_shedding_not_an_outage():
+    """Regression: a lane ceiling fires *below* the deployment's own cap.
+
+    The 503 branch used to re-derive saturation from the deployments' caps, so
+    a bulk request refused at inflight 1 of a cap-2 deployment matched nothing
+    and fell through to "no healthy deployment" — telling the client the
+    backend was down when it was merely full for that lane, and dropping the
+    Retry-After with it.
+    """
+    from wiwi.router.router import execute_with_retries
+
+    r = _router(max_inflight=2, inflight_retry_after_s=2.0,
+                priority_lanes={"interactive": 0.75, "bulk": 0.25},
+                default_lane="bulk")
+    d = r.groups["m"][0]
+    d.max_inflight = 2
+    d.inflight = 1  # under the deployment's cap of 2, at bulk's ceiling of 1
+
+    async def call_one(dep, key, ctx):
+        raise AssertionError("must not reach the upstream when shed")
+
+    ctx = Ctx(_key("bulk"))
+    with pytest.raises(WiwiError) as exc:
+        await execute_with_retries(r, ctx, call_one)
+    assert exc.value.status == 503
+    assert exc.value.etype == "server_overloaded"
+    assert "concurrency limit" in exc.value.message
+    assert "no healthy deployment" not in exc.value.message
+    # A client told "come back in N" needs the N.
+    assert exc.value.retry_after == pytest.approx(2.0)
+    # shed_reason is consumed by the 503 branch, so a retry on the same context
+    # is not misreported as shed forever.
+    assert "shed_reason" not in ctx.metadata
