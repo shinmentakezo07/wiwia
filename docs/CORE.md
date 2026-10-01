@@ -84,7 +84,7 @@ Surface-agnostic engine executing one IR request:
 - `Router.resolve_group(name)` — alias chain + `alias_to_provider` → model group.
 - `pick_deployment` — smooth WRR over healthy deployments (exact-proportion semantics pinned by tests; no jitter).
 - `execute_with_retries` — wraps connect + first-token phase: retry per attempt budget with `Backoff` (honors `Retry-After`), failover across deployments, then fallback groups; records `AttemptRecord`s on the context; skips/cool-downs failing keys.
-- Health scoring (opt-in `router_settings.health_model: scored`): EWMA latency + success-rate window gate deployment/key selection; `adaptive_cooldown` extends cooldowns by recent failure rate.
+- Health scoring (**spec only, not implemented** — `docs/superpowers/specs/2026-08-31-router-health-overhaul-design.md`): opt-in `router_settings.health_model: scored` would add EWMA latency + success-rate window gating of deployment/key selection; `adaptive_cooldown` would extend cooldowns by recent failure rate. Neither field exists in `RouterSettings`.
 
 ## 5. Recovery (`core/recovery.py`)
 
@@ -109,14 +109,14 @@ Encoders are one-directional state machines over the IR delta taxonomy; they ass
 
 ## 7. Providers (`providers/`)
 
-- `base.py`: `ProviderAdapter` protocol (`encode_request`, `_call`, `decode_stream_event`, …), `WiwiError` taxonomy, `ProviderKeyRef`, `error_from_provider_status`, `status_for_key_pool`.
+- `base.py`: `ProviderAdapter` protocol (`encode_request`, `decode_response`, `decode_stream_event`, …), `WiwiError` taxonomy, `ProviderKeyRef`, `error_from_provider_status`, `status_for_key_pool`.
 - `registry.py`: `get_adapter(type)` returns the shared singleton (reset on hand-out; sync-only use) — `fresh_adapter(type)` returns a private instance (request hot path; adapters hold per-stream decode state across awaits). Import-time assert: every `PROVIDER_TYPES` entry has a branch.
-- `_OPENAI_WIRE_TYPES = {openai, openai-compatible, gmicloud, bai}` fall through to `OpenAIAdapter`; the rest have dedicated adapters (see [PROVIDERS.md](PROVIDERS.md) for per-provider quirks).
+- `_OPENAI_WIRE_TYPES = {openai, openai-compatible, gmicloud, bai}` fall through to `OpenAIAdapter` (`bai` is claimed earlier by the `BAIAdapter` subclass, so the fallback never applies to it); the rest have dedicated adapters (see [PROVIDERS.md](PROVIDERS.md) for per-provider quirks).
 
 ## 8. Subsystems
 
 ### Auth (`auth/`)
-`AuthService.authenticate` distinguishes master key (admin), virtual key (client), session cookie (user). Virtual keys: SHA-256 at rest, constant-time compare, model allowlists/budgets/rpm-tpm/expiry, owner (user) linkage. Users: PBKDF2 password hashing, HMAC-signed HttpOnly cookies, roles.
+`AuthService.authenticate(plaintext)` distinguishes master key (admin) from virtual key (client) — it takes a bearer-style plaintext and does **not** handle session cookies; those are verified separately by `verify_session` in `auth/users.py`, wired in `server/app.py`. Virtual keys: SHA-256 at rest, constant-time compare, model allowlists/budgets/rpm-tpm/expiry, owner (user) linkage. Users: PBKDF2 password hashing, HMAC-signed HttpOnly cookies, roles.
 
 ### Rate limiting (`ratelimit/`)
 Sliding-window counters per key: `memory.py` (default) and `redis.py` (multi-instance). Enforced after auth, before routing.
@@ -135,12 +135,12 @@ When `request_logs` is pruned (age or `log_max_rows`), the removed rows are aggr
 Every loss mode is counted, because each one means durable accounting is missing rows: `dropped_request_logs` (request queue full), `failed_request_log_writes` (the batch write raised and the rows were discarded), `dropped_proxy_logs`, `failed_audit_log_writes`. `dropped_log_events` sums them; all four plus the sum are exposed on `/health` and `/metrics`.
 
 ### Server plumbing (`server/`)
-`app.py`: pure-ASGI `RequestIdMiddleware` (request id, body-size guard incl. chunked/HTTP2, latency headers — replaces BaseHTTPMiddleware so shutdown cancellation can't kill stream pumps), `ORJSONResponse`, `run_chat_like` pipeline, lifespan (DB init, refresh services, healer, journal store), `_SPAStaticFiles` mount at `/admin/ui`. `config_store.py`: DB-backed runtime config. `stats.py`/`metrics.py`: shared nearest-rank percentile so admin rollups and Prometheus cannot drift.
+`app.py`: pure-ASGI `RequestIdMiddleware` (request id, body-size guard incl. chunked/HTTP2, latency headers — replaces BaseHTTPMiddleware so shutdown cancellation can't kill stream pumps), `ORJSONResponse`, `run_chat_like` pipeline, lifespan (DB init, refresh services, healer, journal store), `SPAStaticFiles` mounted at `/` with history fallback. `config_store.py`: DB-backed runtime config. `stats.py`/`metrics.py`: shared nearest-rank percentile so admin rollups and Prometheus cannot drift.
 
 ## 9. Cross-cutting invariants
 
-1. No `wire`/`providers` imports outside those layers (checked by convention + review; the registry assert catches missing branches, not misplaced ones).
+1. No `wire` imports outside `wire/`, and no concrete-adapter imports outside `providers/`; `providers.base` / `providers.registry` hold the generic contracts `core/` is allowed to depend on (checked by convention + review; the registry assert catches missing branches, not misplaced ones).
 2. `core/recovery.py` must never import `wiwi.router` or `wiwi.core.gateway` (cycle).
-3. Frozen dataclasses for IR and all stream deltas; per-stream mutable state lives on adapter instances.
+3. Frozen dataclasses for all stream deltas (every `ir/types.py` dataclass is a plain mutable `@dataclass`); per-stream mutable state lives on adapter instances.
 4. Library modules never import `wiwi.server.app` at module level.
 5. All async: `httpx.AsyncClient`, SQLAlchemy async, `orjson` in hot paths; `structlog`, never `print`.

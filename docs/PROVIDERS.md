@@ -28,9 +28,11 @@ The reference adapter. Everything OpenAI-wire-shaped flows through `OpenAIAdapte
 
 ```yaml
 providers:
-  openai:
-    api_key: os.environ/OPENAI_API_KEY
+  - name: openai-main
+    provider: openai
     base_url: https://api.openai.com/v1   # default
+    keys:
+      - {label: main, key: os.environ/OPENAI_API_KEY}
 ```
 
 Supports: streaming, tools, parallel tool calls, `reasoning_effort`, structured outputs (`response_format`), prompt-cache usage reporting, image inputs.
@@ -41,14 +43,16 @@ Any endpoint speaking OpenAI Chat Completions. `base_url` is required.
 
 ```yaml
 providers:
-  ollama:
-    type: openai-compatible
-    api_key: ""                              # often unneeded
+  - name: ollama
+    provider: openai-compatible
     base_url: http://localhost:11434/v1
-  vllm:
-    type: openai-compatible
-    api_key: os.environ/VLLM_KEY
+    keys:
+      - {label: local, key: "not-needed"}     # often unneeded
+  - name: vllm
+    provider: openai-compatible
     base_url: http://vllm.internal:8000/v1
+    keys:
+      - {label: main, key: os.environ/VLLM_KEY}
 ```
 
 Model groups can mix cloud + local deployments under one `model_name`; the router failovers across them.
@@ -59,9 +63,11 @@ Native Messages API (not the OpenAI-compat shim), so Anthropic-only features sur
 
 ```yaml
 providers:
-  anthropic:
-    api_key: os.environ/ANTHROPIC_API_KEY
-    base_url: https://api.anthropic.com      # default
+  - name: anthropic-main
+    provider: anthropic
+    base_url: https://api.anthropic.com/v1   # default
+    keys:
+      - {label: main, key: os.environ/ANTHROPIC_API_KEY}
 ```
 
 Supports: SSE event folding into the IR delta taxonomy (`content_block_start/delta/stop` → `TextDelta`/`ThinkingDelta`/`ToolCall*`), `thinking` blocks with signatures, prompt-cache tokens (`cache_read_input_tokens`, `cache_creation_input_tokens`), server tools (`web_search` → IR builtin tools).
@@ -72,9 +78,11 @@ Speaks Google's native `generateContent` REST protocol with `alt=sse` streaming 
 
 ```yaml
 providers:
-  gemini:
-    api_key: os.environ/GEMINI_API_KEY
+  - name: gemini-main
+    provider: gemini
     base_url: https://generativelanguage.googleapis.com/v1beta   # default
+    keys:
+      - {label: main, key: os.environ/GEMINI_API_KEY}
 ```
 
 ## `openrouter`
@@ -86,9 +94,11 @@ OpenAI-compatible at the wire level with parameter translation:
 
 ```yaml
 providers:
-  openrouter:
-    api_key: os.environ/OPENROUTER_API_KEY
+  - name: openrouter-main
+    provider: openrouter
     base_url: https://openrouter.ai/api/v1   # default
+    keys:
+      - {label: main, key: os.environ/OPENROUTER_API_KEY}
 ```
 
 ## `gmicloud`
@@ -97,9 +107,11 @@ GMICloud's OpenAI-format endpoint. Plain specialization of the OpenAI adapter.
 
 ```yaml
 providers:
-  gmicloud:
-    api_key: os.environ/GMI_API_KEY
-    base_url: https://api.gmicloud.ai/v1     # default
+  - name: gmi-main
+    provider: gmicloud
+    base_url: https://api.gmi-serving.com/v1   # default
+    keys:
+      - {label: main, key: os.environ/GMI_API_KEY}
 ```
 
 ## `bai`
@@ -108,9 +120,11 @@ B.AI unified LLM gateway (`api.b.ai`). Exposes one API key across three protocol
 
 ```yaml
 providers:
-  bai:
-    api_key: os.environ/BAI_API_KEY
+  - name: bai-main
+    provider: bai
     base_url: https://api.b.ai/v1            # default; see adapter for exact endpoint
+    keys:
+      - {label: main, key: os.environ/BAI_API_KEY}
 ```
 
 ## `nvidia-nim`
@@ -123,9 +137,11 @@ NVIDIA NIM (`integrate.api.nvidia.com`) — OpenAI wire format with three quirks
 
 ```yaml
 providers:
-  nvidia-nim:
-    api_key: os.environ/NVIDIA_API_KEY
+  - name: nim-main
+    provider: nvidia-nim
     base_url: https://integrate.api.nvidia.com/v1   # default
+    keys:
+      - {label: main, key: os.environ/NVIDIA_NIM_API_KEY}
 ```
 
 ## `cline`
@@ -140,11 +156,14 @@ Cline (`api.cline.bot`) — OpenAI Chat Completions-compatible with three quirks
    cache, so registry failures never block a request.
 3. **OAuth lifecycle**: tokens refresh on demand; auto-refresh runs as a background service.
 
+There is **no** `client_id` / `client_secret` in config — `cline_oauth.py` states "no client_id / no PKCE", and the OAuth flow needs no pre-registered app credentials. Register the account instead, which stores the resulting token in the key pool:
+
 ```yaml
 providers:
-  cline:
-    client_id: os.environ/CLINE_CLIENT_ID
-    client_secret: os.environ/CLINE_CLIENT_SECRET
+  - name: cline-main
+    provider: cline
+    base_url: https://api.cline.bot/api/v1   # default
+    keys: []                                  # filled in by the OAuth flow
 ```
 
 Connect via the admin UI (Providers → Cline → Connect) or the OAuth endpoints (`/admin/cline/oauth/*`). The callback lands on `/cline/oauth/callback`.
@@ -155,14 +174,17 @@ WorkBuddy / CodeBuddy (Tencent) — OpenAI Chat Completions-compatible with four
 
 1. **Auth**: the key secret is a WorkBuddy **auth JSON** (nested or flat — `workbuddy_auth.py` normalizes both); requests carry the derived access token.
 2. Fingerprint/headers as upstream expects.
-3. Auto-refresh background service (shared `CircuitBreaker`/`Backoff` primitives from `wiwi/core/recovery.py`).
+3. Auto-refresh background service (shared `CircuitBreaker` primitive from `wiwi/core/recovery.py`).
 4. Account import/export via admin endpoints.
+
+As with Cline there is **no** `client_id` / `client_secret` — `workbuddy_auth.py` reads no environment variables. Accounts are imported, and the auth JSON lands in the key pool:
 
 ```yaml
 providers:
-  workbuddy:
-    client_id: os.environ/WB_CLIENT_ID
-    client_secret: os.environ/WB_CLIENT_SECRET
+  - name: workbuddy-main
+    provider: workbuddy
+    base_url: https://copilot.tencent.com   # default
+    keys: []                                 # filled in by import
 ```
 
 Import accounts via `/admin/workbuddy/import` or the admin UI.
@@ -180,16 +202,18 @@ OpenCode Zen (`opencode.ai/zen`) — a multi-protocol gateway: the same base URL
 
 ```yaml
 providers:
-  opencode:
-    api_key: os.environ/OPENCODE_API_KEY
+  - name: opencode-main
+    provider: opencode
     base_url: https://opencode.ai/zen/v1     # default
+    keys:
+      - {label: main, key: os.environ/OPENCODE_API_KEY}
 ```
 
 ---
 
 ## Key pools & weights
 
-Config gives each provider its primary key. The admin API manages a **key pool** per provider — multiple real upstream credentials, each with:
+Config declares a **key pool** per provider account (one or more entries under `keys:`). The admin API manages the same pool at runtime, layering on top of whatever the config file declared. Each key carries:
 
 | Field | Meaning |
 |---|---|
@@ -197,9 +221,9 @@ Config gives each provider its primary key. The admin API manages a **key pool**
 | `secret` | The credential (encrypted at rest; reveal endpoint is audit-logged) |
 | `weight` | WRR bias when picking among pool keys |
 | `enabled` | On/off switch |
-| health state | `active` · `cooling` (transient error → cooldown) · `invalid` (auth rejected) · `disabled` |
+| health state | `active` · `cooling` (transient error → cooldown) · `invalid` (auth rejected) · `disabled` · `probation` (healer-restored, reduced WRR weight until it graduates) |
 
-Router picks a deployment, then a key from that deployment's pool. Errors trigger cooldowns; cooldowns expire automatically (or adaptively with `router_settings.health_model: scored` + `adaptive_cooldown: true`); the optional HealthHealer probes sick keys with 1-token requests to restore them (see [ARCHITECTURE.md](ARCHITECTURE.md) §Recovery).
+Router picks a deployment, then a key from that deployment's pool. Errors trigger cooldowns; cooldowns expire automatically once `cooldown_time` elapses. The optional HealthHealer probes sick keys with 1-token requests and restores them into `probation` (see [ARCHITECTURE.md](ARCHITECTURE.md) §Recovery).
 
 ## Mixing providers in one model group
 
@@ -207,15 +231,17 @@ Router picks a deployment, then a key from that deployment's pool. Errors trigge
 model_list:
   - model_name: claude-sonnet
     wiwi_params:
-      model: anthropic/claude-sonnet-4-5
+      provider: anthropic-main          # a providers[].name
+      model: claude-sonnet-4-5          # provider-native model id
       weight: 2
   - model_name: claude-sonnet          # same group, second deployment
     wiwi_params:
-      model: openrouter/anthropic/claude-sonnet-4.5
+      provider: openrouter-main         # a different account, not a different syntax
+      model: anthropic/claude-sonnet-4.5
       weight: 1
 ```
 
-Clients always request `claude-sonnet`. WRR splits traffic 2:1; upstream failures failover to the other deployment (and to `fallback_groups`, if configured) mid-stream with tape-based resume.
+Clients always request `claude-sonnet`. WRR splits traffic 2:1; upstream failures failover to the other deployment (and to `router_settings.fallbacks`, if configured) mid-stream with tape-based resume.
 
 ## Provider quirks live in adapters — nowhere else
 

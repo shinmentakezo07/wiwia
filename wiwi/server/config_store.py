@@ -23,6 +23,22 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from wiwi.auth.users import widen_pg_floats
 
+
+class ConfigStoreNotFound(LookupError):
+    """A targeted UPDATE/DELETE matched no row.
+
+    The dominant way this happens is a YAML-defined provider: the
+    startup merge skips any DB provider whose name already exists in
+    the router (``app.py``), so the account has no DB row at all — yet
+    the admin API still mutates it, because the PATCH handler checks
+    existence in ``router.providers``, which *includes* YAML providers.
+    The write silently matched zero rows and the handler answered 200,
+    so the edit appeared to apply and reverted on the next restart
+    (AUDIT #319). Renames were lost outright, deleted keys resurrected,
+    and a Cline/WorkBuddy OAuth token rotation — which goes through
+    :meth:`update_key_secret` — never persisted.
+    """
+
 PROVIDER_DDL = """
 CREATE TABLE IF NOT EXISTS providers (
   name TEXT PRIMARY KEY,
@@ -313,9 +329,13 @@ class ConfigStore:
                     sa.text("UPDATE model_price_scopes SET scope = :nn"
                             " WHERE scope = :name"),
                     {"nn": new_name, "name": name})
-            await conn.execute(
+            res = await conn.execute(
                 sa.text(f"UPDATE providers SET {', '.join(sets)} WHERE name = :name"),
                 params)
+            if res.rowcount != 1:
+                raise ConfigStoreNotFound(
+                    f"no persisted provider {name!r} (YAML-defined accounts"
+                    " have no DB row; admin edits to them cannot persist)")
 
     async def delete_provider(self, name: str) -> None:
         async with self.engine.begin() as conn:
@@ -358,10 +378,13 @@ class ConfigStore:
                                 secret: str) -> None:
         """Replace a stored key's secret (used by Cline OAuth token rotation)."""
         async with self.engine.begin() as conn:
-            await conn.execute(
+            res = await conn.execute(
                 sa.text("UPDATE provider_keys SET secret = :s"
                         " WHERE provider_name = :p AND label = :l"),
                 {"p": provider_name, "l": label, "s": secret})
+            if res.rowcount != 1:
+                raise ConfigStoreNotFound(
+                    f"no persisted key {provider_name!r}/{label!r}")
 
     async def update_key(self, provider_name: str, label: str, *,
                          weight: int | None = None,
@@ -377,17 +400,23 @@ class ConfigStore:
         if not sets:
             return
         async with self.engine.begin() as conn:
-            await conn.execute(
+            res = await conn.execute(
                 sa.text(f"UPDATE provider_keys SET {', '.join(sets)}"
                         " WHERE provider_name = :p AND label = :l"),
                 params)
+            if res.rowcount != 1:
+                raise ConfigStoreNotFound(
+                    f"no persisted key {provider_name!r}/{label!r}")
 
     async def delete_key(self, provider_name: str, label: str) -> None:
         async with self.engine.begin() as conn:
-            await conn.execute(
+            res = await conn.execute(
                 sa.text("DELETE FROM provider_keys"
                         " WHERE provider_name = :p AND label = :l"),
                 {"p": provider_name, "l": label})
+            if res.rowcount != 1:
+                raise ConfigStoreNotFound(
+                    f"no persisted key {provider_name!r}/{label!r}")
 
     # -- deployments ------------------------------------------------------------
 

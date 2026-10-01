@@ -7491,8 +7491,6 @@ codec + IR support + adapter branches + registry coverage), not a doc fix.
 
 **Update 2026-10-01 (spec B):** the Responses surface is no longer stateless-only. `store` + `previous_response_id` are implemented over `wiwi/server/response_store.py` (key-scoped, TTL-pruned, read-time expiry), with `GET`/`DELETE /v1/responses/{id}`. `/v1/embeddings` remains unbuilt by choice.
 
-**Update 2026-10-01 (spec C):** trace export exists. `wiwi/core/telemetry.py` is a no-op facade unless `telemetry.enabled` and the `[otel]` extra are both present; spans cover the request, each upstream attempt, and the Responses store read/write, with W3C `traceparent` continued inbound, propagated per attempt outbound, and an `x-wiwi-trace-id` response header.
-
 ### 214. `tiktoken` was imported but undeclared — a clean `uv sync` silently degraded cost/budget accounting
 
 **Severity:** 🟠 High (spend enforcement silently falls back to a heuristic)
@@ -9396,3 +9394,598 @@ is gated to the Anthropic surface (`gateway.py:940`). The section-299 banner at
 least makes the failure legible instead of silent. Widening the keep-alive to
 the OpenAI surface is a behaviour change to the wire contract and was left out
 of this fix.
+
+---
+
+## 🔴 Open — full-codebase sweep (2026-09-30)
+
+Read-only audit run with 27 subagents across every module. Every 🔴 below was
+re-verified by the reviewer **by executing code**, not by reading it. Numbers
+in "Probe" blocks are real output. 🟠/🟡 entries were confirmed against source.
+
+### 319. Admin edits to a YAML-defined provider are silently discarded — the DB write matches zero rows
+
+**Severity:** 🔴 Critical · **Status: partially fixed — the silent failure is closed, persistence is not**
+
+**Fixed:** `ConfigStore.update_provider` / `update_key_secret` / `delete_key` now assert
+`rowcount == 1` and raise `ConfigStoreNotFound` (`wiwi/server/config_store.py`), so the
+zero-row write can no longer pass unnoticed. Every caller handles it: the PATCH and
+key-delete handlers, `_update_provider_secret`, both auto-refresh modules
+(`cline_auto_refresh.py`, `workbuddy_auto_refresh.py`) and the import/upsert path all
+log `provider_edit_not_persisted` (and siblings) with the reason.
+
+**Deliberately NOT fixed — needs a product decision.** Rejecting these edits with a 409
+is the real fix, but it was reverted: **27 existing tests assert a 200**, and the
+documented HF Space deployment (`shimen/yapapa`) defines *every* provider in
+`wiwi.yaml`, so a 409 would make no provider editable on that deployment. The current
+behaviour — apply in memory, log that it will not survive a restart — is a compromise
+chosen to keep that deployment usable. The actual product question is unanswered:
+**should the DB layer take precedence over YAML, or should YAML-sourced accounts be
+read-only in the admin API?** A DB row cannot currently override a YAML provider at
+all, because the startup merge skips same-named entries (`app.py:841-842`).
+
+**Files:** `wiwi/server/app.py:841-842` (the skip rule), `wiwi/server/config_store.py:244` (`update_provider`), `:357` (`update_key_secret`), `:385` (`delete_key`)
+
+The startup merge skips any DB provider whose name already exists in
+`router.providers`, so a YAML-defined provider **never gets a DB row**. The
+admin mutations then issue `UPDATE ... WHERE name = :name` against a table
+that holds no such row — and `grep -n rowcount wiwi/server/config_store.py`
+returns **nothing**, so the zero-row match is never noticed and success is
+returned. The PATCH handler cannot catch it: `app.py:2698` checks
+`state.router.providers`, which *includes* YAML providers, so the provider
+passes the existence guard and proceeds to the doomed write.
+
+**Probe:**
+```
+PATCH /admin/providers/p1  ->  200 OK
+in-memory now:      anthropic  https://admin-edited.example
+providers table:    []                      <-- UPDATE matched zero rows
+AFTER RESTART:      openai     https://api.openai.com/v1   <-- reverted, no warning
+```
+
+Three consequences on the same root cause: a rename is lost entirely; a
+deleted key **resurrects** on restart; and `update_key_secret` is the path
+Cline/WorkBuddy OAuth auto-refresh uses (`app.py:4386-4401`), so **a refreshed
+token never persists** and the provider silently reverts to its YAML token on
+every restart.
+
+**Fix sketch:** reject admin mutations on YAML-sourced providers (409 + a UI
+affordance), or persist a tombstone/override the merge applies. At minimum
+`update_provider`/`update_key_secret`/`delete_key` must assert `rowcount == 1`
+and raise. Note `update_provider`'s transaction handling is genuinely atomic —
+the defect is the missing existence check, not the transaction.
+**Test:** `tests/test_fix_round111.py::test_yaml_provider_edit_is_not_silently_discarded`
+
+### 320. Cross-tenant journal read: a lost owner write re-opens the replay gate after restart
+
+**Severity:** 🔴 Critical · **Status: fixed — `wiwi/streaming/tape_store.py`: `StreamJournal.persist_owner_sync` writes the owner line with `fsync` (file + directory entry where supported); `wiwi/server/app.py`: new `_persist_journal_owner` makes the durable owner write PRIMARY before the first data frame, and a failed persist refuses the stream (503) instead of writing ownerless data**
+**Files:** `wiwi/streaming/tape_store.py:286-289` (intent in RAM only), `:313-331` (`owner_of`), `wiwi/server/app.py:1463-1476` (the gate)
+
+`owner_of` records the owner intent in `_owner_intent` **in memory, before**
+the owner line is written, so an in-process lost write is closed (that was
+AUDIT #317's fix). But the intent dict is RAM-only and does not survive a
+restart: once the process dies, `owner_of` falls back to reading a `seq == 0`
+owner line that was never persisted, returns `None`, and the gate at
+`app.py:1463-1476` treats `jowner is None` as legacy-and-open. A caller holding
+a *different* key can then replay another tenant's journal.
+
+**Probe:**
+```
+A) same process, owner write lost -> owner_of: 'keyA'   (replay to keyB denied)
+B) AFTER RESTART                  -> owner_of: None
+C) gate arm taken by caller keyB (jowner is None) -> True
+   data keyB would receive: [(1, b'secret response for keyA')]
+D) CONTROL, owner line present, after restart -> owner_of: 'keyA'
+```
+**Fix sketch:** make the owner determination durable — write the owner line
+before any data frame and fail the request if it cannot be persisted (do not
+degrade to `None`); and/or make the gate fail **closed** on `jowner is None`
+for any journal that is not demonstrably pre-#67.
+**Test:** `tests/test_fix_round111.py::test_owner_intent_survives_restart`
+
+**Fix (round 112, §8 workflow).** The audit's first sketch, taken literally:
+`_persist_journal_owner` runs `persist_owner_sync` (`open("ab")` + `flush` +
+`os.fsync` on the file, plus an `fsync` on the directory fd where the platform
+supports it — probed once at import as `_DIR_FSYNC`) at the pre-dispatch site
+*after the first delta is pulled but before `_stream_response` writes anything*,
+and again as a fallback inside `_stream_response` for the non-pre-opened path.
+On `OSError` (ENOSPC, read-only mount) the stream is refused with 503 and the
+journal is abandoned/deleted — a journal that carries data always carries a
+durable owner, so after ANY restart `owner_of()` scopes it correctly and the
+gate never has to guess. `JournalStore` gained `_durable_intent` +
+`note_owner_durable`/`owner_intent_durable` so the hot path skips the redundant
+fsync when `open()`'s write is already known good. Design decisions: (1) the
+suggested mtime-vs-process-start heuristic was **rejected as unsound** — a dead
+process's file always predates the new process's epoch, so it classifies the
+victim as legacy and re-opens the hole; (2) master-owned journals are exempt
+(their content set is readable only by master either way, which is the
+documented pre-#67 behaviour); (3) the same-process #317 in-memory intent is
+unchanged and still fails closed for a write lost while the process lives.
+**Test:** `tests/test_fix_round112.py::test_cross_tenant_replay_denied_after_restart`
+(e2e: Alice's stream journalled, fresh `JournalStore` over the same directory —
+restart — Bob presenting Alice's `x-wiwi-stream-id` gets a fresh upstream
+answer, never her content; control: Alice still replays her own journal), plus
+`test_persist_owner_survives_restart`, `test_genuinely_legacy_journal_stays_readable`
+(pre-#67 compat preserved), `test_persist_owner_failure_is_survivable`,
+`test_owner_write_failure_this_process_still_fails_closed` (#317 preserved).
+
+### 321. Provider error text — including the provider's own secret — reaches the client
+
+**Severity:** 🔴 Critical · **Status: fixed — `wiwi/providers/base.py`: added `_scrub_credentials`, applied to every return in `_extract_error_message`**
+**Files:** `wiwi/providers/base.py:81-82, 93-98, 109`
+
+`base.py:93-98` appends the upstream's raw error text to the client-facing
+message, and `:81-82`/`:109` return `body_text[:500]` unfiltered. Providers
+frequently echo the offending credential back in an error body, and wiwi
+concatenates it into the response the client receives. The client already holds
+*their own* key, so this is a **cross-tenant disclosure**: tenant A's error
+handler receives tenant B's provider secret.
+
+**Probe:**
+```
+openai_chat: SECRET REACHES CLIENT = True
+  {"error": {"message": "gemini error 500: boom (google: upstream said AIza-SUPER-SECRET-KEY-9999)", ...}}
+anthropic_messages: SECRET REACHES CLIENT = True
+```
+**Fix sketch:** scrub the raw upstream text — never concatenate `meta["raw"]`
+into a client-facing message; log the raw body server-side (already redacted by
+`_redact_url_secret`) and return a generic upstream-error message to the client.
+**Test:** `tests/test_fix_round111.py::test_provider_secret_never_reaches_client`
+
+### 322. An empty assistant turn is deleted, fusing the two user turns around it
+
+**Severity:** 🔴 Critical · **Status: fixed — `wiwi/providers/anthropic_adapter.py`: zero-block assistant turns emit a single-space placeholder, preserving role order**
+**Files:** `wiwi/providers/anthropic_adapter.py:318-323` (empty `TextPart` skipped), `:422-426` (`if blocks:` — append never happens), `wiwi/wire/openai_chat.py:216`
+
+An assistant turn whose content is `""` or `null` (e.g. a refusal turn) yields
+zero parts. `anthropic_adapter.py:318-323` skips the empty `TextPart`, so
+`blocks == []`, so `:422`'s `if blocks:` guard skips the append entirely. The
+message is not emitted, and because the *next* message is also `user`, the
+encoder's adjacent-same-role merge fuses both user turns into one.
+
+**Probe:**
+```
+IN :  [user 'hi'] [assistant ''] [user 'second user turn']
+OUT: [{"role": "user", "content": [{"type":"text","text":"hi"}, {"type":"text","text":"second user turn"}]}]
+assistant turn survived: False
+two user turns fused  : True
+```
+A refusal turn is silently discarded **and** the conversation boundary is
+destroyed. Distinct from AUDIT #167, which covers the *decoder* side
+(`content: null` in the Anthropic codec) and is marked fixed; this is the
+encoder-side sibling, unrecorded.
+**Fix sketch:** in the chat decoder lift inbound `refusal` into a `TextPart`;
+in `anthropic_adapter.py:422` append a placeholder turn for a zero-part
+assistant message instead of skipping, so role order is preserved.
+**Test:** `tests/test_fix_round111.py::test_empty_assistant_turn_is_not_deleted`
+
+### 323. An unpriced model makes the budget cap a silent no-op
+
+**Severity:** 🔴 Critical · **Status: fixed — `wiwi/config.py`: `GeneralSettings.unpriced_model_policy: warn|admit|reject` (default `warn`); `wiwi/server/app.py`: `_model_group_is_unpriced` + an admission branch — `reject` refuses budget-capped keys with 503 `unpriced_model_error` before dispatch, `warn` serves but tags the response with `x-wiwi-unpriced-model: <model>` and records `ctx.metadata["unpriced_model"]`**
+**Files:** `wiwi/cost/pricing.py:99-101`, `wiwi/auth/service.py:557-558`, `wiwi/server/app.py:1170-1178`
+
+`pricing.py:99-101` returns `CostState(cost=0.0, unpriced=True)` when no price
+row matches, and `service.py:557-558` treats `add_cost <= 0` as "under budget"
+and returns `True`. A model absent from the pricing table therefore accrues
+**zero** spend forever: `max_budget` never trips, `spend_to_date` never moves,
+and nothing warns. `CostEngine` on a fresh install prices **nothing** —
+`prices on a fresh install: {}`.
+
+**Probe:** `cost(unpriced, 1M in / 1M out) -> 0.0`
+
+**Fix sketch:** treat `unpriced` as *not-priced* rather than *free* — reject
+keys whose models are all unpriced, or charge a configured default and emit a
+metric/alert on `unpriced`.
+**Test:** `tests/test_fix_round111.py::test_unpriced_model_cannot_bypass_budget`
+
+**Fix (round 112, §8 workflow).** The audit offered two policies; both shipped
+behind one operator switch (`general_settings.unpriced_model_policy`, default
+`warn` so existing deployments keep serving — the default is back-compat, not
+silent, which is the point the audit presses). The signal is best-effort at
+admission: `_model_group_is_unpriced(group)` resolves the group's deployments
+and returns True only when **no** deployment has a pricing row via the same
+`cost._lookup(f"{provider_type}/{model_id}", ...)` the gateway prices with —
+if any deployment is priced, the gateway may legally route there and that path
+bills normally. Under `reject`, a budget-capped virtual key asking for an
+unpriced model is refused with **503** (not 4xx: the model exists, the
+*server-side pricing* is missing) and `unpriced_model_error` before any
+upstream call; uncapped and master keys are untouched. Under `warn` the request
+serves and the response carries `x-wiwi-unpriced-model: <model>` on all three
+success return sites (cache hit, streaming, non-stream) so the bypass is
+observable per response; the metadata also lands in the request log.
+`admit` is accepted as an explicit no-op synonym of the old behaviour for
+operators who want to silence even the header.
+**Test:** `tests/test_fix_round112.py::test_unpriced_model_is_detected`,
+`test_unpriced_model_bypasses_budget_by_default_is_tagged` (warn → 200 +
+header + spend stays 0), `test_reject_policy_refuses_budget_capped_key_on_unpriced_model`
+(503 pre-dispatch; sails through once `/admin/pricing/gpt-4o` is set),
+`test_reject_policy_never_touches_uncapped_or_master_keys`.
+
+### 324. Budget cap is enforced post-hoc, not at admission — overspend scales with concurrency
+
+**Severity:** 🟠 High · **Status: fixed — `wiwi/auth/service.py`: `reserve_budget` (conditional UPDATE at admission) + `release_budget_reservation` (failure-path refund) + `vkeys.budget_reserved` column/migration; `over_budget` now reads `spend_to_date + budget_reserved`; `wiwi/server/app.py`: reserves `est/4·1e-6 + 0.0001` before dispatch; `record_spend` releases the reservation before the conditional charge**
+**Files:** `wiwi/auth/service.py:547-575` (`update_spend` — atomic), `wiwi/server/app.py:1170-1178` (non-atomic read), `:1636`, `:1781` (record_spend)
+
+The **write** is a genuine conditional compare-and-set: `UPDATE vkeys SET spend_to_date = spend_to_date + :c WHERE id = :id AND (max_budget IS NULL OR spend_to_date + :c <= max_budget)`. But the gate that decides whether to serve is `app.py:1170-1178`, a plain non-atomic read of `info.over_budget` from `authenticate()`, and `record_spend` runs only at `app.py:1636` (after the response already exists) and `:1781` (after streaming). The TOCTOU window therefore spans the entire upstream call. Measured: **250× overspend at concurrency 500.**
+
+This contradicts `.claude/rules/wiwi-bugfix-workflow.md:18`, which states the 2026-08-25 list is "fully fixed as of 2026-08-31 … do not re-fix". The conditional UPDATE was added; the admission gate was not.
+
+**Fix sketch:** reserve budget at admission (a second `max_budget`-bounded increment before dispatch) and reconcile against the actual cost after, or enforce a per-key in-flight reservation ceiling.
+
+**Test:** `tests/test_fix_round111.py::test_budget_gate_is_at_admission_not_after`
+
+**Fix (round 112, §8 workflow).** The audit's first sketch: admission now runs
+`reserve_budget(key_id, est_spend)` — `UPDATE vkeys SET budget_reserved =
+budget_reserved + :a WHERE id = :id AND disabled = 0 AND (max_budget IS NULL
+OR spend_to_date + budget_reserved + :a <= max_budget)` — the same
+compare-and-set shape the audit verified atomic, so N concurrent admissions
+against single-request headroom admit exactly one. The estimate is the TPM
+body estimator (`size/4 · $1e-6/token`) plus a small output allowance so a
+huge-prompt/small-cap request cannot bill past the cap on output tokens alone.
+On every failure path (upstream error, replay/cache hit, stream without usage)
+`release_budget_reservation` gives the headroom back via `budget_reserved =
+max(budget_reserved - :a, 0)`; a reserve DB outage degrades to the old post-hoc
+gate and bumps `spend_charge_failures` rather than 500ing. `over_budget` now
+counts reserved dollars, and budget-capped keys skip the 60 s auth cache so
+the gate reads fresh state.
+
+A first cut added a separate `settle_budget_reservation` (one-statement
+reserved→spend conversion) for the success paths; it was **removed** after the
+full-suite run: it bypassed `record_spend`, silently rewriting the crossing
+contract pinned by rounds 45/55/#179 (a charge that crosses the cap is still
+real money — trued up unconditionally — and the response is refused with 402).
+The shipped shape keeps ONE charge convention: `record_spend` releases the
+request's reservation before `update_spend`'s conditional UPDATE, so the
+charge is tested against `spend_to_date` alone (no double-count of the same
+dollars, no lost true-up, no second reconcile path to keep honest).
+**Test:** `tests/test_fix_round112.py::test_concurrent_reserves_cannot_oversubscribe_headroom`
+(5 concurrent reserves vs headroom for one → exactly one True),
+`test_reserve_refund_round_trip`, `test_reservation_does_not_double_count_spend`,
+`test_admission_reservation_blocks_second_concurrent_request` (e2e 402 before
+upstream), `test_failed_upstream_call_releases_the_reservation`,
+`test_successful_request_reconciles_reservation_to_actual_cost` (bills the real
+9e-6, not estimate + actual).
+
+### 325. Junk `max_tokens` silently discards a valid `max_completion_tokens`
+
+**Severity:** 🟠 High · **Status: fixed — `wiwi/wire/openai_chat.py`: new `_max_token_cap` resolves to an int before falling through to the alias**
+**File:** `wiwi/wire/openai_chat.py:276-278`
+
+The `is not None` guard selects the **key**, then `coerce_int` can still return `None`. With no fallthrough, a non-numeric `max_tokens` discards a perfectly good `max_completion_tokens` alongside it. UPDATE.md §6.2 fixed the `0` case (`0` must win over `77`) but not the junk case.
+
+    max_tokens=100 only          -> 100
+    mct=77 only                  -> 77
+    both 100/77                  -> 100   (correct precedence)
+    junk mt + good mct           -> None  <-- 77 lost
+    mt=false + good mct          -> None  <-- 77 lost
+    mt=null  + good mct          -> 77     (correct)
+    mt=0    + mct=77             -> 0      (correct, UPDATE.md fix holds)
+
+**Related divergence (unresolved, not a bug in this fix):** the three codecs coerce
+output-token caps by three different ladders. `wire/anthropic_messages.py:414-427`
+accepts a digit string (`"77"` -> 77); `ir.coerce_int` (`ir/types.py:299-314`) rejects
+strings outright as a client bug (AUDIT #83), and `wire/openai_responses.py:355` uses it
+directly. Unifying them is the right end state — one alias-resolution helper in the IR so
+junk handling cannot drift per dialect — but it changes the Anthropic codec's accepted
+inputs, which is a product call, not a cleanup. Left as-is deliberately.
+
+**Fix sketch:** fall through — resolve `max_tokens` to an int first, and only consult `max_completion_tokens` when that yields `None`.
+
+**Test:** `tests/test_fix_round111.py::test_junk_max_tokens_does_not_discard_max_completion_tokens`
+
+### 326. `logprobs` is a full-stack IR gap — billed for, silently never returned
+
+**Severity:** 🟠 High · **Status: open**
+**Files:** `wiwi/ir/types.py` (no `AssistantTurn.logprobs`), `wiwi/providers/openai_adapter.py:375-390`, `wiwi/wire/openai_chat.py` (`encode_response`)
+
+A client sends `{"logprobs": true, "top_logprobs": 5}`. The value rides `Request.extras` untyped, is forwarded upstream, and the tokens are **billed as output** — but no adapter decodes `choices[0].logprobs`, no `AssistantTurn` field holds it, and no encoder emits it. The client silently receives no logprobs. `AssistantTurn` fields are `text, thinking, tool_calls, stop_reason, stop_sequence, usage, raw, server_blocks`.
+
+The same gap applies to 12 OpenAI-2026 platform params (`user`, `frequency_penalty`, `presence_penalty`, `logit_bias`, `service_tier`, `store`, `prediction`, `modalities`, `verbosity`, `safety_identifier`, `prompt_cache_key`, `web_search_options`): correct against an OpenAI upstream, silently dropped for Anthropic/Gemini/OpenRouter. Also unrepresentable: assistant **audio output** and `image_url.detail`.
+
+**Fix sketch:** add `AssistantTurn.logprobs` plus a `LogprobsDelta`, decode `choices[0].logprobs`, emit `choice.logprobs` in `encode_response`.
+
+**Test:** `tests/test_fix_round111.py::test_logprobs_round_trips_through_ir`
+
+### 327. Unhashable upstream `stop_reason` raises an unhandled `TypeError`
+
+**Severity:** 🟠 High · **Status: fixed — `wiwi/providers/anthropic_adapter.py`: both sync and streaming lookups coerce to `str` first**
+**Files:** `wiwi/providers/anthropic_adapter.py:652`, `:789`
+
+`_STOP_REASON_IN.get(sr, "stop")` indexes a dict with a value taken straight
+from the upstream JSON. A list or dict `stop_reason` is unhashable, so the
+`.get` raises `TypeError` inside the decode path — a 500 on a response the
+client had every right to receive.
+
+    ['x']        -> TypeError: unhashable type: 'list'
+    {'a': 1}     -> TypeError: unhashable type: 'dict'
+    5            -> ok, stop_reason='stop'
+    'end_turn'   -> ok, stop_reason='stop'
+
+**Fix sketch:** guard the lookup — `sr if isinstance(sr, str) else "end_turn"` — before indexing, in both the sync and streaming paths.
+
+**Test:** `tests/test_fix_round111.py::test_hostile_stop_reason_does_not_raise`
+
+### 328. Gemini hoists every `system` message, losing mid-conversation ones
+
+**Severity:** 🟠 High · **Status: open**
+**Files:** `wiwi/providers/gemini_adapter.py:100`, `:164`; compare `wiwi/providers/anthropic_adapter.py:414-418`
+
+`gemini_adapter.py:100`/`:164` collects **every** `system` role into
+`systemInstruction`, so a mid-conversation system message is hoisted to the
+front and its position is lost. `[system(s1), user(u1), system(s2), user(u2)]`
+produces `systemInstruction={'text': 's1\ns2'}` — s2's position relative to u1
+is destroyed. The Anthropic encoder was explicitly hardened for exactly this
+case (`anthropic_adapter.py:414-418`); Gemini was not. No AUDIT entry covers
+the encoder side (the existing entry is the decoder).
+
+**Fix sketch:** treat only **leading** system messages as `systemInstruction`; fold a later one into the adjacent user content with an explicit marker.
+
+**Test:** `tests/test_fix_round111.py::test_gemini_preserves_mid_conversation_system`
+
+### 329. `anthropic-beta` is absent from the response-cache key
+
+**Severity:** 🔴 Critical · **Status: fixed — `wiwi/cache/keygen.py` + `wiwi/server/app.py`: the header is threaded into the cache key**
+**Files:** `wiwi/cache/keygen.py:81-92`
+
+The cache key omits `anthropic-beta`. Two requests identical in every hashed
+field but differing only in that header share a cache entry, so a beta-gated
+response can be served to a request that did not ask for it. Probe: identical
+SHA-256 with and without the header.
+
+**Fix sketch:** include the beta header (sorted) in the hashed key material, or drop beta-gated responses from the cache entirely.
+
+**Test:** `tests/test_fix_round111.py::test_anthropic_beta_changes_cache_key`
+
+### 330. AUDIT #229 is marked fixed but `estimate_tokens` raises on ordinary text
+
+**Severity:** 🔴 Critical · **Status: fixed — `wiwi/cost/pricing.py`: `disallowed_special=()` passed to the tokenizer** (the "fixed" marker is wrong)
+**Files:** `wiwi/cost/pricing.py:201`
+
+`estimate_tokens('hello  world', 'gpt-4')` raises `ValueError: Encountered text corresponding to disallowed special token`. `grep -rn "disallowed_special" wiwi/ tests/` returns **0 hits**, so the fix sketch recorded in #229 was never implemented.
+
+**Fix sketch:** pass `disallowed_special=()` to the tokenizer call so any text round-trips.
+
+**Test:** `tests/test_fix_round111.py::test_estimate_tokens_handles_special_tokens`
+
+### 331. `tool_use_id` missing on an inbound tool result reaches upstream as a placeholder
+
+**Severity:** 🟡 Medium · **Status: open**
+**Files:** `wiwi/wire/anthropic_messages.py:251`, `wiwi/wire/openai_chat.py:213`
+
+A tool-result message missing its `tool_use_id` is forwarded upstream with an
+empty / `"GHOST"` placeholder rather than being rejected. The upstream then
+returns a mismatched-result error, or worse, associates the result with the
+wrong call.
+
+**Fix sketch:** reject a tool-result block with no `tool_use_id` as a 400 at the codec boundary, rather than substituting a placeholder.
+
+**Test:** `tests/test_fix_round111.py::test_missing_tool_use_id_is_rejected`
+
+### 332. Over-budget true-up swallows its exception with no counter
+
+**Severity:** 🟡 Medium · **Status: open**
+**Files:** `wiwi/server/app.py:1240-1265`
+
+The true-up path wraps its call in `contextlib.suppress(...)` with no metric and
+no log. If it fails, budget accounting silently drifts and nothing is
+observable. This is the `ecc:silent-failure-hunter` class.
+
+**Fix sketch:** increment a counter and log at warning when the true-up fails.
+
+**Test:** `tests/test_fix_round111.py::test_over_budget_trueup_failure_is_observable`
+
+### 334. Non-string `signature` on an inbound thinking block reaches the IR unguarded
+
+**Severity:** 🟡 Medium · **Status: fixed — `wiwi/providers/anthropic_adapter.py`: `signature` coerced exactly as the request path does**
+**Files:** `wiwi/providers/anthropic_adapter.py:611-612`
+
+`ir.ThinkingPart(rt if isinstance(rt, str) else "", block.get("signature"))`
+guards `rt` but passes `signature` through uncoerced. Probe: `IR signature = 123 int`. The request-side mirror at `wire/anthropic_messages.py:268` already coerces correctly (`sig if isinstance(sig, str) else None`), so the two sides disagree.
+
+**Fix sketch:** coerce `signature` the same way the request path does.
+
+**Test:** `tests/test_fix_round111.py::test_hostile_signature_is_coerced`
+
+### 335. `_defer` re-sums the whole buffer on every append (O(n^2))
+
+**Severity:** 🟠 High · **Status: fixed — incremental counter + deque, measured 3900x faster**
+**Files:** `wiwi/wire/anthropic_messages.py` (`AnthropicStreamEncoder._defer`, `MAX_DEFERRED_CHARS` at `:29`)
+
+Three O(n) operations ran per append:
+
+1. `total = sum(len(t) for _, t, _ in self._deferred)` — re-summed the whole
+   buffer every time.
+2. `self._deferred.pop(0)` / `.insert(0, …)` on a **list** — O(n) memmove.
+3. `self._deferred = [e for e in self._deferred if e[1]]` — rebuilt the list
+   unconditionally.
+
+`MAX_DEFERRED_CHARS` (262 144) bounds total **chars**, not record count, so
+the record count is bounded only by fragment size: 262 144 records at 1-byte
+fragments, 4 096 at 64-byte, 128 at 2 KB. Measured marginal cost of a single
+`_defer` before the fix: 0.12 ms at 2 000 records, **914 us/append** in steady
+state at the 32 768-record cap that 8-char deltas reach.
+
+Realistic impact was small — at 2 KB fragments a 1 MiB tool-call cost 32.7 ms
+— so this is a DoS-shaped edge case, not a stall.
+
+**Fix:** an incremental `_deferred_chars` running total (reset alongside
+`.clear()`); a `deque` for the buffer so front-eviction is `popleft`/
+`appendleft`; and the empty-entry filter scoped to `if not text:`, which is
+equivalent because eviction **cannot** create an empty entry — `t[-keep:]` with
+`keep > 0` is non-empty, and the `popleft` removes rather than empties — where
+scanning the whole buffer cost ~975 us per append.
+
+**Verified:** differential-tested against the original implementation over 300
+randomized trials (fragment sizes 0, 1, 5, 40, 500, 5 000, 200 000 chars) —
+**0 mismatches**, byte-identical output. 150 000 appends: **914.62 → 0.23
+us/append**, zero counter drift, cap never breached.
+**Test:** `tests/test_fix_round111.py::test_defer_is_not_quadratic`
+
+### 336. Admin UI: username/password login never opens the live SSE channel
+
+**Severity:** 🔴 Critical · **Status: open**
+**Files:** `web/src/api/auth.tsx:62-65` (`login`), `:67-73` (`loginWithMaster`), `web/src/api/stream.tsx:35-36`
+
+`login` (username/password) never calls `setToken`, so `useToken()` returns `""`
+and the `WiwiStream` effect returns early — permanently. `setToken` has exactly
+one call site, inside `loginWithMaster`. Yet the backend explicitly supports it:
+`app.py:2250-2254` uses `require_admin_dep` with the comment "an admin logged
+in by cookie must get the same channel."
+
+Trigger: sign in as admin with username+password. The entire live layer dies
+silently — Request Logs, Proxy Logs and Dashboard stop tailing with no error;
+the console looks healthy but is frozen. The comment at `auth.tsx:4-5`
+asserting SSE works for cookie admins is contradicted by its own code.
+
+**Fix sketch:** have the username/password path establish the token the stream
+provider expects (or make the stream provider cookie-authenticated).
+
+### 337. Admin UI: the master key is persisted to localStorage before validation and never rolled back
+
+**Severity:** 🔴 Critical · **Status: open**
+**Files:** `web/src/api/auth.tsx:67-73`, `web/src/api/client.ts` (`TOKEN_KEY`, `:52-53`)
+
+`loginWithMaster` calls `setToken(k)` **before** `loginMaster` resolves. A wrong
+key stays in `localStorage` and is re-sent as `Authorization: Bearer …` on every
+subsequent request; `onError` never rolls it back. `Settings.tsx:270-295` then
+renders it and offers a Copy button, so a user can copy a key they never
+successfully authenticated with. The failure surfaces later as an opaque 401 on
+an unrelated page.
+
+The key is the value authenticating **every** `/admin/*` route and is exempt
+from the HttpOnly protection the session cookie gets.
+
+**Fix sketch:** validate first, persist on success only.
+
+### 338. Admin UI: no global 401 handling — an expired session renders as an idle gateway
+
+**Severity:** 🟠 High · **Status: open**
+**Files:** `web/src/api/client.ts` (401 branch), `web/src/main.tsx:74-78`
+
+There is no `QueryCache`/`MutationCache` `onError` and no interceptor. With
+`SESSION_TTL = 7 days` (`auth/users.py:21`) and `/auth/me` called once on mount,
+a tab left open past the TTL stays "logged in" while every query 401s. Because
+`accountsQ.data` is `undefined`, pages render their `length === 0` empty states —
+indistinguishable from "no data configured" — and instruct the operator to
+re-import credentials that already exist.
+
+**Fix sketch:** a QueryCache `onError` that clears the session and redirects to `/login` on 401.
+
+### 339. Admin UI: swallowed query errors render authoritative-looking false zeroes
+
+**Severity:** 🟠 High · **Status: open**
+**Files:** `web/src/pages/WorkBuddyAccounts.tsx:318-342`, `:348-360`; `web/src/pages/OAuthProviders.tsx:970-978`; `web/src/pages/ProviderDetail.tsx:1387`
+
+`accountsQ`/`providersQ` errors are never read (the grep for `error|isError`
+in `WorkBuddyAccounts.tsx` returns zero **query**-error reads). Both queries
+poll every 15 s. The stat cards then render `accounts.length`,
+`workbuddyProviders.length` and `dueCount` as facts, sourced from `undefined`
+data — so a gateway outage produces a confident "Accounts 0 / Providers 0 /
+Need refresh 0" that re-renders every 15 s and looks live. `ProviderDetail.tsx`
+conflates a failed fetch with a missing provider, reporting a transient blip as
+"Unknown provider account."
+
+**Fix sketch:** branch on `q.isError` before rendering, and surface the error state.
+
+### 340. AUDIT.md status markers are unreliable in both directions
+
+**Severity:** 🟡 Medium · **Status: open**
+**File:** `AUDIT.md`
+
+Verified this sweep: entries marked fixed that are not (#229, #317 partial,
+#282, #201, #171 partial, #216 half, #219, #167 half, #253 over-narrow);
+entries treated as live that are genuinely fixed (#5, #6, #93, #19, #77, #54,
+#78, #256, #102); and unmarked-but-fixed (#87, #96, #222, #72, #73, #89). Entry
+number **283** is used twice (`AUDIT.md:1086` and `:9136`). The
+`**Status: fixed** — round 90` marker at `AUDIT.md:8762` sits orphaned above the
+`## 🟡 Medium` heading and belongs to #255, not to #257/#258 beneath it.
+`.claude/rules/wiwi-bugfix-workflow.md:18` claims the 2026-08-25 list is
+"fully fixed … do not re-fix", which #324 above contradicts.
+
+**Fix sketch:** re-verify every marker against source in one pass and correct
+them in place; the drift is systematic, not random.
+
+---
+
+### 341. A failed budget settlement is silent AND 500s a served request (found during the #324 review)
+
+**Severity:** 🔴 Critical · **Status: fixed — resolved in round 112 by REMOVING the second charge path: `settle_budget_reservation` no longer exists, every charge goes through `record_spend` (which carries the #179 guard rails), and the reservation is released inside it before the conditional UPDATE**
+**Files:** `wiwi/auth/service.py:665-699` (`settle_budget_reservation`), `wiwi/server/app.py:1833-1834` (streaming: `:2006`), contrast `wiwi/server/app.py:1246-1295` (`record_spend`)
+
+AUDIT #324 introduced an admission reservation settled by
+`settle_budget_reservation`, which **replaces `record_spend` for every reserved
+request** — i.e. it is now the primary charge path. It has no exception
+handling, and neither call site wraps it.
+
+`record_spend` handles precisely this case and does it carefully: it logs
+`spend_charge_failed` with the key id and cost, increments
+`spend_charge_failures`, and retries through `apply_spend_trueup` so a transient
+write failure loses no money (AUDIT #179). Its docstring explicitly names the
+trap: *"turning a repaired accounting blip into an error would be the AUDIT #24
+defect (a 500/402 after a successful completion) wearing a different status
+code."*
+
+**Probe** (budgeted virtual key, settlement raising `RuntimeError("database is
+locked")` exactly as the existing round-81 tests do):
+
+    HTTP status           : 500
+    spend_charge_failures : 0
+    spend_charge_failed   : False
+    body: {"error":{"message":"internal gateway error","type":"api_error",...}}
+
+Two defects in one:
+1. **The charge is silently lost.** The upstream served and billed; nothing was
+   recorded, nothing logged, no counter. `spend_to_date` under-counts, so the
+   cap silently stops being enforced — AUDIT #179, reintroduced on the main
+   path.
+2. **A served request returns 500** — AUDIT #24.
+
+**This is why 6 pre-existing tests are red**: `test_fix_round43/45/55/81` patch
+`state.auth.update_spend` to raise and assert the charge is logged, counted and
+still recorded. They were the guard rails for exactly this failure and the new
+path routes around all of them. They are **not** stale assertions to be
+rewritten — they are detecting a live regression.
+
+**Fix sketch:** give `settle_budget_reservation` the same contract as
+`record_spend` — catch, log `spend_charge_failed`, bump `spend_charge_failures`,
+and fall back to the unconditional `apply_spend_trueup` so no money is lost and
+no 500 is returned for a turn the upstream already completed. Better: extract
+that handling once and have both charge paths use it, so the next charge-path
+change cannot lose the guard again.
+**Test:** `tests/test_fix_round81.py` (4 of the failing tests) plus
+`test_fix_round43/45/55`.
+
+**Resolution (round 112).** This entry landed mid-fix and its diagnosis was
+confirmed by exactly those 6 red tests. The "Better:" option was taken further:
+there is no second charge path to harden — `settle_budget_reservation` was
+deleted, and the success paths charge through `record_spend(key_id, cost, ctx)`
+like every other request. `record_spend` releases the caller's admission
+reservation (`ctx.budget_reserved`) before `update_spend`'s conditional UPDATE,
+so the charge is tested against `spend_to_date` alone: no double-count of the
+same dollars, no lost true-up, no 500 on a served turn, and the next
+charge-path change cannot route around the #179 guard rails because there is
+only one path. The reservation's remaining job is admission + failure-path
+release (`release_budget_reservation`), which never touches `spend_to_date`.
+All of `test_fix_round43/45/55/81` pass unmodified except one round-45
+assertion updated for the #324 semantics (`call_count == 0`: a request that
+cannot fit is now refused before dispatch, so the upstream is never called).
+
+---
+
+## Notes on this sweep
+
+27 subagents ran across every module; the concurrent limit is 20, so they were
+run in waves. Roughly 10 were terminated by an upstream 429 rate limit before
+reporting, so coverage of `server/app.py`, `logging_core/db_sink.py`, the
+OpenAI Responses codec, and the middleware/lifespan is **partial** rather than
+complete — a follow-up sweep should target those four.
+
+Findings **cleared** with evidence (not defects, recorded so they are not
+re-reported): all 11 adapters reset clean with zero cross-request state leaks;
+`get_adapter` has zero production callers so the shared-singleton hazard is
+theoretical; weighted round-robin exactness under concurrency; the budget
+conditional-UPDATE atomicity; rate-limiter admission atomicity; TPM settle
+idempotency; `cache_hit` vs `response_cache_hit` separation; zero
+`dangerouslySetInnerHTML`; all 68 routes auth-guarded; exactly 2 live import-rule
+violations; config defaults all fail-closed; master-key-less startup fails
+closed.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -61,6 +62,44 @@ def status_for_key_pool(e: WiwiError) -> int | None:
     return None
 
 
+# Credential shapes that providers routinely echo back inside an error body.
+# An upstream that rejects a key frequently quotes the offending value
+# ("Invalid API key: sk-live-…"), and that text was being concatenated
+# straight into the response the *caller* receives — handing one tenant's
+# provider secret to another. Redacted at the source so every caller benefits.
+_CREDENTIAL_PATTERNS: tuple[tuple[Any, str], ...] = (
+    # OpenAI / Anthropic / most gateways: sk-…, sk-ant-…, rk-…
+    (re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}"), "sk-***"),
+    # Google: AIza…
+    (re.compile(r"\bAIza[A-Za-z0-9_\-]{8,}"), "AIza***"),
+    # Google OAuth access tokens: ya29.…
+    (re.compile(r"\bya29\.[A-Za-z0-9_\-]{8,}"), "ya29.***"),
+    # GitHub / generic long opaque tokens.
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{16,}"), "gh*_***"),
+    # Bearer/JWT-looking values in prose.
+    (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{12,}"), "Bearer ***"),
+    # ``key=…`` / ``api_key=…`` / ``token=…`` query-param or JSON forms.
+    # Bare ``key`` and ``token`` are included: an upstream error that quotes
+    # ``"token": "…"`` is exactly as leaky as one quoting ``api_key``.
+    (re.compile(r"(?i)\b((?:api[_-]?key|access[_-]?token|auth[_-]?token|secret"
+                r"|password|key|token)\s*[=:]\s*)\"?([A-Za-z0-9_\-\.]{8,})\"?"),
+     r"\1***"),
+)
+
+
+def _scrub_credentials(text: str) -> str:
+    """Strip credential-shaped substrings from text bound for a client.
+
+    Deliberately pattern-based rather than value-based: this layer has no way
+    to know which secrets the caller's deployment holds, so it redacts things
+    that *look* like credentials. Over-redacting an error message is a far
+    better failure mode than leaking a key.
+    """
+    for pattern, repl in _CREDENTIAL_PATTERNS:
+        text = pattern.sub(repl, text)
+    return text
+
+
 def _extract_error_message(body_text: str) -> str:
     """Extract the most useful human-readable message from a provider error body.
 
@@ -72,14 +111,14 @@ def _extract_error_message(body_text: str) -> str:
     try:
         data = orjson.loads(body_text)
     except (json.JSONDecodeError, ValueError):
-        return body_text[:500]
+        return _scrub_credentials(body_text[:500])
     # Not every upstream returns a JSON *object*: `null`, bare strings,
     # numbers, booleans and arrays are all valid JSON and do occur in the
     # wild (proxies, health-check pages, some gateways).  Probing those for
     # an "error" key raised AttributeError and turned a clean provider 4xx
     # into an opaque gateway 500 with the real status lost.
     if not isinstance(data, dict):
-        return body_text[:500]
+        return _scrub_credentials(body_text[:500])
     # OpenAI shape: {"error": {"message": "..."}}
     err = data.get("error")
     if isinstance(err, dict):
@@ -89,24 +128,24 @@ def _extract_error_message(body_text: str) -> str:
             # "Provider returned error" around a more specific metadata.raw.
             meta = err.get("metadata")
             if not isinstance(meta, dict):
-                return msg
+                return _scrub_credentials(msg)
             raw = meta.get("raw")
             if isinstance(raw, str) and raw and raw != msg:
                 provider_name = (meta.get("provider_name")
                                  if isinstance(meta.get("provider_name"), str)
                                  else "upstream")
-                return f"{msg} ({provider_name}: {raw})"
-            return msg
+                return _scrub_credentials(f"{msg} ({provider_name}: {raw})")
+            return _scrub_credentials(msg)
         # Some providers put the message at error level as a string
     elif isinstance(err, str) and err:
-        return err
+        return _scrub_credentials(err)
     # Anthropic shape: {"type": "error", "error": {"message": "..."}}
     if isinstance(data.get("type"), str) and data["type"] == "error":
         inner = data.get("error")
         if isinstance(inner, dict) and isinstance(inner.get("message"), str):
-            return inner["message"]
+            return _scrub_credentials(inner["message"])
     # Generic: fall back to the whole body if it's small enough
-    return body_text[:500]
+    return _scrub_credentials(body_text[:500])
 
 
 def _extract_error_type(body_text: str) -> str:

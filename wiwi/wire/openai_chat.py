@@ -31,6 +31,25 @@ def _str_or_empty(raw: Any) -> str:
     return raw if isinstance(raw, str) else ""
 
 
+def _max_token_cap(body: dict) -> int | None:
+    """Resolve the output-token cap, preferring ``max_tokens``.
+
+    ``max_completion_tokens`` is the newer alias, but ``max_tokens`` still wins
+    when it carries a *usable* value — including ``0``, which is a real cap and
+    must not fall through (UPDATE.md §6.2).
+
+    The subtlety is that presence and usability differ. Selecting on
+    ``is not None`` picks the key first and then lets ``coerce_int`` return
+    ``None`` for a non-numeric value, which used to discard a perfectly good
+    ``max_completion_tokens`` sitting right beside it. Resolve to an int first,
+    and only consult the alias when the result is genuinely ``None``.
+    """
+    primary = ir.coerce_int(body.get("max_tokens"))
+    if primary is not None:
+        return primary
+    return ir.coerce_int(body.get("max_completion_tokens"))
+
+
 def _stop_list(raw: Any) -> list[str]:
     """Normalize a decoded ``stop`` field to the ``list[str]`` the IR types.
 
@@ -273,9 +292,7 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
     g = ir.GenParams(
         temperature=body.get("temperature"),
         top_p=body.get("top_p"),
-        max_tokens=(ir.coerce_int(body.get("max_tokens"))
-                    if body.get("max_tokens") is not None
-                    else ir.coerce_int(body.get("max_completion_tokens"))),
+        max_tokens=_max_token_cap(body),
         stop=_stop_list(body.get("stop")),
         seed=body.get("seed"),
         n=body.get("n") or 1,

@@ -13,7 +13,7 @@ Self-hosted unified LLM gateway proxy. Three inbound dialects (OpenAI Chat Compl
 ```bash
 # From the repo root
 pip install -e .            # or: uv pip install -e .
-# Optional: Redis rate limiter
+# Optional: shared Redis response cache
 pip install -e .[redis]
 ```
 
@@ -40,19 +40,26 @@ Default port is 4000. Health check at `http://localhost:4000/health`.
 ```yaml
 # wiwi.yaml
 general_settings:
-  master_key: sk-wiwi-master-test    # set WIWI_MASTER_KEY env in production
+  master_key: os.environ/WIWI_MASTER_KEY   # interpolate the env var; see note below
 
 model_list:
   - model_name: gpt-4o
     wiwi_params:
-      model: openai/gpt-4o
-      api_key: os.environ/OPENAI_API_KEY
+      provider: openai-main                # a providers[].name, not a provider type
+      model: gpt-4o                        # provider-native model id
 
-providers:
-  openai:
-    api_key: os.environ/OPENAI_API_KEY
-    base_url: https://api.openai.com/v1
+providers:                                 # a LIST of accounts, not a map
+  - name: openai-main
+    provider: openai
+    keys:
+      - {label: main, key: os.environ/OPENAI_API_KEY}
 ```
+
+> **`WIWI_MASTER_KEY` is not read from the environment by wiwi itself.** The
+> `os.environ/WIWI_MASTER_KEY` interpolation above is what makes it work — copy
+> that line rather than hardcoding a literal `master_key:`, or the env var will
+> be ignored. For a quick local run you can hardcode one instead; startup fails
+> closed if `master_key` is empty and `WIWI_SESSION_SECRET` is unset.
 
 Values can use `os.environ/NAME` interpolation — missing env vars resolve to empty string (providers with empty keys are filtered out).
 
@@ -105,7 +112,7 @@ All surfaces accept `Authorization: Bearer <key>`. `/v1/messages` also accepts `
 
 ## Admin UI
 
-The built SPA is served at `http://localhost:4000/admin/ui`. Log in with the master key.
+The built SPA is served at `http://localhost:4000/`; the admin console lives at `/console`. Log in with the master key.
 
 - Dashboard: live stats, token charts, spend
 - Providers: manage provider accounts + key pools
@@ -130,7 +137,7 @@ The Vite dev server proxies `/admin`, `/v1`, `/auth`, `/public`, `/health` to th
 cd web && npm install && npm run build   # → wiwi/server/static/
 ```
 
-The built SPA is served from `wiwi/server/static/` at `/admin/ui`. `wiwi/server/static/` is gitignored — builds produce it locally.
+The built SPA is served from `wiwi/server/static/` at `/` (admin console at `/console`). `wiwi/server/static/` is gitignored — builds produce it locally.
 
 ## Database
 
@@ -149,7 +156,7 @@ Enabled by default (`stream_journal_enabled: true`). Encoded SSE frames persist 
 ## Environment knobs
 
 - `WIWI_PORT` — backend port (default 4000)
-- `WIWI_CONFIG` — config file path
+- `WIWI_CONFIG` — inline YAML for the whole config (not a file path)
 - `WIWI_MASTER_KEY` — master key (admin auth)
 - `DATABASE_URL` — overrides config DB URL
 - `WIWI_SESSION_SECRET` — session signing key (derived from master key if unset)

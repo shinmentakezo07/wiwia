@@ -162,6 +162,13 @@ general_settings:
   # WIWI_TRUSTED_PROXIES="127.0.0.1/32,10.0.0.0/8" — the usual way to set it
   # in a container, where there is no config file to edit.
   trusted_proxies: os.environ/WIWI_TRUSTED_PROXIES
+  # What a virtual key's max_budget means when a model has no pricing row.
+  # Unpriced models cost $0 in the cost engine, so with the default ("warn")
+  # a budget-capped key can serve an unpriced model forever without the cap
+  # ever tripping — each such request is tagged `unpriced_model` in the
+  # request log instead. "reject" fails closed: budget-capped keys get 503
+  # until an admin adds the price. "admit" restores fully silent behaviour.
+  # unpriced_model_policy: warn
 
 wiwi_settings:
   drop_params: true

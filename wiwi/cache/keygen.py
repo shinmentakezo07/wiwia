@@ -61,7 +61,7 @@ def is_cacheable_request(ir_req: ir.Request) -> bool:
 
 
 def response_cache_key(ir_req: ir.Request, group: str, surface: str,
-                       key_id: str) -> str:
+                       key_id: str, anthropic_beta: str = "") -> str:
     """SHA-256 hex digest over the normalized IR request + routing scope.
 
     Every ``Request`` field that can change the answer is part of the digest.
@@ -88,6 +88,13 @@ def response_cache_key(ir_req: ir.Request, group: str, surface: str,
         "tool_choice": _encode(ir_req.tool_choice),
         "gen_params": _encode(ir_req.gen_params),
         "extras": _encode(ir_req.extras),
+        # The Anthropic Messages format is header-and-body coupled: the
+        # beta gates features whose body fields are rejected with a 400 when
+        # it is absent, and wiwi forwards it verbatim (app.py
+        # ``_FORWARDABLE_HEADERS``). So two requests differing only in the
+        # header are two different upstream requests and must not share a
+        # cache entry (AUDIT #329).
+        "anthropic_beta": anthropic_beta or "",
         "stream": False,
     }
     blob = orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)

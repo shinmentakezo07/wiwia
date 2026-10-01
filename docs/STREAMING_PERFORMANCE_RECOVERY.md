@@ -5,18 +5,23 @@
 > `wiwi/providers/*`, `wiwi/ir/types.py`, plus external research (LiteLLM streaming docs,
 > Vercel AI SDK stream-text/partial-JSON, Anthropic streaming error-recovery guide).
 > **Date:** 2026-08-23
-> **Status:** Implemented — all P0/P1/P2 items shipped. Tests in `tests/test_streaming_improvements.py` (72 tests, all pass).
+> **Status:** Implemented — all P0/P1/P2 items shipped. Tests in `tests/test_streaming_improvements.py` (88 tests, all pass).
 
 ---
 
-## 1. Current State (verified from code)
+## 1. Baseline state (verified from code on 2026-08-23)
+
+> Sections 1–3 are the **pre-implementation record** that drove this work. They are
+> kept verbatim as the audit trail for what was proposed. Most of what they describe as
+> missing has since shipped — see the Status line above. Read them as "this is what the
+> code looked like on 2026-08-23", not as current behaviour.
 
 | Area | Current implementation | Location |
 |---|---|---|
 | **Delta taxonomy** | Clean IR delta contract: `StreamStart → TextDelta / ThinkingDelta / ToolCallOpen → ToolCallArgsDelta* → ToolCallClose → UsageFinal → Finish → StreamEnd \| StreamError`. Ordering contract documented and enforced by adapters. | `wiwi/streaming/deltas.py` |
 | **SSE parsing** | Incremental `LineSSEParser`; handles BOM, CRLF, `:` comment heartbeats; multi-line `data:` joining. | `wiwi/streaming/sse.py` |
 | **Stream pump** | `asyncio.Queue(maxsize=4096)` backpressure; connect-phase retry via `execute_with_retries`; TTFT / last-token timing; partial billing on mid-stream failure (`_price_partial`); key-cooldown + deployment fail counters on mid-stream death (`_note_stream_failure`). | `wiwi/core/gateway.py` `_pump_once()` |
-| **Tool call deltas** | Index-tracked `ToolCallOpen/Close`, re-open on same index closes previous, closes all parallel tools at `finish_reason`. `raw_args` preserved on `ToolUsePart`. | `providers/openai_adapter.py:238–255`, `ir/types.py:34–38` |
+| **Tool call deltas** | Index-tracked `ToolCallOpen/Close`, re-open on same index closes previous, closes all parallel tools at `finish_reason`. `raw_args` preserved on `ToolUsePart`. | `providers/openai_adapter.py:600–657`, `ir/types.py:50–54` |
 | **Error normalization** | `WiwiError` taxonomy + `_extract_error_message` drilling into OpenAI/OpenRouter/Anthropic nested shapes; retryable-status set `{408,429,500,502,503,504,529}`; auth failures stay retryable so the pool fails over. | `providers/base.py` |
 | **Retry/fallback** | Smooth weighted round-robin key pools (nginx algorithm), cooldowns, exponential backoff + jitter, fallback group walk. Retry works **only before first upstream byte**. | `router/router.py` `execute_with_retries` |
 | **Usage estimation** | `estimate_tokens` chars÷4 fallback when provider omits usage; `estimated=True` flag propagated to cost engine and logs. | `core/gateway.py` `_price_partial`, `_pump_once` |
@@ -28,7 +33,7 @@ capture-and-resume).
 
 ---
 
-## 2. Identified Gaps
+## 2. Identified Gaps (as of 2026-08-23 — all since closed)
 
 1. **Mid-stream errors are terminal.** Once a single delta reached the client, any
    upstream failure ends the stream as `StreamError` ("can't retry"). No failover,
@@ -177,11 +182,11 @@ Each phase is independently shippable.
 - All new streaming logic lives under `wiwi/streaming/` — no dialect branches in
   `core/`, `router/`, `auth/` (repo rule).
 - Keep deltas as frozen dataclasses (hot path); orjson only at parse boundaries.
-- Tests follow thematic regression convention: new file
-  `tests/test_stream_recovery.py` covering idle-timeout, loop detection, tape
-  replay, partial-JSON repair; use `respx` for upstream mocking and
+- Tests follow thematic regression convention: the new
+  `tests/test_streaming_improvements.py` covering idle-timeout, loop detection,
+  tape replay, partial-JSON repair; use `respx` for upstream mocking and
   `.verify/fake_upstream.py` patterns for SSE fixtures.
-- Gate before commit: `.venv/bin/python -m pytest tests/ -q && .venv/bin/ruff check wiwi/ tests/`.
+- Gate before commit: `python3 -m pytest tests/ -q && ruff check wiwi/ tests/`.
 - Config additions go in `RouterSettings`/provider settings (Pydantic v2) with
   safe defaults matching current behavior (resume off, idle timeout generous).
 

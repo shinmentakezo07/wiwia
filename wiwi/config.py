@@ -462,6 +462,10 @@ class TelemetrySettings(BaseModel):
     endpoint: str = ""            # e.g. http://localhost:4318/v1/traces
     service_name: str = "wiwi"
     sample_ratio: float = 1.0     # 0..1, applied to trace roots only
+    # Per-export bound. The OTLP/HTTP exporter is synchronous and retries a
+    # dead collector; without a cap a single unreachable endpoint can hold a
+    # batch for tens of seconds and delay process shutdown.
+    export_timeout_s: float = 10.0
     headers: dict[str, str] = Field(default_factory=dict)
 
 

@@ -149,13 +149,14 @@ from wiwi.config import (
     load_config,
     load_env,
 )
-from wiwi.core.context import RequestContext
+from wiwi.core.context import RequestContext, context_of
 from wiwi.core.gateway import (
     Gateway,
     build_log_event,
     estimate_request_tokens,
 )
 from wiwi.core.recovery import HealthHealer
+from wiwi.core.telemetry import tracer
 from wiwi.cost.pricing import CostEngine
 from wiwi.ir import types as ir
 from wiwi.logging_core.events import LogEvent
@@ -1030,6 +1031,9 @@ async def lifespan(app: FastAPI):
     # Persisted Responses state (spec B): TTL sweeper for stored_responses.
     if state.response_store is not None:
         state.response_store.start()
+    # OTLP tracing: no-op unless ``telemetry.enabled`` and the ``[otel]`` extra
+    # is installed, so this is safe to call unconditionally.
+    tracer.configure(state.config.telemetry)
     # Reconcile persisted Cline default-model settings (one global model
     # id → one Deployment per Cline account under ``cline:<model_id>``).
     if state.config_store is not None:
@@ -1050,6 +1054,7 @@ async def lifespan(app: FastAPI):
         await state.healer.stop()
     if state.response_store is not None:
         await state.response_store.stop()
+    tracer.shutdown()
     if state.opencode_refresh is not None:
         await state.opencode_refresh.stop()
     if state.cline_version_refresh is not None:
@@ -1479,8 +1484,14 @@ def create_app(config: WiwiConfig) -> FastAPI:
         return oc.error_body
 
     def _err(status: int, etype: str, message: str,
-             request: Request, surface: str = "chat") -> ORJSONResponse:
+             request: Request, surface: str = "chat",
+             span: Any = None) -> ORJSONResponse:
         rid = getattr(request.state, "request_id", "")
+        # Telemetry (spec C): record the outcome on the request span here rather
+        # than at each return site that builds an error response. Sites that
+        # pass nothing are covered by the execution body's ``finally``.
+        if span is not None:
+            tracer.close(span, **{"wiwi.status": status, "wiwi.error_type": etype})
         # Only the Anthropic dialect echoes the id inside the body (the real
         # Messages API always does, and Claude Code surfaces it in bug
         # reports). The OpenAI-shaped dialects carry it as a header only, so
@@ -1572,6 +1583,37 @@ def create_app(config: WiwiConfig) -> FastAPI:
                             codec_decode, codec_encode_response,
                             bearer_token: str | None = None,
                             codec_history=None, store_response: bool = False):
+        """Request entrypoint. Owns the telemetry root span.
+
+        Thin on purpose: the span has to be opened *outside* the execution body
+        so that a ``finally`` can close it on every one of the body's many
+        return paths, and it has to be opened *here* rather than inside so a
+        streaming response can take ownership of ending it — for a stream the
+        request is not over when this function returns, because the generator
+        handed to Starlette keeps running.
+        """
+        # ``extract`` returns the caller's context; the root span is that
+        # context's child, which is what continues an upstream trace.
+        req_span = tracer.open(
+            "wiwi.request", kind="server",
+            context=tracer.extract(request.headers),
+            **{"wiwi.surface": surface,
+               "wiwi.request_id": getattr(request.state, "request_id", None),
+               "wiwi.model": body.get("model") if isinstance(body, dict) else None})
+        handed_off: list[bool] = [False]
+        try:
+            return await _chat_like(request, surface, body, codec_decode,
+                                    codec_encode_response, bearer_token,
+                                    codec_history, store_response,
+                                    req_span, handed_off)
+        finally:
+            if not handed_off[0]:
+                tracer.close(req_span)
+
+    async def _chat_like(request: Request, surface: str, body: dict[str, Any],
+                         codec_decode, codec_encode_response,
+                         bearer_token: str | None, codec_history,
+                         store_response: bool, req_span, handed_off: list[bool]):
         state_ = app.state.wiwi
         # Stored Responses state (spec B). A response id is only meaningful to
         # the key that owns it, so identity is established before the transcript
@@ -1585,17 +1627,22 @@ def create_app(config: WiwiConfig) -> FastAPI:
             if err0:
                 return err0
             store = state_.response_store
-            prev = (await store.get(body["previous_response_id"], info0.key_id)
-                    if store is not None else None)
+            with tracer.span("wiwi.retrieve", context=context_of(req_span),
+                             **{"wiwi.previous_response_id":
+                                body["previous_response_id"]}) as _rspan:
+                prev = (await store.get(body["previous_response_id"], info0.key_id)
+                        if store is not None else None)
+                _rspan.set_attribute("wiwi.found", prev is not None)
             if prev is None:
                 return _err(404, "not_found_error",
                             f"response '{body['previous_response_id']}' not found",
-                            request, surface)
+                            request, surface, span=req_span)
             body = codec_history(body, prev.output.get("output", []))
         try:
             ir_req = codec_decode(body)
         except (oc.DialectError, ValueError) as e:
-            return _err(400, "invalid_request_error", str(e), request, surface)
+            return _err(400, "invalid_request_error", str(e), request, surface,
+                        span=req_span)
         est = len(orjson.dumps(body)) // 4 if isinstance(body, dict) else 0
         info, err_resp = await authenticate(request, ir_req.model, surface,
                                             bearer_token=bearer_token)
@@ -1604,7 +1651,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
         group, _ = state_.router.resolve_group(ir_req.model)
         if group is None:
             return _err(404, "not_found_error",
-                        f"model '{ir_req.model}' not found", request, surface)
+                        f"model '{ir_req.model}' not found", request, surface,
+                        span=req_span)
         # ForceMapping rewrite: if the client typed a rich alias entry whose
         # ``force_mapping`` is False, the response should reveal the resolved
         # group rather than echoing the alias. The first-hop entry wins —
@@ -1670,17 +1718,24 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     state_.logs.log_request(build_log_event(refused))
                     return _err(402, "budget_exceeded",
                                 f"budget exhausted ({info.spend_to_date:.4f}"
-                                f"/{info.max_budget})", request, surface)
+                                f"/{info.max_budget})", request, surface,
+                                span=req_span)
                 reserved = est_spend
         ctx = RequestContext(surface=surface, ir_req=ir_req, auth=info, group=group,
                              request_id=request_id,
                              forward_headers=_forward_headers(request))
+        ctx.span = req_span
         ctx.budget_reserved = reserved
         if unpriced_model:
             # Surfaced to the request log via metadata and to the client via
             # the x-wiwi-unpriced-model response header below.
             ctx.metadata["unpriced_model"] = unpriced_model
         success_headers = {"x-wiwi-request-id": request_id}
+        # Telemetry (spec C): a caller can quote the trace id to an operator to
+        # pull the exact trace. Present only when tracing is enabled.
+        _trace_id = tracer.trace_id_of(req_span)
+        if _trace_id:
+            success_headers["x-wiwi-trace-id"] = _trace_id
         if unpriced_model:
             success_headers["x-wiwi-unpriced-model"] = unpriced_model
         # Per-deployment tpm admission needs the request's size up front. The
@@ -1784,6 +1839,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 #    afterwards, so each reconnect burns a slot for good.
                 state_.logs.log_request(build_log_event(ctx))
                 await _release_tpm_reservation(info, ctx)
+                # Fully served from the journal: the trace ends here (spec C).
+                tracer.close(ctx.span, **{"wiwi.status": 200, "wiwi.replayed": True})
                 return StreamingResponse(
                     _replay_iter(),
                     media_type="text/event-stream",
@@ -1834,6 +1891,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 # Served locally: the upstream consumed zero tokens, so the
                 # estimated reservation taken at admission must be refunded.
                 await _release_tpm_reservation(info, ctx)
+                tracer.close(ctx.span, **{"wiwi.status": 200, "wiwi.cache_hit": True})
                 return ORJSONResponse(
                     orjson.loads(entry.payload),
                     headers={**success_headers, "x-wiwi-cache": "HIT"})
@@ -1866,7 +1924,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     await stream.aclose()  # release pump resources, if any
                     await _abandon_journal(state_, journal, journal_id)
                     await _release_tpm_reservation(info, ctx)
-                    return _err(e.status, e.etype, e.message, request, surface)
+                    return _err(e.status, e.etype, e.message, request, surface,
+                                span=ctx.span)
                 except BaseException:
                     # Non-WiwiError failure: release the pump's upstream
                     # connection before letting the outer handler deal with it.
@@ -1895,7 +1954,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     await _release_tpm_reservation(info, ctx)
                     return _err(503, "api_error",
                                 "stream replay journal unavailable; retry",
-                                request, surface)
+                                request, surface, span=ctx.span)
                 it = _stream_response(state_, ctx, encoder_pair, surface,
                                       stream, first, journal=journal,
                                       journal_id=journal_id,
@@ -1905,6 +1964,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
                                       store_body=body,
                                       store_model=resp_model,
                                       store_group=group or ir_req.model)
+                # The response is a generator: the request is not finished when
+                # this function returns, so the entrypoint must not end the span.
+                # ``_stream_response`` owns it now and ends it in its teardown
+                # tail, after the body has actually been served.
+                handed_off[0] = True
                 return StreamingResponse(
                     it,
                     media_type="text/event-stream",
@@ -1938,7 +2002,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     # stats/rollups (AUDIT #90).
                     state_.logs.log_request(build_log_event(ctx))
                     return _err(402, "budget_exceeded",
-                                "virtual key budget exhausted", request, surface)
+                                "virtual key budget exhausted", request, surface,
+                                span=ctx.span)
             # Cache only AFTER the budget decision (AUDIT #116): caching above
             # this point stored the payload of a request that is about to be
             # refused with 402, and the hit path serves it as a free 200 with
@@ -1959,11 +2024,15 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 # Persist the dialect response object so GET replays it verbatim,
                 # and the request's normalized input items so the next turn can be
                 # rebuilt. ``store: false`` opts out per request.
-                await state_.response_store.put(
-                    f"resp_{ctx.request_id}",
-                    info.key_id if info is not None else "master",
-                    group or ir_req.model, _stored_input_items(body), payload)
+                with tracer.span("wiwi.persist", context=context_of(req_span),
+                                 **{"wiwi.store_id": f"resp_{ctx.request_id}"}):
+                    await state_.response_store.put(
+                        f"resp_{ctx.request_id}",
+                        info.key_id if info is not None else "master",
+                        group or ir_req.model, _stored_input_items(body), payload)
             state_.logs.log_request(build_log_event(ctx))
+            tracer.close(ctx.span, **{"wiwi.status": ctx.status,
+                                      "wiwi.cost": ctx.cost or None})
             return ORJSONResponse(payload, headers=success_headers)
         except Exception as e:  # noqa: BLE001
             if isinstance(e, WiwiError):
@@ -1974,7 +2043,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 # admission-time reservation so it cannot throttle later
                 # requests (AUDIT #70).
                 await _release_tpm_reservation(info, ctx)
-                resp = _err(e.status, e.etype, e.message, request, surface)
+                resp = _err(e.status, e.etype, e.message, request, surface,
+                            span=ctx.span)
                 if e.retry_after:
                     resp.headers["Retry-After"] = str(int(max(1.0, e.retry_after)))
                 return resp
@@ -1982,7 +2052,18 @@ def create_app(config: WiwiConfig) -> FastAPI:
             state_.logs.log_proxy("error", f"internal error: {e}", ctx.request_id)
             state_.logs.log_request(build_log_event(ctx))
             await _release_tpm_reservation(info, ctx)
-            return _err(500, "api_error", "internal gateway error", request, surface)
+            return _err(500, "api_error", "internal gateway error", request, surface,
+                        span=ctx.span)
+        finally:
+            # Backstop for the non-streaming paths: every return above closes the
+            # span already (via ``_err`` or an explicit ``tracer.close``) and
+            # ``close`` is idempotent, so this only catches a branch that forgot.
+            # It must NOT run once the span has been handed to a stream: this
+            # function returns as soon as the generator is built, long before the
+            # response is served, and closing here would freeze the span without
+            # the stream-only attributes and end it mid-flight.
+            if not handed_off[0]:
+                tracer.close(ctx.span, **{"wiwi.status": ctx.status or 500})
 
     def _encoder_for(surface: str, model: str, req_id: str,
                      include_usage: bool = False):
@@ -2112,7 +2193,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 # Streamed turns are stored too: the accumulated text/tool calls
                 # are the same content the non-streaming path serializes, so a
                 # streamed response can be continued by id like any other.
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(Exception), tracer.span(
+                        "wiwi.persist", context=context_of(ctx.span),
+                        **{"wiwi.store_id": f"resp_{ctx.request_id}"}):
                     await response_store.put(
                         f"resp_{ctx.request_id}",
                         ctx.auth.key_id if ctx.auth else "master",
@@ -2140,6 +2223,20 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         await state.auth.release_budget_reservation(
                             ctx.auth.key_id, ctx.budget_reserved)
                     ctx.budget_reserved = 0.0
+            # Telemetry (spec C): the request span stays open for the whole life
+            # of a stream — the body runs inside the generator handed to
+            # Starlette, long after the entrypoint returned — so this teardown,
+            # which is guaranteed to run last (shielded, AUDIT #222), is where
+            # the request actually ends. Attributes come from fields the same
+            # tail already computed. ``tracer.close`` is idempotent.
+            tracer.close(ctx.span, **{"wiwi.status": ctx.status or 200,
+                                      "wiwi.cost": ctx.cost or None,
+                                      "wiwi.streamed": True,
+                                      "wiwi.errored": errored,
+                                      "wiwi.chunks": _seq,
+                                      "wiwi.ttft_ms": (
+                                          int((ctx.first_token_at - ctx.started) * 1000)
+                                          if ctx.first_token_at else None)})
 
         try:
             async def _emit(chunk: bytes) -> None:

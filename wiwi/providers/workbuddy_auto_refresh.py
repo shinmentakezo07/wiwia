@@ -40,6 +40,7 @@ from wiwi.providers.workbuddy_auth import (
     parse_auth,
     refresh_token,
 )
+from wiwi.server.config_store import ConfigStoreNotFound
 
 if TYPE_CHECKING:
     from wiwi.server.app import AppState
@@ -220,7 +221,17 @@ class WorkBuddyAutoRefresh:
         key.status = "active"
         key.cooldown_until = 0.0
         if self._state.config_store is not None:
-            await self._state.config_store.update_key_secret(provider, label, secret)
+            try:
+                await self._state.config_store.update_key_secret(
+                    provider, label, secret)
+            except ConfigStoreNotFound:
+                # YAML-defined provider: no DB row to update. The in-memory
+                # assignment above is still correct for this process; refusing
+                # here would break OAuth refresh on YAML-only deployments.
+                import structlog
+                structlog.get_logger().warning(
+                    "oauth_secret_not_persisted", provider=provider,
+                    reason="provider is YAML-defined; rotation is in-memory only")
 
     def _trip_circuit(self, ident: tuple[str, str]) -> None:
         self._circuit.trip(ident)

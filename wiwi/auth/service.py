@@ -95,6 +95,11 @@ class AuthInfo:
     models: list[str] = field(default_factory=list)  # empty = all allowed
     max_budget: float | None = None
     spend_to_date: float = 0.0
+    # Dollars already committed by admitted-but-unbilled in-flight requests
+    # (AUDIT #324). The admission gate must count them, or N concurrent
+    # requests can each pass a cap that only covers one; spend reporting must
+    # not, or operators would see money that was never billed.
+    budget_reserved: float = 0.0
     rpm: int | None = None
     tpm: int | None = None
     expires_at: float | None = None
@@ -103,7 +108,12 @@ class AuthInfo:
 
     @property
     def over_budget(self) -> bool:
-        return self.max_budget is not None and self.spend_to_date >= self.max_budget
+        # ``budget_reserved`` is part of the committed total: a reservation is
+        # money this key owes the moment its in-flight requests come back
+        # (AUDIT #324). Reading plain ``spend_to_date`` here is exactly the
+        # post-hoc shape that let overspend scale with concurrency.
+        return (self.max_budget is not None
+                and self.spend_to_date + self.budget_reserved >= self.max_budget)
 
 
 CREATE_SQL = """
@@ -114,6 +124,7 @@ CREATE TABLE IF NOT EXISTS vkeys (
   models TEXT NOT NULL DEFAULT '[]',
   max_budget DOUBLE PRECISION,
   spend_to_date DOUBLE PRECISION NOT NULL DEFAULT 0,
+  budget_reserved DOUBLE PRECISION NOT NULL DEFAULT 0,
   rpm INTEGER,
   tpm INTEGER,
   expires_at DOUBLE PRECISION,
@@ -205,12 +216,20 @@ class AuthService:
             if "owner_id" not in cols:
                 await conn.execute(sa.text(
                     "ALTER TABLE vkeys ADD COLUMN owner_id TEXT"))
+            # Additive migration: in-flight budget reservation column
+            # (idempotent; AUDIT #324). Existing databases get the column at
+            # 0, which preserves their previous semantics exactly.
+            if "budget_reserved" not in cols:
+                await conn.execute(sa.text(
+                    "ALTER TABLE vkeys ADD COLUMN"
+                    " budget_reserved DOUBLE PRECISION NOT NULL DEFAULT 0"))
             if self._is_pg:
                 # Postgres-only: databases created before CREATE_SQL said
                 # DOUBLE PRECISION store these as 4-byte REAL, which floors
                 # spend accumulation and collapses rapid created_at values
                 # (round 108).
                 await widen_pg_floats(conn, "vkeys", "max_budget", "spend_to_date",
+                                      "budget_reserved",
                                       "expires_at", "created_at", "updated_at")
             await conn.execute(sa.text(
                 "CREATE INDEX IF NOT EXISTS idx_vkeys_owner ON vkeys(owner_id)"))
@@ -308,7 +327,7 @@ class AuthService:
             row = (await conn.execute(
                 sa.text("SELECT v.id, v.key_alias, v.models, v.max_budget,"
                         " v.spend_to_date, v.rpm, v.tpm, v.expires_at,"
-                        " v.disabled, v.owner_id FROM vkeys v"
+                        " v.disabled, v.owner_id, v.budget_reserved FROM vkeys v"
                         " WHERE v.key_hash=:h"
                         " AND (v.owner_id IS NULL OR EXISTS ("
                         "   SELECT 1 FROM users u WHERE u.id = v.owner_id"
@@ -323,7 +342,7 @@ class AuthService:
             key_id=row[0], key_type="virtual", alias=row[1],
             models=_json.loads(row[2]), max_budget=row[3], spend_to_date=float(row[4]),
             rpm=row[5], tpm=row[6], expires_at=expires, disabled=bool(row[8]),
-            owner_id=row[9],
+            owner_id=row[9], budget_reserved=float(row[10]),
         )
 
     def evict(self, plaintext: str) -> None:
@@ -574,6 +593,84 @@ class AuthService:
                 info.spend_to_date += add_cost
         return True
 
+    async def reserve_budget(self, key_id: str, amount: float) -> bool:
+        """Atomically reserve *amount* of a key's budget at admission.
+
+        The post-hoc ``update_spend`` gate is a real conditional UPDATE, but it
+        runs only *after* the upstream has served the request — the TOCTOU
+        window spans the whole upstream call, and overspend scaled with
+        concurrency (measured 250× at 500 concurrent; AUDIT #324). The fix is
+        to move the cap check to admission: this method atomically moves
+        *amount* from budget headroom into a reservation, refusing when the
+        headroom is insufficient, so N concurrent admissions cannot all pass
+        against headroom that only covers one of them.
+
+        The reservation is a bookkeeping row separate from ``spend_to_date``:
+        the *gate* reads ``spend_to_date + reserved`` so admission observes
+        every in-flight commitment, while anything that reports spend to the
+        operator still reports only money actually billed.
+
+        No-op True for master (which has no row) and non-positive amounts —
+        the same shape ``update_spend`` uses, so callers branch identically.
+        """
+        if key_id == "master" or amount <= 0:
+            return True
+        async with self.engine.begin() as conn:
+            res = await conn.execute(
+                sa.text(
+                    "UPDATE vkeys SET budget_reserved = budget_reserved + :a,"
+                    " updated_at = :now"
+                    " WHERE id = :id AND disabled = 0"
+                    " AND (max_budget IS NULL OR spend_to_date + budget_reserved"
+                    " + :a <= max_budget)"),
+                {"a": amount, "id": key_id, "now": time.time()},
+            )
+        if res.rowcount == 0:
+            # Mirror ``update_spend``'s cache hygiene: the conditional write
+            # may have been refused because the cached AuthInfo is stale, and
+            # a stale-but-under-budget cache entry would keep admitting.
+            self._evict_cached_key(key_id)
+            return False
+        for info, _ts in self._cache.values():
+            if info is not None and info.key_id == key_id:
+                info.budget_reserved += amount
+        return True
+
+    async def release_budget_reservation(self, key_id: str, amount: float) -> None:
+        """Give a reservation back untouched: the request died before it could
+        produce usage, so the headroom returns to the key.
+
+        Deliberately does NOT touch ``spend_to_date``: nothing was consumed.
+        Conflating release with charge would bill the *estimate* for requests
+        that never ran (AUDIT #324's follow-up hazard). The clamp keeps a
+        crash-era stale reservation (a restart between reserve and release)
+        from going negative — which would inflate headroom and silently
+        disarm the cap.
+        """
+        if key_id == "master" or amount <= 0:
+            return
+        async with self.engine.begin() as conn:
+            await conn.execute(
+                sa.text(
+                    "UPDATE vkeys SET"
+                    " budget_reserved = max(budget_reserved - :a, 0),"
+                    " updated_at = :now"
+                    " WHERE id = :id"),
+                {"a": amount, "id": key_id, "now": time.time()},
+            )
+        for info, _ts in self._cache.values():
+            if info is not None and info.key_id == key_id:
+                info.budget_reserved = max(info.budget_reserved - amount, 0.0)
+
+    def _evict_cached_key(self, key_id: str) -> None:
+        """Drop every cached AuthInfo for *key_id* so the next authenticate()
+        re-reads the row. Cheap and only on the refused path."""
+        for h in list(self._cache):
+            entry = self._cache.get(h)
+            if entry is not None and entry[0] is not None \
+                    and entry[0].key_id == key_id:
+                self._cache.pop(h, None)
+
     async def apply_spend_trueup(self, key_id: str, add_cost: float) -> None:
         """Retroactive spend correction (pricing true-up).
 
@@ -598,12 +695,14 @@ class AuthService:
         async with self.engine.connect() as conn:
             rows = (await conn.execute(
                 sa.text("SELECT id, key_alias, models, max_budget, spend_to_date, rpm, tpm,"
-                        " expires_at, disabled, owner_id FROM vkeys ORDER BY created_at DESC"))).all()
+                        " expires_at, disabled, owner_id, budget_reserved"
+                        " FROM vkeys ORDER BY created_at DESC"))).all()
         import json as _json
         return [
             {"id": r[0], "alias": r[1], "models": _json.loads(r[2]), "max_budget": r[3],
              "spend_to_date": r[4], "rpm": r[5], "tpm": r[6],
-             "expires_at": r[7], "disabled": bool(r[8]), "owner_id": r[9]}
+             "expires_at": r[7], "disabled": bool(r[8]), "owner_id": r[9],
+             "budget_reserved": float(r[10] or 0.0)}
             for r in rows
         ]
 

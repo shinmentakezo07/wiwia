@@ -8,9 +8,9 @@ Dev setup, conventions, testing, and the pre-completion gate. The command source
 
 ```bash
 # Backend — use ambient python3 (3.12 in this checkout). NEVER .venv/bin/python
-# (the .venv symlink here points at an empty venv with no site-packages).
+# (there is no .venv in this checkout at all).
 python3 --version                  # 3.12
-uv pip install -e .[redis]         # optional [redis] extra for the Redis rate limiter/cache
+uv pip install -e ".[dev]"         # + ".[redis]" for the Redis response cache
 
 # Frontend — npm is authoritative (web/package-lock.json present). Never mix package managers.
 cd web && npm install
@@ -32,7 +32,7 @@ uvicorn wiwi.server.app:create_app_from_config_path --factory
 ./start.sh                         # env knobs: WIWI_PORT, WIWI_WEB_PORT, WIWI_RELOAD, WIWI_RELOAD_DIRS, WIWI_BIN
 ```
 
-Frontend dev server (`cd web && npm run dev`) proxies `/admin /v1 /auth /public /health` → `:4000`. Production SPA build: `cd web && npm run build` → `wiwi/server/static/` (served at `/admin/ui`; gitignored — builds produce it).
+Frontend dev server (`cd web && npm run dev`) proxies `/admin /v1 /auth /public /health` → `:4000`. Production SPA build: `cd web && npm run build` → `wiwi/server/static/` (served at `/`; gitignored — builds produce it).
 
 Load test: `python3 bench.py` (async httpx; TTFT, p50/p95, TPS, concurrency sweep).
 
@@ -43,7 +43,7 @@ Load test: `python3 bench.py` (async httpx; TTFT, p50/p95, TPS, concurrency swee
 ```bash
 python3 -m pytest tests/ -q                    # full suite — keep green
 python3 -m pytest tests/test_codecs.py -q      # single file
-python3 -m pytest tests/test_router.py -k cooldown   # by name
+python3 -m pytest tests/test_router.py -k cooling    # by name
 ```
 
 Conventions (binding — copy the surrounding pattern, don't invent a parallel one):
@@ -51,8 +51,8 @@ Conventions (binding — copy the surrounding pattern, don't invent a parallel o
 - **No `conftest.py`** anywhere. Each test file builds its own `_config()` factory and its own `LifespanManager + httpx.ASGITransport` client fixture inline.
 - **Default master key** for admin-auth'd tests: `sk-wiwi-master-test` via `Authorization: Bearer …` (see `tests/test_integration.py`).
 - **Upstream mocking**: `respx`, decorator form preferred (`@respx.mock` + `respx.post(url).respond(...)`; the context-manager form is broken in respx 0.23 + httpx 0.28). `side_effect=[...]` for multi-response failover tests.
-- **Property-based**: `hypothesis` ≥ 6.100 (persistent cache in `.hypothesis/`). Used in `test_property_roundtrip.py`, `test_translation_enhancements.py`, `test_web_search_translation.py`, `test_tool_translation_round2.py`.
-- **Fixtures**: `@pytest.fixture` and `@pytest_asyncio.fixture` both work; newer files (rounds 18+) prefer `@pytest_asyncio.fixture`.
+- **Property-based**: `hypothesis` ≥ 6.100 (persistent cache in `.hypothesis/`). Used in `test_property_roundtrip.py` and `test_integration.py`.
+- **Fixtures**: both `@pytest.fixture` and `@pytest_asyncio.fixture` work, but recent files have settled on plain `@pytest.fixture` — rounds 89+ use it exclusively, and it is the majority across round files. Match the file you are editing.
 - **No pytest-cov / no coverage config.** Don't add `--cov`.
 - **Numbered bugfix regressions**: new bugfix tests go into the next unused `tests/test_fix_roundN.py`. Confirm with `ls tests/test_fix_round*.py` — never assume the number, and never back-fill into topic files like `test_codecs.py`.
 - Only add a test when it defends an observable contract or a plausible bug; otherwise smoke-test the changed path live.
@@ -71,7 +71,7 @@ For UI/server changes, additionally exercise the live path (launch server, hit e
 
 ## 5. Architecture invariants (binding)
 
-1. **No dialect/provider branching outside `wiwi/wire/` and `wiwi/providers/`.** `core/`, `router/`, `auth/`, `streaming/`, `cache/`, `cost/`, `logging_core/`, `ir/` must never import symbols from `wiwi.wire` or `wiwi.providers`. Leakage is silent wrong-language routing.
+1. **No dialect/provider branching outside `wiwi/wire/` and `wiwi/providers/`.** `core/`, `router/`, `auth/`, `streaming/`, `cache/`, `cost/`, `logging_core/`, `ir/` must never import symbols from `wiwi.wire` or from any **concrete** adapter (`wiwi.providers.<name>_adapter`). Leakage is silent wrong-language routing. The one carve-out is the generic contract in `wiwi.providers.base` and `wiwi.providers.registry` — `WiwiError`, `ProviderKeyRef`, `error_from_provider_status`, `status_for_key_pool`, `fresh_adapter` / `get_adapter` — which `core/gateway.py`, `core/recovery.py` and `router/router.py` all legitimately import.
 2. **Import from the module that owns the symbol**, not from a re-export layer.
 3. **New provider type or inbound route ⇒ update `registry.py`'s coverage assert.** `PROVIDER_TYPES` in `config.py` is the single source of truth; the import-time assert catches a forgotten branch.
 4. **Prefer existing module APIs.** A second convention beside an existing one is prohibited.

@@ -419,6 +419,17 @@ class AnthropicAdapter:
             else:
                 # user, and tool (tool results ride in a user turn)
                 role = "user"
+            if not blocks and role == "assistant":
+                # A zero-part assistant turn — an empty string, or a refusal
+                # the Chat codec decoded to nothing. Dropping it (the old
+                # `if blocks:` skip) did not just lose the turn: the *next*
+                # message is a user turn, so the adjacent-same-role merge
+                # below fused it into this one's predecessor and Anthropic
+                # received ONE user message with both questions concatenated
+                # (AUDIT #322). The turn has to survive; Anthropic rejects a
+                # genuinely empty content block, so carry a single space —
+                # the conventional placeholder that preserves role order.
+                blocks = [{"type": "text", "text": " "}]
             if blocks:
                 if msgs and msgs[-1]["role"] == role:
                     msgs[-1]["content"].extend(blocks)
@@ -608,8 +619,10 @@ class AnthropicAdapter:
                 turn.text += raw if isinstance(raw, str) else ""
             elif btype == "thinking":
                 rt = block.get("thinking", "")
+                sig = block.get("signature")
                 turn.thinking.append(ir.ThinkingPart(
-                    rt if isinstance(rt, str) else "", block.get("signature")))
+                    rt if isinstance(rt, str) else "",
+                    sig if isinstance(sig, str) else None))
             elif btype == "redacted_thinking":
                 rd = block.get("data", "")
                 turn.thinking.append(ir.ThinkingPart(
@@ -649,7 +662,8 @@ class AnthropicAdapter:
                 # ``server_tool_use`` replayed unpaired (AUDIT #158).
                 turn.server_blocks.append(dict(block))
         sr = data.get("stop_reason", "end_turn")
-        turn.stop_reason = _STOP_REASON_IN.get(sr, "stop")
+        turn.stop_reason = _STOP_REASON_IN.get(
+            sr if isinstance(sr, str) else "", "stop")
         turn.stop_sequence = data.get("stop_sequence")
         u = as_dict(data.get("usage"))
         # output_tokens_details.thinking_tokens is where Anthropic reports
@@ -786,7 +800,8 @@ class AnthropicAdapter:
                 cache_creation=getattr(self, "_pending_cache_creation", 0),
                 reasoning=_token_count(out_details.get("thinking_tokens")),
                 output=_token_count(u.get("output_tokens"))))
-            out.append(dl.Finish(_STOP_REASON_IN.get(sr, "stop"),
+            out.append(dl.Finish(_STOP_REASON_IN.get(
+                sr if isinstance(sr, str) else "", "stop"),
                                  stop_sequence=d.get("stop_sequence")))
         elif etype == "message_stop":
             out.append(dl.StreamEnd())

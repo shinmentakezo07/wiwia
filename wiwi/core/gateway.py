@@ -13,8 +13,9 @@ import httpx
 import orjson
 import structlog
 
-from wiwi.core.context import RequestContext
+from wiwi.core.context import RequestContext, context_of
 from wiwi.core.recovery import build_url, parse_retry_after
+from wiwi.core.telemetry import tracer
 from wiwi.cost.pricing import (
     CostEngine,
     estimate_media_tokens,
@@ -92,6 +93,51 @@ def prompt_includes_cached(dep: Deployment) -> bool:
     ``provider_type == "anthropic"``; the discriminator was simply too narrow.
     """
     return not _speaks_messages(dep)
+
+
+def _attempt_span(dep: Deployment, ctx: RequestContext) -> Any:
+    """Start a client span for one upstream attempt, parented on the request.
+
+    Returned from :meth:`Gateway._headers` rather than opened around the HTTP
+    call: ``_headers`` runs for every attempt on every path (non-streaming,
+    streaming, and the 401-refresh retry) and already receives both ``dep`` and
+    ``ctx``, so hanging the span there covers all of them with one line each
+    instead of restructuring four try blocks.
+
+    Parented explicitly through ``ctx.span``: the streaming pump runs in a task,
+    whose context is captured at creation, so it cannot be relied on to inherit
+    the request span. The retry loop runs in this task's own context, where
+    nothing is current either (the request span is opened with ``start_span``).
+
+    Returns None when tracing is off, which ``tracer.propagation_headers`` and
+    :func:`_end_attempt_span` both treat as "nothing to do".
+    """
+    span = tracer.open("wiwi.upstream", kind="client", context=context_of(ctx.span),
+                       **{"wiwi.deployment": f"{dep.group}/{dep.model_id}",
+                          "wiwi.provider": dep.provider.provider_type,
+                          "wiwi.attempt": len(ctx.attempts) + 1})
+    ctx.attempt_span = span
+    return span
+
+
+def _end_attempt_span(span: Any, ctx: RequestContext, before: int) -> None:
+    """End an attempt span with the outcome the attempt just recorded.
+
+    The outcome is read back from ``ctx.attempts`` rather than tracked
+    separately: every exit from an attempt appends an ``AttemptRecord`` (with
+    its status and latency) as its first side effect, so the record this call
+    finds is exactly this attempt's result — including the 401-refresh path,
+    which appends ``ok_after_refresh`` or ``http_401``. When nothing was
+    appended the attempt is still in flight or an unexpected exception escaped;
+    the span then closes without those attributes rather than lying about them.
+    """
+    ctx.attempt_span = None
+    if span is None:
+        return
+    record = ctx.attempts[before] if len(ctx.attempts) > before else None
+    tracer.close(span, **{
+        "wiwi.attempt_status": record.status if record else None,
+        "wiwi.latency_ms": record.latency_ms if record else None})
 
 
 def _log_attempt(router: Router, ctx: RequestContext, dep: Deployment,
@@ -395,6 +441,12 @@ class Gateway:
                    **dep.extra_headers}
         if ctx is not None and ctx.forward_headers and _speaks_messages(dep):
             headers.update(ctx.forward_headers)
+        if ctx is not None:
+            # W3C propagation (spec C). The attempt span is stashed on the ctx
+            # by the wrapper that owns the attempt, because ``_headers`` is the
+            # one place every attempt on every path funnels through — including
+            # the 401-refresh retry, which rebuilds headers from the live key.
+            headers.update(tracer.propagation_headers(ctx.attempt_span))
         return headers
 
     async def complete(self, ctx: RequestContext) -> ir.AssistantTurn:
@@ -408,10 +460,17 @@ class Gateway:
         # Inflight covers the full upstream round-trip here, and for streams the
         # pump owns it until the last delta (see _pump wrapper below).
         dep.inflight += 1
+        before = len(ctx.attempts)
+        # One span per attempt (spec C). ``call_one`` runs inside the retry
+        # loop, so this wraps each attempt of each deployment rather than the
+        # whole request. Published on the ctx so ``_headers`` can put this
+        # attempt's traceparent on the outbound request.
+        _aspan = _attempt_span(dep, ctx)
         try:
             return await self._call_once(dep, key, ctx)
         finally:
             dep.inflight -= 1
+            _end_attempt_span(_aspan, ctx, before)
 
     async def _call_once(self, dep: Deployment, key: ProviderKeyRef,
                          ctx: RequestContext) -> ir.AssistantTurn:
@@ -1303,34 +1362,36 @@ class Gateway:
         # The stream stays in flight — and counts toward dep.inflight — until
         # this pump finishes, not merely until the connection opens.
         dep.inflight += 1
+        before = len(ctx.attempts)
+        _aspan = _attempt_span(dep, ctx)
         try:
-            try:
-                await self._pump_once(dep, key, ctx, queue, ready, err_box)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:  # noqa: BLE001
-                # Backstop for the pump's *pre-connect* region — the code that
-                # runs before `_pump_once`'s own try (adapter construction, key
-                # lookup, params assembly). The caller is parked on
-                # `await ready.wait()`, so an exception escaping there leaves
-                # the event unset forever and strands the caller with no
-                # terminal frame and no timeout — the same never-completing
-                # shape AUDIT #211 describes for the mid-stream handler.
-                #
-                # Deliberately nothing to do once `ready` IS set: `_pump_once`
-                # owns every exit after that point (it converts a fault into a
-                # terminal frame, idempotently, and re-raises CancelledError),
-                # so queueing anything here could only add a *second* terminal
-                # to a stream that already has one.
-                if not ready.is_set():
-                    if err_box[0] is None:
-                        err_box[0] = WiwiError(
-                            502, "api_connection_error",
-                            f"stream pump error: {type(e).__name__}: {e}",
-                            retryable=True)
-                    ready.set()
+            await self._pump_once(dep, key, ctx, queue, ready, err_box)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            # Backstop for the pump's *pre-connect* region — the code that runs
+            # before `_pump_once`'s own try (adapter construction, key lookup,
+            # params assembly). The caller is parked on `await ready.wait()`, so
+            # an exception escaping there leaves the event unset forever and
+            # strands the caller with no terminal frame and no timeout — the
+            # same never-completing shape AUDIT #211 describes for the
+            # mid-stream handler.
+            #
+            # Deliberately nothing to do once `ready` IS set: `_pump_once` owns
+            # every exit after that point (it converts a fault into a terminal
+            # frame, idempotently, and re-raises CancelledError), so queueing
+            # anything here could only add a *second* terminal to a stream that
+            # already has one.
+            if not ready.is_set():
+                if err_box[0] is None:
+                    err_box[0] = WiwiError(
+                        502, "api_connection_error",
+                        f"stream pump error: {type(e).__name__}: {e}",
+                        retryable=True)
+                ready.set()
         finally:
             dep.inflight -= 1
+            _end_attempt_span(_aspan, ctx, before)
             # The admission reservation made by `pick_deployment` is settled by
             # `_price_stream`/`_price_partial` as soon as usage is known. A pump
             # torn down before either ran (cancelled between connect and the

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import deque
 from typing import Any
 
 import orjson
@@ -412,6 +413,11 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
     else:
         thinking_budget = None
     mt_raw = body.get("max_tokens")
+    # NB: this ladder accepts digit strings (``"77"`` -> 77) where
+    # ``ir.coerce_int`` rejects them (AUDIT #83 treats a string as a client
+    # bug). The divergence is deliberate for now and unresolved — unifying the
+    # two would change this codec's wire behaviour, which is a product call,
+    # not a cleanup. Recorded in AUDIT #325.
     if isinstance(mt_raw, bool):
         max_tokens = None
     elif isinstance(mt_raw, int):
@@ -652,7 +658,16 @@ class AnthropicStreamEncoder:
         # the answer and the client replays it on the next turn. Buffer it as
         # ("text"|"thinking", text, signature) and emit it as its own block as
         # soon as the tool block closes (AUDIT #156).
-        self._deferred: list[tuple[str, str, str | None]] = []
+        # A deque, not a list: eviction is from the FRONT, and list
+        # ``pop(0)``/``insert(0, …)`` are O(n). ``deque`` makes both O(1)
+        # (AUDIT #335).
+        self._deferred: deque[tuple[str, str, str | None]] = deque()
+        # Running char total for ``_deferred``. Tracked incrementally
+        # rather than re-summed: the cap bounds total CHARS, so a
+        # stream of many small deltas can hold a quarter-million
+        # records, and re-summing them on every append made filling
+        # the buffer quadratic (AUDIT #335).
+        self._deferred_chars = 0
         # Per-delta skeleton, allocated once: only `index` and the delta body
         # change between consecutive deltas of the same kind.
         self._text_delta: dict[str, Any] = {
@@ -739,6 +754,7 @@ class AnthropicStreamEncoder:
                 td["delta"]["text"] = text
                 out.append(self._evt("content_block_delta", td))
         self._deferred.clear()
+        self._deferred_chars = 0
         return out
 
     def _take_server_call(self, block: dict[str, Any]) -> dict[str, Any] | None:
@@ -774,9 +790,9 @@ class AnthropicStreamEncoder:
         when a single delta is itself larger than the cap.
         """
         self._deferred.append((kind, text, sig))
-        total = sum(len(t) for _, t, _ in self._deferred)
+        total = self._deferred_chars + len(text)
         while total > MAX_DEFERRED_CHARS and self._deferred:
-            k, t, s = self._deferred.pop(0)
+            k, t, s = self._deferred.popleft()
             total -= len(t)
             if total < MAX_DEFERRED_CHARS:
                 # This pop overshot the cap: put back the entry's TAIL (the
@@ -784,12 +800,20 @@ class AnthropicStreamEncoder:
                 # instead of losing content it had room for.
                 keep = MAX_DEFERRED_CHARS - total
                 if keep > 0 and t:
-                    self._deferred.insert(0, (k, t[-keep:], s))
+                    self._deferred.appendleft((k, t[-keep:], s))
                     total += keep
                 break
         # A fully-evicted entry leaves nothing to emit; drop empties so the
-        # flush loop never opens a block with no content.
-        self._deferred = [e for e in self._deferred if e[1]]
+        # flush loop never opens a block with no content. Scoped to the only
+        # way an empty entry can appear — a caller passing ``text == ""``.
+        # Eviction cannot create one (``t[-keep:]`` with ``keep > 0`` is
+        # non-empty, and the ``popleft`` above removes rather than empties),
+        # so testing the incoming text is equivalent to re-scanning the whole
+        # buffer on every append — which cost ~975 us at the 32 768-record cap
+        # and kept ``_defer`` quadratic regardless of the running total.
+        if not text:
+            self._deferred = deque(e for e in self._deferred if e[1])
+        self._deferred_chars = total
 
     def _drain_deferred(self) -> list[bytes]:
         """Flush buffered interleaved content AND close the block it opened.

@@ -30,6 +30,7 @@ import structlog
 
 from wiwi.core.recovery import CircuitBreaker
 from wiwi.providers import cline_oauth
+from wiwi.server.config_store import ConfigStoreNotFound
 
 if TYPE_CHECKING:
     from wiwi.server.app import AppState
@@ -212,7 +213,16 @@ class ClineAutoRefresh:
             k.secret = secret
             k.status = "active"
             k.cooldown_until = 0.0
-            await self._state.config_store.update_key_secret(provider, k.label, secret)
+            try:
+                await self._state.config_store.update_key_secret(
+                    provider, k.label, secret)
+            except ConfigStoreNotFound:
+                # YAML-defined provider: no DB row to update. The in-memory
+                # assignment above is still correct for this process; refusing
+                # here would break OAuth refresh on YAML-only deployments.
+                structlog.get_logger().warning(
+                    "oauth_secret_not_persisted", provider=provider,
+                    reason="provider is YAML-defined; rotation is in-memory only")
 
     def _trip_circuit(self, name: str) -> None:
         self._circuit.trip(name)

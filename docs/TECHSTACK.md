@@ -14,9 +14,8 @@ The stack as shipped (source of truth: `pyproject.toml`, `web/package.json`, `Do
 | Package manager | uv (lockfile: `uv.lock`) · pip works | latest | high |
 | API framework | FastAPI | >= 0.110 | high |
 | ASGI server | uvicorn[standard] | >= 0.29 | high |
-| SSE serve | sse-starlette | >= 2.0 | high |
 | Upstream HTTP client | httpx (async, HTTP/2) | >= 0.27 | high |
-| Validation & types | pydantic v2 + pydantic-settings | >= 2.7 | high |
+| Validation & types | pydantic v2 | >= 2.7 | high |
 | Config format | PyYAML → typed pydantic models | PyYAML >= 6 | high |
 | Database | SQLite (aiosqlite) default · PostgreSQL (asyncpg) prod | — | high |
 | ORM / migrations | SQLAlchemy 2.x async · inline `CREATE TABLE IF NOT EXISTS` (no Alembic) | >= 2.0.30 | high |
@@ -28,7 +27,7 @@ The stack as shipped (source of truth: `pyproject.toml`, `web/package.json`, `Do
 | Env loading | python-dotenv | >= 1.0 | high |
 | Build backend | hatchling | latest | high |
 
-Runtime dependencies: 13. That count is a feature.
+Runtime dependencies: 12. That count is a feature.
 
 ### Frontend (`web/package.json`, npm authoritative)
 
@@ -38,11 +37,11 @@ Runtime dependencies: 13. That count is a feature.
 | Bundler / dev server | Vite | ^6.3 |
 | Styling | Tailwind CSS (+ `@tailwindcss/vite`) | ^4.1 |
 | Data fetching | TanStack Query | ^5.62 |
-| Charts | Recharts | ^2.15 |
+| Charts | Recharts | ^3.10 |
 | Routing | react-router-dom | ^7.6 |
 | Icons | lucide-react | ^0.525 |
 | Language | TypeScript (strict, `verbatimModuleSyntax`) | ~5.8 |
-| Lint | ESLint 9 flat config + typescript-eslint | ^9.30 |
+| Lint | ESLint 10 flat config + typescript-eslint | ^8.35 |
 
 ### Testing & quality
 
@@ -83,9 +82,9 @@ path, and the OTLP export happens on a batch processor off the request path.
 
 **React + Vite over Next.js.** The admin console is an SPA served same-origin by the gateway process; SSR/routing conventions of a meta-framework buy nothing here. Router is react-router-dom v7; state is TanStack Query over the admin JSON API; charts are Recharts; styling is Tailwind 4 (CSS-first config via the Vite plugin).
 
-**npm.** `web/package-lock.json` is authoritative, and `start.sh` (`npm ci`) plus the Dockerfile build stage use npm for frontend installs and dev commands. Build output lands in `wiwi/server/static/` and is served at `/admin/ui`.
+**npm.** `web/package-lock.json` is authoritative, and `start.sh` (`npm ci`) plus the Dockerfile build stage use npm for frontend installs and dev commands. Build output lands in `wiwi/server/static/` and is served at `/`.
 
-**Docker multi-stage, non-root.** uv builder → npm SPA build → `python:3.12-slim` runtime; user `wiwi`; healthcheck `GET /health` every 30 s; compose ships Postgres 16 with healthcheck-gated startup.
+**Docker multi-stage, non-root.** uv builder → npm SPA build → `python:3.12-slim-bookworm` runtime; user `wiwi`; healthcheck `GET /health` every 30 s; compose ships Postgres 16 with healthcheck-gated startup.
 
 ---
 

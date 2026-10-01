@@ -198,7 +198,11 @@ def estimate_tokens(text: str, model: str | None = None) -> int:
     if model:
         enc = _get_tiktoken_encoding(model)
         if enc is not None:
-            return len(enc.encode(text))
+            # ``disallowed_special=()``: a client can trivially echo a
+            # special-token string (e.g. in a tool result), and the default
+            # raises ValueError on it — a client-triggerable 500 on the
+            # request path (AUDIT #330).
+            return len(enc.encode(text, disallowed_special=()))
     return max(1, len(text) // 4)
 
 

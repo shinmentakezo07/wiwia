@@ -56,6 +56,11 @@ class RequestContext:
     # usage at pricing time (AUDIT #101). 0 means "unknown": the tpm check then
     # charges nothing for this request.
     est_tokens: int = 0
+    # Budget dollars reserved at admission for a budget-capped virtual key
+    # (AUDIT #324). 0.0 = nothing reserved (master, uncapped key, or refusal).
+    # Reconciled to the actual cost after the response; every early return
+    # between reserve and reconcile must refund it.
+    budget_reserved: float = 0.0
     # outcomes
     cache_hit: bool = False
     stop_reason: str | None = None
@@ -70,6 +75,17 @@ class RequestContext:
     # server from the inbound request; merged into the outbound header set by
     # the gateway. Empty for dialects with no header-coupled surface.
     forward_headers: dict[str, str] = field(default_factory=dict)
+    # The active ``wiwi.request`` telemetry span (spec C), or None when tracing
+    # is off. Threaded here rather than reached through the contextvar because
+    # async generators and tasks do not reliably inherit it: ``_stream_response``
+    # and the gateway pump both run in contexts captured at *creation* time, so
+    # a span opened later in the request body would not be their parent. Every
+    # stage already receives ``ctx``, so the span rides along for free.
+    span: Any = None
+    # The in-flight ``wiwi.upstream`` attempt span (spec C), or None. Set by the
+    # gateway wrapper that owns the current attempt so ``_headers`` can put this
+    # attempt's ``traceparent`` on the outbound request; cleared when it ends.
+    attempt_span: Any = None
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
     # Set by the streaming path: `execute_with_retries` must NOT credit the key
     # at connect time (its call_one returns as soon as the pump connects). The
@@ -81,3 +97,21 @@ class RequestContext:
                      model_id: str = "") -> None:
         self.attempts.append(AttemptRecord(deployment, provider, key_label, status,
                                            latency_ms, detail, model_id))
+
+
+def context_of(span: Any) -> Any:
+    """OTel parent context for *span*, or None when there is no live span.
+
+    Kept here (not in ``core.telemetry``) so ``core.context`` stays free of the
+    telemetry module and its config import. Imported lazily because
+    ``opentelemetry`` is an optional extra: without it this returns None and
+    every explicitly-parented span falls back to the ambient context — which is
+    exactly right, since without the SDK no span is ever live.
+    """
+    if span is None:
+        return None
+    try:
+        from opentelemetry.trace import set_span_in_context
+    except ImportError:
+        return None
+    return set_span_in_context(span)

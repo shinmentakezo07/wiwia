@@ -16,10 +16,11 @@ How streaming works end-to-end: the IR delta taxonomy, the pump, failover/resume
 | `ToolCallOpen` | `index`, `id`, `name`, `builtin?` | Open a tool call; `builtin` = canonical name from `ir/builtin_tools.py` when it's a provider-hosted tool (e.g. Anthropic `server_tool_use` web_search) |
 | `ToolCallArgsDelta` | `index`, `args_fragment` | Partial tool args |
 | `ToolCallClose` | `index` | Close the tool call |
-| `UsageFinal` | `prompt`, `cached`, `reasoning`, `output`, `cache_creation`, `estimated`, `cost` | Exactly one, after the last content delta |
+| `ServerToolResultDelta` | `index`, `block`, `builtin?` | A provider-executed tool's result block, carried verbatim (e.g. Anthropic `web_search_tool_result`). Whole block, not Open/Args/Close — delivered whole upstream. Encoders for dialects with no equivalent block drop it. |
+| `UsageFinal` | `prompt`, `cached`, `reasoning`, `output`, `cache_creation`, `estimated`, `cost` | At least one; the last one wins |
 | `Finish` | `stop_reason` | Exactly one |
 | `StreamEnd` | — | Normal terminal |
-| `StreamError` | error | Abnormal terminal — may occur at ANY point, no `Finish` required |
+| `StreamError` | `message`, `kind?`, `status?`, `etype?` | Abnormal terminal — may occur at ANY point, no `Finish` required |
 
 **Ordering contract** (adapters guarantee, encoders rely on):
 
@@ -72,7 +73,7 @@ Client disconnect: the surface sets `ctx.cancel`; the pump notices, releases the
 A bounded ring buffer of emitted deltas with two roles:
 
 1. **Mid-stream failover**: on upstream death after content has flowed, the tape holds the text deltas already emitted so a retry can prepend them as an assistant-prefix **continuation request** (the Anthropic capture-and-resume pattern). `build_continuation_messages()` synthesizes those messages from the tape; the retry lands on a fallback deployment and the client sees one continuous stream.
-2. **Last-Event-ID replay**: when a client reconnects with `Last-Event-ID`, the tape re-serves deltas after that point (in-process case).
+2. **Last-Event-ID replay**: when a client reconnects with `Last-Event-ID`, the **journal** store re-serves frames after that point. (`StreamTape.replay` is a separate in-process mechanism with no production caller — see the Historical note.)
 
 ---
 
@@ -107,7 +108,7 @@ class default of 100 against a queue of `maxsize=4096`. There is no
 Aborts a stream when the model starts emitting the same content repeatedly (degenerate loop that would otherwise run to the token limit). Uses an incremental periodicity check — the naive whole-window check was O(n²) per token and was replaced with incremental updates. On detection the stream terminates with a **`StreamError`**, not a clean `Finish`: the partial output is priced first, then the error is surfaced. Crucially the failure is charged to the *model*, not the provider — `_note_stream_failure` is deliberately **not** called, so a low-quality model cannot cool a healthy deployment or retire a healthy key (AUDIT #108, pinned by `tests/test_fix_round43.py::test_loop_detection_does_not_penalise_key_health`).
 
 ### Partial JSON (`partial_json.py`)
-Ports the Vercel AI SDK partial-json approach for streaming tool-call arguments: clients can render args as they arrive, and **auto-repair truncated JSON** at close time (appends missing `"`, `]`, `}`) instead of dropping args to `{}`.
+Ports the Vercel AI SDK partial-json approach for streaming tool-call arguments. Only the **repair** half is wired in production: truncated JSON is auto-repaired at close time (appending missing `"`, `]`, `}`) instead of dropping args to `{}`. The incremental-render half (`PartialJSONParser`, `parse_partial`) has **no production caller** — see the Historical note.
 
 ### Tool-args validation (`validation.py`)
 On `ToolCallClose`, validates accumulated args against the tool's JSON schema (`MAX_TOOL_ARGS_BYTES` caps accumulation). Violations are logged via structlog and attached to request metadata (`tool_args_violations`) — the client still receives the tool call, flagged as advisory.
@@ -159,8 +160,8 @@ Encoders consume the delta taxonomy in order; legality is the adapters' guarante
 the distinction matters when reading this page:
 
 - **Partial JSON** — only the *repair* half is wired. `_repair_truncated_json`
-  is called from six sites (both wire codecs, the OpenAI/OpenRouter adapters,
-  the gateway and `resume.py`), but `PartialJSONParser` and `parse_partial`,
+  is called from seven sites (both wire codecs, the OpenAI/OpenRouter adapters,
+  the gateway, `resume.py` and `validation.py`), but `PartialJSONParser` and `parse_partial`,
   which implement "render tool arguments as they arrive", have **no production
   caller** — they are exercised by tests only. Clients do not currently receive
   incremental argument rendering.

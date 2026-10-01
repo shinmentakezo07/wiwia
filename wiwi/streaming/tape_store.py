@@ -34,6 +34,7 @@ import asyncio
 import base64
 import contextlib
 import hashlib
+import os
 import re
 import time
 from pathlib import Path
@@ -47,6 +48,19 @@ import structlog
 # this alphabet is the gate that keeps a crafted id out of another stream's
 # file (AUDIT #191).
 _ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+# os.fsync on a directory fd raises (NotImplementedError/OSError) on platforms
+# without directory fsync (Windows); probe once at import rather than catching
+# per write, so the durable path stays a straight line.
+try:
+    _probe = os.open(os.curdir, os.O_RDONLY)
+    try:
+        os.fsync(_probe)
+    finally:
+        os.close(_probe)
+    _DIR_FSYNC = True
+except OSError:  # pragma: no cover - platform-dependent
+    _DIR_FSYNC = False
 
 log = structlog.get_logger("wiwi.journals")
 
@@ -147,6 +161,47 @@ class StreamJournal:
         self._lock = asyncio.Lock()
         self._last_seq = 0
 
+    @staticmethod
+    def owner_record(key_id: str) -> bytes:
+        """The seq-0 ownership line for *key_id* (schema: see module docstring)."""
+        return orjson.dumps({
+            "seq": 0, "ts": time.time(), "owner": key_id,
+        }) + b"\n"
+
+    def persist_owner_sync(self, key_id: str) -> None:
+        """Write the ownership line, waiting until the OS has it durably.
+
+        Distinct from the fire-and-forget write in ``JournalStore.open``:
+        ``flush`` only moves the bytes to the OS and ``open``'s call runs on a
+        worker thread whose failure is survivable (the in-memory intent still
+        scopes the journal). This method is for the opposite situation — the
+        caller must KNOW the owner line survived, because it is about to
+        promise durability (AUDIT #320): ``os.fsync`` on both the file handle
+        and, where the platform supports it, the directory entry. A crash
+        between "OS acked the write" and "the disk committed it" otherwise
+        loses exactly the line the replay gate reads after restart.
+
+        Raises OSError on failure — the caller decides what failing to
+        persist means. Any bytes written before the failure are fine: the
+        line is idempotent (same shape, fresh ts) and ``owner_of`` reads the
+        first seq-0 line.
+        """
+        with open(self.path, "ab") as fh:
+            fh.write(self.owner_record(key_id))
+            fh.flush()
+            os.fsync(fh.fileno())
+        # The directory entry itself must be durable, or a crash can lose the
+        # FILE RENAME/CREATION while keeping the data blocks (POSIX). Windows
+        # cannot fsync a directory handle; there the create is already
+        # metadata-committed by the close above, which is the best the
+        # platform offers.
+        if _DIR_FSYNC:
+            dfd = os.open(self.path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+
     @property
     def last_seq(self) -> int:
         return self._last_seq
@@ -218,6 +273,13 @@ class JournalStore:
         # owner (pre-#67, legacy, readable by anyone) and one whose owner
         # write was LOST (must be denied). See ``owner_of`` and AUDIT #317.
         self._owner_intent: dict[str, tuple[str, Path]] = {}
+        # Journals whose owner line was made DURABLE (fsync'd) in THIS process
+        # — see :meth:`StreamJournal.persist_owner_sync` and AUDIT #320. The
+        # plain ``_owner_intent`` map records intent regardless of outcome
+        # (#317); this set records the stronger fact that the line is on disk
+        # to stay, so the caller that needs to PROMISE durability (before the
+        # first data frame) can skip a redundant fsync without weakening it.
+        self._durable_intent: set[str] = set()
         self._lock = asyncio.Lock()
         self._sweeper: asyncio.Task | None = None
 
@@ -290,9 +352,7 @@ class JournalStore:
                     # Ownership record: seq=0 keeps it out of every data
                     # replay (read_after filters seq > last_seq with
                     # last_seq >= 0, and data records start at seq 1).
-                    rec = orjson.dumps({
-                        "seq": 0, "ts": time.time(), "owner": key_id,
-                    }) + b"\n"
+                    rec = StreamJournal.owner_record(key_id)
 
                     def _write_owner(path=rec) -> None:
                         with open(j.path, "ab") as fh:
@@ -303,12 +363,37 @@ class JournalStore:
                     except OSError as e:
                         # No longer silent: the operator had no signal that
                         # replay scoping had degraded on a live stream. The
-                        # gate still fails closed via _owner_intent.
+                        # gate still fails closed via _owner_intent, and the
+                        # durable re-persist before the first data frame
+                        # (AUDIT #320) writes the line again with fsync.
                         log.error("journal_owner_write_failed",
                                   request_id=request_id, key_id=key_id,
                                   error=f"{type(e).__name__}: {e}")
                 self._active[request_id] = j
             return j
+
+    def owner_intent_durable(self, request_id: str) -> bool:
+        """True when ``open``'s owner write for *request_id* is known to have
+        been accepted by the OS. Callers use this to skip a redundant durable
+        re-persist."""
+        return request_id in self._durable_intent
+
+    def note_owner_durable(self, request_id: str) -> None:
+        """Record that the owner line for *request_id* was made durable by an
+        explicit fsync (see :meth:`StreamJournal.persist_owner_sync`)."""
+        self._durable_intent.add(request_id)
+
+    def has_owner_intent(self, request_id: str) -> bool:
+        """True when THIS process recorded ownership work for *request_id*.
+
+        After a restart this is unknowable from disk alone — a lineless file
+        is equally consistent with "pre-#67 legacy" and "the line never
+        landed" — which is precisely why the durable owner write is made
+        PRIMARY before any data frame (see ``persist_owner_sync`` and
+        ``server/app.py``): a journal that carries data always carries its
+        owner, so ``owner_of`` scopes it and the gate never has to guess.
+        """
+        return request_id in self._owner_intent
 
     def owner_of(self, request_id: str) -> str | None:
         """The originating key id recorded at open(), or None.
@@ -439,6 +524,8 @@ class JournalStore:
         for rid in [r for r, (_k, p) in self._owner_intent.items()
                     if p in unlinked]:
             self._owner_intent.pop(rid, None)
+        self._durable_intent -= {rid for rid in self._durable_intent
+                                 if self.path_for(rid) in unlinked}
 
     async def sweep_async(self, now: float | None = None) -> int:
         """Sweep, reclaiming intents back on the event loop."""
