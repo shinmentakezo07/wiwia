@@ -2650,14 +2650,25 @@ def create_app(config: WiwiConfig) -> FastAPI:
                          retry_after: float | None = None) -> None:
         """Refuse a websocket before accept, with a readable HTTP status.
 
-        Starlette's pre-accept close is reported to the client as a failed
-        handshake carrying the close code as the status, so a 401 reads as a
-        401 rather than as an opaque socket failure. That is the whole point of
-        refusing here instead of after ``accept``.
+        Sends a literal ``websocket.http.response.start``/``.body`` pair rather
+        than calling ``ws.close()``. A close issued before accept is reported to
+        the client as a *generic* handshake rejection — uvicorn answers 403 for
+        any of them, discarding the code — so a bad key and an unknown model
+        were indistinguishable to the client. Writing the response by hand is
+        what makes a 401 read as a 401, which is the whole reason for refusing
+        here rather than after ``accept``.
         """
-        await ws.close(code=status, reason=msg[:120])
+        body = orjson.dumps(oc.error_body(status, etype, msg))
+        headers = [(b"content-type", b"application/json"),
+                   (b"content-length", str(len(body)).encode())]
+        if retry_after is not None:
+            headers.append((b"retry-after",
+                            str(int(max(1.0, retry_after))).encode()))
+        await ws.send({"type": "websocket.http.response.start",
+                       "status": status, "headers": headers})
+        await ws.send({"type": "websocket.http.response.body", "body": body})
         app.state.wiwi.logs.log_proxy(
-            "realtime_refused", f"{status} {etype}: {msg}")
+            "warn", f"realtime refused {status} {etype}: {msg}")
 
     @app.websocket("/v1/realtime")
     async def realtime_endpoint(ws: WebSocket):
@@ -2762,10 +2773,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     },
                     open_timeout=10.0,
                     max_size=16 * 1024 * 1024) as upstream:
-                usage = await _realtime_relay(ws, upstream, ctx, info, dep,
-                                              rt)
+                usage = await _realtime_relay(ws, upstream, rt)
         except (OSError, websockets.WebSocketException) as exc:
-            app.state.wiwi.logs.log_proxy("realtime_upstream_error", str(exc)[:200])
+            _rt_log.warning("realtime upstream connection failed",
+                            error=str(exc)[:200], model=model)
             usage = None
         finally:
             dep.inflight -= 1

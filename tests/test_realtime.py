@@ -10,6 +10,7 @@ decided before a single frame moves.
 
 import asyncio
 import contextlib
+import threading
 
 import pytest
 import websockets
@@ -37,17 +38,19 @@ BAD_KEY = "sk-wiwi-not-a-real-key-at-all"
 class FakeRealtimeServer:
     """Echoes every text frame back, then emits any scripted follow-up frames.
 
-    ``serve_future`` runs the server on the *test's* event loop, so no thread and
-    no second loop are involved: the relay talks to a genuine socket, but the
-    whole test is one asyncio program.
+    Runs on its **own** thread and event loop, not the test's. Starlette's
+    ``TestClient`` drives the app on a separate portal loop and blocks this one
+    while the test body runs, so a server sharing the test's loop could never
+    accept a connection while the route was trying to make one.
     """
 
     def __init__(self) -> None:
         self.received: list[str] = []
         self.followups: list[str] = []
         self.connections = 0
-        self.server = None
         self.url = ""
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._ready = threading.Event()
 
     async def _handler(self, ws) -> None:
         self.connections += 1
@@ -60,26 +63,57 @@ class FakeRealtimeServer:
         except websockets.ConnectionClosed:
             pass
 
-    async def start(self) -> str:
-        self.server = await websockets.serve(
-            self._handler, "127.0.0.1", 0, compression=None)
-        self.url = f"ws://127.0.0.1:{next(iter(self.server.sockets)).getsockname()[1]}"
+    def start(self) -> str:
+        self._loop = asyncio.new_event_loop()
+
+        def run() -> None:
+            asyncio.set_event_loop(self._loop)
+            self._loop.run_until_complete(self._serve())
+            # Signalled once the listener is bound and the URL is known — after
+            # run_forever, which never returns, would hang the wait forever.
+            self._ready.set()
+            self._loop.run_forever()
+
+        threading.Thread(target=run, daemon=True).start()
+        if not self._ready.wait(timeout=5):
+            raise RuntimeError("fake realtime upstream did not start")
         return self.url
 
-    async def stop(self) -> None:
-        if self.server is not None:
-            self.server.close()
-            await self.server.wait_closed()
+    async def _serve(self) -> None:
+        server = await websockets.serve(
+            self._handler, "127.0.0.1", 0, compression=None)
+        self.url = (f"ws://127.0.0.1:"
+                    f"{next(iter(server.sockets)).getsockname()[1]}")
+        self._server = server
+
+    def stop(self) -> None:
+        """Stop the loop and close it on its own thread.
+
+        ``loop.close()`` from another thread raises "Cannot close a running event
+        loop", so the close has to be scheduled *onto* the loop before it stops.
+        """
+        if self._loop is None:
+            return
+        closed = threading.Event()
+
+        def shutdown() -> None:
+            self._loop.stop()
+            self._loop.close()
+            closed.set()
+
+        with contextlib.suppress(RuntimeError):
+            self._loop.call_soon_threadsafe(shutdown)
+        closed.wait(timeout=5)
 
 
 @pytest.fixture
-async def upstream():
+def upstream():
     server = FakeRealtimeServer()
-    await server.start()
+    server.start()
     try:
         yield server
     finally:
-        await server.stop()
+        server.stop()
 
 
 def _config(provider: str = "openai-compatible", enabled: bool = True,
@@ -98,20 +132,25 @@ def _config(provider: str = "openai-compatible", enabled: bool = True,
     )
 
 
-def _refusal(app, path: str = "/v1/realtime?model=m",
-             key: str = MASTER) -> str:
-    """Connect, expect a refusal, and return how it surfaced to the client.
+def _refusal_status(app, path: str = "/v1/realtime?model=m",
+                    key: str = MASTER) -> int | None:
+    """Connect expecting a refusal; return the HTTP status the client saw.
 
-    Starlette reports a pre-accept ``close(code=N)`` as a failed handshake whose
-    status is N, which is what makes a 401 readable on this surface.
+    A close issued before ``accept`` is reported as a *generic* handshake
+    rejection (uvicorn answers 403 for any of them), so the route writes a real
+    ``websocket.http.response.start`` instead. Reading the status here is what
+    proves a 401 is distinguishable from a 404 for the client — the property the
+    whole before-accept design exists to deliver.
     """
+    from starlette.testclient import WebSocketDenialResponse
+
     with TestClient(app) as client:
         try:
             with client.websocket_connect(
                     path, headers={"authorization": f"Bearer {key}"}):
-                return "ACCEPTED"
-        except Exception as exc:  # noqa: BLE001 — the refusal *is* the assertion
-            return f"{type(exc).__name__}: {exc}"
+                return None
+        except WebSocketDenialResponse as exc:
+            return exc.status_code
 
 
 # --- admission happens before accept -----------------------------------------
@@ -119,20 +158,20 @@ def _refusal(app, path: str = "/v1/realtime?model=m",
 
 def test_realtime_is_off_by_default(upstream):
     app = app_mod.create_app(_config(enabled=False))
-    assert "ACCEPTED" not in _refusal(app)
+    assert _refusal_status(app) is not None
     assert upstream.connections == 0
 
 
 def test_a_bad_key_is_refused_before_the_upstream_is_dialled(upstream):
     app = app_mod.create_app(_config())
-    assert "ACCEPTED" not in _refusal(app, key=BAD_KEY)
+    assert _refusal_status(app, key=BAD_KEY) == 401
     # The property that matters: a refused admission opens no upstream socket.
     assert upstream.connections == 0
 
 
 def test_an_unknown_model_is_refused_before_the_upstream_is_dialled(upstream):
     app = app_mod.create_app(_config())
-    assert "ACCEPTED" not in _refusal(app, path="/v1/realtime?model=nope")
+    assert _refusal_status(app, path="/v1/realtime?model=nope") == 404
     assert upstream.connections == 0
 
 
@@ -140,13 +179,13 @@ def test_a_provider_without_a_realtime_surface_is_refused(upstream):
     """Anthropic has no Realtime protocol. The client must learn that at
     upgrade, not by hanging on a socket that will never open."""
     app = app_mod.create_app(_config(provider="anthropic"))
-    assert "ACCEPTED" not in _refusal(app)
+    assert _refusal_status(app) == 501
     assert upstream.connections == 0
 
 
 def test_a_missing_model_is_refused(upstream):
     app = app_mod.create_app(_config())
-    assert "ACCEPTED" not in _refusal(app, path="/v1/realtime")
+    assert _refusal_status(app, path="/v1/realtime") == 404
     assert upstream.connections == 0
 
 
@@ -244,3 +283,45 @@ def test_a_malformed_frame_yields_no_usage_rather_than_raising():
     assert _realtime_usage('{"type":"response.done"}') is None
     assert _realtime_usage('{"usage":"not-an-object"}') is None
     assert _realtime_usage('{"usage":{"input_tokens":null}}') == (0, 0)
+
+
+async def test_the_route_reaches_the_relay_and_upstream(upstream):
+    """End-to-end through the route: a real client socket, wiwi, a real
+    upstream socket.
+
+    The unit tests below call ``_realtime_relay`` directly, so they cannot catch
+    a mismatch between the route's call and the helper's signature — which is
+    exactly the bug this test was added for (the route raised TypeError at the
+    first frame, so the session closed at accept and nothing ever reached the
+    upstream).
+    """
+    import contextlib as _c
+    from unittest.mock import patch
+
+    from starlette.testclient import TestClient
+
+    app = app_mod.create_app(_config(base_url=upstream.url))
+    seen: list[str] = []
+    # Captured before the patch: the fake must dial with the *real* connect,
+    # or patching the module attribute would also intercept its own call.
+    real_connect = websockets.connect
+
+    @_c.asynccontextmanager
+    async def fake_connect(url, **kwargs):
+        async with real_connect(url, **kwargs) as real:
+            seen.append(url)
+            yield real
+
+    with (patch("wiwi.server.app.websockets.connect", fake_connect),
+          TestClient(app) as client,
+          client.websocket_connect(
+              "/v1/realtime?model=m",
+              headers={"authorization": f"Bearer {MASTER}"}) as ws):
+        ws.send_text('{"type":"response.create"}')
+        assert ws.receive_text() == '{"type":"response.create"}'
+
+    # The adapter derives the realtime URL from the deployment's base_url:
+    # http://host:port/v1 -> ws://host:port/v1/realtime. Asserting the exact
+    # dialed URL is what proves the derivation, not just that *a* socket opened.
+    assert seen == [upstream.url.rstrip("/") + "/realtime"]
+    assert upstream.received == ['{"type":"response.create"}']
