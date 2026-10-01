@@ -9,13 +9,16 @@ import os
 import secrets
 import sys
 import time
+import uuid as _uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import httpx
 import orjson
-from fastapi import FastAPI, Request
+import structlog
+import websockets
+from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
@@ -163,7 +166,7 @@ from wiwi.logging_core.events import LogEvent
 from wiwi.logging_core.subsystem import LoggingSubsystem, encode_sse, public_dict
 from wiwi.providers import cline_oauth, workbuddy_auth
 from wiwi.providers.base import ProviderKeyRef, WiwiError
-from wiwi.providers.registry import fresh_adapter
+from wiwi.providers.registry import fresh_adapter, get_adapter
 from wiwi.providers.workbuddy_auto_refresh import refresh_key_now
 from wiwi.ratelimit.memory import RateLimiter
 from wiwi.router.router import (
@@ -173,6 +176,7 @@ from wiwi.router.router import (
     ProviderKey,
     Router,
     _default_base_url,
+    _refund_deployment_slot,
 )
 from wiwi.server import stats as stats_mod
 from wiwi.server.config_store import ConfigStore, ConfigStoreNotFound
@@ -329,6 +333,132 @@ def _request_is_https(request: Request,
     # trusted proxies (mirrors _client_ip's reading of X-Forwarded-For).
     first = fwd.split(",")[0].strip().lower()
     return first == "https"
+
+
+_rt_log = structlog.get_logger("wiwi.realtime")
+
+
+async def _close_quietly(ws) -> None:
+    """Close *ws*, tolerating an already-closed peer.
+
+    Both relay directions close the other socket as they finish, so a peer that
+    ended first will already be closed here — and Starlette's ``websockets``
+    client raises rather than no-op in that case.
+    """
+    with contextlib.suppress(Exception):
+        await ws.close()
+
+
+def _realtime_usage(text: str) -> tuple[int, int] | None:
+    """Extract ``(prompt, completion)`` from a usage-bearing session event.
+
+    Reads defensively: a frame that is not JSON, or that carries no ``usage``,
+    yields None instead of raising. A malformed frame must never tear down a
+    live audio session — the relay's job is to carry bytes, and failing to bill
+    one event under-counts one turn, while raising drops the call.
+    """
+    try:
+        event = orjson.loads(text)
+    except orjson.JSONDecodeError:
+        return None
+    if not isinstance(event, dict):
+        return None
+    response = event.get("response")
+    usage = event.get("usage")
+    if not isinstance(usage, dict) and isinstance(response, dict):
+        usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    try:
+        return (int(usage.get("input_tokens") or 0),
+                int(usage.get("output_tokens") or 0))
+    except (TypeError, ValueError):
+        return None
+
+
+async def _realtime_relay(client_ws, upstream_ws, rt_settings) -> tuple[int, int] | None:
+    """Pump text frames both ways until either side closes or the cap fires.
+
+    Frames pass through byte-for-byte in both directions. The realtime session
+    protocol is stateful and ordered — ``session.update`` mutates server-side
+    state that later turns depend on, and conversation items are referenced
+    rather than resent — so wiwi reads it and never rewrites it.
+
+    Returns the session's peak ``(prompt, completion)`` pair, or None.
+    """
+    peak: list[tuple[int, int]] = []
+
+    async def from_client() -> None:
+        try:
+            async for frame in client_ws.iter_text():
+                await upstream_ws.send(frame)
+        except Exception as exc:  # noqa: BLE001 — ends this direction only
+            # A client disconnecting mid-session is the normal end of a
+            # realtime call, not an error worth a stack trace. Recorded as
+            # debug so an operator can still see *why* a session ended.
+            _rt_log.debug("realtime client stream ended", error=str(exc)[:200])
+        finally:
+            await _close_quietly(upstream_ws)
+
+    async def from_upstream() -> None:
+        try:
+            async for frame in upstream_ws:
+                # Bill on the peak, never the sum. response.done and the
+                # preceding item-done events restate overlapping windows of the
+                # same conversation, and a resumed response restates its input,
+                # so summing inflates every multi-turn session.
+                if '"usage"' in frame:
+                    got = _realtime_usage(frame)
+                    if got is not None and (
+                            not peak or got[0] + got[1] > peak[0][0] + peak[0][1]):
+                        peak[:] = [got]
+                await client_ws.send_text(frame)
+        except Exception as exc:  # noqa: BLE001
+            _rt_log.debug("realtime upstream stream ended", error=str(exc)[:200])
+        finally:
+            await _close_quietly(client_ws)
+
+    tasks = [asyncio.ensure_future(from_client()),
+             asyncio.ensure_future(from_upstream())]
+    try:
+        await asyncio.wait(tasks, timeout=rt_settings.max_session_s,
+                           return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    return peak[0] if peak else None
+
+
+async def _bill_realtime_session(state, info, ctx, dep,
+                                 usage: tuple[int, int]) -> None:
+    """Price one realtime session and write its single request-log row.
+
+    Billed on the *peak* usage the upstream reported, not the sum of its events,
+    and charged exactly once — at close. Per-event rows would cost a DB write per
+    audio-chunk batch and make the request log unreadable; per-turn charges
+    would double-count, because the realtime protocol restates overlapping
+    windows of the same conversation across several events.
+    """
+    prompt_tokens, completion_tokens = usage
+    if prompt_tokens <= 0 and completion_tokens <= 0:
+        return
+    model_key = f"{dep.provider.provider_type}/{dep.model_id}"
+    priced = state.cost.cost(
+        model_key, prompt_tokens, completion_tokens,
+        provider_type=dep.provider.provider_type,
+        provider_name=dep.provider.name)
+    ctx.usage = ir.Usage(prompt_tokens=prompt_tokens,
+                         completion_tokens=completion_tokens)
+    ctx.deployment = dep
+    dep.settle_tokens(ctx.request_id, prompt_tokens + completion_tokens)
+    ctx.cost = priced
+    ctx.stop_reason = "realtime_session"
+    ctx.status = 200
+    if state.auth is not None:
+        with contextlib.suppress(Exception):
+            await state.auth.record_spend(info.key_id, priced, ctx)
+    state.logs.log_request(build_log_event(ctx))
 
 
 class _AttemptThrottle:
@@ -2507,6 +2637,143 @@ def create_app(config: WiwiConfig) -> FastAPI:
         for name in sorted(app.state.wiwi.router.groups.keys()):
             data.append({"id": name, "object": "model", "owned_by": "wiwi"})
         return ORJSONResponse({"object": "list", "data": data})
+
+    # -- realtime (spec E) ------------------------------------------------------
+    #
+    # Every admission decision happens BEFORE ``accept()``. Once the client has
+    # seen 101 it believes it has a session, and a refusal after that point can
+    # only arrive as a close frame the client cannot map to a status. Closing
+    # before accept makes Starlette answer with a real HTTP error response, so
+    # a bad key is a readable 401 and an unknown model a readable 404, exactly
+    # as on the request/response surfaces.
+    async def _ws_refuse(ws: WebSocket, status: int, etype: str, msg: str,
+                         retry_after: float | None = None) -> None:
+        """Refuse a websocket before accept, with a readable HTTP status.
+
+        Starlette's pre-accept close is reported to the client as a failed
+        handshake carrying the close code as the status, so a 401 reads as a
+        401 rather than as an opaque socket failure. That is the whole point of
+        refusing here instead of after ``accept``.
+        """
+        await ws.close(code=status, reason=msg[:120])
+        app.state.wiwi.logs.log_proxy(
+            "realtime_refused", f"{status} {etype}: {msg}")
+
+    @app.websocket("/v1/realtime")
+    async def realtime_endpoint(ws: WebSocket):
+        rt = config.realtime
+        if not rt.enabled:
+            await _ws_refuse(ws, 404, "invalid_request_error",
+                             "the realtime surface is disabled"
+                             " (realtime.enabled=false)")
+            return
+
+        token = (ws.headers.get("authorization", "") or "")
+        if token.lower().startswith("bearer "):
+            token = token[7:].strip()
+        else:
+            token = (ws.headers.get("x-api-key") or "").strip()
+        if not token and rt.allow_key_in_query:
+            token = (ws.query_params.get("key") or "").strip()
+        if not token:
+            await _ws_refuse(ws, 401, "authentication_error",
+                             "missing API key; send it in Authorization or"
+                             " x-api-key" + (" (realtime.allow_key_in_query is"
+                             " off, so ?key= is not accepted)" if not
+                             rt.allow_key_in_query else ""))
+            return
+
+        model = (ws.query_params.get("model") or "").strip()
+        session_id = (ws.query_params.get("session_id")
+                      or ws.headers.get("x-wiwi-session-id") or "").strip()[:128]
+
+        if state.auth is None:
+            await _ws_refuse(ws, 500, "api_error", "gateway not initialized")
+            return
+        info = await state.auth.authenticate(token)
+        if info is None or info.disabled or (
+                info.expires_at and time.time() > info.expires_at):
+            await _ws_refuse(ws, 401, "authentication_error",
+                             "invalid API key")
+            return
+        if info.over_budget:
+            await _ws_refuse(ws, 402, "budget_exceeded",
+                             f"budget exhausted ({info.spend_to_date:.4f}"
+                             f"/{info.max_budget})")
+            return
+        if info.models and model and model != "*" and model not in info.models:
+            await _ws_refuse(ws, 403, "permission_error",
+                             f"key not allowed for model '{model}'")
+            return
+
+        group_name, deps = state.router.resolve_group(model)
+        if group_name is None or not deps:
+            await _ws_refuse(ws, 404, "invalid_request_error",
+                             f"unknown model '{model}'; pass ?model=<group>")
+            return
+
+        ctx = RequestContext(surface="chat", ir_req=ir.Request(
+            model=model, messages=[],
+            gen_params=ir.GenParams()),
+            auth=info, group=group_name,
+            request_id=_uuid.uuid4().hex[:16],
+            session_id=session_id or None)
+
+        # The deployment pick reuses pick_deployment wholesale, so cooldowns,
+        # probation, rpm/tpm, the concurrency cap, the priority lane and
+        # session affinity all apply to realtime sessions exactly as they do to
+        # HTTP requests. No separate admission path to keep in sync.
+        dep = state.router.pick_deployment(deps, ctx)
+        if dep is None:
+            shed = ctx.metadata.get("shed_reason") == "inflight"
+            await _ws_refuse(
+                ws, 503, "server_overloaded" if shed else "service_unavailable",
+                (f"all deployments for '{group_name}' are at their concurrency"
+                 " limit") if shed else
+                (f"no healthy deployment for '{group_name}'"))
+            return
+
+        key, _weight = await dep.provider.pick_key(
+            probation_weight=state.router.probation_weight)
+        if key is None:
+            _refund_deployment_slot(dep, ctx)
+            await _ws_refuse(ws, 503, "service_unavailable",
+                             f"no available key for '{dep.provider.name}'")
+            return
+
+        adapter = get_adapter(dep.provider.provider_type)
+        url = adapter.realtime_url(dep.provider.base_url)
+        if url is None:
+            _refund_deployment_slot(dep, ctx)
+            await _ws_refuse(ws, 501, "not_implemented",
+                             f"provider type '{dep.provider.provider_type}'"
+                             " has no realtime surface")
+            return
+
+        # From here the session exists upstream; every path must close it.
+        dep.inflight += 1  # hold the slot for the whole session, not one turn
+        await ws.accept()
+        try:
+            async with websockets.connect(
+                    url,
+                    additional_headers={
+                        "Authorization": f"Bearer {key.secret}",
+                        "OpenAI-Beta": "realtime=v1",
+                    },
+                    open_timeout=10.0,
+                    max_size=16 * 1024 * 1024) as upstream:
+                usage = await _realtime_relay(ws, upstream, ctx, info, dep,
+                                              rt)
+        except (OSError, websockets.WebSocketException) as exc:
+            app.state.wiwi.logs.log_proxy("realtime_upstream_error", str(exc)[:200])
+            usage = None
+        finally:
+            dep.inflight -= 1
+            _refund_deployment_slot(dep, ctx)
+            with contextlib.suppress(Exception):
+                await ws.close()
+        if usage is not None:
+            await _bill_realtime_session(state, info, ctx, dep, usage)
 
     @app.get("/health")
     async def health():
