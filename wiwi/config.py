@@ -450,6 +450,21 @@ class WiwiSettings(BaseModel):
     public_url: str = ""
 
 
+class TelemetrySettings(BaseModel):
+    """OTLP trace export. Off unless a collector is configured.
+
+    Free when disabled: the facade degrades to a no-op both when ``enabled`` is
+    false and when the ``[otel]`` extra is absent, so tracing can never become a
+    serving dependency.
+    """
+
+    enabled: bool = False
+    endpoint: str = ""            # e.g. http://localhost:4318/v1/traces
+    service_name: str = "wiwi"
+    sample_ratio: float = 1.0     # 0..1, applied to trace roots only
+    headers: dict[str, str] = Field(default_factory=dict)
+
+
 class WiwiConfig(BaseModel):
     providers: list[ProviderDef] = Field(default_factory=list)
     model_list: list[ModelEntry] = Field(default_factory=list)
@@ -458,6 +473,7 @@ class WiwiConfig(BaseModel):
     wiwi_settings: WiwiSettings = Field(default_factory=WiwiSettings)
     cache_settings: CacheSettings = Field(default_factory=CacheSettings)
     healer: HealerSettings = Field(default_factory=HealerSettings)
+    telemetry: TelemetrySettings = Field(default_factory=TelemetrySettings)
 
     @model_validator(mode="after")
     def _fill_provider_timeouts(self) -> WiwiConfig:

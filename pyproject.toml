@@ -34,6 +34,11 @@ dev = [
   "hypothesis>=6.100",
 ]
 redis = ["redis>=5.0"]
+otel = [
+  "opentelemetry-api>=1.20",
+  "opentelemetry-sdk>=1.20",
+  "opentelemetry-exporter-otlp-proto-http>=1.20",
+]
 
 [project.scripts]
 wiwi = "wiwi.main:cli"
