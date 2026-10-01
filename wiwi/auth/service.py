@@ -105,6 +105,11 @@ class AuthInfo:
     expires_at: float | None = None
     disabled: bool = False
     owner_id: str | None = None
+    # Lane name for router concurrency lanes (RouterSettings.priority_lanes).
+    # None means "no lane declared", which the router reads as ``default_lane``.
+    # Never a capacity grant: a lane only bounds what this key may hold, so an
+    # unset lane is the safer of the two defaults.
+    priority: str | None = None
 
     @property
     def over_budget(self) -> bool:
@@ -130,6 +135,7 @@ CREATE TABLE IF NOT EXISTS vkeys (
   expires_at DOUBLE PRECISION,
   disabled INTEGER NOT NULL DEFAULT 0,
   owner_id TEXT,
+  priority TEXT,
   created_at DOUBLE PRECISION NOT NULL,
   updated_at DOUBLE PRECISION NOT NULL
 );
@@ -223,6 +229,11 @@ class AuthService:
                 await conn.execute(sa.text(
                     "ALTER TABLE vkeys ADD COLUMN"
                     " budget_reserved DOUBLE PRECISION NOT NULL DEFAULT 0"))
+            # Additive migration: priority lane for the key. Idempotent and
+            # nullable, so existing keys read as "no lane" and land on
+            # ``default_lane`` — never a silent capacity upgrade.
+            if "priority" not in cols:
+                await conn.execute(sa.text("ALTER TABLE vkeys ADD COLUMN priority TEXT"))
             if self._is_pg:
                 # Postgres-only: databases created before CREATE_SQL said
                 # DOUBLE PRECISION store these as 4-byte REAL, which floors
@@ -327,7 +338,8 @@ class AuthService:
             row = (await conn.execute(
                 sa.text("SELECT v.id, v.key_alias, v.models, v.max_budget,"
                         " v.spend_to_date, v.rpm, v.tpm, v.expires_at,"
-                        " v.disabled, v.owner_id, v.budget_reserved FROM vkeys v"
+                        " v.disabled, v.owner_id, v.budget_reserved, v.priority"
+                        " FROM vkeys v"
                         " WHERE v.key_hash=:h"
                         " AND (v.owner_id IS NULL OR EXISTS ("
                         "   SELECT 1 FROM users u WHERE u.id = v.owner_id"
@@ -343,6 +355,7 @@ class AuthService:
             models=_json.loads(row[2]), max_budget=row[3], spend_to_date=float(row[4]),
             rpm=row[5], tpm=row[6], expires_at=expires, disabled=bool(row[8]),
             owner_id=row[9], budget_reserved=float(row[10]),
+            priority=row[11],
         )
 
     def evict(self, plaintext: str) -> None:
