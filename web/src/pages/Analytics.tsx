@@ -119,7 +119,7 @@ const METRIC_OPTIONS = [
   { value: "requests", label: "requests" },
   { value: "tokens", label: "tokens" },
   { value: "cost", label: "cost" },
-  { value: "avg_tps", label: "avg tps" },
+  { value: "avg_tps", label: "gen tps (streaming)" },
 ];
 
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
@@ -1317,7 +1317,7 @@ export function AnalyticsPage() {
           featured
           icon={Zap}
           tone="warning"
-          label="avg TPS"
+          label="avg gen TPS"
           value={stats.avgTps.toFixed(1)}
           numeric={stats.avgTps}
           format={(v) => v.toFixed(1)}
@@ -1650,7 +1650,7 @@ export function AnalyticsPage() {
           {breakdown.length === 0 ? (
             <EmptyState>No requests logged yet.</EmptyState>
           ) : (
-            <Table head={[groupDim, "requests", "tokens", "cost", "avg tps", "errors", "share"]}>
+            <Table head={[groupDim, "requests", "tokens", "cost", "gen tps (streaming)", "errors", "share"]}>
               {breakdown.map((r) => {
                 const metricVal =
                   metric === "requests"

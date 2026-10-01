@@ -183,6 +183,10 @@ export interface OverviewStats {
   cache_hit_rate: number;
   tps_avg: number;
   tps_p95: number;
+  /** Share of requests in the window carrying a measurable TPS sample. TPS is
+   *  only recorded for streaming requests, so this is how much traffic the
+   *  tps figures actually describe. */
+  tps_sample_ratio: number;
   ttft_p95_ms: number;
   latency_p95_ms: number;
   cost: number;
@@ -203,6 +207,9 @@ export interface TpsBucket {
   t: number;
   tps_avg: number;
   tps_p95: number;
+  /** Share of requests in this bucket carrying a measurable TPS sample — TPS
+   *  is only recorded for streaming requests. */
+  tps_sample_ratio: number;
 }
 
 export interface TimeseriesResponse {

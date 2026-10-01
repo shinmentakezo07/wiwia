@@ -734,7 +734,7 @@ export function RequestLogsPage() {
               <span key="tc" className="block text-right">Tok cached</span>,
               <span key="tr" className="block text-right">Tok reasoning</span>,
               <span key="to" className="block text-right">Tok out</span>,
-              <span key="tps" className="block text-right">TPS</span>,
+              <span key="tps" className="block text-right">Gen TPS (streaming)</span>,
               <span key="ttft" className="block text-right">TTFT</span>,
               <span key="lat" className="block text-right">Latency</span>,
               <span key="cost" className="block text-right">Cost</span>,

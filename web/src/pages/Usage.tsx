@@ -652,11 +652,19 @@ export function UsagePage() {
         <StatCard
           featured
           icon={Gauge}
-          label="avg tps"
+          label="avg gen tps"
           value={avgTps.toFixed(1)}
           numeric={avgTps}
           format={(v) => v.toFixed(1)}
-          sub={o ? `p95 ${o.tps_p95.toFixed(1)}` : undefined}
+          sub={
+            o
+              ? `p95 ${o.tps_p95.toFixed(1)} · streaming${
+                  typeof o.tps_sample_ratio === "number"
+                    ? ` ${Math.round(o.tps_sample_ratio * 100)}%`
+                    : " only"
+                }`
+              : undefined
+          }
           spark={hourlySeries(tpsPts, nowMs)}
           waiting={!hasTraffic}
         />

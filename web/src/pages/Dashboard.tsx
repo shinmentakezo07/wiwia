@@ -487,6 +487,10 @@ export function DashboardPage() {
     ? logs.filter((l) => l.was_stream).length / logs.length
     : 0;
   const cacheHitRate = o?.cache_hit_rate ?? 0;
+  // Older backends omit tps_sample_ratio; fall back to the bare "streaming"
+  // wording rather than printing NaN%.
+  const tpsSharePct =
+    typeof o?.tps_sample_ratio === "number" ? Math.round(o.tps_sample_ratio * 100) : null;
 
   return (
     <div
@@ -605,11 +609,17 @@ export function DashboardPage() {
         />
         <StatCard
           icon={Gauge}
-          label="avg tps"
+          label="avg gen tps"
           value={o ? o.tps_avg.toFixed(1) : "—"}
           numeric={o?.tps_avg}
           format={(v) => v.toFixed(1)}
-          sub={o ? `p95 ${o.tps_p95.toFixed(1)}` : undefined}
+          sub={
+            o
+              ? `p95 ${o.tps_p95.toFixed(1)} · streaming${
+                  tpsSharePct === null ? " only" : ` ${tpsSharePct}%`
+                }`
+              : undefined
+          }
         />
       </div>
 
@@ -741,7 +751,7 @@ export function DashboardPage() {
           icon={Server}
           right={
             <span className="font-mono text-[11px] text-[var(--admin-text-dim)]">
-              avg {avgTps.toFixed(1)} tok/s
+              avg {avgTps.toFixed(1)} gen tok/s (streaming)
             </span>
           }
         >

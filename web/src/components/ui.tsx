@@ -19,7 +19,7 @@ export function Card(props: { children: ReactNode; className?: string }) {
 
 export function CardHeader(props: { title: ReactNode; subtitle?: ReactNode; right?: ReactNode }) {
   return (
-    <div className="flex items-center justify-between border-b border-[var(--admin-border)] px-5 py-3.5">
+    <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-2 border-b border-[var(--admin-border)] px-5 py-3.5">
       <div className="min-w-0">
         <h3 className="text-[14px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
           {props.title}
@@ -28,7 +28,10 @@ export function CardHeader(props: { title: ReactNode; subtitle?: ReactNode; righ
           <p className="mt-0.5 text-[11px] text-[var(--admin-text-muted)]">{props.subtitle}</p>
         )}
       </div>
-      {props.right}
+      {/* Wraps below the title on narrow viewports. Without it a wide set of
+          controls squeezes the min-w-0 title box below its own text width and
+          the title overflows into them. */}
+      {props.right && <div className="flex flex-wrap items-center gap-2">{props.right}</div>}
     </div>
   );
 }
