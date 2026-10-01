@@ -31,8 +31,13 @@ curl http://localhost:4000/v1/chat/completions \
 OpenAI Responses API shape, used by Codex CLI and the OpenAI Agents SDK. Hosted tools (`web_search`, `code_interpreter`, …) translate through the IR builtin-tool registry to the backing provider.
 
 - Auth: `Authorization: Bearer sk-wiwi-…`
-- Body: Responses JSON (`model`, `input`, `stream`, `instructions`, `tools`, …)
+- Body: Responses JSON (`model`, `input`, `stream`, `instructions`, `tools`, `store`, `previous_response_id`, …)
 - Events (streaming): Responses SSE event names (`response.created`, `response.output_text.delta`, `response.completed`, …)
+
+**State (default on).** A completed response is stored and may be continued by id: send `previous_response_id` with the next `input` instead of resending the transcript. The id in the response (`resp_<request-id>`) is wiwi's, not the upstream's, and reads/deletes are **scoped to the presenting key** — another key's id is a `404`, exactly as if it never existed. `store: false` opts a single request out of persistence, and `previous_response_id: <gone id>` is a `404 not_found_error`. Turn it off globally with `wiwi_settings.store_responses: false`.
+
+- `GET /v1/responses/{id}` — replay the stored response object (404 when absent, expired, or another key's).
+- `DELETE /v1/responses/{id}` — `{"id": …, "object": "response.deleted", "deleted": true}`; 404 when nothing was removed.
 
 ### `POST /v1/messages` — Anthropic Messages dialect
 
