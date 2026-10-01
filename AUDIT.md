@@ -7487,6 +7487,8 @@ codec + IR support + adapter branches + registry coverage), not a doc fix.
 
 **Status: fixed** (docs) — both files now list only the implemented surfaces and mark `/v1/completions` and `/v1/embeddings` as not implemented.
 
+**Update 2026-10-01:** `/v1/completions` itself is now built (spec A): `wiwi/wire/openai_completions.py` + `POST /v1/completions`, served through `run_chat_like`. `/v1/embeddings` remains unbuilt by choice.
+
 ### 214. `tiktoken` was imported but undeclared — a clean `uv sync` silently degraded cost/budget accounting
 
 **Severity:** 🟠 High (spend enforcement silently falls back to a heuristic)

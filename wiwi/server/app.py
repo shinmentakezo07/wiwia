@@ -178,6 +178,7 @@ from wiwi.server.config_store import ConfigStore
 from wiwi.streaming.tape_store import JournalStore
 from wiwi.wire import anthropic_messages as am
 from wiwi.wire import openai_chat as oc
+from wiwi.wire import openai_completions as ocmpl
 from wiwi.wire import openai_responses as orp
 
 # Playground keys are minted automatically on login/signup, so they must be
@@ -1346,6 +1347,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return "messages"
         if path.startswith("/v1/responses"):
             return "responses"
+        if path.startswith("/v1/completions"):
+            return "completions"
         return "chat"
 
     def _error_body_for(surface: str):
@@ -1682,6 +1685,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if surface == "chat":
             return oc.ChatStreamEncoder(model, req_id,
                                         include_usage=include_usage), "chat"
+        if surface == "completions":
+            return ocmpl.CompletionStreamEncoder(
+                model, req_id, include_usage=include_usage), "chat"
         if surface == "messages":
             return am.AnthropicStreamEncoder(model, req_id), "anthropic"
         return orp.ResponsesStreamEncoder(model, req_id), "responses"
@@ -1937,6 +1943,21 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return jerr
         return await run_chat_like(request, "responses", body, orp.decode_request,
                                    orp.encode_response)
+
+    @app.post("/v1/completions")
+    async def completions_api(request: Request):
+        """Legacy OpenAI text completions: one prompt in, ``choices[].text`` out.
+
+        Served through ``run_chat_like`` like every other surface, so auth,
+        routing, retries, budgets, logging and billing are identical. The
+        dialect has no tool protocol and no roles; the codec maps ``prompt``
+        onto one user message and refuses the parameters the IR cannot carry.
+        """
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        return await run_chat_like(request, "completions", body,
+                                   ocmpl.decode_request, ocmpl.encode_response)
 
     @app.post("/v1/messages")
     async def messages_api(request: Request):

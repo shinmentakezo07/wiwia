@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 from wiwi.ir.types import Request, Usage
 
-Surface = Literal["chat", "responses", "messages"]
+Surface = Literal["chat", "responses", "messages", "completions"]
 
 
 @dataclass

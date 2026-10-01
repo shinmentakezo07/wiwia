@@ -44,6 +44,17 @@ Anthropic Messages API shape, used by Claude Code and the Anthropic SDK. Also ac
 
 A client that calls `/v1/messages` gets Anthropic-format responses even if the backing deployment is OpenAI — cross-dialect translation happens through the IR.
 
+### `POST /v1/completions` — legacy OpenAI Completions dialect
+
+The original OpenAI `text_completion` shape: a bare `prompt`, no roles, no tool protocol. Used by older SDKs and by clients that predate `chat/completions`.
+
+- Auth: `Authorization: Bearer sk-wiwi-…`
+- Body: `model`, `prompt` (string), `suffix`, `max_tokens`/`max_completion_tokens`, `temperature`, `top_p`, `stop`, `seed`, `n`, `stream`, `stream_options.include_usage`
+- Returns: `{"id":"cmpl-<request-id>","object":"text_completion","model":…,"choices":[{"index":0,"text":…,"logprobs":null,"finish_reason":…}],"usage":{…}}`; streaming emits `text_completion` chunks then `data: [DONE]`
+- Errors: OpenAI-shaped error body.
+
+Refused with `400 invalid_request_error` (no IR representation — refusing beats silently ignoring a parameter the caller sent): `logprobs`, `best_of > 1`, `echo`, `n > 1`, and `prompt` as a token-id array or a multi-element string array. `prompt` is mapped onto one user message; a prompt string plus `suffix` is concatenated.
+
 ### `POST /v1/messages/count_tokens`
 
 Anthropic token counting. Estimates tokens for the given Messages request (chars/4 heuristic when the provider doesn't expose a counting endpoint).
@@ -197,6 +208,7 @@ Roles: normal users see only their own keys' usage in `/app/*`; admins see the f
 | Surface | Shape |
 |---|---|
 | OpenAI Chat | `{"error": {"message", "type", "code"}}` |
+| OpenAI Completions | `{"error": {"message", "type", "code"}}` (same envelope as Chat) |
 | OpenAI Responses | Responses-style error event / object |
 | Anthropic Messages | `{"type":"error","error":{"type":"<anthropic_error_type>","message":…}}` |
 
