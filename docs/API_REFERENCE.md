@@ -82,6 +82,7 @@ OpenAI-style model list of the model groups visible to the authenticated key.
 | `x-wiwi-request-id` | Request ID, echoed on every SSE frame's `id:` field |
 | `x-wiwi-trace-id` | Trace ID (32 hex), only when `telemetry.enabled`. Pair it with the collector to pull the exact trace; see `docs/CONFIG.md` § `telemetry` |
 | `x-wiwi-stream-id` | Stream journal ID — pass back on reconnect to replay |
+| `x-wiwi-session-id` | Client session identity, used only when `router_settings.session_affinity` is on: pins the session to the deployment that served it so upstream prompt caches stay warm. A pin is dropped the moment that deployment is unhealthy or above this request's lane ceiling. Also accepted as a `session_id` query parameter for clients that cannot set headers; truncated to 128 chars. |
 | `Last-Event-ID` | SSE standard header; reconnect replays missed frames |
 
 Stream journals are ON by default (`.wiwi/journals/`, 600 s TTL, 1 MiB cap): a client reconnecting with `x-wiwi-stream-id` + `Last-Event-ID` replays missed frames even after a wiwi restart. Mid-stream provider death resumes from the tape on a fallback deployment (continuation messages are synthesized from partial output).
@@ -104,8 +105,8 @@ Stream journals are ON by default (`.wiwi/journals/`, 600 s TTL, 1 MiB cap): a c
 | Endpoint | Method | Description |
 |---|---|---|
 | `/admin/keys` | GET | List virtual keys (hashed at rest; never returns plaintext). |
-| `/admin/keys/generate` | POST | Mint a key. Body: name, models, budget, rpm/tpm, expiry. **Plaintext `sk-wiwi-…` returned only here.** |
-| `/admin/keys/{key_id}` | PATCH | Update name/models/budget/limits. |
+| `/admin/keys/generate` | POST | Mint a key. Body: name, models, budget, rpm/tpm, expiry, `priority` (lane name). **Plaintext `sk-wiwi-…` returned only here.** |
+| `/admin/keys/{key_id}` | PATCH | Update name/models/budget/limits/lane. `priority` is operator-only: a key's owner cannot change their own lane. |
 | `/admin/keys/{key_id}` | DELETE | Revoke a key. |
 | `/admin/keys/{key_id}/disable` | POST | Disable without deleting. |
 
@@ -218,7 +219,7 @@ Roles: normal users see only their own keys' usage in `/app/*`; admins see the f
 | OpenAI Responses | Responses-style error event / object |
 | Anthropic Messages | `{"type":"error","error":{"type":"<anthropic_error_type>","message":…}}` |
 
-Common status codes: `401` (bad key), `402` (budget cap exceeded), `404` (unknown model/group), `413` (body too large), `429` (rate limit), `502`/`503` (upstream unavailable after retries/failover).
+Common status codes: `401` (bad key), `402` (budget cap exceeded), `404` (unknown model/group), `413` (body too large), `429` (rate limit — a per-key or per-deployment quota with a horizon), `502`/`503` (upstream unavailable after retries/failover), `503` + `Retry-After` (shed: every deployment for the group is at its concurrency ceiling for this request's lane — saturated now, not quota spent).
 
 ## 7. Worked examples
 
@@ -236,6 +237,11 @@ curl -X POST localhost:4000/admin/keys/generate -H "$MK" \
   -d '{"name": "team-a", "max_budget": 10, "rpm": 60, "tpm": 100000,
        "models": ["gpt-4o"], "ttl_seconds": 86400}'
 # → {"key":"sk-wiwi-...","id":"k...","note":"store this key now..."}
+
+# mint into a priority lane — must name a lane in router_settings.priority_lanes,
+# or the call is a 400 rather than a silent fall back to default_lane
+curl -X POST localhost:4000/admin/keys/generate -H "$MK" \
+  -d '{"name": "nightly", "priority": "bulk"}'
 
 curl localhost:4000/admin/keys -H "$MK"
 curl -X PATCH  localhost:4000/admin/keys/<id> -H "$MK" -d '{"max_budget": 20}'
