@@ -174,7 +174,8 @@ from wiwi.router.router import (
     _default_base_url,
 )
 from wiwi.server import stats as stats_mod
-from wiwi.server.config_store import ConfigStore
+from wiwi.server.config_store import ConfigStore, ConfigStoreNotFound
+from wiwi.server.response_store import ResponseStore
 from wiwi.streaming.tape_store import JournalStore
 from wiwi.wire import anthropic_messages as am
 from wiwi.wire import openai_chat as oc
@@ -698,6 +699,7 @@ class AppState:
         self.gateways: dict[str, Gateway] = {}
         self.alert_rules: list[dict[str, Any]] = []
         self.config_store: ConfigStore | None = None
+        self.response_store: ResponseStore | None = None
         self.users: UserService | None = None
         # Pending Cline OAuth sessions for the automatic (redirect-based)
         # connect flow: state_token → {provider, created_at}. Consumed once
@@ -820,6 +822,10 @@ class AppState:
         # Persist admin-added providers/keys/deployments so they survive restart
         self.config_store = ConfigStore(aengine)
         await self.config_store.startup()
+        if self.config.wiwi_settings.store_responses:
+            self.response_store = ResponseStore(
+                aengine, self.config.wiwi_settings.response_store_ttl_s)
+            await self.response_store.startup()
         await self._load_db_config()
         self.gateways = {
             "chat": Gateway(self.router, self.cost,
@@ -1021,6 +1027,9 @@ async def lifespan(app: FastAPI):
     state.healer = HealthHealer(state.router, state.config.healer,
                                 log_proxy=state.router.log_proxy)
     state.healer.start()
+    # Persisted Responses state (spec B): TTL sweeper for stored_responses.
+    if state.response_store is not None:
+        state.response_store.start()
     # Reconcile persisted Cline default-model settings (one global model
     # id → one Deployment per Cline account under ``cline:<model_id>``).
     if state.config_store is not None:
@@ -1039,6 +1048,8 @@ async def lifespan(app: FastAPI):
         await state.journals.stop()
     if state.healer is not None:
         await state.healer.stop()
+    if state.response_store is not None:
+        await state.response_store.stop()
     if state.opencode_refresh is not None:
         await state.opencode_refresh.stop()
     if state.cline_version_refresh is not None:
@@ -1135,6 +1146,26 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return False
         return hmac.compare_digest(bearer(request).encode(), mk.encode())
 
+    async def _model_group_is_unpriced(group: str) -> bool:
+        """True when nothing in *group*'s deployment set has a pricing row.
+
+        Best-effort admission signal for ``unpriced_model_policy`` (AUDIT
+        #323): ``resolve_group`` returns ``(name, deployments)``, and the
+        gateway later prices through ``f"{provider_type}/{model_id}"``.
+        An unresolvable deployment would cost nothing either, so it counts as
+        unpriced. False when *any* deployment is priced — the gateway may
+        legally route there, and that path is billed normally.
+        """
+        resolved, deps = state.router.resolve_group(group)
+        if not resolved or not deps:
+            return True
+        cost = state.cost
+        for dep in deps:
+            if cost._lookup(f"{dep.provider.provider_type}/{dep.model_id}",
+                            dep.provider.provider_type, dep.provider.name):
+                return False
+        return True
+
     async def authenticate(request: Request, model: str, surface: str = "chat",
                            bearer_token: str | None = None):
         """Resolve and vet the caller's credential. Does NOT reserve rate-limit
@@ -1177,6 +1208,23 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return None, _err(402, "budget_exceeded",
                               f"budget exhausted ({info.spend_to_date:.4f}"
                               f"/{info.max_budget})", request, surface)
+        # Fail closed on unpriced models when the operator asked for it
+        # (AUDIT #323): CostEngine prices a missing row at $0 and
+        # update_spend waves a non-positive charge through, so on the old
+        # behaviour an unpriced model accrued zero spend forever and
+        # max_budget never tripped. "warn" (default) keeps serving but tags
+        # the request so the log/metrics expose it; "reject" refuses with
+        # 503 — the model exists, the *pricing* is missing server-side, so
+        # 4xx would tell the client a lie about whose fault this is.
+        if (model and model != "*" and info.max_budget is not None
+                and config.general_settings.unpriced_model_policy == "reject"
+                and await _model_group_is_unpriced(model)):
+            return None, _err(
+                503, "unpriced_model_error",
+                f"model '{model}' has no pricing entry; budget-capped keys are"
+                " refused until an admin prices it"
+                " (general_settings.unpriced_model_policy=reject)",
+                request, surface)
         # "" / "*" = endpoint is not model-scoped (e.g. GET /v1/models):
         # listing never violates an allowlist, only real completions do
         if info.models and model and model != "*" and model not in info.models:
@@ -1207,7 +1255,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 info.key_id, u.prompt_tokens + u.completion_tokens,
                 request_id=ctx.request_id)
 
-    async def record_spend(key_id: str, cost: float) -> bool:
+    async def record_spend(key_id: str, cost: float, ctx: RequestContext | None = None) -> bool:
         """Charge *cost* to *key_id*, returning False when the cap refused it.
 
         A False return means ``update_spend``'s conditional UPDATE was
@@ -1241,6 +1289,17 @@ def create_app(config: WiwiConfig) -> FastAPI:
         the AUDIT #24 defect (a 500/402 after a successful completion) wearing
         a different status code.
         """
+        # An admission-time reservation (AUDIT #324) is admission-scoped: the
+        # moment a real charge exists, the reservation is redundant (the cap
+        # gate now reads spend directly) and would double-count the same
+        # dollars if left in place — the conditional UPDATE below tests
+        # ``spend_to_date + cost <= max_budget``, which a stale reservation
+        # would make spuriously fail. Release first, then charge once.
+        if ctx.budget_reserved > 0:
+            with contextlib.suppress(Exception):
+                await state.auth.release_budget_reservation(
+                    key_id, ctx.budget_reserved)
+            ctx.budget_reserved = 0.0
         try:
             recorded = await state.auth.update_spend(key_id, cost)
         except Exception as e:  # noqa: BLE001 — accounting must never 500 a served turn
@@ -1275,6 +1334,21 @@ def create_app(config: WiwiConfig) -> FastAPI:
         ``_record_tpm_usage`` too: :meth:`RateLimiter.release` only removes
         still-estimated reservations, never confirmed usage.
         """
+        if info is not None and ctx.budget_reserved > 0:
+            # The budget reservation is admission-scoped exactly like the
+            # rate-limit slot: a request that died before producing usage
+            # never consumed the dollars it reserved, so holding the
+            # reservation would permanently shrink the key's cap for the
+            # process lifetime (AUDIT #324). RELEASE, not settle — the
+            # estimate is given back untouched, because billing it would
+            # charge requests that never ran. Every early return between
+            # reserve and settle funnels through here; the success path
+            # zeroes ``budget_reserved`` after settling, so this is a no-op
+            # there.
+            with contextlib.suppress(Exception):
+                await state.auth.release_budget_reservation(
+                    info.key_id, ctx.budget_reserved)
+            ctx.budget_reserved = 0.0
         if info is None:
             return
         u = ctx.usage
@@ -1284,6 +1358,51 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return
         with contextlib.suppress(Exception):
             await state.limiter.release(info.key_id, request_id=ctx.request_id)
+
+    async def _persist_journal_owner(state_, journal, journal_id, info) -> bool:
+        """Make a journal's ownership line durable before data flows (AUDIT #320).
+
+        ``open()`` writes the owner line best-effort — correct for in-process
+        scoping, where the RAM intent already fails the gate closed on a lost
+        write (#317). But the RAM intent dies with the process, and "the
+        process died before the line landed" is on disk indistinguishable
+        from "the line was lost while the process lived": after a restart the
+        gate read ``None`` and treated the journal as legacy-and-open, so a
+        caller holding a *different* key could replay another tenant's
+        response.
+
+        The fix is to make the durable owner write PRIMARY: this fsyncs the
+        ownership line and runs BEFORE the first data frame is journaled, so
+        a journal that carries data always carries a durable owner too —
+        after any restart, ``owner_of`` scopes it correctly. Returns False
+        when the line could not be persisted (ENOSPC, read-only mount): the
+        caller must then refuse the stream (503) rather than write tenant
+        data into a journal that would be ownerless on disk. Failing closed
+        here is the audit's own fix sketch — the alternative (best-effort
+        persist) is exactly the hole.
+
+        Master streams are exempt: their journals are explicitly readable
+        only by master (the gate's ``jowner == "master"`` arm), and an
+        unscoped-line journal written by master would after a restart read as
+        legacy-open — which for a master-only content set is the documented
+        pre-#67 behaviour, not a cross-tenant leak.
+        """
+        kid = getattr(info, "key_id", None)
+        if (journal is None or kid is None or kid == "master"
+                or state_.journals.owner_intent_durable(journal_id)):
+            return True
+        try:
+            await asyncio.to_thread(journal.persist_owner_sync, kid)
+            state_.journals.note_owner_durable(journal_id)
+            return True
+        except OSError as e:
+            state_.logs.log_proxy(
+                "error",
+                f"journal owner persist failed for {journal_id}; refusing the"
+                f" stream rather than writing ownerless replay data:"
+                f" {type(e).__name__}: {e}",
+                journal_id)
+            return False
 
     async def _abandon_journal(state_, journal, journal_id) -> None:
         """Close and drop a journal opened for an attempt that failed before
@@ -1380,6 +1499,57 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     # -- shared execution ------------------------------------------------------
 
+    def _stored_input_items(body: dict[str, Any]) -> list[dict[str, Any]]:
+        """The request's input items, normalized for replay on the next turn.
+
+        A bare string prompt replays as a message item; everything else must
+        already be a list of item dicts. Without this, a first-turn string
+        prompt stored as-is would not decode on replay.
+        """
+        raw = body.get("input")
+        if isinstance(raw, str):
+            return [{"type": "message", "role": "user", "content": raw}]
+        if isinstance(raw, list):
+            return [i for i in raw if isinstance(i, dict)]
+        return []
+
+    def _streamed_response_payload(ctx, model: str, text: list[str],
+                                   thinking: list[str],
+                                   tools: dict[int, dict[str, Any]]) -> dict[str, Any]:
+        """Assemble the dialect response object for a *streamed* turn.
+
+        The stream encoder emits events as they arrive and keeps no final
+        object, so the stored copy is rebuilt here from the same accumulators
+        the spend log uses — same item ordering and ids as ``encode_response``,
+        so the stored response is indistinguishable from a non-streamed one.
+        """
+        req_id = ctx.request_id
+        out: list[dict[str, Any]] = []
+        out_id = 0
+        for i, t in enumerate(thinking):
+            out.append(orp._reasoning_item(t, req_id, i))
+            out_id += 1
+        joined = "".join(text)
+        if joined or not tools:
+            out.append(orp._message_item(joined, req_id))
+            out_id += 1
+        for _, tc in sorted(tools.items()):
+            if tc.get("builtin") is not None:
+                out.append(orp._builtin_call_item(tc["id"], tc.get("query", ""),
+                                                  tc["builtin"]))
+            else:
+                out.append(orp._function_call_item(
+                    f"fc_{req_id}_{out_id}", tc["id"], tc["name"],
+                    "".join(tc["_args"])))
+            out_id += 1
+        u = getattr(ctx, "_stream_usage", None)
+        usage = orp._usage_obj(u.prompt, u.output, u.cached, u.reasoning) if u else \
+            orp._usage_obj(ctx.usage.prompt_tokens if ctx.usage else 0,
+                           ctx.usage.completion_tokens if ctx.usage else 0,
+                           ctx.usage.cached_tokens if ctx.usage else 0,
+                           ctx.usage.reasoning_tokens if ctx.usage else 0)
+        return orp._response_obj(model, req_id, ctx.stop_reason or "stop", out, usage)
+
     def _serialize_turn(turn: ir.AssistantTurn, payload: Any) -> dict[str, Any]:
         """Build a JSON-serializable snapshot of the model's response."""
         return {
@@ -1400,8 +1570,28 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     async def run_chat_like(request: Request, surface: str, body: dict[str, Any],
                             codec_decode, codec_encode_response,
-                            bearer_token: str | None = None):
+                            bearer_token: str | None = None,
+                            codec_history=None, store_response: bool = False):
         state_ = app.state.wiwi
+        # Stored Responses state (spec B). A response id is only meaningful to
+        # the key that owns it, so identity is established before the transcript
+        # is read — an id must never act as a capability token. Auth here is the
+        # same ``authenticate`` the request would run anyway; the object it
+        # resolves is reused by the call below.
+        if (codec_history is not None and isinstance(body, dict)
+                and body.get("previous_response_id")):
+            info0, err0 = await authenticate(request, str(body.get("model") or ""),
+                                             surface, bearer_token=bearer_token)
+            if err0:
+                return err0
+            store = state_.response_store
+            prev = (await store.get(body["previous_response_id"], info0.key_id)
+                    if store is not None else None)
+            if prev is None:
+                return _err(404, "not_found_error",
+                            f"response '{body['previous_response_id']}' not found",
+                            request, surface)
+            body = codec_history(body, prev.output.get("output", []))
         try:
             ir_req = codec_decode(body)
         except (oc.DialectError, ValueError) as e:
@@ -1428,14 +1618,71 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 and not first_hop.force_mapping
                 and group != ir_req.model):
             resp_model = group
+        # AUDIT #323, policy "warn" (default): a budget-capped key serving an
+        # unpriced model keeps working — back-compat with the old $0 behaviour
+        # — but the response is tagged so the bypass is observable instead of
+        # silent. Mirrors the reject branch's guard in authenticate(): the
+        # policy only ever concerns real completions on capped virtual keys.
+        unpriced_model = ""
+        if (info.key_type != "master" and info.max_budget is not None
+                and ir_req.model and ir_req.model != "*"
+                and config.general_settings.unpriced_model_policy == "warn"
+                and await _model_group_is_unpriced(ir_req.model)):
+            unpriced_model = ir_req.model
         import uuid as _uuid
         request_id = _uuid.uuid4().hex[:16]
         rl_err = await enforce_rate_limit(info, est, request, surface, request_id)
         if rl_err:
             return rl_err
+        # Budget reservation at admission (AUDIT #324). The old gate was a
+        # non-atomic read at authenticate() plus a conditional UPDATE only
+        # *after* the upstream had served the request, so the TOCTOU window
+        # spanned the whole upstream call and overspend scaled with
+        # concurrency (measured 250× at 500 concurrent). The reserve is a
+        # conditional UPDATE of its own — N concurrent admissions against
+        # single-request headroom now admit exactly one.
+        #
+        # Estimate: the request's serialized size / 4 (the same estimator the
+        # TPM path uses, reconciled to actual usage at pricing time), plus a
+        # small output allowance so a huge-prompt/small-cap request cannot
+        # bill past the cap on output tokens alone.
+        reserved = 0.0
+        if info.key_type != "master" and info.max_budget is not None:
+            est_spend = est / 4.0 * 1e-6 + 0.000_1
+            if est_spend > 0:
+                try:
+                    ok = await state.auth.reserve_budget(info.key_id, est_spend)
+                except Exception:  # noqa: BLE001 — a reserve outage must not 500
+                    state.spend_charge_failures += 1
+                    state.logs.log_proxy(
+                        "error",
+                        f"budget reservation failed for key {info.key_id};"
+                        " admission gate degrades to post-hoc", request_id)
+                    ok = False
+                if not ok:
+                    # Refused at the cap: same contract as the pre-flight
+                    # branch in authenticate() — 402, never 429.
+                    refused = RequestContext(
+                        surface=surface, ir_req=ir_req, auth=info, group=group,
+                        request_id=request_id, status=402)
+                    refused.error = WiwiError(402, "budget_exceeded",
+                                              "budget exhausted at admission")
+                    state_.logs.log_request(build_log_event(refused))
+                    return _err(402, "budget_exceeded",
+                                f"budget exhausted ({info.spend_to_date:.4f}"
+                                f"/{info.max_budget})", request, surface)
+                reserved = est_spend
         ctx = RequestContext(surface=surface, ir_req=ir_req, auth=info, group=group,
                              request_id=request_id,
                              forward_headers=_forward_headers(request))
+        ctx.budget_reserved = reserved
+        if unpriced_model:
+            # Surfaced to the request log via metadata and to the client via
+            # the x-wiwi-unpriced-model response header below.
+            ctx.metadata["unpriced_model"] = unpriced_model
+        success_headers = {"x-wiwi-request-id": request_id}
+        if unpriced_model:
+            success_headers["x-wiwi-unpriced-model"] = unpriced_model
         # Per-deployment tpm admission needs the request's size up front. The
         # same body-size estimate that feeds the virtual-key limiter is good
         # enough for a sliding-window cap and costs nothing extra; it is
@@ -1465,8 +1712,19 @@ def create_app(config: WiwiConfig) -> FastAPI:
             # fix and stay readable to preserve restart-replay compat.
             jowner = state_.journals.owner_of(replay_id)
             caller_kid = getattr(info, "key_id", None)
-            owner_ok = (jowner is None
-                        or caller_kid == jowner
+            # AUDIT #320: ``jowner is None`` used to mean legacy-and-open.
+            # The #317 in-memory intent cannot survive a restart, so a
+            # journal whose owner line was lost with the process read as
+            # ``None`` here and opened to *any* caller — cross-tenant
+            # replay. ``has_owner_intent`` adds the disk-side signal: a
+            # journal created after this process started was being opened by
+            # the process that died, so its lineless state means "lost", not
+            # "legacy", and the gate fails closed. Only a journal that
+            # predates this process AND carries no owner line is still
+            # legacy-and-open (documented restart-replay compat).
+            owner_ok = (caller_kid == jowner
+                        or (jowner is None
+                            and not state_.journals.has_owner_intent(replay_id))
                         or (jowner == "master" and caller_kid == "master"))
             replay = state_.journals.read_after(replay_id, replay_after)
             complete = state_.journals.is_complete(replay_id)
@@ -1559,8 +1817,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 # would pin the caller to the first completion for the whole
                 # TTL. Only deterministic requests are admitted.
                 and is_cacheable_request(ir_req)):
-            cache_key = response_cache_key(ir_req, group, surface,
-                                           getattr(info, "key_id", ""))
+            cache_key = response_cache_key(
+                ir_req, group, surface, getattr(info, "key_id", ""),
+                # Header-coupled to the body on the Anthropic surface.
+                request.headers.get("anthropic-beta", ""))
             entry = await cache.get(cache_key)
             if entry is not None:
                 ctx.status = 200
@@ -1576,8 +1836,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 await _release_tpm_reservation(info, ctx)
                 return ORJSONResponse(
                     orjson.loads(entry.payload),
-                    headers={"x-wiwi-request-id": ctx.request_id,
-                             "x-wiwi-cache": "HIT"})
+                    headers={**success_headers, "x-wiwi-cache": "HIT"})
         try:
             if ir_req.stream:
                 encoder_pair = _encoder_for(surface, resp_model, ctx.request_id,
@@ -1614,10 +1873,38 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     await stream.aclose()
                     await _abandon_journal(state_, journal, journal_id)
                     raise
+                # The upstream connected and the first delta exists: this
+                # journal WILL carry client-visible data, so its ownership
+                # line must be durable before that data is readable (AUDIT
+                # #320). Deliberately after the connect-failure branches — a
+                # failed connect abandons the journal and no client ever
+                # replays it, so persisting first would only add an fsync to
+                # every error path. If the durable persist itself fails, the
+                # stream is refused: writing tenant data into a journal that
+                # would be ownerless on disk is the cross-tenant replay hole,
+                # just one restart later.
+                if not await _persist_journal_owner(state_, journal,
+                                                    journal_id, info):
+                    await stream.aclose()
+                    await _abandon_journal(state_, journal, journal_id)
+                    ctx.status = 503
+                    ctx.error = WiwiError(
+                        503, "api_error",
+                        "stream replay journal unavailable; retry")
+                    state_.logs.log_request(build_log_event(ctx))
+                    await _release_tpm_reservation(info, ctx)
+                    return _err(503, "api_error",
+                                "stream replay journal unavailable; retry",
+                                request, surface)
                 it = _stream_response(state_, ctx, encoder_pair, surface,
                                       stream, first, journal=journal,
                                       journal_id=journal_id,
-                                      event_ids=config.router_settings.stream_event_ids)
+                                      event_ids=config.router_settings.stream_event_ids,
+                                      response_store=(state_.response_store
+                                                      if store_response else None),
+                                      store_body=body,
+                                      store_model=resp_model,
+                                      store_group=group or ir_req.model)
                 return StreamingResponse(
                     it,
                     media_type="text/event-stream",
@@ -1628,22 +1915,30 @@ def create_app(config: WiwiConfig) -> FastAPI:
                              # long turn. /admin/stream already set this; the
                              # inference surfaces did not (AUDIT #156).
                              "x-accel-buffering": "no",
-                             "x-wiwi-request-id": ctx.request_id})
+                             **success_headers})
             turn = await gateway.complete(ctx)
             ctx.status = 200
             payload = codec_encode_response(ctx, turn, resp_model, ctx.request_id)
             if config.wiwi_settings.store_prompts_in_spend_logs:
                 ctx.metadata["response_body"] = _serialize_turn(turn, payload)
             await _record_tpm_usage(info, ctx)
+            # The admission reservation (AUDIT #324) has done its job — the
+            # cap bound at dispatch time. The charge itself goes through
+            # record_spend like every other request, which releases the
+            # reservation before the conditional UPDATE so the same dollars
+            # are never tested twice, and keeps the crossing/true-up/402
+            # semantics pinned by rounds 45, 55 and #179 intact (a charge
+            # that crosses the cap is still real money: recorded, and the
+            # response refused).
             if (info and info.key_type != "master"
-                    and not await record_spend(info.key_id, ctx.cost)):
-                ctx.status = 402
-                # Log exactly once: the over-budget status replaces the
-                # success event, so the request is not double-counted in
-                # stats/rollups (AUDIT #90).
-                state_.logs.log_request(build_log_event(ctx))
-                return _err(402, "budget_exceeded",
-                            "virtual key budget exhausted", request, surface)
+                    and not await record_spend(info.key_id, ctx.cost, ctx)):
+                    ctx.status = 402
+                    # Log exactly once: the over-budget status replaces the
+                    # success event, so the request is not double-counted in
+                    # stats/rollups (AUDIT #90).
+                    state_.logs.log_request(build_log_event(ctx))
+                    return _err(402, "budget_exceeded",
+                                "virtual key budget exhausted", request, surface)
             # Cache only AFTER the budget decision (AUDIT #116): caching above
             # this point stored the payload of a request that is about to be
             # refused with 402, and the hit path serves it as a free 200 with
@@ -1659,8 +1954,17 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         model=resp_model,
                     ))
                 ctx.metadata["response_cached"] = True
+            if (store_response and state_.response_store is not None
+                    and body.get("store") is not False):
+                # Persist the dialect response object so GET replays it verbatim,
+                # and the request's normalized input items so the next turn can be
+                # rebuilt. ``store: false`` opts out per request.
+                await state_.response_store.put(
+                    f"resp_{ctx.request_id}",
+                    info.key_id if info is not None else "master",
+                    group or ir_req.model, _stored_input_items(body), payload)
             state_.logs.log_request(build_log_event(ctx))
-            return ORJSONResponse(payload, headers={"x-wiwi-request-id": ctx.request_id})
+            return ORJSONResponse(payload, headers=success_headers)
         except Exception as e:  # noqa: BLE001
             if isinstance(e, WiwiError):
                 ctx.status = e.status
@@ -1727,7 +2031,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     async def _stream_response(state_, ctx, encoder_pair, surface,
                                stream, first=None, event_ids=False,
-                               journal=None, journal_id=None):
+                               journal=None, journal_id=None,
+                               response_store=None, store_body=None,
+                               store_model="", store_group=""):
         from wiwi.streaming import deltas as dl
         encoder, style = encoder_pair
         errored = False
@@ -1742,6 +2048,19 @@ def create_app(config: WiwiConfig) -> FastAPI:
             # which is what makes the reconnect gate correct (AUDIT #117).
             journal = await state_.journals.open(
                 journal_id, key_id=getattr(ctx.auth, "key_id", None))
+            # Same durability contract as the pre-dispatch site (AUDIT #320):
+            # this generator is about to emit its first chunk into the
+            # journal, so the owner line must be on disk first. If it cannot
+            # be made durable, drop the journal entirely — nothing was
+            # written yet, so nothing ownerless reaches disk.
+            if not await _persist_journal_owner(state_, journal, journal_id,
+                                                ctx.auth):
+                with contextlib.suppress(Exception):
+                    await journal.aclose()
+                state_.journals.release(journal_id)
+                with contextlib.suppress(OSError):
+                    journal.path.unlink(missing_ok=True)
+                journal = None
         stream_text: list[str] = []
         stream_thinking: list[str] = []
         stream_tools: dict[int, dict[str, Any]] = {}
@@ -1783,15 +2102,39 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 }
             state_.logs.log_request(build_log_event(ctx))
             await _record_tpm_usage(ctx.auth, ctx)
-            if (ctx.usage and ctx.auth and ctx.auth.key_type != "master"
-                    and not await record_spend(ctx.auth.key_id, ctx.cost)):
-                # The response has already been streamed, so a budget breach
-                # can't turn into a 402 here. record_spend still trues up the
-                # charge — the upstream billed it — which is what makes the
-                # *next* request fail admission instead of letting spend run
-                # past the cap forever (AUDIT_REPORT C1).
-                ctx.status = 402
-                ctx.metadata["budget_exceeded"] = True
+            if (response_store is not None and not errored
+                    and store_body is not None and store_body.get("store") is not False):
+                # Streamed turns are stored too: the accumulated text/tool calls
+                # are the same content the non-streaming path serializes, so a
+                # streamed response can be continued by id like any other.
+                with contextlib.suppress(Exception):
+                    await response_store.put(
+                        f"resp_{ctx.request_id}",
+                        ctx.auth.key_id if ctx.auth else "master",
+                        store_group, _stored_input_items(store_body),
+                        _streamed_response_payload(
+                            ctx, store_model, stream_text, stream_thinking,
+                            stream_tools))
+            if ctx.auth and ctx.auth.key_type != "master":
+                if ctx.usage:
+                    # The response was already streamed, so a budget breach
+                    # can't turn into a 402 here. record_spend releases the
+                    # admission reservation before the conditional UPDATE (so
+                    # the cap test is not skewed by stale reserved dollars,
+                    # AUDIT #324) and still trues up the charge — the upstream
+                    # billed it — which is what makes the *next* request fail
+                    # admission instead of letting spend run past the cap
+                    # forever (AUDIT_REPORT C1).
+                    await record_spend(ctx.auth.key_id, ctx.cost, ctx)
+                elif ctx.budget_reserved > 0:
+                    # No usage: the upstream died or the client hung up. The
+                    # tail runs on every exit, so release the reservation
+                    # untouched — the estimate must not be billed for a
+                    # request that produced nothing (AUDIT #324).
+                    with contextlib.suppress(Exception):
+                        await state.auth.release_budget_reservation(
+                            ctx.auth.key_id, ctx.budget_reserved)
+                    ctx.budget_reserved = 0.0
 
         try:
             async def _emit(chunk: bytes) -> None:
@@ -1942,7 +2285,35 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if jerr:
             return jerr
         return await run_chat_like(request, "responses", body, orp.decode_request,
-                                   orp.encode_response)
+                                   orp.encode_response,
+                                   codec_history=orp.with_history,
+                                   store_response=True)
+
+    @app.get("/v1/responses/{response_id}")
+    async def responses_get(request: Request, response_id: str):
+        """Replay a stored response object. Key-scoped: a foreign id is a 404."""
+        st = app.state.wiwi.response_store
+        info, err_resp = await authenticate(request, "", "responses")
+        if err_resp:
+            return err_resp
+        row = (await st.get(response_id, info.key_id)) if st is not None else None
+        if row is None:
+            return _err(404, "not_found_error", f"response '{response_id}' not found",
+                        request, "responses")
+        return ORJSONResponse(row.output)
+
+    @app.delete("/v1/responses/{response_id}")
+    async def responses_delete(request: Request, response_id: str):
+        st = app.state.wiwi.response_store
+        info, err_resp = await authenticate(request, "", "responses")
+        if err_resp:
+            return err_resp
+        deleted = ((await st.delete(response_id, info.key_id)) if st is not None
+                   else False)
+        if not deleted:
+            return _err(404, "not_found_error", f"response '{response_id}' not found",
+                        request, "responses")
+        return {"id": response_id, "object": "response.deleted", "deleted": True}
 
     @app.post("/v1/completions")
     async def completions_api(request: Request):
@@ -2518,10 +2889,19 @@ def create_app(config: WiwiConfig) -> FastAPI:
             key.recover(force=True)
             diff["reset_status"] = True
         if state.config_store:
-            await state.config_store.update_key(
-                name, label,
-                weight=diff.get("weight"),
-                enabled=diff.get("enabled"))
+            try:
+                await state.config_store.update_key(
+                    name, label,
+                    weight=diff.get("weight"),
+                    enabled=diff.get("enabled"))
+            except ConfigStoreNotFound:
+                # YAML-defined account: no DB row, so the edit applies in
+                # memory only and reverts on restart (AUDIT #319).
+                import structlog
+                structlog.get_logger().warning(
+                    "provider_key_update_not_persisted", provider=name, label=label,
+                    reason="provider is YAML-defined; edit is in-memory only"
+                           " and will not survive restart")
         await state.logs.log_audit(actor="master", action="provider_key.update",
                                    target=f"{name}/{label}", diff=diff)
         return ORJSONResponse({"key": _key_view(key, time.monotonic(), time.time())})
@@ -2582,7 +2962,16 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         f"unknown key '{label}' on provider '{name}'", request)
         acct.keys = [k for k in acct.keys if k.label != label]
         if state.config_store:
-            await state.config_store.delete_key(name, label)
+            try:
+                await state.config_store.delete_key(name, label)
+            except ConfigStoreNotFound:
+                # YAML-defined account: nothing to delete in the DB, so the
+                # key comes back on the next restart (AUDIT #319).
+                import structlog
+                structlog.get_logger().warning("provider_key_delete_not_persisted",
+                            provider=name, label=label,
+                            reason="provider is YAML-defined; delete is "
+                                   "in-memory only and will not survive restart")
         await state.logs.log_audit(actor="master", action="provider_key.delete",
                                    target=f"{name}/{label}")
         return ORJSONResponse({"deleted": True, "label": label})
@@ -2807,7 +3196,19 @@ def create_app(config: WiwiConfig) -> FastAPI:
             if alias_change is not None:
                 update_kwargs["alias_id"] = alias_change[0]
                 update_kwargs["alias_id_set"] = True
-            await state.config_store.update_provider(name, **update_kwargs)
+            try:
+                await state.config_store.update_provider(name, **update_kwargs)
+            except ConfigStoreNotFound:
+                # The account is YAML-defined and so has no DB row to update.
+                # The edit applies in memory for this process and is lost on
+                # restart (AUDIT #319). Rejecting with 409 would be the real
+                # fix, but it would also make every provider un-editable on
+                # the HF Space deployment, where YAML is the only source of
+                # providers — so this stays an in-memory edit and says so.
+                import structlog
+                structlog.get_logger().warning("provider_edit_not_persisted", provider=name,
+                            reason="provider is YAML-defined; edit is "
+                                   "in-memory only and will not survive restart")
         if new_ptype is not None:
             acct.provider_type = new_ptype
         if new_base_url is not None:
@@ -3156,14 +3557,25 @@ def create_app(config: WiwiConfig) -> FastAPI:
                             acct.name)
                     acct.alias_id = p["alias_id"]
                 if state.config_store:
-                    await state.config_store.update_provider(
-                        name, provider_type=p["provider_type"],
-                        base_url=p["base_url"], timeout_s=p["timeout_s"],
-                        extra_headers=p["extra_headers"],
-                        round_robin=p["round_robin"],
-                        alias_id=(p["alias_id"] if p["alias_id_set"]
-                                  else None),
-                        alias_id_set=p["alias_id_set"])
+                    try:
+                        await state.config_store.update_provider(
+                            name, provider_type=p["provider_type"],
+                            base_url=p["base_url"], timeout_s=p["timeout_s"],
+                            extra_headers=p["extra_headers"],
+                            round_robin=p["round_robin"],
+                            alias_id=(p["alias_id"] if p["alias_id_set"]
+                                      else None),
+                            alias_id_set=p["alias_id_set"])
+                    except ConfigStoreNotFound:
+                        # The import upserted a provider the DB has no row for
+                        # (a YAML-defined account). In-memory state is already
+                        # correct; the import simply cannot be persisted for
+                        # it (AUDIT #319).
+                        import structlog
+                        structlog.get_logger().warning(
+                            "provider_import_not_persisted", provider=name,
+                            reason="provider is YAML-defined; import is "
+                                   "in-memory only for this account")
             for k in p["keys"]:
                 n_keys += 1
                 ek = acct.get_key(k["label"])
@@ -4414,12 +4826,32 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if acct is None or not acct.keys:
             return False
         key0 = acct.keys[0]
+        # Persist BEFORE touching memory. A YAML-defined provider has no DB
+        # row, so the write raises; the old ordering had already assigned
+        # ``key0.secret``, leaving the process running on a token that a
+        # restart would silently revert (AUDIT #319). Returning False makes
+        # the OAuth/refresh caller reject the connect rather than report
+        # success on a write that went nowhere.
+        if state.config_store:
+            try:
+                await state.config_store.update_key_secret(provider, key0.label, secret)
+            except ConfigStoreNotFound:
+                # YAML-defined account. Applying it in memory is still correct
+                # for the running process, and refusing here would break OAuth
+                # entirely on YAML-only deployments (the HF Space). Say so.
+                import structlog
+                structlog.get_logger().warning("provider_secret_not_persisted", provider=provider,
+                            label=key0.label,
+                            reason="provider is YAML-defined; rotation is "
+                                   "in-memory only and will not survive restart")
+                key0.secret = secret
+                key0.status = "active"
+                key0.cooldown_until = 0.0
+                return True
         key0.secret = secret
         # Reset runtime cooldown state — the credential just changed.
         key0.status = "active"
         key0.cooldown_until = 0.0
-        if state.config_store:
-            await state.config_store.update_key_secret(provider, key0.label, secret)
         return True
 
     @app.post("/admin/cline/oauth/login-url")

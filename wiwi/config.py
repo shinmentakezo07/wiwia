@@ -375,6 +375,14 @@ class GeneralSettings(BaseModel):
     # trusts neither, so an attacker cannot mint a fresh throttle bucket by
     # rotating the header (AUDIT #73).
     trusted_proxies: list[str] = Field(default_factory=list)
+    # What a virtual key's max_budget means when the resolved model has no
+    # pricing row (AUDIT #323). ``CostEngine`` prices a missing entry at $0,
+    # and ``update_spend`` treats a non-positive charge as success — so on the
+    # default, every unpriced model bypassed every budget forever, silently.
+    #   "warn"       back-compat: serve, mark unpriced (metadata + request log)
+    #   "admit"      serve with no signal at all — pre-#323 behaviour, but named
+    #   "reject"     fail closed: 503 until an admin prices the model
+    unpriced_model_policy: Literal["warn", "admit", "reject"] = "warn"
 
     @field_validator("trusted_proxies", mode="before")
     @classmethod
@@ -410,6 +418,11 @@ class WiwiSettings(BaseModel):
     drop_params: bool = True
     max_request_body_mb: int = 50
     store_prompts_in_spend_logs: bool = False
+    # Responses-API state. With ``store_responses`` False the surface behaves as
+    # it did before persistence existed: the field is accepted, nothing is saved,
+    # and ``previous_response_id`` 404s. ttl_s <= 0 keeps rows forever.
+    store_responses: bool = True
+    response_store_ttl_s: float = 86400.0
     """Prune request_logs older than this many days. 0 = keep forever.
 
     Pruning rolls the doomed rows into ``request_rollups`` first, so totals,
