@@ -74,6 +74,8 @@ def _unwrap_envelope(data: Any) -> Any:
 
 
 class ClineAdapter(OpenAIAdapter):
+    """OpenAI wire format + Cline auth/fingerprint/streaming quirks."""
+
     def realtime_url(self, base_url: str) -> str | None:
         """No Realtime surface here, despite the shared OpenAI wire shape.
 
@@ -86,7 +88,6 @@ class ClineAdapter(OpenAIAdapter):
         mid-session as a closed socket instead of at upgrade as a 501.
         """
         return None
-    """OpenAI wire format + Cline auth/fingerprint/streaming quirks."""
 
     provider_type = "cline"
     force_stream = True  # gateway reads this: upstream has no non-streaming mode

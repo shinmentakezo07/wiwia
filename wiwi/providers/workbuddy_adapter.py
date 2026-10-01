@@ -167,6 +167,8 @@ def _normalize_tool_choice(body: dict[str, Any]) -> None:
 
 
 class WorkBuddyAdapter(OpenAIAdapter):
+    """OpenAI Chat wire format + WorkBuddy auth/streaming/tool_choice quirks."""
+
     def realtime_url(self, base_url: str) -> str | None:
         """No Realtime surface here, despite the shared OpenAI wire shape.
 
@@ -178,7 +180,6 @@ class WorkBuddyAdapter(OpenAIAdapter):
         mid-session as a closed socket instead of at upgrade as a 501.
         """
         return None
-    """OpenAI Chat wire format + WorkBuddy auth/streaming/tool_choice quirks."""
 
     provider_type = "workbuddy"
     force_stream = True  # upstream has no non-streaming mode (code 11101)

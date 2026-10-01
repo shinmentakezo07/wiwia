@@ -325,3 +325,51 @@ async def test_the_route_reaches_the_relay_and_upstream(upstream):
     # dialed URL is what proves the derivation, not just that *a* socket opened.
     assert seen == [upstream.url.rstrip("/") + "/realtime"]
     assert upstream.received == ['{"type":"response.create"}']
+
+
+# --- adapter capability declarations ------------------------------------------
+
+
+def test_every_adapter_still_documents_itself():
+    """A ``realtime_url`` override must not displace the class docstring.
+
+    Inserting a method as the first body of a class turns its docstring into a
+    dead string expression: the class still imports and behaves identically,
+    so every behavioural test stays green while ``__doc__`` silently becomes
+    ``None``. That is how four adapters lost their docs at once.
+
+    Asserted structurally over the whole package rather than per-adapter, since
+    the failure mode is "a method was inserted at the top of some class" and
+    has nothing to do with realtime specifically.
+    """
+    import ast
+    import pathlib
+
+    displaced: list[str] = []
+    for path in sorted((pathlib.Path(__file__).parent.parent / "wiwi" /
+                        "providers").glob("*_adapter.py")):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef) or not node.body:
+                continue
+            first = node.body[0]
+            if isinstance(first, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                displaced.append(f"{path.name}:{node.lineno} {node.name}")
+    assert not displaced, "class docstring displaced by a leading method: " + ", ".join(displaced)
+
+
+def test_only_openai_wire_providers_declare_realtime():
+    """Capability is a declaration, and a wrong one fails mid-session.
+
+    The four adapters that inherit the OpenAI chat shape but have no Realtime
+    protocol must answer ``None`` so the client gets a 501 at upgrade, rather
+    than completing a handshake against a URL that 404s and dying as a closed
+    socket once the session is already live.
+    """
+    from wiwi.providers.registry import PROVIDER_TYPES, get_adapter
+
+    declared = {t: get_adapter(t).realtime_url("https://api.example.com")
+                for t in PROVIDER_TYPES}
+    with_realtime = {t for t, u in declared.items() if u is not None}
+    assert with_realtime == {"openai", "openai-compatible", "gmicloud", "bai"}
+    assert declared["openai"] == "wss://api.example.com/realtime"

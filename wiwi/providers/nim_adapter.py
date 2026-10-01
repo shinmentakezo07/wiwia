@@ -87,6 +87,8 @@ def _token_count(value: Any) -> int:
 
 
 class NimAdapter(OpenAIAdapter):
+    """NVIDIA NIM: extends OpenAI adapter with NIM-specific translations."""
+
     def realtime_url(self, base_url: str) -> str | None:
         """No Realtime surface here, despite the shared OpenAI wire shape.
 
@@ -99,7 +101,6 @@ class NimAdapter(OpenAIAdapter):
         mid-session as a closed socket instead of at upgrade as a 501.
         """
         return None
-    """NVIDIA NIM: extends OpenAI adapter with NIM-specific translations."""
 
     provider_type = "nvidia-nim"
 

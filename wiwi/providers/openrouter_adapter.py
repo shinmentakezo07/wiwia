@@ -51,6 +51,15 @@ def _token_count(value: Any) -> int:
 
 
 class OpenRouterAdapter(OpenAIAdapter):
+    """OpenRouter: extends OpenAI adapter with OpenRouter-specific translations.
+
+    Key translations:
+    - ``reasoning_effort`` / ``thinking_budget``  →  ``reasoning: {effort|max_tokens}``
+    - ``reasoning_details`` array  →  IR ``ThinkingPart`` (text/summary/encrypted)
+    - mid-stream ``error`` + ``finish_reason:"error"``  →  ``StreamError``
+    - ``max_tokens``  →  ``max_completion_tokens`` (deprecated → preferred)
+    """
+
     def realtime_url(self, base_url: str) -> str | None:
         """No Realtime surface here, despite the shared OpenAI wire shape.
 
@@ -63,14 +72,6 @@ class OpenRouterAdapter(OpenAIAdapter):
         mid-session as a closed socket instead of at upgrade as a 501.
         """
         return None
-    """OpenRouter: extends OpenAI adapter with OpenRouter-specific translations.
-
-    Key translations:
-    - ``reasoning_effort`` / ``thinking_budget``  →  ``reasoning: {effort|max_tokens}``
-    - ``reasoning_details`` array  →  IR ``ThinkingPart`` (text/summary/encrypted)
-    - mid-stream ``error`` + ``finish_reason:"error"``  →  ``StreamError``
-    - ``max_tokens``  →  ``max_completion_tokens`` (deprecated → preferred)
-    """
 
     provider_type = "openrouter"
 

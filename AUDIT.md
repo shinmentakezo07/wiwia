@@ -9970,7 +9970,38 @@ All of `test_fix_round43/45/55/81` pass unmodified except one round-45
 assertion updated for the #324 semantics (`call_count == 0`: a request that
 cannot fit is now refused before dispatch, so the upstream is never called).
 
+### 342. Four provider adapters lost their class docstrings to a leading method
+
+**Severity:** 🟡 Medium · **Status: fixed — docstring restored above the method**
+**Files:** `wiwi/providers/{openrouter,cline,nim,workbuddy}_adapter.py` (commit `0320a88`)
+
+Adding `realtime_url()` to the four adapters that must *not* declare a Realtime
+surface inserted the method as the **first** statement of each class. Python
+only reads a class docstring when it is the first statement, so each of the four
+original docstrings — the ones listing the adapter's key translations and
+streaming quirks — became a dead string expression evaluated after
+`return None`.
+
+The failure is invisible to every behavioural test: the classes import, build
+URLs, encode, decode and stream exactly as before. `__doc__` alone becomes
+`None`. Nothing reads `__doc__` in this repo, so the only real loss was the
+translation tables that record *why* each adapter behaves as it does.
+
+**Fix:** the class docstring moved back above `realtime_url` in all four files.
+No logic changed; each diff is the docstring relocating by one statement.
+
+**Verified:** `__doc__` is live again for all four classes; `realtime_url` still
+returns `None` for each (the capability claim is unchanged), and the four
+`wss://`-declaring providers still return a URL.
+
+**Test:** `tests/test_realtime.py::test_every_adapter_still_documents_itself`
+asserts structurally, over the whole adapter package, that no class body opens
+with a method. Confirmed to fail on the reintroduced defect, naming file, line
+and class. `::test_only_openai_wire_providers_declare_realtime` pins the
+capability set itself.
+
 ---
+
 
 ## Notes on this sweep
 
