@@ -51,20 +51,22 @@ def test_build_log_event_with_none_usage_no_tokens():
     assert evt.tok_out == 0
 
 
-# -- R1b: non-streaming TPS computed from total latency --------------------------
-# OpenRouter reports throughput (output tokens/sec) for all requests, not just
-# streaming ones.  For non-streaming requests where first_token_at is never set,
-# TPS must fall back to completion_tokens / total_latency.
+# -- R1b: non-streaming requests report no TPS -----------------------------------
+# INVERTED in round 117. This test used to assert a non-streaming request's TPS
+# fell back to completion_tokens / total_latency. That fallback made TPS mean
+# two different things in one quantile family — generation-phase for streaming,
+# whole round-trip (queueing and prefill included) for non-streaming. TPS is
+# output generation speed, so a request with no separable generation phase now
+# reports 0.0 and is covered by `tps_sample_ratio` instead of being averaged in.
 def test_build_log_event_non_streaming_tps():
-    """Non-streaming request: TPS from total latency (no first/last_token_at)."""
+    """Non-streaming request: no generation phase -> no TPS (was: 200.0)."""
     ctx = RequestContext(surface="chat", ir_req=ir.Request(model="g", messages=[]))
     ctx.usage = ir.Usage(prompt_tokens=10, completion_tokens=100)
     # Simulate 500ms total latency by shifting started back in time.
     ctx.started = ctx.started - 0.5
     evt = build_log_event(ctx)
     assert evt.tok_out == 100
-    # 100 tokens / 0.5s = 200 tps
-    assert abs(evt.tps - 200.0) < 1.0
+    assert evt.tps == 0.0
 
 
 def test_build_log_event_streaming_tps_preferred_over_latency():
@@ -80,16 +82,20 @@ def test_build_log_event_streaming_tps_preferred_over_latency():
     assert abs(evt.tps - 100.0) < 0.1
 
 
-def test_build_log_event_short_stream_falls_back_to_latency():
-    """Stream too short to time (<0.05s): falls back to total latency TPS."""
+def test_build_log_event_short_stream_reports_no_tps():
+    """Stream too short to time (<0.05s) has no usable generation window.
+
+    INVERTED in round 117: this used to fall back to 30 / 0.3 = 100 tps of
+    round-trip latency, reintroducing the second TPS definition for exactly the
+    requests least able to support a rate.
+    """
     ctx = RequestContext(surface="chat", ir_req=ir.Request(model="g", messages=[]))
     ctx.usage = ir.Usage(prompt_tokens=10, completion_tokens=30)
     ctx.first_token_at = ctx.started
     ctx.last_token_at = ctx.started + 0.01  # 10ms — below 0.05 threshold
     ctx.started = ctx.started - 0.3  # 300ms total latency
-    # stream_secs = 0.01 (too short) -> fallback: 30 / 0.3 = 100 tps
     evt = build_log_event(ctx)
-    assert abs(evt.tps - 100.0) < 1.0
+    assert evt.tps == 0.0
 
 
 def test_build_log_event_zero_output_tps_is_zero():

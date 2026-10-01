@@ -914,6 +914,13 @@ Pure functions over `LogEvent` lists — unit-testable without a DB.
 
 Events with `tps == 0` or `ttft_ms == 0` (non-streaming or missing timing) are excluded from those specific aggregates only.
 
+TPS is **output generation speed** — completion tokens over the span between
+first and last token, which excludes queueing and prefill. Only streaming
+requests have a separable generation phase, so only they report a TPS sample.
+Because that exclusion is structural rather than incidental, every TPS
+aggregate ships with a `tps_sample_ratio` (0–1) stating what share of the
+window that figure actually describes.
+
 ---
 
 ## 14. Admin API

@@ -2228,17 +2228,20 @@ def build_log_event(ctx: RequestContext) -> LogEvent:
     stream_secs = ((ctx.last_token_at - ctx.first_token_at)
                    if ctx.first_token_at and ctx.last_token_at else 0.0)
     u = ctx.usage
-    # Throughput (output tokens/sec) — like OpenRouter's "throughput" metric:
-    # for streaming, generation-phase speed (completion_tokens / stream_secs);
-    # for non-streaming or streams too short to time meaningfully, fall back
-    # to total round-trip latency so throughput is always reported when we
-    # have output tokens, not just for streaming requests.
+    # Throughput (output tokens/sec) — OpenRouter's "throughput" metric, and
+    # the generation phase ONLY: completion tokens over the span between the
+    # first and last token, which excludes queueing and prefill.
+    #
+    # A non-streaming request has no separable generation phase (the whole
+    # response arrives at once), so it reports tps == 0 and is excluded from
+    # TPS aggregates. This used to fall back to completion_tokens / total
+    # latency, which put a measure that includes prefill and queueing into the
+    # same quantile family as one that does not. Consumers that need to know
+    # how much of their traffic a TPS figure describes read `tps_sample_ratio`
+    # alongside it.
     tps = 0.0
-    if u and u.completion_tokens > 0:
-        if stream_secs > 0.05:
-            tps = u.completion_tokens / stream_secs
-        elif latency_ms > 50:
-            tps = u.completion_tokens / (latency_ms / 1000)
+    if u and u.completion_tokens > 0 and stream_secs > 0.05:
+        tps = u.completion_tokens / stream_secs
     auth = ctx.auth
     evt = LogEvent(
         stream="request", ts=time.time(), request_id=ctx.request_id,

@@ -18,7 +18,7 @@ import structlog
 
 from wiwi.logging_core import hist as hist_mod
 from wiwi.logging_core.events import LogEvent
-from wiwi.server.stats import VALID_METRICS
+from wiwi.server.stats import VALID_METRICS, tps_sample_ratio
 
 log = structlog.get_logger("wiwi.db_sink")
 
@@ -240,15 +240,16 @@ class _BucketSum:
     """Merged view over a raw bucket row plus its rolled-up counterpart.
 
     Duck-types the column attributes the timeseries reader touches
-    (``tok_*``, ``tps_sum``, ``tps_count``, ``tps_max``), so merging two
-    sources needs no change at the read site.
+    (``tok_*``, ``tps_sum``, ``tps_count``, ``tps_max``, ``req_count``), so
+    merging two sources needs no change at the read site.
 
     Every member is a sum except ``tps_max``, which is a maximum on both
     sides and so is maxed rather than added (AUDIT #150).
     """
 
-    __slots__ = ("tok_cache_creation", "tok_cached", "tok_in", "tok_out",
-                 "tok_reasoning", "tps_count", "tps_max", "tps_sum")
+    __slots__ = ("req_count", "tok_cache_creation", "tok_cached", "tok_in",
+                 "tok_out", "tok_reasoning", "tps_count", "tps_max",
+                 "tps_sum")
 
     def __init__(self, a, b) -> None:
         for f in self.__slots__:
@@ -1420,6 +1421,7 @@ class DBSink:
                 "cache_hit_rate": 0.0,
                 "tps_avg": 0.0,
                 "tps_p95": 0.0,
+                "tps_sample_ratio": 0.0,
                 "ttft_p95_ms": 0.0,
                 "latency_p95_ms": 0.0,
                 "cost": 0.0,
@@ -1466,6 +1468,7 @@ class DBSink:
                        COALESCE(SUM(tok_out), 0) AS tok_out,
                        SUM(CASE WHEN usage_estimated = 1 THEN 1 ELSE 0 END) AS estimated_requests,
                        SUM(CASE WHEN cache_hit = 1 OR tok_cached > 0 THEN 1 ELSE 0 END) AS cache_hits,
+                       SUM(CASE WHEN tps > 0 THEN 1 ELSE 0 END) AS tps_samples,
                        COALESCE(SUM(cost), 0) AS cost,
                        COALESCE(SUM(cache_savings), 0) AS cache_savings
                 FROM request_logs
@@ -1478,6 +1481,13 @@ class DBSink:
             requests = row.requests or 0
             errors = row.errors or 0
             cache_hits = row.cache_hits or 0
+            # Exact count of rows carrying a TPS sample, over the same window
+            # as `requests`. Deliberately NOT len(tps_values): that list is
+            # capped at 5000 rows, so using it as the ratio's numerator would
+            # saturate the ratio at 5000/requests and under-report coverage
+            # precisely on the high-traffic gateways the field exists to
+            # describe honestly.
+            tps_samples_raw = row.tps_samples or 0
 
             # Rows already rolled up and deleted must still count: without this
             # the dashboard would silently shrink every time the cap pruned.
@@ -1553,6 +1563,11 @@ class DBSink:
             "cache_hit_rate": round(cache_hits / requests, 4) if requests else 0.0,
             "tps_avg": round(tps_sum / tps_n, 2) if tps_n else 0.0,
             "tps_p95": round(_pct(tps_values, "tps"), 2),
+            # Coverage of the tps_avg above: only streaming requests with a
+            # measurable generation window carry a sample. The numerator is
+            # the exact per-window count, not the size of the capped sample.
+            "tps_sample_ratio": tps_sample_ratio(
+                tps_samples_raw + roll["tps_count"], requests),
             "ttft_p95_ms": round(_pct(ttft_values, "ttft_ms"), 1),
             "latency_p95_ms": round(_pct(lat_values, "latency_ms"), 1),
             "cost": round((row.cost or 0) + roll["cost"], 6),
@@ -1642,7 +1657,16 @@ class DBSink:
         """DB-backed timeseries with the same dict shape as stats.timeseries().
 
         minutes == 0 means all-time (no ts cutoff).
-        For metric="tps", tps_p95 is approximated as max(tps) in the bucket.
+        For metric="tps", tps_p95 is approximated as max(tps) in the bucket,
+        and tps_sample_ratio is exact per bucket.
+
+        Note on the rollup half of the window: raw rows are filtered by
+        ``ts >= cutoff`` exactly, but a rollup row is included or excluded
+        wholesale by its hour-start ``bucket_ts``, so on a cutoff that falls
+        mid-hour the coverage figure can describe a slightly different span
+        than the raw rows beside it. It never breaks the ``<= 1.0`` bound —
+        numerator and denominator come from the same row — and the same
+        imprecision already applies to the token sums.
 
         *key_ids* scoping semantics (see ``read_requests``):
         - ``None`` → admin / unfiltered.
@@ -1696,7 +1720,7 @@ class DBSink:
         else:
             buckets = [
                 {"t": bucket_start + i * bucket_seconds,
-                 "tps_avg": 0.0, "tps_p95": 0.0}
+                 "tps_avg": 0.0, "tps_p95": 0.0, "tps_sample_ratio": 0.0}
                 for i in range(n_fill)
             ]
         return {"bucket_seconds": bucket_seconds, "metric": metric, "buckets": buckets}
@@ -1740,7 +1764,8 @@ class DBSink:
                        SUM(tok_out) AS tok_out,
                        SUM(CASE WHEN tps > 0 THEN tps ELSE 0 END) AS tps_sum,
                        COUNT(CASE WHEN tps > 0 THEN 1 END) AS tps_count,
-                       MAX(CASE WHEN tps > 0 THEN tps ELSE 0 END) AS tps_max
+                       MAX(CASE WHEN tps > 0 THEN tps ELSE 0 END) AS tps_max,
+                       COUNT(*) AS req_count
                 FROM request_logs
                 {where_ts}
                 GROUP BY bucket_t
@@ -1771,7 +1796,8 @@ class DBSink:
                        SUM(tok_out) AS tok_out,
                        SUM(tps_sum) AS tps_sum,
                        SUM(tps_count) AS tps_count,
-                       MAX(tps_p95) AS tps_max
+                       MAX(tps_p95) AS tps_max,
+                       SUM(requests) AS req_count
                 FROM request_rollups
                 {roll_where}
                 GROUP BY bucket_t
@@ -1826,7 +1852,9 @@ class DBSink:
             buckets = [
                 {"t": t,
                  "tps_avg": round(r.tps_sum / r.tps_count, 2) if r and r.tps_count else 0.0,
-                 "tps_p95": round(r.tps_max or 0.0, 2) if r else 0.0}
+                 "tps_p95": round(r.tps_max or 0.0, 2) if r else 0.0,
+                 "tps_sample_ratio": tps_sample_ratio(
+                     r.tps_count or 0, r.req_count or 0) if r else 0.0}
                 for t, r in sorted(by_t.items())
             ]
         return {"bucket_seconds": bucket_seconds, "metric": metric, "buckets": buckets}

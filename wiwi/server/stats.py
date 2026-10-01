@@ -3,7 +3,9 @@
 Pure functions over LogEvent lists so the math is unit-testable with
 deterministic synthetic rings (no DB schema migration in v1). Events with
 tps == 0 or ttft_ms == 0 (non-streaming / missing timing) are excluded from
-those aggregates only.
+those aggregates only — and because TPS is generation-phase throughput, that
+exclusion is no longer silent: every TPS aggregate is published with the
+``tps_sample_ratio`` of the traffic it was computed over.
 """
 
 from __future__ import annotations
@@ -34,16 +36,41 @@ def bucket_size_for(minutes: int) -> int:
     return 86400
 
 
+def percentile_sorted(sorted_vals: list[float], p: float = 0.95) -> float:
+    """Nearest-rank percentile of an *already-sorted* list; 0.0 when empty.
+
+    *p* is a fraction in ``(0.0, 1.0]`` — 0.95, not 95.
+
+    The formula lives here and only here — :func:`percentile` is this function
+    applied to an unsorted list, and the Prometheus exporter calls it directly
+    because it renders several quantiles from one window. Before round 117 the
+    exporter carried a private copy of this formula, which meant the two could
+    drift without any test noticing.
+    """
+    if not sorted_vals:
+        return 0.0
+    return sorted_vals[max(0, min(len(sorted_vals) - 1,
+                                  math.ceil(len(sorted_vals) * p) - 1))]
+
+
 def percentile(values: list[float], p: float = 0.95) -> float:
     """Nearest-rank percentile of *values* (0.0 < p <= 1.0); 0.0 when empty.
 
     Single source of truth: the Prometheus exporter, the admin rollups and
     per-deployment latency all use this so their numbers cannot drift apart.
     """
-    if not values:
-        return 0.0
-    s = sorted(values)
-    return s[max(0, min(len(s) - 1, math.ceil(len(s) * p) - 1))]
+    return percentile_sorted(sorted(values), p) if values else 0.0
+
+
+def tps_sample_ratio(samples: int, requests: int) -> float:
+    """Share of *requests* that carry a measurable TPS sample.
+
+    TPS is generation-phase throughput, so only streaming requests with a
+    measurable generation window produce one. Reporting the coverage alongside
+    the aggregate keeps an operator from reading a p50 computed over a tenth of
+    their traffic as if it described all of it.
+    """
+    return round(samples / requests, 4) if requests else 0.0
 
 
 def _p95(values: list[float]) -> float:
@@ -99,6 +126,8 @@ def overview(events: list[LogEvent], minutes: int,
         "cache_hit_rate": round(cache_hits / requests, 4) if requests else 0.0,
         "tps_avg": round(sum(tps_values) / len(tps_values), 2) if tps_values else 0.0,
         "tps_p95": round(_p95(tps_values), 2),
+        # How much of the window the tps_avg/tps_p95 above actually describe.
+        "tps_sample_ratio": tps_sample_ratio(len(tps_values), requests),
         "ttft_p95_ms": round(_p95(ttft_values), 1),
         "latency_p95_ms": round(_p95([e.latency_ms for e in win if e.latency_ms > 0]), 1),
         "cost": round(sum(e.cost for e in win), 6),
@@ -139,6 +168,9 @@ def timeseries(events: list[LogEvent], bucket: str, metric: str, minutes: int,
         first_t = min(starts) if starts else int(now // size) * size
     token_buckets = [[0, 0, 0, 0, 0] for _ in range(n_buckets)]
     tps_buckets: list[list[float]] = [[] for _ in range(n_buckets)]
+    # Requests per bucket, including those with no TPS sample, so the buckets
+    # can publish the coverage of their own tps_avg.
+    req_buckets = [0 for _ in range(n_buckets)]
     for e in win:
         idx = int((e.ts - first_t) // size)
         if not 0 <= idx < n_buckets:
@@ -149,6 +181,7 @@ def timeseries(events: list[LogEvent], bucket: str, metric: str, minutes: int,
         b[2] += e.tok_cache_creation
         b[3] += e.tok_reasoning
         b[4] += e.tok_out
+        req_buckets[idx] += 1
         if e.tps > 0:
             tps_buckets[idx].append(e.tps)
     if metric == "tokens":
@@ -160,7 +193,8 @@ def timeseries(events: list[LogEvent], bucket: str, metric: str, minutes: int,
     else:
         buckets = [
             {"t": first_t + i * size, "tps_avg": round(sum(v) / len(v), 2) if v else 0.0,
-             "tps_p95": round(_p95(v), 2)}
+             "tps_p95": round(_p95(v), 2),
+             "tps_sample_ratio": tps_sample_ratio(len(v), req_buckets[i])}
             for i, v in enumerate(tps_buckets)
         ]
     return {"bucket_seconds": size, "metric": metric, "buckets": buckets}

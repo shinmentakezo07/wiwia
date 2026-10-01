@@ -8,6 +8,162 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — round 117 (2026-10-01)
+
+TPS is output **generation** speed. Four defects in how it was measured and
+reported. Covered by `tests/test_fix_round117.py`.
+
+### 319. TPS had two different definitions inside one quantile family
+**Severity:** 🟠 high
+**Status:** fixed
+
+`build_log_event` computed `tps` two ways: for streaming requests
+`completion_tokens / (last_token_at - first_token_at)` (generation phase only),
+and otherwise `completion_tokens / (latency_ms / 1000)` (whole round trip, so
+prefill and queueing included). Both landed in `wiwi_tps` and in the same
+`tps_avg`/`tps_p95` admin aggregates, so a single quantile mixed two
+incomparable measures. The split was not even within a request type: because
+`first_token_at`/`last_token_at` are stamped only in the stream path
+(`wiwi/core/gateway.py:1085-1088`), **every** non-streaming request took the
+round-trip branch.
+
+The fallback was deliberate — `tests/test_fix_round4.py:58` asserted it, and
+its comment claimed "OpenRouter reports throughput for all requests". That
+rationale does not hold: OpenRouter's throughput is a generation-phase
+measure, and a round-trip figure is not comparable with one.
+
+**Fix:** one definition — `gateway.py:2231-2241` now requires
+`stream_secs > 0.05` and has no fallback. Requests with no separable
+generation phase report `tps = 0.0`. `test_fix_round4.py:58` and the
+short-stream test beside it were **inverted**, with the original expectation
+preserved in the docstrings so the change stays traceable.
+
+### 320. Requests with no TPS sample vanished from every aggregate
+**Severity:** 🟡 medium
+**Status:** fixed
+
+Every TPS consumer filtered on `tps > 0` — `metrics.py:131`, `stats.py`,
+`db_sink.py:1499` — with no denominator anywhere. A p50 computed over a tenth
+of the window's traffic was indistinguishable from one computed over all of
+it, and non-streaming-heavy gateways reported a throughput figure for what was
+really a streaming-only statistic.
+
+**Fix:** the exclusion is now published rather than silent.
+`wiwi/server/stats.py:tps_sample_ratio` is the single implementation, used by
+`stats.overview()`, `stats.timeseries()` (per bucket, via a new `req_buckets`
+count), `DBSink.read_overview`, `DBSink.read_timeseries` (new `COUNT(*) AS
+req_count` in the raw query and `SUM(requests) AS req_count` in the rollup
+query, summed by `_BucketSum`), and a new `wiwi_tps_sample_ratio` gauge.
+
+### 321. `wiwi_tps` exported no p99 while latency and TTFT did
+**Severity:** ⚪ low
+**Status:** fixed
+
+`metrics.py` rendered p50/p95 for TPS but p50/p95/p99 for
+`wiwi_request_duration_ms` and `wiwi_ttft_ms`, and documented the asymmetry in
+a comment rather than fixing it. The slow-generation tail is what a throughput
+metric is alerted on.
+
+**Fix:** `wiwi_tps` now exports `0.99` as well, matching the other two.
+
+### 322. The nearest-rank percentile formula was duplicated
+**Severity:** ⚪ low
+**Status:** fixed
+
+`metrics.py:_percentile` (0–100 scale) reimplemented
+`stats.percentile` (0–1 scale) in the same repo, each with a comment pointing
+at the other as the owner. Either could drift with no test failing.
+
+**Fix:** `stats.percentile_sorted` is the single owner;
+`stats.percentile` sorts and delegates, and the exporter calls
+`percentile_sorted` directly (it renders three quantiles from one sorted
+window, so re-sorting per call would have cost the O(n log n × 3) → O(n log n)
+win). `metrics.py:_percentile` deleted; `tests/test_fix_round117.py` asserts
+it is gone and that the two entry points agree.
+
+---
+
+## ⚪ Open — declined by choice (2026-10-01)
+
+### 323. `wiwi_tps` stays a scrape-time summary, so Prometheus cannot `rate()` it
+**Severity:** ⚪ low
+**Status:** OPEN — declined, do not re-report without new information
+
+Quantiles are computed at scrape time from the `deque(maxlen=500)` ring
+(`metrics.py`), so `wiwi_tps` has no `_bucket`/`_sum`/`_count` series. A real
+histogram would let `histogram_quantile()` and cross-instance aggregation work,
+and would lift the 500-request window cap — at the cost of **breaking every
+existing `wiwi_tps{quantile="..."}` query**, dashboard and alert.
+
+**Considered and declined** when round 117 asked: keep the summary shape and add
+the missing p99 instead (finding 321). The round-117 author chose
+compatibility over the histogram.
+
+**Revisit if** a second gateway instance comes online, or if anyone needs
+`rate(wiwi_tps…)` in a recording rule — both are hard blockers that the
+compatibility choice defers rather than solves. `wiwi/logging_core/hist.py`
+already implements log-scale binning suitable for a Prometheus histogram when
+that day comes.
+
+### 324. The DB ratio's numerator was a capped sample, its denominator was not
+**Severity:** 🟠 high
+**Status:** fixed (found in round-117 review, before commit)
+
+`DBSink.read_overview` derived `tps_sample_ratio`'s numerator from
+`tps_values`, which `_sample_stmt` caps at `ORDER BY id DESC LIMIT 5000`,
+while the denominator `requests` is an uncapped `COUNT(*)`. The ratio
+therefore saturated at `5000/requests`: a 50 000-request all-streaming window
+reported **0.1** instead of 1.0. Harmless for `tps_avg`/`tps_p95`, where a
+bounded sample is a documented approximation — fatal for a field whose entire
+purpose is honest coverage disclosure, and wrong precisely on the
+high-traffic gateways it exists to describe.
+
+**Fix:** `SUM(CASE WHEN tps > 0 THEN 1 ELSE 0 END) AS tps_samples` added to
+the exact `agg_stmt` (same window and key filter as `requests`), and the ratio
+uses `tps_samples_raw + roll["tps_count"]`. Regression test writes 6000
+streaming rows — past the cap — and asserts the ratio is 1.0.
+
+### 325. Two zero-row DB shapes omitted `tps_sample_ratio`
+**Severity:** 🟡 medium
+**Status:** fixed (found in round-117 review, before commit)
+
+The no-key-scope early return in `read_overview` and `_read_timeseries_empty`
+build their dicts by hand and were not updated, so a TS consumer declaring
+`tps_sample_ratio: number` read `undefined` on exactly the first-visit empty
+render — the same shape-contract break as AUDIT #86. `_read_timeseries_empty`
+is the *only* path a user without a key ever reaches.
+
+**Fix:** both hand-built shapes now carry `"tps_sample_ratio": 0.0`.
+
+### 326. `CardHeader` squeezed its title into a collision with wide controls
+**Severity:** 🟡 medium
+**Status:** fixed (found in round-117 review, before commit)
+
+`CardHeader` (`web/src/components/ui.tsx:20`) was
+`flex items-center justify-between` with `min-w-0` on the title box and an
+**unconstrained** right slot. Any header whose controls were wide enough
+squeezed the title box below its own text width, and because `min-w-0` permits
+that, the title text then overflowed its box and collided with the controls.
+
+Latent until round 117 lengthened the Analytics metric label to
+"gen tps (streaming)", which widened its `<select>` from 96px to 158px at
+375px. Measured: title box 74px → **24px** while the text still needed 74px,
+rendering "Breakdo**wn**odel". Violates the project's 375px rule.
+
+**Fix:** the header row is now `flex flex-wrap ... gap-x-2 gap-y-2` and the
+right slot is wrapped in a `flex flex-wrap items-center gap-2` div, so controls
+wrap onto a second line rather than compressing the title.
+
+**Verified by A/B in a real browser** against a reverted baseline, not by
+inspection: at 375px the title goes from `scrollWidth 74 / offsetWidth 24`
+(overflow) to `74 / 74` (clean). Desktop is a measured no-op — header geometry
+identical before and after at 1440x900. Zero title overflow and zero
+page-level horizontal overflow across 6 `/console/*` pages × 2 widths.
+`Providers` uses a hand-rolled header and `RequestLogs`/`VirtualKeys` use no
+`CardHeader`, so neither is affected.
+
+---
+
 ## ✅ Fixed — docs page touch targets (2026-09-30)
 
 ### 318. Heading deep-link anchors were a 17×17 px target on touch

@@ -6,7 +6,8 @@ Exposes gateway metrics in the Prometheus text exposition format:
 - ``wiwi_tokens_total``: counter of tokens (input/output/cached/reasoning)
 - ``wiwi_cost_total``: counter of total cost in USD
 - ``wiwi_ttft_ms``: quantile summary of time-to-first-token
-- ``wiwi_tps``: quantile summary of tokens per second
+- ``wiwi_tps``: quantile summary of output generation speed (streaming only)
+- ``wiwi_tps_sample_ratio``: gauge for the share of the window that wiwi_tps describes
 - ``wiwi_stream_errors_total``: counter of mid-stream failures
 - ``wiwi_request_logs_dropped_total``: counter of request-log events dropped
   because the logging queue was full
@@ -41,14 +42,17 @@ exist here:
   from ``AppState`` (it counts a non-log event, so the logging subsystem does
   not own it).
 - Series that are honestly per-scrape window values stay ring-derived and are
-  declared ``gauge`` (``wiwi_prompt_cache_hit_rate``,
+  declared ``gauge`` (``wiwi_prompt_cache_hit_rate``, ``wiwi_tps_sample_ratio``,
   ``wiwi_requests_by_status``, ``wiwi_requests_by_provider``) or ``summary``
   (the three quantile families).
 
 The three quantile families are ``summary``, not ``histogram``: percentiles
 are computed from the ring buffer at scrape time, so no ``_bucket``/``_sum``/
 ``_count`` series exist. Declaring them ``histogram`` made every sample parse
-as an empty histogram (SampleCount=0) and broke ``histogram_quantile()``.
+as an empty histogram (SampleCount=0) and broke ``histogram_quantile()``. The
+consequence — that ``rate()`` and cross-instance aggregation are impossible on
+``wiwi_tps`` — is a known, declined trade-off recorded in AUDIT.md, not an
+oversight.
 
 The loss counters are passed in for the same reason: a lost event is absent
 from the ring by definition, so it cannot be derived from *events*.
@@ -56,31 +60,17 @@ from the ring by definition, so it cannot be derived from *events*.
 
 from __future__ import annotations
 
-import math
 import time
 from collections import Counter
 
 from wiwi.logging_core.events import LogEvent
 from wiwi.logging_core.subsystem import RequestTotals
+from wiwi.server.stats import percentile_sorted, tps_sample_ratio
 
 
 def _escape_label(value: str) -> str:
     """Escape a label value for Prometheus text exposition format."""
     return value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
-
-def _percentile(sorted_vals: list[float], p: float) -> float:
-    """Nearest-rank percentile of an already-sorted list; *p* is 0-100.
-
-    Same nearest-rank formula as :func:`wiwi.server.stats.percentile`
-    (which owns it for the admin rollups); this variant takes a pre-sorted
-    list because several quantiles are rendered from one sample.
-    """
-    if not sorted_vals:
-        return 0.0
-    # Pre-sorted input, so index directly; stats.percentile owns the formula.
-    idx = max(0, min(len(sorted_vals) - 1,
-                     math.ceil(len(sorted_vals) * p / 100) - 1))
-    return sorted_vals[idx]
 
 
 def render_metrics(events: list[LogEvent],
@@ -187,21 +177,27 @@ def render_metrics(events: list[LogEvent],
             f"wiwi_requests_by_provider{{provider=\"{_escape_label(provider)}\"}} {count}")
 
     # Summaries: quantiles computed over the ring buffer at scrape time
-    # (p50, p95, p99 for latency/ttft; p50, p95 for tps).
+    # (p50, p95, p99 for all three families).
     if durations:
         sd = sorted(durations)
-        lines.append(f"wiwi_request_duration_ms{{quantile=\"0.5\"}} {_percentile(sd, 50):.1f}")
-        lines.append(f"wiwi_request_duration_ms{{quantile=\"0.95\"}} {_percentile(sd, 95):.1f}")
-        lines.append(f"wiwi_request_duration_ms{{quantile=\"0.99\"}} {_percentile(sd, 99):.1f}")
+        lines.append(f"wiwi_request_duration_ms{{quantile=\"0.5\"}} {percentile_sorted(sd, 0.5):.1f}")
+        lines.append(f"wiwi_request_duration_ms{{quantile=\"0.95\"}} {percentile_sorted(sd, 0.95):.1f}")
+        lines.append(f"wiwi_request_duration_ms{{quantile=\"0.99\"}} {percentile_sorted(sd, 0.99):.1f}")
     if ttfts:
         st = sorted(ttfts)
-        lines.append(f"wiwi_ttft_ms{{quantile=\"0.5\"}} {_percentile(st, 50):.1f}")
-        lines.append(f"wiwi_ttft_ms{{quantile=\"0.95\"}} {_percentile(st, 95):.1f}")
-        lines.append(f"wiwi_ttft_ms{{quantile=\"0.99\"}} {_percentile(st, 99):.1f}")
+        lines.append(f"wiwi_ttft_ms{{quantile=\"0.5\"}} {percentile_sorted(st, 0.5):.1f}")
+        lines.append(f"wiwi_ttft_ms{{quantile=\"0.95\"}} {percentile_sorted(st, 0.95):.1f}")
+        lines.append(f"wiwi_ttft_ms{{quantile=\"0.99\"}} {percentile_sorted(st, 0.99):.1f}")
     if tps_values:
         sv = sorted(tps_values)
-        lines.append(f"wiwi_tps{{quantile=\"0.5\"}} {_percentile(sv, 50):.2f}")
-        lines.append(f"wiwi_tps{{quantile=\"0.95\"}} {_percentile(sv, 95):.2f}")
+        lines.append(f"wiwi_tps{{quantile=\"0.5\"}} {percentile_sorted(sv, 0.5):.2f}")
+        lines.append(f"wiwi_tps{{quantile=\"0.95\"}} {percentile_sorted(sv, 0.95):.2f}")
+        lines.append(f"wiwi_tps{{quantile=\"0.99\"}} {percentile_sorted(sv, 0.99):.2f}")
+    # TPS is generation-phase throughput, so only streaming requests with a
+    # measurable generation window contribute to wiwi_tps. Without this gauge
+    # a p50 computed over a tenth of the window's traffic is indistinguishable
+    # from one computed over all of it.
+    lines.append(f"wiwi_tps_sample_ratio {tps_sample_ratio(len(tps_values), total)}")
 
     lines.append(f"# ts {time.time()}")
     return "\n".join(lines) + "\n"
@@ -243,6 +239,8 @@ _HEADER = """# HELP wiwi_requests_total Total number of requests.
 # TYPE wiwi_request_duration_ms summary
 # HELP wiwi_ttft_ms Time to first token in milliseconds (scrape-time quantiles).
 # TYPE wiwi_ttft_ms summary
-# HELP wiwi_tps Tokens per second (scrape-time quantiles).
+# HELP wiwi_tps Output generation speed in tokens per second (scrape-time quantiles; streaming requests only).
 # TYPE wiwi_tps summary
+# HELP wiwi_tps_sample_ratio Share of window requests that carry a measurable TPS sample.
+# TYPE wiwi_tps_sample_ratio gauge
 """
