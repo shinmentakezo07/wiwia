@@ -1145,6 +1145,22 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 out[name] = value
         return out
 
+    def _session_id(request: Request) -> str | None:
+        """The client's session identity for router deployment affinity.
+
+        A header is authoritative; the query parameter exists for clients that
+        cannot set headers (browsers opening a WebSocket, ``curl`` without
+        ``-H``). Truncated to 128 chars: it is an opaque routing hint, and an
+        unbounded client-supplied string would otherwise become a key in a
+        process-lifetime map.
+        """
+        raw = request.headers.get("x-wiwi-session-id") or request.query_params.get(
+            "session_id")
+        if not raw:
+            return None
+        raw = raw.strip()
+        return raw[:128] or None
+
     def is_admin(request: Request) -> bool:
         mk = config.general_settings.master_key
         if not mk:
@@ -1723,7 +1739,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 reserved = est_spend
         ctx = RequestContext(surface=surface, ir_req=ir_req, auth=info, group=group,
                              request_id=request_id,
-                             forward_headers=_forward_headers(request))
+                             forward_headers=_forward_headers(request),
+                             session_id=_session_id(request))
         ctx.span = req_span
         ctx.budget_reserved = reserved
         if unpriced_model:

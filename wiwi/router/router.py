@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import random
 import time
 from collections import deque
@@ -396,6 +397,9 @@ class Deployment:
     fails: list[float] = field(default_factory=list)
     cooldown_until: float = 0.0
     inflight: int = 0
+    # Concurrency ceiling for deployments of this model. ``None`` defers to
+    # ``RouterSettings.max_inflight``; see ``effective_max_inflight``.
+    max_inflight: int | None = None
     # Probation: set by the HealthHealer on restore. pick_deployment prefers
     # non-probation deployments; execute_with_retries graduates on success,
     # record_fail demotes.
@@ -413,6 +417,18 @@ class Deployment:
     def limited(self) -> bool:
         """Whether this deployment declares any per-deployment cap."""
         return bool(self.rpm or self.tpm)
+
+    def effective_max_inflight(self, settings: RouterSettings) -> int | None:
+        """Resolve this deployment's concurrency ceiling.
+
+        The model's own ``max_inflight`` wins over the router-wide default, so
+        one expensive model can be capped harder than its siblings on the same
+        provider. ``None`` means uncapped — the default, which keeps existing
+        deployments behaving exactly as before.
+        """
+        if self.max_inflight is not None:
+            return self.max_inflight
+        return settings.max_inflight
 
     def _window(self, is_token: bool) -> _DepWindow:
         if is_token:
@@ -630,6 +646,49 @@ def _alias_target(v: str | ModelAliasEntry) -> str:
     return v
 
 
+def _at_inflight_cap(d: Deployment, settings: RouterSettings) -> bool:
+    """Whether *d* is already holding as many requests as its ceiling allows.
+
+    Module-level and lane-agnostic on purpose: it answers the operator's
+    question ("is this deployment full?") without committing to a lane
+    comparison, so the 503 branch in ``execute_with_retries`` can report a
+    saturated deployment even when this particular request was refused by a
+    lane ceiling well below the deployment's own.
+    """
+    cap = d.effective_max_inflight(settings)
+    return cap is not None and d.inflight >= cap
+
+
+
+def _lane_ceiling(d: Deployment, settings: RouterSettings,
+                  auth: Any | None) -> int | None:
+    """Concurrency a request authenticated as *auth* may hold on *d*.
+
+    ``None`` means uncapped — the deployment declares no ceiling, or no lanes
+    are configured, and admission is governed by the cap alone. A lane's share
+    is capacity it may *use*, not capacity reserved against it: an interactive
+    request is admitted onto a deployment a bulk request already occupies.
+    ``max(1, ...)`` keeps a tiny lane usable rather than deadlocking it out of a
+    small pool, which a bare ``ceil(cap * 0.01) == 0`` would do.
+    """
+    cap = d.effective_max_inflight(settings)
+    if cap is None:
+        return None
+    lanes = settings.priority_lanes
+    if not lanes or auth is None:
+        return cap
+    # An operator's request outranks every lane: a human is waiting on a
+    # console, and a lane boundary must never be what refuses it.
+    if getattr(auth, "key_type", None) == "master":
+        return cap
+    lane = getattr(auth, "priority", None) or settings.default_lane
+    share = lanes.get(lane, lanes.get(settings.default_lane))
+    if share is None:
+        return cap
+    return max(1, math.ceil(cap * share))
+
+
+
 class Router:
     def __init__(self, config: WiwiConfig):
         self.settings: RouterSettings = config.router_settings
@@ -650,6 +709,10 @@ class Router:
         # Only populated for groups whose deployments span 2+ providers;
         # single-provider groups keep their original shuffle semantics.
         self._group_provider_rr: dict[str, _CrossProviderWRR] = {}
+        # session id -> (id(deployment), expiry). Per-process by design, the
+        # same single-instance-target caveat as the in-memory rate limiter and
+        # response cache: a multi-instance gateway pins per instance.
+        self._affinity: dict[str, tuple[int, float]] = {}
         # Consecutive-success counters for ``cycle_every_n``. These MUST live on
         # the router, not in ``ctx.metadata``: the context is per-request, so
         # counters kept there reset to 0 before every pick and the cadence
@@ -688,6 +751,7 @@ class Router:
                                  f" {wp.provider!r}")
             dep = Deployment(group=entry.model_name, provider=acct, model_id=wp.model,
                              weight=wp.weight, rpm=wp.rpm, tpm=wp.tpm,
+                             max_inflight=wp.max_inflight,
                              timeout=wp.timeout, max_tokens=wp.max_tokens,
                              extra_headers=dict(wp.extra_headers),
                              extra_body=dict(wp.extra_body),
@@ -764,6 +828,36 @@ class Router:
             # Every candidate is at its cap: refuse rather than exceed it.
             return None
         avail = uncapped
+        # Concurrency shedding, lane-aware. Tested and reserved at the same
+        # synchronous point as the rpm/tpm windows above, so no other
+        # coroutine can slip between this check and the gateway's increment in
+        # ``_call`` — the same no-lock argument ``Deployment._window`` makes.
+        settings = self.settings
+        auth = getattr(ctx, "auth", None)
+        kept: list[Deployment] = []
+        shed: list[Deployment] = []
+        for d in avail:
+            ceiling = _lane_ceiling(d, settings, auth)
+            if ceiling is not None and d.inflight >= ceiling:
+                shed.append(d)
+            else:
+                kept.append(d)
+        if not kept and shed:
+            # Everything is above this request's ceiling. Record why, so the
+            # caller's 503 names the bound that refused it instead of reporting
+            # the indistinguishable "no healthy deployment".
+            ctx.metadata["shed_reason"] = "inflight"
+            return None
+        avail = kept or avail
+
+        # Session affinity: reuse the deployment that served this session last
+        # time so upstream prompt caches stay warm. Evaluated after every health
+        # and lane filter above, so a pin can never resurrect a deployment that
+        # any of those filters just rejected.
+        pinned = self._affinity_pin(ctx, avail, exclude, auth)
+        if pinned is not None:
+            pinned.reserve_slot(getattr(ctx, "request_id", ""), est)
+            return pinned
         # Prefer fully-healthy deployments; probation ones only serve when no
         # fresh sibling exists (the healer restored them on a trial basis).
         fresh = [d for d in avail if not d.probation]
@@ -771,12 +865,54 @@ class Router:
             avail = fresh
         strategy = self.settings.routing_strategy
         chosen = self._choose(avail, deps, strategy)
+        self._pin_affinity(ctx, chosen)
         # Reserve at the single exit point: every strategy path above returns
         # through here, so a new strategy cannot forget the reservation (the
         # first cut reserved inside two of the four branches, leaving
         # simple-shuffle and the cross-provider pool uncapped).
         chosen.reserve_slot(getattr(ctx, "request_id", ""), est)
         return chosen
+
+    def _affinity_pin(self, ctx: RequestContext, avail: list[Deployment],
+                      exclude: set[int], auth: Any | None) -> Deployment | None:
+        """The deployment this session is pinned to, if that pin is still valid.
+
+        A pin is honoured only while its deployment is in *avail* (so every
+        health, cooldown, rpm/tpm and lane filter has already passed it), is not
+        excluded as already-tried, and has not outlived the TTL. There is no
+        "sticky anyway" path: a stale pin to a cooling deployment is precisely
+        the failure affinity exists to prevent.
+        """
+        if not self.settings.session_affinity:
+            return None
+        session = getattr(ctx, "session_id", None)
+        if not session:
+            return None
+        entry = self._affinity.get(session)
+        if entry is None:
+            return None
+        dep_id, expiry = entry
+        if expiry <= time.monotonic():
+            # Drop on read, so a map nobody touches again cannot grow forever.
+            self._affinity.pop(session, None)
+            return None
+        for d in avail:
+            if id(d) == dep_id and id(d) not in exclude and d.available:
+                ceiling = _lane_ceiling(d, self.settings, auth)
+                if ceiling is None or d.inflight < ceiling:
+                    return d
+        return None
+
+    def _pin_affinity(self, ctx: RequestContext, chosen: Deployment) -> None:
+        """Record *chosen* as this session's deployment for the TTL window."""
+        if not self.settings.session_affinity:
+            return
+        session = getattr(ctx, "session_id", None)
+        if not session:
+            return
+        self._affinity[session] = (
+            id(chosen),
+            time.monotonic() + self.settings.session_affinity_ttl_s)
 
     def _choose(self, avail: list[Deployment], deps: list[Deployment],
                 strategy: str) -> Deployment:
@@ -1224,10 +1360,29 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                     # Reporting the cap as 503 told the client to give up on a
                     # deployment that is serving fine (AUDIT #101).
                     now = time.monotonic()
+                    shed = [d for d in deps
+                            if d.available and _at_inflight_cap(d, router.settings)]
                     capped = [d for d in deps
                               if d.available
                               and d.rate_limited(now, getattr(ctx, "est_tokens", 0))]
-                    if capped:
+                    if shed and (not capped or ctx.metadata.get("shed_reason")):
+                        # Concurrency saturation is a 503, not a 429: the cap is
+                        # a horizon-free "this server is full right now", while
+                        # 429 means "this quota is spent, retry in N seconds".
+                        # Reported in that order so a deployment that is both
+                        # token-capped and full reads as full — the client
+                        # action is the same, but the operator's diagnosis is
+                        # not.
+                        retry_after = router.settings.inflight_retry_after_s
+                        last_err = WiwiError(
+                            503, "server_overloaded",
+                            f"all deployments for '{group_name}' are at their"
+                            f" concurrency limit",
+                            retry_after=float(retry_after))
+                        _proxy("warn",
+                               f"deployment concurrency limit reached for"
+                               f" '{group_name}': retry in {retry_after}s")
+                    elif capped:
                         retry_after = min(d.retry_after_s(now) for d in capped)
                         last_err = WiwiError(
                             429, "rate_limit_error",

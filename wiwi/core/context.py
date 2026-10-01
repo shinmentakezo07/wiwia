@@ -67,6 +67,10 @@ class RequestContext:
     status: int = 200
     error: Any = None  # WiwiError
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Client-supplied session identity (``x-wiwi-session-id``). Read by the
+    # router for deployment affinity, and by nothing else: it is a routing hint
+    # the client controls, never an authorization or accounting input.
+    session_id: str | None = None
     # Inbound request headers the client expects the upstream to see.
     # Anthropic's Messages format is header-and-body coupled: ``anthropic-beta``
     # gates features that body fields then rely on, so stripping the header
