@@ -288,6 +288,30 @@ Shares must each be in `(0, 1]` and sum to at most `1.0`; a config that
 over-subscribes is rejected at load rather than silently admitting every lane at
 full capacity.
 
+## Realtime
+
+Only some providers expose a Realtime-style WebSocket. An adapter declares it
+with `realtime_url(base_url)`, derived from the deployment's configured base URL:
+
+```python
+>>> adapter.realtime_url("https://api.openai.com/v1")
+'wss://api.openai.com/v1/realtime'
+```
+
+The capability is per adapter, not per wire shape. The four OpenAI-shaped
+providers (`openai`, `openai-compatible`, `gmicloud`, `bai`) implement it;
+`openrouter`, `nvidia-nim`, `cline` and `workbuddy` share the chat wire shape
+but **not** the realtime protocol, and answer `501` rather than inheriting a URL
+that would 404 mid-session. `anthropic`, `gemini` and `opencode` have no
+realtime surface at all.
+
+Relays need `realtime.enabled` in the config (off by default). A session is
+admitted through the ordinary path — the same auth, budgets, cooldowns, key
+rotation and `max_inflight` caps as an HTTP request — and then its frames pass
+through untouched. wiwi does not translate the session protocol: it is stateful
+and ordered, and reimplementing it would mean reimplementing the upstream's
+session store.
+
 ## Provider quirks live in adapters — nowhere else
 
 The binding invariant: all dialect/provider branching stays inside `wiwi/wire/` and `wiwi/providers/`. `core/`, `router/`, `auth/`, `streaming/` must never import dialect or provider symbols. If you find yourself special-casing a provider in the gateway or router, it belongs in the adapter.

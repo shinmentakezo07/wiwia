@@ -205,3 +205,16 @@ wiwi_settings:
   log_retention_days: 30                 # drop raw rows older than this (0 = keep forever)
   log_max_rows: 10000                    # keep at most N raw rows (0 = unlimited)
   log_prune_interval_s: 3600             # seconds between sweeps (0 = startup only)
+
+# Realtime WebSocket surface (WS /v1/realtime). Off by default; the route does
+# not exist until this is on, and a provider must also declare a realtime_url
+# (openai, openai-compatible, gmicloud, bai). Everything else answers 501 at
+# upgrade instead of dialling a URL that does not exist.
+# realtime:
+#   enabled: true
+#   # Only turn this on for browser clients, which cannot set an
+#   # Authorization header — and remember that a query string lands in proxy
+#   # logs, browser history and access logs.
+#   allow_key_in_query: false
+#   idle_timeout_s: 300      # close a session with no traffic in either direction
+#   max_session_s: 3600      # absolute cap; a forgotten socket must not hold a slot

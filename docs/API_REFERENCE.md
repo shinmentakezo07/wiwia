@@ -87,6 +87,38 @@ OpenAI-style model list of the model groups visible to the authenticated key.
 
 Stream journals are ON by default (`.wiwi/journals/`, 600 s TTL, 1 MiB cap): a client reconnecting with `x-wiwi-stream-id` + `Last-Event-ID` replays missed frames even after a wiwi restart. Mid-stream provider death resumes from the tape on a fallback deployment (continuation messages are synthesized from partial output).
 
+### `WS /v1/realtime`
+
+Relays a Realtime WebSocket session to an OpenAI-shaped upstream. **Off by
+default** (`realtime.enabled`); with it off the route does not exist.
+
+```
+ws://host/v1/realtime?model=<group>[&session_id=…]
+Authorization: Bearer sk-wiwi-…
+```
+
+Every admission check runs **before** the upgrade, so a refusal is a readable
+HTTP status rather than an opaque close: `401` bad key, `402` budget exhausted,
+`403` model not allowed, `404` unknown model or surface disabled, `429` rate
+limited, `501` the provider has no realtime surface, `503` every deployment is
+cooling or at its concurrency cap. Once the client sees `101`, a session exists
+upstream and errors arrive as close frames.
+
+Frames pass through byte-for-byte in both directions — the session protocol is
+stateful and ordered, so wiwi relays it and never rewrites it. A session holds
+its deployment's concurrency slot for its whole life, so `max_inflight`,
+priority lanes and session affinity apply to sessions exactly as they do to HTTP
+requests.
+
+**Auth:** header only by default. `?key=` is accepted only when
+`realtime.allow_key_in_query` is on — a query string lands in proxy logs,
+browser history and access logs.
+
+**Billing:** a session is charged once, at close, on the **peak** usage its
+events reported. Not the sum: the protocol restates overlapping windows of the
+same conversation, so summing inflates every multi-turn session. One
+request-log row is written per session.
+
 ---
 
 ## 2. Health & metrics

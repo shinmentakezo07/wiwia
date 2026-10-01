@@ -322,6 +322,32 @@ as distinct children rather than duplicates under one hop.
 **Never emitted:** prompt or response text. `store_prompts_in_spend_logs`
 governs content capture and writes to the database, not to a collector.
 
+## `realtime`
+
+The Realtime WebSocket surface, `WS /v1/realtime`. See
+[API_REFERENCE.md](API_REFERENCE.md) § `WS /v1/realtime` for the wire contract.
+
+| Field | Default | Notes |
+|---|---|---|
+| `enabled` | `false` | Master switch. With it off the route does not exist, so a client gets a 404 rather than a socket that refuses later. |
+| `allow_key_in_query` | `false` | Accept `?key=` in addition to the `Authorization` / `x-api-key` headers. Off by default: a query string lands in proxy logs, browser history and access logs. Needed by browser `WebSocket`, which cannot set headers. |
+| `idle_timeout_s` | `300.0` | Close a session with no traffic in either direction for this long. A realtime session is idle far more often than busy. |
+| `max_session_s` | `3600.0` | Absolute session lifetime. A forgotten socket must not hold a deployment's concurrency slot forever; clients are expected to reconnect. |
+
+Enabling the surface does not by itself enable realtime on any provider: an
+adapter must also declare a `realtime_url`. Today that is `openai`,
+`openai-compatible`, `gmicloud` and `bai` (the four sharing the OpenAI wire
+shape). Everything else answers `501` at upgrade rather than dialling a URL that
+does not exist — see [PROVIDERS.md](PROVIDERS.md) § Realtime.
+
+```yaml
+realtime:
+  enabled: true
+  allow_key_in_query: false   # only for browser clients, and understand the logs
+  idle_timeout_s: 300
+  max_session_s: 3600
+```
+
 ## `model_list`
 
 Array of model groups. Each entry names a group (`model_name`) and one or more deployments (`wiwi_params`), each pointing at a provider **account** and a provider-native model id.
