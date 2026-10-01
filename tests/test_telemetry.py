@@ -11,8 +11,8 @@ def test_disabled_is_a_noop_context_manager():
     t = Tracer()
     t.configure(TelemetrySettings(enabled=False))
     assert t.is_active is False
-    assert t.current_traceparent() is None
-    assert t.current_trace_id() is None
+    assert t.propagation_headers(None) == {}
+    assert t.trace_id_of(None) is None
     with t.span("x", surface="chat") as span:
         span.set_attribute("k", "v")
         span.set_status("ok")
