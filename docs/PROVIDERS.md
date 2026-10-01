@@ -243,6 +243,51 @@ model_list:
 
 Clients always request `claude-sonnet`. WRR splits traffic 2:1; upstream failures failover to the other deployment (and to `router_settings.fallbacks`, if configured) mid-stream with tape-based resume.
 
+## Capacity: concurrency caps and priority lanes
+
+An upstream with a connection limit will happily be handed one socket per
+inbound request. `router_settings.max_inflight` bounds that; a request arriving at
+a full deployment is refused with `503` and a `Retry-After` rather than queued
+(see [CONFIG.md](CONFIG.md) § Load shedding for the full table).
+
+**Cap an expensive model harder than its siblings.** The router-wide default
+applies to every deployment unless the model overrides it:
+
+```yaml
+router_settings:
+  max_inflight: 8
+
+model_list:
+  - model_name: gpt-4o
+    wiwi_params:
+      provider: openai-main
+      model: gpt-4o
+      max_inflight: 2      # tighter than the default of 8
+```
+
+**Keep interactive traffic off a batch job's back.** Lanes partition a
+deployment's concurrency by share. The share is capacity a lane may *use* — bulk
+cannot consume the slots interactive needs, and interactive is still admitted onto
+a deployment bulk already occupies:
+
+```yaml
+router_settings:
+  max_inflight: 10
+  priority_lanes:
+    interactive: 0.8       # may hold up to 8 concurrent requests
+    bulk: 0.2              # refused at 2
+  default_lane: bulk
+```
+
+A virtual key declares its lane with the `priority` field (admin API, or the
+`vkeys.priority` column). A key with no lane, or one naming a lane the operator
+never configured, lands on `default_lane` — never on full capacity. Master-key
+requests always get the full cap.
+
+Shares must each be in `(0, 1]` and sum to at most `1.0`; a config that
+over-subscribes is rejected at load rather than silently admitting every lane at
+full capacity.
+
 ## Provider quirks live in adapters — nowhere else
 
 The binding invariant: all dialect/provider branching stays inside `wiwi/wire/` and `wiwi/providers/`. `core/`, `router/`, `auth/`, `streaming/` must never import dialect or provider symbols. If you find yourself special-casing a provider in the gateway or router, it belongs in the adapter.

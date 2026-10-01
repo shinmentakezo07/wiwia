@@ -152,6 +152,65 @@ Streaming resilience and journal knobs live here too — see the tables below.
 | `stream_event_ids` | `false` | Assign monotonic SSE event ids for `Last-Event-ID` resumption. |
 | `stream_grace_drain_s` | `0.0` | On client disconnect, keep pumping upstream for accurate billing. `0` cancels immediately. |
 
+### Load shedding, priority lanes and session affinity
+
+Three admission controls for a gateway fronting a shared upstream pool. All are
+**off by default**: with no configuration the router behaves exactly as before.
+
+| Field | Default | Notes |
+|---|---|---|
+| `max_inflight` | `None` | Concurrency ceiling per deployment. `None` is uncapped. A model's own `wiwi_params.max_inflight` overrides this for that model. |
+| `inflight_retry_after_s` | `1.0` | `Retry-After` sent with a shed `503`. Deliberately short — a slot frees as soon as any in-flight request returns. |
+| `priority_lanes` | `{}` | Lane name → share of a deployment's concurrency that lane may hold. Shares must each be in `(0, 1]` and sum to at most `1.0`. |
+| `default_lane` | `"bulk"` | Lane used by a key with no `priority` set, and the fallback for a lane name not in `priority_lanes`. |
+| `session_affinity` | `false` | Pin a client session to the deployment that served it. |
+| `session_affinity_ttl_s` | `600.0` | How long a session stays pinned before it may be re-pinned. |
+
+**503, not 429.** A shed request is refused with `503` and the configured
+`Retry-After`. This is deliberately distinct from an rpm/tpm cap, which is `429`
+with a real horizon: 429 means "this quota is spent, come back in N seconds", 503
+means "this server is full right now". Shed requests are **not** queued — a queue in
+front of an already-saturated upstream only turns 503s into timeouts.
+
+**Lanes partition capacity; they do not reserve it.** A lane's share is capacity
+it may *use*, not capacity taken away from other lanes. With
+`max_inflight: 4` and `{"interactive": 0.5, "bulk": 0.25}`:
+
+| `inflight` | bulk (ceiling 1) | interactive (ceiling 2) |
+|---|---|---|
+| 0 | admitted | admitted |
+| 1 | **refused** | admitted |
+| 2 | refused | **refused** |
+| 3 | refused | refused (at the deployment's own cap) |
+
+Each ceiling is `max(1, ceil(max_inflight × share))`. The `max(1, …)` keeps a
+tiny lane usable: without it a 1% lane on a small pool computes to 0 slots and
+deadlocks itself out entirely. Master-key requests are always admitted at the full
+cap — a lane boundary must never refuse an operator's request.
+
+**Affinity is a preference among healthy candidates, never a retry policy.** A pin
+is honoured only while its deployment is available, below this request's lane
+ceiling, and inside the TTL; it is also ignored once the deployment has failed this
+request. There is no "sticky anyway" path, because a stale pin to a cooling
+deployment is the exact failure affinity exists to prevent.
+
+```yaml
+router_settings:
+  max_inflight: 8
+  inflight_retry_after_s: 2.0
+  priority_lanes:
+    interactive: 0.8
+    bulk: 0.2
+  default_lane: bulk
+  session_affinity: true
+  session_affinity_ttl_s: 900
+```
+
+Clients opt into affinity with an `x-wiwi-session-id` header (or a `session_id`
+query parameter, for clients that cannot set headers); the value is truncated to
+128 characters. Affinity state is per process, like the in-memory rate limiter and
+response cache — a multi-instance gateway pins per instance.
+
 ### Stream journal
 
 Encoded SSE frames are appended to a per-request JSONL file, so a client reconnecting with `x-wiwi-stream-id` + `Last-Event-ID` replays even after a wiwi restart. **On by default.** Journals are key-scoped — readable only by the virtual key that created them.
@@ -288,6 +347,7 @@ model_list:
 | `wiwi_params.weight` | no | Default `1`. WRR weight within the group. Must be `>= 1`; a `0` starves the group's other deployments. |
 | `wiwi_params.max_tokens` | no | Cap on `max_tokens` for this deployment. |
 | `wiwi_params.rpm` / `tpm` | no | Per-deployment rate ceilings. |
+| `wiwi_params.max_inflight` | no | Overrides `router_settings.max_inflight` for this model alone — cap an expensive model harder than its siblings on the same provider. |
 | `wiwi_params.timeout` | no | Overrides both `providers[].timeout_s` and `router_settings.timeout`. |
 | `wiwi_params.extra_headers` | no | Extra headers merged into the upstream request. |
 | `wiwi_params.extra_body` | no | Extra JSON merged into the upstream body — e.g. OpenRouter's `provider: {only: [...]}` routing pin. |

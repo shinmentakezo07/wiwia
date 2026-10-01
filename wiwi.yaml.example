@@ -101,6 +101,23 @@ router_settings:
   cooldown_time: 30
   # global_rpm: 600        # optional gateway-wide RPM/TPM caps (per process)
   # global_tpm: 200000
+  # Concurrency ceiling per deployment. Uncomment to shed load with 503 +
+  # Retry-After instead of queueing into a saturated upstream. A deployment's
+  # own wiwi_params.max_inflight overrides this.
+  # max_inflight: 8
+  # inflight_retry_after_s: 1.0
+  # Lanes partition a deployment's concurrency by share: bulk is refused at 2
+  # while interactive may still reach 8. Shares must each be in (0, 1] and sum
+  # to <= 1.0. A key with no lane (or an unknown lane) lands on default_lane.
+  # priority_lanes:
+  #   interactive: 0.8
+  #   bulk: 0.2
+  # default_lane: bulk
+  # Pin a client session (x-wiwi-session-id) to the deployment that served it, so
+  # upstream prompt caches stay warm. A pin is dropped as soon as its deployment
+  # is unhealthy or above this request's lane ceiling.
+  # session_affinity: false
+  # session_affinity_ttl_s: 600
   fallbacks:
     claude-sonnet: ["gpt-4o"]
   model_group_alias:
