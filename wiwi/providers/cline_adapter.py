@@ -74,6 +74,18 @@ def _unwrap_envelope(data: Any) -> Any:
 
 
 class ClineAdapter(OpenAIAdapter):
+    def realtime_url(self, base_url: str) -> str | None:
+        """No Realtime surface here, despite the shared OpenAI wire shape.
+
+        Cline exposes chat completions over OAuth; the
+        realtime surface is not part of that API.
+
+        Inheriting the OpenAI implementation would be a *wrong* capability
+        claim rather than a convenient one: the client would complete a
+        handshake against a URL that answers 404, and the failure would surface
+        mid-session as a closed socket instead of at upgrade as a 501.
+        """
+        return None
     """OpenAI wire format + Cline auth/fingerprint/streaming quirks."""
 
     provider_type = "cline"

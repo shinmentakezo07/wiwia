@@ -362,6 +362,29 @@ class RouterSettings(BaseModel):
     stream_journal_max_bytes: int = 1_048_576  # per-journal byte cap
 
 
+class RealtimeSettings(BaseModel):
+    """Realtime WebSocket surface (``WS /v1/realtime``, spec E).
+
+    Off by default: a gateway that has never been asked to carry a
+    bidirectional session should not be holding one open. Turning it on grants
+    nothing by itself — a provider must also declare ``realtime_url``, so a
+    chat-only deployment is unaffected either way.
+    """
+
+    enabled: bool = False
+    # Accept the virtual key as a ``?key=`` query parameter. Off by default:
+    # a query string lands in proxy logs, browser history and access logs, so
+    # this trades credential hygiene for compatibility with clients (notably
+    # browser WebSocket) that cannot set an Authorization header.
+    allow_key_in_query: bool = False
+    # Close a session that has seen no traffic in either direction for this
+    # long. A realtime session is idle far more often than it is busy.
+    idle_timeout_s: float = 300.0
+    # Absolute lifetime cap. A forgotten socket must not hold a deployment's
+    # concurrency slot forever; the client is expected to reconnect.
+    max_session_s: float = 3600.0
+
+
 class CacheSettings(BaseModel):
     """Exact-match response cache (docs/CORE.md §6). Non-streaming requests
     only; keyed on normalized IR so dialect differences that decode to the
@@ -523,6 +546,7 @@ class WiwiConfig(BaseModel):
     cache_settings: CacheSettings = Field(default_factory=CacheSettings)
     healer: HealerSettings = Field(default_factory=HealerSettings)
     telemetry: TelemetrySettings = Field(default_factory=TelemetrySettings)
+    realtime: RealtimeSettings = Field(default_factory=RealtimeSettings)
 
     @model_validator(mode="after")
     def _fill_provider_timeouts(self) -> WiwiConfig:

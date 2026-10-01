@@ -220,6 +220,15 @@ class AnthropicAdapter:
     def headers(self, key: ProviderKeyRef) -> dict[str, str]:
         return {"x-api-key": key.secret, "anthropic-version": "2023-06-01"}
 
+    def realtime_url(self, base_url: str) -> str | None:
+        """No Realtime-style WebSocket surface on this provider.
+
+        The /v1/realtime route reads this and answers 501 rather than dialling
+        a URL that does not exist, so a client learns the provider cannot serve
+        a session instead of hanging on a connection that will never open.
+        """
+        return None
+
     def build_url(self, base_url: str, model_id: str, stream: bool) -> str:
         base = base_url.rstrip("/")
         return f"{base}/messages"

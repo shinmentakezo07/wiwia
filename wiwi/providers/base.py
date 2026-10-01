@@ -335,6 +335,16 @@ def as_str(value: Any, default: str = "") -> str:
 class ProviderAdapter(Protocol):
     provider_type: str
 
+    def realtime_url(self, base_url: str) -> str | None:
+        """WebSocket endpoint for a Realtime-style session, or None.
+
+        A method, not an attribute: the answer depends on the deployment's
+        configured ``base_url``, which is a call-time argument everywhere else
+        in the adapter protocol too. ``None`` means the provider has no such
+        surface, and the /v1/realtime route refuses it with a 501 rather than
+        dialling a URL that does not exist.
+        """
+
     def headers(self, key: ProviderKeyRef) -> dict[str, str]: ...
     def build_url(self, base_url: str, model_id: str, stream: bool) -> str: ...
     def encode_request(self, req: IRRequest, model_id: str,

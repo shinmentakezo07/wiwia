@@ -51,6 +51,18 @@ def _token_count(value: Any) -> int:
 
 
 class OpenRouterAdapter(OpenAIAdapter):
+    def realtime_url(self, base_url: str) -> str | None:
+        """No Realtime surface here, despite the shared OpenAI wire shape.
+
+        OpenRouter proxies chat completions, not the
+        Realtime WebSocket protocol.
+
+        Inheriting the OpenAI implementation would be a *wrong* capability
+        claim rather than a convenient one: the client would complete a
+        handshake against a URL that answers 404, and the failure would surface
+        mid-session as a closed socket instead of at upgrade as a 501.
+        """
+        return None
     """OpenRouter: extends OpenAI adapter with OpenRouter-specific translations.
 
     Key translations:

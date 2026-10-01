@@ -217,6 +217,23 @@ class OpenAIAdapter:
         base = base_url.rstrip("/")
         return f"{base}/chat/completions"
 
+    def realtime_url(self, base_url: str) -> str | None:
+        """Realtime session endpoint derived from the deployment's base_url.
+
+        https://api.openai.com/v1 -> wss://api.openai.com/v1/realtime. The
+        scheme swap is the whole transformation: a base_url is always http(s)
+        because httpx speaks http, and the realtime surface is only served
+        over wss.
+        """
+        base = base_url.rstrip("/")
+        for http, ws in (("https://", "wss://"), ("http://", "ws://")):
+            if base.startswith(http):
+                return ws + base[len(http):] + "/realtime"
+        # Already ws:// or relative: hand it back with the path appended
+        # rather than guessing a scheme, so a misconfigured account fails
+        # loudly at dial time instead of silently.
+        return base + "/realtime"
+
     def encode_request(self, req: ir.Request, model_id: str,
                        deployment_params: dict[str, Any]) -> dict[str, Any]:
         g = req.gen_params

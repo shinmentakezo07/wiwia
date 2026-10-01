@@ -79,6 +79,15 @@ class GeminiAdapter:
     def headers(self, key: ProviderKeyRef) -> dict[str, str]:
         return {}  # key goes in querystring
 
+    def realtime_url(self, base_url: str) -> str | None:
+        """No Realtime-style WebSocket surface on this provider.
+
+        The /v1/realtime route reads this and answers 501 rather than dialling
+        a URL that does not exist, so a client learns the provider cannot serve
+        a session instead of hanging on a connection that will never open.
+        """
+        return None
+
     def build_url(self, base_url: str, model_id: str, stream: bool) -> str:
         base = base_url.rstrip("/") or "https://generativelanguage.googleapis.com/v1beta"
         method = "streamGenerateContent?alt=sse&key=" if stream else "generateContent?key="

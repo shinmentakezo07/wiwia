@@ -87,6 +87,18 @@ def _token_count(value: Any) -> int:
 
 
 class NimAdapter(OpenAIAdapter):
+    def realtime_url(self, base_url: str) -> str | None:
+        """No Realtime surface here, despite the shared OpenAI wire shape.
+
+        NIM serves /v1/chat/completions; its streaming is SSE,
+        not a bidirectional realtime session.
+
+        Inheriting the OpenAI implementation would be a *wrong* capability
+        claim rather than a convenient one: the client would complete a
+        handshake against a URL that answers 404, and the failure would surface
+        mid-session as a closed socket instead of at upgrade as a 501.
+        """
+        return None
     """NVIDIA NIM: extends OpenAI adapter with NIM-specific translations."""
 
     provider_type = "nvidia-nim"

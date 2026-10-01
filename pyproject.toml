@@ -22,6 +22,9 @@ dependencies = [
   # the chars/4 heuristic and degraded cost/budget accounting. Declared so the
   # fallback is a deliberate choice, not an accident.
   "tiktoken>=0.7",
+  # The /v1/realtime WebSocket relay (spec E). Client-side only — the upstream
+  # hop is a raw websocket connection, not an httpx call.
+  "websockets>=13.0",
 ]
 
 [project.optional-dependencies]
