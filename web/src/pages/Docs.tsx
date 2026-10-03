@@ -1,8 +1,7 @@
-// Docs — public API documentation for the gateway. Sticky scroll-tracking
-// sidebar with reading-progress rail, tabbed code examples with copy buttons,
-// endpoint reference cards with HTTP method badges, and feature highlights.
-// Matches the dark design system shared with the admin console.
-
+// Docs — public API documentation for the gateway. A reference-manual layout:
+// a numbered left rail that tracks the reader, hairline-separated sections
+// (no floating cards), tabbed code examples with copy buttons, and an endpoint
+// reference list. Matches the dark design system shared with the admin console.
 
 import {
   useCallback,
@@ -20,7 +19,6 @@ import {
   Boxes,
   Check,
   ChevronDown,
-  ChevronRight,
   Copy,
   Hash,
   KeyRound,
@@ -28,7 +26,6 @@ import {
   Network,
   Palette,
   RefreshCw,
-  Server,
   Settings2,
   Shield,
   Terminal,
@@ -36,8 +33,6 @@ import {
   Zap,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { Badge, Card } from "@/components/ui";
-import { HERO_BEAMS_COMPACT, HeroBeamBackdrop } from "@/components/HeroBeamBackdrop";
 
 const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
 
@@ -142,7 +137,7 @@ function CopyBtn(props: { text: string }) {
         setCopied(true);
         timer.current = setTimeout(() => setCopied(false), 1500);
       }}
-      className="absolute right-2.5 top-2.5 flex h-11 min-w-[72px] items-center justify-center gap-1 rounded-md border border-white/[0.06] bg-white/[0.03] px-2.5 text-[10px] font-medium text-[var(--admin-text-dim)] opacity-100 transition-all hover:border-white/[0.12] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100"
+      className="inline-flex h-11 min-w-[72px] shrink-0 items-center justify-center gap-1.5 rounded-md border border-white/[0.06] bg-white/[0.03] px-2.5 text-[10px] font-medium text-[var(--admin-text-dim)] transition-colors hover:border-white/[0.14] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
       aria-label="Copy code"
     >
       {copied ? <Check size={11} /> : <Copy size={11} />}
@@ -151,7 +146,7 @@ function CopyBtn(props: { text: string }) {
   );
 }
 
-// Small inline copy button for endpoint paths (visible, not hover-revealed).
+// Small inline copy button for endpoint paths.
 function PathCopyBtn(props: { text: string }) {
   const [copied, setCopied] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -164,7 +159,7 @@ function PathCopyBtn(props: { text: string }) {
         setCopied(true);
         timer.current = setTimeout(() => setCopied(false), 1500);
       }}
-      className="inline-flex h-11 w-11 items-center justify-center rounded-md border border-white/[0.06] bg-white/[0.02] text-[var(--admin-text-dim)] transition-all hover:border-white/[0.12] hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+      className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-white/[0.06] bg-white/[0.02] text-[var(--admin-text-dim)] transition-colors hover:border-white/[0.14] hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
       aria-label={`Copy ${props.text}`}
     >
       {copied ? <Check size={11} /> : <Copy size={11} />}
@@ -236,29 +231,16 @@ const LANG_DOT: Record<Lang, string> = {
 function CodeBlock(props: { code: string; label?: string; lang?: Lang }) {
   const lang = props.lang ?? (props.label ? langFromLabel(props.label) : "bash");
   return (
-    <div className="docs-codeblock group relative overflow-hidden rounded-[10px] border border-[var(--admin-border)] bg-[var(--admin-surface)]">
-      <div className="docs-codeblock-glow" aria-hidden />
-      {props.label && (
-        <div className="relative z-10 flex items-center justify-between border-b border-[var(--admin-border)] bg-white/[0.015] px-3.5 py-1.5">
-          <div className="flex items-center gap-1.5 pl-0.5">
-            <span className="h-2 w-2 rounded-full bg-[#ff5f57]/70" aria-hidden />
-            <span className="h-2 w-2 rounded-full bg-[#febc2e]/70" aria-hidden />
-            <span className="h-2 w-2 rounded-full bg-[#28c840]/70" aria-hidden />
-            <span className="admin-label ml-1.5 text-[10px]">{props.label}</span>
-          </div>
-          <CopyBtn text={props.code} />
-        </div>
-      )}
-      {!props.label && (
-        <div className="absolute right-0 top-0 z-10 px-2.5 py-2 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:focus-within:opacity-100">
-          <CopyBtn text={props.code} />
-        </div>
-      )}
+    <div className="docs-codeblock group">
+      <div className="flex items-center justify-between gap-3 border-b border-[var(--admin-border)] bg-white/[0.015] px-3 py-1.5">
+        <span className="admin-label truncate text-[10px]">{props.label ?? lang}</span>
+        <CopyBtn text={props.code} />
+      </div>
       <pre
         tabIndex={0}
         role="group"
         aria-label={props.label ? `${props.label} code example` : "Code example"}
-        className="relative z-10 overflow-x-auto px-3.5 py-3 text-[12px] leading-relaxed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+        className="overflow-x-auto px-3.5 py-3 text-[12px] leading-relaxed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
         style={{ fontFamily: MONO }}
       >
         <code className="text-[var(--admin-text-muted)]">{highlight(props.code, lang)}</code>
@@ -269,25 +251,23 @@ function CodeBlock(props: { code: string; label?: string; lang?: Lang }) {
 
 // ── tabbed code block ──────────────────────────────────────────────────────
 
-function TabbedCode(props: {
-  tabs: { label: string; code: string }[];
-}) {
+function TabbedCode(props: { tabs: { label: string; code: string }[] }) {
   const [idx, setIdx] = useState(0);
   const tab = props.tabs[idx];
   return (
     <div className="space-y-2.5">
-      <div className="flex items-center gap-1 rounded-[10px] border border-[var(--admin-border)] bg-[var(--admin-surface)] p-1">
+      <div className="flex flex-wrap items-center gap-1">
         {props.tabs.map((t, i) => (
           <button
             key={t.label}
             type="button"
             onClick={() => setIdx(i)}
             aria-pressed={i === idx}
-            className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[11px] font-medium transition-all ${
+            className={`inline-flex min-h-11 items-center gap-1.5 rounded-md px-3 text-[11px] font-medium transition-colors sm:min-h-0 sm:py-1.5 ${
               i === idx
-                ? "bg-blue-500/[0.12] text-blue-200 shadow-[inset_0_1px_0_rgba(147,197,253,0.12)] ring-1 ring-blue-400/20"
+                ? "bg-blue-500/[0.12] text-blue-200 ring-1 ring-blue-400/20"
                 : "text-[var(--admin-text-muted)] hover:bg-white/[0.03] hover:text-[var(--admin-text)]"
-            }`}
+            } focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50`}
           >
             <span
               className={`h-1.5 w-1.5 rounded-full transition-opacity ${LANG_DOT[langFromLabel(t.label)]} ${
@@ -308,26 +288,27 @@ function TabbedCode(props: {
 
 type Method = "POST" | "GET";
 
-const METHOD_STYLES: Record<Method, { bg: string; text: string; accent: string }> = {
-  POST: { bg: "bg-amber-500/10", text: "text-amber-400", accent: "border-l-amber-500/40" },
-  GET: { bg: "bg-emerald-500/10", text: "text-emerald-400", accent: "border-l-emerald-500/40" },
+const METHOD_STYLES: Record<Method, { bg: string; text: string }> = {
+  POST: { bg: "bg-amber-500/10", text: "text-amber-400" },
+  GET: { bg: "bg-emerald-500/10", text: "text-emerald-400" },
 };
 
-function EndpointCard(props: {
+function EndpointRow(props: {
   method: Method;
   path: string;
   desc: string;
   auth?: string;
   clients?: string[];
   example?: { label: string; code: string }[];
-  children?: ReactNode;
 }) {
-  const { method, path, desc, auth, clients, example, children } = props;
+  const { method, path, desc, auth, clients, example } = props;
   const ms = METHOD_STYLES[method];
   return (
-    <div className={`docs-endpoint group/endpoint rounded-[12px] border border-[var(--admin-border)] border-l-2 ${ms.accent} bg-[var(--admin-surface)] p-4 transition-all hover:-translate-y-px hover:border-[var(--admin-border-hover)] hover:shadow-lg hover:shadow-black/20`}>
+    <article className="group/endpoint py-5">
       <div className="flex flex-wrap items-center gap-2">
-        <span className={`docs-method-badge flex h-5 min-w-[48px] items-center justify-center rounded-md px-2 text-[10px] font-bold tracking-wider ${ms.bg} ${ms.text}`}>
+        <span
+          className={`docs-method-badge flex h-5 min-w-[48px] items-center justify-center rounded-md px-2 text-[10px] font-bold tracking-wider ${ms.bg} ${ms.text}`}
+        >
           {method}
         </span>
         <code className="text-[13px] font-semibold text-[var(--admin-text)]" style={{ fontFamily: MONO }}>
@@ -337,115 +318,31 @@ function EndpointCard(props: {
         {clients && (
           <div className="docs-endpoint-clients flex flex-wrap items-center gap-1.5">
             {clients.map((c) => (
-              <span key={c} className="rounded-full border border-white/[0.06] bg-white/[0.02] px-2 py-0.5 text-[9.5px] font-medium tracking-wide text-[var(--admin-text-dim)] transition-colors group-hover/endpoint:border-white/[0.1] group-hover/endpoint:text-[var(--admin-text-muted)]">
+              <span
+                key={c}
+                className="rounded-full border border-white/[0.06] bg-white/[0.02] px-2 py-0.5 text-[9.5px] font-medium tracking-wide text-[var(--admin-text-dim)] transition-colors group-hover/endpoint:border-white/[0.1] group-hover/endpoint:text-[var(--admin-text-muted)]"
+              >
                 {c}
               </span>
             ))}
           </div>
         )}
       </div>
-      <p className="mt-2 text-[12px] leading-relaxed text-[var(--admin-text-muted)]">{desc}</p>
+      <p className="mt-2 max-w-[74ch] text-[12px] leading-relaxed text-[var(--admin-text-muted)]">
+        {desc}
+      </p>
       {auth && (
         <div className="mt-2 flex items-center gap-1.5 text-[11px] text-[var(--admin-text-dim)]">
-          <KeyRound size={11} />
+          <KeyRound size={11} className="shrink-0" aria-hidden />
           <code style={{ fontFamily: MONO }}>{auth}</code>
         </div>
       )}
-      {children}
       {example && (
         <div className="mt-3">
           <TabbedCode tabs={example} />
         </div>
       )}
-    </div>
-  );
-}
-
-// ── feature pill ────────────────────────────────────────────────────────────
-
-const FEATURE_TONES: Record<string, string> = {
-  blue: "text-blue-300 from-blue-500/15 to-blue-500/[0.05]",
-  violet: "text-violet-300 from-violet-500/15 to-violet-500/[0.05]",
-  amber: "text-amber-300 from-amber-500/15 to-amber-500/[0.05]",
-  emerald: "text-emerald-300 from-emerald-500/15 to-emerald-500/[0.05]",
-  cyan: "text-cyan-300 from-cyan-500/15 to-cyan-500/[0.05]",
-  pink: "text-pink-300 from-pink-500/15 to-pink-500/[0.05]",
-};
-
-function FeatureCard(props: { icon: LucideIcon; title: string; body: string; tone?: keyof typeof FEATURE_TONES }) {
-  const Icon = props.icon;
-  const tone = FEATURE_TONES[props.tone ?? "blue"].split(" ");
-  return (
-    <div
-      className="admin-card docs-spotlight p-4 transition-all hover:-translate-y-px hover:border-[var(--admin-border-hover)] hover:shadow-lg hover:shadow-black/20"
-      onMouseMove={(e) => {
-        const r = e.currentTarget.getBoundingClientRect();
-        e.currentTarget.style.setProperty("--mx", `${e.clientX - r.left}px`);
-        e.currentTarget.style.setProperty("--my", `${e.clientY - r.top}px`);
-      }}
-    >
-      <div className="relative z-10 flex items-center gap-2.5">
-        <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-gradient-to-br ${tone[1]} ${tone[2]} ring-1 ring-white/[0.06]`}>
-          <Icon className={`h-3.5 w-3.5 ${tone[0]}`} />
-        </span>
-        <h3 className="text-[13px] font-semibold text-[var(--admin-text)]">{props.title}</h3>
-      </div>
-      <p className="relative z-10 mt-2 text-[12px] leading-relaxed text-[var(--admin-text-muted)]">{props.body}</p>
-    </div>
-  );
-}
-
-// ── heading anchor ─────────────────────────────────────────────────────────
-
-// Per-section accent tones for the heading icon chip (keyed by section index).
-const HEADING_TONES: Record<number, { chip: string; icon: string }> = {
-  1: { chip: "from-blue-500/20 to-blue-500/[0.04]", icon: "text-blue-300" },
-  2: { chip: "from-emerald-500/20 to-emerald-500/[0.04]", icon: "text-emerald-300" },
-  3: { chip: "from-violet-500/20 to-violet-500/[0.04]", icon: "text-violet-300" },
-  4: { chip: "from-amber-500/20 to-amber-500/[0.04]", icon: "text-amber-300" },
-  5: { chip: "from-cyan-500/20 to-cyan-500/[0.04]", icon: "text-cyan-300" },
-  6: { chip: "from-fuchsia-500/20 to-fuchsia-500/[0.04]", icon: "text-fuchsia-300" },
-  7: { chip: "from-sky-500/20 to-sky-500/[0.04]", icon: "text-sky-300" },
-  8: { chip: "from-pink-500/20 to-pink-500/[0.04]", icon: "text-pink-300" },
-};
-
-function SectionHeading(props: { id: string; icon: LucideIcon; title: string; subtitle?: string; index?: number }) {
-  const Icon = props.icon;
-  const tone = HEADING_TONES[props.index ?? 0] ?? {
-    chip: "from-blue-500/20 to-blue-500/[0.04]",
-    icon: "text-blue-300",
-  };
-  return (
-    <div className="docs-heading group mb-4 flex items-center gap-3">
-      <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-gradient-to-br ${tone.chip} ring-1 ring-white/[0.06]`}>
-        <Icon className={`h-4 w-4 ${tone.icon}`} />
-      </span>
-      <div>
-        <h2 className="flex items-center gap-1.5 text-[18px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
-          {props.index != null && (
-            <span className="font-mono text-[12px] font-normal text-[var(--admin-text-dim)]">
-              {String(props.index).padStart(2, "0")}
-            </span>
-          )}
-          {props.title}
-          <a
-            href={`#${props.id}`}
-            aria-label={`Link to ${props.title}`}
-            onClick={(e) => {
-              e.preventDefault();
-              scrollToId(props.id);
-              history.replaceState(null, "", `#${props.id}`);
-            }}
-            className="docs-anchor rounded p-0.5 text-[var(--admin-text-dim)] hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
-          >
-            <Hash size={13} />
-          </a>
-        </h2>
-        {props.subtitle && (
-          <p className="mt-0.5 text-[12px] text-[var(--admin-text-dim)]">{props.subtitle}</p>
-        )}
-      </div>
-    </div>
+    </article>
   );
 }
 
@@ -570,15 +467,6 @@ print(resp.content[0].text)`,
   },
 ];
 
-// ── hero stat chips ────────────────────────────────────────────────────────
-
-const HERO_STATS: [LucideIcon, string][] = [
-  [Layers, "3 inbound dialects"],
-  [Server, "11 provider types"],
-  [Boxes, "1 canonical IR"],
-  [Zap, "SSE streaming"],
-];
-
 // ── provider ecosystem map ────────────────────────────────────────────────
 
 const PROVIDER_ASSETS: { label: string; src?: string; icon?: LucideIcon }[] = [
@@ -595,150 +483,157 @@ const PROVIDER_ASSETS: { label: string; src?: string; icon?: LucideIcon }[] = [
   { label: "Cline", icon: Boxes },
 ];
 
-function ProviderMap() {
+function ProviderGrid() {
   return (
-    <Card className="mt-6 overflow-hidden p-0">
-      <div className="border-b border-[var(--admin-border)] bg-white/[0.015] px-5 py-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <p className="admin-label">Provider ecosystem</p>
-            <h3 className="mt-1 text-[15px] font-semibold text-[var(--admin-text)]">
-              One IR, every outbound path
-            </h3>
-          </div>
-          <span className="inline-flex h-7 items-center rounded-full border border-emerald-400/15 bg-emerald-400/[0.07] px-2.5 text-[10px] font-medium text-emerald-300">
-            11 provider types
-          </span>
-        </div>
+    <div className="mt-6">
+      <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+        <h3 className="admin-label">Provider ecosystem</h3>
+        <span className="text-[11px] text-[var(--admin-text-dim)]">11 provider types</span>
       </div>
-      <div className="relative p-4 sm:p-5">
-        <div className="pointer-events-none absolute inset-0 opacity-[0.22]" aria-hidden>
-          <div className="docs-provider-grid" />
-        </div>
-        <div className="relative grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-4">
-          {PROVIDER_ASSETS.map((provider) => {
-            const Logo = provider.icon;
-            return (
-              <div
-                key={provider.label}
-                className="docs-provider-item group flex min-h-[78px] flex-col items-center justify-center gap-2 rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] px-2 py-3 transition-all hover:-translate-y-0.5 hover:border-blue-400/25 hover:bg-white/[0.025] hover:shadow-lg hover:shadow-black/20"
-              >
-                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-white/[0.03] p-1.5 ring-1 ring-white/[0.05]">
-                  {provider.src ? (
-                    <img
-                      src={provider.src}
-                      alt=""
-                      className="h-full w-full object-contain transition-transform duration-200 group-hover:scale-110"
-                    />
-                  ) : Logo ? (
-                    <Logo className="h-5 w-5 text-[var(--admin-text-muted)] transition-colors group-hover:text-blue-300" />
-                  ) : null}
-                </div>
-                <span className="max-w-full truncate text-[10px] font-medium text-[var(--admin-text-muted)] group-hover:text-[var(--admin-text)]">
-                  {provider.label}
-                </span>
+      <div className="docs-provider-grid">
+        {PROVIDER_ASSETS.map((provider) => {
+          const Logo = provider.icon;
+          return (
+            <div
+              key={provider.label}
+              className="docs-provider-item flex min-h-[76px] flex-col items-center justify-center gap-2 px-2 py-3"
+            >
+              <div className="flex h-7 w-7 items-center justify-center">
+                {provider.src ? (
+                  <img src={provider.src} alt="" className="h-full w-full object-contain" />
+                ) : Logo ? (
+                  <Logo className="h-5 w-5 text-[var(--admin-text-muted)]" />
+                ) : null}
               </div>
-            );
-          })}
-        </div>
+              <span className="max-w-full truncate text-[10px] font-medium text-[var(--admin-text-dim)]">
+                {provider.label}
+              </span>
+            </div>
+          );
+        })}
       </div>
-      <div className="border-t border-[var(--admin-border)] px-5 py-3">
-        <div className="flex flex-wrap justify-center gap-2">
-          <span className="docs-flow-chip text-blue-300">chat/completions</span>
-          <span className="docs-flow-chip text-cyan-300">responses</span>
-          <span className="docs-flow-chip text-fuchsia-300">messages</span>
-          <span className="docs-flow-arrow" aria-hidden>→</span>
-          <span className="docs-flow-chip text-violet-300">wiwi IR</span>
-          <span className="docs-flow-arrow" aria-hidden>→</span>
-          <span className="docs-flow-chip text-[var(--admin-text-muted)]">provider adapter</span>
-        </div>
-      </div>
-    </Card>
+    </div>
   );
 }
 
-// ── hero request flow ───────────────────────────────────────────────────────
+// ── request pipeline strip ────────────────────────────────────────────────
 
-function HeroRequestFlow() {
+const PIPELINE = [
+  { chip: "chat/completions", tone: "text-blue-300" },
+  { chip: "responses", tone: "text-cyan-300" },
+  { chip: "messages", tone: "text-fuchsia-300" },
+  { chip: "wiwi IR", tone: "text-violet-300" },
+  { chip: "provider adapter", tone: "text-[var(--admin-text-muted)]" },
+];
+
+function Pipeline() {
   return (
-    <div className="docs-request-flow relative w-full" role="group" aria-label="Gateway request flow">
-      <div className="docs-flow-glow" aria-hidden />
-      <div className="relative z-10 p-4 sm:p-5">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <p className="admin-label">Unified request path</p>
-            <h2 className="mt-1 text-[15px] font-semibold text-[var(--admin-text)]">
-              Any client, any provider
-            </h2>
-          </div>
-          <span className="docs-flow-chip shrink-0 text-emerald-300">
-            <span className="docs-pulse-dot mr-1.5" aria-hidden />
-            gateway ready
-          </span>
-        </div>
+    <div className="docs-pipeline" aria-label="dialect to IR to provider pipeline">
+      {PIPELINE.map((step, i) => (
+        <span key={step.chip} className="inline-flex items-center gap-2">
+          {i > 0 && (
+            <span className="docs-pipe-arrow" aria-hidden>
+              →
+            </span>
+          )}
+          <span className={`docs-pipe-chip ${step.tone}`}>{step.chip}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
 
-        <div className="docs-flow-track mt-5" role="list" aria-label="Request stages">
-          <div className="docs-flow-stage" role="listitem">
-            <div className="docs-flow-stage-icon">
-              <Terminal size={16} />
-            </div>
-            <div className="relative z-10 mt-3">
-              <p className="text-[11px] font-semibold text-[var(--admin-text)]">Any client</p>
-              <p className="mt-1 text-[10px] leading-relaxed text-[var(--admin-text-muted)]">
-                Chat · Responses · Messages
-              </p>
-            </div>
-          </div>
+// ── section heading ─────────────────────────────────────────────────────────
 
-          <div className="docs-flow-connector" aria-hidden>
-            <ArrowRight size={14} />
-          </div>
+function SectionHeading(props: {
+  id: string;
+  title: string;
+  subtitle?: string;
+  index: number;
+}) {
+  return (
+    <div className="docs-heading group mb-5">
+      <p className="admin-label mb-2">Section {String(props.index).padStart(2, "0")}</p>
+      <h2 className="flex items-center gap-2 text-[20px] font-semibold tracking-[-0.015em] text-[var(--admin-text)]">
+        {props.title}
+        <a
+          href={`#${props.id}`}
+          aria-label={`Link to ${props.title}`}
+          onClick={(e) => {
+            e.preventDefault();
+            scrollToId(props.id);
+            history.replaceState(null, "", `#${props.id}`);
+          }}
+          className="docs-anchor rounded p-0.5 text-[var(--admin-text-dim)] hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+        >
+          <Hash size={14} />
+        </a>
+      </h2>
+      {props.subtitle && (
+        <p className="mt-1 text-[12.5px] text-[var(--admin-text-dim)]">{props.subtitle}</p>
+      )}
+    </div>
+  );
+}
 
-          <div className="docs-flow-stage" role="listitem">
-            <div className="docs-flow-stage-icon">
-              <Network size={16} />
-            </div>
-            <div className="relative z-10 mt-3">
-              <p className="text-[11px] font-semibold text-[var(--admin-text)]">wiwi IR</p>
-              <p className="mt-1 text-[10px] leading-relaxed text-[var(--admin-text-muted)]">
-                Decode · route · translate
-              </p>
-            </div>
-          </div>
+// ── feature grid ───────────────────────────────────────────────────────────
 
-          <div className="docs-flow-connector" aria-hidden>
-            <ArrowRight size={14} />
-          </div>
+const FEATURES: { icon: LucideIcon; title: string; body: string; tone: string }[] = [
+  {
+    icon: Layers,
+    tone: "text-blue-300",
+    title: "Three inbound dialects",
+    body: "OpenAI Chat, OpenAI Responses (Codex CLI), and Anthropic Messages all speak the same canonical IR.",
+  },
+  {
+    icon: KeyRound,
+    tone: "text-violet-300",
+    title: "Virtual keys",
+    body: "Per-client credentials with model allowlists, expiry, and spend caps. Callers never see provider keys.",
+  },
+  {
+    icon: Wallet,
+    tone: "text-amber-300",
+    title: "Budgets & rate limits",
+    body: "Per-key spend ceilings and RPM/TPM throttles keep noisy tenants from burning your quota.",
+  },
+  {
+    icon: Boxes,
+    tone: "text-emerald-300",
+    title: "Key pools",
+    body: "Pool multiple keys per provider with smooth weighted round-robin. Exhausted keys cool down automatically.",
+  },
+  {
+    icon: RefreshCw,
+    tone: "text-cyan-300",
+    title: "Retries & fallbacks",
+    body: "Automatic retries on transient failures, per-key cooldowns, and fallback model groups.",
+  },
+  {
+    icon: Palette,
+    tone: "text-pink-300",
+    title: "Cost tracking",
+    body: "Token usage and cost calculation for every call, per key, per model, per provider.",
+  },
+];
 
-          <div className="docs-flow-stage" role="listitem">
-            <div className="docs-flow-stage-icon">
-              <Server size={16} />
+function FeatureGrid() {
+  return (
+    <div className="grid grid-cols-1 gap-px overflow-hidden rounded-xl border border-[var(--admin-border)] bg-[var(--admin-border)] sm:grid-cols-2">
+      {FEATURES.map((feature) => {
+        const Icon = feature.icon;
+        return (
+          <div key={feature.title} className="bg-[var(--admin-surface)] p-4">
+            <div className="flex items-center gap-2">
+              <Icon className={`h-3.5 w-3.5 shrink-0 ${feature.tone}`} aria-hidden />
+              <h3 className="text-[13px] font-semibold text-[var(--admin-text)]">{feature.title}</h3>
             </div>
-            <div className="relative z-10 mt-3">
-              <p className="text-[11px] font-semibold text-[var(--admin-text)]">Any provider</p>
-              <p className="mt-1 text-[10px] leading-relaxed text-[var(--admin-text-muted)]">
-                11 provider types
-              </p>
-            </div>
+            <p className="mt-1.5 text-[12px] leading-relaxed text-[var(--admin-text-muted)]">
+              {feature.body}
+            </p>
           </div>
-        </div>
-
-        <div className="mt-5 border-t border-[var(--admin-border)] pt-4">
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-            {[
-              ["3", "inbound dialects"],
-              ["11", "provider types"],
-              ["1", "canonical IR"],
-              ["SSE", "streaming + journals"],
-            ].map(([value, label]) => (
-              <div className="docs-flow-metric" key={label}>
-                <span className="docs-flow-metric-value">{value}</span>
-                <span className="docs-flow-metric-label">{label}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
+        );
+      })}
     </div>
   );
 }
@@ -760,74 +655,82 @@ export function DocsPage() {
     }
   }, []);
 
+  const activeIndex = Math.max(1, SECTIONS.findIndex((s) => s.id === active) + 1);
+
   return (
     <div className="relative">
       <div className="docs-progress" aria-hidden>
-        <div className="docs-progress-fill" style={{ "--docs-progress": progress.toFixed(4) } as CSSProperties} />
+        <div
+          className="docs-progress-fill"
+          style={{ "--docs-progress": progress.toFixed(4) } as CSSProperties}
+        />
       </div>
       <BackToTop />
 
-      {/* Hero banner */}
-      <div className="docs-hero relative mb-10 overflow-hidden rounded-2xl border border-[var(--admin-border)] px-6 py-10 sm:px-10 sm:py-14">
+      {/* Masthead */}
+      <header className="docs-hero mb-10">
         <div className="docs-hero-glow" aria-hidden />
-        {/* Shared beam backdrop — same motion language as the Landing/Pricing heroes. */}
-        <HeroBeamBackdrop beams={HERO_BEAMS_COMPACT} />
-        <div className="relative z-10 grid items-center gap-10 lg:grid-cols-[1.05fr_0.95fr]">
-        <div>
-          <div className="mb-3 flex items-center gap-2">
-            <span className="admin-badge admin-badge-blue inline-flex items-center gap-1.5">
-              <BookOpen size={11} /> Documentation
-            </span>
-            <span className="admin-badge admin-badge-gray inline-flex items-center gap-1.5">
-              <Zap size={11} /> v0.1.0
-            </span>
-          </div>
-          <h1 className="text-3xl font-semibold tracking-[-0.02em] text-[var(--admin-text)] sm:text-4xl">
-            Point any client at{" "}
-            <span className="docs-gradient-text bg-gradient-to-r from-blue-400 via-fuchsia-400 to-blue-400 bg-clip-text text-transparent">
-              wiwi
-            </span>
-          </h1>
-          <p className="mt-3 max-w-2xl text-[15px] leading-relaxed text-[var(--admin-text-muted)]">
-            wiwi is a single endpoint that speaks every inbound dialect and routes to every
-            outbound provider. Bring your own client — OpenAI SDK, Anthropic SDK, Codex CLI,
-            Claude Code, or plain <code style={{ fontFamily: MONO }}>curl</code> — retarget it
-            at the gateway, and authenticate with a virtual key.
-          </p>
-          <div className="docs-hero-actions mt-5 flex flex-wrap items-center gap-2">
-            <button
-              onClick={() => handleClick("quickstart")}
-              className="wiwi-shimmer group inline-flex h-10 items-center gap-2 rounded-[10px] bg-gradient-to-b from-brand-500 to-brand-700 px-5 text-[13px] font-medium text-white shadow-lg shadow-brand-600/20 transition-[filter] duration-150 hover:brightness-110"
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <span className="admin-badge admin-badge-blue inline-flex items-center gap-1.5">
+            <BookOpen size={11} /> Documentation
+          </span>
+          <span className="admin-badge admin-badge-gray inline-flex items-center gap-1.5">
+            v0.1.0
+          </span>
+        </div>
+        <h1 className="max-w-3xl text-3xl font-semibold tracking-[-0.025em] text-[var(--admin-text)] sm:text-4xl">
+          Point any client at <span className="text-blue-300">wiwi</span>
+        </h1>
+        <p className="mt-3 max-w-2xl text-[15px] leading-relaxed text-[var(--admin-text-muted)]">
+          wiwi is a single endpoint that speaks every inbound dialect and routes to every
+          outbound provider. Bring your own client — OpenAI SDK, Anthropic SDK, Codex CLI,
+          Claude Code, or plain <code style={{ fontFamily: MONO }}>curl</code> — retarget it
+          at the gateway, and authenticate with a virtual key.
+        </p>
+        <div className="docs-hero-actions mt-5 flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => handleClick("quickstart")}
+            className="inline-flex h-11 items-center gap-2 rounded-[10px] bg-gradient-to-b from-brand-500 to-brand-700 px-5 text-[13px] font-medium text-white shadow-lg shadow-brand-600/20 transition-[filter] duration-150 hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+          >
+            <Terminal size={14} /> Quickstart
+            <ArrowRight size={13} />
+          </button>
+          <button
+            onClick={() => handleClick("endpoints")}
+            className="inline-flex h-11 items-center gap-2 rounded-[10px] border border-white/[0.08] bg-white/[0.02] px-5 text-[13px] font-medium text-[var(--admin-text)] transition-colors hover:border-white/[0.14] hover:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+          >
+            <Network size={14} /> API reference
+          </button>
+        </div>
+
+        <div className="docs-hero-meta mt-8">
+          <div className="min-w-0">
+            <p className="admin-label">Base URL</p>
+            <code
+              className="mt-1 block truncate text-[13px] text-[var(--admin-text)]"
+              style={{ fontFamily: MONO }}
             >
-              <Terminal size={14} /> Quickstart
-              <ArrowRight size={13} className="transition-transform duration-150 group-hover:translate-x-0.5" />
-            </button>
-            <button
-              onClick={() => handleClick("endpoints")}
-              className="inline-flex h-10 items-center gap-2 rounded-[10px] border border-white/[0.08] bg-white/[0.02] px-5 text-[13px] font-medium text-[var(--admin-text)] transition-colors hover:border-white/[0.14] hover:bg-white/[0.04]"
-            >
-              <Network size={14} /> API reference
-            </button>
+              http://localhost:4000
+            </code>
           </div>
-          <div className="mt-7 flex flex-wrap gap-2">
-            {HERO_STATS.map(([Icon, label]) => (
-              <span
-                key={label}
-                className="inline-flex items-center gap-1.5 rounded-full border border-white/[0.06] bg-white/[0.02] px-2.5 py-1 text-[11px] text-[var(--admin-text-dim)] transition-colors hover:border-white/[0.1] hover:text-[var(--admin-text-muted)]"
-              >
-                <Icon size={11} className="text-blue-300/70" aria-hidden />
-                {label}
-              </span>
-            ))}
+          <div>
+            <p className="admin-label">Facts</p>
+            <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-[var(--admin-text-muted)]">
+              <span>3 inbound dialects</span>
+              <span>11 provider types</span>
+              <span>1 canonical IR</span>
+              <span>SSE streaming</span>
+            </div>
           </div>
         </div>
-        <HeroRequestFlow />
-        </div>
-      </div>
+      </header>
 
       {/* Mobile jump control */}
       <div className="docs-mobile-jump mb-6 lg:hidden">
-        <label htmlFor="docs-section-select" className="mb-2 block text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--admin-text-muted)]">
+        <label
+          htmlFor="docs-section-select"
+          className="mb-2 block text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--admin-text-muted)]"
+        >
           On this page
         </label>
         <div className="relative">
@@ -838,22 +741,26 @@ export function DocsPage() {
             className="docs-section-select h-11 w-full appearance-none rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] px-4 pr-10 text-[13px] text-[var(--admin-text)] shadow-sm focus:border-blue-400/50 focus:outline-none focus:ring-2 focus:ring-blue-400/20"
           >
             {SECTIONS.map((section) => (
-              <option key={section.id} value={section.id}>{section.label}</option>
+              <option key={section.id} value={section.id}>
+                {section.label}
+              </option>
             ))}
           </select>
-          <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--admin-text-dim)]" aria-hidden />
+          <ChevronDown
+            className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--admin-text-dim)]"
+            aria-hidden
+          />
         </div>
       </div>
 
-      {/* Two-column: sticky sidebar + content */}
+      {/* Two-column: left rail + document */}
       <div className="docs-grid">
-        {/* Sidebar */}
         <aside className="docs-sidebar">
-          <nav className="sticky top-[80px] space-y-0.5">
-            <div className="mb-2 flex items-baseline justify-between px-3">
+          <nav className="space-y-0.5" aria-label="Documentation sections">
+            <div className="mb-3 flex items-baseline justify-between pr-2">
               <span className="admin-label">On this page</span>
               <span className="font-mono text-[9px] tabular-nums text-[var(--admin-text-dim)]">
-                {String(Math.max(1, SECTIONS.findIndex((s) => s.id === active) + 1)).padStart(2, "0")}
+                {String(activeIndex).padStart(2, "0")}
                 <span className="opacity-50"> / {String(SECTIONS.length).padStart(2, "0")}</span>
               </span>
             </div>
@@ -865,67 +772,72 @@ export function DocsPage() {
                   key={s.id}
                   type="button"
                   onClick={() => handleClick(s.id)}
-                  className={`docs-nav-item flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-[12px] transition-colors ${
-                    isActive
-                      ? "is-active bg-blue-500/[0.06] font-medium text-blue-200"
-                      : "text-[var(--admin-text-muted)] hover:bg-white/[0.02] hover:text-[var(--admin-text)]"
+                  aria-current={isActive ? "true" : undefined}
+                  className={`docs-nav-item flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left text-[12px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/40 ${
+                    isActive ? "is-active" : "text-[var(--admin-text-muted)] hover:text-[var(--admin-text)]"
                   }`}
                 >
-                  <span className="font-mono text-[10px] opacity-50">{String(i + 1).padStart(2, "0")}</span>
-                  <Icon className="h-3.5 w-3.5 shrink-0" />
+                  <span className="font-mono text-[10px] opacity-50">
+                    {String(i + 1).padStart(2, "0")}
+                  </span>
+                  <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden />
                   <span className="flex-1">{s.label}</span>
-                  {isActive && <ChevronRight size={12} className="text-blue-400" />}
                 </button>
               );
             })}
-            <div className="mt-4 border-t border-[var(--admin-border)] px-1 pt-4">
+            <div className="mt-5 border-t border-[var(--admin-border)] pt-4">
               <Link
                 to="/playground"
-                className="group/play flex items-center gap-2 rounded-lg border border-white/[0.06] bg-gradient-to-br from-blue-500/[0.08] to-violet-500/[0.04] px-3 py-2.5 text-[12px] font-medium text-[var(--admin-text-muted)] transition-all hover:border-blue-400/25 hover:text-blue-200"
+                className="group/play flex items-center gap-2 rounded-lg px-2 py-2 text-[12px] font-medium text-[var(--admin-text-muted)] transition-colors hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/40"
               >
-                <Terminal size={13} className="text-blue-300/80" />
+                <Terminal size={13} className="text-blue-300/80" aria-hidden />
                 <span className="flex-1">Open playground</span>
-                <ArrowRight size={12} className="opacity-0 transition-all group-hover/play:translate-x-0.5 group-hover/play:opacity-100" />
+                <ArrowRight
+                  size={12}
+                  className="opacity-0 transition-opacity group-hover/play:opacity-100 group-focus-visible/play:opacity-100"
+                  aria-hidden
+                />
               </Link>
             </div>
           </nav>
         </aside>
 
-        {/* Content */}
-        <div className="docs-content space-y-16">
-          {/* overview */}
-          <section id="overview" className="docs-section docs-section-card scroll-mt-20">
+        {/* Document */}
+        <div className="docs-content">
+          <section id="overview" className="docs-section scroll-mt-20">
             <SectionHeading
               id="overview"
               index={1}
-              icon={BookOpen}
               title="Overview"
               subtitle="How the gateway translates and routes requests"
             />
             <p className="text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
-              Every request follows the same hub-and-spoke path: the wire codec for the
-              inbound dialect decodes the request into a canonical internal representation (IR),
-              the router selects a provider and key from the pool, and the adapter encodes
-              the IR into the provider's native format. Responses flow back through the same
-              path — the adapter decodes the provider response into IR deltas, and the wire
-              encoder re-encodes them in the caller's original dialect.
+              Every request follows the same hub-and-spoke path: the wire codec for the inbound
+              dialect decodes the request into a canonical internal representation (IR), the router
+              selects a provider and key from the pool, and the adapter encodes the IR into the
+              provider&apos;s native format. Responses flow back through the same path — the adapter
+              decodes the provider response into IR deltas, and the wire encoder re-encodes them in
+              the caller&apos;s original dialect.
             </p>
-<ProviderMap />
+            <div className="mt-5 rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] p-4">
+              <p className="admin-label mb-3">Translation path</p>
+              <Pipeline />
+            </div>
+            <ProviderGrid />
           </section>
 
-          {/* quickstart */}
-          <section id="quickstart" className="docs-section docs-section-card scroll-mt-20">
+          <section id="quickstart" className="docs-section scroll-mt-20">
             <SectionHeading
               id="quickstart"
               index={2}
-              icon={Terminal}
               title="Quickstart"
               subtitle="Running locally in under a minute"
             />
             <p className="text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
-              Assuming wiwi is running on <code style={{ fontFamily: MONO }}>http://localhost:4000</code>,
-              every path below is relative to <code style={{ fontFamily: MONO }}>/v1</code>. The
-              Authorization header (or <code style={{ fontFamily: MONO }}>x-api-key</code> for Anthropic)
+              Assuming wiwi is running on{" "}
+              <code style={{ fontFamily: MONO }}>http://localhost:4000</code>, every path below
+              is relative to <code style={{ fontFamily: MONO }}>/v1</code>. The Authorization
+              header (or <code style={{ fontFamily: MONO }}>x-api-key</code> for Anthropic)
               carries a virtual key you mint in the console.
             </p>
             <div className="mt-5">
@@ -947,12 +859,10 @@ curl http://localhost:4000/v1/chat/completions \\
             </div>
           </section>
 
-          {/* authentication */}
-          <section id="authentication" className="docs-section docs-section-card scroll-mt-20">
+          <section id="authentication" className="docs-section scroll-mt-20">
             <SectionHeading
               id="authentication"
               index={3}
-              icon={KeyRound}
               title="Authentication"
               subtitle="Virtual keys — never provider keys"
             />
@@ -962,62 +872,70 @@ curl http://localhost:4000/v1/chat/completions \\
               and model allowlists are enforced before a request ever leaves the gateway.
             </p>
             <div className="mt-5 flex flex-wrap gap-2">
-              <Badge tone="blue">
+              <span className="inline-flex min-h-11 items-center rounded-full border border-white/[0.07] bg-white/[0.02] px-3 text-[12px] text-[var(--admin-text-muted)]">
                 <code style={{ fontFamily: MONO }}>Authorization: Bearer sk-wiwi-…</code>
-              </Badge>
-              <Badge tone="violet">
+              </span>
+              <span className="inline-flex min-h-11 items-center rounded-full border border-white/[0.07] bg-white/[0.02] px-3 text-[12px] text-[var(--admin-text-muted)]">
                 <code style={{ fontFamily: MONO }}>x-api-key: sk-wiwi-…</code>
-              </Badge>
-              <Badge tone="gray">OpenAI · Responses · Anthropic</Badge>
+              </span>
+              <span className="inline-flex min-h-11 items-center rounded-full border border-white/[0.07] bg-white/[0.02] px-3 text-[12px] text-[var(--admin-text-dim)]">
+                OpenAI · Responses · Anthropic
+              </span>
             </div>
-            <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
-              <Card className="p-4">
-                <div className="flex items-center gap-2">
-                  <Shield size={14} className="text-[var(--admin-accent)]" />
-                  <h3 className="text-[13px] font-semibold text-[var(--admin-text)]">Hashed at rest</h3>
-                </div>
-                <p className="mt-1.5 text-[12px] leading-relaxed text-[var(--admin-text-muted)]">
-                  SHA-256 with constant-time compare — the plaintext is shown once at creation.
-                </p>
-              </Card>
-              <Card className="p-4">
-                <div className="flex items-center gap-2">
-                  <Wallet size={14} className="text-amber-400" />
-                  <h3 className="text-[13px] font-semibold text-[var(--admin-text)]">Per-key budgets</h3>
-                </div>
-                <p className="mt-1.5 text-[12px] leading-relaxed text-[var(--admin-text-muted)]">
-                  Spend ceilings, model allowlists, and RPM/TPM throttles per key.
-                </p>
-              </Card>
-              <Card className="p-4">
-                <div className="flex items-center gap-2">
-                  <KeyRound size={14} className="text-violet-400" />
-                  <h3 className="text-[13px] font-semibold text-[var(--admin-text)]">One key, all surfaces</h3>
-                </div>
-                <p className="mt-1.5 text-[12px] leading-relaxed text-[var(--admin-text-muted)]">
-                  The same key works across all three inbound dialects.
-                </p>
-              </Card>
+            <div className="mt-5 grid grid-cols-1 gap-px overflow-hidden rounded-xl border border-[var(--admin-border)] bg-[var(--admin-border)] sm:grid-cols-3">
+              {[
+                {
+                  icon: Shield,
+                  tone: "text-blue-300",
+                  title: "Hashed at rest",
+                  body: "SHA-256 with constant-time compare — the plaintext is shown once at creation.",
+                },
+                {
+                  icon: Wallet,
+                  tone: "text-amber-300",
+                  title: "Per-key budgets",
+                  body: "Spend ceilings, model allowlists, and RPM/TPM throttles per key.",
+                },
+                {
+                  icon: KeyRound,
+                  tone: "text-violet-300",
+                  title: "One key, all surfaces",
+                  body: "The same key works across all three inbound dialects.",
+                },
+              ].map((item) => {
+                const Icon = item.icon;
+                return (
+                  <div key={item.title} className="bg-[var(--admin-surface)] p-4">
+                    <div className="flex items-center gap-2">
+                      <Icon className={`h-3.5 w-3.5 shrink-0 ${item.tone}`} aria-hidden />
+                      <h3 className="text-[13px] font-semibold text-[var(--admin-text)]">
+                        {item.title}
+                      </h3>
+                    </div>
+                    <p className="mt-1.5 text-[12px] leading-relaxed text-[var(--admin-text-muted)]">
+                      {item.body}
+                    </p>
+                  </div>
+                );
+              })}
             </div>
           </section>
 
-          {/* endpoints */}
-          <section id="endpoints" className="docs-section docs-section-card scroll-mt-20">
+          <section id="endpoints" className="docs-section scroll-mt-20">
             <SectionHeading
               id="endpoints"
               index={4}
-              icon={Network}
               title="Endpoints"
               subtitle="The three inbound surfaces plus model listing"
             />
             <p className="text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
               Each surface maps onto the same canonical IR. Responses are re-encoded in the
-              caller's dialect on the way back out — so a Claude Code session (Anthropic Messages)
-              can be backed by GPT, and vice versa.
+              caller&apos;s dialect on the way back out — so a Claude Code session (Anthropic
+              Messages) can be backed by GPT, and vice versa.
             </p>
-            <div className="mt-5 space-y-3">
+            <div className="mt-4 divide-y divide-[var(--admin-border)]">
               {ENDPOINTS.map((ep) => (
-                <EndpointCard
+                <EndpointRow
                   key={ep.path}
                   method={ep.method}
                   path={ep.path}
@@ -1030,21 +948,19 @@ curl http://localhost:4000/v1/chat/completions \\
             </div>
           </section>
 
-          {/* cross-provider */}
-          <section id="cross-provider" className="docs-section docs-section-card scroll-mt-20">
+          <section id="cross-provider" className="docs-section scroll-mt-20">
             <SectionHeading
               id="cross-provider"
               index={5}
-              icon={RefreshCw}
               title="Cross-provider routing"
               subtitle="Decouple the caller's dialect from the upstream provider"
             />
             <p className="text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
-              Because every direction goes dialect → IR → provider, the caller's dialect is
+              Because every direction goes dialect → IR → provider, the caller&apos;s dialect is
               decoupled from the upstream provider. Clients request a{" "}
-              <code style={{ fontFamily: MONO }}>model_name</code>; wiwi routes to the configured
-              provider account and native model id. Key pools, retries, cooldowns, and fallbacks
-              are wired in the same config.
+              <code style={{ fontFamily: MONO }}>model_name</code>; wiwi routes to the
+              configured provider account and native model id. Key pools, retries, cooldowns, and
+              fallbacks are wired in the same config.
             </p>
             <div className="mt-5">
               <CodeBlock
@@ -1069,20 +985,19 @@ router_settings:
             </div>
           </section>
 
-          {/* streaming */}
-          <section id="streaming" className="docs-section docs-section-card scroll-mt-20">
+          <section id="streaming" className="docs-section scroll-mt-20">
             <SectionHeading
               id="streaming"
               index={6}
-              icon={Zap}
               title="Streaming"
               subtitle="Server-sent events across all three dialects"
             />
             <p className="text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
               Streaming is supported across all three surfaces. Set{" "}
-              <code style={{ fontFamily: MONO }}>"stream": true</code> in the request body. The
-              gateway decodes the provider's stream into <code style={{ fontFamily: MONO }}>IRStreamDelta</code>{" "}
-              events and re-encodes them as SSE in the caller's dialect —{" "}
+              <code style={{ fontFamily: MONO }}>&quot;stream&quot;: true</code> in the request
+              body. The gateway decodes the provider&apos;s stream into{" "}
+              <code style={{ fontFamily: MONO }}>IRStreamDelta</code> events and re-encodes them
+              as SSE in the caller&apos;s dialect —{" "}
               <code style={{ fontFamily: MONO }}>data: {"{...}"}\n\n</code> chunks for OpenAI,
               and the Anthropic event taxonomy for Messages.
             </p>
@@ -1100,30 +1015,31 @@ router_settings:
               />
             </div>
             <p className="mt-3 text-[12px] leading-relaxed text-[var(--admin-text-dim)]">
-              The streaming contract guarantees: exactly one <code style={{ fontFamily: MONO }}>StreamStart</code>,
-              then <code style={{ fontFamily: MONO }}>ToolCallOpen → ArgsDelta* → Close</code> per index,
-              then <code style={{ fontFamily: MONO }}>UsageFinal</code>, then{" "}
+              The streaming contract guarantees: exactly one{" "}
+              <code style={{ fontFamily: MONO }}>StreamStart</code>, then{" "}
+              <code style={{ fontFamily: MONO }}>ToolCallOpen → ArgsDelta* → Close</code> per
+              index, then <code style={{ fontFamily: MONO }}>UsageFinal</code>, then{" "}
               <code style={{ fontFamily: MONO }}>Finish</code>, then{" "}
               <code style={{ fontFamily: MONO }}>StreamEnd</code> or{" "}
               <code style={{ fontFamily: MONO }}>StreamError</code>.
             </p>
           </section>
 
-          {/* configuration */}
-          <section id="config" className="docs-section docs-section-card scroll-mt-20">
+          <section id="config" className="docs-section scroll-mt-20">
             <SectionHeading
               id="config"
               index={7}
-              icon={Settings2}
               title="Configuration"
               subtitle="A single wiwi.yaml — LiteLLM-shaped"
             />
             <p className="text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
               The entire gateway is configured through one YAML file. Providers hold named
-              accounts with pools of keyed entries; <code style={{ fontFamily: MONO }}>model_list</code>{" "}
-              maps client-requested names to provider accounts; router settings control strategy,
-              retries, cooldowns, and fallbacks. Any string value may reference{" "}
-              <code style={{ fontFamily: MONO }}>os.environ/NAME</code> for secret interpolation.
+              accounts with pools of keyed entries;{" "}
+              <code style={{ fontFamily: MONO }}>model_list</code> maps client-requested names
+              to provider accounts; router settings control strategy, retries, cooldowns, and
+              fallbacks. Any string value may reference{" "}
+              <code style={{ fontFamily: MONO }}>os.environ/NAME</code> for secret
+              interpolation.
             </p>
             <div className="mt-5">
               <CodeBlock
@@ -1163,57 +1079,18 @@ router_settings:
             </div>
           </section>
 
-          {/* features */}
-          <section id="features" className="docs-section docs-section-card scroll-mt-20">
+          <section id="features" className="docs-section scroll-mt-20">
             <SectionHeading
               id="features"
               index={8}
-              icon={Layers}
               title="Features"
               subtitle="Built-in for every deployment — no plugins"
             />
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <FeatureCard
-                icon={Layers}
-                tone="blue"
-                title="Three inbound dialects"
-                body="OpenAI Chat, OpenAI Responses (Codex CLI), and Anthropic Messages all speak the same canonical IR."
-              />
-              <FeatureCard
-                icon={KeyRound}
-                tone="violet"
-                title="Virtual keys"
-                body="Per-client credentials with model allowlists, expiry, and spend caps. Callers never see provider keys."
-              />
-              <FeatureCard
-                icon={Wallet}
-                tone="amber"
-                title="Budgets & rate limits"
-                body="Per-key spend ceilings and RPM/TPM throttles keep noisy tenants from burning your quota."
-              />
-              <FeatureCard
-                icon={Boxes}
-                tone="emerald"
-                title="Key pools"
-                body="Pool multiple keys per provider with smooth weighted round-robin. Exhausted keys cool down automatically."
-              />
-              <FeatureCard
-                icon={RefreshCw}
-                tone="cyan"
-                title="Retries & fallbacks"
-                body="Automatic retries on transient failures, per-key cooldowns, and fallback model groups."
-              />
-              <FeatureCard
-                icon={Palette}
-                tone="pink"
-                title="Cost tracking"
-                body="Token usage and cost calculation for every call, per key, per model, per provider."
-              />
-            </div>
+            <FeatureGrid />
           </section>
 
           {/* CTA */}
-          <div className="docs-cta rounded-2xl border border-[var(--admin-border)] bg-gradient-to-b from-white/[0.02] to-transparent p-8 text-center">
+          <div className="docs-cta mt-12 p-8 text-center">
             <h2 className="text-xl font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
               Ready to try it?
             </h2>
@@ -1223,13 +1100,13 @@ router_settings:
             <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
               <Link
                 to="/playground"
-                className="inline-flex h-10 items-center gap-2 rounded-[10px] bg-gradient-to-b from-brand-500 to-brand-700 px-5 text-[13px] font-medium text-white shadow-lg shadow-brand-600/20 transition-[filter] duration-150 hover:brightness-110"
+                className="inline-flex h-11 items-center gap-2 rounded-[10px] bg-gradient-to-b from-brand-500 to-brand-700 px-5 text-[13px] font-medium text-white shadow-lg shadow-brand-600/20 transition-[filter] duration-150 hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
               >
                 <Terminal size={14} /> Open playground
               </Link>
               <Link
                 to="/signup"
-                className="inline-flex h-10 items-center gap-2 rounded-[10px] border border-white/[0.08] bg-white/[0.02] px-5 text-[13px] font-medium text-[var(--admin-text)] transition-colors hover:bg-white/[0.04]"
+                className="inline-flex h-11 items-center gap-2 rounded-[10px] border border-white/[0.08] bg-white/[0.02] px-5 text-[13px] font-medium text-[var(--admin-text)] transition-colors hover:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
               >
                 Create an account <ArrowRight size={13} />
               </Link>

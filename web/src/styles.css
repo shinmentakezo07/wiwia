@@ -1010,7 +1010,10 @@ select.admin-input option {
 }
 }
 
-/* -- docs page: editorial layout, navigation, and reference surfaces -------- */
+/* -- docs page: reference-manual layout (redesigned) ------------------------
+   Two-column document: hairline-separated sections instead of floating cards,
+   a numbered section rail, and a quieter masthead. All tokens come from the
+   shared admin design system (--admin-*). */
 
 .docs-grid {
   display: grid;
@@ -1031,19 +1034,16 @@ select.admin-input option {
   font-family: inherit;
 }
 
+/* Left rail: a hairline spine with numbered entries, not a floating panel. */
 .docs-sidebar {
   position: sticky;
   top: 96px;
   align-self: start;
   max-height: calc(100vh - 116px);
   overflow-y: auto;
-  padding: 10px;
-  border: 1px solid var(--admin-border);
-  border-radius: var(--admin-radius);
-  background: rgba(10, 10, 10, 0.72);
-  backdrop-filter: blur(12px);
+  padding-left: 16px;
+  border-left: 1px solid var(--admin-border);
 }
-
 @media (max-width: 1023px) {
   .docs-grid {
     grid-template-columns: 1fr;
@@ -1053,91 +1053,60 @@ select.admin-input option {
   }
 }
 
+/* Sections are separated by hairlines, not cards. */
 .docs-section {
   position: relative;
   scroll-margin-top: 96px;
+  padding-top: clamp(1.75rem, 4vw, 2.75rem);
+  border-top: 1px solid var(--admin-border);
+}
+.docs-section:first-child {
+  padding-top: 0;
+  border-top: 0;
 }
 
-.docs-section-card {
-  overflow: hidden;
-  padding: clamp(1.25rem, 3vw, 2rem);
-  border: 1px solid var(--admin-border);
-  border-radius: var(--admin-radius);
-  background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.022), transparent 36%),
-    var(--admin-surface);
-  box-shadow: 0 22px 60px -42px rgba(0, 0, 0, 0.85);
-  transition: border-color 0.25s ease, box-shadow 0.25s ease;
+/* Comfortable reading measure for section body prose. */
+.docs-section > p {
+  max-width: 74ch;
 }
-.docs-section-card:hover,
-.docs-section-card:focus-within {
-  border-color: rgba(255, 255, 255, 0.12);
-  box-shadow:
-    0 0 0 1px rgba(96, 165, 250, 0.06),
-    0 26px 66px -40px rgba(59, 130, 246, 0.2),
-    0 22px 60px -42px rgba(0, 0, 0, 0.85);
+
+/* Section navigation */
+.docs-nav-item {
+  position: relative;
+  min-height: 36px;
+  transition: color 0.2s ease;
 }
-.docs-section-card::before {
+.docs-nav-item:hover,
+.docs-nav-item:focus-visible {
+  color: var(--admin-text);
+}
+.docs-nav-item:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.28);
+}
+.docs-nav-item.is-active {
+  color: #bfdbfe;
+}
+.docs-nav-item.is-active::before {
   content: "";
   position: absolute;
-  inset: 0 0 auto;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(96, 165, 250, 0.18), transparent);
-  pointer-events: none;
-  transition: background 0.25s ease;
-}
-.docs-section-card:hover::before,
-.docs-section-card:focus-within::before {
-  background: linear-gradient(90deg, transparent, rgba(96, 165, 250, 0.34), transparent);
+  left: -16px;
+  top: 22%;
+  bottom: 22%;
+  width: 2px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #60a5fa, #a78bfa);
 }
 
-@media (max-width: 768px) {
-  .docs-section-card {
-    padding: 1.1rem;
-  }
-}
-
-/* Code blocks remain internally scrollable on narrow screens. */
-.docs-codeblock {
-  min-width: 0;
-  max-width: 100%;
-  overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.055);
-  background: #08090b;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025), 0 18px 34px -28px rgba(0, 0, 0, 0.9);
-  transition: border-color 0.25s ease, box-shadow 0.25s ease, transform 0.25s ease;
-}
-.docs-codeblock:hover {
-  border-color: rgba(96, 165, 250, 0.32);
-  box-shadow:
-    0 0 0 1px rgba(96, 165, 250, 0.08),
-    0 18px 38px -22px rgba(59, 130, 246, 0.28);
-}
-.docs-codeblock pre {
-  max-width: 100%;
-  scrollbar-width: thin;
-}
-.docs-codeblock-glow {
-  position: absolute;
-  inset: 0;
-  background:
-    linear-gradient(90deg, rgba(59, 130, 246, 0.045), transparent 42%),
-    radial-gradient(ellipse 220px 70px at 50% 0%, rgba(139, 92, 246, 0.055), transparent 70%);
-  pointer-events: none;
-}
-
-/* Hero banner */
+/* Masthead */
 .docs-hero {
+  position: relative;
   isolation: isolate;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--admin-border);
   border-radius: 20px;
-  background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.035), transparent 32%),
-    #090a0d;
-  box-shadow:
-    0 32px 90px -48px rgba(59, 130, 246, 0.22),
-    0 24px 70px -44px rgba(0, 0, 0, 0.95);
+  background: var(--admin-surface);
+  padding: clamp(2rem, 5vw, 3.5rem);
 }
 .docs-hero::before {
   content: "";
@@ -1145,255 +1114,93 @@ select.admin-input option {
   inset: 0;
   z-index: -1;
   background-image:
-    linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
-  background-size: 24px 24px;
-  -webkit-mask-image: radial-gradient(ellipse 72% 92% at 50% 0%, black 20%, transparent 78%);
-  mask-image: radial-gradient(ellipse 72% 92% at 50% 0%, black 20%, transparent 78%);
-  opacity: 0.6;
+    linear-gradient(rgba(255, 255, 255, 0.028) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.028) 1px, transparent 1px);
+  background-size: 26px 26px;
+  -webkit-mask-image: radial-gradient(ellipse 76% 100% at 22% 0%, black 0%, transparent 72%);
+  mask-image: radial-gradient(ellipse 76% 100% at 22% 0%, black 0%, transparent 72%);
   pointer-events: none;
 }
 .docs-hero-glow {
   position: absolute;
   inset: 0;
   z-index: -1;
-  background:
-    radial-gradient(ellipse 480px 230px at 12% 0%, rgba(59, 130, 246, 0.10) 0%, transparent 62%),
-    radial-gradient(ellipse 420px 220px at 88% 100%, rgba(168, 85, 247, 0.07) 0%, transparent 62%);
+  background: radial-gradient(ellipse 560px 220px at 14% -6%, rgba(59, 130, 246, 0.10), transparent 62%);
   pointer-events: none;
 }
-.docs-gradient-text {
-  background-size: 200% auto;
-}
-
-.docs-request-flow {
-  position: relative;
-  overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  border-radius: 18px;
-  background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.035), transparent 34%),
-    var(--admin-surface);
-  box-shadow:
-    0 28px 70px -28px rgba(0, 0, 0, 0.9),
-    0 0 0 1px rgba(255, 255, 255, 0.025) inset;
-}
-.docs-request-flow::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background-image:
-    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
-  background-size: 20px 20px;
-  -webkit-mask-image: radial-gradient(ellipse 90% 85% at 50% 0%, black 0%, transparent 82%);
-  mask-image: radial-gradient(ellipse 90% 85% at 50% 0%, black 0%, transparent 82%);
-  pointer-events: none;
-}
-.docs-flow-glow {
-  position: absolute;
-  inset: 0;
-  background:
-    radial-gradient(ellipse 320px 140px at 80% 0%, rgba(139, 92, 246, 0.11) 0%, transparent 70%),
-    radial-gradient(ellipse 260px 120px at 10% 100%, rgba(59, 130, 246, 0.08) 0%, transparent 70%);
-  pointer-events: none;
-}
-.docs-flow-track {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  grid-template-columns: 1fr;
-  align-items: center;
-}
-.docs-flow-stage {
-  position: relative;
-  min-width: 0;
-  overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.025);
-  padding: 14px;
-}
-.docs-flow-stage::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: radial-gradient(circle at 15% 0%, rgba(96, 165, 250, 0.11), transparent 64%);
-  pointer-events: none;
-}
-.docs-flow-stage-icon {
-  position: relative;
-  z-index: 1;
+.docs-hero-meta {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: 10px;
-  background: rgba(96, 165, 250, 0.1);
-  color: #93c5fd;
+  flex-wrap: wrap;
+  gap: 0.75rem 2rem;
+  border-top: 1px solid var(--admin-border);
+  padding-top: 1.25rem;
 }
-.docs-flow-stage:nth-child(3) .docs-flow-stage-icon {
-  background: rgba(168, 85, 247, 0.1);
-  color: #c4b5fd;
-}
-.docs-flow-stage:nth-child(5) .docs-flow-stage-icon {
-  background: rgba(52, 211, 153, 0.1);
-  color: #6ee7b7;
-}
-.docs-flow-connector {
+
+/* Inline pipeline: dialect -> IR -> provider, as mono chips. */
+.docs-pipeline {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: center;
-  width: 100%;
-  height: 28px;
-  color: var(--admin-text-dim);
+  gap: 0.5rem;
 }
-.docs-flow-connector svg {
-  transform: rotate(90deg);
-}
-.docs-flow-metric {
-  min-width: 0;
-  border: 1px solid rgba(255, 255, 255, 0.055);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.018);
-  padding: 10px 12px;
-}
-.docs-flow-metric-value {
-  display: block;
-  color: var(--admin-text);
-  font-size: 16px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-}
-.docs-flow-metric-label {
-  display: block;
-  margin-top: 2px;
-  color: var(--admin-text-muted);
-  font-size: 10px;
-  line-height: 1.35;
-}
-@media (min-width: 640px) {
-  .docs-flow-track {
-    grid-template-columns: 1fr auto 1fr auto 1fr;
-    gap: 0 12px;
-  }
-  .docs-flow-connector {
-    width: 28px;
-    height: 1px;
-  }
-  .docs-flow-connector svg {
-    transform: none;
-  }
-}
-
-/* Section navigation */
-.docs-nav-item {
-  position: relative;
-  min-height: 38px;
-  border-radius: 9px;
-  transition: background-color 0.2s ease, color 0.2s ease, transform 0.2s ease;
-}
-.docs-nav-item:hover,
-.docs-nav-item:focus-visible {
-  transform: translateX(2px);
-  background: rgba(255, 255, 255, 0.025);
-  color: var(--admin-text);
-}
-.docs-nav-item:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.28);
-}
-.docs-nav-item::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 22%;
-  bottom: 22%;
-  width: 2px;
-  border-radius: 2px;
-  background: transparent;
-  transition: background 0.2s ease;
-}
-.docs-nav-item.is-active {
-  background: rgba(59, 130, 246, 0.09);
-  color: #bfdbfe;
-}
-.docs-nav-item.is-active::before {
-  background: linear-gradient(180deg, #60a5fa, #a78bfa);
-}
-
-/* Provider ecosystem map */
-.docs-provider-grid {
-  position: absolute;
-  inset: 0;
-  background-image:
-    linear-gradient(rgba(96, 165, 250, 0.08) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(96, 165, 250, 0.08) 1px, transparent 1px);
-  background-size: 24px 24px;
-  -webkit-mask-image: radial-gradient(ellipse 90% 80% at 50% 50%, black 0%, transparent 78%);
-  mask-image: radial-gradient(ellipse 90% 80% at 50% 50%, black 0%, transparent 78%);
-}
-.docs-provider-item {
-  position: relative;
-  isolation: isolate;
-}
-.docs-provider-item::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  border-radius: inherit;
-  background: radial-gradient(circle at 50% 0%, rgba(59, 130, 246, 0.11), transparent 68%);
-  opacity: 0;
-  transition: opacity 0.2s ease;
-}
-.docs-provider-item:hover::after,
-.docs-provider-item:focus-within::after {
-  opacity: 1;
-}
-
-.docs-flow-chip {
+.docs-pipe-chip {
   display: inline-flex;
   align-items: center;
-  min-height: 28px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  min-height: 30px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.025);
-  padding: 0.2rem 0.6rem;
+  background: rgba(255, 255, 255, 0.02);
+  padding: 0.2rem 0.7rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 10px;
+  font-size: 10.5px;
   line-height: 1;
 }
-.docs-flow-arrow {
-  align-self: center;
+.docs-pipe-arrow {
   color: var(--admin-text-dim);
   font-size: 11px;
 }
 
-/* Endpoint and feature cards */
-.docs-method-badge {
-  box-shadow: 0 0 16px -7px currentColor;
-}
-.docs-spotlight {
-  position: relative;
+/* Code blocks: flat, with a left accent spine. */
+.docs-codeblock {
+  min-width: 0;
+  max-width: 100%;
   overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  background: #08090b;
+  box-shadow: inset 3px 0 0 rgba(96, 165, 250, 0.16);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
-.docs-spotlight::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  opacity: 0;
-  transition: opacity 0.3s ease;
-  background: radial-gradient(
-    260px circle at var(--mx, 50%) var(--my, 50%),
-    rgba(96, 165, 250, 0.10),
-    transparent 65%
-  );
-  pointer-events: none;
+.docs-codeblock:hover {
+  border-color: rgba(96, 165, 250, 0.26);
+  box-shadow: inset 3px 0 0 rgba(96, 165, 250, 0.32);
 }
-.docs-spotlight:hover::before {
-  opacity: 1;
+.docs-codeblock pre {
+  max-width: 100%;
+  scrollbar-width: thin;
+}
+
+/* Provider ecosystem: hairline-separated tiles (gap-px over a border fill). */
+.docs-provider-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--admin-border);
+  border-radius: 12px;
+  background: var(--admin-border);
+}
+@media (min-width: 640px) {
+  .docs-provider-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+.docs-provider-item {
+  background: var(--admin-surface);
+  transition: background-color 0.2s ease;
+}
+.docs-provider-item:hover {
+  background: rgba(255, 255, 255, 0.028);
 }
 
 /* Inline code chips in docs prose (not inside <pre>) */
@@ -1402,7 +1209,6 @@ select.admin-input option {
   border: 1px solid rgba(255, 255, 255, 0.075);
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.045);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
   font-size: 0.85em;
   color: #bfdbfe;
 }
@@ -1439,25 +1245,16 @@ select.admin-input option {
   color: #67e8f9;
 }
 
-.docs-pulse-dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 9999px;
-  background: #34d399;
+/* Method badge + endpoint chips */
+.docs-method-badge {
+  box-shadow: 0 0 16px -7px currentColor;
 }
-
-@media (prefers-reduced-motion: no-preference) {
-  .docs-gradient-text {
-    animation: hero-gradient-pan 6s linear infinite;
+@media (min-width: 640px) {
+  /* Client chips sit at the end of the row instead of drifting to the far
+     right edge of a wide content column. */
+  .docs-endpoint-clients {
+    margin-left: 8px;
   }
-  .docs-pulse-dot {
-    animation: docs-pulse 1.8s ease-in-out infinite;
-  }
-}
-
-@keyframes docs-pulse {
-  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.45); }
-  50% { opacity: 0.65; box-shadow: 0 0 0 5px rgba(52, 211, 153, 0); }
 }
 
 /* Reading-progress hairline, pinned to the very top of the viewport */
@@ -1476,14 +1273,10 @@ select.admin-input option {
   transform: scaleX(var(--docs-progress, 0));
   transform-origin: left;
   background: linear-gradient(90deg, #3b82f6, #8b5cf6 55%, #d946ef);
-  box-shadow: 0 0 12px rgba(139, 92, 246, 0.55);
   transition: transform 0.12s linear;
 }
 
 /* Heading deep-link anchors: hover/focus-revealed, always visible to touch */
-.docs-heading {
-  position: relative;
-}
 .docs-anchor {
   opacity: 0;
   transform: translateX(-2px);
@@ -1499,8 +1292,7 @@ select.admin-input option {
     opacity: 0.6;
     /* The # glyph alone is a ~17px target, well under the 44px touch floor.
        Grow the hit area to 44x44 and pull the vertical bleed back with a
-       negative margin so the heading keeps its current height. It is the last
-       flex item in the h2, so the extra width falls into the gap. */
+       negative margin so the heading keeps its current height. */
     display: inline-flex;
     min-height: 44px;
     min-width: 44px;
@@ -1508,11 +1300,6 @@ select.admin-input option {
     align-items: center;
     justify-content: center;
   }
-}
-
-/* Comfortable reading measure for section body prose */
-.docs-section > p {
-  max-width: 74ch;
 }
 
 /* Selection themed to the docs world */
@@ -1567,68 +1354,24 @@ select.admin-input option {
   }
 }
 
-/* Endpoint client-affinity chips ride the same language as flow chips */
-.docs-endpoint-clients {
-  margin-left: auto;
-}
-@media (max-width: 639px) {
-  .docs-endpoint-clients {
-    margin-left: 0;
-    flex-basis: 100%;
-  }
-}
-
-/* The active nav item gets a soft lift, not just a tint */
-.docs-nav-item.is-active {
-  box-shadow: inset 0 1px 0 rgba(147, 197, 253, 0.08);
-}
-
-@media (min-width: 640px) and (prefers-reduced-motion: no-preference) {
-  .docs-flow-connector svg {
-    animation: docs-flow-travel 2.8s ease-in-out infinite;
-  }
-  .docs-flow-connector + .docs-flow-stage + .docs-flow-connector svg {
-    animation-delay: 0.5s;
-  }
-}
-@keyframes docs-flow-travel {
-  0%, 100% { opacity: 0.35; transform: translateX(-2px); }
-  50% { opacity: 1; transform: translateX(2px); }
-}
-
-/* CTA: authored glow so the closing panel reads as a destination */
+/* CTA: a flat closing panel with a single lit top edge. */
 .docs-cta {
   position: relative;
   isolation: isolate;
   overflow: hidden;
+  border: 1px solid var(--admin-border);
+  border-radius: 20px;
+  background: var(--admin-surface);
 }
 .docs-cta::before {
   content: "";
   position: absolute;
-  inset: 0;
-  z-index: -1;
-  background:
-    radial-gradient(ellipse 70% 90% at 50% -10%, rgba(139, 92, 246, 0.14), transparent 62%),
-    radial-gradient(ellipse 45% 70% at 18% 110%, rgba(59, 130, 246, 0.08), transparent 60%);
-  pointer-events: none;
-}
-.docs-cta::after {
-  content: "";
-  position: absolute;
   inset: 0 0 auto;
   height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(167, 139, 250, 0.4), transparent);
+  background: linear-gradient(90deg, transparent, rgba(167, 139, 250, 0.45), transparent);
   pointer-events: none;
 }
-@media (prefers-reduced-motion: no-preference) {
-  .docs-cta::before {
-    animation: docs-cta-breathe 7s ease-in-out infinite;
-  }
-}
-@keyframes docs-cta-breathe {
-  0%, 100% { opacity: 0.75; }
-  50% { opacity: 1; }
-}
+
 /* ─── Login page: split-panel beam console ───────────────────────────────── */
 
 /* Single-screen fit. The page must fill exactly one viewport with no
