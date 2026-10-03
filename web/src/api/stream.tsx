@@ -33,7 +33,11 @@ export function AdminStreamProvider({ children }: { children: ReactNode }) {
   const token = useToken();
 
   useEffect(() => {
-    if (!token) return;
+    // Always attempt the connection: a cookie-authenticated admin (username/
+    // password login) has no bearer token but the server authorizes
+    // /admin/stream from the session cookie. WiwiStream omits the Authorization
+    // header when the token is empty and stops (rather than retrying forever)
+    // on a 401/403.
     const stream = new WiwiStream("/admin/stream", token, {
       "log.created": (data, id) =>
         handlers.current.get("log.created")?.forEach((h) => h(data, id)),

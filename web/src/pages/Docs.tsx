@@ -250,7 +250,7 @@ function CodeBlock(props: { code: string; label?: string; lang?: Lang }) {
         </div>
       )}
       {!props.label && (
-        <div className="absolute right-0 top-0 z-10 px-2.5 py-2 opacity-0 transition-opacity group-hover:opacity-100">
+        <div className="absolute right-0 top-0 z-10 px-2.5 py-2 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:focus-within:opacity-100">
           <CopyBtn text={props.code} />
         </div>
       )}

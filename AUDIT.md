@@ -9979,7 +9979,7 @@ us/append**, zero counter drift, cap never breached.
 
 ### 336. Admin UI: username/password login never opens the live SSE channel
 
-**Severity:** 🔴 Critical · **Status: open**
+**Severity:** 🔴 Critical · **Status: fixed** — `web/src/api/stream.tsx` always opens the stream (cookie auth), `web/src/api/sse.ts` omits the Authorization header when no token, sends `credentials: "include"`, and stops retrying on 401/403.
 **Files:** `web/src/api/auth.tsx:62-65` (`login`), `:67-73` (`loginWithMaster`), `web/src/api/stream.tsx:35-36`
 
 `login` (username/password) never calls `setToken`, so `useToken()` returns `""`
@@ -9998,7 +9998,7 @@ provider expects (or make the stream provider cookie-authenticated).
 
 ### 337. Admin UI: the master key is persisted to localStorage before validation and never rolled back
 
-**Severity:** 🔴 Critical · **Status: open**
+**Severity:** 🔴 Critical · **Status: fixed** — `auth.tsx` now validates via `loginMaster` first and calls `setToken(k)` only on success.
 **Files:** `web/src/api/auth.tsx:67-73`, `web/src/api/client.ts` (`TOKEN_KEY`, `:52-53`)
 
 `loginWithMaster` calls `setToken(k)` **before** `loginMaster` resolves. A wrong
@@ -10015,7 +10015,7 @@ from the HttpOnly protection the session cookie gets.
 
 ### 338. Admin UI: no global 401 handling — an expired session renders as an idle gateway
 
-**Severity:** 🟠 High · **Status: open**
+**Severity:** 🟠 High · **Status: fixed** — `main.tsx` adds `QueryCache`/`MutationCache` `onError` that clears the stored token and redirects to `/login` on any 401.
 **Files:** `web/src/api/client.ts` (401 branch), `web/src/main.tsx:74-78`
 
 There is no `QueryCache`/`MutationCache` `onError` and no interceptor. With
@@ -10029,7 +10029,7 @@ re-import credentials that already exist.
 
 ### 339. Admin UI: swallowed query errors render authoritative-looking false zeroes
 
-**Severity:** 🟠 High · **Status: open**
+**Severity:** 🟠 High · **Status: fixed** — all three pages branch on the query's `isError` and render an explicit error state instead of the zeroed stat cards / "Unknown provider account."
 **Files:** `web/src/pages/WorkBuddyAccounts.tsx:318-342`, `:348-360`; `web/src/pages/OAuthProviders.tsx:970-978`; `web/src/pages/ProviderDetail.tsx:1387`
 
 `accountsQ`/`providersQ` errors are never read (the grep for `error|isError`
@@ -10158,6 +10158,18 @@ capability set itself.
 
 ---
 
+### 343. Admin UI: docs-page code-block copy button unreachable on touch/keyboard
+
+**Severity:** 🟡 Medium · **Status: fixed**
+**File:** `web/src/pages/Docs.tsx:253`
+
+The copy button on label-less code blocks used `opacity-0 group-hover:opacity-100`
+with no focus or mobile fallback — invisible and unreachable for touch and
+keyboard users. Fixed with `opacity-100 sm:opacity-0 sm:group-hover:opacity-100
+sm:focus-within:opacity-100` (always visible below `sm`, focus-within reveals on
+desktop), matching the pattern in `web/src/components/detail-page.tsx:39`.
+
+---
 
 ## Notes on this sweep
 

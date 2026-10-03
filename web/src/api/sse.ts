@@ -35,13 +35,22 @@ export class WiwiStream {
         this.controller = new AbortController();
         const resp = await fetch(this.url, {
           headers: {
-            Authorization: `Bearer ${this.token}`,
+            // Cookie-authenticated admins have no bearer token — send none
+            // rather than a malformed "Bearer " header.
+            ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
             Accept: "text/event-stream",
             ...(this.lastId > 0 ? { "Last-Event-ID": String(this.lastId) } : {}),
           },
+          credentials: "include",
           signal: this.controller.signal,
         });
         if (!resp.ok || !resp.body) {
+          // 401/403 will not heal without a fresh login — stop retrying.
+          if (resp.status === 401 || resp.status === 403) {
+            this.closed = true;
+            this.onStateChange?.(false);
+            return;
+          }
           throw new Error(`SSE HTTP ${resp.status}`);
         }
         backoffMs = 1000;

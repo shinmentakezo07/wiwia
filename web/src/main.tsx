@@ -1,7 +1,8 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useParams } from "react-router-dom";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MutationCache, QueryCache, QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { ApiError, clearToken } from "@/api/client";
 import { AuthProvider, useAuth } from "@/api/auth";
 import { AdminStreamProvider } from "@/api/stream";
 import { AdminLayout } from "@/components/Layout";
@@ -71,10 +72,23 @@ import { SettingsPage } from "@/pages/Settings";
 document.documentElement.classList.add("dark");
 localStorage.setItem("wiwi.theme", "dark");
 
+// A 401 means the session/key expired — drop stale credentials and bounce to
+// /login, otherwise pages would keep rendering their idle empty states for a
+// tab that no longer has a valid session (AUDIT #338).
+function redirectOnAuthError(e: unknown) {
+  if (!(e instanceof ApiError) || e.status !== 401) return;
+  clearToken();
+  if (!window.location.pathname.endsWith("/login")) {
+    window.location.assign(`${import.meta.env.BASE_URL}login`);
+  }
+}
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: { staleTime: 5_000, retry: 1, refetchOnWindowFocus: false },
   },
+  queryCache: new QueryCache({ onError: redirectOnAuthError }),
+  mutationCache: new MutationCache({ onError: redirectOnAuthError }),
 });
 
 // Legacy redirects must carry the query string and hash across.

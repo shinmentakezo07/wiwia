@@ -484,23 +484,29 @@ class DBSink:
         """
         if not keys:
             return {}
-        clauses = []
-        params: dict = {}
-        for i, k in enumerate(keys):
-            clauses.append(
-                f"(bucket_ts = :b{i} AND key_id = :k{i} AND model_group = :g{i}"
-                f" AND provider = :p{i} AND serving_model = :s{i})")
-            params[f"b{i}"], params[f"k{i}"], params[f"g{i}"] = k[0], k[1], k[2]
-            params[f"p{i}"], params[f"s{i}"] = k[3], k[4]
-        rows = (await conn.execute(sa.text(
-            "SELECT bucket_ts, key_id, model_group, provider, serving_model,"
-            " p95_hist FROM request_rollups WHERE " + " OR ".join(clauses)),
-            params)).all()
         out: dict[tuple, dict] = {}
-        for r in rows:
-            decoded = _decode_hists(r[5])
-            if decoded:
-                out[(r[0], r[1], r[2], r[3], r[4])] = decoded
+        # Chunk the OR-ed equality: one enormous query tree overflows SQLite's
+        # expression depth (error "Expression tree is too large") when a sweep
+        # rolls up more than a few hundred groups.
+        _CHUNK = 100
+        for start in range(0, len(keys), _CHUNK):
+            chunk = keys[start:start + _CHUNK]
+            clauses = []
+            params: dict = {}
+            for i, k in enumerate(chunk):
+                clauses.append(
+                    f"(bucket_ts = :b{i} AND key_id = :k{i} AND model_group = :g{i}"
+                    f" AND provider = :p{i} AND serving_model = :s{i})")
+                params[f"b{i}"], params[f"k{i}"], params[f"g{i}"] = k[0], k[1], k[2]
+                params[f"p{i}"], params[f"s{i}"] = k[3], k[4]
+            rows = (await conn.execute(sa.text(
+                "SELECT bucket_ts, key_id, model_group, provider, serving_model,"
+                " p95_hist FROM request_rollups WHERE " + " OR ".join(clauses)),
+                params)).all()
+            for r in rows:
+                decoded = _decode_hists(r[5])
+                if decoded:
+                    out[(r[0], r[1], r[2], r[3], r[4])] = decoded
         return out
 
     async def rollup_and_prune(self, cutoff_ts: float,

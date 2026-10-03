@@ -1401,6 +1401,15 @@ export function ProviderDetailPage() {
   const PIcon = p ? providerIcon(p.provider_type) : Server;
 
   if (q.isLoading) return <Spinner />;
+  if (q.isError) {
+    return (
+      <div>
+        <PageHeader title={name} subtitle="Failed to load provider account." />
+        <ErrorText>{q.error.message}</ErrorText>
+        <Link to="/console/providers"><Button variant="outline"><ArrowLeft size={14} /> Back to providers</Button></Link>
+      </div>
+    );
+  }
   if (!p) {
     return (
       <div>

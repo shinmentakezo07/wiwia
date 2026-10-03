@@ -30,6 +30,8 @@ later refactor cannot silently re-open these.
 from __future__ import annotations
 
 import asyncio
+import os
+import tempfile
 import time
 
 import httpx
@@ -54,7 +56,15 @@ AUTH = {"Authorization": f"Bearer {MASTER}"}
 
 
 def _memory_engine():
-    return create_async_engine("sqlite+aiosqlite:///:memory:")
+    # A plain ":memory:" engine collapses to StaticPool, whose single shared
+    # aiosqlite connection is not safe to checkout concurrently — a second
+    # checkout (e.g. the count-keys read inside a concurrent create_key)
+    # shares the connection of an open write transaction and silently rolls
+    # it back. A temp file DB gives every concurrent caller its own
+    # connection, matching what the cap test actually intends to exercise.
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    return create_async_engine(f"sqlite+aiosqlite:///{path}")
 
 
 async def _svc(max_keys_per_user: int = 50) -> tuple[object, AuthService]:

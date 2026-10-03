@@ -66,9 +66,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const loginWithMaster = useCallback(async (k: string) => {
     // back-compat: keep the master key for bearer-style calls (/admin/stream
-    // SSE, which is bearer-only, and any legacy /admin/* fetch).
-    setToken(k);
+    // SSE, which is bearer-only, and any legacy /admin/* fetch). Validate
+    // first — persist only on success, so a rejected key never reaches
+    // localStorage or the Settings page.
     const { user } = await loginMaster({ master_key: k });
+    setToken(k);
     setUser(user);
   }, []);
 

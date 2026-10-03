@@ -969,6 +969,12 @@ export function OAuthProvidersPage() {
 
       {q.isLoading ? (
         <Spinner />
+      ) : q.isError ? (
+        <Card>
+          <div className="px-4 py-6">
+            <ErrorText>Failed to load providers: {q.error.message}</ErrorText>
+          </div>
+        </Card>
       ) : oauthProviders.length === 0 ? (
         <Card>
           <EmptyState>

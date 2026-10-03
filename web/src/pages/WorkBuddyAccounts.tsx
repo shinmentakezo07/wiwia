@@ -313,53 +313,66 @@ export function WorkBuddyAccountsPage() {
         <div className="mb-3 text-[12px] text-[var(--admin-text-muted)]">{notice}</div>
       )}
 
-      <div className="mb-4 grid grid-cols-3 gap-4">
-        <Card>
-          <div className="px-4 py-3">
-            <div className="text-[10px] uppercase tracking-wide text-[var(--admin-text-muted)]">
-              Accounts
-            </div>
-            <div className="mt-1 text-xl font-semibold">{accounts.length}</div>
+      {accountsQ.isError || providersQ.isError ? (
+        <Card className="mb-4">
+          <div className="px-4 py-6">
+            <ErrorText>
+              Failed to load WorkBuddy data:{" "}
+              {accountsQ.error?.message ?? providersQ.error?.message ?? "request failed"}
+            </ErrorText>
           </div>
         </Card>
-        <Card>
-          <div className="px-4 py-3">
-            <div className="text-[10px] uppercase tracking-wide text-[var(--admin-text-muted)]">
-              Providers
-            </div>
-            <div className="mt-1 text-xl font-semibold">{workbuddyProviders.length}</div>
+      ) : (
+        <>
+          <div className="mb-4 grid grid-cols-3 gap-4">
+            <Card>
+              <div className="px-4 py-3">
+                <div className="text-[10px] uppercase tracking-wide text-[var(--admin-text-muted)]">
+                  Accounts
+                </div>
+                <div className="mt-1 text-xl font-semibold">{accounts.length}</div>
+              </div>
+            </Card>
+            <Card>
+              <div className="px-4 py-3">
+                <div className="text-[10px] uppercase tracking-wide text-[var(--admin-text-muted)]">
+                  Providers
+                </div>
+                <div className="mt-1 text-xl font-semibold">{workbuddyProviders.length}</div>
+              </div>
+            </Card>
+            <Card>
+              <div className="px-4 py-3">
+                <div className="text-[10px] uppercase tracking-wide text-[var(--admin-text-muted)]">
+                  Need refresh
+                </div>
+                <div className="mt-1 text-xl font-semibold">
+                  {dueCount}
+                </div>
+              </div>
+            </Card>
           </div>
-        </Card>
-        <Card>
-          <div className="px-4 py-3">
-            <div className="text-[10px] uppercase tracking-wide text-[var(--admin-text-muted)]">
-              Need refresh
-            </div>
-            <div className="mt-1 text-xl font-semibold">
-              {dueCount}
-            </div>
-          </div>
-        </Card>
-      </div>
 
-      <Card>
-        <CardHeader
-          title="Connected accounts"
-          subtitle="auths/ JSON format — export to back up, import to add"
-        />
-        <div className="px-4 pb-4 pt-2">
-          {accountsQ.isLoading ? (
-            <Spinner />
-          ) : accounts.length === 0 ? (
-            <EmptyState>
-              No WorkBuddy accounts yet. Import auth JSONs from the CodeBuddy
-              plugin (auths/ directory) to get started.
-            </EmptyState>
-          ) : (
-            <AccountsTable accounts={accounts} onError={setError} />
-          )}
-        </div>
-      </Card>
+          <Card>
+            <CardHeader
+              title="Connected accounts"
+              subtitle="auths/ JSON format — export to back up, import to add"
+            />
+            <div className="px-4 pb-4 pt-2">
+              {accountsQ.isLoading ? (
+                <Spinner />
+              ) : accounts.length === 0 ? (
+                <EmptyState>
+                  No WorkBuddy accounts yet. Import auth JSONs from the CodeBuddy
+                  plugin (auths/ directory) to get started.
+                </EmptyState>
+              ) : (
+                <AccountsTable accounts={accounts} onError={setError} />
+              )}
+            </div>
+          </Card>
+        </>
+      )}
 
       <ImportAccountsDialog
         open={importOpen}

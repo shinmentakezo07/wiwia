@@ -169,6 +169,63 @@ from wiwi.providers.base import ProviderKeyRef, WiwiError
 from wiwi.providers.registry import fresh_adapter, get_adapter
 from wiwi.providers.workbuddy_auto_refresh import refresh_key_now
 from wiwi.ratelimit.memory import RateLimiter
+
+
+class _SerializedAsyncEngine:
+    """AsyncEngine stand-in that serializes every checkout through one lock.
+
+    Only used for the plain in-memory SQLite URL, where SQLAlchemy collapses
+    the pool to StaticPool. StaticPool hands out the same raw aiosqlite
+    connection for every checkout, which is not safe for concurrent use: a
+    second checkout shares the connection of a checkout already inside a
+    transaction, and the implicit rollback issued on the overlapping close
+    silently discards the first transaction's uncommitted work. Serializing
+    here keeps the same single-connection behavior but makes interleaved use
+    impossible. Everything except ``connect()``/``begin()`` (notably
+    ``dialect``, ``dispose()``, ``execution_options()``) delegates through.
+    Production file-backed SQLite and Postgres never see this wrapper.
+    """
+
+    def __init__(self, engine: Any) -> None:
+        self._engine = engine
+        self._lock = asyncio.Lock()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._engine, name)
+
+    async def __aenter__(self) -> _SerializedAsyncEngine:  # tests do not, but keep it honest  # noqa: PYI034
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+    def connect(self) -> Any:
+        return _SerializedCheckout(self._lock, self._engine.connect())
+
+    def begin(self) -> Any:
+        return _SerializedCheckout(self._lock, self._engine.begin())
+
+
+class _SerializedCheckout:
+    """Async context manager that holds the engine lock for the checkout."""
+
+    def __init__(self, lock: asyncio.Lock, ctx: Any) -> None:
+        self._lock = lock
+        self._ctx = ctx
+
+    async def __aenter__(self) -> Any:
+        await self._lock.acquire()
+        try:
+            return await self._ctx.__aenter__()
+        except BaseException:
+            self._lock.release()
+            raise
+
+    async def __aexit__(self, *exc: object) -> Any:
+        try:
+            return await self._ctx.__aexit__(*exc)
+        finally:
+            self._lock.release()
 from wiwi.router.router import (
     BUILTIN_PROVIDER_TYPES,
     Deployment,
@@ -912,7 +969,17 @@ class AppState:
             def _enable_sqlite_fk(dbapi_conn, _record):
                 cursor = dbapi_conn.cursor()
                 cursor.execute("PRAGMA foreign_keys=ON")
+                cursor.execute("PRAGMA busy_timeout=5000")
                 cursor.close()
+        if url.endswith(":///:memory:"):
+            # The plain ":memory:" URL collapses the pool to StaticPool, which
+            # is not safe to checkout concurrently: a second checkout (e.g. a
+            # request-log reader) would share the raw aiosqlite connection the
+            # log pump holds mid-transaction, and its implicit rollback on an
+            # overlapping close would silently discard the pump's uncommitted
+            # batch — no error, no failure counter. Serialize every checkout
+            # through one asyncio lock instead.
+            aengine = _SerializedAsyncEngine(aengine)
         self._db_engine = aengine
         self.auth = AuthService(aengine, self.config.general_settings.master_key,
                                 self.config.general_settings.max_keys_per_user)
