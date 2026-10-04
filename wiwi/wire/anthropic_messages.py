@@ -249,7 +249,14 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                         text = ""
                     else:
                         text = json.dumps(c)
-                    parts.append(ir.ToolResultPart(tool_use_id=b.get("tool_use_id", ""),
+                    # A tool-result with no tool_use_id cannot be correlated to
+                    # the call it answers: upstream 400s, or worse, attaches
+                    # the result to the wrong call. Reject it here (AUDIT #331)
+                    # rather than substituting an empty/placeholder id.
+                    raw_tool_use_id = b.get("tool_use_id")
+                    if not isinstance(raw_tool_use_id, str) or not raw_tool_use_id:
+                        raise DialectError("tool_result is missing 'tool_use_id'")
+                    parts.append(ir.ToolResultPart(tool_use_id=raw_tool_use_id,
                                                    content=text,
                                                    is_error=bool(b.get("is_error")),
                                                    cache_control=b.get("cache_control"),

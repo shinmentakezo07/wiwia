@@ -9905,8 +9905,8 @@ SHA-256 with and without the header.
 
 ### 331. `tool_use_id` missing on an inbound tool result reaches upstream as a placeholder
 
-**Severity:** 🟡 Medium · **Status: open**
-**Files:** `wiwi/wire/anthropic_messages.py:251`, `wiwi/wire/openai_chat.py:213`
+**Severity:** 🟡 Medium · **Status: fixed — `wiwi/wire/{anthropic_messages,openai_chat,openai_responses}.py`: the tool-result arms now raise `DialectError` (a 400) when `tool_use_id`/`tool_call_id`/`call_id` is missing, empty, or non-string, instead of substituting an empty placeholder. Covered by `tests/test_fix_round118.py`**
+**Files:** `wiwi/wire/anthropic_messages.py:256-258`, `wiwi/wire/openai_chat.py:236-238`, `wiwi/wire/openai_responses.py:359-361` (`function_call_output`)
 
 A tool-result message missing its `tool_use_id` is forwarded upstream with an
 empty / `"GHOST"` placeholder rather than being rejected. The upstream then
@@ -9915,7 +9915,7 @@ wrong call.
 
 **Fix sketch:** reject a tool-result block with no `tool_use_id` as a 400 at the codec boundary, rather than substituting a placeholder.
 
-**Test:** `tests/test_fix_round111.py::test_missing_tool_use_id_is_rejected`
+**Test:** `tests/test_fix_round118.py` (10)
 
 ### 332. Over-budget true-up swallows its exception with no counter
 

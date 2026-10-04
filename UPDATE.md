@@ -3478,3 +3478,64 @@ when deliberately broken).
 (`test_stats_db`, `round56`, `round57`, `round59`, `round65`, `round85`) are
 unchanged and green, which is the evidence the histogram did not alter any
 reported total.
+
+---
+
+# Round 118 — a tool result with no call id is a 400, not a placeholder (2026-10-03)
+
+AUDIT #331. Validation tightening in the three inbound decoders; no translation
+semantics changed, and no encoder was touched.
+
+## 118.1 A missing call id is rejected at the codec boundary
+
+Each of the three dialects decoded a tool result with a **substituted empty id**
+when the client omitted the correlating field:
+
+| Dialect | Field | Was | Now |
+|---|---|---|---|
+| `wire/anthropic_messages.py:256` | `tool_result.tool_use_id` | `b.get("tool_use_id", "")` | `DialectError` |
+| `wire/openai_chat.py:236` | `tool.tool_call_id` | `m.get("tool_call_id", "")` | `DialectError` |
+| `wire/openai_responses.py:359` | `function_call_output.call_id` | `item.get("call_id", "")` | `DialectError` |
+
+The empty string then travelled through the IR into the outbound encoder, where
+it reached the provider as a tool result matching no call. The provider either
+returned a mismatched-result error, or — worse — correlated the result to an
+unrelated call. Rejecting at the boundary turns an opaque upstream failure into
+a 400 that names the offending field.
+
+All three arms raise the same `DialectError` (defined in `wire/openai_chat.py`,
+a `ValueError` subclass) on a missing, empty, **or non-string** id. The
+non-string case matters: `{"tool_call_id": 42}` previously sailed through
+`.get(..., "")` and re-serialized as a number where the provider expects a
+string. `run_chat_like` (`server/app.py:1870`) and the `count_tokens` surface
+(`server/app.py:2678`) already catch `(oc.DialectError, ValueError)` and return
+400 `invalid_request_error`, so no new error plumbing was needed and the three
+dialects report in their own correct error envelope via `error_body()`.
+
+**Not a regression in `previous_response_id` replay.** `with_history`
+(`wire/openai_responses.py:239`) merges a stored response's output items into the
+next request, so a decoder change could have 400'd wiwi's own replayed history.
+It cannot: the stored `call_id: None` values are emitted only on
+`tool_search_call` / `web_search_call` items (`openai_responses.py:510`, `:749`),
+which are self-contained hosted-tool items with no matching
+`function_call_output` in any protocol. Every replayed `function_call_output`
+carries the `call_id` of a `function_call` that has one by construction. The
+`streaming/resume.py:292` continuation placeholder is built from `ToolUsePart.id`
+in the IR, never from a decoded body, so it is unaffected.
+
+**Deliberately asymmetric:** the sibling `function_call` arms stay permissive
+(`openai_responses.py:350`, `openai_chat.py:189` still default the tool id to
+`""`). A tool *result* must be correlatable to a call it answers, which is a
+hard protocol requirement; a dangling *call* is more often a client quirk and
+rejecting it would break prompts that replay partial history. If that asymmetry
+is ever closed, guard both halves together — a result-side guard alone leaves
+the empty-id tool_use still reaching upstream.
+
+**Tests**: `tests/test_fix_round118.py` (10) — missing / empty / non-string id
+per dialect, plus a valid-id-still-decodes control per dialect.
+
+**Whole-branch**: 2874 tests pass, ruff clean. The 5 failures are pre-existing
+and unrelated to this change: 4 in `test_fix_round34.py` (the optional `redis`
+extra is not installed in this environment) and
+`test_fix_round98.py::test_consumer_cancellation_keeps_failed_pump_owned`
+(verified failing on clean `HEAD` with this change stashed).

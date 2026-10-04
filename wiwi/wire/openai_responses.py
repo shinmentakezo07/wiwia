@@ -353,8 +353,14 @@ def decode_request(body: dict[str, Any],
         elif itype == "function_call_output":
             # Images in a tool result (computer-use screenshots) ride
             # ToolResultPart.images so multimodal adapters can re-emit them.
+            # A result with no call_id cannot be correlated to the call it
+            # answers: upstream 400s, or worse, attaches it to the wrong
+            # call. Reject it here (AUDIT #331) rather than an empty id.
+            raw_call_id = item.get("call_id")
+            if not isinstance(raw_call_id, str) or not raw_call_id:
+                raise DialectError("function_call_output is missing 'call_id'")
             messages.append(ir.Message(role="tool", parts=[
-                ir.ToolResultPart(tool_use_id=item.get("call_id", ""),
+                ir.ToolResultPart(tool_use_id=raw_call_id,
                                   content=_item_text(item),
                                   images=_item_images(item))]))
         elif itype == "reasoning":

@@ -229,7 +229,14 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                         tool_images.append(ir.ImagePart(url=url))
             else:
                 tool_content = str(content)
-            parts = [ir.ToolResultPart(tool_use_id=m.get("tool_call_id", ""),
+            # A tool message with no tool_call_id cannot be correlated to the
+            # call it answers: upstream 400s, or worse, attaches the result
+            # to the wrong call. Reject it here (AUDIT #331) rather than
+            # substituting an empty placeholder id.
+            raw_tool_call_id = m.get("tool_call_id")
+            if not isinstance(raw_tool_call_id, str) or not raw_tool_call_id:
+                raise DialectError("tool message is missing 'tool_call_id'")
+            parts = [ir.ToolResultPart(tool_use_id=raw_tool_call_id,
                                        content=tool_content,
                                        images=tool_images)]
         if not parts and role != "assistant":
