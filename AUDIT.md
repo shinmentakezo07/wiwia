@@ -10171,6 +10171,54 @@ desktop), matching the pattern in `web/src/components/detail-page.tsx:39`.
 
 ---
 
+### 344. `wait_for(shield(pump))` hides pump-teardown failures behind a loop-level log
+
+**Severity:** 🟠 High · **Status: fixed — all three bounded pump waits use `asyncio.wait({task}, timeout=…)`, which does not cancel on timeout and leaves the task's own result to its registered owner; verified against CPython `asyncio/tasks.py` and reproduced both ways**
+**Files:** `wiwi/core/gateway.py:1125-1133` (resume handoff), `:1200-1216` (consumer-cancel `finally`), `:1367-1373` (`_attempt_resume` cleanup)
+
+Three sites awaited a pump as `await asyncio.wait_for(asyncio.shield(task), timeout=…)`.
+That is the right idiom for "wait, but don't cancel" — and it silently stopped
+working on **Python 3.14**, where `shield` returns a separate *outer* future and
+attaches `_log_on_exception` to the inner task (`asyncio/tasks.py:930-1002`). When
+the timeout fires, `wait_for` drops that outer future **unretrieved**. A pump that
+then dies during its own teardown has its exception delivered to the **loop
+exception handler** — `"RuntimeError exception in shielded future"` — instead of
+to the `_reap` callback (`gateway.py:906-919`) that this machinery exists to
+install.
+
+The loss is not cosmetic. `_track_retired_pump` exists precisely to own
+cancellation-resistant cleanup: without a completion callback the task's
+exception is never retrieved, which asyncio reports as *"exception was never
+retrieved"* and which leaks the deployment slot accounting the callback was
+added to protect. The path is reachable on every consumer disconnect — a client
+closing a streaming response mid-flight is ordinary, not an edge case.
+
+Reproduced minimally: a task that sleeps past a 0.01 s `wait_for(shield(...))`
+timeout and then raises produces **1** loop error on 3.14 and **0** on 3.12
+(`shield` had no `_log_on_exception` there). Swapping in `asyncio.wait({task},
+timeout=…)` gives **0** on 3.14, and the exception stays retrievable on the task
+itself. That is why this is a real defect and not a version quirk: the
+correct-seeming code is right on 3.12 and wrong on 3.14, and `pyproject.toml`
+declares `requires-python = ">=3.11"`, so both are supported.
+
+**Fix:** `asyncio.wait({task}, timeout=…)` at all three sites. It is bounded, does
+**not** cancel on timeout (preserving the shield's actual intent), and does not
+manufacture an unretrieved future. The explicit `pump_task.cancel()` /
+`failed_pump.cancel()` on the following lines is unchanged and remains what
+actually stops a wedged pump — these waits only ever yield to let teardown run.
+
+The remaining `asyncio.shield` calls (`gateway.py:837`, `:1916-1918`,
+`server/app.py:2567`) are deliberately left alone: each wraps a coroutine the
+caller awaits to completion inside a `suppress`, with no `wait_for` timeout to
+orphan an outer future, so none can produce an unretrieved-future report.
+
+**Test:** `tests/test_fix_round98.py::test_consumer_cancellation_keeps_failed_pump_owned`
+(the pre-existing regression that pinned this; it asserts `loop_errors == []` after
+a pump dies during teardown and failed on 3.14), plus the 10 other tests in that
+file. Surfaced as a hard suite failure by `pytest tests/ -q` on 3.14.
+
+---
+
 ## Notes on this sweep
 
 27 subagents ran across every module; the concurrent limit is 20, so they were

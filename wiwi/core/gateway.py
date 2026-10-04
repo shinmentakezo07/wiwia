@@ -1122,10 +1122,15 @@ class Gateway:
                         # a completion callback.
                         _track_retired_pump(failed_pump)
                     if failed_pump is not None and not failed_pump.done():
+                        # ``asyncio.wait``, not ``wait_for(shield(...))`` — see
+                        # the outer ``finally`` for why (AUDIT #344): the
+                        # shield's outer future is dropped unretrieved on
+                        # timeout and a pump that dies in teardown has its
+                        # exception reported to the loop exception handler
+                        # instead of to ``_reap``.
                         with contextlib.suppress(TimeoutError):
-                            await asyncio.wait_for(
-                                asyncio.shield(failed_pump),
-                                timeout=_PUMP_CANCEL_GRACE_S)
+                            await asyncio.wait({failed_pump},
+                                               timeout=_PUMP_CANCEL_GRACE_S)
                         if not failed_pump.done():
                             failed_pump.cancel()
                             await asyncio.wait(
@@ -1194,9 +1199,21 @@ class Gateway:
                 # deliver CancelledError before the pump is ever rescheduled to
                 # observe the flag. Yield first, bounded, so the pump can run
                 # its own teardown; cancel only if it doesn't finish.
+                #
+                # ``asyncio.wait``, not ``wait_for(shield(...))``: on Python
+                # 3.14 ``shield`` attaches ``_log_on_exception`` to the inner
+                # task and hands the caller a separate outer future. When the
+                # timeout fires that outer future is dropped unretrieved, so a
+                # pump that dies during its own teardown has its exception
+                # reported to the loop exception handler ("... exception in
+                # shielded future") instead of to the ``_reap`` callback that
+                # owns it — the failure becomes unobservable noise on a path
+                # that exists precisely to observe failures (AUDIT #344).
+                # ``asyncio.wait`` is bounded, does not cancel on timeout, and
+                # leaves the task's own result/exception for its owner.
                 with contextlib.suppress(Exception):
-                    await asyncio.wait_for(
-                        asyncio.shield(pump_task),
+                    await asyncio.wait(
+                        {pump_task},
                         timeout=pump_cancel_grace(
                             self.router.settings.stream_grace_drain_s))
             if pump_task and not pump_task.done():
@@ -1347,12 +1364,14 @@ class Gateway:
             dep.release_slot(resume_ctx.request_id)
             # Cancel AND await: the pump's `finally` releases the upstream
             # response, and a fire-and-forget cancel can leave the socket
-            # checked out until GC. `wait_for` bounds a wedged teardown so one
-            # bad fallback cannot stall the whole resume loop.
+            # checked out until GC. A bounded wait keeps one wedged teardown
+            # from stalling the whole resume loop. ``asyncio.wait``, not
+            # ``wait_for(shield(...))`` — see the outer ``finally`` for why
+            # (AUDIT #344).
             new_pump_task.cancel()
             with contextlib.suppress(BaseException):
-                await asyncio.wait_for(
-                    asyncio.shield(new_pump_task), timeout=_PUMP_CANCEL_GRACE_S)
+                await asyncio.wait({new_pump_task},
+                                   timeout=_PUMP_CANCEL_GRACE_S)
         return False, None
 
     async def _pump(self, dep: Deployment, key: ProviderKeyRef,
