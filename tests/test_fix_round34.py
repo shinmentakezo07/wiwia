@@ -30,6 +30,7 @@ Scope (all reproduced against source before fixing):
 
 from __future__ import annotations
 
+import importlib.util
 import time
 
 import httpx
@@ -309,6 +310,41 @@ async def test_e2e_sampling_temperature_not_cached(tmp_path, temperature,
         assert calls == 2, "non-deterministic request must reach upstream twice"
 
 
+# ---------------------------------------------------------------------------
+# 5. Backend selection requires the optional ``redis`` extra
+# ---------------------------------------------------------------------------
+
+# ``build_response_cache`` selects the Redis backend only when
+# ``import redis.asyncio`` succeeds, and degrades to memory with a warning when
+# it does not (see that function's docstring: silently serving from memory
+# while an operator believes a shared cache is live is exactly the failure it
+# guards). The four backend-selection tests below therefore assert a real
+# selection decision, reachable only with the ``.[redis]`` extra installed — it
+# is an optional dependency (``pyproject.toml``: ``redis = ["redis>=5.0"]``),
+# so a dev checkout without it reported four hard failures that looked like a
+# product regression and were purely environmental.
+
+
+def _redis_extra_installed() -> bool:
+    """True when the optional ``redis`` extra can be imported.
+
+    ``find_spec("redis.asyncio")`` raises rather than returning ``None`` when
+    the *parent* package is absent — the common case here — so the parent is
+    probed first.
+    """
+    try:
+        return (importlib.util.find_spec("redis") is not None
+                and importlib.util.find_spec("redis.asyncio") is not None)
+    except (ImportError, ValueError):
+        return False
+
+
+requires_redis_extra = pytest.mark.skipif(
+    not _redis_extra_installed(),
+    reason="requires the optional 'redis' extra (uv pip install -e '.[redis]')")
+
+
+@requires_redis_extra
 async def test_e2e_redis_url_selects_redis_backend(tmp_path, monkeypatch):
     """``general_settings.redis_url`` must actually pick the Redis backend."""
     from wiwi.cache import redis_cache as rc_mod
@@ -350,6 +386,7 @@ async def test_e2e_redis_url_selects_redis_backend(tmp_path, monkeypatch):
 # 4. REDIS_URL env override (container/Railway ergonomics)
 # ---------------------------------------------------------------------------
 
+@requires_redis_extra
 async def test_redis_url_env_overrides_config(tmp_path, monkeypatch):
     """REDIS_URL must work without mounting a custom wiwi.yaml.
 
@@ -366,6 +403,7 @@ async def test_redis_url_env_overrides_config(tmp_path, monkeypatch):
     assert app.state.wiwi.response_cache.url == "redis://from-env:6379/0"
 
 
+@requires_redis_extra
 async def test_redis_url_env_takes_precedence_over_yaml(tmp_path, monkeypatch):
     from wiwi.server.app import create_app
 
@@ -374,6 +412,7 @@ async def test_redis_url_env_takes_precedence_over_yaml(tmp_path, monkeypatch):
     assert app.state.wiwi.response_cache.url == "redis://env-wins:6379/0"
 
 
+@requires_redis_extra
 async def test_empty_redis_url_env_falls_back_to_config(tmp_path, monkeypatch):
     """An empty env var must not shadow a configured URL (Railway/Render
     sometimes inject empty values)."""
