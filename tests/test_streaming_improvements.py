@@ -423,6 +423,18 @@ class TestConfigSettings:
         rs = RouterSettings()
         assert rs.stream_idle_timeout_s == 30.0
 
+    def test_stream_first_chunk_timeout_default(self):
+        """The pre-content budget must outlast the inter-chunk one.
+
+        AUDIT #356: a reasoning model can queue and think for minutes before
+        its first token. Charging that silence against
+        ``stream_idle_timeout_s`` (30 s) cut healthy long generations, so the
+        two phases got separate budgets and the pre-content one is the larger.
+        """
+        from wiwi.config import RouterSettings
+        rs = RouterSettings()
+        assert rs.stream_first_chunk_timeout_s > rs.stream_idle_timeout_s
+
     def test_stream_loop_detection_default(self):
         from wiwi.config import RouterSettings
         rs = RouterSettings()

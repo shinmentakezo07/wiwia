@@ -8,6 +8,97 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — round 119 (2026-10-05)
+
+Reported symptom: `Error: upstream idle >30s between chunks`. A model that was
+still legitimately working — a reasoning model thinking through a code task, a
+cold prompt against a long context — produced no bytes for longer than
+`stream_idle_timeout_s` (30 s default) and the gateway declared the turn dead
+instead of waiting or failing over. Three distinct defects sat behind that one
+message. Covered by `tests/test_fix_round119.py`.
+
+### 356. A long pre-content phase was cut, and never retried
+**Severity:** 🟠 high
+**Status:** fixed
+
+Two independent bugs, one symptom.
+
+**The cut.** `stream_idle_timeout_s` governed both phases of a stream. Silence
+*between* content chunks is diagnostic — that long a gap mid-stream really is a
+dead connection. Silence *before* the first content is normal: a reasoning model
+queues and thinks, and a cold cache-miss prompt can run for minutes before its
+first token. Charging that against a 30 s budget killed healthy long
+generations, and the operator's only recourse was raising the watchdog for the
+whole stream, which in turn held genuinely wedged connections open far longer.
+
+**No failover.** `_pump_once` set `started = True; ready.set()` the moment the
+**200 headers** arrived (`gateway.py:1697-1699`), so `execute_with_retries` had
+already returned success before a single body byte was read. Every pre-content
+fault was therefore forced down the mid-stream `_fail_stream` arm, and the
+`if not started:` err_box branch — the one that raises a retryable `WiwiError`
+so the retry loop can pick a different deployment — was **unreachable** for this
+entire class of fault. Verified: an upstream that accepts the request and then
+goes silent produced `StreamError("upstream idle >30s between chunks")` with a
+healthy sibling deployment never contacted, despite `num_retries: 1` and a
+configured fallback group.
+
+**Fix:** `started`/`ready` now mark the first *body line*, not the response
+headers, which is the single boundary all three of their uses already meant
+(`ready` for the retry loop, the err_box-vs-`_fail_stream` split, and partial
+billing on cancellation). A new `stream_first_chunk_timeout_s` (default 300 s,
+`<= 0` falls back to `stream_idle_timeout_s`) governs the pre-content phase and
+`stream_idle_timeout_s` the inter-chunk phase; `saw_content` tracks the boundary
+and is deliberately not `started`, because a provider may emit many non-content
+frames first (Anthropic's `message_start`/`ping`, OpenRouter's comments) and the
+watchdog must tolerate those. The pre-content stall boxes a retryable 504 and is
+accounted for by `execute_with_retries` alone — the pump must not also call
+`_note_stream_failure`, or the same failure is charged twice (the AUDIT #174
+double-count, retiring keys at half the configured threshold).
+
+**Consequence to handle, not to leave:** holding `ready` back until the first
+byte means the consumer may not exist for the whole of a long thinking phase,
+which is exactly the silence `stream_ping_interval_s` exists to prevent
+(AUDIT #177). `stream()`'s wait on the retry driver is now interleaved with the
+keep-alive pings instead of blocking on it outright, so an Anthropic client is
+still told the connection is alive while the upstream says nothing.
+
+### 357. A read timeout pre-empted the gateway's own watchdog, and reported nothing
+**Severity:** 🟠 high
+**Status:** fixed
+
+Both stream arms passed a **scalar** timeout to httpx, which applies it to
+*every* timeout phase — connect, read, write and pool. So the provider's blanket
+request deadline (`router_settings.timeout`, default 120 s) fired as a **read**
+timeout, not the gateway's watchdog. Two consequences:
+
+1. A stream legitimately quiet for longer than that deadline was killed by
+   httpx rather than by the watchdog, so the retryable watchdog path never ran
+   and no failover happened.
+2. `httpx.ReadTimeout` carries **no message** — httpx maps httpcore's exceptions
+   with `mapped_exc(str(exc))`, and httpcore raises its timeouts with no
+   arguments. Both arms passed `str(e)` through, so the client received a
+   `StreamError` whose message was the **empty string**: indistinguishable from
+   a gateway bug, and useless in a log. The same `f"upstream {type(e).__name__}"`
+   that the other call sites use was never applied here.
+
+**Fix:** `stream_read_timeout()` lifts the read deadline on the two
+watchdog-armed arms only (the watchdog is the authority for "no progress";
+connect/write/pool keep the configured value, which is what a scalar was
+actually good for), and keeps the configured deadline when no watchdog is armed
+rather than leaving the body unbounded. `_transport_message()` names every
+transport failure, falling back to the exception class when there is no text.
+`_fmt_secs()` replaces `f"{idle_s:.0f}"`, which rendered a sub-second budget as
+`"upstream idle >0s"` — a message naming no duration at all.
+
+**Also fixed while in there:** `_pump_once`'s `finally` now installs a completion
+owner on the pump before cancelling it, and so does `stream()`'s pre-consumer
+driver wait. Previously that guarantee depended on the consumer happening to
+reach the resume branch first, which the extra scheduling hop in the driver wait
+made timing-dependent (`test_fix_round98.py::test_consumer_cancellation_keeps_failed_pump_owned`).
+
+
+---
+
 ## ✅ Fixed — round 117 (2026-10-01)
 
 TPS is output **generation** speed. Four defects in how it was measured and
@@ -10216,6 +10307,676 @@ orphan an outer future, so none can produce an unretrieved-future report.
 (the pre-existing regression that pinned this; it asserts `loop_errors == []` after
 a pump dies during teardown and failed on 3.14), plus the 10 other tests in that
 file. Surfaced as a hard suite failure by `pytest tests/ -q` on 3.14.
+
+---
+
+## 🔴 Open — follow-up sweep (2026-10-04)
+
+Targeted at the four areas the 2026-09-30 sweep left **partial** (its own
+"Notes on this sweep" named `server/app.py`, `logging_core/db_sink.py`, the
+OpenAI Responses codec, and the middleware/lifespan). #345 is the
+`server/app.py` result and is reproduced by executing code, not by reading it.
+
+### 345. Realtime sessions are priced and logged but never charged to the key
+
+**Severity:** 🔴 Critical · **Status: open**
+
+**Files:** `wiwi/server/app.py:515-517` (`_bill_realtime_session`),
+`wiwi/auth/service.py` (no such method)
+
+`/v1/realtime` closes a session by calling `_bill_realtime_session`, which
+prices the peak usage, settles the deployment's token counters, writes the
+request-log row, and then charges the virtual key:
+
+```python
+if state.auth is not None:
+    with contextlib.suppress(Exception):
+        await state.auth.record_spend(info.key_id, priced, ctx)
+```
+
+**`AuthService` has no `record_spend` method.** The public surface is
+`apply_spend_trueup`, `authenticate`, `count_keys`, `create_key`,
+`delete_key`, `evict`, `expire_keys`, `get_key`, `key_owner`, `list_keys`,
+`list_keys_for_owner`, `release_budget_reservation`, `reserve_budget`,
+`set_disabled`, `startup`, `update_key`, `update_spend`. `record_spend` exists
+only as the *nested closure* inside `run_chat_like` (`app.py:1490`) — it was
+never a method, so `state.auth.record_spend` raises `AttributeError` on every
+call, and the surrounding `contextlib.suppress(Exception)` swallows it with no
+log, no counter and no /health field.
+
+**Probe** (`realtime.enabled`, one virtual key with `max_budget=1.00`, a
+10 000-in/10 000-out session on a model priced at 1e-4/1e-3):
+
+```
+state.auth.record_spend          -> '<<MISSING>>'
+budget cap                      : $1.0
+logged request cost for session : $11.000000
+vkeys.spend_to_date after bill  : $0.000000
+vkeys.max_budget                : $1.000000
+spend_charge_failures counter   : 0
+```
+
+So an $11 session is priced, logged and visible in the admin console, and the
+key is charged **$0.00**. Three consequences:
+
+1. **A budget cap is a no-op on this surface.** `max_budget` is the one control
+   a self-hosted gateway exists to offer; realtime is an unmetered hole in it.
+   The key's `spend_to_date` never moves, so neither `over_budget`
+   (`auth/service.py:114-121`) nor the 402 pre-flight refusal
+   (`app.py:2777-2781`) ever fires for a realtime key.
+2. **It is silent in the worst way.** Unlike AUDIT #179 and #324 — both of
+   which make a failed charge loud with `spend_charge_failed` and a
+   `spend_charge_failures` counter — this path cannot even be observed. The
+   request log says the request cost $11 and the key says it spent nothing;
+   nothing reconciles the two.
+3. **The `suppress` is load-bearing for the bug, not for the design.** The
+   intent of `with contextlib.suppress(Exception)` is "accounting must never
+   500 a served turn" (the AUDIT #24 rule, honoured correctly in the nested
+   `record_spend` at `app.py:1535-1557`). But it converts a *programming
+   error* into a silent no-op, which is exactly the `ecc:silent-failure`
+   class that AUDIT #332 already flags one function away. The sibling fix in
+   round 112 is the model to follow: log, count, and retry through
+   `apply_spend_trueup`.
+
+**Fix sketch:** charge through the real API — `update_spend` with the same
+release-first/charge-once shape as the nested `record_spend`, falling back to
+`apply_spend_trueup` — or promote that closure to an `AuthService` method so
+both call sites share one implementation (AGENTS.md rule 4: no second
+convention beside an existing one). Replace the bare `suppress` with the
+#179 guard rails: `spend_charge_failed` log + `spend_charge_failures` counter +
+`apply_spend_trueup` retry. Realtime is also the only surface that skips the
+admission-time `reserve_budget` (`app.py:1924-1950`), so it needs neither the
+reservation nor its release.
+
+**Test:** none exists — `tests/test_realtime.py` asserts the *peak-usage*
+selection (`:244`) and the relay, never that a key is charged.
+
+---
+
+### 346. A crash between reserve and settle leaks `budget_reserved` across restarts, permanently
+
+**Severity:** 🟠 High · **Status: open**
+
+**Files:** `wiwi/auth/service.py:657-681` (`release_budget_reservation`),
+`:614-655` (`reserve_budget`), `:114-121` (`over_budget`),
+`wiwi/server/app.py:1924-1956` (the reserve site)
+
+Round 112 (#324) moved budget enforcement to admission: `reserve_budget`
+adds `est/4·1e-6 + 1e-4` to a new `budget_reserved` column, and
+`over_budget` reads `spend_to_date + budget_reserved >= max_budget` so
+in-flight commitments block admission. The release is best-effort by design
+(`app.py:1580`, `:2450`), which is correct — but a reservation whose
+**process dies** between reserve and release is never reconciled. There is no
+startup reset, no TTL, and no process-generation stamp: `budget_reserved` is
+a plain persisted column, so the leaked amount outlives every restart and
+permanently shrinks the key's usable headroom.
+
+The release path's own docstring identifies the hazard and fixes only half of
+it (`auth/service.py:663-666`): the `max(…, 0)` clamp stops a *negative*
+balance from inflating headroom "from a crash-era stale reservation" — the
+audit author saw the crash case and defended against the sign, not the
+magnitude. A stale reservation is positive, and positive is exactly the
+direction that disarms the cap.
+
+**Probe** (key with `max_budget=0.01`; one request reserves its full estimate,
+then the process is torn down without releasing):
+
+```
+reserve_budget(0.010) of a $0.01 cap -> True
+AFTER RESTART
+  spend_to_date   : $0.0
+  budget_reserved : $0.01   <-- never billed, never refunded
+  real headroom   : $0.0100
+  usable headroom : $0.0000   <-- what admission actually sees
+reserve_budget(0.0001) -> False   (a trivial request the key could easily afford)
+  -> REFUSED: a key with real headroom cannot be served at all.
+```
+
+A key that has spent **nothing** and has its **full budget intact** is
+permanently refused at admission after one unclean shutdown mid-request. There
+is no admin affordance for it either — `/admin/keys/*` can raise `max_budget`
+but nothing zeroes `budget_reserved`, and `list_keys` only *reports* it
+(`auth/service.py:723`). The blast radius scales with how large a request was
+in flight when the process died: the leaked amount is that request's estimate,
+so a gateway serving long-context requests can strand a key on a single crash.
+
+**Fix sketch:** treat the column as process-scoped, the way the round-112
+journal-owner fix treats durability. Zero `budget_reserved` for every key in
+`AuthService.startup` (nothing is in flight at startup, so any non-zero value
+is by definition orphaned), or stamp reservations with the owning process
+generation and expire them. Zeroing at startup is one idempotent UPDATE and
+needs no schema change.
+
+**Test:** none — `tests/test_fix_round112.py` covers reserve/refund within one
+process lifetime, which is precisely the case that works.
+
+---
+
+### 347. The 402 budget refusal leaks the rate-limit slot it already reserved, and the leak is global
+
+**Severity:** 🟠 High · **Status: open**
+
+**Files:** `wiwi/server/app.py:1909` (`enforce_rate_limit`), `:1937-1949`
+(the 402 return), `:1951-1956` (`ctx` construction, *after* the return)
+
+`_chat_like` reserves a rate-limit slot **first** (`:1909`), then attempts the
+budget reservation (`:1929`) and returns 402 when it is refused (`:1937-1949`) —
+**without calling `_release_tpm_reservation`**. The `RequestContext` carrying
+`budget_reserved` is not even constructed until `:1951`, so no enclosing
+`finally` can reach the refund helper on this path. Every sibling early return
+does call it (`:2069`, `:2121`, `:2154`, `:2182`, `:2273`, `:2282`); this one
+was added by round 112 after that convention was written and was not converted.
+
+The slot is unrecoverable: `RateLimiter.release` only removes events matching
+that request id (`wiwi/ratelimit/memory.py:233`), and nothing else reclaims it
+for the rest of the 60 s window.
+
+**Probe** (`global_rpm=100`, one key with `max_budget=1e-9, rpm=2`):
+
+```
+req0: status=402 global:rpm=1 key:rpm=1  LEAK +1
+req1: status=402 global:rpm=2 key:rpm=2  LEAK +1
+req2: status=429 global:rpm=2 key:rpm=2
+```
+
+Two requests that never reached an upstream fully throttle the key. Worse, the
+leaked event sits in the **global** scope, so it crosses tenants — with
+`global_rpm=3`, three 402s from capped keys lock an unrelated uncapped key out:
+
+```
+capped req 0 -> 402
+capped req 1 -> 402
+capped req 2 -> 402
+global:rpm events leaked by capped keys: 3
+innocent key request -> 429          <-- unrelated, uncapped key, locked out
+```
+
+**Consequence:** availability. A single caller holding one budget-capped key
+can throttle the whole gateway at any configured `global_rpm`/`global_tpm`,
+one slot per refused request per window. This is the mirror image of AUDIT #285
+(double-reserve), and its fix note claims "every early return between reserve and
+settle funnels through here" — this return predates that claim.
+
+**Fix sketch:** construct `ctx` above the reserve block so one `finally` owns
+every post-reserve return, or call `await _release_tpm_reservation(info, refused)`
+on the 402 path exactly as `:2069` does.
+
+---
+
+### 348. `lifespan` teardown is unguarded: one failing `stop()` skips every later one, including engine disposal
+
+**Severity:** 🟠 High · **Status: open**
+
+**Files:** `wiwi/server/app.py:1248-1266` (the whole teardown half),
+`:1144-1152` (`AppState.shutdown` — `shutdown_event`, log pumps, engine dispose)
+
+Twelve bare sequential `await X.stop()` calls with **no `try/finally`, no
+`suppress`, no aggregation**. The first one to raise aborts every later stop
+*and* `state.shutdown()` at `:1266`. Starlette's `Router.lifespan` does
+`await receive()` inside the `async with` and re-raises, so **any exception
+raised while serving** — including the `CancelledError` of a hard SIGINT —
+skips the identical teardown half.
+
+Every one of these workers is a third-party-or-local background task
+(`tape_store.py:587`, `recovery.py:319`, `retention.py:48`, the three
+`*_auto_refresh.py`, `response_store.py:139`) and none is individually guarded.
+`retention.stop()` is the lone exception that suppresses internally
+(`retention.py:54-55`) — the convention exists in the codebase and the lifespan
+does not follow it.
+
+**Probe** (a) — `journals.stop` (the *first* teardown await) raising:
+
+```
+B: lifespan exited with: journals.stop failed
+[B: after] cline_refresh=RUNNING workbuddy_refresh=RUNNING opencode=RUNNING
+           cline_version_refresh=RUNNING workbuddy_version_refresh=RUNNING
+           retention=RUNNING journals=RUNNING
+           shutdown_event_set=False dbpool=StaticPool
+```
+
+**Probe** (b) — no monkeypatch at all, just an exception inside the served body:
+
+```
+A: lifespan exited with: handler blew up
+[A: after] ... journals=RUNNING sd_event_set=False
+```
+
+Control on the clean path is correct (`[after normal exit] ... sd_event=True`),
+so the defect is the *sequencing*, not a missing or misordered stop: all nine
+start/stop pairs match, and the DB-touching workers correctly stop before
+`state.shutdown()` disposes the engine (`:1263`, `:1266`).
+
+**Consequence:** `shutdown_event` is never set, so the `/admin/stream` SSE
+keepalive loop (`app.py:3153-3157`, whose only break condition is `shutdown`)
+never returns — the exact "hangs at *Waiting for connections to close*" the
+comment says it exists to prevent. The engine is never disposed (`:1152`).
+Seven orphaned tasks keep polling providers and holding sockets and DB
+connections, and `tracer.shutdown()` (`:1254`) leaves the OTLP exporter
+unflushed.
+
+**Fix sketch:** `try: ... finally:` around the teardown half with
+`await asyncio.gather(*stops, return_exceptions=True)` and a log per failure
+(mirroring `retention.py:48-58`); `AsyncExitStack` also covers the
+exception-during-serve case.
+
+---
+
+### 349. `/metrics` returns the SPA's `index.html` (HTTP 200) when Prometheus is disabled
+
+**Severity:** 🟡 Medium · **Status: open**
+
+**Files:** `wiwi/server/app.py:2905` (route registered only inside
+`if config.router_settings.prometheus_enabled:`), `:5844-5853`
+(`SPAStaticFiles.get_response`), `:5860` (the catch-all mount)
+
+With `prometheus_enabled: false` — **the default** — the metrics route is never
+registered, so the SPA mount is the only handler left for that path. It answers
+with `index.html` and a 200, including for paths that 404 internally.
+
+**Probe** (default config):
+
+```
+GET /metrics   -> 200 text/html; charset=utf-8
+GET /metrics/  -> 200 text/html; charset=utf-8
+```
+
+**Consequence:** a scrape expecting `text/plain` gets 200 HTML. Prometheus's
+`up` stays **1** while every metric is unparseable — a silent monitoring black
+hole whose failure mode is precisely "looks healthy". Contrast `/health`,
+`/public/models`, `/auth/me`, `/admin/*` and `/v1/*`, which all correctly return
+JSON because they are registered above the mount.
+
+**Fix sketch:** register the route unconditionally and return
+`_err(404, "not_found_error", "metrics disabled", …)` from the body when the
+setting is off, rather than not registering it at all.
+
+---
+
+### 350. `previous_response_id` drops the entire user-side conversation history
+
+**Severity:** 🔴 Critical · **Status: open**
+
+**Files:** `wiwi/server/app.py:1867` (`codec_history(body, prev.output.get("output", []))`),
+`wiwi/wire/openai_responses.py:239-255` (`with_history`),
+`wiwi/server/response_store.py:51` (`StoredResponse.input_items`)
+
+The store records **both** halves of a turn — `put(..., input_items, output)`
+at `app.py:2260` and `:2430`, persisted in the `input_json` column and read
+back at `response_store.py:98`. But `with_history` is handed **only**
+`prev.output["output"]`. `StoredResponse.input_items` is written by two call
+sites and read by **none** — `prev.input_items` appears nowhere in the repo
+(grep-verified). So the previous turn's *user* message never reaches the
+upstream.
+
+**Probe** (three chained `/v1/responses` turns against a mocked Anthropic
+upstream, capturing the upstream body each turn):
+
+```
+turn2 upstream: [{"role":"user","content":"Q2-SECOND"}]   + assistant A1
+turn3 upstream: [{"role":"user","content":"Q3-THIRD"}]    + assistant A2
+>>> Q1 present on turn 3: False
+>>> Q2 present on turn 3: False
+```
+
+The model sees `[assistant A1, user Q2]` on turn 2 and never learns what the
+user originally asked. Stateless callers that resend `input` in full are
+unaffected, so this bites exactly the stateful `previous_response_id` path —
+the documented spec-B feature. `AUDIT.md:7648` claims the store keeps "the
+request's normalized input items so the next turn can be rebuilt"; that half
+is never read.
+
+**Consequence:** every stateful multi-turn Responses/Codex session silently
+loses context and appears to forget what it was asked, with no error anywhere.
+
+**Fix sketch:** read `prev.input_items` at `app.py:1867` and prepend it inside
+`with_history` ahead of `previous_output`, so `decode_request`'s existing
+`previous_output` path carries both halves.
+
+---
+
+### 351. A non-string `reasoning.effort` 500s every non-OpenAI deployment (the inbound half of #288)
+
+**Severity:** 🔴 Critical · **Status: open**
+
+**Files:** `wiwi/wire/openai_responses.py:411-413` (effort read untyped),
+`wiwi/ir/types.py:296` (`_EFFORT_BUDGETS.get(effort)`),
+reached from `wiwi/providers/anthropic_adapter.py:520` and
+`wiwi/providers/gemini_adapter.py:190`
+
+The Responses decoder forwards any client value into
+`GenParams.reasoning_effort` (typed `str | None`) with no coercion. A list or
+dict effort is unhashable, so the `.get` in `effort_to_thinking_budget` raises
+`TypeError` inside the adapter's encode path.
+
+**Probe** (direct — no HTTP layer needed, so this is unambiguous):
+
+```
+GenParams.reasoning_effort = ['low']
+Traceback (most recent call last):
+  File "wiwi/providers/anthropic_adapter.py", line 520, in encode_request
+    budget = g.effective_thinking_budget()
+  File "wiwi/ir/types.py", line 264, in effective_thinking_budget
+    return effort_to_thinking_budget(self.reasoning_effort)
+  File "wiwi/ir/types.py", line 296, in effort_to_thinking_budget
+    return _EFFORT_BUDGETS.get(effort)
+TypeError: cannot use 'list' as a dict key (unhashable type: 'list')
+```
+
+Through the full stack this is an HTTP 500 `internal gateway error` before any
+upstream call, on **every** Anthropic and Gemini deployment. AUDIT #288 fixed
+this exact crash on the *outbound* openai/openrouter adapters
+(`tests/test_fix_round96.py`) but the **inbound** Responses decoder — the only
+place a client-supplied effort enters — was never guarded. Same class as #327.
+`openai_chat.py`'s `reasoning_effort` is untyped in the same way, so the class
+is not closed by fixing one codec.
+
+**Fix sketch:** guard in `effort_to_thinking_budget` with
+`isinstance(effort, str)` — that closes the class for every present and future
+caller — and coerce at the two inbound decoders.
+
+---
+
+### 352. A non-list/non-string `input` is silently discarded; the gateway answers 200 with an empty prompt
+
+**Severity:** 🟠 High · **Status: open**
+
+**Files:** `wiwi/wire/openai_responses.py:270-277` (`else: items = []`),
+`wiwi/server/app.py:1740-1752` (`_stored_input_items` → `[]`)
+
+The two sibling codecs both reject the equivalent shape:
+`openai_chat.py:77-83` and `anthropic_messages.py:53-57` raise
+`DialectError("'messages' must be a list")`. The Responses codec is the only
+one with no guard, so `input: {...}`, `input: 123` or `input: true` produces
+`items = []`.
+
+**Probe:**
+
+```
+input=dict (OpenAI 400s this shape) -> HTTP 200   upstream messages=[]
+input=123                            -> HTTP 200   upstream messages=[]
+input=true                           -> HTTP 200   upstream messages=[]
+control: input="hi"                  -> HTTP 200   upstream messages=[{'role':'user','content':'hi'}]
+control: chat messages=123           -> HTTP 400   "'messages' must be a list"
+```
+
+The user's entire prompt is dropped, the upstream is called with
+`messages: []`, it returns 200, and tokens are billed for a model answering a
+question nobody asked. The same shape also zeroes the stored transcript, so the
+next `previous_response_id` turn compounds #350.
+
+**Fix sketch:** raise `DialectError("'input' must be a string or a list")`,
+mirroring both siblings.
+
+---
+
+### 353. `audit_logs` has no retention, no cap and no rollup
+
+**Severity:** 🟠 High · **Status: open**
+
+**Files:** `wiwi/logging_core/db_sink.py:1198-1206` (`write_audit`, INSERT
+only), `:774` (`idx_audit_logs_ts`), vs `wiwi/logging_core/retention.py:96-97`
+(`sweep()` touches only `request_logs`)
+
+`grep "DELETE" db_sink.py` returns exactly one statement —
+`DELETE FROM request_logs` (`:682`). No `DELETE FROM audit_logs` exists
+anywhere in the codebase, and `LogRetention.sweep()` calls only
+`prune_old_requests` and `enforce_log_cap`.
+
+**Consequence, two defects in one:**
+
+1. **Unbounded growth.** Every admin key/deploy/provider/pricing mutation is a
+   permanent row. `log_retention_days` and `log_max_rows` are silently
+   non-applicable to this table, on any gateway an operator actually
+   administers.
+2. **Read amplification.** `read_audit` orders by `ts DESC, id DESC` but the
+   only index is `idx_audit_logs_ts(ts)`. The `id DESC` tiebreak forces a sort
+   of every matching row, and `/admin/logs/audit?limit=5000` (`app.py:4671`)
+   is polled by the console — so this degrades into a scan per refresh.
+
+**Fix sketch:** add `audit_logs` to `LogRetention.sweep()` (age prune or row
+cap) and add `CREATE INDEX ... ON audit_logs(ts, id)`.
+
+---
+
+### 354. `rollup_and_prune` has no cross-process lock — concurrent sweeps double-count the table
+
+**Severity:** 🟠 High · **Status: open**
+
+**Files:** `wiwi/logging_core/db_sink.py:567-687` (the whole transaction),
+`:660-663` (`if not groups: return 0` inside it),
+`wiwi/logging_core/retention.py:96-97`
+
+Each sweep accumulates rollup groups from a snapshot with no lock, then does an
+**additive** `ON CONFLICT … DO UPDATE SET requests = request_rollups.requests
++ excluded.requests`. That form is correct for *sequential* repeated sweeps and
+wrong for concurrent ones: under READ COMMITTED, sweep B's upsert can commit
+before sweep A's delete, so A's delete removes rows B already counted.
+
+**Probe** (30 rows, two overlapping `prune_old_requests` calls):
+
+```
+returns: [30, 0]
+rollup SUM(requests): 60   raw rows left: 0
+single-run control: rollup SUM(requests) = 30
+```
+
+30 requests in, **60** reported. Reachable with two uvicorn workers against one
+Postgres, or two gateway instances against one DB. Rollups are never pruned, so
+the inflation is permanent, and it hits cost and spend on the dashboard.
+`_existing_histograms` merging repairs only `p95_hist`, not the additive
+counters.
+
+**Fix sketch:** take a Postgres advisory lock (`pg_try_advisory_xact_lock`) or a
+row lock on a singleton row at the top of the transaction.
+
+---
+
+### 355. A Responses `reasoning` item replays with no `encrypted_content`
+
+**Severity:** 🟠 High · **Status: open**
+
+**Files:** `wiwi/wire/openai_responses.py:377-387` (the `reasoning` decode
+arm), `:459-462` (`_reasoning_item`), `wiwi/ir/types.py:115` (`ThinkingPart`
+has no blob field), `RESEARCH.md:26` and `:67`
+
+Codex sends `include: ["reasoning.encrypted_content"]` on **every** request and
+must replay every output item verbatim including that blob (`RESEARCH.md:26`,
+`:67`). `RESEARCH.md:107` names this exact hazard. The decoder reads only
+`summary` and builds `ir.ThinkingPart(text=…, signature=None, data=None)` — the
+blob has nowhere to live in the IR — and `_reasoning_item` never re-emits it.
+
+**Probe:**
+
+```
+decoded reasoning part: ThinkingPart(text='plan', signature=None, data=None)
+encrypted_content survived: False
+-> anthropic upstream gets {"type":"thinking","thinking":"secret plan"}   # no signature
+```
+
+**Consequence:** the next turn sends reasoning history with the opaque blob
+missing, which the Responses API rejects (`'encrypted_content' is required`),
+so reasoning-model multi-turn through `/v1/responses` breaks on turn 2. Downstream
+the blob degrades to plain text — an Anthropic upstream receives an unsigned
+`thinking` block, which 400s for the same reason.
+
+**Fix sketch:** add `encrypted_content: str | None` to `ir.ThinkingPart`,
+decode it, re-emit it from `_reasoning_item`, and have `anthropic_adapter` skip
+(or refuse) a `ThinkingPart` with no signature rather than send it unsigned.
+
+---
+
+### 356. A tool item's `item_id` uses the IR stream index, so streamed and sync ids disagree
+
+**Severity:** 🟡 Medium · **Status: open**
+
+**Files:** `wiwi/wire/openai_responses.py:761` (`ToolCallOpen` mints
+`fc_{req_id}_{n}` from `d.index`), `:625` (`_close_tool` likewise), `:551-556`
+(`encode_response` mints from a *different* counter)
+
+`output_index` is bumped for **every** item (message, reasoning, tool);
+`d.index` is the IR tool index. So with a message at `output_index` 0 and one
+tool call, the stream mints `fc_<req>_0` at `output_index: 1`, while
+`encode_response` for the same turn mints `fc_<req>_1` (it counts the message
+first).
+
+**Probe:**
+
+```
+stream: output_item.added oi=0 id=fc_r1_7    (d.index=7, output_index=0)
+sync:   function_call fc_r1_3
+-> same turn, two different ids for the same call
+```
+
+With non-monotonic IR indices the id sequence also runs *against*
+`output_index`. A client that stores the streamed id and later references it
+against the sync-shaped payload points at a different item.
+
+**Fix sketch:** key both on `t["output_index"]` (or one dedicated monotonic item
+counter) and reuse it from `encode_response`.
+
+---
+
+### 357. `ToolCallClose` in an order other than open order misorders `response.completed.output`
+
+**Severity:** 🟡 Medium · **Status: open**
+
+**Files:** `wiwi/wire/openai_responses.py:604-609` (`_item_done` appends in
+**close** order), `:829-832` (`_completed` sorts `sorted(self._tools)`)
+
+`streaming/deltas.py` explicitly permits batch closes in any order ("Adapters
+may hold several indices open at once and close them in a batch"). `self._output`
+is built in close order, so the terminal payload's `output[]` disagrees with
+`output_index`.
+
+**Probe:**
+
+```
+--- parallel tools, Close(1) then Close(0)
+   output_item.added oi=0 id=fc_req1_0
+   output_item.added oi=1 id=fc_req1_1
+   response.completed output_order_ids=['fc_req1_1', 'fc_req1_0']
+```
+
+**Consequence:** a client rebuilding the assistant turn from
+`response.completed.response.output` rather than the per-item `done` events gets
+tool calls in the wrong sequence relative to the text they bracket.
+
+**Fix sketch:** insert at `idx` in `_item_done` rather than appending.
+
+---
+
+### 358. `stop_reason: context_window_exceeded` reports `status: "completed"`
+
+**Severity:** 🟡 Medium · **Status: open (re-opens #272)**
+
+**Files:** `wiwi/wire/openai_responses.py:428` (`_INCOMPLETE_REASONS`),
+`:445-450` (`_response_obj`), `:823-825` (the `incomplete` test)
+
+`_INCOMPLETE_REASONS` covers only `{"length", "content_filter"}`. An Anthropic
+upstream returning `stop_reason: "model_context_window_exceeded"` is carried
+verbatim as `context_window_exceeded` (`ir/translation.py:41`), and
+`ir/types.py:17-24` documents that value as one of the three "stop" cannot
+express. The client gets `status: "completed"` with no `incomplete_details`, so
+it has no signal to trigger auto-compact — the exact failure the IR field
+exists to prevent, and the exact symptom #272 recorded and closed as
+"non-actionable". `compaction` and `pause_turn` behave the same way.
+
+**Fix sketch:** map `context_window_exceeded` → `incomplete` /
+`max_output_tokens` (the spec's own value) and `pause_turn` → `incomplete` with a
+dedicated reason, in both `_INCOMPLETE_REASONS` and the `:823` test.
+
+---
+
+### 359. `json_schema.schema` is accepted unvalidated in all three codecs
+
+**Severity:** ⚪ Low · **Status: open**
+
+**Files:** `wiwi/wire/openai_responses.py:230-232`,
+`wiwi/wire/openai_chat.py:305`, `wiwi/wire/anthropic_messages.py:392`
+
+`{"text":{"format":{"type":"json_schema","name":"n","schema":"oops"}}}` puts the
+string `"oops"` into `ResponseFormat.json_schema` (typed `dict | None`), which
+`openai_adapter.py:301-304` forwards upstream as `"schema": "oops"`. The
+upstream 400s naming nothing the caller sent — the class of AUDIT #186/#187.
+No crash, hence low. `openai_chat.py:307` guards the same field; these two do not.
+
+**Fix sketch:** `json_schema=(fmt.get("schema") if isinstance(..., dict) else
+{"type":"object"})` in all three, matching the one that already does.
+
+---
+
+## Seams cleared in this follow-up (2026-10-04)
+
+Recorded so they are not re-investigated. Each was checked against source and,
+where marked, by execution:
+
+- **CORS — no middleware is configured at all.** `grep -rn "CORSMiddleware\|
+  allow_origins" --include=*.py wiwi/` returns nothing, so the
+  `allow_credentials=True` + `allow_origins=["*"]` spec violation does not
+  exist here. The opposite defect class is present instead (a cross-origin
+  request gets no `Access-Control-Allow-Origin`; a preflight gets 405), which
+  combined with `samesite="lax"` (`app.py:5044`) is the fail-closed shape.
+- **Middleware body handling — clean.** `RequestIdMiddleware` (`:42-136`) is pure
+  ASGI, not `BaseHTTPMiddleware`; only `json_body` (`:1662`) reads the body, and
+  the chunked/no-`Content-Length` cap (`:118-132`) correctly terminates with
+  `more_body=False` plus a `body_too_large` flag. Verified at the raw-ASGI level
+  on both a dialect surface and an admin route: a 163 840-byte chunked body is
+  refused with 413 and no key is created.
+- **SPA mount ordering — clean.** The mount is the last statement before
+  `return app` (`:5860` vs `:5863`); no route is registered after it. All of
+  `/health`, `/public/models`, `/auth/me`, `/admin/*`, `/v1/*` return JSON.
+- **Header allowlist — clean.** The forward-header allowlist is the single
+  literal `anthropic-beta` (`:1335-1359`), so no case-sensitivity or
+  comma-joining hazard exists; a duplicate header narrows rather than bypasses.
+  `_session_id` is truncated to 128 chars and is only a routing hint. There is
+  no `wiwi_settings` header-allowlist middleware to bypass — the setting does
+  not exist; the only `settings.headers` is `telemetry.headers`.
+- **`X-Forwarded-*` posture — fail closed.** `_client_ip` (`:331-349`) and
+  `_request_is_https` (`:368-392`) both gate on `trusted_proxies` CIDR checks
+  with an empty default (`config.py:445`); `X-Forwarded-Host` is deliberately
+  ignored (`:5506`).
+- **`/V1/` normalization (`:63-73`) — intentional, not a bypass.** Only the two
+  documented forms are rewritten; `/V1/MESSAGES` correctly 405s as JSON.
+- **Session-secret fail-closed — clean, checked in two places** (`create_app`
+  `:1305-1310` and `init_db` `:994-999`).
+- **Other `run_chat_like` admission paths — clean.** Unknown model 404, bad-body
+  400, `count_tokens` and `GET /v1/models` all leave `global:rpm` and the
+  per-key window at 0 events, i.e. genuinely pre-admission. The journal-replay
+  and cache-hit early returns *do* refund both halves. The streaming teardown
+  tail is shielded against `CancelledError` (`app.py:2566-2567`, AUDIT #222). A
+  mid-stream `StreamError` returning HTTP 200 is correct SSE semantics — the
+  status is committed before the body.
+
+From the Responses-codec / `db_sink` sweep:
+
+- **`wire/openai_responses.py` read in full** (841 lines) against both sibling
+  codecs. Every field read from the wire body was traced through `ir.Request`
+  into at least one outbound adapter; `with_history` traced into `app.py:1840-1884`,
+  `:2250-2261`, `:2419-2431` and `response_store.py`. Encoders exercised both
+  directly and through the real ASGI stack. The **tool-result call-id guard is
+  present** (`openai_responses.py:366`) — AUDIT #331's fix did land here.
+- **`logging_core/db_sink.py` read in full** (1867 lines) plus `subsystem.py`,
+  `retention.py`, `response_store.py` and the app-level call sites. Explicitly
+  **cleared**: no unaccounted silent `except` (all 7 sites are counted or
+  justified, loss counters in `subsystem.py:167-171`); audit and request rows
+  are written on the same DB in separate single-row transactions with no
+  cross-half atomicity requirement; `key_id` scoping is correct at every read
+  (`key_ids=[]` means "own nothing", verified); no SQL is built from user data by
+  interpolation (binds are parameters; the f-string `clauses`/`cols` are column
+  lists from module constants, and `LIKE` patterns are correctly `ESCAPE`-escaped
+  — probed `%`/`_`/`\` with 0 spurious matches); no per-request DB write on the
+  hot path (`log_request` is `put_nowait`); the row-cap boundary, the `ts`/`id`
+  tiebreak and the rollup-then-delete contract are all correct **under
+  sequential** execution (probed: 10 rows → cap 5 → 7 deleted, 5 kept, 7 rolled up).
+- **Not a defect:** the N+1 shape in `reprice_unpriced_history` is *per-row*
+  `rate_for`, not per-query (`db_sink.py:922`), on an admin-only path inside a
+  guarded `try` — probed 20 rows → exactly 20 calls, and idempotent on a second
+  run (`tests/test_fix_round56.py` already pins it).
+- **Latent, not live:** `response.failed` followed by `response.completed`.
+  `app.py:2537`'s `if errored:` guard currently prevents the double terminal on
+  the live path, but `app.py:2551` has no `not errored` guard of its own.
+  Recording so it is not mistaken for a live bug; the cheap fix is to make
+  `_completed()` a no-op after a `StreamError`.
 
 ---
 

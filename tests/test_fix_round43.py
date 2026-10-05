@@ -482,10 +482,19 @@ async def test_resume_does_not_credit_key_at_connect():
     tape.append(dl.TextDelta("partial answer already delivered"))
     queue: asyncio.Queue = asyncio.Queue()
 
+    async def _sse():
+        # A real body, not an empty one: since AUDIT #356 a 200 that carries no
+        # byte at all is a *pre-content* failure the pump boxes for the retry
+        # loop instead of reporting as connected, so an empty body would no
+        # longer reach the assertion below.
+        yield b'data: {"choices":[{"delta":{"content":"resumed"},'
+        yield b'"index":0}]}\n\n'
+        await asyncio.sleep(30)  # never terminates: the pump stays in flight
+
     with respx.mock:
         respx.post("https://api.openai.com/v1/chat/completions").mock(
-            return_value=httpx.Response(
-                200, text="",
+            side_effect=lambda request: httpx.Response(
+                200, content=_sse(),
                 headers={"content-type": "text/event-stream"}))
         resumed, new_task = await gw._attempt_resume(
             ctx, tape, queue)

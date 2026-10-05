@@ -140,8 +140,9 @@ Streaming resilience and journal knobs live here too — see the tables below.
 
 | Field | Default | Notes |
 |---|---|---|
-| `stream_idle_timeout_s` | `30.0` | Max seconds between upstream chunks before the stream is aborted. |
-| `stream_ping_interval_s` | `15.0` | SSE keep-alive ping cadence — a long thinking phase emits no upstream bytes and an idle proxy reaps the connection. `0` disables. Keep below `stream_idle_timeout_s`. |
+| `stream_idle_timeout_s` | `30.0` | Max seconds **between upstream content chunks** before the stream is aborted. Once content has flowed, a gap this long really is a dead connection. |
+| `stream_first_chunk_timeout_s` | `300.0` | Max seconds the upstream may stay silent **before its first content chunk**. Separate from, and larger than, `stream_idle_timeout_s` because silence there is normal, not diagnostic: a reasoning model can queue and think for minutes before its first token, and charging that against the inter-chunk watchdog cut healthy long generations. A stall inside this budget is retryable — the client has received nothing yet, so the request fails over to another deployment. `<= 0` falls back to `stream_idle_timeout_s`. |
+| `stream_ping_interval_s` | `15.0` | SSE keep-alive ping cadence — a long thinking phase emits no upstream bytes and an idle proxy reaps the connection. `0` disables. Keep below whichever timeout governs the current phase. |
 | `stream_loop_detection` | `true` | Abort on a non-terminating upstream loop. |
 | `stream_loop_limit` | `100` | Identical consecutive chunks before aborting. |
 | `stream_coalesce` | `false` | Coalesce `TextDelta`s under backpressure. |

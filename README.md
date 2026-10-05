@@ -350,7 +350,9 @@ router_settings:
   # global_rpm: 600                    # optional gateway-wide sliding-window caps
   # global_tpm: 200000
   # -- streaming resilience --
-  stream_idle_timeout_s: 30
+  stream_idle_timeout_s: 30           # silence between content chunks
+  stream_first_chunk_timeout_s: 300   # silence before the first chunk (a
+                                      # reasoning model may think this long)
   stream_loop_detection: true
   stream_coalesce: false               # merge TextDeltas under backpressure
   stream_resume: off                   # off | content_only | enabled

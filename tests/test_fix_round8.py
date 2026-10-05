@@ -574,10 +574,17 @@ async def test_stream_success_is_counted_at_completion_not_connect():
     cfg = _config()
     gw = Gateway(Router(cfg), CostEngine())
     try:
-        # Connects fine (200), then the body ends with no content at all —
-        # a connect-then-drop, the exact case AUDIT #6 describes.
-        respx.post(UPSTREAM).mock(return_value=httpx.Response(
-            200, content=b""))
+        # One real content chunk, then the body drops with no finish_reason —
+        # a connect-then-die, the exact case AUDIT #6 describes. (An *empty*
+        # body would no longer be a mid-stream drop: since AUDIT #356 a 200 that
+        # carries no byte at all is a pre-content failure the pump boxes for the
+        # retry loop, so the client never saw the stream fail.)
+        async def _chunk_then_drop():
+            yield b'data: {"choices":[{"delta":{"content":"partial"},'
+            yield b'"index":0}]}\n\n'
+
+        respx.post(UPSTREAM).mock(side_effect=lambda request: httpx.Response(
+            200, content=_chunk_then_drop()))
         ctx = RequestContext(surface="chat", ir_req=_req(), group="gpt-x")
         async for _ in gw.stream(ctx):
             pass

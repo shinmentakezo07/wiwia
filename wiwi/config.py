@@ -249,6 +249,15 @@ class RouterSettings(BaseModel):
     global_tpm: int | None = None
     # Streaming resilience
     stream_idle_timeout_s: float = 30.0  # max seconds between upstream chunks
+    # Separate, much larger budget for the phase *before* the upstream produces
+    # its first content-bearing delta. Silence there is normal — a reasoning
+    # model (or a cache-miss prompt) can queue and think for minutes before the
+    # first token — so charging it against the inter-chunk watchdog cut healthy
+    # long generations at ``stream_idle_timeout_s`` (AUDIT #356). Once content
+    # has flowed the tight watchdog applies again: a gap that long mid-stream
+    # really is a dead connection. <= 0 falls back to
+    # ``stream_idle_timeout_s`` (the pre-#356 behaviour).
+    stream_first_chunk_timeout_s: float = 300.0
     # SSE keep-alive. Anthropic's wire has a named ``ping`` event for exactly
     # this: a long thinking phase produces no upstream bytes, and an idle
     # proxy/ALB reaps the connection mid-turn. Claude Code's SSE reader skips

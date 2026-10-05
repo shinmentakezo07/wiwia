@@ -240,6 +240,58 @@ def pump_cancel_grace(grace_drain_s: float) -> float:
     return max(_PUMP_CANCEL_GRACE_S, float(grace_drain_s or 0.0))
 
 
+def _fmt_secs(seconds: float) -> str:
+    """Render a duration for an operator-facing message.
+
+    ``f"{30.0:.0f}"`` reads fine but ``f"{0.5:.0f}"`` is ``"0"``, so a
+    sub-second watchdog reported itself as ``upstream idle >0s`` — a message
+    that names no duration at all. Whole seconds stay integral (the common
+    case, and what operators grep for); anything else keeps one decimal.
+    """
+    return f"{seconds:.0f}" if seconds >= 10 else f"{seconds:.1f}"
+
+
+def _transport_message(e: Exception) -> str:
+    """A non-empty, useful message for an httpx transport failure.
+
+    httpx maps its httpcore exceptions with ``mapped_exc(str(exc))``, and
+    httpcore raises its timeouts with no arguments — so ``str(e)`` is ``""`` for
+    exactly the failures this message exists to explain. Both stream arms passed
+    that through, so a client whose upstream timed out mid-stream received a
+    ``StreamError`` with a *blank* message: indistinguishable from a gateway bug,
+    and useless in a log (AUDIT #356).
+
+    There is no ``.message`` attribute to fall back to — httpx keeps the text in
+    ``args`` — so a blank one is described from the class name instead, which at
+    least says *what kind* of transport failure occurred.
+    """
+    detail = str(e).strip()
+    return f"upstream {type(e).__name__}" + (f": {detail}" if detail else "")
+
+
+def stream_read_timeout(dep: Deployment, watchdog_s: float) -> Any:
+    """httpx timeout for a *streamed* upstream body.
+
+    A scalar timeout makes httpx apply the same value to the **read** timeout,
+    so the provider's blanket request deadline pre-empted the gateway's own
+    no-progress watchdog: a stream that legitimately went quiet for longer than
+    that deadline was killed by httpx, and ``httpx.ReadTimeout`` carries no
+    message of its own (``str(e) == ""``), so the client received an
+    unexplained blank ``StreamError`` instead of the watchdog's own retryable
+    one — and, because the fault arrived mid-stream, no failover (AUDIT #356).
+
+    The watchdog is the single authority for "no progress" on these arms, so
+    the read timeout is lifted here. connect/write/pool keep the configured
+    value; that part is what a scalar was actually good for. A non-positive
+    watchdog disables the authority, so the configured read deadline is kept
+    rather than leaving the body unbounded.
+    """
+    base = float(dep.timeout or dep.provider.timeout_s or 0.0) or None
+    if watchdog_s <= 0:
+        return base
+    return httpx.Timeout(connect=base, read=None, write=base, pool=base)
+
+
 def merge_resume_context(origin: RequestContext,
                          resumed: RequestContext | None) -> None:
     """Fold a resumed stream's usage/cost back into the originating context.
@@ -512,7 +564,7 @@ class Gateway:
             raise WiwiError(504 if "Timeout" in type(e).__name__ else 502,
                             "timeout" if "Timeout" in type(e).__name__
                             else "api_connection_error",
-                            f"upstream {type(e).__name__}", retryable=True) from e
+                            _transport_message(e), retryable=True) from e
         latency = int((time.monotonic() - t0) * 1000)
         if resp.status_code != 200:
             ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
@@ -545,7 +597,7 @@ class Gateway:
                             timeout=dep.timeout or dep.provider.timeout_s)
                     except httpx.TransportError as e:
                         raise WiwiError(502, "api_connection_error",
-                                        f"upstream {type(e).__name__}",
+                                        _transport_message(e),
                                         retryable=True) from e
                     if retry_resp.status_code == 200:
                         ctx.note_attempt(f"{dep.group}/{dep.model_id}",
@@ -601,10 +653,14 @@ class Gateway:
             adapter.set_tool_context(body)
         _record_translation_warnings(ctx, adapter)
         headers = self._headers(adapter, key, dep, ctx)
+        # The read loop below is watchdog-armed, so httpx's own read deadline is
+        # lifted in favour of it (see `stream_read_timeout`).
+        idle_s = self.router.settings.stream_idle_timeout_s
+        timeout = stream_read_timeout(dep, idle_s)
         t0 = time.monotonic()
         try:
             resp_cm = self._client.stream("POST", url, json=body, headers=headers,
-                                          timeout=dep.timeout or dep.provider.timeout_s)
+                                          timeout=timeout)
             resp = await resp_cm.__aenter__()
         except httpx.TransportError as e:
             ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
@@ -663,7 +719,7 @@ class Gateway:
                     try:
                         retry_cm = self._client.stream(
                             "POST", url, json=body, headers=retry_headers,
-                            timeout=dep.timeout or dep.provider.timeout_s)
+                            timeout=timeout)
                         retry_resp = await retry_cm.__aenter__()
                     except httpx.TransportError as e:
                         raise WiwiError(502, "api_connection_error",
@@ -731,17 +787,27 @@ class Gateway:
             parser = LineSSEParser(allow_unframed=True)
 
 
-            def _apply_event(evt: SSEEvent) -> None:
+            def _apply_event(evt: SSEEvent) -> bool:
+                """Fold one event into the turn; True if it carried content.
+
+                The return value drives the read loop's choice of idle budget —
+                the pre-content phase is allowed to be far longer than a gap
+                between content chunks (AUDIT #356).
+                """
                 nonlocal usage, stop_reason, saw_terminal
+                content = False
                 for d in adapter.decode_stream_event(evt.event, evt.data):
                     if isinstance(d, dl.TextDelta):
                         text_parts.append(d.text)
+                        content = True
                     elif isinstance(d, dl.ThinkingDelta):
                         thinking_parts.append(d.text)
+                        content = True
                     elif isinstance(d, dl.ToolCallOpen):
                         open_calls[d.index] = ir.ToolUsePart(
                             id=d.id, name=d.name, args={}, raw_args="")
                         arg_bufs[d.index] = []
+                        content = True
                     elif isinstance(d, dl.ToolCallArgsDelta):
                         if d.index in arg_bufs:
                             arg_bufs[d.index].append(d.args_fragment)
@@ -773,17 +839,30 @@ class Gateway:
                     elif isinstance(d, dl.StreamError):
                         raise WiwiError(502, "api_error", d.message,
                                         retryable=d.kind != "status")
+                return content
 
             line_iter = resp.aiter_lines().__aiter__()
+            # Content-bearing deltas seen so far. A streaming-only upstream that
+            # answers a long reasoning turn produces nothing for minutes, so the
+            # pre-content phase gets the generous budget while a gap *between*
+            # content chunks keeps the tight one (AUDIT #356).
+            via_stream_saw_content = False
             while True:
+                budget = (self.router.settings.stream_first_chunk_timeout_s
+                          if not via_stream_saw_content else idle_s)
+                if budget <= 0:
+                    budget = idle_s
                 try:
                     line = await asyncio.wait_for(
-                        line_iter.__anext__(),
-                        timeout=self.router.settings.stream_idle_timeout_s)
+                        line_iter.__anext__(), timeout=budget)
                 except TimeoutError:
-                    raise WiwiError(504, "timeout",
-                                    f"upstream idle >{self.router.settings.stream_idle_timeout_s:.0f}s",
-                                    retryable=True)
+                    raise WiwiError(
+                        504, "timeout",
+                        (f"upstream produced no output within "
+                         f"{_fmt_secs(budget)}s"
+                         if not via_stream_saw_content
+                         else f"upstream idle >{_fmt_secs(budget)}s between chunks"),
+                        retryable=True)
                 except StopAsyncIteration:
                     break
                 except httpx.TransportError as e:
@@ -803,11 +882,10 @@ class Gateway:
                     raise WiwiError(504 if "Timeout" in type(e).__name__ else 502,
                                     "timeout" if "Timeout" in type(e).__name__
                                     else "api_connection_error",
-                                    f"upstream {type(e).__name__}",
-                                    retryable=True) from e
+                                    _transport_message(e), retryable=True) from e
                 evt = parser.feed_line(line)
-                if evt is not None:
-                    _apply_event(evt)
+                if evt is not None and _apply_event(evt):
+                    via_stream_saw_content = True
             # Flush any frame buffered without a trailing blank line
             # (DeepSeek/B.A.I close with "data: [DONE]\n"). Without this the
             # final content delta is silently dropped.
@@ -931,9 +1009,10 @@ class Gateway:
             err_box: list[WiwiError | None] = [None]
             pump_task = asyncio.create_task(
                 self._pump(dep, key, c, queue, ready, err_box))
-            # Wait until the pump either connects successfully or fails before
-            # sending any data.  If it fails, raise so execute_with_retries can
-            # retry on a different deployment.
+            # Wait until the pump reports that the upstream actually began
+            # responding (its first body byte), or that it failed before sending
+            # anything.  If it failed, raise so execute_with_retries can retry on
+            # a different deployment (AUDIT #356).
             await ready.wait()
             if err_box[0] is not None:
                 # Do NOT cancel the pump here: it has already recorded the
@@ -965,26 +1044,6 @@ class Gateway:
         # Streaming: hold back the key credit until the pump reports a clean
         # completion. See RequestContext._defer_key_credit / AUDIT #6.
         ctx._defer_key_credit = True
-        try:
-            await execute_with_retries(self.router, ctx, call_one)
-        except BaseException:
-            # Cancellation (client gone) or exhaustion while waiting for the
-            # pump to connect: without this the pump task keeps running and
-            # leaks its upstream connection.
-            if pump_task and not pump_task.done():
-                pump_task.cancel()
-            raise
-        assert pump_task is not None
-        first = True
-        content_flowed = False
-        # StreamStart is emitted lazily on the pump's first delta rather than
-        # here, so the upstream's own StreamStart can be folded in. Anthropic
-        # reports prompt/cache usage in message_start — before any content —
-        # and Claude Code reads it there to drive its context meter and
-        # auto-compact threshold. Emitting ours unconditionally meant the
-        # adapter's numbers were discarded (`continue`) and the client's
-        # running total stayed at zero for the whole session (AUDIT #156).
-        started = False
         # SSE keep-alive. A long thinking phase (or a cold cache-miss prompt)
         # produces no upstream bytes for many seconds, and an idle proxy/ALB
         # reaps the connection mid-turn. Anthropic's wire has a named ``ping``
@@ -998,6 +1057,59 @@ class Gateway:
         # leaking an encoder concept into the pump.
         ping_frame = (b'event: ping\ndata: {"type": "ping"}\n\n'
                       if ctx.surface == "messages" and ping_s > 0 else None)
+        # ``execute_with_retries`` returns once the pump reports ``ready``, which
+        # the pump now holds until the upstream has produced its FIRST BODY BYTE
+        # rather than its response headers (AUDIT #356). That is what lets a
+        # stalled pre-first-chunk upstream be failed over instead of cutting the
+        # stream — but it also means the driver can wait a long time before this
+        # consumer exists, and a client sitting in silence that long is exactly
+        # what the keep-alive exists to prevent (AUDIT #177). So the wait is
+        # interleaved with the pings instead of blocking on it outright.
+        #
+        # Without a ping configured there is nothing to send, so the wait is a
+        # plain ``await`` on the driver.
+        retry_task = asyncio.create_task(
+            execute_with_retries(self.router, ctx, call_one))
+        try:
+            while not retry_task.done():
+                # ``asyncio.wait`` rather than ``wait_for(shield(...))``: the
+                # shield's outer future would be dropped unretrieved on every
+                # timeout and could report the driver's exception to the loop
+                # handler instead of to the ``await`` below (AUDIT #344).
+                await asyncio.wait({retry_task},
+                                   timeout=ping_s if ping_frame is not None else None)
+                if retry_task.done() or ping_frame is None:
+                    break
+                # Not content, so the client's first-token timer is untouched.
+                yield ping_frame
+            await retry_task  # propagate the driver's result, or its exception
+        except BaseException:
+            # Cancellation (client gone) or exhaustion while the upstream never
+            # produced a byte: without this both the driver task and the pump
+            # task keep running and leak their upstream connection.
+            #
+            # The pump needs an owner before the cancel. The outer `finally`
+            # cannot provide one — it is not in scope yet on this path, and a
+            # fault raised during the pump's own teardown would otherwise reach
+            # the loop exception handler as "Task exception was never retrieved"
+            # (AUDIT #344, and the AUDIT #356 path that first made it
+            # reachable).
+            retry_task.cancel()
+            if pump_task and not pump_task.done():
+                _track_retired_pump(pump_task)
+                pump_task.cancel()
+            raise
+        assert pump_task is not None
+        first = True
+        content_flowed = False
+        # StreamStart is emitted lazily on the pump's first delta rather than
+        # here, so the upstream's own StreamStart can be folded in. Anthropic
+        # reports prompt/cache usage in message_start — before any content —
+        # and Claude Code reads it there to drive its context meter and
+        # auto-compact threshold. Emitting ours unconditionally meant the
+        # adapter's numbers were discarded (`continue`) and the client's
+        # running total stayed at zero for the whole session (AUDIT #156).
+        started = False
         # The coalescer holds text until the NEXT delta arrives or its deadline
         # passes, and a quiet upstream is exactly when its deadline must be
         # honoured (AUDIT #277). Waiting only on the queue would leave that text
@@ -1194,6 +1306,19 @@ class Gateway:
             # that path entirely.
             ctx.cancel.set()
             if pump_task and not pump_task.done():
+                # Install a completion owner *before* the cancel below, and
+                # unconditionally. This `finally` is the last reference to
+                # `pump_task` on the paths that reach it without the resume
+                # branch having claimed it (a client disconnect, a driver
+                # failure, cancellation before the first frame was queued), and
+                # cancelling a task nobody then awaits means a fault raised
+                # during its own teardown is reported to the loop exception
+                # handler as "Task exception was never retrieved" instead of to
+                # `_reap` — unobservable noise on the path that exists to
+                # observe failures. It used to depend on the consumer happening
+                # to reach the resume branch first, which the extra scheduling
+                # hop in the driver wait made timing-dependent (AUDIT #356).
+                _track_retired_pump(pump_task)
                 # Setting the flag is not enough on its own: this is a
                 # synchronous `finally`, so cancelling on the next line would
                 # deliver CancelledError before the pump is ever rescheduled to
@@ -1467,7 +1592,27 @@ class Gateway:
         usage_final: dl.UsageFinal | None = None
         finish: dl.Finish | None = None
         text_len = 0
+        # ``started`` is the "the upstream has actually begun responding"
+        # boundary, and it gates THREE things that must all mean the same thing:
+        #   * ``ready`` — signalling ``execute_with_retries``/``_attempt_resume``
+        #     that the attempt is live. Held back until the first body line so a
+        #     fault *before* the upstream produced anything lands in the
+        #     pre-ready arm below, which boxes a retryable error instead of
+        #     handing the client a dead stream (AUDIT #356).
+        #   * ``_fail_stream`` vs. the err_box — the same boundary decides
+        #     whether a retry is possible at all.
+        #   * partial billing on cancellation — nothing to bill below it.
+        # It used to be set the moment the 200 headers arrived, which made all
+        # three fire too early: an upstream that accepted the request and then
+        # went silent produced a bare StreamError on a stream the client had
+        # received *nothing* on, and no deployment/key failover.
         started = False
+        # The client's own view of progress, used only to pick which idle
+        # budget applies to the next read. A provider may emit many non-content
+        # frames first (Anthropic's ``message_start``, ``ping``; OpenRouter's
+        # comments), so this is deliberately not ``started``: the watchdog must
+        # tolerate a long pre-content phase that is made of real bytes.
+        saw_content = False
         saw_terminal = False
         # Set once a terminal frame (StreamEnd | StreamError) has been queued,
         # so a fault raised after it cannot emit a second one (the contract
@@ -1495,6 +1640,15 @@ class Gateway:
         # client got a generic 502.
         resp_cm = None
         closed = False  # True once resp_cm.__aexit__ has been called
+        # The two no-progress budgets. Silence *before* the upstream has produced
+        # content is normal for a long generation (a reasoning model, a
+        # cache-miss prompt), so it gets its own, far larger allowance; a gap
+        # *between* content chunks keeps the tight watchdog, where that long a
+        # silence really is a dead connection (AUDIT #356).
+        idle_s = self.router.settings.stream_idle_timeout_s
+        first_chunk_s = self.router.settings.stream_first_chunk_timeout_s
+        if first_chunk_s <= 0:
+            first_chunk_s = idle_s
 
         async def _close_upstream() -> None:
             nonlocal closed
@@ -1587,10 +1741,15 @@ class Gateway:
             terminal_sent = True
 
         try:
+            # The read loop below is watchdog-armed, so httpx's own read deadline
+            # is lifted in favour of it (see `stream_read_timeout`): the scalar
+            # provider timeout used to pre-empt the watchdog at
+            # ``router_settings.timeout`` and, because a read timeout carries no
+            # message, reach the client as a blank error.
+            timeout = stream_read_timeout(dep, max(first_chunk_s, idle_s))
             try:
                 cm = self._client.stream("POST", url, json=body, headers=headers,
-                                         timeout=dep.timeout
-                                         or dep.provider.timeout_s)
+                                         timeout=timeout)
                 resp = await cm.__aenter__()
                 resp_cm = cm
             except httpx.TransportError as e:
@@ -1601,7 +1760,7 @@ class Gateway:
                     504 if "Timeout" in type(e).__name__ else 502,
                     "timeout" if "Timeout" in type(e).__name__
                     else "api_connection_error",
-                    f"upstream {type(e).__name__}", retryable=True)
+                    _transport_message(e), retryable=True)
                 with contextlib.suppress(Exception):
                     ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
                                      key.label, type(e).__name__,
@@ -1641,13 +1800,13 @@ class Gateway:
                         try:
                             cm = self._client.stream(
                                 "POST", url, json=body, headers=retry_headers,
-                                timeout=dep.timeout or dep.provider.timeout_s)
+                                timeout=timeout)
                             resp = await cm.__aenter__()
                             resp_cm = cm
                         except httpx.TransportError as e:
                             err_box[0] = WiwiError(
                                 502, "api_connection_error",
-                                f"upstream {type(e).__name__}", retryable=True)
+                                _transport_message(e), retryable=True)
                             with contextlib.suppress(Exception):
                                 _log_attempt(self.router, ctx, dep, key,
                                              type(e).__name__,
@@ -1694,14 +1853,13 @@ class Gateway:
                                      int((time.monotonic() - t0) * 1000))
                     await _close_upstream()
                     return
-            # Connection established — signal the caller to start consuming.
-            started = True
-            ready.set()
+            # Connection established. `started`/`ready` are deliberately NOT set
+            # here — they mark the first *body line*, i.e. that the upstream has
+            # begun responding (AUDIT #356).
             parser = LineSSEParser()
             client_gone = False
             grace_drain_s = self.router.settings.stream_grace_drain_s
             grace_deadline: float | None = None  # monotonic deadline for grace drain
-            idle_s = self.router.settings.stream_idle_timeout_s
             loop_limit = (self.router.settings.stream_loop_limit
                           if self.router.settings.stream_loop_detection else 0)
             # O(1) per token: tracks repetition runs for short periods only,
@@ -1717,7 +1875,7 @@ class Gateway:
 
             async def _apply_delta(deltas: list[dl.IRStreamDelta]) -> bool:
                 """Route one decoded event's deltas; returns True = abort pump."""
-                nonlocal text_len, usage_final, finish, saw_terminal
+                nonlocal text_len, usage_final, finish, saw_terminal, saw_content
                 for d in deltas:
                     if isinstance(d, dl.StreamStart):
                         # Providers that report prompt/cache usage up front
@@ -1778,18 +1936,61 @@ class Gateway:
                                 ctx, _tool_schemas, _open_tools, _arg_bufs, d.index)
                         if not client_gone:
                             await queue.put(d)
+                        if isinstance(d, (dl.TextDelta, dl.ThinkingDelta,
+                                          dl.ToolCallOpen)):
+                            saw_content = True
                 return False
 
             while True:
+                budget = first_chunk_s if not saw_content else idle_s
                 try:
-                    line = await asyncio.wait_for(line_iter.__anext__(), timeout=idle_s)
+                    line = await asyncio.wait_for(line_iter.__anext__(),
+                                                  timeout=budget)
                 except TimeoutError:
+                    if not started:
+                        # The upstream accepted the request and then said
+                        # *nothing at all* within the pre-content budget. The
+                        # client has received no frame on this attempt, so a
+                        # different deployment can still answer it whole: box a
+                        # retryable error and signal `ready` instead of failing
+                        # the stream. `execute_with_retries` owns the key-pool
+                        # and cooldown accounting here — calling
+                        # `_note_stream_failure` as well would charge the same
+                        # failure twice, which is the AUDIT #174 double-count
+                        # (AUDIT #356).
+                        err = WiwiError(
+                            504, "timeout",
+                            f"upstream produced no output within "
+                            f"{_fmt_secs(budget)}s", retryable=True)
+                        err_box[0] = err
+                        latency = int((time.monotonic() - t0) * 1000)
+                        with contextlib.suppress(Exception):
+                            ctx.note_attempt(f"{dep.group}/{dep.model_id}",
+                                             dep.provider.name, key.label,
+                                             "idle_timeout", latency,
+                                             model_id=dep.model_id)
+                            _log_attempt(self.router, ctx, dep, key,
+                                         "idle_timeout", latency)
+                        ready.set()
+                        await _close_upstream()
+                        return
                     await _fail_stream(
-                        f"upstream idle >{idle_s:.0f}s between chunks", "timeout")
+                        (f"upstream produced no output within "
+                         f"{_fmt_secs(budget)}s" if not saw_content
+                         else f"upstream idle >{_fmt_secs(budget)}s between chunks"),
+                        "timeout")
                     await _close_upstream()
                     return
                 except StopAsyncIteration:
                     break
+                if not started:
+                    # First byte off the wire: the upstream is alive and
+                    # responding. Only now is the attempt committed — signal the
+                    # caller to start consuming, and from here on a fault is
+                    # reported to the client instead of to the retry loop
+                    # (AUDIT #356).
+                    started = True
+                    ready.set()
                 if ctx.cancel.is_set():
                     if not client_gone:
                         client_gone = True
@@ -1813,6 +2014,26 @@ class Gateway:
                     adapter.decode_stream_event(evt.event, evt.data))
                 if aborted:
                     return
+            if not started:
+                # A 200 whose body carried nothing at all: the upstream accepted
+                # the request and then produced no output whatsoever. The client
+                # received no frame on this attempt, so this belongs to the retry
+                # loop, not the queue — queueing a terminal frame here would put
+                # attempt 1's failure in front of whichever attempt answers next
+                # (AUDIT #356).
+                err_box[0] = WiwiError(
+                    502, "api_connection_error",
+                    "upstream closed before sending any output",
+                    retryable=True)
+                latency = int((time.monotonic() - t0) * 1000)
+                with contextlib.suppress(Exception):
+                    ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
+                                     key.label, "no_output", latency,
+                                     model_id=dep.model_id)
+                    _log_attempt(self.router, ctx, dep, key, "no_output", latency)
+                ready.set()
+                await _close_upstream()
+                return
             # Flush any frame buffered without a trailing blank line
             # (DeepSeek/B.A.I close with "data: [DONE]\n"). Without this the
             # final [DONE] stays buffered, is never seen, and the stream is
@@ -1925,8 +2146,20 @@ class Gateway:
                 # metrics hook) would strand them there with the pump already
                 # dead — the same never-completing shape AUDIT #211 describes
                 # for the mid-stream arm.
-                err_box[0] = WiwiError(502, "api_connection_error",
-                                       f"stream pump error: {type(e).__name__}: {e}",
+                #
+                # Reaching here means the upstream produced *no* byte at all, so
+                # this is a retryable pre-content failure and the retry loop can
+                # still hand the request to a different deployment or key
+                # (AUDIT #356). Classify a transport failure the way the
+                # connect-time wrap does, and never emit a blank message.
+                is_transport = isinstance(e, httpx.TransportError)
+                timed_out = "Timeout" in type(e).__name__
+                err_box[0] = WiwiError(504 if (is_transport and timed_out) else 502,
+                                       "timeout" if timed_out
+                                       else "api_connection_error",
+                                       (_transport_message(e) if is_transport
+                                        else f"stream pump error: "
+                                             f"{type(e).__name__}: {e}"),
                                        retryable=True)
                 with contextlib.suppress(Exception):
                     ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name,
@@ -1944,10 +2177,29 @@ class Gateway:
                 # unguarded fault here killed the pump before it queued
                 # anything, and the consumer — parked on `await queue.get()`
                 # with no timeout — never woke (AUDIT #211).
+                #
+                # `str(e)` is blank for httpx's timeout exceptions, which left
+                # the client with a message-less StreamError; `_transport_message`
+                # names the failure and keeps the exception class visible
+                # (AUDIT #356).
                 await _fail_stream(
-                    str(e),
+                    (_transport_message(e) if isinstance(e, httpx.TransportError)
+                     else str(e) or f"stream pump error: {type(e).__name__}"),
                     "timeout" if "Timeout" in type(e).__name__ else "connection")
         finally:
+            # Safety net for the `ready` contract. `call_one`/`_attempt_resume`
+            # park on `await ready.wait()`, so any exit that leaves it unset
+            # strands them on a pump that is already dead — the never-completing
+            # shape AUDIT #211 describes. Since `ready` moved to the first
+            # upstream byte (AUDIT #356) there are more ways to leave the read
+            # loop before it than there were, so the guarantee is made here,
+            # once, rather than re-derived per arm.
+            if not ready.is_set() and err_box[0] is None:
+                err_box[0] = WiwiError(
+                    502, "api_connection_error",
+                    "upstream produced no output", retryable=True)
+            if not ready.is_set():
+                ready.set()
             # Moved out of the two arms above (and out of the happy path's own
             # explicit call, which is idempotent) so the upstream connection is
             # released on EVERY exit, including a fault raised by the failure
