@@ -5281,18 +5281,46 @@ def create_app(config: WiwiConfig) -> FastAPI:
     # handed to ANY client (signup response, /auth/playground-key, the
     # wrapper) is the key the wrapper reuses instead of minting a rival.
 
+    def _playground_key_usable(info) -> bool:
+        """Whether an authenticated playground key is fit to be handed back.
+
+        This must stay in step with ``authenticate()``'s admission checks in
+        ``run_chat_like``, because the plaintext returned here is injected as
+        that call's bearer and re-tested there. A predicate weaker than the one
+        downstream wedges the Playground instead of healing it.
+
+        ``AuthService.authenticate`` refuses an *expired* credential itself (both
+        the cached and the miss path), so expiry is already covered by the
+        ``is not None`` test. It does NOT refuse a *disabled* one:
+        ``_lookup_db`` selects ``v.disabled`` into ``AuthInfo`` without
+        filtering on it, by design, because every caller is expected to check
+        ``info.disabled`` itself. This wrapper was that caller and was not
+        checking it, so a revoked key read as healthy here, the plaintext was
+        served, ``run_chat_like`` answered 401 "key disabled or expired", and
+        because this predicate kept passing, no later request could re-mint.
+
+        Only the two credential-liveness conditions belong here. Model
+        allowlists and budget caps are request-scoped and are evaluated per call
+        by the admission path; a playground key declares no budget, and copying
+        the allowlist test in would make the cache depend on which model this
+        particular turn happens to ask for.
+        """
+        return info is not None and not info.disabled
+
     async def _playground_bearer(actor: UserInfo) -> str:
         """Return a live playground virtual key plaintext for *actor*.
 
-        Resolution order: cached plaintext that still authenticates → a fresh
-        capped mint (same per-owner cap and TTL as /auth/playground-key).
-        Raises on a mint failure; the caller converts that into a 500.
+        Resolution order: cached plaintext that still authenticates AND is still
+        usable → a fresh capped mint (same per-owner cap and TTL as
+        /auth/playground-key). Raises on a mint failure; the caller converts
+        that into a 500.
         """
         service = state.auth
         if service is None:  # guarded by the caller, kept for type-checking
             raise RuntimeError("gateway not initialized")
         plaintext = state.pg_bearers.get(actor.id)
-        if plaintext and await service.authenticate(plaintext) is not None:
+        if plaintext and _playground_key_usable(
+                await service.authenticate(plaintext)):
             return plaintext
         state.pg_bearers.drop(actor.id)
         return await _mint_playground_key(actor)

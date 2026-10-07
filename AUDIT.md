@@ -642,6 +642,58 @@ every later refetch.
 
 ---
 
+### 379. A disabled Playground key is served instead of re-minted, wedging the Playground
+
+**Severity:** 🟠 High · **Status: fixed**
+**Files:** `wiwi/server/app.py:5295` (`_playground_bearer`), predicate added as
+`_playground_key_usable`
+**Fix:** fixed — the wrapper's revalidation now applies the same
+`not info.disabled` predicate the downstream admission check applies. Tests:
+`tests/test_fix_round121.py` (3).
+
+`/v1/playground/completions` (round 103) resolves a playground virtual key per
+actor and caches its plaintext on `AppState.pg_bearers`. Its stated contract is
+that the plaintext is re-validated on every resolution "so a key the per-owner
+cap expired, a TTL expiry, or a revoke is detected on the next request and
+healed by a fresh mint".
+
+`AuthService.authenticate` heals two of those three. It refuses an *expired*
+credential on both the cached and the miss path (`_expired`), so a TTL expiry
+and a per-owner-cap expiry both return `None` and the wrapper re-mints. It does
+**not** refuse a *disabled* one: `_lookup_db` (`service.py:341`) selects
+`v.disabled` into `AuthInfo` without filtering on it, by design, because every
+caller is expected to check `info.disabled` itself.
+
+`_playground_bearer` used only `is not None` as its health test. So for a
+revoked key it concluded the key was healthy, returned the cached plaintext, and
+never re-minted. The downstream check in `run_chat_like` (`app.py:1431`) *does*
+test `info.disabled`, so it answered **401 "key disabled or expired"** — and
+because the wrapper's own revalidation kept passing, no subsequent request could
+ever heal it. Reproduced by direct instrumentation: after
+`POST /admin/keys/{id}/disable` on the key the wrapper had cached,
+`authenticate()` returned `AuthInfo(disabled=True)` while
+`_playground_bearer`'s predicate returned `True`.
+
+This is permanent, self-inflicted lockout of the Playground for a logged-in user
+— exactly the failure class the wrapper was built to eliminate. Reachable from
+the UI without operator action: any owner may disable their own key
+(`POST /admin/keys/{key_id}/disable` allows the owner when they are not an
+admin), and the playground key is an owned key that appears in their key list.
+
+**Fix:** the predicate is extracted as `_playground_key_usable` and must stay in
+step with `authenticate()`'s admission checks, since the plaintext it returns is
+injected as that call's bearer and re-tested there. Only the two
+credential-liveness conditions belong in it — model allowlists and budget caps
+are request-scoped and are evaluated per call by the admission path; a
+playground key declares no budget, and copying the allowlist test in would make
+the cache depend on which model the current turn asks for.
+
+The two other `authenticate` callers (HTTP admission at `app.py:1431`, the
+realtime WebSocket at `app.py:2772`) already check `info.disabled` correctly, so
+this was the only instance of the weaker predicate.
+
+---
+
 ## Seams cleared in this sweep (2026-10-06)
 
 Recorded so the are not re-investigated. Each was checked against source and,

@@ -3565,3 +3565,45 @@ message **after** both tools.
 
 The defer buffer is capped at `MAX_DEFERRED_CHARS`; older content may be
 truncated once that cap is reached, matching the Anthropic encoder's policy.
+
+---
+
+## Round 121 — a disabled Playground key is re-minted instead of served (2026-10-07)
+
+**Files:** `wiwi/server/app.py` (`_playground_bearer`, new
+`_playground_key_usable`), `tests/test_fix_round121.py`.
+
+This is an admission/admission-revalidation mismatch rather than a wire-format
+change, so it touches no `wiwi/wire/` codec or provider adapter — but the
+wrapper injects the resolved plaintext into the same `run_chat_like` admission
+path a bearer call uses, so the finding is recorded here as well as AUDIT #379.
+
+`/v1/playground/completions` caches one playground virtual-key plaintext per
+actor and re-validates it on every request, healing by re-mint when the key no
+longer works. `AuthService.authenticate` returns `None` for an *expired* key but
+a live-looking `AuthInfo(disabled=True)` for a *disabled* one — it selects
+`v.disabled` without filtering on it, because every caller checks
+`info.disabled` itself.
+
+`_playground_bearer` treated `is not None` as "healthy", so a revoked key was
+served straight through: `run_chat_like`'s own check (`app.py:1431`) then
+answered 401 `key disabled or expired`, and because the wrapper's revalidation
+kept passing, the request could never heal. A user who disabled their own
+playground key — a one-click action in the Virtual Keys page, since the key is
+owned and listed under their account — was locked out of the Playground for the
+lifetime of the session while appearing correctly logged in.
+
+The revalidation now applies the same `not info.disabled` predicate the
+downstream admission check applies. The predicate is a named function so the two
+sites are visibly one contract: the plaintext returned here is injected as that
+call's bearer and re-tested there, so a weaker check here wedges the feature
+instead of healing it. Credential liveness only — model allowlist and budget
+stay request-scoped in the admission path.
+
+**Tests**: `tests/test_fix_round121.py` (3) — a disabled key heals on the next
+request; the recovery is a genuine re-mint (the revoked key stays revoked, a
+distinct enabled key appears) rather than a loosened admission check; and an
+enabled key is reused across repeated requests, pinning against a
+re-mint-on-every-call over-correction.
+
+**Whole-branch**: 2932 tests pass, ruff clean.
