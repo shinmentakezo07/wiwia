@@ -492,6 +492,30 @@ input[type="number"].admin-input::-webkit-inner-spin-button {
   opacity: 0.35;
   cursor: not-allowed;
 }
+/* Touch: the 26px column splits into two ~17px buttons, far under the 44px
+   floor, and stacking two 44px buttons inside a 34px-tall field would clip
+   them (the wrapper is overflow:hidden). Lay the steppers out horizontally
+   instead — each becomes a 44x44 square beside the input, so the field only
+   has to grow to one stepper tall rather than two. */
+@media (hover: none) {
+  .admin-number-field .admin-input {
+    min-height: 44px;
+    padding-right: 92px;
+  }
+  .admin-number-stepper {
+    width: 88px;
+    flex-direction: row;
+    border-left: 1px solid var(--admin-border);
+  }
+  .admin-number-stepper button {
+    flex: 1;
+    min-height: 44px;
+  }
+  .admin-number-stepper button + button {
+    border-top: 0;
+    border-left: 1px solid var(--admin-border);
+  }
+}
 select.admin-input option {
   background: var(--admin-surface-elevated);
   color: var(--admin-text);

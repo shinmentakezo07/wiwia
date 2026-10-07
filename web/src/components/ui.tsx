@@ -2,7 +2,12 @@
 // surfaces, hairline borders, uppercase micro-labels, mono tabular values.
 
 import { useEffect, useRef, useState } from "react";
-import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from "react";
+import type {
+  ButtonHTMLAttributes,
+  InputHTMLAttributes,
+  KeyboardEvent as ReactKeyboardEvent,
+  ReactNode,
+} from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, ChevronUp, Copy, X } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -89,8 +94,10 @@ export function NumberInput(props: {
   placeholder?: string;
   autoFocus?: boolean;
   className?: string;
+  /** Forwarded to the inner input — Enter/Escape handling lives on callers. */
+  onKeyDown?: (e: ReactKeyboardEvent<HTMLInputElement>) => void;
 }) {
-  const { value, onChange, min, step, suffix, disabled, ...rest } = props;
+  const { value, onChange, min, step, suffix, disabled, onKeyDown, ...rest } = props;
   const stepN = step === "any" || step == null ? 1 : step;
   const num = value === "" ? null : Number(value);
   const atMin = min != null && num != null && !Number.isNaN(num) && num <= min;
@@ -110,6 +117,7 @@ export function NumberInput(props: {
         type="number"
         value={value}
         onChange={(e) => onChange(e.target.value)}
+        onKeyDown={onKeyDown}
         min={min}
         step={step}
         disabled={disabled}

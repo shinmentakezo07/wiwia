@@ -27,6 +27,8 @@ export interface DeploymentInfo {
   model_id: string;
   weight: number;
   available: boolean;
+  /** Healer-restored; skipped while a non-probation sibling is available. */
+  probation?: boolean;
   inflight: number;
   p95_latency_ms: number;
   cooldown_remaining_s: number;
