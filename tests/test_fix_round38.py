@@ -386,12 +386,16 @@ def test_responses_interleave_preserves_tool_output_index_routing():
     done = [e for e in events if e.get("type") == "response.output_item.done"]
     tools = [e for e in done if e["item"].get("type") == "function_call"]
     msg = [e for e in done if e["item"].get("type") == "message"]
-    # exactly one done per tool — no mid-stream close from the interleave,
-    # no duplicate from ToolCallClose (round-25 bug class), and NO message
-    # item: the interleaved text was suppressed while tools were open, so
-    # no message item is synthesized after the fact.
+    # exactly one done per tool — no mid-stream close from the interleave and
+    # no duplicate from ToolCallClose (round-25 bug class). The interleaved
+    # text is buffered while tools are open (AUDIT #367 — it used to be
+    # discarded) and flushed as ONE message item after the LAST tool closes,
+    # so it never lands between the two tools' done events.
     assert len(tools) == 2
-    assert msg == []
+    assert len(msg) == 1
+    assert msg[0]["item"]["content"][0]["text"] == "interjected"
+    assert msg[0]["output_index"] > max(t["output_index"] for t in tools)
+    assert done.index(msg[0]) > max(done.index(t) for t in tools)
     # and each closed tool item carries its FULL argument string
     item1 = next(t for t in tools if t["item"]["call_id"] == "c1")
     assert item1["item"]["arguments"] == '{"b":1}'

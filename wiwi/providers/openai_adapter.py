@@ -597,6 +597,16 @@ class OpenAIAdapter:
                 # Malformed entry (null/scalar): skip, not crash (AUDIT #154).
                 continue
             idx = tc.get("index", i)
+            if not isinstance(idx, int) or isinstance(idx, bool):
+                # ``idx`` becomes a set element and a dict key below, so an
+                # unhashable upstream value (a list/dict from a re-serializing
+                # proxy) raised TypeError out of the decoder mid-stream, which
+                # the pump turns into a StreamError plus a deployment cooldown
+                # for a semantically fine frame (AUDIT #366). A hashable-wrong
+                # value ("0") is worse quietly: it keys a different dict from
+                # 0, splitting one provider call across two tool blocks. Same
+                # guard as the OpenRouter sibling.
+                idx = i
             fn = tc.get("function")
             fn = fn if isinstance(fn, dict) else {}
             name_fragment = fn.get("name", "")

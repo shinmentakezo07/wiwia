@@ -218,6 +218,17 @@ def _decode_tool_choice(tc_raw: Any) -> ir.ToolChoice | None:
     return None
 
 
+def _effort_str(value: Any) -> str | None:
+    """Coerce a client-supplied reasoning effort to ``str`` or drop it.
+
+    ``GenParams.reasoning_effort`` is typed ``str | None`` but is a plain
+    dataclass with no runtime enforcement, so a list/dict straight off the wire
+    used to reach ``effort_to_thinking_budget``'s dict lookup and 500 the
+    request on every Anthropic/Gemini deployment (AUDIT #351).
+    """
+    return value if isinstance(value, str) else None
+
+
 def _decode_response_format(text_field: Any) -> ir.ResponseFormat | None:
     """Responses nests structured-output config under ``text.format``."""
     if not isinstance(text_field, dict):
@@ -277,8 +288,17 @@ def decode_request(body: dict[str, Any],
         items = [{"type": "message", "role": "user", "content": raw_input}]
     elif isinstance(raw_input, list):
         items = raw_input
-    else:
+    elif raw_input is None:
         items = []
+    else:
+        # A non-list/non-string input (a dict, 123, true) used to fall through
+        # to `items = []`, so the gateway called the upstream with an empty
+        # prompt, got a 200, and billed for an answer to a question nobody
+        # asked (AUDIT #352). Both sibling codecs reject the same shape:
+        # openai_chat.py:77 and anthropic_messages.py:53 raise
+        # DialectError("'messages' must be a list"). A missing `input` still
+        # means empty (that is how the two shapes above agree).
+        raise DialectError("'input' must be a string or a list")
 
     # Stored history first: the caller's own input is the continuation.
     if previous_output:
@@ -346,8 +366,14 @@ def decode_request(body: dict[str, Any],
                     # codec applies to the identical field (AUDIT #124).
                     raw_args = ""
                 raw_args = raw_args or "{}"
+            call_id = item.get("call_id")
+            if not isinstance(call_id, str) or not call_id:
+                # Mirror the function_call_output guard (AUDIT #331): a call with
+                # no id can never be paired with a result, and the client is
+                # left holding an unanswerable turn (AUDIT #368).
+                raise DialectError("function_call is missing 'call_id'")
             messages.append(ir.Message(role="assistant", parts=[
-                ir.ToolUsePart(id=item.get("call_id", ""),
+                ir.ToolUsePart(id=call_id,
                                name=_str_or_empty(item.get("name")),
                                args=_load_args(raw_args), raw_args=raw_args)]))
         elif itype == "function_call_output":
@@ -402,10 +428,22 @@ def decode_request(body: dict[str, Any],
         top_k=ir.coerce_int(body.get("top_k")),
         parallel_tool_calls=body.get("parallel_tool_calls"),
         disable_parallel_tool_use=(True if body.get("parallel_tool_calls") is False else None),
-        reasoning_effort=((body.get("reasoning") or {}).get("effort")
-                          if isinstance(body.get("reasoning"), dict) else None),
+        reasoning_effort=_effort_str((body.get("reasoning") or {}).get("effort")
+                                     if isinstance(body.get("reasoning"), dict)
+                                     else None),
     )
     g.response_format = _decode_response_format(body.get("text"))
+    extras = {k: v for k, v in body.items() if k not in _KNOWN_KEYS}
+    # `text` is denylisted above so the whole object could not ride extras, but
+    # only `text.format` is read into the IR. `text.verbosity` is on the
+    # openai/nim adapters' explicit forward list, so the plumbing to carry it
+    # exists — the decoder was discarding it before it got there (AUDIT #369).
+    # Flatten it to the bare string the adapter expects, mirroring the Chat
+    # surface's `verbosity` field.
+    verbosity = (body.get("text") or {}).get("verbosity") \
+        if isinstance(body.get("text"), dict) else None
+    if isinstance(verbosity, str):
+        extras["verbosity"] = verbosity
     return ir.Request(model=model, messages=messages, tools=tools,
                       tool_choice=tool_choice, gen_params=g,
                       stream=bool(body.get("stream")),
@@ -413,8 +451,7 @@ def decode_request(body: dict[str, Any],
                       # safety_identifier, store, metadata, truncation, ...):
                       # openai_adapter forwards these upstream, so keep them
                       # rather than dropping them on the floor.
-                      extras={k: v for k, v in body.items()
-                              if k not in _KNOWN_KEYS})
+                      extras=extras)
 
 
 def _usage_obj(prompt: int, output: int, cached: int, reasoning: int) -> dict[str, Any]:
@@ -430,6 +467,12 @@ def _usage_obj(prompt: int, output: int, cached: int, reasoning: int) -> dict[st
 # stop_reason -> Responses incomplete_details.reason. A safety block is NOT a
 # successful completion; reporting "completed" would hide it from the client.
 _INCOMPLETE_REASONS = {"length": "max_output_tokens", "content_filter": "content_filter"}
+
+# Cap on content buffered while a tool item is open (AUDIT #367). Matches the
+# Anthropic encoder's MAX_DEFERRED_CHARS: a model that narrates around a tool
+# call must not be able to grow this without bound, and the newest content is
+# the one worth keeping.
+MAX_DEFERRED_CHARS = 64 * 1024
 
 
 def _response_obj(model: str, req_id: str, stop: str, output: list[dict[str, Any]],
@@ -592,6 +635,18 @@ class ResponsesStreamEncoder:
         # corrupt each other's item ids / argument buffers.
         self._tools: dict[int, dict[str, Any]] = {}
         self._open_tool: int | None = None
+        # Text/thinking that arrived while a tool item was open. It cannot be
+        # emitted inline — a text delta must never close an open tool item, or
+        # _close_tool POPS the entry and the tool's later args fragments are
+        # dropped mid-call — so it is buffered here and flushed as its own
+        # output item on ToolCallClose, exactly as the Anthropic encoder's
+        # _defer/_flush_deferred pair does (AUDIT #367).
+        #
+        # This buffer used to not exist: the encoder returned None and the
+        # content was silently discarded, while a comment claimed the policy
+        # "mirrors the Anthropic encoder" — which in fact preserves it.
+        self._deferred: list[tuple[str, str]] = []
+        self._deferred_chars = 0
         # Closed item payloads (the dicts emitted by output_item.done), so the
         # terminal response.completed/response.incomplete event can carry the
         # full output array as the spec (and Codex CLI) require.
@@ -630,10 +685,103 @@ class ResponsesStreamEncoder:
             return [self._item_done(idx, item)]
         item_id = f"fc_{self.req_id}_{n}"
         item = _function_call_item(item_id, t["call_id"], t["name"], t["args"])
-        return [self._evt("response.function_call_arguments.done", {
+        out = [self._evt("response.function_call_arguments.done", {
                     "item_id": item_id, "output_index": idx,
                     "arguments": t["args"]}),
-                self._item_done(idx, item)]
+               self._item_done(idx, item)]
+        # Once the LAST open tool is closed the buffer is safe to emit (AUDIT
+        # #367). It goes after the tool's own done event, preserving the order
+        # the client saw the content in. With a parallel sibling still open the
+        # flush waits for it: a message item emitted between the two tools'
+        # done events would interleave output items mid-call.
+        if not self._tools:
+            out.extend(self._flush_deferred())
+        return out
+
+    def _defer(self, kind: str, text: str) -> None:
+        """Buffer content that arrived while a tool item was open.
+
+        Capped like the Anthropic encoder's ``MAX_DEFERRED_CHARS``: evict from
+        the front so the newest content survives, and trim the boundary entry
+        from its head rather than dropping it whole, so the buffer always ends
+        up within the cap even when one delta is itself larger than it.
+        """
+        if not text:
+            return
+        self._deferred.append((kind, text))
+        total = self._deferred_chars + len(text)
+        while total > MAX_DEFERRED_CHARS and self._deferred:
+            k, t = self._deferred.pop(0)
+            total -= len(t)
+        while total > MAX_DEFERRED_CHARS and self._deferred:
+            k, t = self._deferred[0]
+            if len(t) <= total - MAX_DEFERRED_CHARS:
+                break
+            trimmed = t[-(total - MAX_DEFERRED_CHARS):]
+            self._deferred[0] = (k, trimmed)
+            total -= len(t) - len(trimmed)
+        self._deferred_chars = total
+
+    def _flush_deferred(self) -> list[bytes]:
+        """Emit buffered content as its own output item(s).
+
+        Only safe when no tool item is open — the buffer exists precisely
+        because one was. Consecutive same-kind entries coalesce into one item,
+        so text-then-thinking yields two items and thinking-then-text yields
+        two, matching how the real API interleaves content around a tool call.
+        """
+        if not self._deferred:
+            return []
+        out: list[bytes] = []
+        for kind, text in self._deferred:
+            if kind == "thinking":
+                oi = self._next_output_index()
+                item_id = f"rs_{self.req_id}_{oi}"
+                out.append(self._evt("response.output_item.added", {
+                    "output_index": oi,
+                    "item": {"type": "reasoning", "id": item_id, "summary": []}}))
+                out.append(self._evt("response.reasoning_summary_text.delta", {
+                    "item_id": item_id, "output_index": oi, "delta": text}))
+                out.append(self._evt("response.reasoning_summary_text.done", {
+                    "item_id": item_id, "output_index": oi, "text": text}))
+                # _item_done, not a bare event: it records the item so the
+                # terminal response.completed output array carries it too.
+                out.append(self._item_done(
+                    oi, _reasoning_item(text, self.req_id, oi)))
+            else:
+                out.extend(self._message_item_events(text))
+        self._deferred.clear()
+        self._deferred_chars = 0
+        return out
+
+    def _message_item_events(self, text: str) -> list[bytes]:
+        """add → content_part.added → text.done → content_part.done → item.done."""
+        oi = self._next_output_index()
+        item_id = f"msg_{self.req_id}"
+        return [
+            self._evt("response.output_item.added", {
+                "output_index": oi,
+                "item": {"type": "message", "id": item_id,
+                         "status": "in_progress", "role": "assistant",
+                         "content": []}}),
+            self._evt("response.content_part.added", {
+                "item_id": item_id, "output_index": oi,
+                "content_index": 0,
+                "part": {"type": "output_text", "text": "", "annotations": []}}),
+            # Clients (Codex CLI) build the visible text from the delta events;
+            # the .done frames alone are not enough to render it.
+            self._evt("response.output_text.delta", {
+                "item_id": item_id, "output_index": oi,
+                "content_index": 0, "delta": text}),
+            self._evt("response.output_text.done", {
+                "item_id": item_id, "output_index": oi,
+                "content_index": 0, "text": text}),
+            self._evt("response.content_part.done", {
+                "item_id": item_id, "output_index": oi,
+                "content_index": 0,
+                "part": {"type": "output_text", "text": text, "annotations": []}}),
+            self._item_done(oi, _message_item(text, self.req_id)),
+        ]
 
     def _close_item(self) -> list[bytes]:
         if self._item_open is None:
@@ -676,10 +824,12 @@ class ResponsesStreamEncoder:
             # A text delta must never close an open tool item: _close_item
             # POPS the tool, so its later args fragments would be dropped and
             # output_item.done would fire mid-stream (Codex CLI counts a
-            # half-finished call). Interleaved text is suppressed — the same
-            # policy as the Anthropic encoder — and the tool's args keep
-            # streaming legally on their own output_index.
+            # half-finished call). Buffer it instead and flush it as its own
+            # item when the tool closes — the Anthropic encoder's policy, which
+            # this previously claimed to mirror while discarding the text
+            # outright (AUDIT #367).
             if self._item_open == "tool":
+                self._defer("text", d.text)
                 return None
             out = []
             if self._item_open != "message":
@@ -706,8 +856,10 @@ class ResponsesStreamEncoder:
                 return None  # signature-only delta: no Responses representation
             # Same interleave policy as TextDelta: never close an open tool
             # item from a thinking delta (round-25 proved this class of bug
-            # for text; thinking has the identical _close_item hazard).
+            # for text; thinking has the identical _close_item hazard). Buffer
+            # rather than drop, for the same reason (AUDIT #367).
             if self._item_open == "tool":
+                self._defer("thinking", d.text)
                 return None
             out = []
             if self._item_open != "thinking":

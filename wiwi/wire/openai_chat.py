@@ -186,7 +186,15 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                     # arguments like `"foo"` or `[]` parse fine but are not
                     # an object; ToolUsePart.args is typed dict.
                     args = {}
-            parts.append(ir.ToolUsePart(id=tc.get("id", ""),
+            call_id = tc.get("id")
+            if not isinstance(call_id, str) or not call_id:
+                # Mirror the tool-RESULT guard (AUDIT #331). Defaulting a
+                # missing id to "" produced a ToolUsePart whose call can never
+                # be answered: the result side rejects an empty call_id, so the
+                # turn is permanently unpairable and the upstream receives a
+                # nameless tool_use it 400s on (AUDIT #368).
+                raise DialectError("tool_call is missing 'id'")
+            parts.append(ir.ToolUsePart(id=call_id,
                                         name=_str_or_empty(fn.get("name")),
                                         args=args, raw_args=raw_args))
         if role == "tool":
@@ -307,7 +315,8 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         # OpenAI has no disable_parallel_tool_use; derive from parallel_tool_calls=False.
         # parallel_tool_calls=false means parallel is disabled → disable_parallel_tool_use=true.
         disable_parallel_tool_use=(True if body.get("parallel_tool_calls") is False else None),
-        reasoning_effort=body.get("reasoning_effort"),
+        reasoning_effort=(body.get("reasoning_effort")
+                          if isinstance(body.get("reasoning_effort"), str) else None),
     )
     rf = body.get("response_format")
     if isinstance(rf, dict) and rf.get("type") in ("json_object", "json_schema"):

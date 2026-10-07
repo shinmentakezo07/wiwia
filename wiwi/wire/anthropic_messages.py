@@ -141,8 +141,14 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                             cache_control=b.get("cache_control")))
                 elif btype == "tool_use":
                     raw_name = b.get("name")
+                    raw_id = b.get("id")
+                    if not isinstance(raw_id, str) or not raw_id:
+                        # Mirror the tool_result guard (AUDIT #331): an empty id
+                        # can never be answered, and Anthropic rejects an
+                        # unpaired tool_use on replay (AUDIT #368).
+                        raise DialectError("tool_use is missing 'id'")
                     parts.append(ir.ToolUsePart(
-                        id=b.get("id", ""),
+                        id=raw_id,
                         # ``b.get("name", "")`` defaults only a MISSING key:
                         # an explicit JSON null passed straight through and was
                         # re-emitted upstream as ``"name": null`` (AUDIT #186).

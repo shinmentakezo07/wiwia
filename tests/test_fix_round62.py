@@ -121,13 +121,17 @@ async def test_rpm_saturated_deployment_yields_to_sibling():
         ],
         general_settings=GeneralSettings(master_key="sk-wiwi-master-test",
                                          database_url="sqlite+aiosqlite:///:memory:"),
-        # least-busy is deterministic here: all inflight counts are 0, so the
-        # first available deployment in list order wins.
+        # least-busy ranks by inflight; the ordering is pinned below.
         router_settings=RouterSettings(num_retries=0,
                                        routing_strategy="least-busy"),
     )
     r = Router(cfg)
     picked: list[str] = []
+    # least-busy now breaks an inflight tie at random (AUDIT #370), so pin the
+    # order explicitly: the uncapped sibling carries one in-flight request, which
+    # makes the capped deployment the strict least-busy pick until its cap bites.
+    _, deps = r.resolve_group("g")
+    next(d for d in deps if d.model_id == "uncapped").inflight = 1
 
     async def call_one(dep, key, ctx):
         picked.append(dep.model_id)

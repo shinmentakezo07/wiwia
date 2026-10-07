@@ -52,6 +52,26 @@ def _token_count(value: Any) -> int:
     return ir.coerce_int(value) or 0
 
 
+# Gemini finishReason -> IR stop reason. One owner for both the sync and the
+# stream arm (AUDIT #365): the two arms previously carried identical inline
+# copies of this dict, and neither guarded the key, so a typed-wrong
+# ``finishReason`` (a list or dict from a proxy) raised ``TypeError`` out of the
+# decoder — which the gateway turns into a retryable 502 and charges against a
+# healthy deployment's cooldown. Every other adapter routes through
+# ``ir.translation.normalize_finish_reason``, total by construction; this map
+# keeps Gemini's richer vocabulary and is guarded the same way at each lookup
+# (non-str -> "" -> "stop").
+_FINISH_MAP: dict[str, ir.StopReason] = {
+    "STOP": "stop",
+    "MAX_TOKENS": "length",
+    "SAFETY": "content_filter",
+    "RECITATION": "content_filter",
+    "BLOCKLIST": "content_filter",
+    "PROHIBITED": "content_filter",
+    "SPII": "content_filter",
+}
+
+
 class GeminiAdapter:
     provider_type = "gemini"
 
@@ -317,11 +337,8 @@ class GeminiAdapter:
             turn.stop_reason = "content_filter"
         else:
             finish = cand.get("finishReason", "STOP")
-            turn.stop_reason = {"STOP": "stop", "MAX_TOKENS": "length",
-                                "SAFETY": "content_filter", "RECITATION": "content_filter",
-                                "BLOCKLIST": "content_filter", "PROHIBITED": "content_filter",
-                                "SPII": "content_filter",
-                                }.get(finish, "stop")
+            turn.stop_reason = _FINISH_MAP.get(
+                finish if isinstance(finish, str) else "", "stop")
             if turn.tool_calls:
                 turn.stop_reason = "tool_call"
         u = as_dict(data.get("usageMetadata"))
@@ -446,13 +463,8 @@ class GeminiAdapter:
             if self._saw_function_call:
                 out.append(dl.Finish("tool_call"))
             else:
-                out.append(dl.Finish({"STOP": "stop", "MAX_TOKENS": "length",
-                                      "SAFETY": "content_filter",
-                                      "RECITATION": "content_filter",
-                                      "BLOCKLIST": "content_filter",
-                                      "PROHIBITED": "content_filter",
-                                      "SPII": "content_filter",
-                                      }.get(finish, "stop")))
+                out.append(dl.Finish(_FINISH_MAP.get(
+                    finish if isinstance(finish, str) else "", "stop")))
             out.append(dl.StreamEnd())
             self._saw_tail = True
         elif u and not self._saw_tail and not (cand.get("content") or {}).get("parts"):

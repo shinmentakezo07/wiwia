@@ -306,6 +306,11 @@ def merge_resume_context(origin: RequestContext,
     """
     if resumed is None:
         return
+    # The fallback's attempt record lands on the resumed context. Without
+    # folding it in, a request served by two upstreams logs an empty
+    # attempts[] (AUDIT #360). Appended after the origin's own records, so
+    # insertion order is already chronological.
+    origin.attempts.extend(getattr(resumed, "attempts", None) or [])
     ru = getattr(resumed, "usage", None)
     if ru is not None:
         ou = getattr(origin, "usage", None)

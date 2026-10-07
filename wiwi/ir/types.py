@@ -292,7 +292,18 @@ def effort_to_thinking_budget(effort: str) -> int | None:
     typo ('hight') or a future level this map has not learned must leave
     thinking OFF, never silently enable it at an arbitrary budget. Callers
     must check the return before setting a thinking config.
+
+    Total by construction: a non-``str`` effort (a list or dict forwarded
+    verbatim by the Responses decoder) is unhashable, so the ``.get`` below
+    would raise ``TypeError`` inside an adapter's encode path and 500 the
+    request on every Anthropic/Gemini deployment (AUDIT #351). The type is
+    not enforced at the IR boundary — ``GenParams`` is a plain dataclass and
+    the inbound decoders forward whatever the client sent — so the guard
+    belongs here, which closes the class for every present and future caller
+    rather than one codec at a time.
     """
+    if not isinstance(effort, str):
+        return None
     return _EFFORT_BUDGETS.get(effort)
 
 

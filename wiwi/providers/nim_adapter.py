@@ -419,6 +419,12 @@ class NimAdapter(OpenAIAdapter):
                 # Malformed entry (null/scalar): skip, not crash (AUDIT #154).
                 continue
             idx = tc.get("index", i)
+            if not isinstance(idx, int) or isinstance(idx, bool):
+                # See openai_adapter.py for why (AUDIT #366): idx is a set
+                # element and a dict key, so an unhashable upstream value
+                # raises out of the decoder, and a hashable-wrong one splits
+                # one call across two tool blocks.
+                idx = i
             fn = tc.get("function")
             fn = fn if isinstance(fn, dict) else {}
             name_fragment = fn.get("name", "")

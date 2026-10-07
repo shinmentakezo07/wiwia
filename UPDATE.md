@@ -3539,3 +3539,29 @@ and unrelated to this change: 4 in `test_fix_round34.py` (the optional `redis`
 extra is not installed in this environment) and
 `test_fix_round98.py::test_consumer_cancellation_keeps_failed_pump_owned`
 (verified failing on clean `HEAD` with this change stashed).
+
+---
+
+## Round 120 — Responses interleaved content preservation (2026-10-07)
+
+**Files:** `wiwi/wire/openai_responses.py`, `tests/test_fix_round120.py`,
+`tests/test_fix_round38.py`.
+
+Round 39 fixed a duplicate `output_item.done` when text or thinking arrived
+while a function-call item was open, by suppressing the interleaved delta.
+That protected the tool's argument stream but silently **lost** the text and
+thinking (AUDIT #367). The Anthropic encoder's equivalent path actually
+buffers and re-emits them, despite the Responses encoder's old comment
+claiming suppression was the same policy.
+
+The Responses encoder now defers the content while tools are open. It flushes
+only after the *last* parallel tool closes, so no message item lands between
+two tools' done events. A deferred text item emits `output_text.delta` before
+its done frames; deferred reasoning emits `reasoning_summary_text.delta/done`.
+Both are added to the terminal `response.completed.output` array through
+`_item_done`, matching the normal item path. The round-38 regression's old
+`msg == []` expectation was intentionally updated to require the buffered
+message **after** both tools.
+
+The defer buffer is capped at `MAX_DEFERRED_CHARS`; older content may be
+truncated once that cap is reached, matching the Anthropic encoder's policy.

@@ -6,6 +6,7 @@ request validates the user still exists and is enabled.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import os
@@ -203,13 +204,17 @@ class UserService:
                 f"password must be at most {_MAX_PASSWORD_LEN} characters")
         uid = _user_id()
         now = _now()
+        # Same ~75 ms of blocking CPU as verify(), and public signup needs no
+        # authentication at all (AUDIT #362). Hashed before the transaction
+        # opens so the loop is free for the DB round trip too.
+        pw_hash = await asyncio.to_thread(hash_password, password)
         try:
             async with self.engine.begin() as conn:
                 await conn.execute(
                     sa.text("INSERT INTO users (id, username, password_hash,"
                             " role, disabled, created_at, updated_at)"
                             " VALUES (:id, :u, :h, 'user', 0, :t, :t)"),
-                    {"id": uid, "u": uname, "h": hash_password(password), "t": now},
+                    {"id": uid, "u": uname, "h": pw_hash, "t": now},
                 )
         except IntegrityError as e:
             raise ValueError("username already taken") from e
@@ -226,9 +231,15 @@ class UserService:
         if row is None:
             # Burn the same PBKDF2 work a real account would, so the response
             # time does not reveal whether the username exists (AUDIT #223).
-            burn_dummy_verify(password)
+            # Off-thread for the same reason as the real verify below.
+            await asyncio.to_thread(burn_dummy_verify, password)
             return None
-        if not verify_password(password, row[1]):
+        # 200k PBKDF2 iterations is ~75 ms of pure CPU. Called inline it froze
+        # the event loop for that whole window, stalling every other request in
+        # flight — including in-progress streaming completions — on two
+        # unauthenticated endpoints (AUDIT #362). Same remedy as
+        # estimate_tokens_async (AUDIT #33) and the journal FS I/O (AUDIT #105).
+        if not await asyncio.to_thread(verify_password, password, row[1]):
             return None
         return UserInfo(id=row[0], username=uname, role=row[2],
                         disabled=bool(row[3]))

@@ -650,6 +650,26 @@ def _alias_target(v: str | ModelAliasEntry) -> str:
 
 
 
+def _min_with_tiebreak(cands: list[Deployment],
+                       key: Any) -> Deployment:
+    """``min(cands, key=key)``, but a tie is broken at random.
+
+    A bare ``min`` returns the first candidate in list order whenever the key
+    ties, so on the strategies that rank by a metric — ``least-busy`` by
+    ``inflight``, ``latency-based`` by ``p95`` — every deployment with an equal
+    metric after the first was starved permanently. Equal metrics are the
+    *normal* state, not an edge case: an idle gateway has ``inflight == 0``
+    everywhere, and healthy deployments converge on a similar p95.
+
+    Random (not round-robin) because the callers already own cursor state for
+    the weighted paths; a stateless tie-break keeps this helper free of
+    per-group bookkeeping and is what the cold-latency arm above already does.
+    """
+    best = min(key(d) for d in cands)
+    tied = [d for d in cands if key(d) == best]
+    return tied[0] if len(tied) == 1 else random.choice(tied)
+
+
 def _lane_ceiling(d: Deployment, settings: RouterSettings,
                   auth: Any | None) -> int | None:
     """Concurrency a request authenticated as *auth* may hold on *d*.
@@ -912,7 +932,11 @@ class Router:
                 strategy: str) -> Deployment:
         """Apply the routing strategy to an already-filtered candidate list."""
         if strategy == "least-busy":
-            return min(avail, key=lambda d: d.inflight)
+            # ``min`` has no tie-break, so on equal ``inflight`` — the normal
+            # idle/low-QPS state — it always returned the list-order-first
+            # deployment and every sibling was starved permanently (0 of 2000
+            # picks, forever). Rotate among the tied set instead (AUDIT #370).
+            return _min_with_tiebreak(avail, lambda d: d.inflight)
         if strategy == "latency-based":
             # p95 == 0 means "no samples yet": among cold deployments,
             # break ties randomly so they get explored instead of all
@@ -920,7 +944,9 @@ class Router:
             cold = [d for d in avail if d.p95_latency() == 0.0]
             if cold and len(cold) == len(avail):
                 return random.choice(cold)
-            return min(avail, key=lambda d: d.p95_latency())
+            # Same starvation on a WARM tie (all deployments equally fast),
+            # which the cold arm above never covered (AUDIT #370).
+            return _min_with_tiebreak(avail, lambda d: d.p95_latency())
         # Cross-provider weighted round-robin: when this group has
         # deployments on 2+ providers, rotate across providers (provider-then-key)
         # instead of weighted-shuffling every pick.  This means each provider
@@ -1330,10 +1356,17 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
             # requests already, prefer a different one this round.
             prefer_exclude: set[int] = set(tried_dep_ids)
             if cycle_n > 0:
-                for d in deps:
-                    pname = d.provider.name
+                # Iterate PROVIDER NAMES, not deployments, and pop the credit
+                # once per provider. Walking deployments instead fired the pop
+                # on the first match and left the provider's other deployments
+                # eligible, so with 2+ deployments per provider only one was
+                # ever excluded: the credit was consumed with no effect and the
+                # cadence never held (AUDIT #361 — the same class as #226/#305
+                # on the axis their single-deployment tests never covered).
+                for pname in {d.provider.name for d in deps}:
                     if provider_consec.get(pname, 0) >= cycle_n:
-                        prefer_exclude.add(id(d))
+                        prefer_exclude.update(
+                            id(d) for d in deps if d.provider.name == pname)
                         # Consume the credit, exactly as the key-level cadence
                         # below does. Left to climb, every provider eventually
                         # sits at >= cycle_n, the exclusion set contains them

@@ -2830,8 +2830,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
         # From here the session exists upstream; every path must close it.
         dep.inflight += 1  # hold the slot for the whole session, not one turn
-        await ws.accept()
         try:
+            # Accept can fail if the client disconnects during the handshake;
+            # keep it inside the slot's finally (AUDIT #363).
+            await ws.accept()
             async with websockets.connect(
                     url,
                     additional_headers={
@@ -3524,16 +3526,24 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return _err(409, "invalid_request_error",
                         f"alias_id '{alias_id}' is the name of an existing"
                         " provider — pick a different alias", request)
+        # Persist before exposing a routable account. A failed DB write must
+        # not leave a ghost provider (and plaintext key) in memory (AUDIT #364).
+        if state.config_store:
+            await state.config_store.add_provider(name, ptype, base_url,
+                                                  alias_id=alias_id)
+            try:
+                await state.config_store.add_key(name, label, secret)
+            except Exception:
+                # Do not leave a keyless provider row behind either.
+                with contextlib.suppress(Exception):
+                    await state.config_store.delete_provider(name)
+                raise
         state.router.providers[name] = ProviderAccount(
             name=name, provider_type=ptype, base_url=base_url,
             keys=[ProviderKey(label=label, secret=secret)],
             alias_id=alias_id)
         if alias_id is not None:
             state.router.alias_to_provider[alias_id] = name
-        if state.config_store:
-            await state.config_store.add_provider(name, ptype, base_url,
-                                                  alias_id=alias_id)
-            await state.config_store.add_key(name, label, secret)
         # If a Cline provider was just added and global default models are
         # persisted, auto-deploy them for the new account so it joins the
         # cross-account WRR pool immediately (no manual setup required).
@@ -4422,6 +4432,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             "model_id": dep.model_id,
             "weight": dep.weight,
             "available": dep.available,
+            "probation": dep.probation,
             "inflight": dep.inflight,
             "p95_latency_ms": round(dep.p95_latency(), 1),
             "cooldown_remaining_s": round(max(0.0, dep.cooldown_until - mono), 1),
@@ -4490,6 +4501,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     "model_id": d.model_id,
                     "weight": d.weight,
                     "available": d.available,
+                    # The router skips probation deployments while a fresh
+                    # sibling is available; the UI needs it to report the real
+                    # traffic split (AUDIT #372).
+                    "probation": d.probation,
                     "inflight": d.inflight,
                     "p95_latency_ms": round(d.p95_latency(), 1),
                     "cooldown_remaining_s": round(max(0.0, d.cooldown_until - mono), 1),
