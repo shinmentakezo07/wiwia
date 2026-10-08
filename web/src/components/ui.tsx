@@ -478,7 +478,7 @@ export function Dialog(props: {
             type="button"
             aria-label="Close"
             onClick={props.onClose}
-            className="shrink-0 rounded-lg p-2 text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.03] hover:text-[var(--admin-text)]"
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.03] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
           >
             <X size={16} />
           </button>
