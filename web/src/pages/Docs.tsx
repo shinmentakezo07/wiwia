@@ -9,7 +9,9 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { Link } from "react-router-dom";
 import {
@@ -19,13 +21,16 @@ import {
   Boxes,
   Check,
   ChevronDown,
+  Coins,
   Copy,
+  Database,
   Hash,
+  HeartPulse,
   KeyRound,
   Layers,
   Network,
-  Palette,
   RefreshCw,
+  ScrollText,
   Settings2,
   Shield,
   Terminal,
@@ -74,6 +79,33 @@ function useScrollSpy(ids: string[]) {
 function scrollToId(id: string) {
   const el = document.getElementById(id);
   if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// Reports true the first time an element enters the viewport, then stops.
+// Used to stagger the feature tiles once the reader actually reaches them —
+// content is never gated behind the observer (no IO means "reveal now").
+function useInViewOnce(ref: RefObject<HTMLElement | null>) {
+  const [seen, setSeen] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (seen || !el) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setSeen(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setSeen(true);
+          observer.disconnect();
+        }
+      },
+      { threshold: 0 },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [ref, seen]);
+  return seen;
 }
 
 // ── reading progress ───────────────────────────────────────────────────────
@@ -550,10 +582,14 @@ function SectionHeading(props: {
   title: string;
   subtitle?: string;
   index: number;
+  aside?: ReactNode;
 }) {
   return (
     <div className="docs-heading group mb-5">
-      <p className="admin-label mb-2">Section {String(props.index).padStart(2, "0")}</p>
+      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+        <p className="admin-label mb-2">Section {String(props.index).padStart(2, "0")}</p>
+        {props.aside && <div className="mb-2">{props.aside}</div>}
+      </div>
       <h2 className="flex items-center gap-2 text-[20px] font-semibold tracking-[-0.015em] text-[var(--admin-text)]">
         {props.title}
         <a
@@ -578,60 +614,131 @@ function SectionHeading(props: {
 
 // ── feature grid ───────────────────────────────────────────────────────────
 
-const FEATURES: { icon: LucideIcon; title: string; body: string; tone: string }[] = [
+// One capability per tile. `hue` drives every accent on the tile (icon chip,
+// left spine, spotlight, index) through CSS custom properties, so the grid
+// reads as one spectrum instead of six unrelated colors. `meta` is the module
+// that owns the capability — the tile doubles as a map of the codebase.
+const FEATURES: {
+  icon: LucideIcon;
+  title: string;
+  body: string;
+  meta: string;
+  hue: number;
+}[] = [
   {
     icon: Layers,
-    tone: "text-blue-300",
+    hue: 213,
     title: "Three inbound dialects",
-    body: "OpenAI Chat, OpenAI Responses (Codex CLI), and Anthropic Messages all speak the same canonical IR.",
+    body: "OpenAI Chat, OpenAI Responses (Codex CLI), and Anthropic Messages all decode into the same canonical IR.",
+    meta: "wiwi/wire/",
   },
   {
     icon: KeyRound,
-    tone: "text-violet-300",
+    hue: 262,
     title: "Virtual keys",
     body: "Per-client credentials with model allowlists, expiry, and spend caps. Callers never see provider keys.",
+    meta: "wiwi/auth/",
   },
   {
     icon: Wallet,
-    tone: "text-amber-300",
+    hue: 43,
     title: "Budgets & rate limits",
-    body: "Per-key spend ceilings and RPM/TPM throttles keep noisy tenants from burning your quota.",
+    body: "Per-key spend ceilings plus RPM and TPM throttles keep noisy tenants from burning your quota.",
+    meta: "wiwi/ratelimit/",
   },
   {
     icon: Boxes,
-    tone: "text-emerald-300",
+    hue: 156,
     title: "Key pools",
     body: "Pool multiple keys per provider with smooth weighted round-robin. Exhausted keys cool down automatically.",
+    meta: "wiwi/router/",
   },
   {
     icon: RefreshCw,
-    tone: "text-cyan-300",
+    hue: 187,
     title: "Retries & fallbacks",
-    body: "Automatic retries on transient failures, per-key cooldowns, and fallback model groups.",
+    body: "Automatic retries on transient failures, per-key cooldowns, and ordered fallback model groups.",
+    meta: "wiwi/router/",
   },
   {
-    icon: Palette,
-    tone: "text-pink-300",
+    icon: Coins,
+    hue: 330,
     title: "Cost tracking",
-    body: "Token usage and cost calculation for every call, per key, per model, per provider.",
+    body: "Token usage and cost for every call, priced per model and sliced by key, model, and provider.",
+    meta: "wiwi/cost/",
+  },
+  {
+    icon: HeartPulse,
+    hue: 27,
+    title: "Health healing",
+    body: "Keys that start failing cool off, get probed, and come back on their own — no operator paging.",
+    meta: "wiwi/core/recovery.py",
+  },
+  {
+    icon: Database,
+    hue: 235,
+    title: "Response cache",
+    body: "Identical requests answer from Redis, or from an in-memory LRU when no cache server is configured.",
+    meta: "wiwi/cache/",
+  },
+  {
+    icon: ScrollText,
+    hue: 172,
+    title: "Logs & metrics",
+    body: "Every call is journalled and scraped by Prometheus, with a React admin console sitting over the top.",
+    meta: "wiwi/logging_core/",
   },
 ];
 
+// Module coverage the grid actually touches — derived from `meta` so the
+// heading chip can never drift out of sync with the tiles below it.
+const FEATURE_MODULE_COUNT = new Set(
+  FEATURES.map((f) => f.meta.replace(/^wiwi\//, "").split("/")[0]),
+).size;
+
 function FeatureGrid() {
+  const gridRef = useRef<HTMLDivElement>(null);
+  const revealed = useInViewOnce(gridRef);
+
+  // Pointer position is written straight onto the tile as two custom
+  // properties — no React state, so the spotlight never re-renders the grid.
+  const trackPointer = useCallback((event: ReactPointerEvent<HTMLElement>) => {
+    const el = event.currentTarget;
+    const rect = el.getBoundingClientRect();
+    el.style.setProperty("--mx", `${((event.clientX - rect.left) / rect.width) * 100}%`);
+    el.style.setProperty("--my", `${((event.clientY - rect.top) / rect.height) * 100}%`);
+  }, []);
+
   return (
-    <div className="grid grid-cols-1 gap-px overflow-hidden rounded-xl border border-[var(--admin-border)] bg-[var(--admin-border)] sm:grid-cols-2">
-      {FEATURES.map((feature) => {
+    <div
+      ref={gridRef}
+      className={`docs-feature-grid${revealed ? " is-revealed" : ""}`}
+      role="list"
+    >
+      {FEATURES.map((feature, i) => {
         const Icon = feature.icon;
         return (
-          <div key={feature.title} className="bg-[var(--admin-surface)] p-4">
-            <div className="flex items-center gap-2">
-              <Icon className={`h-3.5 w-3.5 shrink-0 ${feature.tone}`} aria-hidden />
-              <h3 className="text-[13px] font-semibold text-[var(--admin-text)]">{feature.title}</h3>
+          <article
+            key={feature.title}
+            role="listitem"
+            className="docs-feature"
+            style={{ "--f-hue": feature.hue, "--f-i": i } as CSSProperties}
+            onPointerMove={trackPointer}
+          >
+            <span className="docs-feature-spot" aria-hidden />
+            <div className="docs-feature-top">
+              <span className="docs-feature-icon">
+                <Icon strokeWidth={1.75} aria-hidden />
+              </span>
+              <span className="docs-feature-index">{String(i + 1).padStart(2, "0")}</span>
             </div>
-            <p className="mt-1.5 text-[12px] leading-relaxed text-[var(--admin-text-muted)]">
-              {feature.body}
-            </p>
-          </div>
+            <h3 className="docs-feature-title">{feature.title}</h3>
+            <p className="docs-feature-body">{feature.body}</p>
+            <span className="docs-feature-meta">
+              <span className="docs-feature-dot" aria-hidden />
+              {feature.meta}
+            </span>
+          </article>
         );
       })}
     </div>
@@ -1085,6 +1192,13 @@ router_settings:
               index={8}
               title="Features"
               subtitle="Built-in for every deployment — no plugins"
+              aside={
+                <span className="docs-count-chip">
+                  <b>{FEATURES.length}</b> capabilities
+                  <span className="docs-count-sep" aria-hidden />
+                  <b>{FEATURE_MODULE_COUNT}</b> modules
+                </span>
+              }
             />
             <FeatureGrid />
           </section>

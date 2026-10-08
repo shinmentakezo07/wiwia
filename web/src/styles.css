@@ -1227,6 +1227,222 @@ select.admin-input option {
   background: rgba(255, 255, 255, 0.028);
 }
 
+/* -- docs §08 Features ------------------------------------------------------
+   Hairline tiles over one spectrum: each tile receives --f-hue and derives its
+   icon chip, left spine, index, and pointer-tracked spotlight from it. The
+   base state already carries a low-opacity tint, so the tiles read the same on
+   touch devices where there is no hover to intensify them. */
+
+.docs-feature-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--admin-border);
+  border-radius: 14px;
+  background: var(--admin-border);
+}
+@media (min-width: 640px) {
+  .docs-feature-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (min-width: 1180px) {
+  .docs-feature-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.docs-feature {
+  --f-ink: hsl(var(--f-hue) 85% 78%);
+  --f-soft: hsl(var(--f-hue) 80% 62% / 0.1);
+  --f-line: hsl(var(--f-hue) 80% 62% / 0.24);
+  position: relative;
+  isolation: isolate;
+  min-width: 0;
+  padding: 16px 16px 15px;
+  background: var(--admin-surface);
+  transition: background-color 0.25s ease;
+}
+/* Pointer-tracked spotlight. Negative z-index keeps it above the tile's own
+   background (painted first inside this stacking context) but under the text. */
+.docs-feature-spot {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: radial-gradient(
+    200px circle at var(--mx, 50%) var(--my, 0%),
+    hsl(var(--f-hue) 80% 62% / 0.14),
+    transparent 70%
+  );
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+}
+.docs-feature:hover .docs-feature-spot {
+  opacity: 1;
+}
+/* Left spine, lit in the tile's hue */
+.docs-feature::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 2px;
+  background: linear-gradient(180deg, transparent, var(--f-line), transparent);
+  opacity: 0.6;
+  transition: opacity 0.25s ease;
+  pointer-events: none;
+}
+.docs-feature:hover::before {
+  opacity: 1;
+}
+.docs-feature:hover {
+  background: hsl(var(--f-hue) 22% 8%);
+}
+
+.docs-feature-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.docs-feature-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--f-line);
+  border-radius: 9px;
+  background: var(--f-soft);
+  color: var(--f-ink);
+  box-shadow: inset 0 1px 0 hsl(var(--f-hue) 90% 82% / 0.07);
+  transition:
+    transform 0.25s ease,
+    border-color 0.25s ease,
+    background-color 0.25s ease,
+    box-shadow 0.25s ease;
+}
+.docs-feature-icon svg {
+  width: 15px;
+  height: 15px;
+}
+.docs-feature:hover .docs-feature-icon {
+  transform: translateY(-1px);
+  border-color: hsl(var(--f-hue) 85% 70% / 0.45);
+  background: hsl(var(--f-hue) 80% 62% / 0.17);
+  box-shadow:
+    0 0 20px -6px hsl(var(--f-hue) 85% 62% / 0.55),
+    inset 0 1px 0 hsl(var(--f-hue) 90% 85% / 0.12);
+}
+.docs-feature-index {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.08em;
+  color: var(--admin-text-dim);
+  opacity: 0.75;
+  transition: color 0.25s ease, opacity 0.25s ease;
+}
+.docs-feature:hover .docs-feature-index {
+  color: var(--f-ink);
+  opacity: 1;
+}
+
+.docs-feature-title {
+  margin-top: 11px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--admin-text);
+  transition: color 0.25s ease;
+}
+.docs-feature:hover .docs-feature-title {
+  color: hsl(var(--f-hue) 45% 92%);
+}
+.docs-feature-body {
+  margin-top: 5px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--admin-text-muted);
+}
+
+/* Owning module: the tile doubles as a map of the codebase. */
+.docs-feature-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  color: var(--admin-text-dim);
+}
+.docs-feature-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--f-line);
+  transition: background-color 0.25s ease, box-shadow 0.25s ease;
+}
+.docs-feature:hover .docs-feature-dot {
+  background: var(--f-ink);
+  box-shadow: 0 0 7px hsl(var(--f-hue) 85% 70% / 0.7);
+}
+
+/* Section heading aside: a quiet count chip next to "Section 08". */
+.docs-count-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--admin-border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.02);
+  padding: 3px 10px;
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  color: var(--admin-text-dim);
+}
+.docs-count-chip b {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--admin-text-muted);
+}
+.docs-count-sep {
+  width: 1px;
+  height: 9px;
+  background: var(--admin-border);
+}
+
+/* Tile entrance: staggered once the grid scrolls into view. */
+@keyframes docs-feature-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .docs-feature-grid.is-revealed .docs-feature {
+    animation: docs-feature-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+    animation-delay: calc(var(--f-i, 0) * 45ms);
+  }
+}
+/* No hover pointer: keep the tints and spine at full strength so the grid
+   still reads as colored rather than grey. */
+@media (hover: none) {
+  .docs-feature::before {
+    opacity: 1;
+  }
+  .docs-feature-spot {
+    opacity: 0.5;
+  }
+}
+
 /* Inline code chips in docs prose (not inside <pre>) */
 .docs-content :not(pre) > code {
   padding: 0.12em 0.38em;
