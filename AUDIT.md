@@ -817,6 +817,55 @@ path, and **2944 passed, 11 skipped**, ruff clean.
 
 ---
 
+### 381. `_CrossProviderWRR` cursor keys go stale if a group-membership edit forgets to rebuild
+
+**Severity:** 🟡 Medium (latent — no live trigger today) · **Status: fixed**
+**Files:** `wiwi/router/router.py` (`_CrossProviderWRR.pick`, `Router._choose`),
+`tests/test_fix_round123.py`
+
+`_CrossProviderWRR._dep_cursors` is keyed by `id(deployment)` — deliberately, so
+a YAML combo that lists the same `(provider, model_id)` pair twice does not make
+the two `Deployment` objects share one deficit and starve the second (the AUDIT
+#307 fix; `(provider, model_id)` was the pre-#307 key). An `id()` key is only
+valid while the object is alive **and** still in the group. The shipped code
+keeps both true only through an implicit contract: every group-membership
+mutation calls `Router.rebuild_cross_provider_pools`, which recreates the
+`_CrossProviderWRR` object (and so its cursor dict) from scratch.
+
+All **eight** current mutation sites honour that contract — the four admin
+deployment endpoints, the Cline default-model reconciler, the startup DB loader,
+the provider importer, and `_build` — so there is **no live bug**. But the
+contract is unenforced and spread across unrelated modules, and a future
+membership edit that forgot to rebuild would leave an orphaned key behind. Two
+failures follow: `_dep_cursors` grows by one entry per detached deployment for
+the process lifetime, and CPython recycles a freed object's `id()` for the next
+allocation, so a brand-new `Deployment` at that address silently inherits a dead
+one's deficit and is mis-served.
+
+**Verified by execution** (pruning disabled to simulate the forbidden shape):
+after detaching a deployment without rebuilding, the orphaned `id()` key
+persisted in `_dep_cursors` with a stale deficit — the exact leak the fix closes:
+
+```
+assert 125225817575392 not in {125225817575392: 87.0, 125225817575632: 13.0}
+```
+
+**Fix:** `pick` now prunes `_dep_cursors` and `_state` to the group's *live*
+membership on every call (`_choose` passes the full group, not just the
+available subset). A detached deployment's key is dropped; a merely-*cooling*
+deployment keeps its deficit — it is still a member, since a cooldown changes
+availability, not membership — so the smooth-WRR "a temporarily-unhealthy peer
+is not starved after it recovers" property is preserved. In steady state every
+key is already live, so the prune is a no-op and routing behaviour is unchanged
+(pinned by `test_steady_state_distribution_unchanged_by_pruning`).
+
+**Regression:** `tests/test_fix_round123.py` (4 tests) — detached-key pruning,
+cooling-member deficit retention, unchanged steady-state distribution, and a
+reattached deployment starting from a fresh cursor. Confirmed to fail without
+the fix and pass with it. Full gate: **2948 passed, 11 skipped**, ruff clean.
+
+---
+
 ## Seams cleared in this sweep (2026-10-06)
 
 Recorded so the are not re-investigated. Each was checked against source and,

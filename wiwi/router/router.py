@@ -954,7 +954,9 @@ class Router:
         # matches the user's "round robin over key plus provider" requirement.
         rr = self._group_provider_rr.get(deps[0].group)
         if rr is not None and len({d.provider.name for d in avail}) >= 2:
-            return rr.pick(avail)
+            # Pass the full group (not just the available subset) so the WRR can
+            # prune cursor keys to live membership — see ``_CrossProviderWRR.pick``.
+            return rr.pick(avail, deps)
         # simple-shuffle: weight-weighted random
         total = sum(d.weight for d in avail)
         r = random.uniform(0, total)
@@ -1031,7 +1033,35 @@ class _CrossProviderWRR:
     # deployments exist, so the keys stay valid for the object's lifetime.
     _dep_cursors: dict[int, float] = field(default_factory=dict)
 
-    def pick(self, avail: list[Deployment]) -> Deployment | None:
+    def pick(self, avail: list[Deployment],
+             group_deps: list[Deployment] | None = None) -> Deployment | None:
+        # Reconcile the cursor state against the group's *current* membership
+        # before picking. ``_dep_cursors`` is keyed by ``id(deployment)`` (see
+        # the field comment for why not ``(provider, model_id)``), so a key is
+        # only valid while its Deployment object is alive AND still in the
+        # group. The normal path guarantees both — every membership change calls
+        # ``rebuild_cross_provider_pools``, which recreates this object — but
+        # that is an implicit contract spread across eight call sites, and a
+        # future membership edit that forgot to rebuild would leave an orphaned
+        # key here. Two failures follow: the dict grows once per detached
+        # deployment for the process lifetime, and CPython recycles a freed
+        # object's ``id()`` for the next allocation, so a brand-new Deployment
+        # could silently inherit a dead one's deficit and be mis-served.
+        # Pruning to the live membership on every pick makes the object
+        # self-healing instead of trusting that contract: a deployment that left
+        # the group has its key dropped, while a merely-*cooling* deployment
+        # keeps its deficit (it is still in ``group_deps`` — a cooldown changes
+        # availability, not membership), which preserves the nginx smooth-WRR
+        # "a temporarily-unhealthy peer is not starved after it recovers"
+        # property. In the steady state every key is already a live member, so
+        # this is a no-op and routing behaviour is unchanged.
+        if group_deps is not None:
+            live_ids = {id(d) for d in group_deps}
+            self._dep_cursors = {k: v for k, v in self._dep_cursors.items()
+                                 if k in live_ids}
+            live_providers = {d.provider.name for d in group_deps}
+            self._state = {k: v for k, v in self._state.items()
+                           if k in live_providers}
         # Only consider providers with at least one available deployment.
         avail_providers: dict[str, int] = {}
         for d in avail:
