@@ -38,8 +38,7 @@ import {
   Zap,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-
-const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
+import { highlight, langFromLabel, LANG_DOT, MONO, type Lang } from "@/lib/code-highlight";
 
 // ── scroll-spy ─────────────────────────────────────────────────────────────
 
@@ -199,84 +198,49 @@ function PathCopyBtn(props: { text: string }) {
   );
 }
 
-// ── syntax highlighting (dependency-free, line-safe token coloring) ────────
-
-type Lang = "bash" | "python" | "yaml";
-
-// Ordered alternation — earlier groups win at the same position.
-const LANG_REGEX: Record<Lang, RegExp> = {
-  bash: /(?<com>#.*$)|(?<url>https?:\/\/[^\s"']+)|(?<str>"[^"\n]*"|'[^'\n]*')|(?<var>\$\{?[A-Za-z_][A-Za-z0-9_]*\}?)|(?<flag>\s--?[A-Za-z][\w-]*)|(?<cmd>^export\s|^curl\b)/gm,
-  python: /(?<com>#.*$)|(?<str>f?"[^"\n]*"|f?'[^'\n]*')|(?<kw>\b(?:from|import|print|def|return|class|True|False|None)\b)|(?<num>\b\d+\b)/gm,
-  yaml: /(?<com>(?:^|\s)#.*$)|(?<key>^[ \t]*-?[ \t]*[\w.-]+(?=:))|(?<str>"[^"\n]*"|'[^'\n]*')|(?<bool>\b(?:true|false)\b)|(?<num>\b\d+(?:\.\d+)?\b)/gm,
-};
-
-const TOKEN_CLASS: Record<string, string> = {
-  com: "tok-com",
-  str: "tok-str",
-  var: "tok-var",
-  flag: "tok-flag",
-  cmd: "tok-kw",
-  kw: "tok-kw",
-  key: "tok-key",
-  num: "tok-num",
-  bool: "tok-bool",
-  url: "tok-url",
-};
-
-function highlight(code: string, lang: Lang): ReactNode[] {
-  const out: ReactNode[] = [];
-  let last = 0;
-  let k = 0;
-  for (const m of code.matchAll(LANG_REGEX[lang])) {
-    const idx = m.index ?? 0;
-    if (idx > last) out.push(code.slice(last, idx));
-    const groups = m.groups ?? {};
-    const name = Object.keys(groups).find((g) => groups[g] !== undefined);
-    out.push(
-      <span key={k++} className={name ? TOKEN_CLASS[name] : undefined}>
-        {m[0]}
-      </span>,
-    );
-    last = idx + m[0].length;
-  }
-  if (last < code.length) out.push(code.slice(last));
-  return out;
-}
-
-function langFromLabel(label: string): Lang {
-  const l = label.toLowerCase();
-  if (l.includes("python")) return "python";
-  if (l.includes("yaml") || l.includes("yml")) return "yaml";
-  return "bash";
-}
-
-// Language identity dots for the tab bar: bash/curl emerald, python amber,
-// yaml violet — the same hue family the syntax tokens already speak.
-const LANG_DOT: Record<Lang, string> = {
-  bash: "bg-emerald-400",
-  python: "bg-amber-400",
-  yaml: "bg-violet-400",
-};
-
 // ── code block ─────────────────────────────────────────────────────────────
+
+// Splits code into physical lines so the gutter can show line numbers. Only
+// rendered for multi-line snippets — a one-liner's gutter adds noise, not
+// reference value.
+function codeLines(code: string): string[] {
+  return code.split("\n");
+}
 
 function CodeBlock(props: { code: string; label?: string; lang?: Lang }) {
   const lang = props.lang ?? (props.label ? langFromLabel(props.label) : "bash");
+  const lines = codeLines(props.code);
+  const showGutter = lines.length > 1;
   return (
     <div className="docs-codeblock group">
       <div className="flex items-center justify-between gap-3 border-b border-[var(--admin-border)] bg-white/[0.015] px-3 py-1.5">
-        <span className="admin-label truncate text-[10px]">{props.label ?? lang}</span>
+        <span className="flex min-w-0 items-center gap-2">
+          <span
+            className={`h-1.5 w-1.5 shrink-0 rounded-full ${LANG_DOT[lang]}`}
+            aria-hidden
+          />
+          <span className="admin-label truncate text-[10px]">{props.label ?? lang}</span>
+        </span>
         <CopyBtn text={props.code} />
       </div>
-      <pre
-        tabIndex={0}
-        role="group"
-        aria-label={props.label ? `${props.label} code example` : "Code example"}
-        className="overflow-x-auto px-3.5 py-3 text-[12px] leading-relaxed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
-        style={{ fontFamily: MONO }}
-      >
-        <code className="text-[var(--admin-text-muted)]">{highlight(props.code, lang)}</code>
-      </pre>
+      <div className="docs-codebody">
+        {showGutter && (
+          <div className="docs-codegutter" aria-hidden>
+            {lines.map((_, i) => (
+              <span key={i}>{i + 1}</span>
+            ))}
+          </div>
+        )}
+        <pre
+          tabIndex={0}
+          role="group"
+          aria-label={props.label ? `${props.label} code example` : "Code example"}
+          className="overflow-x-auto px-3.5 py-3 text-[12px] leading-relaxed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+          style={{ fontFamily: MONO }}
+        >
+          <code className="text-[var(--admin-text-muted)]">{highlight(props.code, lang)}</code>
+        </pre>
+      </div>
     </div>
   );
 }
@@ -343,7 +307,10 @@ function EndpointRow(props: {
         >
           {method}
         </span>
-        <code className="text-[13px] font-semibold text-[var(--admin-text)]" style={{ fontFamily: MONO }}>
+        <code
+          className="docs-endpoint-path text-[13px] font-semibold text-[var(--admin-text)]"
+          style={{ fontFamily: MONO }}
+        >
           {path}
         </code>
         <PathCopyBtn text={path} />
@@ -560,7 +527,14 @@ const PIPELINE = [
 
 function Pipeline() {
   return (
-    <div className="docs-pipeline" aria-label="dialect to IR to provider pipeline">
+    // `role="img"` makes the flow strip's label permitted: a bare aria-label on
+    // a div is prohibited, and role="list"/"listitem" would then demand the
+    // connector spans be list items too, which would break the reading order.
+    <div
+      className="docs-pipeline"
+      role="img"
+      aria-label="dialect to IR to provider pipeline"
+    >
       {PIPELINE.map((step, i) => (
         <span key={step.chip} className="inline-flex items-center gap-2">
           {i > 0 && (
@@ -576,6 +550,26 @@ function Pipeline() {
 }
 
 // ── section heading ─────────────────────────────────────────────────────────
+
+// Quiet "jump to the next section" control, rendered under the heading. A
+// reference manual is read in order, and a keyboard-only reader should be able
+// to advance without hunting through the rail.
+function SectionNext(props: { nextId: string; nextLabel: string; onGo: (id: string) => void }) {
+  return (
+    <button
+      type="button"
+      onClick={() => props.onGo(props.nextId)}
+      className="docs-next group/next mt-3 inline-flex min-h-11 items-center gap-1.5 rounded-full border border-[var(--admin-border)] bg-white/[0.02] px-3.5 py-2 text-[11.5px] font-medium text-[var(--admin-text-muted)] transition-colors hover:border-blue-400/30 hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+    >
+      <span>Next: {props.nextLabel}</span>
+      <ArrowRight
+        size={12}
+        className="transition-transform group-hover/next:translate-x-0.5 group-focus-visible/next:translate-x-0.5"
+        aria-hidden
+      />
+    </button>
+  );
+}
 
 function SectionHeading(props: {
   id: string;
@@ -599,6 +593,11 @@ function SectionHeading(props: {
             e.preventDefault();
             scrollToId(props.id);
             history.replaceState(null, "", `#${props.id}`);
+            // Deep links are the only way to share a specific section, so the
+            // absolute URL goes to the clipboard — the # glyph alone is far
+            // too small a target to be the whole affordance on touch.
+            const url = `${window.location.origin}${window.location.pathname}#${props.id}`;
+            void navigator.clipboard?.writeText(url).catch(() => {});
           }}
           className="docs-anchor rounded p-0.5 text-[var(--admin-text-dim)] hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
         >
@@ -874,6 +873,9 @@ export function DocsPage() {
             {SECTIONS.map((s, i) => {
               const Icon = s.icon;
               const isActive = active === s.id;
+              // Completed = everything the reader has already passed, so a
+              // partially-read document still reads as progress.
+              const isDone = i + 1 < activeIndex;
               return (
                 <button
                   key={s.id}
@@ -881,18 +883,44 @@ export function DocsPage() {
                   onClick={() => handleClick(s.id)}
                   aria-current={isActive ? "true" : undefined}
                   className={`docs-nav-item flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left text-[12px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/40 ${
-                    isActive ? "is-active" : "text-[var(--admin-text-muted)] hover:text-[var(--admin-text)]"
+                    isActive
+                      ? "is-active"
+                      : isDone
+                        ? "text-[var(--admin-text-muted)] hover:text-[var(--admin-text)]"
+                        : "text-[var(--admin-text-dim)] hover:text-[var(--admin-text)]"
                   }`}
                 >
-                  <span className="font-mono text-[10px] opacity-50">
-                    {String(i + 1).padStart(2, "0")}
+                  <span
+                    className={`docs-nav-num font-mono text-[10px] tabular-nums ${isDone ? "is-done" : "opacity-50"}`}
+                    aria-hidden
+                  >
+                    {isDone ? <Check size={10} strokeWidth={2.5} /> : String(i + 1).padStart(2, "0")}
                   </span>
                   <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden />
                   <span className="flex-1">{s.label}</span>
                 </button>
               );
             })}
-            <div className="mt-5 border-t border-[var(--admin-border)] pt-4">
+            {/* Rail footer: a quiet progress meter. The filled width mirrors
+                the reading-progress hairline at the top of the viewport, so
+                the rail always states how much of the document remains. */}
+            <div
+              className="docs-rail-progress mt-5 border-t border-[var(--admin-border)] pt-4"
+              aria-hidden
+            >
+              <div className="docs-rail-track">
+                <div
+                  className="docs-rail-fill"
+                  style={{ transform: `scaleX(${progress.toFixed(4)})` }}
+                />
+              </div>
+              {/* --admin-text-dim is #6b7280 on #0a0a0a, which fails 4.5:1 at
+                  9px. --admin-text-muted (#9ca3af) clears it. */}
+              <p className="mt-2 font-mono text-[9px] tabular-nums text-[var(--admin-text-muted)]">
+                {Math.round(progress * 100)}% read
+              </p>
+            </div>
+            <div className="mt-3">
               <Link
                 to="/playground"
                 className="group/play flex items-center gap-2 rounded-lg px-2 py-2 text-[12px] font-medium text-[var(--admin-text-muted)] transition-colors hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/40"
@@ -918,6 +946,7 @@ export function DocsPage() {
               title="Overview"
               subtitle="How the gateway translates and routes requests"
             />
+            <SectionNext nextId="quickstart" nextLabel="Quickstart" onGo={handleClick} />
             <p className="text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
               Every request follows the same hub-and-spoke path: the wire codec for the inbound
               dialect decodes the request into a canonical internal representation (IR), the router
@@ -940,6 +969,7 @@ export function DocsPage() {
               title="Quickstart"
               subtitle="Running locally in under a minute"
             />
+            <SectionNext nextId="authentication" nextLabel="Authentication" onGo={handleClick} />
             <p className="text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
               Assuming wiwi is running on{" "}
               <code style={{ fontFamily: MONO }}>http://localhost:4000</code>, every path below
@@ -973,6 +1003,7 @@ curl http://localhost:4000/v1/chat/completions \\
               title="Authentication"
               subtitle="Virtual keys — never provider keys"
             />
+            <SectionNext nextId="endpoints" nextLabel="Endpoints" onGo={handleClick} />
             <p className="text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
               Callers authenticate with a virtual key — never a provider key. Virtual keys are
               SHA-256-hashed at rest with constant-time comparison; per-key budgets, rate limits,
@@ -1035,6 +1066,7 @@ curl http://localhost:4000/v1/chat/completions \\
               title="Endpoints"
               subtitle="The three inbound surfaces plus model listing"
             />
+            <SectionNext nextId="cross-provider" nextLabel="Cross-provider" onGo={handleClick} />
             <p className="text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
               Each surface maps onto the same canonical IR. Responses are re-encoded in the
               caller&apos;s dialect on the way back out — so a Claude Code session (Anthropic
@@ -1062,6 +1094,7 @@ curl http://localhost:4000/v1/chat/completions \\
               title="Cross-provider routing"
               subtitle="Decouple the caller's dialect from the upstream provider"
             />
+            <SectionNext nextId="streaming" nextLabel="Streaming" onGo={handleClick} />
             <p className="text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
               Because every direction goes dialect → IR → provider, the caller&apos;s dialect is
               decoupled from the upstream provider. Clients request a{" "}
@@ -1099,6 +1132,7 @@ router_settings:
               title="Streaming"
               subtitle="Server-sent events across all three dialects"
             />
+            <SectionNext nextId="config" nextLabel="Configuration" onGo={handleClick} />
             <p className="text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
               Streaming is supported across all three surfaces. Set{" "}
               <code style={{ fontFamily: MONO }}>&quot;stream&quot;: true</code> in the request
@@ -1139,6 +1173,7 @@ router_settings:
               title="Configuration"
               subtitle="A single wiwi.yaml — LiteLLM-shaped"
             />
+            <SectionNext nextId="features" nextLabel="Features" onGo={handleClick} />
             <p className="text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
               The entire gateway is configured through one YAML file. Providers hold named
               accounts with pools of keyed entries;{" "}

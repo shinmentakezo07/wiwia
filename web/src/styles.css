@@ -1122,6 +1122,39 @@ select.admin-input option {
   background: linear-gradient(180deg, #60a5fa, #a78bfa);
 }
 
+/* Completed-section marker: a tick replaces the number, tinted like the
+   active spine so "done" reads as a lighter form of "here". */
+.docs-nav-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  transition: color 0.2s ease, opacity 0.2s ease;
+}
+.docs-nav-num.is-done {
+  color: #4ade80;
+  opacity: 0.85;
+}
+
+/* Rail footer: a 2px progress track. scaleX (not width) keeps the transform
+   on the compositor, so scrolling never triggers a layout on this element. */
+.docs-rail-progress {
+  min-width: 0;
+}
+.docs-rail-track {
+  height: 2px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+}
+.docs-rail-fill {
+  height: 100%;
+  width: 100%;
+  transform-origin: left;
+  background: linear-gradient(90deg, #3b82f6, #8b5cf6 55%, #d946ef);
+  transition: transform 0.12s linear;
+}
+
 /* Masthead */
 .docs-hero {
   position: relative;
@@ -1202,6 +1235,38 @@ select.admin-input option {
 .docs-codeblock pre {
   max-width: 100%;
   scrollbar-width: thin;
+}
+
+/* Code body: a line-number gutter beside the scrollable pre. The gutter is a
+   flex sibling (not absolutely positioned) so the pre's own horizontal
+   scrollbar never overlaps the numbers, and the gutter itself stays fixed
+   while only the code scrolls. Tabular numerals keep the column aligned. */
+.docs-codebody {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+}
+.docs-codegutter {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  padding: 12px 8px 12px 10px;
+  border-right: 1px solid rgba(255, 255, 255, 0.05);
+  background: rgba(255, 255, 255, 0.012);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.625;
+  color: rgba(255, 255, 255, 0.18);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  /* Line numbers are real content, not decoration — 0.18 alpha failed the 4.5:1
+     contrast floor on the #08090b block background. */
+  color: rgba(255, 255, 255, 0.42);
+  user-select: none;
+}
+.docs-codebody > pre {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 /* Provider ecosystem: hairline-separated tiles (gap-px over a border fill). */
@@ -1453,36 +1518,69 @@ select.admin-input option {
   color: #bfdbfe;
 }
 
-/* Syntax highlighting tokens (dependency-free) */
-.docs-codeblock .tok-com {
+/* Syntax highlighting tokens (dependency-free). Scoped to the two code
+   surfaces that tokenize: the /docs reference block and the shared detail-page
+   block. Token classes are the same in both — only the base text color differs. */
+.docs-codeblock .tok-com,
+.detail-code-text .tok-com {
   color: rgba(139, 148, 158, 0.8);
   font-style: italic;
 }
-.docs-codeblock .tok-str {
+.docs-codeblock .tok-str,
+.detail-code-text .tok-str {
   color: #6ee7b7;
   opacity: 0.9;
 }
-.docs-codeblock .tok-kw {
+.docs-codeblock .tok-kw,
+.detail-code-text .tok-kw {
   color: #c4b5fd;
 }
-.docs-codeblock .tok-key {
+.docs-codeblock .tok-key,
+.detail-code-text .tok-key {
   color: #7dd3fc;
 }
-.docs-codeblock .tok-var {
+.docs-codeblock .tok-var,
+.detail-code-text .tok-var {
   color: #fcd34d;
 }
-.docs-codeblock .tok-flag {
+.docs-codeblock .tok-flag,
+.detail-code-text .tok-flag {
   color: #93c5fd;
   opacity: 0.85;
 }
-.docs-codeblock .tok-num {
+.docs-codeblock .tok-num,
+.detail-code-text .tok-num {
   color: #fde68a;
 }
-.docs-codeblock .tok-bool {
+.docs-codeblock .tok-bool,
+.detail-code-text .tok-bool {
   color: #f9a8d4;
 }
-.docs-codeblock .tok-url {
+.docs-codeblock .tok-url,
+.detail-code-text .tok-url {
   color: #67e8f9;
+}
+
+/* Next-section control: a quiet reading affordance under each heading. */
+.docs-next {
+  transition:
+    border-color 0.2s ease,
+    color 0.2s ease,
+    background-color 0.2s ease;
+}
+.docs-next:hover,
+.docs-next:focus-visible {
+  background: rgba(96, 165, 250, 0.06);
+}
+
+/* Endpoint path: the identifier readers copy, so it gets a surface of its own
+   rather than sitting bare next to the method badge. */
+.docs-endpoint-path {
+  border-radius: 5px;
+  transition: background-color 0.2s ease;
+}
+.group\/endpoint:hover .docs-endpoint-path {
+  background: rgba(255, 255, 255, 0.03);
 }
 
 /* Method badge + endpoint chips */

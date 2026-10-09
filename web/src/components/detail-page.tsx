@@ -3,13 +3,16 @@
 // GuideDetail pioneered — back link, badge + title + intro header, numbered
 // step cards with terminal-styled code blocks — so every detail surface
 // follows one convention instead of five parallel ones.
+//
+// Code blocks tokenize through `@/lib/code-highlight`, the same dependency-free
+// highlighter the /docs reference uses, so a `wiwi.yaml` snippet reads
+// identically wherever it appears.
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { ArrowLeft, Check, Copy, FileQuestion } from "lucide-react";
 import { Card } from "@/components/ui";
-
-const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
+import { highlight, langFromLabel, LANG_DOT, MONO } from "@/lib/code-highlight";
 
 // ── code block with copy ───────────────────────────────────────────────────
 
@@ -17,14 +20,13 @@ export function DetailCodeBlock(props: { code: string; label?: string }) {
   const [copied, setCopied] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+  const lang = props.label ? langFromLabel(props.label) : "bash";
   return (
     <div className="group relative overflow-hidden rounded-xl border border-[var(--admin-border)] bg-zinc-950">
       <div className="flex items-center gap-2 border-b border-[var(--admin-border)] bg-white/[0.02] px-4 py-2.5">
-        <span className="h-2.5 w-2.5 rounded-full bg-[#ff5f57]" aria-hidden />
-        <span className="h-2.5 w-2.5 rounded-full bg-[#febc2e]" aria-hidden />
-        <span className="h-2.5 w-2.5 rounded-full bg-[#28c840]" aria-hidden />
+        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${LANG_DOT[lang]}`} aria-hidden />
         {props.label && (
-          <span className="ml-1.5 font-mono text-[11px] text-[var(--admin-text-dim)]">
+          <span className="font-mono text-[11px] text-[var(--admin-text-dim)]">
             {props.label}
           </span>
         )}
@@ -46,9 +48,10 @@ export function DetailCodeBlock(props: { code: string; label?: string }) {
         role="group"
         aria-label={props.label ? `${props.label} code example` : "Code example"}
         className="overflow-x-auto p-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+        style={{ fontFamily: MONO }}
       >
-        <code className="text-[12.5px] leading-relaxed text-zinc-200" style={{ fontFamily: MONO }}>
-          {props.code}
+        <code className="detail-code-text text-[12.5px] leading-relaxed text-zinc-200">
+          {highlight(props.code, lang)}
         </code>
       </pre>
     </div>
@@ -183,6 +186,7 @@ function InlineCode({ text }: { text: string }) {
             key={i}
             className="rounded-md border border-white/[0.075] bg-white/[0.045] px-1.5 py-0.5 text-[0.85em] text-blue-200"
             style={{ fontFamily: MONO }}
+            data-doc-code=""
           >
             {part}
           </code>
