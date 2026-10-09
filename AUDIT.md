@@ -8,6 +8,207 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## 🟠 Open — sweep 2026-10-09 (config, adapters)
+
+New findings from a fresh eight-subsystem sweep. Every one below was confirmed by
+**executing code** against the real adapters/`load_config_from_string`, not by reading
+alone. Findings #382-#386.
+
+### 382. `router_settings` retry/failover knobs have no positivity validator; `num_retries: -1` makes every request a 503
+
+**Severity:** 🔴 critical (single-typo total outage) · **Status: open**
+**Files:** `wiwi/config.py:236-243` (`RouterSettings`, no `field_validator`), consumed at
+`wiwi/router/router.py:1384` (`for attempt in range(router.settings.num_retries + 1)`)
+**Fix:** a `_positive`-style validator on `num_retries`, `allowed_fails`,
+`key_max_consecutive_fails`, `stream_resume_max_retries`, `stream_loop_limit`, mirroring
+`config.py:185-197` (`_limits_must_be_positive`) and `:198-212` (`_weight_positive`).
+
+`DeploymentParams` validates `weight`, `rpm`, `tpm`, `max_inflight` positive
+(`config.py:185-197`), and `KeyDef.weight` too (`:198-212`) — but the `RouterSettings`
+resilience knobs that feed the *same* retry/cooldown control loop have no validator at
+all. This config loads cleanly (verified with `load_config_from_string`):
+
+```
+ACCEPTED: num_retries=-5 allowed_fails=0 key_max_fails=-1 cycle=-3 resume=-2 loop_limit=0
+range(num_retries+1) = []
+```
+
+**Probe** (executed): the config above parses with no error; `list(range(num_retries+1))`
+is `[]`.
+
+**Consequence chain, per knob:**
+- `num_retries: -1` → the retry loop at `router.py:1384` iterates **zero** times, so no
+  request is ever attempted and every request falls through to
+  `raise first_error or WiwiError(503, ...)` (`router.py:1626`). One typo turns the
+  gateway into a permanent 503 for every model. This is strictly worse than the `rpm: 0`
+  case the code explicitly guards against (`config.py:190-193`, "a zero slipped through as
+  an unlimited deployment"): zero *attempts* is a total outage, not a silent no-op.
+- `allowed_fails: 0` → `if len(recent) >= allowed_fails` (`router.py:608`) is true on the
+  *first* failure, so every deployment cools on a single transient 500.
+- `key_max_consecutive_fails: -1` → any key with ≥1 failure is retired on the first error.
+- `stream_loop_limit: 0` → loop detection fires on chunk zero.
+- `stream_resume_max_retries: -2` → mid-stream resume never runs.
+
+`cycle_every_n` and `cooldown_time` happen to be defended at their use sites
+(`max(0, ...)` at `router.py:1348`, `max(cooldown_time, 1.0)` at `router.py:605`) — the
+exact pattern that makes the missing validation easy to miss: two siblings are defended
+at the call site, five are not defended anywhere.
+
+**Why not a known finding:** AUDIT #306 is `KeyDef`/`DeploymentParams` `weight`; #101 is
+deployment `rpm`. Neither covers `RouterSettings`.
+
+### 383. Healer settings that gate real provider spend are unvalidated; `tick_s: 0` makes the probe loop a busy-spin
+
+**Severity:** 🟠 High (unbounded real-money probe spend) · **Status: open**
+**Files:** `wiwi/config.py:408-436` (`HealerSettings` — only `probation_weight` is
+validated), consumers `wiwi/core/recovery.py:330-342`, `:356`, `:392`, `:456`
+
+`HealerSettings` has exactly one validator, on `probation_weight` (`config.py:429-436`),
+with a comment arguing for clamping because "at `0` the key … can never be picked". Every
+field that controls **how much money the healer spends** is unvalidated. Verified — all
+accepted with no error:
+
+```
+tick_s=0.0 max_probes=1000000 min_interval=0.0 backoff_base=0.0 probes_to_restore=0
+```
+
+**Consequences:**
+- `tick_s: 0` → `await asyncio.wait_for(self._stop.wait(), timeout=self._s.tick_s)`
+  (`recovery.py:339-340`) returns immediately every iteration, so the sweep becomes a
+  **tight busy-loop** that saturates a core and hammers every cooling deployment with
+  1-token completions (real provider money). The initial `asyncio.sleep(self._s.tick_s)`
+  (`recovery.py:332`) also becomes a no-op, so probes start the instant the process boots.
+- `max_probes_per_sweep: 1000000` removes the documented per-tick blast-radius cap.
+- `min_probe_interval_s: 0` + `probe_backoff_base_s: 0` → `CircuitBreaker.trip`'s
+  `window = min(cap, base * 2 ** (streak-1))` = 0 (`recovery.py:78`) and `ok()`'s interval
+  check (`recovery.py:392`) always passes, so both independent circuit brakes are disabled
+  and every target is re-probed every tick.
+- `probes_to_restore: 0` → `if dst.streak >= self._s.probes_to_restore`
+  (`recovery.py:456`) is true after the first healthy probe, restoring an intermittently-
+  401'd key into rotation on a single lucky probe — the premature-restore the streak
+  exists to prevent.
+
+`healer.enabled` is off by default, which protects a default deployment but not an
+operator who turns it on and typos `tick_s`.
+
+**Why not a known finding:** #238 covers only `probation_weight`; #97 covers premature
+restore via the `CREDS_VALID_MODEL_BAD` verdict, not a zero `probes_to_restore`.
+
+### 384. Anthropic streaming decoder never guards `content_block_*.index`; unhashable value crashes the pump
+
+**Severity:** 🟠 High · **Status: open**
+**Files:** `wiwi/providers/anthropic_adapter.py:729, 741, 789, 794-795`
+**Fix:** lift the OpenAI-base/OpenRouter guard verbatim — `if not isinstance(idx, int) or
+isinstance(idx, bool): idx = 0` — before `self._tool_indices.add(idx)` at `:741` and the
+read at `:789`.
+
+```python
+729:  idx = payload.get("index", 0)
+...
+741:  self._tool_indices.add(idx)
+...
+789:  index=payload.get("index", 0),
+```
+
+`payload.get("index", 0)` defaults only a *missing* key. An Anthropic frame whose `index`
+is a list/dict (a re-serializing proxy, or a malformed upstream) reaches
+`self._tool_indices.add(idx)` at `:741` and raises `TypeError: unhashable type`.
+
+**Probe** (executed, `fresh_adapter("anthropic")`, `decode_stream_event("content_block_start", …)`):
+
+```
+start index=list -> TypeError: unhashable type: 'list'
+start index=dict -> TypeError: unhashable type: 'dict'
+start index="0"  -> OK, _tool_indices={'0'}
+start index=null -> OK, _tool_indices={None}
+```
+
+**Consequence:** the `TypeError` escapes `decode_stream_event` into the pump's mid-stream
+handler, which converts it to a `StreamError`, bills the partial, fires
+`dep.record_fail`, and moves a healthy key to `cooling` — a frame with zero semantics
+penalizes a healthy credential and cools a healthy deployment.
+
+**Why not a known finding:** this is the exact class #366 fixed in `openai_adapter.py` and
+`nim_adapter.py` (both now carry `if not isinstance(idx, int) or isinstance(idx, bool):
+idx = i`), and the OpenRouter twin inherited the base guard. Anthropic is now the sole
+unguarded streaming decoder. #153's crash sweep of this adapter added dict guards at
+`:715, :727, :774, :800` but not `index`.
+
+**Disproved sub-claim (recorded so it is not re-filed):** a `null` index does **not**
+split one call in two. `content_block_start` stores `None`, `content_block_stop` reads
+`payload.get("index", 0)` → `0`, but the `in` test at `:795` is `0 in {None}` → False…
+**yet the executed probe shows `ToolCallClose` IS still emitted** (the `None` default and
+the stored `None` agree when the key is present-but-null on both frames). Verified:
+`start(index=null)` then `stop(index=null)` → `['ToolCallClose']`. The split only occurs
+on a *missing* key at open vs present-`null` at close, which no observed provider emits.
+Only the unhashable crash is a live defect.
+
+### 385. `openai_adapter` / `nim_adapter` do not coerce a JSON `null` tool-call `name`, emitting `ToolCallOpen(name="")`
+
+**Severity:** 🟡 Medium · **Status: open**
+**Files:** `wiwi/providers/openai_adapter.py:612`, `wiwi/providers/nim_adapter.py:430`
+**Fix:** `name_fragment = as_str(fn.get("name"))` — exactly the OpenRouter sibling
+(`openrouter_adapter.py:450`).
+
+```python
+612:  name_fragment = fn.get("name", "")     # openai + nvidia-nim
+450:  name_fragment = as_str(fn.get("name")) # openrouter — guarded
+```
+
+`fn.get("name", "")` defaults only a *missing* key, so an explicit `null` name flows
+through as `None`, then into `self._tool_names[idx] = name_fragment or ""` and the
+deferred open `self._pending_opens[idx] = (tc["id"], "")` → `ToolCallOpen(name="")`. The
+client receives a `tool_use` block with an empty name it cannot dispatch.
+
+**Probe** (executed, a single `finish_reason` chunk carrying one tool call):
+
+```
+openai     name=null -> [('ToolCallOpen', ''), ('ToolCallArgsDelta', None), ('ToolCallClose', None), ('Finish', None)]
+nvidia-nim name=null -> [('ToolCallOpen', ''), ...]
+openai     name=str  -> [('ToolCallOpen', 'get_weather'), ...]
+```
+
+**Why not a known finding:** #232 fixed exactly this shape for Gemini and Anthropic
+(`as_str` guards) and states "and 10 similar `.get(k, "")` sites across the adapters", but
+the OpenRouter `as_str` fix was the only one applied to the OpenAI family. The divergence
+is now direct: OpenRouter guards, its two siblings do not.
+
+### 386. `gemini_adapter.py:470` re-implements the dict gate as `(cand.get("content") or {}).get("parts")`, which a truthy non-dict turns into an `AttributeError`
+
+**Severity:** 🟡 Medium · **Status: open**
+**Files:** `wiwi/providers/gemini_adapter.py:470`
+**Fix:** `not as_dict(cand.get("content")).get("parts")` — the sync twin at `:302`
+already uses `as_dict(cand.get("content"))`, and `:419` uses `if not isinstance(u, dict):
+u = None` for the sibling `usageMetadata` in the same method.
+
+```python
+470:  elif u and not self._saw_tail and not (cand.get("content") or {}).get("parts"):
+```
+
+The `or {}` default fires only on a *falsy* `content`. A truthy non-dict (`5`, `true`,
+`"x"`, `[]`) passes straight into `.get("parts")`.
+
+**Probe** (executed, `fresh_adapter("gemini")`):
+
+```
+content=int   -> AttributeError: 'int' object has no attribute 'get'
+content=bool  -> AttributeError: 'bool' object has no attribute 'get'
+content=str   -> AttributeError: 'str' object has no attribute 'get'
+content=list  -> OK      (falsy-when-empty, hits the `or {}` default)
+content=null  -> OK      (falsy, hits the default)
+content=dict  -> OK, deltas=['StreamStart','TextDelta']   (control)
+```
+
+**Consequence:** escapes `decode_stream_event` → pump cooldown + key penalty on a frame
+carrying no semantics.
+
+**Why not a known finding:** #247 established `as_dict` for nested reads and the same
+file already applies it correctly one line above (`:419`, citing #154 for "a truthy
+non-dict `usageMetadata` must not reach `u.get`"); `:302` is the sync twin. #194/#195
+covered usage counters, not this container gate.
+
+---
+
 ## ✅ Fixed — sweep 2026-10-06 (gateway, streaming, codecs, adapters, router, auth, server)
 
 All thirteen findings below (#360–#372) are fixed; regressions in `tests/test_fix_round120.py`. Review of these fixes found follow-up defects, recorded open as #373–#378.
