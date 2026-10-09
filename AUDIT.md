@@ -694,6 +694,129 @@ this was the only instance of the weaker predicate.
 
 ---
 
+## ✅ Fixed — round 122 (2026-10-08) — container deployments
+
+### 380. The shipped image's journal dir is unwritable, so every virtual-key STREAM is refused with 503
+
+**Severity:** 🔴 critical · **Status: fixed**
+**Files:** `wiwi/server/app.py` (`AppState.__init__` journal construction, the
+lifespan boot probe, `_persist_journal_owner`, new `_drop_journal`,
+`_stream_response`'s new `journal_disabled` flag, the pre-dispatch site),
+`Dockerfile`, `docker-compose.yml`, `tests/test_fix_round122.py`
+
+**Trigger:** run the shipped Docker image (Railway, `docker compose up`, the HF
+Space) and issue a **streaming** request with a **virtual key**.
+
+`stream_journal_dir` defaults to `.wiwi/journals` — a path **relative to the
+process CWD**. The image sets `WORKDIR /app`, so that resolves to
+`/app/.wiwi/journals`, but `/app` is owned by `root` (the `COPY` layers) while
+the process runs as `USER wiwi` (uid 10001). The Dockerfile `chown`s only
+`/app/data` and `/data` — the two paths it documents as writable — and
+`docker-compose.yml` mounts a volume on `/app/data` only. Nothing makes
+`/app/.wiwi` creatable, so `mkdir` raises `PermissionError` on every request.
+
+The refusal is then *correct code amplifying a deployment defect*. AUDIT #320
+made the durable owner line PRIMARY and specified: when it cannot be persisted,
+refuse the stream rather than write tenant data into an ownerless journal. That
+is exactly what happens — but the blast radius is wrong:
+
+- **master** (`key_id == "master"`) is **exempt** from the persist, so it streams fine.
+- **non-streaming** requests never touch the journal, so they work fine.
+- **virtual-key streaming** is refused: `503 {"error":{"message":"stream replay journal unavailable; retry"}}`.
+
+So the gateway is up, healthy (`/health` 200), serves completions and serves
+master streams, and fails *only* the combination that matters most in
+production. Nothing says "permission denied" to the operator: `JournalStore.open`
+swallows the `mkdir`/`touch` failure as `journal_touch_failed` and the owner
+write as `journal_owner_write_failed` (both at `error`, but on the request path,
+interleaved with normal traffic), and the startup `sweep` swallows its own
+`OSError` and returns `0` (`tape_store.py:_unlink_expired`) — so the container
+comes up reporting nothing wrong. The refusal message names only the journal,
+never the directory or the OS error, so the 503 looks like a transient upstream
+blip and a client retry loop produces the same 503 forever.
+
+**Verified by execution**, not by reading: a repro driving a real `create_app`
+with `stream_journal_dir` pointed at a path whose parent is a regular file (so
+`mkdir` fails with `NotADirectoryError` for any uid, no privilege drop needed)
+produced exactly this asymmetry —
+
+```
+journal_touch_failed        NotADirectoryError: ... /.wiwi/journals
+journal_owner_write_failed  key_id=master
+master  stream: 200        (SSE frames delivered)
+journal_owner_write_failed  key_id=k04ff7f11c2c76516
+journal owner persist failed for 42c6838f7e9444a4; refusing the stream ...
+vkey    stream: 503 {"error":{"message":"stream replay journal unavailable; retry"}}
+vkey nonstream: 200        (body returned)
+```
+
+**Fix sketch — three parts, the second and third being what keep this class of
+bug from being silent again.**
+
+1. **Make the default resolvable in the shipped image.** Add a
+   `WIWI_STREAM_JOURNAL_DIR` env override in `AppState.__init__`, mirroring the
+   existing `REDIS_URL`/`DATABASE_URL` convention (empty env falls back to
+   config, so platforms that inject empty values do not shadow it), and have
+   the image set it to a directory it has already made writable — `/data` is the
+   documented writable path in both the Dockerfile and `wiwi.yaml.example`, and
+   co-locating journals with the SQLite DB gives them one persistence story.
+   Create and `chown` it in the Dockerfile alongside `/app/data`.
+2. **Fail loudly at startup, once, with the resolved absolute path.** When
+   `stream_journal_enabled`, attempt the directory creation during lifespan and
+   log an `error` naming the absolute path and the `OSError` if it fails. The
+   operator should learn about this from the boot log, not from a stream of
+   503s. Do **not** refuse to start — journaling is a replay convenience, and
+   turning a resume-feature misconfiguration into a boot failure would be a
+   worse outage than the one being fixed.
+3. **Degrade the #320 refusal instead of refusing the request.** When the
+   durable owner write fails, drop the journal entirely (unlink, release, and
+   mark it unusable so `_stream_response`'s fallback branch does not re-open
+   it) and stream the response normally. This is *strictly safer* than what
+   happens today with respect to #320's own threat model: with no journal on
+   disk there is no ownerless replay data, so the cross-tenant hole #320 closed
+   cannot occur — while reconnect-resume is merely unavailable for that
+   request. Note that `_stream_response`'s fallback branch already implements
+   exactly this degradation (`journal = None`, unlink, release, keep streaming);
+   the pre-dispatch site in `run_chat_like` is the outlier that returns 503, so
+   the two sites disagree about what an unwritable journal means. Unifying them
+   also means a `read-only` mount or a full volume degrades one feature instead
+   of taking down all virtual-key streaming.
+
+**Also note for the container story:** the image's journal dir is on the
+container filesystem, so on Railway (ephemeral) journals do not survive a
+redeploy. That is a separate durability caveat from this bug — mount a Railway
+volume on the journal dir if cross-restart resume is wanted — but part 1 is
+still required for resume to work at all within a single process lifetime.
+
+**Fix — all three parts implemented.** `WIWI_STREAM_JOURNAL_DIR` overrides the
+configured dir in `AppState.__init__` (empty env falls back to config, matching
+the `REDIS_URL`/`DATABASE_URL` convention, because Railway and Render inject
+empty variables for unset names); the image sets it to `/data/journals` and
+`chown`s that path alongside `/app/data`, and `docker-compose.yml` mounts the
+existing `wiwi_data` volume at `/data` too so journals survive `down`/`up`
+alongside the SQLite DB. The lifespan now probes the dir once and logs
+`stream_journal_dir_unwritable` with the **resolved absolute path**, the OS
+error, and a remediation hint — non-fatally, since refusing to boot would trade
+this outage for a worse one. The pre-dispatch site now calls the new
+`_drop_journal` (aclose → release → unlink) and streams on; `_stream_response`
+gained a `journal_disabled` flag so the fallback branch cannot re-open a
+journal on the directory that just failed, and the two sites now agree.
+
+The security posture is **unchanged or better**: dropping the journal means no
+file on disk, so there is no ownerless replay data for #320's cross-tenant hole
+to exploit, and `release` deliberately leaves the in-memory intent alive so
+`owner_of` still reports the real owner. `tests/test_fix_round122.py` pins all
+of it (12 tests), including the two controls that matter most — a working
+journal dir still records a complete, replayable, correctly-owned journal with
+no second upstream call, and cross-key replay is still refused after the 503 was
+removed.
+
+Verified: the repro now returns **200 with full SSE frames** for a virtual-key
+stream against an unwritable dir (was 503), the boot log names the absolute
+path, and **2944 passed, 11 skipped**, ruff clean.
+
+---
+
 ## Seams cleared in this sweep (2026-10-06)
 
 Recorded so the are not re-investigated. Each was checked against source and,

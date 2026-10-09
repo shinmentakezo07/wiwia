@@ -53,6 +53,11 @@ services:
     # activate providers; absent keys are filtered at load time.
     volumes:
       - wiwi_data:/app/data
+      # The stream journal lives at /data/journals (see the Dockerfile: the
+      # configured default is relative and resolves against a root-owned CWD,
+      # AUDIT #380). Mounted on the same volume so journals survive a
+      # `docker compose down/up` alongside the SQLite DB.
+      - wiwi_data:/data
       # Uncomment to mount a custom config:
       # - ./wiwi.yaml:/app/wiwi.yaml:ro
     command: ["--config", "/app/wiwi.yaml", "--host", "0.0.0.0", "--port", "4000"]

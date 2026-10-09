@@ -85,6 +85,7 @@ Closes the restart-durability gap: StreamTape is in-process, so a wiwi kill mid-
 - A reconnecting client sends `x-wiwi-stream-id: <request_id>` + `Last-Event-ID: <chunk seq>`; the same surface replays chunks > last_event_id from the journal, then tails live.
 - Defaults (journal settings): **enabled by default**, dir `.wiwi/journals`, TTL 600 s, 1 MiB per journal.
 - `.wiwi/` is gitignored runtime scratch — never commit it.
+- **The dir is relative**, so it resolves against the process CWD. The Docker image cannot write there (non-root `wiwi` user, root-owned `/app`), so it sets `WIWI_STREAM_JOURNAL_DIR=/data/journals`; override the env var to move it (e.g. onto a persistent volume, since Railway's filesystem is ephemeral). An unwritable dir is logged once at startup as `stream_journal_dir_unwritable` with the resolved absolute path. Per-request it costs reconnect-resume only, not availability: when the journal's owner line cannot be made durable, the journal is dropped and the stream proceeds (AUDIT #380).
 
 Journals survive wiwi restarts; StreamTape handles the common in-process case without disk I/O.
 

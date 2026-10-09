@@ -126,6 +126,9 @@ router_settings:
   # client can reconnect with `x-wiwi-stream-id` + `Last-Event-ID` after a
   # restart and replay what it missed.
   stream_journal_enabled: true
+  # Relative paths resolve against the process CWD. The Docker image is not
+  # root and cannot write there, so it sets WIWI_STREAM_JOURNAL_DIR=/data/journals
+  # (which wins over this field); set the env var to point at a persistent volume.
   # stream_journal_dir: .wiwi/journals
   # stream_journal_ttl_s: 600
   # stream_journal_max_bytes: 1048576

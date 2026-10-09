@@ -902,8 +902,20 @@ class AppState:
         self.healer: Any = None
         # Durable stream journal (restart-safe SSE replay). Created eagerly so
         # handlers can reach it before init_db runs; sweep happens at startup.
+        #
+        # WIWI_STREAM_JOURNAL_DIR env var overrides config, mirroring how
+        # REDIS_URL and DATABASE_URL work. The configured default
+        # (``.wiwi/journals``) is RELATIVE, so it resolves against the process
+        # CWD — which in the shipped image is ``/app``, owned by root while the
+        # process runs as ``USER wiwi``. Nothing could create it there, and the
+        # failure surfaced as #380: every virtual-key stream refused 503 while
+        # master streams and non-streaming requests worked, so the deployment
+        # looked healthy. An empty env value falls back to config, so platforms
+        # that inject empty variables (Railway/Render) do not shadow it.
         rjs = config.router_settings
-        self.journals = JournalStore(rjs.stream_journal_dir, rjs.stream_journal_ttl_s,
+        journal_dir = (os.environ.get("WIWI_STREAM_JOURNAL_DIR")
+                       or rjs.stream_journal_dir)
+        self.journals = JournalStore(journal_dir, rjs.stream_journal_ttl_s,
                                      rjs.stream_journal_max_bytes)
         # Exact-match response cache (docs/CORE.md §6). Off by default.
         # Backend: memory LRU (default) or Redis when general_settings.redis_url
@@ -1169,6 +1181,34 @@ async def lifespan(app: FastAPI):
             _sl.get_logger("wiwi.startup").info("swept_stale_stream_journals",
                                                 removed=removed)
         if state.config.router_settings.stream_journal_enabled:
+            # AUDIT #380: probe the journal dir ONCE at boot and say so loudly
+            # if it is unusable. Every other symptom of an unwritable dir is
+            # swallowed — ``open`` logs the mkdir/touch failure on the request
+            # path, and the startup sweep below returns 0 on its own OSError —
+            # so the container reports healthy while refusing virtual-key
+            # streams 503. The absolute path is in the message because the
+            # failure is a *relative-path-resolved-against-the-wrong-CWD* bug,
+            # and the configured value alone never reveals where it landed.
+            #
+            # Deliberately NOT fatal: journaling is a replay convenience, and
+            # refusing to boot would turn a resume-feature misconfiguration
+            # into a worse outage than the one being fixed.
+            import structlog as _sl
+            _jlog = _sl.get_logger("wiwi.startup")
+            try:
+                await asyncio.to_thread(
+                    state.journals.dir.mkdir, parents=True, exist_ok=True)
+                _probe = state.journals.dir / ".writable"
+                await asyncio.to_thread(_probe.touch, exist_ok=True)
+                await asyncio.to_thread(_probe.unlink)
+            except OSError as e:
+                _jlog.error(
+                    "stream_journal_dir_unwritable",
+                    dir=str(state.journals.dir.resolve()),
+                    error=f"{type(e).__name__}: {e}",
+                    hint="point WIWI_STREAM_JOURNAL_DIR at a writable path "
+                         "(the image ships /data for this); without it every "
+                         "virtual-key streaming request is refused 503")
             # Sweep at a fraction of the TTL so expiry lags the configured
             # TTL by at most one interval (clamped: at least 1s, at most 60s).
             ttl = state.config.router_settings.stream_journal_ttl_s
@@ -1608,10 +1648,19 @@ def create_app(config: WiwiConfig) -> FastAPI:
         a journal that carries data always carries a durable owner too —
         after any restart, ``owner_of`` scopes it correctly. Returns False
         when the line could not be persisted (ENOSPC, read-only mount): the
-        caller must then refuse the stream (503) rather than write tenant
-        data into a journal that would be ownerless on disk. Failing closed
-        here is the audit's own fix sketch — the alternative (best-effort
-        persist) is exactly the hole.
+        caller must then drop the journal and stream WITHOUT it
+        (:func:`_drop_journal`) rather than write tenant data into a journal
+        that would be ownerless on disk. Failing closed on the *journal* is the
+        audit's own fix sketch — the alternative (best-effort persist) is
+        exactly the hole.
+
+        Failing closed on the *request* was the original sketch too, and was
+        wrong in practice (AUDIT #380): the shipped image's journal dir is
+        unwritable, so refusing turned a replay-feature misconfiguration into
+        a 503 on every virtual-key stream while the rest of the gateway looked
+        perfectly healthy. Dropping the journal is strictly safer than
+        persisting an ownerless one — no file on disk means no replay data to
+        leak — so the cross-tenant hole stays closed either way.
 
         Master streams are exempt: their journals are explicitly readable
         only by master (the gate's ``jowner == "master"`` arm), and an
@@ -1630,8 +1679,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
         except OSError as e:
             state_.logs.log_proxy(
                 "error",
-                f"journal owner persist failed for {journal_id}; refusing the"
-                f" stream rather than writing ownerless replay data:"
+                f"journal owner persist failed for {journal_id}; dropping the"
+                f" journal so no ownerless replay data is written, and"
+                f" streaming without reconnect-resume:"
                 f" {type(e).__name__}: {e}",
                 journal_id)
             return False
@@ -1650,6 +1700,29 @@ def create_app(config: WiwiConfig) -> FastAPI:
             with contextlib.suppress(Exception):
                 await journal.aclose()
             state_.journals.release(journal_id)
+    async def _drop_journal(state_, journal, journal_id) -> None:
+        """Remove a journal that can never be durably owned, leaving it
+        UNUSABLE for the rest of this request.
+
+        Distinct from :func:`_abandon_journal`, which leaves the file on disk:
+        this is the AUDIT #320 case, where the owner line could not be made
+        durable, so the file must not survive at all. The in-memory intent is
+        left in place (``release`` deliberately outlives it, AUDIT #175), which
+        means ``owner_of`` still reports the real owner rather than ``None`` —
+        so the replay gate stays correctly scoped even though the file is gone.
+
+        Callers must ALSO pass ``journal_disabled=True`` to
+        ``_stream_response``: ``journal=None`` alone would re-enter the
+        fallback branch and re-open a journal on the very directory that just
+        failed, looping back to the same refusal.
+        """
+        if journal is None:
+            return
+        with contextlib.suppress(Exception):
+            await journal.aclose()
+        state_.journals.release(journal_id)
+        with contextlib.suppress(OSError):
+            await asyncio.to_thread(journal.path.unlink, True)
 
     async def json_body(request: Request) -> tuple[Any, ORJSONResponse | None]:
         """Parse the request body; malformed JSON is a client error (400)."""
@@ -2166,26 +2239,28 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 # #320). Deliberately after the connect-failure branches — a
                 # failed connect abandons the journal and no client ever
                 # replays it, so persisting first would only add an fsync to
-                # every error path. If the durable persist itself fails, the
-                # stream is refused: writing tenant data into a journal that
-                # would be ownerless on disk is the cross-tenant replay hole,
-                # just one restart later.
+                # every error path.
+                #
+                # If the durable persist fails, the journal is DROPPED and the
+                # stream proceeds without one (AUDIT #380). Returning 503 here
+                # — which is what this site used to do — satisfied #320's letter
+                # but blew up its blast radius: an unwritable journal directory
+                # (the shipped image's relative default resolved against a
+                # root-owned CWD, AUDIT #380) refused EVERY virtual-key stream
+                # while master streams and all non-streaming traffic kept
+                # working, so the deployment looked healthy. Dropping the
+                # journal is strictly safer than persisting an ownerless one —
+                # with no file on disk there is no replay data to leak, which
+                # is exactly the hole #320 closed — and it costs only
+                # reconnect-resume for this one request.
                 if not await _persist_journal_owner(state_, journal,
                                                     journal_id, info):
-                    await stream.aclose()
-                    await _abandon_journal(state_, journal, journal_id)
-                    ctx.status = 503
-                    ctx.error = WiwiError(
-                        503, "api_error",
-                        "stream replay journal unavailable; retry")
-                    state_.logs.log_request(build_log_event(ctx))
-                    await _release_tpm_reservation(info, ctx)
-                    return _err(503, "api_error",
-                                "stream replay journal unavailable; retry",
-                                request, surface, span=ctx.span)
+                    await _drop_journal(state_, journal, journal_id)
+                    journal = None
                 it = _stream_response(state_, ctx, encoder_pair, surface,
                                       stream, first, journal=journal,
                                       journal_id=journal_id,
+                                      journal_disabled=journal is None,
                                       event_ids=config.router_settings.stream_event_ids,
                                       response_store=(state_.response_store
                                                       if store_response else None),
@@ -2341,6 +2416,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
     async def _stream_response(state_, ctx, encoder_pair, surface,
                                stream, first=None, event_ids=False,
                                journal=None, journal_id=None,
+                               journal_disabled=False,
                                response_store=None, store_body=None,
                                store_model="", store_group=""):
         from wiwi.streaming import deltas as dl
@@ -2355,7 +2431,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
         store_prompts = config.wiwi_settings.store_prompts_in_spend_logs
         if journal_id is None:
             journal_id = ctx.request_id
-        if (journal is None and config.router_settings.stream_journal_enabled
+        if (journal is None and not journal_disabled
+                and config.router_settings.stream_journal_enabled
                 and state_.journals is not None):
             # Fallback path: the caller did not pre-open a journal. Prefer the
             # caller-opened one — it is open before the first upstream call,
@@ -2369,12 +2446,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
             # written yet, so nothing ownerless reaches disk.
             if not await _persist_journal_owner(state_, journal, journal_id,
                                                 ctx.auth):
-                with contextlib.suppress(Exception):
-                    await journal.aclose()
-                state_.journals.release(journal_id)
-                with contextlib.suppress(OSError):
-                    journal.path.unlink(missing_ok=True)
+                await _drop_journal(state_, journal, journal_id)
                 journal = None
+                # Nothing is left to re-open it on a later chunk, so this
+                # request streams without a journal (AUDIT #380).
+                journal_disabled = True
         stream_text: list[str] = []
         stream_thinking: list[str] = []
         stream_tools: dict[int, dict[str, Any]] = {}

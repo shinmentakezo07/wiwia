@@ -43,8 +43,22 @@ COPY wiwi.yaml.example /app/wiwi.yaml
 # Writable data dir for SQLite DB (mounted as a volume in docker-compose).
 # /data is also the only writable path on a HuggingFace Docker Space, where
 # no volume is mounted — deploy/hf_space.sh points DATABASE_URL there.
+#
+# /data also holds the stream journal (AUDIT #380). The configured default is
+# the RELATIVE `.wiwi/journals`, which resolves against WORKDIR (/app) — and
+# /app is owned by root while the process runs as USER wiwi, so nothing could
+# create it. `stream_journal_enabled` defaults true, so that made every
+# virtual-key STREAMING request fail 503 with "stream replay journal
+# unavailable" while master streams and non-streaming calls kept working, and
+# the container still reported healthy. Naming the dir explicitly (below, via
+# WIWI_STREAM_JOURNAL_DIR) keeps journals on the same path as the SQLite DB,
+# so they share one persistence story: persistent where a volume is mounted,
+# ephemeral on Railway otherwise.
 RUN mkdir -p /app/data && chown wiwi:wiwi /app/data \
-    && mkdir -p /data && chown wiwi:wiwi /data
+    && mkdir -p /data && chown wiwi:wiwi /data \
+    && mkdir -p /data/journals && chown wiwi:wiwi /data/journals
+
+ENV WIWI_STREAM_JOURNAL_DIR=/data/journals
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \

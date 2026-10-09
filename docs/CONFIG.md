@@ -219,7 +219,7 @@ Encoded SSE frames are appended to a per-request JSONL file, so a client reconne
 | Field | Default | Notes |
 |---|---|---|
 | `stream_journal_enabled` | `true` | Master switch. |
-| `stream_journal_dir` | `.wiwi/journals` | Journal directory. |
+| `stream_journal_dir` | `.wiwi/journals` | Journal directory. **Relative paths resolve against the process CWD** — in the Docker image that is `/app`, which is not writable by the `wiwi` user, so the image sets `WIWI_STREAM_JOURNAL_DIR=/data/journals`. Override the env var to point it at persistent storage; wiwi logs `stream_journal_dir_unwritable` with the resolved absolute path at startup if the directory cannot be created. |
 | `stream_journal_ttl_s` | `600.0` | Journals older than this are swept at startup and opportunistically at finish. |
 | `stream_journal_max_bytes` | `1048576` | Per-journal byte cap (1 MiB). |
 
