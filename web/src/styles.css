@@ -2705,6 +2705,14 @@ select.admin-input option {
   width: 52px;
   background: rgba(9, 9, 11, 0.92);
 }
+/* Tap-outside scrim for the mobile history overlay. */
+.pg-scrim {
+  animation: pg-scrim-in 0.18s ease both;
+}
+@keyframes pg-scrim-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
 .pg-icon-button {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
 }
@@ -2744,7 +2752,12 @@ select.admin-input option {
 }
 .pg-arena {
   isolation: isolate;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.012), transparent 28%);
+  /* Two stacked washes: a faint top light from the beam layer, and a soft
+     violet pool seated behind the composer so the message column does not sit
+     on flat black. */
+  background:
+    radial-gradient(120% 60% at 50% 118%, rgba(99, 102, 241, 0.11), transparent 62%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.022), transparent 30%);
 }
 .pg-context-bar {
   position: relative;
@@ -2847,7 +2860,7 @@ select.admin-input option {
 }
 .pg-user-bubble {
   background: linear-gradient(135deg, rgba(109, 76, 224, 0.92), rgba(79, 70, 229, 0.94));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 8px 24px -14px rgba(76, 29, 149, 0.8);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 10px 28px -16px rgba(76, 29, 149, 0.85);
 }
 .pg-avatar-user {
   background: linear-gradient(145deg, #8b5cf6, #4f46e5);
@@ -2955,12 +2968,27 @@ select.admin-input option {
   letter-spacing: 0.14em;
   text-transform: uppercase;
 }
+/* Each stat is its own tile so six numbers read as six facts instead of one
+   undifferentiated run of monospace. */
 .pg-metric {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   min-height: 22px;
+  padding: 2px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.022);
   white-space: nowrap;
+}
+.pg-metric-tone-blue { color: #bfdbfe; border-color: rgba(96, 165, 250, 0.18); background: rgba(59, 130, 246, 0.07); }
+.pg-metric-tone-violet { color: #ddd6fe; border-color: rgba(167, 139, 250, 0.18); background: rgba(139, 92, 246, 0.07); }
+.pg-metric-tone-emerald { color: #a7f3d0; border-color: rgba(52, 211, 153, 0.18); background: rgba(16, 185, 129, 0.07); }
+.pg-metric-tone-neutral { color: var(--admin-text-muted); }
+.pg-metric-estimated {
+  color: #fde68a;
+  border-color: rgba(251, 191, 36, 0.22);
+  background: rgba(245, 158, 11, 0.08);
 }
 .pg-metric-label {
   color: rgba(255, 255, 255, 0.45);
@@ -3021,6 +3049,15 @@ select.admin-input option {
   background: rgba(255, 255, 255, 0.025);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
 }
+/* The category row scrolls horizontally instead of clipping or wrapping at
+   narrow widths, and keeps its own scrollbar out of the layout. */
+.pg-hero-tabs-scroll {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  scroll-snap-type: x proximity;
+}
+.pg-hero-tabs-scroll::-webkit-scrollbar { display: none; }
+.pg-hero-tabs-scroll > * { scroll-snap-align: center; }
 .pg-suggestion-card {
   min-height: 58px;
 }
@@ -3038,8 +3075,10 @@ select.admin-input option {
 }
 
 @media (max-width: 767px) {
+  /* On mobile the sidebar is a fixed overlay, so its width is capped against
+     the viewport rather than the flex row, and it gets its own elevation. */
   .pg-sidebar {
-    width: min(280px, calc(100vw - 52px));
+    width: min(300px, calc(100vw - 56px));
   }
   .pg-context-bar {
     padding-top: 10px;
@@ -3057,7 +3096,10 @@ select.admin-input option {
     align-items: flex-start;
   }
   .pg-metrics-items {
-    gap-x: 9px;
+    gap: 5px;
+  }
+  .pg-metric {
+    padding: 2px 6px;
   }
   .pg-composer-region {
     padding-bottom: max(16px, env(safe-area-inset-bottom));

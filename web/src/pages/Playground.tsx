@@ -532,6 +532,19 @@ function ChatSidebar(props: {
   const clearTimer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(clearTimer.current), []);
 
+  // Below 768px the sidebar is not a flex column, it is an overlay floating
+  // above the arena. It therefore needs its own dismiss affordances: Escape,
+  // and a tap-outside scrim rendered below the panel.
+  const isOverlay = collapsed && typeof window !== "undefined" && window.innerWidth < 768;
+  useEffect(() => {
+    if (!isOverlay) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onToggle();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [isOverlay, onToggle]);
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return chats;
@@ -541,6 +554,13 @@ function ChatSidebar(props: {
         c.messages.some((m) => m.content.toLowerCase().includes(q)),
     );
   }, [chats, query]);
+
+  // In overlay mode the panel covers the arena, so a selection has to dismiss
+  // it or the chosen conversation stays hidden underneath.
+  const pickChat = (id: string) => {
+    onSelect(id);
+    if (isOverlay) onToggle();
+  };
 
   // Group filtered chats by recency, preserving the newest-first order.
   const grouped = useMemo(() => {
@@ -589,224 +609,241 @@ function ChatSidebar(props: {
   };
 
   return (
-    <aside className="pg-sidebar flex shrink-0 flex-col border-r border-[var(--admin-border)] bg-[var(--admin-surface)]" aria-label="Conversation history">
-      {/* Header */}
-      <div className="pg-sidebar-header flex items-center justify-between px-4 py-4">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <Layers3 size={14} className="text-brand-300" aria-hidden />
-            <span className="text-[12px] font-semibold uppercase tracking-wider text-[var(--admin-text)]">
-              Workspace
-            </span>
-          </div>
-          <span className="mt-1 block truncate text-[11px] text-[var(--admin-text-dim)]">Local conversation history</span>
-        </div>
-        <button
-          type="button"
+    <>
+      {/* Tap-outside scrim. aria-hidden: it is a pointer affordance, not a control. */}
+      {isOverlay && (
+        <div
+          className="pg-scrim fixed inset-0 z-20 bg-black/60 backdrop-blur-[2px] md:hidden"
           onClick={onToggle}
-          className="pg-icon-button flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.05] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
-          aria-label="Collapse sidebar"
-          title="Collapse sidebar"
-        >
-          <PanelLeftClose size={16} />
-        </button>
-      </div>
-
-      {/* New chat button */}
-      <div className="px-3 pb-3">
-        <button
-          type="button"
-          onClick={onNew}
-          className="pg-new-chat flex min-h-11 w-full items-center gap-2 rounded-lg border border-[var(--admin-border)] bg-white/[0.025] px-3 py-2 text-[13px] font-medium text-[var(--admin-text)] transition-colors hover:border-brand-400/30 hover:bg-brand-500/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
-        >
-          <span className="flex h-7 w-7 items-center justify-center rounded-md bg-brand-500/10 text-brand-300">
-            <MessageSquarePlus size={15} />
-          </span>
-          <span>New conversation</span>
-        </button>
-      </div>
-
-      {/* Search */}
-      <div className="px-3 pb-2">
-        <div className="flex items-center gap-2 rounded-lg border border-[var(--admin-border)] bg-white/[0.02] px-2.5 py-1.5 transition-colors focus-within:border-[var(--admin-border-hover)] focus-within:ring-2 focus-within:ring-blue-400/20">
-          <Search className="h-3.5 w-3.5 shrink-0 text-[var(--admin-text-dim)]" />
-          <input
-            type="search"
-            aria-label="Search conversations"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search chats…"
-            className="w-full bg-transparent text-[12px] text-[var(--admin-text)] outline-none placeholder:text-[var(--admin-text-dim)]"
-          />
-          {query && (
-            <button
-              type="button"
-              onClick={() => setQuery("")}
-              className="shrink-0 text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]"
-              aria-label="Clear search"
-            >
-              <X size={12} />
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* Chat list, grouped by recency */}
-      <div className="pg-scroll min-h-0 flex-1 overflow-y-auto px-2 pb-2">
-        {filtered.length === 0 ? (
-          <div className="px-3 py-8 text-center text-[12px] text-[var(--admin-text-dim)]">
-            {query ? "No chats match your search." : "No conversations yet."}
-          </div>
-        ) : (
-          grouped.map(([group, items]) => (
-            <div key={group} className="mb-2">
-              <div className="px-2 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--admin-text-dim)]">
-                {group}
-              </div>
-              <div className="space-y-0.5">
-                {items.map((c) =>
-                  renamingId === c.id ? (
-                    <div key={c.id} className="rounded-lg border border-brand-500/30 bg-white/[0.03] px-2 py-1.5">
-                      <input
-                        autoFocus
-                        value={renameDraft}
-                        onChange={(e) => setRenameDraft(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" && !e.nativeEvent.isComposing) {
-                            e.preventDefault();
-                            commitRename();
-                          } else if (e.key === "Escape") {
-                            e.stopPropagation();
-                            setRenamingId(null);
-                          }
-                        }}
-                        onBlur={commitRename}
-                        className="w-full bg-transparent text-[13px] text-[var(--admin-text)] outline-none"
-                        aria-label="Chat name"
-                      />
-                    </div>
-                  ) : (
-                    <div
-                      key={c.id}
-                      data-active={c.id === activeId}
-                      role="button"
-                      tabIndex={0}
-                      aria-current={c.id === activeId ? "page" : undefined}
-                      onClick={() => onSelect(c.id)}
-                      onKeyDown={(e) => {
-                        if (e.target !== e.currentTarget) return;
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          onSelect(c.id);
-                        }
-                      }}
-                      className="pg-chat-item group flex cursor-pointer items-start gap-2.5 rounded-lg border border-transparent px-2.5 py-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
-                    >
-                      <span className="pg-chat-item-icon mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--admin-text-dim)]" aria-hidden>
-                        <MessageSquare size={12} />
-                      </span>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5">
-                          <span className={`truncate text-[13px] ${c.id === activeId ? "text-blue-300 font-medium" : "text-[var(--admin-text-muted)]"}`}>
-                            {c.title || "New chat"}
-                          </span>
-                        </div>
-                        <span className="text-[10px] text-[var(--admin-text-dim)]">
-                          {relativeTime(c.updated)} · {c.messages.length} msgs
-                        </span>
-                      </div>
-                      {/* Revealed on hover, keyboard focus, and any coarse
-                          pointer — a hover-only reveal is invisible on touch
-                          (AUDIT #210). The buttons carry the binding 44px
-                          minimum; the negative vertical margin keeps that box
-                          inside the row's own padding so the row does not
-                          grow, and nothing overlaps the neighbouring rows. */}
-                      <div className="-my-1.5 flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100">
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setRenamingId(c.id);
-                            setRenameDraft(c.title || "");
-                          }}
-                          className="flex h-11 w-11 items-center justify-center rounded text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
-                          aria-label="Rename chat"
-                          title="Rename chat"
-                        >
-                          <Pencil size={12} />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onDelete(c.id);
-                          }}
-                          className="flex h-11 w-11 items-center justify-center rounded text-[var(--admin-text-dim)] transition-colors hover:bg-red-500/10 hover:text-red-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50"
-                          aria-label="Delete chat"
-                          title="Delete chat"
-                        >
-                          <Trash2 size={13} />
-                        </button>
-                      </div>
-                    </div>
-                  ),
-                )}
-              </div>
+          aria-hidden
+        />
+      )}
+      <aside
+        className={
+          isOverlay
+            ? "pg-sidebar pg-sidebar-enter fixed inset-y-0 left-0 z-30 flex flex-col border-r border-[var(--admin-border)] bg-[var(--admin-surface)] shadow-2xl shadow-black/70 md:hidden"
+            : "pg-sidebar hidden flex-col border-r border-[var(--admin-border)] bg-[var(--admin-surface)] md:flex"
+        }
+        aria-label="Conversation history"
+      >
+        {/* Header */}
+        <div className="pg-sidebar-header flex items-center justify-between px-4 py-4">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <Layers3 size={14} className="text-brand-300" aria-hidden />
+              <span className="text-[12px] font-semibold uppercase tracking-wider text-[var(--admin-text)]">
+                Workspace
+              </span>
             </div>
-          ))
-        )}
-      </div>
-
-      {/* Footer */}
-      <div className="shrink-0 border-t border-[var(--admin-border)] px-3 py-2">
-        <div className="flex items-center justify-between">
-          <Link
-            to="/console"
-            className="flex min-h-11 items-center gap-2 text-[12px] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]"
+            <span className="mt-1 block truncate text-[11px] text-[var(--admin-text-dim)]">Local conversation history</span>
+          </div>
+          <button
+            type="button"
+            onClick={onToggle}
+            className="pg-icon-button flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.05] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+            aria-label="Collapse sidebar"
+            title="Collapse sidebar"
           >
-            <Terminal size={12} />
-            Dashboard
-          </Link>
-          {chats.length > 0 && !confirmingClear && (
-            <button
-              type="button"
-              onClick={() => {
-                setConfirmingClear(true);
-                window.clearTimeout(clearTimer.current);
-                clearTimer.current = window.setTimeout(() => setConfirmingClear(false), 4000);
-              }}
-              className="flex min-h-11 items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] text-[var(--admin-text-dim)] transition-colors hover:text-red-400"
-              aria-label="Clear all chats"
-              title="Clear all chats"
-            >
-              <Eraser size={12} />
-              Clear all
-            </button>
-          )}
-          {confirmingClear && (
-            <div className="flex items-center gap-1">
+            <PanelLeftClose size={16} />
+          </button>
+        </div>
+
+        {/* New chat button */}
+        <div className="px-3 pb-3">
+          <button
+            type="button"
+            onClick={onNew}
+            className="pg-new-chat flex min-h-11 w-full items-center gap-2 rounded-lg border border-[var(--admin-border)] bg-white/[0.025] px-3 py-2 text-[13px] font-medium text-[var(--admin-text)] transition-colors hover:border-brand-400/30 hover:bg-brand-500/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+          >
+            <span className="flex h-7 w-7 items-center justify-center rounded-md bg-brand-500/10 text-brand-300">
+              <MessageSquarePlus size={15} />
+            </span>
+            <span>New conversation</span>
+          </button>
+        </div>
+
+        {/* Search */}
+        <div className="px-3 pb-2">
+          <div className="flex items-center gap-2 rounded-lg border border-[var(--admin-border)] bg-white/[0.02] px-2.5 py-1.5 transition-colors focus-within:border-[var(--admin-border-hover)] focus-within:ring-2 focus-within:ring-blue-400/20">
+            <Search className="h-3.5 w-3.5 shrink-0 text-[var(--admin-text-dim)]" />
+            <input
+              type="search"
+              aria-label="Search conversations"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search chats…"
+              className="w-full bg-transparent text-[12px] text-[var(--admin-text)] outline-none placeholder:text-[var(--admin-text-dim)]"
+            />
+            {query && (
               <button
                 type="button"
-                onClick={() => {
-                  onClearAll();
-                  setConfirmingClear(false);
-                }}
-                className="rounded-md border border-red-500/30 bg-red-500/10 px-1.5 py-0.5 text-[11px] text-red-400 transition-colors hover:bg-red-500/20"
-              >
-                Confirm
-              </button>
-              <button
-                type="button"
-                onClick={() => setConfirmingClear(false)}
-                className="rounded-md px-1 py-0.5 text-[11px] text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]"
+                onClick={() => setQuery("")}
+                className="shrink-0 text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]"
+                aria-label="Clear search"
               >
                 <X size={12} />
               </button>
+            )}
+          </div>
+        </div>
+
+        {/* Chat list, grouped by recency */}
+        <div className="pg-scroll min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+          {filtered.length === 0 ? (
+            <div className="px-3 py-8 text-center text-[12px] text-[var(--admin-text-dim)]">
+              {query ? "No chats match your search." : "No conversations yet."}
             </div>
+          ) : (
+            grouped.map(([group, items]) => (
+              <div key={group} className="mb-2">
+                <div className="px-2 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--admin-text-dim)]">
+                  {group}
+                </div>
+                <div className="space-y-0.5">
+                  {items.map((c) =>
+                    renamingId === c.id ? (
+                      <div key={c.id} className="rounded-lg border border-brand-500/30 bg-white/[0.03] px-2 py-1.5">
+                        <input
+                          autoFocus
+                          value={renameDraft}
+                          onChange={(e) => setRenameDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                              e.preventDefault();
+                              commitRename();
+                            } else if (e.key === "Escape") {
+                              e.stopPropagation();
+                              setRenamingId(null);
+                            }
+                          }}
+                          onBlur={commitRename}
+                          className="w-full bg-transparent text-[13px] text-[var(--admin-text)] outline-none"
+                          aria-label="Chat name"
+                        />
+                      </div>
+                    ) : (
+                      <div
+                        key={c.id}
+                        data-active={c.id === activeId}
+                        role="button"
+                        tabIndex={0}
+                        aria-current={c.id === activeId ? "page" : undefined}
+                        onClick={() => pickChat(c.id)}
+                        onKeyDown={(e) => {
+                          if (e.target !== e.currentTarget) return;
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            pickChat(c.id);
+                          }
+                        }}
+                        className="pg-chat-item group flex cursor-pointer items-start gap-2.5 rounded-lg border border-transparent px-2.5 py-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+                      >
+                        <span className="pg-chat-item-icon mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--admin-text-dim)]" aria-hidden>
+                          <MessageSquare size={12} />
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5">
+                            <span className={`truncate text-[13px] ${c.id === activeId ? "text-blue-300 font-medium" : "text-[var(--admin-text-muted)]"}`}>
+                              {c.title || "New chat"}
+                            </span>
+                          </div>
+                          <span className="text-[10px] text-[var(--admin-text-dim)]">
+                            {relativeTime(c.updated)} · {c.messages.length} msgs
+                          </span>
+                        </div>
+                        {/* Revealed on hover, keyboard focus, and any coarse
+                            pointer — a hover-only reveal is invisible on touch
+                            (AUDIT #210). The buttons carry the binding 44px
+                            minimum; the negative vertical margin keeps that box
+                            inside the row's own padding so the row does not
+                            grow, and nothing overlaps the neighbouring rows. */}
+                        <div className="-my-1.5 flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setRenamingId(c.id);
+                              setRenameDraft(c.title || "");
+                            }}
+                            className="flex h-11 w-11 items-center justify-center rounded text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+                            aria-label="Rename chat"
+                            title="Rename chat"
+                          >
+                            <Pencil size={12} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onDelete(c.id);
+                            }}
+                            className="flex h-11 w-11 items-center justify-center rounded text-[var(--admin-text-dim)] transition-colors hover:bg-red-500/10 hover:text-red-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50"
+                            aria-label="Delete chat"
+                            title="Delete chat"
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      </div>
+                    ),
+                  )}
+                </div>
+              </div>
+            ))
           )}
         </div>
-      </div>
-    </aside>
+
+        {/* Footer */}
+        <div className="shrink-0 border-t border-[var(--admin-border)] px-3 py-2">
+          <div className="flex items-center justify-between">
+            <Link
+              to="/console"
+              className="flex min-h-11 items-center gap-2 text-[12px] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]"
+            >
+              <Terminal size={12} />
+              Dashboard
+            </Link>
+            {chats.length > 0 && !confirmingClear && (
+              <button
+                type="button"
+                onClick={() => {
+                  setConfirmingClear(true);
+                  window.clearTimeout(clearTimer.current);
+                  clearTimer.current = window.setTimeout(() => setConfirmingClear(false), 4000);
+                }}
+                className="flex min-h-11 items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] text-[var(--admin-text-dim)] transition-colors hover:text-red-400"
+                aria-label="Clear all chats"
+                title="Clear all chats"
+              >
+                <Eraser size={12} />
+                Clear all
+              </button>
+            )}
+            {confirmingClear && (
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClearAll();
+                    setConfirmingClear(false);
+                  }}
+                  className="rounded-md border border-red-500/30 bg-red-500/10 px-1.5 py-0.5 text-[11px] text-red-400 transition-colors hover:bg-red-500/20"
+                >
+                  Confirm
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmingClear(false)}
+                  className="rounded-md px-1 py-0.5 text-[11px] text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]"
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </aside>
+    </>
   );
 }
 
@@ -1487,36 +1524,36 @@ export function PlaygroundPage() {
                   <Activity size={12} />
                   <span>Response</span>
                 </div>
-                <div className="pg-metrics-items flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-[var(--admin-text-dim)]">
+                <div className="pg-metrics-items flex min-w-0 flex-1 flex-wrap items-center gap-1.5 font-mono text-[11px] text-[var(--admin-text-dim)]">
                   {metrics ? (
                     <>
-                      <span className="pg-metric" title="Server-measured time to first token">
-                        <Clock size={11} className="text-blue-300/90" />
+                      <span className="pg-metric pg-metric-tone-blue" title="Server-measured time to first token">
+                        <Clock size={11} aria-hidden />
                         {fmtMs(metrics.ttft_ms)} <span className="pg-metric-label">ttft</span>
                       </span>
-                      <span className="pg-metric" title="Server-measured generation speed">
-                        <Gauge size={11} className="text-violet-300/90" />
+                      <span className="pg-metric pg-metric-tone-violet" title="Server-measured generation speed">
+                        <Gauge size={11} aria-hidden />
                         {fmtTps(metrics.tps)}
                       </span>
-                      <span className="pg-metric" title="Gateway request latency">
-                        <Clock size={11} className="text-emerald-300/90" />
+                      <span className="pg-metric pg-metric-tone-emerald" title="Gateway request latency">
+                        <Clock size={11} aria-hidden />
                         {fmtMs(metrics.latency_ms)} <span className="pg-metric-label">latency</span>
                       </span>
-                      <span className="pg-metric" title="Provider-reported input tokens">
-                        <span className="h-1.5 w-1.5 rounded-full bg-blue-300/80" />
-                        {fmtTokens(metrics.prompt_tokens)} in
+                      <span className="pg-metric pg-metric-tone-blue" title="Provider-reported input tokens">
+                        <span className="h-1.5 w-1.5 rounded-full bg-blue-300/80" aria-hidden />
+                        {fmtTokens(metrics.prompt_tokens)} <span className="pg-metric-label">in</span>
                       </span>
-                      <span className="pg-metric" title="Provider-reported output tokens">
-                        <span className="h-1.5 w-1.5 rounded-full bg-violet-300/80" />
-                        {fmtTokens(metrics.completion_tokens)} out
+                      <span className="pg-metric pg-metric-tone-violet" title="Provider-reported output tokens">
+                        <span className="h-1.5 w-1.5 rounded-full bg-violet-300/80" aria-hidden />
+                        {fmtTokens(metrics.completion_tokens)} <span className="pg-metric-label">out</span>
                       </span>
-                      <span className="pg-metric" title="Total tokens">
-                        <span className="h-1.5 w-1.5 rounded-full bg-white/35" />
-                        {fmtTokens(metrics.total_tokens)} total
+                      <span className="pg-metric pg-metric-tone-neutral" title="Total tokens">
+                        <span className="h-1.5 w-1.5 rounded-full bg-white/35" aria-hidden />
+                        {fmtTokens(metrics.total_tokens)} <span className="pg-metric-label">total</span>
                       </span>
                       {metrics.usage_estimated && (
-                        <span className="text-amber-300/90" title="Token counts were estimated by wiwi">
-                          estimated usage
+                        <span className="pg-metric pg-metric-estimated" title="Token counts were estimated by wiwi">
+                          estimated
                         </span>
                       )}
                     </>
@@ -1529,7 +1566,7 @@ export function PlaygroundPage() {
           )}
 
           {/* Composer */}
-          <div className="pg-composer-region shrink-0 px-4 pb-4 pt-2 sm:px-6">
+          <div className="pg-composer-region sticky bottom-0 z-10 shrink-0 px-4 pt-3 sm:px-6">
             <form onSubmit={onSubmit} className="mx-auto max-w-[820px]">
               <div className="relative">
                 <div className="pg-composer relative flex items-end gap-2 rounded-2xl border border-[var(--admin-border)] bg-[var(--admin-surface)] p-2 shadow-lg shadow-black/30">
@@ -1580,6 +1617,13 @@ export function PlaygroundPage() {
                   <span className="hidden items-center gap-1.5 sm:inline-flex">
                     <kbd className="pg-kbd">Shift</kbd>+<kbd className="pg-kbd">Enter</kbd> newline
                   </span>
+                  {/* Live draft length makes an over-long prompt visible before
+                      it is sent. */}
+                  {draft.trim().length > 0 && (
+                    <span className="inline-flex items-center gap-1 font-mono tabular-nums text-[var(--admin-text-muted)]">
+                      {draft.trim().length.toLocaleString()} chars
+                    </span>
+                  )}
                 </div>
                 <span className="inline-flex items-center gap-1.5">
                   <Plug size={11} /> streamed live
@@ -1607,23 +1651,23 @@ function HeroEmptyState(props: {
   const current = suggestions?.[activeGroup] ?? [];
 
   return (
-    <div className="pg-hero-shell relative flex min-h-full items-center justify-center overflow-hidden px-4 py-10 sm:px-6 sm:py-14">
+    <div className="pg-hero-shell relative flex min-h-full items-center justify-center overflow-hidden px-4 py-6 sm:px-6 sm:py-10">
       <div className="animate-hero-enter relative w-full max-w-[760px] text-center">
-        <div className="mb-5 flex justify-center">
-          <div className="pg-hero-badge relative flex h-14 w-14 items-center justify-center rounded-2xl border border-white/[0.08] shadow-xl shadow-brand-900/30">
-            <Sparkles className="relative h-6 w-6 text-white" />
+        <div className="mb-3 flex justify-center sm:mb-5">
+          <div className="pg-hero-badge relative flex h-12 w-12 items-center justify-center rounded-2xl border border-white/[0.08] shadow-xl shadow-brand-900/30 sm:h-14 sm:w-14">
+            <Sparkles className="relative h-5 w-5 text-white sm:h-6 sm:w-6" />
           </div>
         </div>
 
-        <h2 className="pg-hero-title text-[30px] font-semibold tracking-[-0.025em]">
+        <h2 className="pg-hero-title text-[26px] font-semibold tracking-[-0.025em] sm:text-[30px]">
           Start a model session
         </h2>
-        <p className="mx-auto mt-2 max-w-md text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
+        <p className="mx-auto mt-1.5 max-w-md text-[13px] leading-relaxed text-[var(--admin-text-muted)] sm:mt-2 sm:text-[14px]">
           Choose a prompt below or write directly into the workbench. Responses stream here in real time.
         </p>
 
         {model && (
-          <div className="pg-model-card mx-auto mt-6 max-w-[440px] rounded-2xl px-4 py-3">
+          <div className="pg-model-card mx-auto mt-4 max-w-[440px] rounded-2xl px-4 py-3 sm:mt-6">
             <div className="flex items-center gap-3">
               <div className="pg-model-card-icon flex h-9 w-9 shrink-0 items-center justify-center rounded-xl">
                 <Terminal size={17} />
@@ -1638,7 +1682,7 @@ function HeroEmptyState(props: {
 
         {model && (
           <>
-            <div className="pg-hero-tabs mt-7 inline-flex items-center gap-1 rounded-xl p-1" role="tablist" aria-label="Prompt categories">
+            <div className="pg-hero-tabs pg-hero-tabs-scroll mt-5 inline-flex max-w-full items-center gap-1 overflow-x-auto rounded-xl p-1 sm:mt-7" role="tablist" aria-label="Prompt categories">
               {visible.map((g) => (
                 <button
                   key={g}
@@ -1646,7 +1690,7 @@ function HeroEmptyState(props: {
                   role="tab"
                   aria-selected={activeGroup === g}
                   onClick={() => onGroupChange(g)}
-                  className={`min-h-11 rounded-lg px-3.5 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50 ${
+                  className={`min-h-11 shrink-0 rounded-lg px-3.5 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50 ${
                     activeGroup === g
                       ? "bg-white/[0.09] text-[var(--admin-text)] shadow-sm"
                       : "text-[var(--admin-text-muted)] hover:text-[var(--admin-text)]"
@@ -1663,7 +1707,7 @@ function HeroEmptyState(props: {
                   key={s}
                   type="button"
                   onClick={() => onPick(s)}
-                  className="pg-sugg-enter pg-suggestion-card group flex min-h-[58px] items-center gap-3 rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] px-3.5 py-3 text-left text-[13px] leading-relaxed text-[var(--admin-text-muted)] transition-[border-color,background-color,color,transform] duration-200 hover:-translate-y-0.5 hover:border-brand-400/30 hover:bg-brand-500/[0.06] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+                  className="pg-sugg-enter pg-suggestion-card group flex min-h-[58px] items-start gap-3 rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] px-3.5 py-2.5 text-left text-[13px] leading-snug text-[var(--admin-text-muted)] transition-[border-color,background-color,color,transform,box-shadow] duration-200 hover:-translate-y-0.5 hover:border-brand-400/30 hover:bg-brand-500/[0.06] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
                   style={{ animationDelay: `${i * 0.04}s` }}
                 >
                   <span className="pg-suggestion-icon flex h-8 w-8 shrink-0 items-center justify-center rounded-lg">
