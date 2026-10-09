@@ -437,6 +437,15 @@ export function Dialog(props: {
    *  MUST provide its own `overflow-y-auto` region or its content will be
    *  clipped and unreachable. */
   contained?: boolean;
+  /** Optional leading icon in the header (accented chip). */
+  icon?: LucideIcon;
+  /** Optional second line under the title. */
+  subtitle?: ReactNode;
+  /** Optional sticky footer row pinned below the (scrolling) body. Rendered
+   *  right-aligned on desktop; full-width and stacked on mobile. */
+  footer?: ReactNode;
+  /** Hide the default bottom hairline divider on the footer. */
+  footerBordered?: boolean;
 }) {
   useEffect(() => {
     if (!props.open) return;
@@ -454,9 +463,10 @@ export function Dialog(props: {
     "3xl": "max-w-3xl",
     "5xl": "max-w-5xl",
   };
+  const Icon = props.icon;
   return createPortal(
     <div
-      className={`admin-overlay-enter fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/70 backdrop-blur-sm ${
+      className={`admin-overlay-enter fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/70 ${
         props.contained ? "p-3 pt-[6vh] sm:p-4 sm:pt-[8vh]" : "p-4 pt-[10vh]"
       }`}
       onClick={(e) => {
@@ -470,15 +480,29 @@ export function Dialog(props: {
           props.contained ? "flex max-h-[88vh] flex-col" : ""
         }`}
       >
-        <div className="flex items-center justify-between gap-4 border-b border-white/[0.04] px-5 py-3.5">
-          <h3 className="min-w-0 text-[14px] font-semibold text-[var(--admin-text)]">
-            {props.title}
-          </h3>
+        <div className="flex items-start justify-between gap-4 border-b border-white/[0.06] px-5 py-4">
+          <div className="flex min-w-0 items-start gap-3">
+            {Icon && (
+              <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-white/[0.08]">
+                <Icon className="h-4 w-4 text-[var(--admin-text)]" />
+              </span>
+            )}
+            <div className="min-w-0">
+              <h3 className="text-[14px] font-semibold leading-tight text-[var(--admin-text)]">
+                {props.title}
+              </h3>
+              {props.subtitle && (
+                <p className="mt-1 text-[12px] leading-snug text-[var(--admin-text-muted)]">
+                  {props.subtitle}
+                </p>
+              )}
+            </div>
+          </div>
           <button
             type="button"
             aria-label="Close"
             onClick={props.onClose}
-            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.03] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+            className="-mr-2 flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30"
           >
             <X size={16} />
           </button>
@@ -486,9 +510,28 @@ export function Dialog(props: {
         {/* A contained body deliberately does not scroll: the panel is capped to
             the viewport, so the consumer owns the single scroll region. A nested
             scroll here is what makes a tall form feel cramped on short screens. */}
-        <div className={props.contained ? "flex min-h-0 flex-1 flex-col overflow-hidden p-5" : "p-5"}>
+        <div
+          className={
+            props.contained
+              ? `flex min-h-0 flex-1 flex-col overflow-hidden p-5 ${props.footer ? "pb-4" : ""}`
+              : props.footer
+                ? "p-5 pb-4"
+                : "p-5"
+          }
+        >
           {props.children}
         </div>
+        {props.footer && (
+          <div
+            className={
+              props.footerBordered === false
+                ? "flex flex-col-reverse gap-2.5 px-5 py-4 sm:flex-row sm:items-center sm:justify-end"
+                : "flex flex-col-reverse gap-2.5 border-t border-white/[0.06] bg-[#0c0c0c] px-5 py-4 sm:flex-row sm:items-center sm:justify-end"
+            }
+          >
+            {props.footer}
+          </div>
+        )}
       </div>
     </div>,
     document.body,

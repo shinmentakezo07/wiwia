@@ -55,6 +55,27 @@ function isBad(n: number | null): boolean {
   return n !== null && Number.isNaN(n);
 }
 
+/** "720" → "30d", "24" → "1d", "1.5" → "1.5h", "" → "never". Used by the
+ *  footer recap so the picked limits read at a glance. */
+function humanTtl(hours: string): string {
+  const h = hours.trim();
+  if (!h) return "never";
+  const n = Number(h);
+  if (!Number.isFinite(n)) return "—";
+  if (n >= 24 && n % 24 === 0) return `${Math.round(n / 24)}d`;
+  return `${h}h`;
+}
+
+/** "100000" → "100k", "2500" → "2500". Keeps the footer recap on one line. */
+function compactNum(v: string): string {
+  const n = v.trim();
+  if (!n) return "∞";
+  if (!Number.isFinite(Number(n))) return "—";
+  const num = Number(n);
+  if (num >= 1_000_000) return `${Math.round(num / 1000)}k`;
+  return n;
+}
+
 /** "a, b,,c" → ["a","b","c"]; "" → [] (= all models). */
 function parseCsv(s: string): string[] {
   return s
@@ -96,20 +117,21 @@ function FieldError(props: { children: ReactNode }) {
 }
 
 /** Inset panel wrapping one logical group of the create form, numbered so the
- *  three groups read as an ordered pass over the key's shape. */
+ *  three groups read as an ordered pass over the key's shape. Solid surfaces
+ *  (no transparency) keep the groups legible against the dialog body. */
 function FormSection(props: { index: string; icon: LucideIcon; title: string; desc?: string; children: ReactNode }) {
   const Icon = props.icon;
   return (
-    <section className="rounded-xl border border-[var(--admin-border)] bg-white/[0.015] p-4">
+    <section className="rounded-2xl border border-[var(--admin-border)] bg-[#0c0c0c] p-4">
       <div className="mb-3.5 flex items-center gap-2.5">
-        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500/15 to-violet-500/15 ring-1 ring-white/[0.06]">
-          <Icon className="h-3.5 w-3.5" style={{ color: "rgba(59,130,246,0.75)" }} />
+        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-white/[0.08]">
+          <Icon className="h-3.5 w-3.5 text-[var(--admin-text)]" />
         </span>
         <div className="min-w-0 leading-tight">
           <p className="admin-label">{props.title}</p>
           {props.desc && <p className="mt-0.5 text-[11px] text-[var(--admin-text-dim)]">{props.desc}</p>}
         </div>
-        <span className="ml-auto shrink-0 font-mono text-[11px] text-[var(--admin-text-dim)]">
+        <span className="ml-auto shrink-0 font-mono text-[11px] tabular-nums text-[var(--admin-text-dim)]">
           {props.index}
         </span>
       </div>
@@ -132,22 +154,30 @@ function KeySourceCard(props: {
       type="button"
       aria-pressed={props.active}
       onClick={props.onClick}
-      className={`flex flex-1 items-start gap-2.5 rounded-lg border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50 ${
+      className={`relative flex flex-1 items-start gap-2.5 rounded-xl border p-3.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 ${
         props.active
-          ? "border-[var(--admin-accent-glow)] bg-[var(--admin-accent-soft)] ring-1 ring-[var(--admin-accent-glow)]"
-          : "border-[var(--admin-border)] bg-white/[0.015] hover:border-[var(--admin-border-hover)] hover:bg-white/[0.025]"
+          ? "border-white/[0.16] bg-white/[0.05]"
+          : "border-[var(--admin-border)] bg-[#0c0c0c] hover:border-white/[0.1] hover:bg-[#141414]"
       }`}
     >
+      {props.active && (
+        <span
+          aria-hidden
+          className="absolute right-2.5 top-2.5 flex h-4 w-4 items-center justify-center rounded-full bg-white/15"
+        >
+          <Check size={10} className="text-[var(--admin-text)]" />
+        </span>
+      )}
       <span
-        className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${
-          props.active ? "bg-blue-500/15" : "bg-white/[0.04]"
+        className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
+          props.active ? "bg-white/[0.12]" : "bg-white/[0.06]"
         }`}
       >
-        <Icon className={`h-3.5 w-3.5 ${props.active ? "text-blue-400" : "text-[var(--admin-text-dim)]"}`} />
+        <Icon className={`h-4 w-4 ${props.active ? "text-[var(--admin-text)]" : "text-[var(--admin-text-dim)]"}`} />
       </span>
-      <div className="min-w-0">
+      <div className="min-w-0 pr-5">
         <p className="text-[13px] font-medium text-[var(--admin-text)]">{props.title}</p>
-        <p className="text-[11px] leading-tight text-[var(--admin-text-dim)]">{props.desc}</p>
+        <p className="mt-0.5 text-[11px] leading-tight text-[var(--admin-text-dim)]">{props.desc}</p>
       </div>
     </button>
   );
@@ -161,13 +191,13 @@ function PresetPill(props: { active: boolean; label: string; onClick: () => void
       type="button"
       aria-pressed={props.active}
       onClick={props.onClick}
-      className={`inline-flex min-h-11 items-center gap-1.5 rounded-full border px-3.5 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50 ${
+      className={`inline-flex min-h-11 items-center gap-1.5 rounded-full border px-3.5 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 ${
         props.active
-          ? "border-[var(--admin-accent-glow)] bg-[var(--admin-accent-soft)] text-[var(--admin-accent)]"
-          : "border-[var(--admin-border)] bg-white/[0.015] text-[var(--admin-text-muted)] hover:border-[var(--admin-border-hover)] hover:text-[var(--admin-text)]"
+          ? "border-white/[0.16] bg-white/[0.07] text-[var(--admin-text)]"
+          : "border-[var(--admin-border)] bg-[#0c0c0c] text-[var(--admin-text-muted)] hover:border-white/[0.1] hover:bg-[#141414] hover:text-[var(--admin-text)]"
       }`}
     >
-      <Zap size={11} className={props.active ? "" : "text-[var(--admin-text-dim)]"} />
+      <Zap size={11} className={props.active ? "text-[var(--admin-text)]" : "text-[var(--admin-text-dim)]"} />
       {props.label}
     </button>
   );
@@ -193,21 +223,21 @@ function ModelChips(props: { value: string; onChange: (v: string) => void }) {
   }
 
   return (
-    <div className="rounded-lg border border-[var(--admin-border)] bg-white/[0.02] p-1.5 transition-colors focus-within:border-[var(--admin-accent-glow)]">
+    <div className="rounded-lg border border-[var(--admin-border)] bg-[#0c0c0c] p-1.5 transition-colors focus-within:border-white/[0.16]">
       {chips.length > 0 && (
         <div className="mb-1.5 flex flex-wrap gap-1.5">
           {chips.map((m) => (
             <span
               key={m}
-              className="inline-flex items-center gap-1 rounded-md bg-blue-500/10 py-1 pl-2 pr-1 text-[12px] font-medium text-blue-300 ring-1 ring-blue-500/15"
+              className="inline-flex items-center gap-1 rounded-md bg-white/[0.08] py-1 pl-2 pr-1 text-[12px] font-medium text-[var(--admin-text)]"
             >
-              <Layers size={10} className="text-blue-400/60" />
+              <Layers size={10} className="text-[var(--admin-text-muted)]" />
               <span className="font-mono">{m}</span>
               <button
                 type="button"
                 aria-label={`Remove ${m}`}
                 onClick={() => props.onChange(chips.filter((c) => c !== m).join(", "))}
-                className="-my-2.5 -mr-1.5 flex h-11 w-11 items-center justify-center rounded-md text-blue-300/50 transition-colors hover:bg-white/[0.06] hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+                className="-my-2.5 -mr-1.5 flex h-11 w-11 items-center justify-center rounded-md text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.08] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30"
               >
                 <X size={12} />
               </button>
@@ -510,58 +540,67 @@ export function VirtualKeysPage() {
         open={createOpen}
         wide
         contained
+        icon={created ? Check : KeyRound}
         title={created ? "Key created" : "New virtual key"}
+        subtitle={
+          created
+            ? `${created.name || "Key"} is live — copy the plaintext now, it's never shown again.`
+            : "Issue a client credential. Every limit is optional and editable later."
+        }
         onClose={closeCreate}
       >
         {created ? (
-          <div className="space-y-4">
-            <div className="flex items-center gap-3">
-              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-emerald-500/10 ring-1 ring-emerald-500/20">
-                <Check className="h-5 w-5 text-emerald-400" />
-              </span>
-              <div className="min-w-0">
-                <p className="text-[15px] font-semibold text-[var(--admin-text)]">
-                  {created.name || "Key"} created
-                </p>
-                <p className="text-[12px] text-[var(--admin-text-muted)]">
-                  Copy it now — the plaintext is never shown again.
-                </p>
-              </div>
-            </div>
-
-            <div className="rounded-xl border border-blue-500/15 bg-blue-500/[0.04] p-4">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
+          <div className="flex min-h-0 flex-1 flex-col">
+            <div className="-mr-1 min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+              {/* Reveal-once secret panel — elevated neutral surface so the
+                  plaintext reads as the single focal value, no color, no
+                  transparency. */}
+              <div className="rounded-2xl border border-white/[0.08] bg-[#141414] p-4">
+                <div className="flex items-center gap-3">
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white/[0.08]">
+                    <Check className="h-4.5 w-4.5 text-emerald-400" />
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-[14px] font-semibold text-[var(--admin-text)]">
+                      {created.name || "Key"} created
+                    </p>
+                    <p className="mt-0.5 text-[12px] text-[var(--admin-text-muted)]">
+                      Copy it now — the plaintext is never shown again.
+                    </p>
+                  </div>
+                </div>
+                <div className="mt-3.5">
                   <p className="admin-label mb-1.5">Secret key</p>
-                  <p className="break-all font-mono text-[15px] tracking-wide text-blue-300">
+                  <p className="break-all font-mono text-[15px] leading-relaxed tracking-wide text-[var(--admin-text)]">
                     {created.key}
                   </p>
                 </div>
-                <CopyButton text={created.key} />
+              </div>
+
+              <div className="flex items-start gap-2.5 rounded-lg border border-amber-500/30 bg-[#1a1408] px-3.5 py-3">
+                <AlertTriangle size={14} className="mt-0.5 shrink-0 text-amber-400" />
+                <p className="text-[12px] leading-relaxed text-amber-200">
+                  This is the only time the plaintext is shown. wiwi stores a SHA-256 hash — keep
+                  the key in your secret manager.
+                </p>
+              </div>
+
+              <div className="rounded-lg border border-[var(--admin-border)] bg-[#0c0c0c] px-3.5 py-3">
+                <p className="admin-label mb-1.5">Authenticate with</p>
+                <p className="break-all font-mono text-[12px] text-[var(--admin-text-muted)]">
+                  Authorization: Bearer <span className="text-[var(--admin-text)]">{created.key}</span>
+                </p>
+                <p className="mt-1.5 text-[11px] text-[var(--admin-text-dim)]">
+                  Works on /v1/chat/completions, /v1/responses and /v1/messages (x-api-key is also
+                  accepted on the Anthropic surface).
+                </p>
               </div>
             </div>
 
-            <div className="flex items-start gap-2.5 rounded-lg border border-amber-500/15 bg-amber-500/[0.05] px-3.5 py-3">
-              <AlertTriangle size={14} className="mt-0.5 shrink-0 text-amber-400/80" />
-              <p className="text-[12px] leading-relaxed text-amber-200/80">
-                This is the only time the plaintext is shown. wiwi stores a SHA-256 hash — keep the
-                key in your secret manager.
-              </p>
-            </div>
-
-            <div className="rounded-lg border border-[var(--admin-border)] bg-white/[0.015] px-3.5 py-3">
-              <p className="admin-label mb-1.5">Authenticate with</p>
-              <p className="break-all font-mono text-[12px] text-[var(--admin-text-muted)]">
-                Authorization: Bearer <span className="text-[var(--admin-text)]">{created.key}</span>
-              </p>
-              <p className="mt-1.5 text-[11px] text-[var(--admin-text-dim)]">
-                Works on /v1/chat/completions, /v1/responses and /v1/messages (x-api-key is also
-                accepted on the Anthropic surface).
-              </p>
-            </div>
-
-            <div className="flex justify-end pt-1">
+            <div className="mt-5 flex flex-col-reverse gap-2.5 border-t border-white/[0.04] pt-4 sm:flex-row sm:items-center sm:justify-end">
+              <CopyButton text={created.key} />
               <Button
+                className="min-w-0 sm:w-auto"
                 onClick={() => {
                   closeCreate();
                   void qc.invalidateQueries({ queryKey: ["keys"] });
@@ -591,7 +630,7 @@ export function VirtualKeysPage() {
             }}
           >
             <div className="-mr-1 min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
-              <p className="flex items-start gap-2.5 rounded-lg border border-[var(--admin-border)] bg-white/[0.015] px-3.5 py-3 text-[12px] leading-relaxed text-[var(--admin-text-muted)]">
+              <p className="flex items-start gap-2.5 rounded-lg border border-[var(--admin-border)] bg-[#0c0c0c] px-3.5 py-3 text-[12px] leading-relaxed text-[var(--admin-text-muted)]">
                 <ShieldCheck size={14} className="mt-0.5 shrink-0 text-[var(--admin-text-dim)]" />
                 <span>
                   Limits are optional — leave any of them empty for unrestricted access. Every limit
@@ -753,16 +792,57 @@ export function VirtualKeysPage() {
               {createError && <ErrorText>{createError}</ErrorText>}
             </div>
 
-            <div className="mt-5 flex items-center justify-between gap-3 border-t border-white/[0.04] pt-4">
+            {/* Footer recap — every picked limit reads at a glance so the user
+                can commit without scrolling back up to check each field. */}
+            <div className="mt-5 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-white/[0.04] pt-4 text-[11px] text-[var(--admin-text-dim)]">
+              <span className="admin-label">Summary</span>
+              <span className="font-mono tabular-nums text-[var(--admin-text-muted)]">
+                {models.length > 0 ? `${models.length} model${models.length > 1 ? "s" : ""}` : "all models"}
+              </span>
+              <span aria-hidden>·</span>
+              <span className="font-mono tabular-nums text-[var(--admin-text-muted)]">
+                {budget.trim() ? `$${budget.trim()} budget` : "unlimited budget"}
+              </span>
+              <span aria-hidden>·</span>
+              <span className="font-mono tabular-nums text-[var(--admin-text-muted)]">
+                {compactNum(rpm)} rpm
+              </span>
+              <span aria-hidden>·</span>
+              <span className="font-mono tabular-nums text-[var(--admin-text-muted)]">
+                {compactNum(tpm)} tpm
+              </span>
+              <span aria-hidden>·</span>
+              <span className="font-mono tabular-nums text-[var(--admin-text-muted)]">
+                expires {humanTtl(ttlHours)}
+              </span>
+            </div>
+
+            <div className="mt-4 flex flex-col-reverse gap-2.5 border-t border-white/[0.04] pt-4 sm:flex-row sm:items-center sm:justify-between">
               <p className="hidden text-[11px] text-[var(--admin-text-dim)] sm:block">
                 The plaintext key is shown once, after creation.
               </p>
-              <div className="flex gap-2">
+              <div className="flex flex-col-reverse gap-2.5 sm:flex-row">
                 <Button variant="ghost" type="button" onClick={closeCreate}>
                   Cancel
                 </Button>
-                <Button type="submit" disabled={!canCreate} title={blockedWhy ?? undefined}>
-                  <Sparkles size={14} /> Create key
+                {/* Neutral primary CTA — solid white button, matching the
+                    dialog's no-color, no-transparency treatment. */}
+                <Button
+                  type="submit"
+                  disabled={!canCreate}
+                  title={blockedWhy ?? undefined}
+                  className="border-white/[0.16] bg-white text-black hover:bg-white/90"
+                >
+                  {create.isPending ? (
+                    <>
+                      <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                      Creating…
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles size={14} /> Create key
+                    </>
+                  )}
                 </Button>
               </div>
             </div>
@@ -839,7 +919,7 @@ export function VirtualKeysPage() {
                   type="checkbox"
                   checked={clearBudget}
                   onChange={(e) => setClearBudget(e.target.checked)}
-                  className="h-4 w-4 rounded border-[var(--admin-border)] accent-blue-500"
+                  className="h-4 w-4 rounded border-[var(--admin-border)] accent-white"
                 />
                 Clear budget → unlimited
               </label>
@@ -848,7 +928,7 @@ export function VirtualKeysPage() {
                   type="checkbox"
                   checked={clearRpm}
                   onChange={(e) => setClearRpm(e.target.checked)}
-                  className="h-4 w-4 rounded border-[var(--admin-border)] accent-blue-500"
+                  className="h-4 w-4 rounded border-[var(--admin-border)] accent-white"
                 />
                 Clear RPM → unlimited
               </label>
@@ -857,7 +937,7 @@ export function VirtualKeysPage() {
                   type="checkbox"
                   checked={clearTpm}
                   onChange={(e) => setClearTpm(e.target.checked)}
-                  className="h-4 w-4 rounded border-[var(--admin-border)] accent-blue-500"
+                  className="h-4 w-4 rounded border-[var(--admin-border)] accent-white"
                 />
                 Clear TPM → unlimited
               </label>
@@ -880,7 +960,7 @@ export function VirtualKeysPage() {
                   type="checkbox"
                   checked={clearModels}
                   onChange={(e) => setClearModels(e.target.checked)}
-                  className="h-4 w-4 rounded border-[var(--admin-border)] accent-blue-500"
+                  className="h-4 w-4 rounded border-[var(--admin-border)] accent-white"
                 />
                 Clear allowlist → all models
               </label>
@@ -889,7 +969,7 @@ export function VirtualKeysPage() {
                   type="checkbox"
                   checked={clearExpiry}
                   onChange={(e) => setClearExpiry(e.target.checked)}
-                  className="h-4 w-4 rounded border-[var(--admin-border)] accent-blue-500"
+                  className="h-4 w-4 rounded border-[var(--admin-border)] accent-white"
                 />
                 Clear expiry
                 {editTarget.expires_at != null && (
