@@ -409,6 +409,298 @@ them.
 
 ---
 
+## 🟠 Open — sweep 2026-10-10 (auth, cache, cost, ratelimit, journals)
+
+Five subsystems swept by executing code against the real objects rather than by
+reading alone. Findings #391-#395. Everything else probed clean and is listed as a
+cleared seam at the end of the section.
+
+### 391. A crash mid-request strands `budget_reserved` forever, wedging the key at 402 with $0 spent
+
+**Severity:** 🟠 High · **Status: fixed** — round 125
+(`tests/test_fix_round125.py`; found 2026-10-10, fixed same day)
+**Files:** `wiwi/auth/service.py:639` (`reserve_budget`, the column write),
+`wiwi/server/app.py:2029` (`ctx.budget_reserved = reserved`), the startup path in
+`wiwi/auth/service.py:200-240` (`startup`, which never cleared the column)
+**Fix:** clear stranded reservations at startup — `UPDATE vkeys SET budget_reserved
+= 0` in the same transaction as the existing DDL/migration block in
+`AuthService.startup()`. A reservation is by definition admission-scoped (the release
+path's own comment: "the request died before it could produce usage, so the headroom
+returns to the key"), so no live process can depend on a value written before the
+current one booted. It also cannot lose real spend: `spend_to_date` is a separate
+column only `update_spend` writes. Idempotent, so a second `startup()` is a no-op.
+Left open as a secondary improvement: an admin lever to zero the column on a *running*
+process, for an operator who wants the headroom back without a restart.
+
+`reserve_budget` commits `budget_reserved + :a` to the row at admission
+(`auth/service.py:639`), and `AuthInfo.over_budget` reads
+`spend_to_date + budget_reserved >= max_budget` (`:107`). Every in-process exit
+releases it — `server/app.py:1570`, `:1609`, `:2521` all funnel through
+`release_budget_reservation`. But all three are in-process, and a hard crash
+(SIGKILL, OOM, container restart, `docker compose down` mid-stream) skips every one
+of them. Nothing reconciled the column at startup, and `sweep`-style recovery exists
+for the analogous rate-limit case (`RateLimiter` rebuilds its windows from empty) but
+not here.
+
+**Probe** (executed — real `AuthService` + `UserService` over in-memory SQLite, then
+a simulated restart by constructing a second `AuthService` on the same engine and
+running `startup()`. Pre-fix output first, post-fix second):
+
+```
+PRE-FIX
+reserve 8.0 of a 10.0 cap -> True
+CRASHED STATE : spend=2.0 reserved=8.0 (total=10.0 of 10)
+  over_budget before restart: True   <- wedged
+AFTER RESTART : spend=2.0 reserved=8.0
+  over_budget after restart: True    <- still wedged, permanently
+
+POST-FIX
+CRASHED STATE : spend=2.0 reserved=8.0 (total=10.0 of 10)
+  over_budget before restart: True
+AFTER RESTART : spend=2.0 reserved=0.0
+  over_budget after restart: False   (usable again)
+  real spend preserved     : 2.0
+```
+
+**Consequence:** the key was refused with `402 budget_exhausted` on every subsequent
+request, having actually spent only its real `spend_to_date`. The stranded amount is
+the in-flight request's *estimate*, so a gateway serving long-context requests strands
+a proportionally larger cap on a single crash, and a key whose `max_budget` equals one
+request's estimate was wedged permanently. There was still no *in-process* admin
+affordance: `/admin/keys/*` can raise `max_budget` (which masks the symptom and
+silently grants the key more headroom than the operator intended) but nothing zeroes
+`budget_reserved` on a running process — `list_keys` only *reports* it
+(`auth/service.py:723`), and the two `AuthService` budget APIs are `reserve_budget`
+and `release_budget_reservation`, neither reachable from an HTTP route. The fix
+recovers a wedged key at the next restart, which is the path every deployment takes
+anyway; a live admin lever remains the one open follow-up.
+
+**Why not a known finding:** #324 introduced the reservation and #324's own text
+documents the in-process release discipline ("every early return between reserve and
+settle must refund it"), but it scopes that guarantee to the process. The crash path
+is the one exit the discipline cannot cover, and it is the only one that persists.
+
+**Regression:** `tests/test_fix_round125.py` — five tests, written failing-first
+against the unfixed source (4 failed, 1 passed: the live reserve/release test, which
+is the control proving the fix does not disturb the working path). They pin that a
+full and a partial stranded reservation are both cleared, that real `spend_to_date`
+survives the reconciliation, that the live reserve→release pair is untouched, and
+that repeated `startup()` calls are idempotent.
+
+### 392. `load_config` lets `OSError` escape as a raw traceback instead of a config error
+
+**Severity:** 🟡 Medium (operator-facing; no security or correctness impact)
+**Status: open**
+**Files:** `wiwi/config.py:611-616` (`load_config`), callers `wiwi/main.py:54` and
+`:81` (both catch only `ConfigError`)
+**Fix:** widen to `except (yaml.YAMLError, OSError) as e: raise ConfigError(f"cannot
+read {p}: {e}") from e`.
+
+The `try` wraps only `yaml.safe_load` and catches only `yaml.YAMLError`, but
+`p.read_text()` sits inside that same `try`, so its `OSError` propagates. `main.py`
+catches `ConfigError` only.
+
+**Probe** (executed):
+
+```
+directory    -> IsADirectoryError ESCAPES as a raw traceback
+unreadable   -> PermissionError    ESCAPES as a raw traceback
+nonexistent  -> ConfigError        (clean CLI error)
+```
+
+The common case (a missing file) is already clean, which is why this is medium: the
+reachable triggers are a `--config` pointed at a directory, a `docker run -v` mount
+mistake, or a root-owned `wiwi.yaml` read by the non-root container user.
+
+**Why not a known finding:** grepped for `load_config`, `ConfigError`, `IsADirectory`,
+`PermissionError`, `main.py` — no entry. #382/#383 cover `config.py` *validators*, not
+its I/O error handling.
+
+### 393. The deploy script overwrites the Space's `.gitattributes`, destroying its LFS weight rules
+
+**Severity:** 🟡 Medium (latent deploy failure)
+**Status: open**
+**Files:** `deploy/hf_space.sh:91-94` (the preserve loop) defeated by `:96`
+(`git archive … | tar -x -C "$WORK/space"`)
+**Fix:** have the archive step skip it — `tar -x --exclude=.gitattributes` — or
+re-append the preserved rules after the extract.
+
+`:91-94` deliberately skips `.gitattributes` in the cleanup loop with the comment
+"`.gitattributes` carries HF's LFS rules … must survive". One line later `:96`
+unpacks the repo's own `.gitattributes` over it, defeating the guard. `:113`'s
+`git lfs track "*.png"` then appends to the *repo's* file, so the Space's own weight
+rules (`*.bin`, `*.safetensors`, `*.gguf`) are gone.
+
+**Probe** (executed in a scratch clone): after the archive extract the Space's
+`.gitattributes` contains only the repo's `docs/assets/shots/*.png` line; HF's
+weight rules are absent (`False`).
+
+**Consequence:** latent today — `git ls-files` contains no `.bin`/`.safetensors`, and
+the repo's own `.gitattributes` exists and is tracked, which is what gets shipped.
+The failure mode it sets up is the exact one `:109-113` documents: a future commit
+adding a model weight ships it as a raw binary and HF rejects the push with "Your push
+was rejected because it contains binary files". Worth fixing before anyone adds a
+weight, not after.
+
+**Why not a known finding:** no entry mentions `hf_space.sh` or `.gitattributes`.
+The deploy path is documented as secret-safe (`git archive` exports tracked files
+only), and it is — this is a reliability gap, not an exposure.
+
+### 394. A DB-stored `providers.provider_type` bypasses the `PROVIDER_TYPES` check the YAML path enforces
+
+**Severity:** 🟡 Medium (latent; needs an out-of-band DB write)
+**Status: open**
+**Files:** `wiwi/server/config_store.py:230-256` (`add_provider` accepts any type),
+`wiwi/server/app.py:1046-1065` (`_load_db_config` builds `ProviderAccount` with no
+validation), consumed by `wiwi/core/gateway.py:539` and `:1566`
+**Fix:** in `_load_db_config`, skip and log any DB provider whose `provider_type` is
+not in `PROVIDER_TYPES`.
+
+The YAML path rejects a bad type (`ProviderDef.provider` is
+`Literal[PROVIDER_TYPES]`), the admin create route validates (`app.py:3584`), and
+the registry's import-time assert covers *missing* branches. `_load_db_config` never
+re-validates what it reads back.
+
+**Probe** (executed):
+
+```
+config_store.add_provider accepted bogus type: True
+YAML path rejects it: ConfigError … Input should be 'openai', 'anthropic', ...
+fresh_adapter('not-a-real-type') -> ValueError (isinstance WiwiError: False)
+```
+
+**Consequence:** a raw `ValueError` escapes `decode`/`encode` rather than becoming a
+`WiwiError`. `router.py` catches `WiwiError` (`:1543`) and re-raises anything else
+(`:1598`), so it skips the retry/fallback machinery and surfaces as an unhandled 500
+instead of a clean one. Unreachable through any API today, which is why it is medium:
+the triggers are a hand DB edit, a restore from a foreign dump, or a build whose
+`PROVIDER_TYPES` differed from the one that wrote the row.
+
+**Why not a known finding:** no entry covers `_load_db_config` validation. The
+registry assert at `registry.py`'s bottom catches *missing* branches, not
+out-of-place ones — the same gap `CLAUDE.md` names explicitly.
+
+### 395. `_owner_intent` leaks permanently for journals dropped by the #320 path
+
+**Severity:** 🟡 Medium (slow unbounded memory growth; not a security hole)
+**Status: open**
+**Files:** `wiwi/server/app.py:1704-1725` (`_drop_journal`), reached from
+`wiwi/streaming/tape_store.py:418` (`release`) and `:520` (`_reclaim_intent`)
+**Fix:** give `_drop_journal` a way to forget the intent — a
+`JournalStore.forget_owner(journal_id)` that pops `_owner_intent[journal_id]` (and
+`_durable_intent`), called right after `release`. A dropped journal has no replay
+data left to scope, so the intent has no remaining job.
+
+`open()` records `_owner_intent[request_id]` unconditionally (`tape_store.py:355`).
+On the AUDIT #320 degraded path the owner line cannot be made durable, so
+`_drop_journal` runs `release()` — which pops `_active` only — and then unlinks the
+file. `_reclaim_intent` only reclaims intents whose path appears in the set of files
+`_unlink_expired` itself unlinked, so a file that is already gone is never reclaimed.
+
+**Probe** (executed — real `JournalStore`, the exact `_drop_journal` sequence, then
+the production `sweep_async`; file mtimes aged past the TTL so the control is
+genuinely exercising expiry):
+
+```
+NORMAL path: intent BEFORE: 3   sweep removed: 3   intent AFTER: 0  <- reclaimed
+DROP path  : intent BEFORE: 3   sweep removed: 0   intent AFTER: 3  <- LEAKED
+DROP path  : 2nd sweep removed: 0                  intent AFTER: 3
+```
+
+**Consequence:** in the degraded-journal state (unwritable journal dir — the AUDIT
+#380 container case, a permission error, or a full disk) the map grows by one entry
+per streamed request for the process lifetime, violating the invariant its own
+docstring states at `tape_store.py:277` ("bounded by the journals on disk") and
+#317's fix intent. Each entry is small (a tuple of key id + Path), so this is a slow
+leak, not an OOM.
+
+**Not a security hole — verified.** A stale intent makes `owner_of` report the real
+owner for a journal whose file no longer exists, which makes the replay gate *deny
+or miss*, never leak. Cross-key replay stays refused: a second key replaying the
+dropped id gets `401` and is re-dispatched rather than served the first key's bytes.
+
+**Why not a known finding:** #317 introduced `_owner_intent` and #320 introduced
+`_drop_journal`; #320's own docstring reasons about the intent deliberately ("left in
+place … so the replay gate stays correctly scoped"), which is correct for the request
+in flight but never revisits it afterwards. The reclaim path was written for
+TTL-expiry only.
+
+---
+
+### Cleared seams (probed, no defect — recorded so the next sweep does not redo them)
+
+All confirmed by executing code, not by reading.
+
+- **`cache/keygen.py` — determinism gate and scoping.** `temperature` truthiness
+  correctly rejects `>0` *and* negative values (a negative temperature is not greedy
+  decoding); `n>1` rejected; a typed-wrong `"hot"` temperature fails closed. Key
+  varies with `key_id`, `surface`, `anthropic_beta` and `extras`, and is
+  order-insensitive over `extras` dict ordering. No cross-key serving.
+- **`cache/response_cache.py` — LRU + TTL.** Cap respected, least-recently-used
+  evicted (a touched key survives), TTL expiry exact, a future `stored_at` does not
+  extend the TTL. Note `stored_at=0` (the dataclass default) reads as epoch-1970 and
+  never caches — latent, but the sole production caller
+  (`server/app.py:2320`) sets `stored_at=time.time()`, and the Redis backend
+  compensates for a falsy value at `redis_cache.py:110` while the memory backend does
+  not. Unreachable today; worth making symmetric if either caller changes.
+- **`cost/pricing.py` — clamping and estimators.** Every token term clamped at 0
+  (a negative provider count cannot become a credit), unpriced models report
+  `unpriced=True` with cost 0, and `prompt_includes_cached` handled correctly for
+  both the OpenAI-total and Anthropic-excludes-cached conventions.
+- **`ratelimit/memory.py` — boundaries and refunds.** A request whose `est_tokens`
+  exceeds the whole `tpm` cap is refused *without* reserving, so the key stays usable
+  (no self-DoS). A double `release` does not double-refund. A stored `rpm: 0`
+  (pre-#163 row) fails closed. RPM admission is exact at the boundary.
+- **`streaming/tape_store.py` — journal security.** `path_for` is injective and
+  hashes anything outside the conforming id alphabet, so `../escape`,
+  `../../etc/passwd`, `/abs`, `a/b`, `..`, and a NUL byte all stay inside the journal
+  dir and cannot alias a real journal's file (the #191 class). The owner gate works:
+  `keyA` reads its own journal, `keyB` is denied. A legacy ownerless journal reports
+  `None`, which is the documented restart-replay compat.
+- **`auth/keys.py` + `auth/users.py` — session and password crypto.** Signing is
+  HMAC-SHA256 over an HKDF-derived key; a tampered `role` or `expires` is rejected;
+  a role containing a `.` is rejected (the 4-field split cannot be spoofed).
+  `verify_password` rejects a malformed stored record rather than raising, and
+  password length is bounded on both ends so PBKDF2 cost cannot be driven up on an
+  unauthenticated endpoint.
+- **`auth/service.py` `_owner_locks`.** The `weakref.WeakValueDictionary` of
+  per-owner create locks looked unsound (a lock held only by the dict can be GC'd
+  mid-use, handing two concurrent creates different locks and re-opening #198). It is
+  not: the real call site is `async with self._owner_lock(owner_id):`, which keeps a
+  real reference for the whole critical section. Verified by running 5 concurrent
+  creates through that exact shape — the critical sections serialize with no
+  interleaving, and the dict never hands out a second object.
+- **Journal replay fidelity — cleared.** A `/v1/completions` stream reconnected with
+  `Last-Event-ID: 0` replays byte-identically: same frame count, exactly one `[DONE]`,
+  exactly one usage frame, no double-billing (the replay path logs cost 0). A
+  `final_frame` carrying two sub-frames is correctly split into separate seqs (#283),
+  and the done record sharing the last data record's seq is correctly emitted (#282).
+- **`wire/openai_completions.py` — decode robustness cleared.** 25 typed-wrong inputs
+  either decode sanely or raise `DialectError` (→ 400); no `AttributeError`/
+  `TypeError` reaches a 500. `_max_token_cap` resolves the alias pair exactly as
+  documented, including `max_tokens: 0` as a real cap. Minor cosmetic note (not a
+  defect): `_KNOWN_KEYS` omits `best_of`, so it rides `extras` even though
+  `decode_request` models it — with the default `drop_params=True` it is dropped, and
+  with `False` forwarding it is correct for a real OpenAI param.
+- **`streaming/resume.py` — cleared.** A signature carried on its own
+  `ThinkingDelta` after the text run is captured (the normal Anthropic block-end
+  ordering), and `head_evicted` is correctly consulted so a partially-evicted tape
+  cannot be resumed into an unsigned thinking block.
+- **`deploy/hf_space.sh` secret hygiene — cleared.** `git archive HEAD` exports
+  tracked files only: a planted `.env.probe` in the working tree does not appear in
+  the archive, and the four live secret files are all gitignored. `HF_TOKEN` never
+  lands in argv or `.git/config` — the credential-helper form expands `$HF_TOKEN` in
+  git's own shell, so only the literal placeholder reaches `GIT_AUTH`.
+- **`config_store.py` DDL portability — cleared.** Shared `DOUBLE PRECISION` DDL
+  parses on SQLite as 8-byte `REAL` and round-trips exactly at price precision
+  (1e-7 / 3.3e-9); every `ALTER` is idempotent on both engines via the
+  `_table_columns` guard; #314's `INSERT OR REPLACE` column-drop class is closed
+  (all six sites name every column). Numeric/bool config fields fail closed with a
+  clean `ConfigError` when an env var is missing, and an empty `database_url`
+  correctly falls back to SQLite.
+
+---
+
 ## ✅ Fixed — sweep 2026-10-06 (gateway, streaming, codecs, adapters, router, auth, server)
 
 All thirteen findings below (#360–#372) are fixed; regressions in `tests/test_fix_round120.py`. Review of these fixes found follow-up defects, recorded open as #373–#378.

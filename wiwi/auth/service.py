@@ -244,6 +244,30 @@ class AuthService:
                                       "expires_at", "created_at", "updated_at")
             await conn.execute(sa.text(
                 "CREATE INDEX IF NOT EXISTS idx_vkeys_owner ON vkeys(owner_id)"))
+            # Reconcile in-flight budget reservations (AUDIT #391).
+            #
+            # Every *in-process* exit releases a reservation — the success
+            # settle (server/app.py:1570), the non-success tail (:1609) and the
+            # streaming teardown (:2521) all funnel through
+            # ``release_budget_reservation``. The one exit none of them can
+            # cover is a hard crash: SIGKILL, OOM, container restart,
+            # ``docker compose down`` mid-stream. All three are skipped, and
+            # nothing cleared the column afterwards, so a stranded reservation
+            # survived the restart and the key was refused with 402
+            # ``budget_exhausted`` on every subsequent request having actually
+            # spent $0.00 — with no admin route able to clear it.
+            #
+            # Zeroing is sound because a reservation is admission-scoped by
+            # definition: the release path's own comment says "the request died
+            # before it could produce usage, so the headroom returns to the
+            # key". No live process can depend on a value written before the
+            # current one booted, and a running process holds its own
+            # reservations in memory (``ctx.budget_reserved``) where this cannot
+            # reach them. It also cannot lose real spend: ``spend_to_date`` is a
+            # separate column that only ``update_spend`` writes.
+            #
+            # Idempotent, so a second ``startup()`` (tests, tools) is a no-op.
+            await conn.execute(sa.text("UPDATE vkeys SET budget_reserved = 0"))
 
     # -- lookup ----------------------------------------------------------------
     @staticmethod
