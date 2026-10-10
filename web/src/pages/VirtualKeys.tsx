@@ -2,7 +2,7 @@
 // model allowlists, expiry. Generated plaintext keys are revealed exactly once.
 
 import type { ReactNode } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -11,9 +11,11 @@ import {
   KeyRound,
   Layers,
   Plus,
+  Search,
   ShieldCheck,
   Sparkles,
   Upload,
+  Wallet,
   X,
   Zap,
 } from "lucide-react";
@@ -35,6 +37,7 @@ import {
   ProgressBar,
   Select,
   Spinner,
+  StatCard,
   Table,
   TD,
 } from "@/components/ui";
@@ -94,6 +97,51 @@ function keyStatus(k: VirtualKey): KeyStatus {
   return { label: "active", tone: "green" };
 }
 
+/** Status pill with a leading colored dot. The dot carries the state color at a
+ *  glance even when the label is truncated on a narrow screen; the pill uses the
+ *  shared admin-badge tone so it matches the rest of the console. */
+const STATUS_DOT: Record<KeyStatus["tone"], string> = {
+  green: "bg-emerald-400",
+  amber: "bg-amber-400",
+  gray: "bg-zinc-500",
+};
+
+function StatusBadge(props: { tone: KeyStatus["tone"]; label: string }) {
+  return (
+    <span
+      className={`admin-badge admin-badge-${
+        props.tone === "green" ? "green" : props.tone === "amber" ? "amber" : "gray"
+      }`}
+    >
+      <span aria-hidden className={`h-1.5 w-1.5 rounded-full ${STATUS_DOT[props.tone]}`} />
+      {props.label}
+    </span>
+  );
+}
+
+/** A single "clear this field → unlimited" toggle in the edit dialog. Rows keep
+ *  a ≥44px hit area for touch and an amber tint when armed so the intent is
+ *  unmistakable on a phone, not just on a checkbox tick. */
+function ClearCheck(props: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <label
+      className={`flex min-h-11 cursor-pointer items-center gap-2.5 rounded-md px-2.5 text-[12.5px] transition-colors ${
+        props.checked
+          ? "bg-[#1a1408] text-amber-200"
+          : "text-[var(--admin-text-muted)] hover:bg-[#141414]"
+      }`}
+    >
+      <input
+        type="checkbox"
+        checked={props.checked}
+        onChange={(e) => props.onChange(e.target.checked)}
+        className="h-4 w-4 shrink-0 rounded border-[var(--admin-border)] accent-white"
+      />
+      {props.label}
+    </label>
+  );
+}
+
 function BudgetCell(props: { k: VirtualKey }) {
   const { k } = props;
   return (
@@ -124,7 +172,7 @@ function FormSection(props: { index: string; icon: LucideIcon; title: string; de
   return (
     <section className="rounded-2xl border border-[var(--admin-border)] bg-[#0c0c0c] p-4">
       <div className="mb-3.5 flex items-center gap-2.5">
-        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-white/[0.08]">
+        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[#1a1a1a]">
           <Icon className="h-3.5 w-3.5 text-[var(--admin-text)]" />
         </span>
         <div className="min-w-0 leading-tight">
@@ -154,23 +202,23 @@ function KeySourceCard(props: {
       type="button"
       aria-pressed={props.active}
       onClick={props.onClick}
-      className={`relative flex flex-1 items-start gap-2.5 rounded-xl border p-3.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 ${
+      className={`relative flex flex-1 items-start gap-2.5 rounded-xl border p-3.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500 ${
         props.active
-          ? "border-white/[0.16] bg-white/[0.05]"
-          : "border-[var(--admin-border)] bg-[#0c0c0c] hover:border-white/[0.1] hover:bg-[#141414]"
+          ? "border-[#232323] bg-[#1a1a1a]"
+          : "border-[var(--admin-border)] bg-[#0c0c0c] hover:border-[#1f1f1f] hover:bg-[#141414]"
       }`}
     >
       {props.active && (
         <span
           aria-hidden
-          className="absolute right-2.5 top-2.5 flex h-4 w-4 items-center justify-center rounded-full bg-white/15"
+          className="absolute right-2.5 top-2.5 flex h-4 w-4 items-center justify-center rounded-full bg-[#2a2a2a]"
         >
           <Check size={10} className="text-[var(--admin-text)]" />
         </span>
       )}
       <span
         className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
-          props.active ? "bg-white/[0.12]" : "bg-white/[0.06]"
+          props.active ? "bg-[#2a2a2a]" : "bg-[#1a1a1a]"
         }`}
       >
         <Icon className={`h-4 w-4 ${props.active ? "text-[var(--admin-text)]" : "text-[var(--admin-text-dim)]"}`} />
@@ -191,10 +239,10 @@ function PresetPill(props: { active: boolean; label: string; onClick: () => void
       type="button"
       aria-pressed={props.active}
       onClick={props.onClick}
-      className={`inline-flex min-h-11 items-center gap-1.5 rounded-full border px-3.5 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 ${
+      className={`inline-flex min-h-11 items-center gap-1.5 rounded-full border px-3.5 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500 ${
         props.active
-          ? "border-white/[0.16] bg-white/[0.07] text-[var(--admin-text)]"
-          : "border-[var(--admin-border)] bg-[#0c0c0c] text-[var(--admin-text-muted)] hover:border-white/[0.1] hover:bg-[#141414] hover:text-[var(--admin-text)]"
+          ? "border-[#232323] bg-[#1c1c1c] text-[var(--admin-text)]"
+          : "border-[var(--admin-border)] bg-[#0c0c0c] text-[var(--admin-text-muted)] hover:border-[#1f1f1f] hover:bg-[#141414] hover:text-[var(--admin-text)]"
       }`}
     >
       <Zap size={11} className={props.active ? "text-[var(--admin-text)]" : "text-[var(--admin-text-dim)]"} />
@@ -223,13 +271,13 @@ function ModelChips(props: { value: string; onChange: (v: string) => void }) {
   }
 
   return (
-    <div className="rounded-lg border border-[var(--admin-border)] bg-[#0c0c0c] p-1.5 transition-colors focus-within:border-white/[0.16]">
+    <div className="rounded-lg border border-[var(--admin-border)] bg-[#0c0c0c] p-1.5 transition-colors focus-within:border-[#232323]">
       {chips.length > 0 && (
         <div className="mb-1.5 flex flex-wrap gap-1.5">
           {chips.map((m) => (
             <span
               key={m}
-              className="inline-flex items-center gap-1 rounded-md bg-white/[0.08] py-1 pl-2 pr-1 text-[12px] font-medium text-[var(--admin-text)]"
+              className="inline-flex items-center gap-1 rounded-md bg-[#1a1a1a] py-1 pl-2 pr-1 text-[12px] font-medium text-[var(--admin-text)]"
             >
               <Layers size={10} className="text-[var(--admin-text-muted)]" />
               <span className="font-mono">{m}</span>
@@ -237,7 +285,7 @@ function ModelChips(props: { value: string; onChange: (v: string) => void }) {
                 type="button"
                 aria-label={`Remove ${m}`}
                 onClick={() => props.onChange(chips.filter((c) => c !== m).join(", "))}
-                className="-my-2.5 -mr-1.5 flex h-11 w-11 items-center justify-center rounded-md text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.08] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30"
+                className="-my-2.5 -mr-1.5 flex h-11 w-11 items-center justify-center rounded-md text-[var(--admin-text-dim)] transition-colors hover:bg-[#232323] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500"
               >
                 <X size={12} />
               </button>
@@ -287,6 +335,14 @@ const EXPIRY_OPTIONS: { value: string; label: string }[] = [
 
 function KeyRow(props: { k: VirtualKey; onEdit: (k: VirtualKey) => void; onError: (m: string) => void }) {
   const qc = useQueryClient();
+  const [confirmingRevoke, setConfirmingRevoke] = useState(false);
+  // Disarm the two-step confirm a few seconds after arming, so an abandoned
+  // "Revoke" never stays live where a later stray click could fire it.
+  useEffect(() => {
+    if (!confirmingRevoke) return;
+    const t = setTimeout(() => setConfirmingRevoke(false), 6000);
+    return () => clearTimeout(t);
+  }, [confirmingRevoke]);
   const disable = useMutation({
     mutationFn: () => disableKey(props.k.id, !props.k.disabled),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["keys"] }),
@@ -294,15 +350,33 @@ function KeyRow(props: { k: VirtualKey; onEdit: (k: VirtualKey) => void; onError
   });
   const revoke = useMutation({
     mutationFn: () => deleteKey(props.k.id),
-    onSuccess: () => void qc.invalidateQueries({ queryKey: ["keys"] }),
+    onSuccess: () => {
+      setConfirmingRevoke(false);
+      void qc.invalidateQueries({ queryKey: ["keys"] });
+    },
     onError: (e) => props.onError(e.message),
   });
   const status = keyStatus(props.k);
   return (
-    <tr>
-      <TD className="font-medium">{props.k.alias}</TD>
+    <tr className="group">
+      {/* Sticky identity cell so horizontal scroll on a phone keeps the row's
+          name pinned. A key glyph gives the row an anchor that reads at a
+          glance the way the Dashboard's tiles do. */}
+      <TD className="sticky left-0 z-10 bg-[var(--admin-surface)] after:absolute after:inset-y-0 after:right-0 after:w-px after:bg-[var(--admin-border)] after:content-['']">
+        <span className="flex items-center gap-2.5">
+          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-[var(--admin-border)] bg-white/[0.02] text-[var(--admin-text-dim)] transition-colors group-hover:text-[var(--admin-text)]">
+            <KeyRound size={13} />
+          </span>
+          <span className="min-w-0">
+            <span className="block truncate font-medium text-[var(--admin-text)]">{props.k.alias}</span>
+            <span className="block font-mono text-[10.5px] uppercase tracking-wider text-[var(--admin-text-dim)]">
+              {status.label}
+            </span>
+          </span>
+        </span>
+      </TD>
       <TD>
-        <Badge tone={status.tone}>{status.label}</Badge>
+        <StatusBadge tone={status.tone} label={status.label} />
       </TD>
       <TD>
         {props.k.models.length === 0 ? (
@@ -323,29 +397,36 @@ function KeyRow(props: { k: VirtualKey; onEdit: (k: VirtualKey) => void; onError
         <BudgetCell k={props.k} />
       </TD>
       <TD className="font-mono tabular-nums">{props.k.rpm != null ? fmtInt(props.k.rpm) : "—"}</TD>
-      <TD className="font-mono tabular-nums">{props.k.tpm != null ? fmtInt(props.k.tpm) : "—"}</TD>
-      <TD className="font-mono text-[12px] text-[var(--admin-text-dim)]">
+      <TD className="hidden font-mono tabular-nums lg:table-cell">{props.k.tpm != null ? fmtInt(props.k.tpm) : "—"}</TD>
+      <TD className="hidden font-mono text-[12px] text-[var(--admin-text-dim)] xl:table-cell">
         {props.k.expires_at != null ? fmtDateTime(props.k.expires_at) : "—"}
       </TD>
       <TD>
-        <div className="flex justify-end gap-1.5">
+        <div className="flex flex-wrap items-center justify-end gap-1.5">
           <Button variant="outline" onClick={() => props.onEdit(props.k)}>
             Edit
           </Button>
           <Button variant="outline" disabled={disable.isPending} onClick={() => disable.mutate()}>
             {props.k.disabled ? "Enable" : "Disable"}
           </Button>
-          <Button
-            variant="danger"
-            disabled={revoke.isPending}
-            onClick={() => {
-              if (window.confirm(`Revoke key "${props.k.alias}"? Clients using it will stop working. This cannot be undone.`)) {
-                revoke.mutate();
-              }
-            }}
-          >
-            Revoke
-          </Button>
+          {/* Two-step destructive action: the first click arms a short confirm
+              inline instead of a native window.confirm, so the intent is clear
+              and the button gives undo-style feedback. Auto-cancels after a
+              few seconds so an abandoned confirm never lingers armed. */}
+          {confirmingRevoke ? (
+            <>
+              <Button variant="danger" disabled={revoke.isPending} onClick={() => revoke.mutate()}>
+                {revoke.isPending ? "Revoking…" : "Confirm revoke"}
+              </Button>
+              <Button variant="ghost" disabled={revoke.isPending} onClick={() => setConfirmingRevoke(false)}>
+                Cancel
+              </Button>
+            </>
+          ) : (
+            <Button variant="danger" onClick={() => setConfirmingRevoke(true)}>
+              Revoke
+            </Button>
+          )}
         </div>
       </TD>
     </tr>
@@ -357,6 +438,7 @@ export function VirtualKeysPage() {
 
   // -- list -------------------------------------------------------------------
   const [pageError, setPageError] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
   const query = useQuery({ queryKey: ["keys"], queryFn: listKeys, refetchInterval: 15_000 });
 
   // -- create dialog ------------------------------------------------------------
@@ -492,6 +574,26 @@ export function VirtualKeysPage() {
     }
   }
 
+  // -- list view model ---------------------------------------------------------
+  // Search matches the key alias or any model on its allowlist, so an operator
+  // can find a key by the model it was scoped to, not just by name. The
+  // summaries are computed over the FULL set (not the filtered view) so the
+  // counts always describe the whole account, whatever the current search.
+  const allKeys = query.data?.keys ?? [];
+  const needle = search.trim().toLowerCase();
+  const visibleKeys = needle
+    ? allKeys.filter(
+        (k) =>
+          k.alias.toLowerCase().includes(needle) ||
+          k.models.some((m) => m.toLowerCase().includes(needle)),
+      )
+    : allKeys;
+  const activeCount = allKeys.filter((k) => !k.disabled).length;
+  const totalSpend = allKeys.reduce((s, k) => s + (k.spend_to_date || 0), 0);
+  const nearCap = allKeys.filter(
+    (k) => k.max_budget != null && k.max_budget > 0 && k.spend_to_date / k.max_budget >= 0.8,
+  ).length;
+
   return (
     <div>
       <PageHeader
@@ -510,6 +612,48 @@ export function VirtualKeysPage() {
         </div>
       )}
 
+      {/* Account-level summary — the shared StatCard (accent glow + icon) so
+          these read as the same "live surface" language the Dashboard uses,
+          rather than a flat one-off box. */}
+      {query.data && query.data.keys.length > 0 && (
+        <div className="mb-3 grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+          <StatCard
+            icon={KeyRound}
+            label="Keys"
+            value={fmtInt(query.data.keys.length)}
+            numeric={query.data.keys.length}
+            format={fmtInt}
+            sub={`${activeCount} active`}
+          />
+          <StatCard
+            icon={ShieldCheck}
+            label="Active"
+            value={fmtInt(activeCount)}
+            numeric={activeCount}
+            format={fmtInt}
+            tone="success"
+            sub="in rotation"
+          />
+          <StatCard
+            icon={Wallet}
+            label="Spend to date"
+            value={fmtUsd(totalSpend)}
+            numeric={totalSpend}
+            format={fmtUsd}
+            tone="brand"
+          />
+          <StatCard
+            icon={AlertTriangle}
+            label="Near cap"
+            value={fmtInt(nearCap)}
+            numeric={nearCap}
+            format={fmtInt}
+            tone={nearCap > 0 ? "warning" : "default"}
+            sub={nearCap > 0 ? "≥80% of budget" : "all clear"}
+          />
+        </div>
+      )}
+
       <Card>
         {query.isLoading && (
           <div className="flex justify-center py-10">
@@ -521,14 +665,48 @@ export function VirtualKeysPage() {
             <ErrorText>{query.error.message}</ErrorText>
           </div>
         )}
+        {query.data && query.data.keys.length > 0 && (
+          <div className="flex items-center gap-3 border-b border-[var(--admin-border)] px-4 py-3">
+            <label className="relative min-w-0 flex-1">
+              <span className="sr-only">Search keys by name or model</span>
+              <Search
+                size={14}
+                aria-hidden
+                className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--admin-text-dim)]"
+              />
+              <Input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search by name or model…"
+                className="pl-9"
+              />
+            </label>
+            <span className="shrink-0 font-mono text-[11px] tabular-nums text-[var(--admin-text-dim)]">
+              {needle
+                ? `${visibleKeys.length}/${allKeys.length}`
+                : `${allKeys.length}`}
+            </span>
+          </div>
+        )}
         {query.data &&
           (query.data.keys.length === 0 ? (
             <EmptyState>No virtual keys yet. Issue one with “New key”.</EmptyState>
+          ) : visibleKeys.length === 0 ? (
+            <EmptyState>
+              No keys match “{search.trim()}”.{" "}
+              <button
+                type="button"
+                onClick={() => setSearch("")}
+                className="font-medium text-[var(--admin-accent)] underline-offset-2 hover:underline focus-visible:outline-none focus-visible:underline"
+              >
+                Clear search
+              </button>
+            </EmptyState>
           ) : (
             <Table
               head={["Name", "Status", "Models", "Budget", "RPM", "TPM", "Expires", ""]}
             >
-              {query.data.keys.map((k) => (
+              {visibleKeys.map((k) => (
                 <KeyRow key={k.id} k={k} onEdit={openEdit} onError={setPageError} />
               ))}
             </Table>
@@ -555,9 +733,9 @@ export function VirtualKeysPage() {
               {/* Reveal-once secret panel — elevated neutral surface so the
                   plaintext reads as the single focal value, no color, no
                   transparency. */}
-              <div className="rounded-2xl border border-white/[0.08] bg-[#141414] p-4">
+              <div className="rounded-2xl border border-[#232323] bg-[#141414] p-4">
                 <div className="flex items-center gap-3">
-                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white/[0.08]">
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#1a1a1a]">
                     <Check className="h-4.5 w-4.5 text-emerald-400" />
                   </span>
                   <div className="min-w-0">
@@ -597,7 +775,7 @@ export function VirtualKeysPage() {
               </div>
             </div>
 
-            <div className="mt-5 flex flex-col-reverse gap-2.5 border-t border-white/[0.04] pt-4 sm:flex-row sm:items-center sm:justify-end">
+            <div className="mt-5 flex flex-col-reverse gap-2.5 border-t border-[#171717] pt-4 sm:flex-row sm:items-center sm:justify-end">
               <CopyButton text={created.key} />
               <Button
                 className="min-w-0 sm:w-auto"
@@ -792,58 +970,73 @@ export function VirtualKeysPage() {
               {createError && <ErrorText>{createError}</ErrorText>}
             </div>
 
-            {/* Footer recap — every picked limit reads at a glance so the user
-                can commit without scrolling back up to check each field. */}
-            <div className="mt-5 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-white/[0.04] pt-4 text-[11px] text-[var(--admin-text-dim)]">
-              <span className="admin-label">Summary</span>
-              <span className="font-mono tabular-nums text-[var(--admin-text-muted)]">
-                {models.length > 0 ? `${models.length} model${models.length > 1 ? "s" : ""}` : "all models"}
-              </span>
-              <span aria-hidden>·</span>
-              <span className="font-mono tabular-nums text-[var(--admin-text-muted)]">
-                {budget.trim() ? `$${budget.trim()} budget` : "unlimited budget"}
-              </span>
-              <span aria-hidden>·</span>
-              <span className="font-mono tabular-nums text-[var(--admin-text-muted)]">
-                {compactNum(rpm)} rpm
-              </span>
-              <span aria-hidden>·</span>
-              <span className="font-mono tabular-nums text-[var(--admin-text-muted)]">
-                {compactNum(tpm)} tpm
-              </span>
-              <span aria-hidden>·</span>
-              <span className="font-mono tabular-nums text-[var(--admin-text-muted)]">
-                expires {humanTtl(ttlHours)}
-              </span>
-            </div>
+            {/* Sticky summary + actions. Kept OUT of the scrolling body so the
+                live recap and the primary CTA are always reachable, whatever
+                the form height — on a short phone the action bar never scrolls
+                out from under the user's thumb. */}
+            <div className="mt-5 shrink-0 border-t border-[#171717] pt-4">
+              {/* Live recap — every picked limit reads at a glance so the user
+                  can commit without scrolling back up to check each field. */}
+              <div className="mb-3.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-[var(--admin-text-dim)]">
+                <span className="admin-label">Summary</span>
+                <span className="font-mono tabular-nums text-[var(--admin-text-muted)]">
+                  {models.length > 0 ? `${models.length} model${models.length > 1 ? "s" : ""}` : "all models"}
+                </span>
+                <span aria-hidden>·</span>
+                <span className="font-mono tabular-nums text-[var(--admin-text-muted)]">
+                  {budget.trim() ? `$${budget.trim()} budget` : "unlimited budget"}
+                </span>
+                <span aria-hidden>·</span>
+                <span className="font-mono tabular-nums text-[var(--admin-text-muted)]">
+                  {compactNum(rpm)} rpm
+                </span>
+                <span aria-hidden>·</span>
+                <span className="font-mono tabular-nums text-[var(--admin-text-muted)]">
+                  {compactNum(tpm)} tpm
+                </span>
+                <span aria-hidden>·</span>
+                <span className="font-mono tabular-nums text-[var(--admin-text-muted)]">
+                  expires {humanTtl(ttlHours)}
+                </span>
+              </div>
 
-            <div className="mt-4 flex flex-col-reverse gap-2.5 border-t border-white/[0.04] pt-4 sm:flex-row sm:items-center sm:justify-between">
-              <p className="hidden text-[11px] text-[var(--admin-text-dim)] sm:block">
-                The plaintext key is shown once, after creation.
-              </p>
-              <div className="flex flex-col-reverse gap-2.5 sm:flex-row">
-                <Button variant="ghost" type="button" onClick={closeCreate}>
-                  Cancel
-                </Button>
-                {/* Neutral primary CTA — solid white button, matching the
-                    dialog's no-color, no-transparency treatment. */}
-                <Button
-                  type="submit"
-                  disabled={!canCreate}
-                  title={blockedWhy ?? undefined}
-                  className="border-white/[0.16] bg-white text-black hover:bg-white/90"
-                >
-                  {create.isPending ? (
-                    <>
-                      <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                      Creating…
-                    </>
-                  ) : (
-                    <>
-                      <Sparkles size={14} /> Create key
-                    </>
-                  )}
-                </Button>
+              {/* Readiness: the CTA explains *why* it is disabled inline, rather
+                  than only on hover — hover-only feedback is invisible on touch. */}
+              {!canCreate && blockedWhy && (
+                <p className="mb-2.5 flex items-center gap-1.5 text-[11px] text-amber-400">
+                  <AlertTriangle size={12} className="shrink-0" />
+                  {blockedWhy}
+                </p>
+              )}
+
+              <div className="flex flex-col-reverse gap-2.5 sm:flex-row sm:items-center sm:justify-between">
+                <p className="hidden text-[11px] text-[var(--admin-text-dim)] sm:block">
+                  The plaintext key is shown once, after creation.
+                </p>
+                <div className="flex flex-col-reverse gap-2.5 sm:flex-row">
+                  <Button variant="ghost" type="button" onClick={closeCreate}>
+                    Cancel
+                  </Button>
+                  {/* Neutral primary CTA — solid white button, matching the
+                      dialog's no-color, no-transparency treatment. */}
+                  <Button
+                    type="submit"
+                    disabled={!canCreate}
+                    title={blockedWhy ?? undefined}
+                    className="border-[#e5e5e5] bg-white text-black hover:bg-[#e5e5e5]"
+                  >
+                    {create.isPending ? (
+                      <>
+                        <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                        Creating…
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles size={14} /> Create key
+                      </>
+                    )}
+                  </Button>
+                </div>
               </div>
             </div>
           </form>
@@ -913,34 +1106,10 @@ export function VirtualKeysPage() {
                 />
               </Field>
             </div>
-            <div className="flex flex-wrap gap-x-4 gap-y-1 text-[13px] text-[var(--admin-text-muted)]">
-              <label className="flex min-h-11 items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={clearBudget}
-                  onChange={(e) => setClearBudget(e.target.checked)}
-                  className="h-4 w-4 rounded border-[var(--admin-border)] accent-white"
-                />
-                Clear budget → unlimited
-              </label>
-              <label className="flex min-h-11 items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={clearRpm}
-                  onChange={(e) => setClearRpm(e.target.checked)}
-                  className="h-4 w-4 rounded border-[var(--admin-border)] accent-white"
-                />
-                Clear RPM → unlimited
-              </label>
-              <label className="flex min-h-11 items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={clearTpm}
-                  onChange={(e) => setClearTpm(e.target.checked)}
-                  className="h-4 w-4 rounded border-[var(--admin-border)] accent-white"
-                />
-                Clear TPM → unlimited
-              </label>
+            <div className="flex flex-col gap-1 rounded-lg border border-[var(--admin-border)] bg-[#0c0c0c] p-1">
+              <ClearCheck label="Clear budget → unlimited" checked={clearBudget} onChange={setClearBudget} />
+              <ClearCheck label="Clear RPM → unlimited" checked={clearRpm} onChange={setClearRpm} />
+              <ClearCheck label="Clear TPM → unlimited" checked={clearTpm} onChange={setClearTpm} />
             </div>
             <Field
               label="Model allowlist"
@@ -954,30 +1123,17 @@ export function VirtualKeysPage() {
                 placeholder="unchanged"
               />
             </Field>
-            <div className="flex flex-wrap gap-x-4 gap-y-1 text-[13px] text-[var(--admin-text-muted)]">
-              <label className="flex min-h-11 items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={clearModels}
-                  onChange={(e) => setClearModels(e.target.checked)}
-                  className="h-4 w-4 rounded border-[var(--admin-border)] accent-white"
-                />
-                Clear allowlist → all models
-              </label>
-              <label className="flex min-h-11 items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={clearExpiry}
-                  onChange={(e) => setClearExpiry(e.target.checked)}
-                  className="h-4 w-4 rounded border-[var(--admin-border)] accent-white"
-                />
-                Clear expiry
-                {editTarget.expires_at != null && (
-                  <span className="text-[11px] text-[var(--admin-text-dim)]">
-                    (currently {fmtDateTime(editTarget.expires_at)})
-                  </span>
-                )}
-              </label>
+            <div className="flex flex-col gap-1 rounded-lg border border-[var(--admin-border)] bg-[#0c0c0c] p-1">
+              <ClearCheck label="Clear allowlist → all models" checked={clearModels} onChange={setClearModels} />
+              <ClearCheck
+                label={
+                  editTarget.expires_at != null
+                    ? `Clear expiry (currently ${fmtDateTime(editTarget.expires_at)})`
+                    : "Clear expiry"
+                }
+                checked={clearExpiry}
+                onChange={setClearExpiry}
+              />
             </div>
             {editError && <ErrorText>{editError}</ErrorText>}
             <div className="flex justify-end gap-2 pt-2">

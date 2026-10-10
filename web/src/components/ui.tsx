@@ -447,13 +447,50 @@ export function Dialog(props: {
   /** Hide the default bottom hairline divider on the footer. */
   footerBordered?: boolean;
 }) {
+  const panelRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (!props.open) return;
+    // Remember the trigger so focus returns to it when the dialog closes — a
+    // keyboard user who opens a modal should land back where they started, not
+    // at the top of the document (A11y). Captured on open, before the move.
+    const restoreTo = document.activeElement as HTMLElement | null;
+    const panel = panelRef.current;
+    const FOCUSABLE =
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    // Move focus into the dialog on open (prefers the first field), so Tab
+    // starts inside the panel rather than on the page behind it.
+    const initial = panel?.querySelector<HTMLElement>(FOCUSABLE) ?? panel;
+    initial?.focus?.();
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") props.onClose();
+      if (e.key === "Escape") {
+        props.onClose();
+        return;
+      }
+      // Focus trap: with an open modal, Tab must cycle within the panel and
+      // never reach the page behind it. Wrap from the last node to the first
+      // (and Shift-Tab the other way). Without this, keyboard focus escapes the
+      // dialog into the inert content underneath.
+      if (e.key !== "Tab" || panel == null) return;
+      const nodes = Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
+        (n) => n.offsetParent !== null || n === document.activeElement,
+      );
+      if (nodes.length === 0) return;
+      const first = nodes[0];
+      const last = nodes[nodes.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      if (e.shiftKey && (active === first || !panel.contains(active))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && (active === last || !panel.contains(active))) {
+        e.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      restoreTo?.focus?.();
+    };
   }, [props.open, props]);
 
   if (!props.open) return null;
@@ -474,8 +511,10 @@ export function Dialog(props: {
       }}
     >
       <div
+        ref={panelRef}
         role="dialog"
         aria-modal="true"
+        tabIndex={-1}
         className={`admin-dialog-enter w-full overflow-hidden rounded-2xl border border-white/[0.06] bg-[var(--admin-surface-elevated)] shadow-2xl shadow-black/60 ${SIZE_CLASS[sizeClass]} ${
           props.contained ? "flex max-h-[88vh] flex-col" : ""
         }`}
