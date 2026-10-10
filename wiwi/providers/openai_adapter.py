@@ -10,7 +10,13 @@ import structlog
 
 from wiwi.ir import translation as tr
 from wiwi.ir import types as ir
-from wiwi.providers.base import ProviderKeyRef, as_dict, as_list, coerce_args_fragment
+from wiwi.providers.base import (
+    ProviderKeyRef,
+    as_dict,
+    as_list,
+    as_str,
+    coerce_args_fragment,
+)
 from wiwi.streaming import deltas as dl
 
 log = structlog.get_logger("wiwi.openai_adapter")
@@ -609,7 +615,17 @@ class OpenAIAdapter:
                 idx = i
             fn = tc.get("function")
             fn = fn if isinstance(fn, dict) else {}
-            name_fragment = fn.get("name", "")
+            # Coerce at the boundary: ``ToolCallOpen.name`` is contractually a
+            # ``str``, and ``fn.get("name", "")`` defaults only a *missing* key,
+            # so an explicit JSON ``null`` — or a list/dict from a re-serializing
+            # proxy — flowed straight through. A ``None`` collapsed to "" (AUDIT
+            # #385), but a *container* poisoned ``_tool_names`` below and raised
+            # on the NEXT fragment: ``"" + ["web_search"]`` is a ``TypeError``
+            # out of ``decode_stream_event``, which the pump turns into a
+            # mid-stream ``StreamError`` and bills as a failed request with a
+            # healthy upstream blamed. ``as_str`` is the guard the OpenRouter
+            # sibling already uses for this exact read.
+            name_fragment = as_str(fn.get("name"))
             if tc.get("id"):
                 if idx in self._synthesized_opens:
                     # The provider omitted the id on the first chunk, so we

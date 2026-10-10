@@ -209,6 +209,206 @@ covered usage counters, not this container gate.
 
 ---
 
+## 🟠 Open — sweep 2026-10-10 (ir)
+
+Two findings from a sweep of `wiwi/ir/` (`types.py`, `translation.py`, `builtin_tools.py`),
+both confirmed by **executing code** against the real adapters rather than reading alone.
+Findings #387-#388.
+
+### 387. `is_builtin_name` is not total — a non-str `ToolUsePart.name` raises `TypeError` on replay
+
+**Severity:** 🟠 High · **Status: fixed** — round 124
+(`tests/test_fix_round124.py`; found 2026-10-10, fixed same day)
+**Files:** `wiwi/ir/builtin_tools.py:136-138` (`is_builtin_name`), reached from
+`wiwi/providers/anthropic_adapter.py:373`
+
+> **HTTP-reachable sibling: see #390.** Verifying this fix end to end over the real
+> request path found that a *fragmented* container name raises earlier, in the
+> adapter's name-accumulating branch. #387 is the downstream read; #390 is the one a
+> client can actually trigger.
+**Fix:** `return isinstance(name, str) and name in BUILTIN_TOOL_TYPES` — the guard the
+sibling `canonical_for` already carries (`builtin_tools.py:104-105`) and that #126 asks for.
+
+```python
+136:  def is_builtin_name(name: str) -> bool:
+137:      """True when a tool-call name (ToolUsePart.name) names a canonical builtin."""
+138:      return name in BUILTIN_TOOL_TYPES
+```
+
+`name in <dict>` hashes the key, so a `list`/`dict` name raises `TypeError`. Every other
+entry point in this module is total (`canonical_for` guards its input, and the `wire/`
+callers pre-guard `ttype`); this is the one unguarded read.
+
+**Probe** (executed against the real adapter; reachable through the unguarded
+`name_fragment = fn.get("name", "")` at `openai_adapter.py:612` / `nim_adapter.py:430`
+that open #385 records — a JSON `null` is the *weakest* case of that missing coercion,
+and a list/dict name is the one that crashes):
+
+```
+openai     name=['web_search']  -> chunk holds _pending_opens={0: ('c1', ['web_search'])}
+openai     name=['web_search']  -> [DONE]: ToolCallOpen(name=['web_search']), ToolCallClose, Finish, StreamEnd
+anthropic  block_type='tool_use' -> OK, upstream body carries {"type":"tool_use","name":["web_search"]}
+anthropic  block_type='' / None  -> RAISE TypeError: unhashable type: 'list'
+```
+
+**Consequence chain.** The gateway folds the delta into `ir.ToolUsePart`
+(`core/gateway.py:812`, `streaming/resume.py:170`), whose `__post_init__` coerces the
+*id* but not the *name*. So a list name reaches the Anthropic adapter's replay path
+verbatim and is emitted upstream as `{"type":"tool_use","name":["web_search"]}`, which
+Anthropic 400s. When `block_type` is falsy — an IR part built without it, the fallback
+#156 documents — the `bt.is_builtin_name(p.name)` call at `anthropic_adapter.py:373`
+raises `TypeError` instead, which the pump turns into a `StreamError`: the request fails
+and a healthy deployment is cooled.
+
+**Why not a known finding:** #126 and #154 fix `canonical_for`'s guard and the `wire/`
+callers; #232/#385 cover name *coercion* in the adapters. None covers `is_builtin_name`
+itself, which is the read that turns a bad name into a 500 instead of a clean 400.
+
+### 388. `thinking_budget_to_effort` is not total — a non-int budget raises `TypeError`
+
+**Severity:** 🟡 Medium · **Status: fixed** — round 124
+(`tests/test_fix_round124.py`; found 2026-10-10, fixed same day)
+**Files:** `wiwi/ir/types.py:328-349` (`thinking_budget_to_effort`), consumed by
+`GenParams.effective_reasoning_effort` (`:251`)
+**Fix:** return `"none"` for a non-numeric budget, mirroring the guard #351 added to
+`effort_to_thinking_budget` directly above it.
+
+```python
+328:  def thinking_budget_to_effort(budget: int) -> str:
+...
+341:      if budget <= 0:      # str/None/list -> TypeError
+```
+
+**Probe** (executed):
+
+```
+thinking_budget_to_effort('8000')  -> RAISE TypeError: '<=' not supported between 'str' and 'int'
+thinking_budget_to_effort(None)    -> RAISE TypeError
+thinking_budget_to_effort([8000])  -> RAISE TypeError
+thinking_budget_to_effort(8000.0)  -> 'medium'   (float accepted, so the type is loose by design)
+GenParams(thinking_budget='8000').effective_reasoning_effort() -> RAISE TypeError
+```
+
+`effort_to_thinking_budget` (`:288`) was made total by #351 with the reasoning "The type
+is not enforced at the IR boundary … so the guard belongs here", and its docstring says
+so. The inverse function below never got the mirror guard, so the class #351 closed is
+only half closed.
+
+**Reachability (recorded so the severity is not over-rated).** No current wire decoder
+reaches this: `anthropic_messages.py:415-427` coerces `budget_tokens` to `int` (verified —
+a digit-string `"8000"` decodes to `8000`, and all four adapters then encode cleanly), and
+the other three surfaces never set `thinking_budget`. It is reachable from any adapter or
+admin path that sets the field without coercion. Medium rather than high because the live
+entry point is guarded, not because the helper is safe.
+
+**Consequence when reached:** `effective_reasoning_effort()` runs inside `encode_request`
+on six adapters (`openai`, `bai`, `nim`, `opencode`, `openrouter`, `workbuddy`), so the
+`TypeError` surfaces as a 500 before any upstream call.
+
+**Why not a known finding:** #351 covers only the forward direction; #83/#187 cover
+`coerce_int` at the wire boundary.
+
+### 389. `effective_thinking_budget` forwarded the raw field, so fixing #388's helper was not enough
+
+**Severity:** 🟠 High · **Status: fixed** — round 124
+(`tests/test_fix_round124.py::test_broken_thinking_budget_never_raises_in_any_adapter`)
+**Files:** `wiwi/ir/types.py` (`GenParams.effective_thinking_budget`),
+`wiwi/providers/openrouter_adapter.py:179` (`max(g.thinking_budget, 1024)`)
+
+Found while verifying the #388 fix end to end, not in the original sweep: with only
+`thinking_budget_to_effort` guarded, three of the eleven provider types still raised
+`TypeError` inside `encode_request` on a non-numeric budget.
+
+**Probe** (executed, post-#388-fix, pre-#389-fix):
+
+```
+budget='8000'  -> openai:ok bai:ok nvidia-nim:ok opencode:ok
+                  openrouter:TypeError workbuddy:ok anthropic:TypeError gemini:ok
+```
+
+Two independent reads of the same unvalidated field:
+
+```
+ir/types.py  effective_thinking_budget:  if self.thinking_budget is not None:
+                                             return self.thinking_budget     # raw
+openrouter   179:  budget = max(g.thinking_budget, 1024)                      # raw
+anthropic    530:  budget = max(budget, MIN_THINKING_BUDGET)                  # via accessor
+```
+
+`effective_thinking_budget` was typed `int | None` but returned the field verbatim, so
+`coerce_int` never ran on it — the exact "second convention beside an existing one"
+shape `AGENTS.md` prohibits, since `coerce_int` already existed for this job and its
+sibling accessor used it. OpenRouter additionally bypassed the accessor entirely and
+read the raw field, so it would have raised even with the accessor fixed.
+
+**Fix:** `effective_thinking_budget` routes the field through the existing
+`ir.coerce_int` and returns `None` for an unusable value — the value every caller
+already handles as "no resolvable budget, leave thinking OFF", so a malformed budget
+degrades exactly like an unknown effort instead of 500ing. A float still passes through
+(`coerce_int` accepts an integral one, and the callers only compare and add), and `0`
+still passes through as the documented thinking-off signal.
+
+**Near-miss while fixing, recorded because it bit.** Routing OpenRouter's read through
+`effective_thinking_budget` broke two existing tests (`test_openrouter_adapter.py::test_reasoning_effort_maps_to_reasoning_effort`
+and `::test_cross_dialect_openai_to_openrouter`): that accessor *derives* a budget from
+a named effort, so `reasoning_effort: high` became `{"max_tokens": 32000}` and lost the
+provider's own effort level. The adapter documents the opposite precedence — a *direct*
+budget wins over a named level — so OpenRouter reads the raw field through `coerce_int`
+and the derived accessor is deliberately not used there. Pinned by
+`test_fix_round124.py::test_openrouter_keeps_effort_precedence_over_a_derived_budget`.
+
+**Why not a known finding:** #388 recorded the helper but not this sibling, and the
+two were only separated by executing the fix rather than reasoning about it.
+
+### 390. A *fragmented* container tool name 500s the stream — the HTTP-reachable half of #387
+
+**Severity:** 🟠 High · **Status: fixed** — round 124
+(`tests/test_fix_round124_e2e.py::test_fragmented_container_tool_name_does_not_500_over_http`)
+**Files:** `wiwi/providers/openai_adapter.py:612` and `:646`,
+`wiwi/providers/nim_adapter.py:430` and its accumulate branch
+
+Found while verifying #387 end to end over the real HTTP stack — the adapter-level
+tests could not catch it because they sent the name in ONE chunk. Sent fragmented,
+the first chunk stores the container in `_tool_names` and the second (a bare name
+fragment with no `id`) reaches the accumulating branch:
+
+```python
+646:  self._tool_names[idx] = self._tool_names.get(idx, "") + name_fragment
+                            TypeError: can only concatenate list (not "str") to list
+```
+
+**Probe** (executed over HTTP, Anthropic client → OpenAI-wire upstream, pre-fix):
+
+```
+STATUS: 200
+event: content_block_start
+data: {"type":"content_block_start",...,"content_block":{"type":"tool_use","id":"c1","name":["web_search"],...}}
+event: error
+data: {"type":"error","error":{"type":"api_error","message":"unhashable type: 'list'"}}
+request log: status=502 api_error
+```
+
+So the client got a `tool_use` block with an array where a string belongs, then a
+synthetic error frame, and the request was logged as a failed one — a healthy
+upstream blamed for a frame with no semantics. The `TypeError` escapes
+`decode_stream_event` into the pump's mid-stream handler, which bills the partial and
+feeds the deployment/key health machinery (the #153 consequence class).
+
+**Fix:** coerce at the boundary with the existing `as_str` — the guard the OpenRouter
+sibling already used for this exact read, and the fix #385's own sketch called for
+(`name_fragment = as_str(fn.get("name"))`). Applied to both `openai_adapter` and
+`nim_adapter`, which carried the identical unguarded pair. This also closes the
+explicit-`null` variant: `fn.get("name", "")` defaults only a *missing* key, so a
+JSON `null` reached the same branch as `"" + None`. Pinned over HTTP by the test
+above and `::test_fragmented_null_tool_name_does_not_500_over_http`.
+
+**Why not a known finding:** #385 filed the single-chunk shape and #387 the
+downstream read; neither covered the *accumulating* branch, which is only reachable
+when the name arrives fragmented. Only executing the full request path separated
+them.
+
+---
+
 ## ✅ Fixed — sweep 2026-10-06 (gateway, streaming, codecs, adapters, router, auth, server)
 
 All thirteen findings below (#360–#372) are fixed; regressions in `tests/test_fix_round120.py`. Review of these fixes found follow-up defects, recorded open as #373–#378.

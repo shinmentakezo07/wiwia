@@ -39,7 +39,7 @@ import orjson
 
 from wiwi.ir import translation as tr
 from wiwi.ir import types as ir
-from wiwi.providers.base import ProviderKeyRef, coerce_args_fragment
+from wiwi.providers.base import ProviderKeyRef, as_str, coerce_args_fragment
 from wiwi.providers.nim_native_tools import (
     MiniMaxFramer,
     NimToolProtocolError,
@@ -427,7 +427,12 @@ class NimAdapter(OpenAIAdapter):
                 idx = i
             fn = tc.get("function")
             fn = fn if isinstance(fn, dict) else {}
-            name_fragment = fn.get("name", "")
+            # Coerce at the boundary (mirrors OpenAIAdapter, AUDIT #385/#390):
+            # ``ToolCallOpen.name`` is contractually a ``str``, and a container
+            # name poisons ``_tool_names`` below, raising on the next fragment's
+            # ``"" + name_fragment`` out of ``decode_stream_event`` — which the
+            # pump bills as a mid-stream failure with a healthy upstream blamed.
+            name_fragment = as_str(fn.get("name"))
             if tc.get("id"):
                 if idx in self._synthesized_opens:
                     # Args arrived first and we synthesized an Open; the real

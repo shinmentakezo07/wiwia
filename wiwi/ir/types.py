@@ -257,9 +257,21 @@ class GenParams:
         Returns None when reasoning_effort is 'none' (thinking disabled) or
         when neither field is set, so adapters can distinguish 'no thinking'
         from 'use a default budget.'
+
+        Returns None for an UNUSABLE budget (a non-numeric value, or a ``bool``)
+        rather than forwarding it: this is typed ``int | None`` but
+        ``GenParams`` is a plain dataclass with no runtime enforcement, and
+        every caller does arithmetic on the result (``max(budget, 1024)`` in the
+        Anthropic and OpenRouter adapters, ``thinkingBudget`` in Gemini), so a
+        raw non-numeric raised ``TypeError`` out of ``encode_request`` (AUDIT
+        #388). None is the value the callers already handle as "no resolvable
+        budget — leave thinking OFF", so a malformed budget degrades the same
+        way an unknown effort does, instead of 500ing. A float is preserved:
+        the callers only compare and add, so ``8000.0`` has always been usable.
         """
-        if self.thinking_budget is not None:
-            return self.thinking_budget
+        budget = coerce_int(self.thinking_budget)
+        if budget is not None:
+            return budget
         if self.reasoning_effort:
             return effort_to_thinking_budget(self.reasoning_effort)
         if self.effort:
@@ -332,10 +344,26 @@ def thinking_budget_to_effort(budget: int) -> str:
     ``effort_to_thinking_budget("none") is None``. Previously 0 fell through to
     "low", which turned thinking ON for a caller that had disabled it.
 
+    Total by construction, mirroring ``effort_to_thinking_budget`` above (AUDIT
+    #351/#388): a non-numeric budget must not reach the ``<=`` ladder, which
+    raises ``TypeError``. ``thinking_budget`` is typed ``int | None`` but
+    ``GenParams`` is a plain dataclass and callers may set it uncoerced, and the
+    one accessor that calls this (``effective_reasoning_effort``) runs inside six
+    adapters' ``encode_request`` — so the guard belongs here, closing the class
+    for every present and future caller rather than one adapter at a time. An
+    unusable value degrades to "none" (thinking off), matching the inverse's
+    rule that an unknown effort leaves thinking OFF rather than enabling it at
+    an arbitrary budget. A ``bool`` is rejected even though
+    ``isinstance(True, int)`` is True — ``thinking_budget=true`` is a client
+    bug, not "1", the same rule ``coerce_int`` documents. A float is accepted:
+    the ladder only compares, so ``8000.0`` was always well-typed here.
+
     Note: "minimal" and "max" are intentionally NOT reachable from here. They
     alias "low" (1024) and "xhigh" (64000) in the forward map, so the inverse
     keeps its original boundaries for those collisions.
     """
+    if isinstance(budget, bool) or not isinstance(budget, (int, float)):
+        return "none"
     if budget <= 0:
         return "none"
     if budget <= 2048:

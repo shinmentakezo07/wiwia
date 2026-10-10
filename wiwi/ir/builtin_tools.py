@@ -134,5 +134,15 @@ def wire_type_for(surface: str, canonical: str) -> str | None:
 
 
 def is_builtin_name(name: str) -> bool:
-    """True when a tool-call name (ToolUsePart.name) names a canonical builtin."""
-    return name in BUILTIN_TOOL_TYPES
+    """True when a tool-call name (ToolUsePart.name) names a canonical builtin.
+
+    Total by construction, mirroring the guard ``canonical_for`` carries above
+    (AUDIT #126/#387): a ``list``/``dict`` name is unhashable, so a bare
+    ``name in BUILTIN_TOOL_TYPES`` raises ``TypeError``. That read sits inside
+    ``anthropic_adapter.encode_request``, so the raise became a 500 with a
+    healthy upstream blamed for it. ``ToolUsePart.name`` is typed ``str`` but is
+    a plain dataclass with no runtime enforcement, and ``__post_init__`` coerces
+    the *id* only — so the guard belongs here, where it closes the class for
+    every present and future caller.
+    """
+    return isinstance(name, str) and name in BUILTIN_TOOL_TYPES

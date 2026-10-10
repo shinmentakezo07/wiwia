@@ -164,8 +164,19 @@ class OpenRouterAdapter(OpenAIAdapter):
         # ``effort`` reconciles the named spellings (reasoning_effort and
         # Anthropic's output_config.effort); reading only the raw
         # reasoning_effort dropped an effort-only request (AUDIT #156).
+        #
+        # Read the raw field through ``coerce_int`` rather than through
+        # ``effective_thinking_budget``: that accessor also *derives* a budget
+        # from a named effort, which would promote every effort-only request
+        # (``reasoning_effort: high``) to ``{"max_tokens": 32000}`` and lose the
+        # provider's own effort level. The precedence documented above is a
+        # *direct* budget first, effort second, so only the direct field is read
+        # here. The coercion is what AUDIT #388 needs: the field is typed
+        # ``int | None`` but unenforced, and a non-numeric value made ``max``
+        # below raise ``TypeError`` out of ``encode_request``.
         reasoning_obj: dict[str, Any] | None = None
         effort = g.effective_reasoning_effort()
+        direct_budget = ir.coerce_int(g.thinking_budget)
 
         if g.thinking_budget == 0:
             # Zero budget is the documented thinking-off value; the sibling
@@ -173,11 +184,10 @@ class OpenRouterAdapter(OpenAIAdapter):
             # 1024 minimum instead switched thinking ON for an explicit
             # disable.
             reasoning_obj = {"enabled": False}
-        elif g.thinking_budget is not None:
+        elif direct_budget is not None:
             # Anthropic-style token budget -> OpenRouter reasoning.max_tokens.
             # OpenRouter enforces a minimum of 1024 for Anthropic models.
-            budget = max(g.thinking_budget, 1024)
-            reasoning_obj = {"max_tokens": budget}
+            reasoning_obj = {"max_tokens": max(direct_budget, 1024)}
         elif effort == "none":
             # Explicitly disable reasoning
             reasoning_obj = {"enabled": False}
