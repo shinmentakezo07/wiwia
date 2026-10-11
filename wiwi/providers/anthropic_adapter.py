@@ -699,12 +699,35 @@ class AnthropicAdapter:
         and moves a HEALTHY key to ``cooling`` for a frame carrying no
         semantics.
 
-        Same rule as the openai/nim/openrouter decoders (AUDIT #384): a bool is
-        rejected too, since ``isinstance(True, int)`` is True and ``True``/``1``
-        would collide as set members.
+        Two classes of wrong value, handled differently because they mean
+        different things:
+
+        * **A float that is numerically whole** (``1.0``) is the SAME block as
+          ``1`` — the int-ness was lost in transit, not the identity. It is
+          normalized, not discarded. Falling back to ``0`` here would route one
+          tool call's argument fragments onto a *different* tool call, whose
+          args then concatenate into unparseable JSON (AUDIT #419).
+        * **Anything else** (a list/dict/str, a bool, a non-integral float)
+          names no block that can be recovered, so ``0`` is the only coherent
+          fallback and the frame is kept rather than dropped — the client paid
+          for the tokens.
+
+        ``bool`` is rejected even though ``isinstance(True, int)`` is True, per
+        the sibling decoders (AUDIT #384): ``True`` would collide with ``1`` as
+        a set member. A numeric *string* is rejected for the same reason from
+        the other side — ``"1"`` and ``1`` are distinct dict keys, so coercing
+        it would split one call across two blocks.
+
+        Note ``hash(1.0) == hash(1)``, so testing membership against the open
+        set would have silently passed for the float case. The distinction has
+        to be made on the type.
         """
         idx = payload.get("index", 0)
-        if not isinstance(idx, int) or isinstance(idx, bool):
+        if isinstance(idx, bool):
+            return 0
+        if isinstance(idx, float) and idx.is_integer():
+            return int(idx)
+        if not isinstance(idx, int):
             return 0
         return idx
 

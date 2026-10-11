@@ -16,6 +16,8 @@ this file's existing ``as_str`` helper rather than a new coercion idiom.
 
 from __future__ import annotations
 
+import json
+
 import orjson
 
 from wiwi.providers.registry import fresh_adapter
@@ -213,3 +215,138 @@ def test_hostile_frames_do_not_cool_a_healthy_key():
         etype = orjson.loads(raw).get("type")
         out = a.decode_stream_event(etype, raw)
         assert isinstance(out, list), raw
+
+
+# ---------------------------------------------------------------------------
+# A wrong-but-numeric index must not be silently rerouted to block 0
+# ---------------------------------------------------------------------------
+#
+# `_block_index` coerces any non-int to ``0``. That is the right answer for an
+# UNUSABLE index (an unhashable list/dict has no block to belong to, and 0 is
+# the only coherent fallback), but it is the WRONG answer for a *numeric* index
+# that merely lost its int-ness in transit: ``1.0`` names block 1, and sending
+# its args to block 0 corrupts a live tool call rather than failing one.
+#
+# The distinction matters because Anthropic's ``index`` is the provider's own
+# content-block id, NOT an array position — the openai/nim decoders can fall
+# back to the loop's array index ``i`` because their index is positional, but an
+# Anthropic block id has no such fallback. Rerouting is therefore the only
+# option there, and it must reroute to the RIGHT block.
+#
+# Note ``hash(1.0) == hash(1)``, so a membership test against the open set
+# would have silently passed; the guard has to test the TYPE.
+
+
+def _tool_start_at(index, block_id: str, name: str) -> str:
+    return _start(index, {"type": "tool_use", "id": block_id, "name": name})
+
+
+def _args_delta(index, fragment: str) -> str:
+    return _frame(type="content_block_delta", index=index,
+                  delta={"type": "input_json_delta", "partial_json": fragment})
+
+
+def _args_by_block(a, frames) -> dict[int, str]:
+    """Reassemble per-block tool args the way the gateway does."""
+    bufs: dict[int, list[str]] = {}
+    for etype, data in frames:
+        for d in a.decode_stream_event(etype, data):
+            if isinstance(d, dl.ToolCallOpen):
+                bufs[d.index] = []
+            elif isinstance(d, dl.ToolCallArgsDelta):
+                bufs.setdefault(d.index, []).append(d.args_fragment)
+    return {i: "".join(v) for i, v in bufs.items()}
+
+
+def test_float_index_keeps_its_own_tool_call_args():
+    """``index: 1.0`` names block 1 and must not land on block 0."""
+    a = fresh_adapter("anthropic")
+    decoded = []
+    for raw in [
+        _frame(type="message_start", message={"model": "m"}),
+        _tool_start_at(0, "A", "Grep"),
+        _args_delta(1.0, '{"p":"a"}'),
+    ]:
+        decoded.append((orjson.loads(raw).get("type"), raw))
+    args = _args_by_block(a, decoded)
+    assert args.get(0, "") == "", f"block 0 stole block 1's args: {args}"
+    assert args.get(1) == '{"p":"a"}', f"block 1 lost its args: {args}"
+
+
+def test_float_index_does_not_concatenate_into_a_sibling_tool():
+    """Two tools, float index on the second: the observed corruption.
+
+    Before the fix block 0's args became ``'{"p":"a"}{"q":"b"}'`` — invalid
+    JSON, handed to a client that would parse and fail on it.
+    """
+    a = fresh_adapter("anthropic")
+    decoded = []
+    for raw in [
+        _frame(type="message_start", message={"model": "m"}),
+        _tool_start_at(0, "A", "Grep"),
+        _tool_start_at(1, "B", "Read"),
+        _args_delta(1.0, '{"p":"a"}'),
+        _args_delta(0, '{"q":"b"}'),
+    ]:
+        decoded.append((orjson.loads(raw).get("type"), raw))
+    args = _args_by_block(a, decoded)
+    assert args.get(0) == '{"q":"b"}', f"block 0 corrupted: {args}"
+    assert args.get(1) == '{"p":"a"}', f"block 1 lost its args: {args}"
+    for blob in args.values():
+        # must be parseable, or the client cannot run the tool
+        json.loads(blob)
+
+
+def test_float_index_still_emits_deltas_for_a_valid_block():
+    """The delta itself must survive — not be dropped along with the bad routing."""
+    a = fresh_adapter("anthropic")
+    out = a.decode_stream_event(
+        "content_block_delta",
+        _args_delta(1.0, '{"city":"Paris"}'))
+    assert len(out) == 1, out
+    assert isinstance(out[0], dl.ToolCallArgsDelta)
+    assert out[0].index == 1, out[0]
+    assert out[0].args_fragment == '{"city":"Paris"}'
+
+
+def test_genuine_int_index_is_untouched():
+    """Control: the common path must be unaffected."""
+    a = fresh_adapter("anthropic")
+    out = a.decode_stream_event("content_block_delta", _args_delta(1, '{"a":1}'))
+    assert out[0].index == 1
+
+
+def test_unusable_index_still_falls_back_to_zero():
+    """Control: a genuinely unaddressable index keeps the round-128 fallback.
+
+    An unhashable value names no block at all, so there is nothing better than
+    block 0 — and dropping the frame would lose content the client paid for.
+    """
+    a = fresh_adapter("anthropic")
+    for bad in ([0], {"i": 0}, "1", None, True):
+        out = a.decode_stream_event("content_block_delta", _args_delta(bad, "{"))
+        assert len(out) == 1, bad
+        assert out[0].index == 0, f"{bad!r} -> {out[0].index}"
+
+
+def test_numeric_string_index_is_not_treated_as_numeric():
+    """``"1"`` is a coercion hazard, not a number: it must not become block 1.
+
+    Accepting it would be worse than the current fallback — ``"1"`` and ``1``
+    are distinct dict keys, so it would split one tool call across two blocks.
+    """
+    a = fresh_adapter("anthropic")
+    out = a.decode_stream_event("content_block_delta", _args_delta("1", "{"))
+    assert out[0].index == 0, out[0].index
+
+
+def test_float_start_and_stop_stay_paired():
+    """A float index on both ends must still open and close the SAME block."""
+    a = fresh_adapter("anthropic")
+    opened = a.decode_stream_event("content_block_start", _tool_start_at(2.0, "A", "f"))
+    closed = a.decode_stream_event("content_block_stop", _stop(2.0))
+    assert isinstance(opened[0], dl.ToolCallOpen)
+    assert opened[0].index == 2
+    assert len(closed) == 1, closed
+    assert isinstance(closed[0], dl.ToolCallClose)
+    assert closed[0].index == 2, "open and close disagreed — orphaned tool block"
