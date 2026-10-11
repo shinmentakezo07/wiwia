@@ -3,13 +3,24 @@
 
 import { useEffect, useRef, useState } from "react";
 import type {
+  AnchorHTMLAttributes,
   ButtonHTMLAttributes,
   InputHTMLAttributes,
   KeyboardEvent as ReactKeyboardEvent,
   ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { Check, ChevronDown, ChevronUp, Copy, X } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  Copy,
+  Info,
+  X,
+  XCircle,
+} from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { AnimatedNumber } from "@/components/animated";
 import type { Delta } from "@/lib/dashboard-metrics";
@@ -70,11 +81,32 @@ const BTN: Record<ButtonVariant, string> = {
   outline: "admin-btn-ghost",
 };
 
-export function Button(props: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: ButtonVariant }) {
-  const { variant = "primary", className = "", ...rest } = props;
-  return (
-    <button className={`admin-btn ${BTN[variant]} ${className}`} {...rest} />
-  );
+type ButtonOwn = { variant?: ButtonVariant; className?: string };
+
+/** A button, or — when `href` is set — an anchor styled identically.
+ *
+ *  The anchor form exists because `window.open()` is not a safe way to launch an
+ *  external login: it is only permitted inside a user gesture, so calling it
+ *  from an async callback is routinely popup-blocked, and its return value
+ *  cannot report the block (`window.open(..., "noopener")` returns null on
+ *  *success* in Chrome and Firefox, per spec). An `<a target="_blank">` is
+ *  driven by a real click, so the browser never blocks it, and if something
+ *  downstream swallows it the caller can still surface the URL for copying. */
+export function Button(
+  props: ButtonOwn &
+    (
+      | ({ href: string } & AnchorHTMLAttributes<HTMLAnchorElement>)
+      | ({ href?: undefined } & ButtonHTMLAttributes<HTMLButtonElement>)
+    ),
+) {
+  const cls = `admin-btn ${BTN[props.variant ?? "primary"]} ${props.className ?? ""}`;
+  if (typeof props.href === "string") {
+    const { variant: _v, className: _c, href, ...rest } = props;
+    return <a href={href} className={cls} {...rest} />;
+  }
+  const { variant: _v, className: _c, ...rest } = props as ButtonOwn &
+    ButtonHTMLAttributes<HTMLButtonElement>;
+  return <button className={cls} {...rest} />;
 }
 
 export function Input(props: InputHTMLAttributes<HTMLInputElement>) {
@@ -394,7 +426,15 @@ export function ErrorText(props: { children: ReactNode }) {
 
 // -- table --------------------------------------------------------------------
 
-export function Table(props: { head: ReactNode[]; children: ReactNode; className?: string }) {
+export function Table(props: {
+  head: ReactNode[];
+  children: ReactNode;
+  className?: string;
+  /** `aria-sort` per column index — set it on the active sortable column only.
+   *  The attribute belongs on the `<th>` (which carries the `columnheader` role),
+   *  not on the button inside it, so it cannot live inside `head`. */
+  headSort?: Record<number, "ascending" | "descending" | "none" | undefined>;
+}) {
   return (
     <div className={`admin-table ${props.className ?? ""}`}>
       <div className="admin-scroll overflow-x-auto">
@@ -402,7 +442,9 @@ export function Table(props: { head: ReactNode[]; children: ReactNode; className
           <thead>
             <tr>
               {props.head.map((h, i) => (
-                <th key={i}>{h}</th>
+                <th key={i} aria-sort={props.headSort?.[i]}>
+                  {h}
+                </th>
               ))}
             </tr>
           </thead>
@@ -418,6 +460,32 @@ export function TD(props: { children: ReactNode; className?: string; colSpan?: n
     <td colSpan={props.colSpan} className={props.className ?? ""}>
       {props.children}
     </td>
+  );
+}
+
+/** Clickable column header that sorts its table. `K` is the caller's own sort-key
+ *  union, so each page keeps its own key vocabulary while sharing this affordance.
+ *  The caller announces the active column through `Table`'s `headSort` —
+ *  `aria-sort` belongs on the `<th>` (the columnheader), not on this button. */
+export function SortHeader<K extends string>(props: {
+  label: string;
+  k: K;
+  active: K;
+  dir: "asc" | "desc";
+  onSort: (k: K) => void;
+}) {
+  const isActive = props.k === props.active;
+  return (
+    <button
+      type="button"
+      className="inline-flex items-center gap-1 transition-colors hover:text-[var(--admin-text)] focus-visible:text-[var(--admin-text)]"
+      onClick={() => props.onSort(props.k)}
+    >
+      {props.label}
+      <span aria-hidden className={isActive ? "text-blue-400" : "opacity-30"}>
+        {isActive && props.dir === "asc" ? "▲" : "▼"}
+      </span>
+    </button>
   );
 }
 

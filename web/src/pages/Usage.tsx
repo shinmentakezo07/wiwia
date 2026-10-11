@@ -45,6 +45,7 @@ import {
   LiveBadge,
   PageHeader,
   Select,
+  SortHeader,
   StatCard,
   Table,
   TD,
@@ -120,6 +121,25 @@ type SortKey =
   | "ttft"
   | "latency"
   | "cost";
+
+/** Column index of each sortable column within the table's `head` array, so the
+ *  active one can carry `aria-sort` on its `<th>`. Every column here is
+ *  sortable, so this is simply the declaration order. */
+const USAGE_SORT_COLUMNS: SortKey[] = [
+  "time",
+  "key",
+  "model",
+  "provider",
+  "status",
+  "tok_in",
+  "cached",
+  "reasoning",
+  "out",
+  "tps",
+  "ttft",
+  "latency",
+  "cost",
+];
 
 interface UsageTotals {
   requests: number;
@@ -225,28 +245,6 @@ function sortValue(l: RequestLogEntry, k: SortKey): number | string {
     case "cost":
       return l.cost;
   }
-}
-
-function SortHeader(props: {
-  label: string;
-  k: SortKey;
-  active: SortKey;
-  dir: SortDir;
-  onSort: (k: SortKey) => void;
-}) {
-  const isActive = props.k === props.active;
-  return (
-    <button
-      type="button"
-      className="inline-flex items-center gap-1 transition-colors hover:text-[var(--admin-text)]"
-      onClick={() => props.onSort(props.k)}
-    >
-      {props.label}
-      <span className={isActive ? "text-blue-400" : "opacity-30"}>
-        {isActive && props.dir === "asc" ? "▲" : "▼"}
-      </span>
-    </button>
-  );
 }
 
 function ChartTooltip(props: {
@@ -1154,6 +1152,9 @@ export function UsagePage() {
               <SortHeader key="latency" label="latency" k="latency" active={sortKey} dir={sortDir} onSort={onSort} />,
               <SortHeader key="cost" label="cost" k="cost" active={sortKey} dir={sortDir} onSort={onSort} />,
             ]}
+            headSort={{
+              [USAGE_SORT_COLUMNS.indexOf(sortKey)]: sortDir === "asc" ? ("ascending" as const) : ("descending" as const),
+            }}
           >
             {visibleRows.map((l) => (
               <tr key={l.request_id}>
