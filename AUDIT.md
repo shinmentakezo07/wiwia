@@ -8,6 +8,270 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — /console/oauth redesign (2026-10-11)
+
+Found while redesigning the console's connected-accounts page. Entries #399-#410 were
+new (verified against source, not present in this register); #411 is **still open** and
+needs backend work that was deliberately out of scope for the UI change.
+
+The page was rewritten across `web/src/pages/OAuthProviders.tsx` (page shell, account
+cards, add-account dialog), two new modules `web/src/pages/oauth-shared.tsx` (connect
+flow, status, callback banner) and `web/src/pages/oauth-routing.tsx` (routing + default
+models), plus additive primitives in `web/src/components/ui.tsx` and `styles.css`.
+
+### 399. Cross-account routing pool deploys to *disconnected* Cline accounts
+
+**Severity:** 🟡 Medium (silent misconfiguration; the deployment 401s on first use) · **Status: fixed**
+**Files:** `web/src/pages/OAuthProviders.tsx` (old `:739-741` unfiltered `providers` prop,
+`:757-763` `createPool` loop, `:961-968` gate on `providers.length >= 2` rather than
+connected count)
+**Fix:** statuses hoisted to a page-level `useClineStatusIndex`; `createPool` now iterates
+only connected accounts, and the helper copy names how many were skipped.
+
+Deliberately **client-side only**. `connected: false` means only "there is no
+`cline_oauth:<name>` row in the settings table", which is also true of a Cline account
+provisioned from YAML or import that holds a perfectly valid key — so
+`POST /admin/model-groups/{name}/deployments` (`wiwi/server/app.py:4492`) must *not*
+reject such a provider. Gating it server-side would break config-only Cline deployments.
+
+### 400. The routing-strategy toggle on the OAuth page mutated **global** router state
+
+**Severity:** 🟠 High (an admin flipping what reads as a pool-local switch silently
+re-routes every model group in the gateway) · **Status: fixed**
+**Files:** old `web/src/pages/OAuthProviders.tsx:752` (`globalStrategy = modelsQ.data.strategy`),
+`:772-781` (`toggleStrategy`), `:852-858` (the `Toggle`); `wiwi/server/app.py:4672-4680`
+**Fix:** the toggle and its mutation are deleted. The card now renders the strategy
+read-only and links to `/console/models`, which owns the control.
+
+There is no per-group routing strategy anywhere in the system.
+`admin_patch_model_group` takes a `{name:path}` parameter and then **ignores it** for the
+`strategy` key, writing the single global `state.router.settings.routing_strategy`; there
+is no `strategy` field on the `ModelGroup` type at all. The old badge and the old toggle
+therefore agreed with each other while both lied about scope — an admin could not have
+known the switch was gateway-wide. `web/src/pages/Models.tsx:477` already carries the
+comment "strategy is global router state", so the duplicate control was a known hazard
+rather than an oversight.
+
+### 401. Refetch silently discarded unsaved default-model selections
+
+**Severity:** 🟡 Medium (silent loss of admin intent) · **Status: fixed**
+**Files:** old `web/src/pages/OAuthProviders.tsx:508-512` (the `useEffect` syncing `selected`
+from `settingsQ.data`), triggered by the default `refetchOnWindowFocus` at `:484-487`
+**Fix:** read-through-until-first-edit — `selected` is now `Set<string> | null` where `null`
+means pristine, `current = selected ?? savedSet`, and resync happens only on a genuine change
+in the persisted list.
+
+The old effect keyed on `settingsQ.data` identity, which changes on **every** refetch
+including the default window-focus one, so ticking models and then switching tabs discarded
+the selection with no warning. The same bug class was already recorded unnumbered against
+`web/src/pages/Combos.tsx`; that sibling is still unfixed.
+
+### 402. "Save" was disabled at zero selections, and `PUT` cannot remove a default
+
+**Severity:** 🟡 Medium (dead primary button; two same-sounding operations with different
+server semantics) · **Status: fixed**
+**Files:** old `web/src/pages/OAuthProviders.tsx:687-715`;
+`wiwi/server/app.py:4357-4399` (PUT only *adds*, via `_apply_cline_default_models`)
+vs `:4404-4451` (DELETE pops the whole `cline:<id>` group)
+**Fix:** Save is now enabled whenever the list is dirty, including at zero, with an
+`aria-describedby` hint and an explicit `Alert` when zero is the confusing state; the
+destructive path is renamed "Remove all defaults" (see #404).
+
+At zero selections with saved ids present the page rendered `dirty === true` next to a
+permanently disabled primary button, and the only escape — "Clear all" — is an entirely
+different server path. Even clicking it would not have removed the existing deployments,
+because `PUT []` only persists an empty list; the UI implied otherwise.
+
+### 403. The Cline callback banner was dropped when `cline_provider` was absent, and could not be dismissed
+
+**Severity:** ⚪ Low (dormant path today, but it is the only UI for `/cline/oauth/callback`)
+· **Status: fixed**
+**Files:** old `web/src/pages/OAuthProviders.tsx:108` / `:117` (`?? ""`),
+`:991-993` (`callbackResult?.provider === p.name ? … : null`), `:308-328` (no dismiss)
+**Fix:** rendered once at page level with a dismiss button, so there is no key to mismatch.
+
+Worse than hidden: `_stripClineParams` had already deleted the params from the URL before
+the match was attempted, so a missing `cline_provider` destroyed the result rather than
+merely failing to show it. The old code also made `cline_provider` a *routing key*, which
+is what made it fragile; it is now message text only.
+
+### 404. "Clear all" ran N destructive requests with no confirmation
+
+**Severity:** 🟡 Medium · **Status: fixed**
+**Files:** old `web/src/pages/OAuthProviders.tsx:693-706` vs `:444-465` (a single "Disconnect",
+which *did* get a modal)
+**Fix:** renamed "Remove all defaults", `variant="danger"`, behind a `Dialog` naming the
+model count. The serialized `for … await` loop is preserved byte-identically — that is the
+#209 fix and must not be "simplified" into `Promise.all`.
+
+The inconsistency was stark: a reversible single-request action got a confirmation modal
+while an irreversible multi-request one did not.
+
+### 405. A failed Cline status poll rendered as "not connected"
+
+**Severity:** 🟡 Medium (a gateway blip is indistinguishable from a genuine disconnect)
+· **Status: fixed**
+**Files:** old `web/src/pages/OAuthProviders.tsx:214-221` (no `isError` branch),
+`:294-302` (badge fell through to "not connected"); same defect at
+`web/src/pages/ProviderDetail.tsx:1108-1118`
+**Fix:** a four-way badge — `checking…` / **`status unavailable` (red)** / `connected` /
+`expires soon` / `not connected` — and a Retry control beside it.
+
+This branch fires on a real condition, not just a theoretical one:
+`GET /admin/cline/oauth/status` returns 404 for an unknown provider
+(`wiwi/server/app.py:5692-5698`), so a provider removed from the router mid-poll reported
+itself as "not connected" and offered a full re-connect flow.
+
+### 406. `window.open` for the Cline login had no popup-blocker handling and no copy fallback
+
+**Severity:** ⚪ Low · **Status: fixed**
+**Files:** old `web/src/pages/OAuthProviders.tsx:239` and
+`web/src/pages/ProviderDetail.tsx:1140`
+**Fix:** the login URL is now an `<a target="_blank">` (`Button` gained an `href` variant)
+alongside an always-visible `CopyButton`.
+
+The call sat inside a `useMutation` `onSuccess`, i.e. after an `await`, so it was outside
+the user-gesture window and routinely blocked. Note that detecting the block is not
+possible: `window.open(url, "_blank", "noopener,noreferrer")` returns `null` on **success**
+per spec in Chrome and Firefox, so a null-check would warn falsely every time. The fix
+inverts the problem — the fallback is always present, so nothing needs detecting.
+
+### 407. The account list load-error state offered no retry
+
+**Severity:** 🟡 Medium (a failing 15s-polling query strands the page) · **Status: fixed**
+**Files:** old `web/src/pages/OAuthProviders.tsx:970-977`
+**Fix:** `Alert tone="danger"` with a Retry button. #339 added the `isError` branch but not
+the recovery affordance.
+
+### 408. Default-model picker rows were ~30px tall with hover-only feedback
+
+**Severity:** ⚪ Low (binding UI/UX rules 2 and 3) · **Status: fixed**
+**Files:** old `web/src/pages/OAuthProviders.tsx:652-669`
+**Fix:** rows are `min-h-11` with `focus-within` alongside `hover`, and a 16px checkbox.
+Cross-ref #261, which lists eight other files but not this one.
+
+### 409. One shared page-level `error` string served four unrelated scopes
+
+**Severity:** ⚪ Low · **Status: fixed**
+**Files:** old `web/src/pages/OAuthProviders.tsx:917, 944, 949, 956, 966`
+**Fix:** errors are now scoped and dismissible. A failure in "Remove all defaults" used to
+paint a red box at the top of the page, above the header's own content, which never cleared
+except by triggering another error or reloading.
+
+`ErrorText` also gained `role="alert"` — it is used at 45 call sites and every one of them
+was previously silent to assistive technology.
+
+### 410. The page header comment promised an automatic redirect flow that cannot complete
+
+**Severity:** ⚪ Low (documentation defect that hides a real constraint) · **Status: fixed**
+**Files:** old `web/src/pages/OAuthProviders.tsx:6-8`, contradicting its own comment at
+`:229-233`; `wiwi/providers/cline_oauth.py:41-45`; `REMINDERS.md:99-108`
+**Fix:** the new `oauth-shared.tsx` header states plainly that no one-click path exists and
+why. The UI now presents the manual three-step flow as the designed path rather than
+labelling a button "Connect with Cline" and describing the manual requirement only in body
+copy 350 lines below.
+
+`build_auth_url` sends `callback_url` and `redirect_uri`, but Cline's Google OAuth ignores
+both and lands the browser on `https://app.cline.bot/auth/callback?code=…`. The gateway's
+`GET /cline/oauth/callback` (`wiwi/server/app.py:5610`) therefore never fires, and the
+whole `auto-connect` + state-token + banner pipeline is dormant by design.
+
+### 412. `Dialog`'s focus effect re-ran on every parent render, yanking focus to the trigger
+
+**Severity:** 🟠 High (background polling steals focus out of whatever field is being
+typed in, every 15s) · **Status: fixed**
+**Files:** `web/src/components/ui.tsx` — the focus/Escape effect, previously
+`useEffect(..., [props.open, props])`
+**Fix:** `onClose` is now read through a ref and the effect depends on `[props.open]`
+alone.
+
+`props` is a fresh object on every render, so the effect tore down and re-ran on every
+parent render — and its cleanup called `restoreTo?.focus?.()`. Every console page polls
+(`getProviders` and `getModels` both at 15s on this one), so a refetch mid-typing moved
+focus back to the trigger button. The same churn could capture `restoreTo` as the panel
+itself rather than the original trigger, breaking focus restoration on close.
+
+Surfaced while building the connect dialog: pasting a callback URL into step 3 while a
+15s poll landed would throw the caret back to step 1. Related: #257.
+
+### 413. `CopyButton` reported success it could not have had
+
+**Severity:** ⚪ Low · **Status: fixed**
+**Files:** `web/src/components/ui.tsx` (`CopyButton`)
+**Fix:** `navigator.clipboard.writeText` is now awaited in a `try`/`catch`; a rejection
+renders a distinct "Copy failed" state instead of "Copied". `CopyButton` also accepts a
+`className`, which it previously ignored — callers could not size it to the 44px tap-target
+floor without reimplementing it.
+
+The clipboard API rejects on an insecure context or a denied permission. Since the whole
+Cline connect flow now depends on this button as the fallback when the login link cannot be
+opened, a false "Copied" would be worse than an error.
+
+---
+
+### 411. `/admin/cline/oauth/status` reads a settings row that a credential-provisioned account never creates
+**Severity:** 🟠 High (the console reports real, credentialed accounts as disconnected) · **Status: open**
+**Files:** `wiwi/server/app.py:5692-5715` (`cline_oauth_status`), reading
+`config_store` key `cline_oauth:<provider>` minted at `:5465-5466`; credentials actually live
+in `provider_keys` (written by `connect` at `:5520`)
+**Fix:** have `cline_oauth_status` fall back to inspecting the account's pool keys — decode
+the stored JWT's `exp` (and `email` claim) when no `cline_oauth:<name>` row exists, and
+report that credential as expired rather than absent.
+
+**Observed on a live install (2026-10-11).** Three Cline accounts each hold a real
+WorkOS-issued JWT in `provider_keys`, with distinct `email`/`sub`/`sid` claims, all
+`exp`ired 25–32 days earlier. The `settings` table is empty, so every status lookup misses
+and all three report `{"connected": false}` — while remaining `healthy: true`, still holding
+a pool key, and still serving ten live deployments across two `cline:*` routing groups.
+The console has no way to express "expired credential that is still deployed", and this
+entry is the reason the redesign distinguishes the states it can actually observe.
+
+This is the one finding the redesign deliberately did **not** fix: it needs a backend change,
+and the brief for that work was the UI. It is the highest-value follow-up here because no
+visual fix can surface a state the API does not return.
+
+### 414. `test_realtime` opens two relay connections under full-suite ordering
+
+**Severity:** 🟡 Medium (the binding gate is not reproducible-green on `main`) · **Status: open**
+**File:** `tests/test_realtime.py:208` (`assert upstream.connections == 1`), with a
+cascading teardown error at `:101`
+**Trigger:** full-suite `python3 -m pytest tests/ -q`. Reproduced on 2 of 2 full runs;
+`tests/test_realtime.py` passes 13/13 in isolation, and
+`test_fix_round10.py::TestLoopDetector::test_per_token_cost_is_bounded` is the same
+class of flake (failed run 1, passed run 2, 65/65 in isolation).
+**Fix:** give each `FakeRealtimeServer` a per-test unique identity (or reset
+`connections` in `startup`) so an event-loop/task leaked by an earlier test cannot
+reconnect to the next test's server. Not fixed here: this redesign changed no Python,
+and the Python tree is byte-identical to HEAD — the failure predates it.
+
+### Verification status (important caveat)
+
+The `/console/oauth` redesign (#399-#413) passes `npx tsc -b --force`, `npm run lint`
+(0 errors), `npx vite build`, and `ruff check`. The redesigned page is a pure React
+change with no test runner in this repo — `web/` has no vitest/jest/playwright and no
+`*.test.*` file, so there is no automated way to assert its behaviour. The Python suite
+is **not** green on `main` for reasons unrelated to this work — see #414.
+
+**The binding "verify at 375×812 and desktop" rule has NOT been discharged.** This machine
+has no headless browser: no chromium/firefox binary, no `~/.cache/ms-playwright`, and
+Python `playwright`/`selenium` are absent. The acceptance criteria below are therefore
+**unverified, not passing**:
+
+- horizontal overflow at 375px
+- every tap target ≥44×44 (statically: this page's own buttons pass `min-h-11`, but
+  `.admin-btn` itself is ~30px and #261's other 7 call sites are still open)
+- the focus ring actually painting (the `styles.css` placement fix is reasoned, not seen)
+- dialog focus trap / Escape / focus restoration at runtime
+- reduced-motion rendering
+
+Also still open and relevant to this page's components: **#257** (Dialog/Drawer declare
+`aria-modal` but do not trap focus) and **#377**. The `Dialog` focus-trap, Escape, and
+focus-restoration code all exists and was reviewed by reading; what is missing is a way to
+*run* it. Someone with a browser should walk the remaining steps of the redesign's
+verification plan before this page is considered done.
+
+---
+
 ## 🟠 Open — sweep 2026-10-09 (config, adapters)
 
 New findings from a fresh eight-subsystem sweep. Every one below was confirmed by
@@ -414,6 +678,126 @@ them.
 Five subsystems swept by executing code against the real objects rather than by
 reading alone. Findings #391-#395. Everything else probed clean and is listed as a
 cleared seam at the end of the section.
+
+---
+
+## 🟠 Open — sweep 2026-10-11 (server stats, db_sink, wire encoders)
+
+Three findings, each re-verified by the reviewer executing code against the real
+functions rather than trusting the subagent report. Findings #396-#398.
+
+### 396. `stats.timeseries` silently drops the oldest in-window requests on the ring backend
+
+**Severity:** 🔴 High (a chart that under-reports its own panel's totals)
+**Status: open**
+**Files:** `wiwi/server/stats.py:160-176` (the grid alignment vs the `idx` guard at
+`:175`)
+**Fix:** extend the grid one bucket left when `first_t > cutoff` (or clamp `idx` to
+0) so every `window_events` row lands in a bucket.
+
+The grid is bucket-aligned: `first_t = int(now // size) * size - (n_buckets - 1) *
+size`. But `window_events` admits everything with `ts >= now - minutes*60`. When
+`now` falls mid-bucket, `first_t` lands *above* the cutoff, so the leading region is
+in-window for `window_events` yet computes a negative index, and line 175's
+`if not 0 <= idx < n_buckets: continue` drops it silently.
+
+**Probe** (executed against the real `stats.timeseries`; `now` placed mid-bucket so
+the leading gap is 50 s of a 60-minute window):
+
+```
+  now=1000030.0  bucket_start=1000020  first_t=996480  window cutoff=996430.0
+  leading gap (in-window but below first_t): 50 seconds
+
+  overview counts both      : 2
+  timeseries bucket count   : 60 (expected 60)
+  timeseries tok_in total   : 200 (overview says 300)
+```
+
+`stats.overview` on the identical list correctly reports both requests, so the two
+halves of the same admin panel disagree about the same traffic on the same request.
+A phase sweep across all four bucket sizes (60/1440/3600/21600 s) drops at every
+clock alignment.
+
+**Consequence:** the oldest requests in every bounded window vanish from the usage
+chart (tokens, TPS avg/p95, sample ratio) while the panel's own totals count them.
+Worst case is one bucket of the window: 60 s of 60 min (1.7%), but 2 h of the 30-day
+window.
+
+**Why not a known finding:** #325 and #86 concern *empty* result sets and the
+first-visit bucket shape; #319-#322 concern percentile duplication. None covers a
+populated leading-edge bucket.
+
+### 397. `DBSink.read_timeseries` emits `n_buckets + 1`, breaking the fixed-grid contract
+
+**Severity:** 🟠 High (backend parity violation; a client indexing `buckets[-1]` is
+off by one) · **Status: open**
+**Files:** `wiwi/logging_core/db_sink.py:1832-1848` (`first_t`/`n_fill` vs the emit
+at `:1848-1859`)
+**Fix:** filter `by_t` to `first_t <= t < first_t + n_fill * bucket_seconds` before
+emitting, or derive `first_t`/`n_fill` from the grid after the merge.
+
+`n_fill` is set to `n_buckets` and the zero-fill loop only visits grid indices, but
+the final emit iterates `sorted(by_t.items())` over *all* populated buckets —
+including any whose `FLOOR(ts/bs)*bs` falls below `bucket_start`. The
+`WHERE ts >= :cutoff` clause admits exactly those rows.
+
+**Probe** (executed against a real in-memory SQLite `DBSink`; one event placed in
+the leading gap, one well inside, `now` mid-bucket):
+
+```
+  bs=60     min=60     grid=60    emitted=61    extra=True
+  bs=60     min=1440   grid=1440  emitted=1441  extra=True
+  bs=3600   min=1441   grid=24    emitted=25    extra=True
+  bs=21600  min=43200  grid=120   emitted=120   extra=False
+```
+
+No tokens are lost or double-counted — `sum(tok_in) == 300` matches `overview` — so
+this is a shape bug, not an accounting one. The count is simply one more than the
+fixed grid the ring backend returns for the same request, and
+`tests/test_admin_api.py:483` asserts an exact length, so the contract is real.
+
+**Consequence:** the DB and ring backends answer the same request with
+different-length arrays. A client that indexes `buckets[-1]` or zips the array
+against an `overview`-derived expectation is off by one, and the DB path loses the
+parity its own docstring promises.
+
+**Why not a known finding:** same neighbours as #396 — none covers a populated
+leading-edge bucket producing an extra grid slot.
+
+### 398. The Anthropic streaming path drops `output_tokens_details.thinking_tokens`
+
+**Severity:** 🟡 Medium (same turn, two different token counts)
+**Status: open**
+**Files:** `wiwi/wire/anthropic_messages.py:1162-1169` (`final_frame`'s
+`message_delta` usage omits `u.reasoning`); the sync twin at `:625-627` emits it
+**Fix:** add `"output_tokens_details": {"thinking_tokens": u.reasoning} if
+u.reasoning else {}` to the `message_delta` usage, mirroring `:625`.
+
+**Probe** (executed — real `encode_response` vs the real stream encoder, same turn):
+
+```
+SYNC   usage: {"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":0,
+               "cache_creation_input_tokens":0,
+               "output_tokens_details":{"thinking_tokens":15}}
+STREAM usage: {"output_tokens":20,"input_tokens":10,
+               "cache_read_input_tokens":0,"cache_creation_input_tokens":0}
+```
+
+`cache_creation` and `cached` ARE carried on the streaming path, so the omission is
+specific to `reasoning` — accidental, not a protocol limit. Four adapters report
+reasoning tokens (`anthropic_adapter.py:810`, `openrouter_adapter.py:392`,
+`nim_adapter.py:362`, `gemini_adapter.py:494`) and the Messages surface can be backed
+by any of them, so it is reachable on real traffic.
+
+**Consequence:** a client that meters or bills thinking tokens sees them on
+non-streamed turns and zero on streamed ones, for the same request. `cache_creation`
+riding through proves there is no protocol reason for the asymmetry.
+
+**Why not a known finding:** #131 covers the `estimated` flag and a
+whole-usage-estimate mislabelling; #319-#322 cover TPS percentiles. No entry covers
+the sync-vs-stream usage field asymmetry on the Anthropic surface.
+
+---
 
 ### 391. A crash mid-request strands `budget_reserved` forever, wedging the key at 402 with $0 spent
 
@@ -1618,7 +2002,22 @@ where marked, by execution:
   `key_ids` fail-closed contract. `key_ids` are bound parameters, never
   interpolated.
 - **SQL parameterization** — every dynamic f-string in `db_sink.py` and
-  `config_store.py` interpolates only column-name lists from module constants;
+- **`wire/*` stream terminals over the real HTTP stack — cleared.** All four surfaces
+  emit their correct terminal and balanced blocks end to end: chat `[DONE]`,
+  completions `[DONE]`, Anthropic `message_stop` with `content_block_start` count ==
+  `content_block_stop` count, Responses `response.completed`. Two apparent findings
+  were disproved this way and are recorded so they are not re-filed: testing an
+  encoder in isolation shows no `message_stop`/`[DONE]`/`response.completed`, because
+  the *server* appends them (`app.py:2652-2667`), not the encoder. `tool_choice`
+  decodes correctly in every valid form on both OpenAI surfaces (chat uses the string
+  form `"auto"`, not the dict form), and `window_events` is inclusive at the cutoff
+  for all four bucket sizes.
+- **`server/response_store.py` — cleared.** Key scoping is correct on `get`/`delete`
+  (a foreign key is indistinguishable from absent), master crosses the boundary,
+  read-time TTL is honoured, the live sweeper really deletes, `start()` is idempotent,
+  and `ttl_s <= 0` is a true keep-forever switch. `put` raises on a
+  non-serialisable payload rather than storing a partial row.
+- **`config_store.py` interpolates only column-name lists from module constants;
   all user data goes through bound params. The one `LIKE` construction
   (`_reprice_rolled_up`, `db_sink.py:1009-1019`) escapes `%`, `_` and `\`.
 - **Adapter state leaks** — every adapter's `reset()` covers all per-stream
@@ -10664,7 +11063,7 @@ add `inert` to `#root` while open (React 19 supports `inert` natively).
 
 ### 258. Every `<Button>` suppresses the focus ring with no replacement (107 call sites)
 
-**Severity:** 🟡 Medium (binding UI/UX rule 3, on the primary interactive control)
+**Severity:** 🟡 Medium (binding UI/UX rule 3, on the primary interactive control) · **Status: fixed**
 **File:** `web/src/components/ui.tsx:55-63` (`BTN` map), `web/src/styles.css:500` (`outline: none` in `.admin-btn`)
 
 `.admin-btn` sets `outline: none` and the stylesheet defines **no**
@@ -10685,6 +11084,23 @@ equivalent") is violated app-wide.
 **Fix:** add `.admin-btn:focus-visible { outline: none; box-shadow: 0 0 0 3px
 rgba(99,102,241,.35); }`, mirroring the `.admin-collapse-btn` treatment already in
 the file.
+
+**Fixed (2026-10-11):** added to `web/src/styles.css` as
+`.admin-btn:focus-visible:not(:disabled) { outline: none; box-shadow: 0 0 0 2px var(--admin-bg), 0 0 0 4px rgba(59,130,246,0.55); }`.
+The original single-stop suggestion was adjusted to a two-stop ring: the opaque inner
+stop sits against the `#0a0a0a` card surface and the accent outer stop against the
+`#050505` page background, so the ring reads on both.
+
+Placement is load-bearing and was corrected on review: the rule is declared **after**
+every variant `:hover` rule and carries `:not(:disabled)` to reach specificity
+(0,3,0). Declared earlier and without it, at (0,2,0), it lost to
+`.admin-btn-primary:hover:not(:disabled)` (0,3,0) and the ring silently disappeared on
+exactly the buttons that matter most — a keyboard user tabbing to a focused *and hovered*
+primary CTA saw only the soft hover glow. Ghost and danger variants were unaffected because
+their hover rules set no `box-shadow`.
+
+All 107 call sites are covered by the one rule. Not yet re-verified in a real browser: no
+headless browser is installed on this machine (see the verification note below).
 
 ### 259. Docs code-block copy button is hover-only — invisible and unusable on touch
 
@@ -10716,7 +11132,7 @@ and expose visible keyboard focus states.
 
 ### 260. `Toggle` renders `role="switch"` with no accessible name
 
-**Severity:** 🟡 Medium (screen readers announce an unidentifiable control)
+**Severity:** 🟡 Medium (screen readers announce an unidentifiable control) · **Status: fixed**
 **File:** `web/src/components/ui.tsx:168-188`
 
 ```tsx
@@ -10735,6 +11151,17 @@ unidentifiable.
 
 **Fix:** add an optional `label?: string` prop rendering `aria-label`, and pass it
 at each call site (or `aria-labelledby` pointing at the existing text node).
+
+**Fixed (2026-10-11):** `Toggle` now accepts `label?: string` (rendered as `aria-label`)
+and `id?: string`, in `web/src/components/ui.tsx`. All six remaining call sites were
+migrated in the same change: `Settings.tsx` ×3 ("Reduce motion", "Compact tables",
+"24-hour clock"), `ProviderDetail.tsx` ("Round-robin key selection"), `logs-shared.tsx`
+("Live tail"), and `Users.tsx` — where the switch sits under an "Enabled" column header
+with no adjacent text, so the label is built per row (`Disable <username>` /
+`Enable <username>`) rather than reusing the header, which would have announced every row
+identically. The seventh site, `OAuthProviders.tsx:852`, no longer exists: that toggle was
+mutating global router state and was deleted (see #400). No `Toggle` call site in `web/src`
+remains without an accessible name.
 
 ### 261. Tap targets below the 44 px minimum (binding rule 2)
 

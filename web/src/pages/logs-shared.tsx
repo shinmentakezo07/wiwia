@@ -131,7 +131,7 @@ export function LiveTail(props: { live: boolean; onToggle: (v: boolean) => void;
       )}
       <span className="flex items-center gap-2 text-[13px] text-[var(--admin-text-muted)]">
         Live tail
-        <Toggle checked={props.live} onChange={props.onToggle} />
+        <Toggle label="Live tail" checked={props.live} onChange={props.onToggle} />
       </span>
     </div>
   );

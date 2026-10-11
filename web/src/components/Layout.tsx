@@ -106,7 +106,7 @@ const ADMIN_ONLY_SECTIONS: NavSection[] = [
     title: "Configuration",
     items: [
       { to: "/console/providers", label: "Providers", icon: Server },
-      { to: "/console/oauth", label: "OAuth Cline", icon: Link2 },
+      { to: "/console/oauth", label: "Accounts", icon: Link2 },
       { to: "/console/workbuddy", label: "WorkBuddy", icon: Briefcase },
       { to: "/console/builtin-providers", label: "Built-in Providers", icon: Boxes },
       { to: "/console/combos", label: "Combos", icon: Layers },
@@ -129,7 +129,7 @@ const PAGE_META: Record<string, { title: string; section: string }> = {
   "/console/usage": { title: "Usage", section: "Traffic" },
   "/console/analytics": { title: "Analytics", section: "Traffic" },
   "/console/providers": { title: "Providers", section: "Configuration" },
-  "/console/oauth": { title: "OAuth Cline", section: "Configuration" },
+  "/console/oauth": { title: "Connected accounts", section: "Configuration" },
   "/console/workbuddy": { title: "WorkBuddy", section: "Configuration" },
   "/console/builtin-providers": { title: "Built-in Providers", section: "Configuration" },
   "/console/models": { title: "Models", section: "Configuration" },

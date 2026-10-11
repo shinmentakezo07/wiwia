@@ -181,7 +181,11 @@ function AppearanceTab() {
                 Disables entrance animations, pulses, and shimmer effects.
               </p>
             </div>
-            <Toggle checked={prefs.reduceMotion} onChange={(v) => update({ reduceMotion: v })} />
+            <Toggle
+              label="Reduce motion"
+              checked={prefs.reduceMotion}
+              onChange={(v) => update({ reduceMotion: v })}
+            />
           </div>
         </div>
       </Card>
@@ -200,6 +204,7 @@ function AppearanceTab() {
               </p>
             </div>
             <Toggle
+              label="Compact tables"
               checked={prefs.density === "compact"}
               onChange={(v) => update({ density: v ? "compact" : "comfortable" })}
             />
@@ -217,7 +222,11 @@ function AppearanceTab() {
                 Uses 24-hour time when on, 12-hour am/pm when off.
               </p>
             </div>
-            <Toggle checked={prefs.clock24h} onChange={(v) => update({ clock24h: v })} />
+            <Toggle
+              label="24-hour clock"
+              checked={prefs.clock24h}
+              onChange={(v) => update({ clock24h: v })}
+            />
           </div>
         </div>
       </Card>

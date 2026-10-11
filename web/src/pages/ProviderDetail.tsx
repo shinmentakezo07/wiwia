@@ -241,6 +241,7 @@ function KeyPoolCard(props: { p: Provider; providerName: string; onError: (m: st
                 {roundRobin ? "round-robin" : "sequential"}
               </span>
               <Toggle
+                label="Round-robin key selection"
                 checked={roundRobin}
                 onChange={() => toggleRR.mutate()}
                 disabled={toggleRR.isPending}

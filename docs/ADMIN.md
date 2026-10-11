@@ -121,7 +121,14 @@ Brand accent is an indigo→violet "iris" ramp from `#f3f1ff` (50) to `#291560` 
 - **Fixed 64px topbar**: `backdrop-filter: blur(12px) saturate(1.2)` over `rgba(5,5,5,0.75)` — section eyebrow + page title, centered live/offline SSE pulse badge, mono tabular live clock, Sign out; blue→violet gradient hairline underneath.
 - **Ambient backdrop**: fixed 64px grid at 2% opacity plus three radial glows (blue top-left, violet bottom-right, purple center).
 
-**Component kit** (`components/ui.tsx`): `Card`/`PageHeader` · `Button` (primary/ghost/danger/outline) · `Input`/`NumberInput`/`Select`/`Field` · `Toggle` · `Badge` (6 semantic tints) · `StatCard` (gradient value, optional sparkline, delta chip, `waiting` pulse at zero traffic) · `Table` · `Dialog` · `Drawer` · `CopyButton` · `Spinner` · `LiveBadge` · `EmptyState` · `ErrorText` · `ProgressBar`.
+**Component kit** (`components/ui.tsx`): `Card`/`PageHeader` · `Button` (primary/ghost/danger/outline) · `Input`/`NumberInput`/`Select`/`Field` · `Toggle` · `Badge` (6 semantic tints) · `StatCard` (gradient value, optional sparkline, delta chip, `waiting` pulse at zero traffic) · `Table` · `Dialog` · `Drawer` · `CopyButton` · `Spinner` · `LiveBadge` · `EmptyState` · `ErrorText` · `Alert` · `ProgressBar`.
+
+Four notes on the kit's contract:
+
+- **`Button` has an `href` variant** that renders an `<a>` with the same styling. Use it instead of `window.open` for anything that launches an external site: `window.open` is only permitted inside a user gesture, so calling it from an async callback is routinely popup-blocked, and its return value cannot report the block — `window.open(url, "_blank", "noopener")` returns `null` on *success* in Chrome and Firefox. An anchor is driven by a real click and never blocked.
+- **`Toggle` requires a `label` prop** (rendered as `aria-label`). It has no visible text of its own, so an unlabelled switch is announced as "switch, on" with no name. In a table cell, build the label per row rather than reusing the column header.
+- **`Alert`** is the block status notice (info/success/warning/danger), with an optional `onDismiss` that renders a 44×44 ghost close. Prefer it over hand-rolled banner `div`s — the console had accumulated ~17 of those with hardcoded palette values that bypassed the `--admin-*` tokens, and none of which could be dismissed. `ErrorText` remains the tight inline form-error register; it carries `role="alert"`.
+- **`EmptyState`** accepts optional `icon`/`title`/`action`. An empty state that names a button in its prose is asking the reader to go find it — offer the button.
 
 All motion is gated behind `@media (prefers-reduced-motion: no-preference)` and disables cleanly under `reduce`.
 

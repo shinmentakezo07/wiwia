@@ -208,15 +208,27 @@ export function Field(props: { label: string; children: ReactNode; hint?: string
   );
 }
 
-export function Toggle(props: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
+export function Toggle(props: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  disabled?: boolean;
+  /** Accessible name. The switch renders no text of its own, so without this
+   *  a screen reader announces an unlabelled switch (AUDIT #260). */
+  label?: string;
+  /** Optional id, for callers that would rather wire `aria-labelledby` to a
+   *  visible label than pass a duplicate string. */
+  id?: string;
+}) {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={props.checked}
+      aria-label={props.label}
+      id={props.id}
       disabled={props.disabled}
       onClick={() => props.onChange(!props.checked)}
-      className={`relative h-5 w-9 rounded-full transition-colors disabled:opacity-50 ${
+      className={`relative h-5 w-9 shrink-0 rounded-full transition-colors disabled:opacity-50 ${
         props.checked ? "bg-blue-500/40" : "bg-white/[0.06]"
       }`}
       style={props.checked ? { boxShadow: "0 0 12px -2px rgba(59,130,246,0.3)" } : undefined}
@@ -389,11 +401,11 @@ export function ProgressBar(props: { value: number; tone?: string }) {
   );
 }
 
-export function Spinner(_props: { className?: string }) {
+export function Spinner(props: { className?: string }) {
   return (
-    <div className="relative h-8 w-8">
+    <div className={`relative h-8 w-8 ${props.className ?? ""}`}>
       <div className="absolute inset-0 rounded-full border border-white/[0.04]" />
-      <div className="absolute inset-0 animate-spin rounded-full border-2 border-transparent border-t-blue-400/50" />
+      <div className="absolute inset-0 animate-spin rounded-full border-2 border-transparent border-t-blue-400/50 motion-reduce:animate-none" />
     </div>
   );
 }
@@ -408,19 +420,106 @@ export function LiveBadge(props: { connected: boolean }) {
   );
 }
 
-export function EmptyState(props: { children: ReactNode }) {
+export function EmptyState(props: {
+  children?: ReactNode;
+  icon?: LucideIcon;
+  title?: ReactNode;
+  /** Primary action. An empty state that names a button in its prose is asking
+   *  the reader to find it; offering the button is what closes the loop. */
+  action?: ReactNode;
+}) {
+  const Icon = props.icon;
   return (
-    <div className="px-4 py-12 text-center text-[13px] text-[var(--admin-text-dim)]">
-      {props.children}
+    <div className="flex flex-col items-center gap-3 px-4 py-12 text-center">
+      {Icon && (
+        <span className="flex h-10 w-10 items-center justify-center rounded-xl border border-[var(--admin-border)] bg-white/[0.03]">
+          <Icon size={17} className="text-[var(--admin-text-dim)]" />
+        </span>
+      )}
+      {props.title && (
+        <div className="text-[14px] font-medium text-[var(--admin-text)]">{props.title}</div>
+      )}
+      {props.children && (
+        <p className="max-w-md text-[13px] leading-relaxed text-[var(--admin-text-dim)]">
+          {props.children}
+        </p>
+      )}
+      {props.action}
     </div>
   );
 }
 
 export function ErrorText(props: { children: ReactNode }) {
   return (
-    <p className="rounded-[10px] border border-red-500/10 bg-red-500/[0.04] px-2.5 py-2 text-[12px] text-red-400">
+    <p
+      role="alert"
+      className="rounded-[10px] border border-red-500/10 bg-red-500/[0.04] px-2.5 py-2 text-[12px] text-red-400"
+    >
       {props.children}
     </p>
+  );
+}
+
+// -- alert ---------------------------------------------------------------------
+
+export type AlertTone = "info" | "success" | "warning" | "danger";
+
+const ALERT_TONES: Record<AlertTone, { cls: string; Icon: LucideIcon }> = {
+  info: { cls: "admin-alert-info", Icon: Info },
+  success: { cls: "admin-alert-success", Icon: CheckCircle2 },
+  warning: { cls: "admin-alert-warning", Icon: AlertTriangle },
+  danger: { cls: "admin-alert-danger", Icon: XCircle },
+};
+
+/** Block-level status notice.
+ *
+ *  Replaces the hand-rolled `rounded-lg border border-emerald-500/20
+ *  bg-emerald-500/[0.04]` divs that had accumulated across the console. Those
+ *  hardcoded palette values bypassed the `--admin-*` tokens entirely, so they
+ *  drifted from every other surface, and none of them could be dismissed.
+ *  `onDismiss` makes that structurally impossible going forward. */
+export function Alert(props: {
+  tone?: AlertTone;
+  /** Override the tone's default icon; pass `null` for a text-only notice. */
+  icon?: LucideIcon | null;
+  title?: ReactNode;
+  onDismiss?: () => void;
+  children?: ReactNode;
+  action?: ReactNode;
+  className?: string;
+}) {
+  const tone = ALERT_TONES[props.tone ?? "info"];
+  const Icon = props.icon === null ? null : (props.icon ?? tone.Icon);
+  return (
+    <div
+      // `danger` interrupts; everything else reports politely. A page that
+      // renders four notices should not have all four announced at once.
+      role={props.tone === "danger" ? "alert" : "status"}
+      className={`admin-alert ${tone.cls} ${props.className ?? ""}`}
+    >
+      {Icon && <Icon size={15} className="mt-px shrink-0" aria-hidden />}
+      <div className="min-w-0 flex-1">
+        {props.title && <div className="text-[13px] font-medium">{props.title}</div>}
+        {props.children && (
+          <div className={`text-[12px] leading-relaxed ${props.title ? "mt-0.5" : ""}`}>
+            {props.children}
+          </div>
+        )}
+        {props.action && <div className="mt-2.5 flex flex-wrap items-center gap-2">{props.action}</div>}
+      </div>
+      {props.onDismiss && (
+        <button
+          type="button"
+          onClick={props.onDismiss}
+          aria-label="Dismiss"
+          // 44px hit area per the binding tap-target rule; the negative margin
+          // keeps the optical size of the X close to the notice's edge.
+          className="-mr-2 -mt-2 flex h-11 w-11 shrink-0 items-center justify-center rounded-lg opacity-70 transition-colors hover:bg-white/[0.06] hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30"
+        >
+          <X size={14} aria-hidden />
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -516,6 +615,16 @@ export function Dialog(props: {
   footerBordered?: boolean;
 }) {
   const panelRef = useRef<HTMLDivElement | null>(null);
+  // `onClose` is read through a ref so the focus effect below can depend on
+  // `open` alone. With `props` in the dep array the effect re-ran on EVERY
+  // parent render — and its cleanup re-called `restoreTo.focus()`, so any
+  // background refetch (these pages poll every 15s) yanked focus out of
+  // whatever field the user was typing in, and could also capture `restoreTo`
+  // as the panel itself.
+  const onCloseRef = useRef(props.onClose);
+  useEffect(() => {
+    onCloseRef.current = props.onClose;
+  });
   useEffect(() => {
     if (!props.open) return;
     // Remember the trigger so focus returns to it when the dialog closes — a
@@ -531,7 +640,7 @@ export function Dialog(props: {
     initial?.focus?.();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        props.onClose();
+        onCloseRef.current();
         return;
       }
       // Focus trap: with an open modal, Tab must cycle within the panel and
@@ -559,7 +668,7 @@ export function Dialog(props: {
       window.removeEventListener("keydown", onKey);
       restoreTo?.focus?.();
     };
-  }, [props.open, props]);
+  }, [props.open]);
 
   if (!props.open) return null;
   const sizeClass = props.size ?? (props.wide ? "3xl" : "md");
@@ -687,8 +796,9 @@ export function Drawer(props: {
   );
 }
 
-export function CopyButton(props: { text: string }) {
+export function CopyButton(props: { text: string; className?: string }) {
   const [copied, setCopied] = useState(false);
+  const [failed, setFailed] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => {
     if (timer.current) clearTimeout(timer.current);
@@ -696,14 +806,32 @@ export function CopyButton(props: { text: string }) {
   return (
     <Button
       variant="outline"
+      className={props.className}
       onClick={async () => {
-        await navigator.clipboard.writeText(props.text);
-        setCopied(true);
-        timer.current = setTimeout(() => setCopied(false), 1500);
+        try {
+          await navigator.clipboard.writeText(props.text);
+          setFailed(false);
+          setCopied(true);
+        } catch {
+          // Clipboard access can be denied (insecure context, permissions).
+          // Saying "Copied" when nothing was copied is worse than saying so.
+          setCopied(false);
+          setFailed(true);
+        }
+        timer.current = setTimeout(() => {
+          setCopied(false);
+          setFailed(false);
+        }, 1500);
       }}
     >
-      {copied ? <Check size={14} /> : <Copy size={14} />}
-      {copied ? "Copied" : "Copy"}
+      {copied ? (
+        <Check size={14} aria-hidden />
+      ) : failed ? (
+        <AlertTriangle size={14} aria-hidden />
+      ) : (
+        <Copy size={14} aria-hidden />
+      )}
+      {copied ? "Copied" : failed ? "Copy failed" : "Copy"}
     </Button>
   );
 }

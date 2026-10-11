@@ -393,6 +393,40 @@ body {
   border: 1px solid var(--admin-border);
 }
 
+/* Admin alert — block status notice (tone follows the badge palette so a
+   notice and its badge read as the same severity). */
+.admin-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border-radius: var(--admin-radius-sm);
+  border: 1px solid var(--admin-border);
+  background: rgba(255, 255, 255, 0.02);
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--admin-text-muted);
+}
+.admin-alert-info {
+  color: var(--admin-accent);
+  background: rgba(59, 130, 246, 0.05);
+  border-color: rgba(59, 130, 246, 0.18);
+}
+.admin-alert-success {
+  color: var(--admin-success);
+  background: rgba(52, 211, 153, 0.05);
+  border-color: rgba(52, 211, 153, 0.18);
+}
+.admin-alert-warning {
+  color: var(--admin-warning);
+  background: rgba(251, 191, 36, 0.05);
+  border-color: rgba(251, 191, 36, 0.18);
+}
+.admin-alert-danger {
+  color: var(--admin-danger);
+  background: rgba(248, 113, 113, 0.05);
+  border-color: rgba(248, 113, 113, 0.18);
+}
+
 /* Admin input */
 .admin-input {
   background: rgba(255, 255, 255, 0.03);
@@ -572,6 +606,21 @@ select.admin-input option {
 .admin-btn-danger:hover:not(:disabled) {
   background: rgba(248, 113, 113, 0.14);
   border-color: rgba(248, 113, 113, 0.2);
+}
+
+/* Keyboard focus ring — MUST come after every `:hover` rule above, and must
+   match their specificity, or a focused-and-hovered primary button loses the
+   ring to `.admin-btn-primary:hover`'s glow (AUDIT #258).
+
+   The `:not(:disabled)` is what buys the third specificity class; the
+   two-stop ring puts an opaque inner edge against the `#0a0a0a` card surface
+   and an accent outer edge against the `#050505` page background, so it reads
+   on both. */
+.admin-btn:focus-visible:not(:disabled) {
+  outline: none;
+  box-shadow:
+    0 0 0 2px var(--admin-bg),
+    0 0 0 4px rgba(59, 130, 246, 0.55);
 }
 
 /* Admin section label */

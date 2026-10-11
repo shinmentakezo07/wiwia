@@ -53,7 +53,16 @@ function DisableCell(props: { u: AdminUser; meId?: string; onError: (m: string) 
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["users"] }),
     onError: (e) => props.onError(e.message),
   });
-  return <Toggle checked={!props.u.disabled} onChange={() => patch.mutate()} disabled={patch.isPending} />;
+  return (
+    <Toggle
+      // The cell sits under an "Enabled" column header, so the header alone
+      // would announce every row the same way (AUDIT #260).
+      label={props.u.disabled ? `Enable ${props.u.username}` : `Disable ${props.u.username}`}
+      checked={!props.u.disabled}
+      onChange={() => patch.mutate()}
+      disabled={patch.isPending}
+    />
+  );
 }
 
 export function UsersPage() {
