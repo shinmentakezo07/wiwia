@@ -687,6 +687,27 @@ class AnthropicAdapter:
         )
         return turn
 
+    @staticmethod
+    def _block_index(payload: dict[str, Any]) -> int:
+        """The frame's content-block index, coerced to a usable ``int``.
+
+        ``payload.get("index", 0)`` defaults only a MISSING key: an upstream
+        frame (or a re-serializing proxy) carrying ``"index": [0]`` put a list
+        into ``self._tool_indices.add(idx)`` and raised ``TypeError: unhashable
+        type`` straight out of the decoder. That escape is not cosmetic — the
+        pump turns it into a ``StreamError``, bills the partial, records a fail
+        and moves a HEALTHY key to ``cooling`` for a frame carrying no
+        semantics.
+
+        Same rule as the openai/nim/openrouter decoders (AUDIT #384): a bool is
+        rejected too, since ``isinstance(True, int)`` is True and ``True``/``1``
+        would collide as set members.
+        """
+        idx = payload.get("index", 0)
+        if not isinstance(idx, int) or isinstance(idx, bool):
+            return 0
+        return idx
+
     def decode_stream_event(self, event: str, data: str) -> list[dl.IRStreamDelta]:
         try:
             payload = orjson.loads(data)
@@ -726,7 +747,7 @@ class AnthropicAdapter:
         elif etype == "content_block_start":
             cb = payload.get("content_block")
             cb = cb if isinstance(cb, dict) else {}
-            idx = payload.get("index", 0)
+            idx = self._block_index(payload)
             if cb.get("type") == "redacted_thinking":
                 # Anthropic's extended-thinking redaction: an opaque encrypted
                 # blob that MUST be replayed verbatim on the next turn or the
@@ -762,9 +783,20 @@ class AnthropicAdapter:
                 # tool it may now call, so dropping it (the previous behaviour —
                 # only tool_use/server_tool_use were recognized) left Claude
                 # Code with a search trace and no results.
+                #
+                # ``cb.get("tool_use_id", "")`` defaults only a MISSING key, so
+                # an unhashable value (a list/dict from a malformed frame or a
+                # re-serializing proxy) was hashed straight into the dict lookup
+                # and raised ``TypeError: unhashable type`` out of the decoder
+                # — the same crash-and-cool consequence as the unguarded
+                # ``index``. Every sibling arm in this branch already coerces
+                # (``as_str`` on the id above, ``isinstance(..., str)`` on the
+                # block type), so use the same helper here.
+                tid = cb.get("tool_use_id")
                 out.append(dl.ServerToolResultDelta(
                     index=idx, block=cb,
-                    builtin=self._tool_names_by_id.get(cb.get("tool_use_id", ""))))
+                    builtin=self._tool_names_by_id.get(
+                        tid if isinstance(tid, str) else "")))
         elif etype == "content_block_delta":
             d = payload.get("delta")
             d = d if isinstance(d, dict) else {}
@@ -786,12 +818,12 @@ class AnthropicAdapter:
                 # (AUDIT #160). Gate exactly like the sibling arms above.
                 frag = d.get("partial_json")
                 out.append(dl.ToolCallArgsDelta(
-                    index=payload.get("index", 0),
+                    index=self._block_index(payload),
                     args_fragment=frag if isinstance(frag, str) else ""))
         elif etype == "content_block_stop":
             # only tool_use blocks close a tool call; text/thinking stops are not
             # tool-call lifecycle events
-            idx = payload.get("index", 0)
+            idx = self._block_index(payload)
             if idx in self._tool_indices:
                 self._tool_indices.discard(idx)
                 out.append(dl.ToolCallClose(index=idx))

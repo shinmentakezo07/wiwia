@@ -8,6 +8,173 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — round 127/128: Anthropic translation sweep (2026-10-11)
+
+Found by fuzzing `wiwi/ir/` + the Anthropic codec and adapter with executed
+probes rather than by reading. Four defects, all confirmed by running the real
+encoder/decoder before and after the fix. Entries #415-#418.
+
+Two of them (#417, #418) are typed-wrong-scalar leaks that survive to the
+upstream; the other two (#415, #416) corrupt a *stream* mid-flight, and both
+share one consequence worth naming: a `TypeError` escaping a decoder is not a
+500, it is worse — the pump converts it to a `StreamError`, bills the partial,
+records a fail against the deployment, and moves a **healthy** key to `cooling`.
+A frame carrying no semantics penalizes a healthy credential.
+
+### 415. Parallel tool calls emitted malformed block ordering — a text block nested inside an open tool block
+
+**Severity:** 🔴 High · **Status: fixed** — round 127 (`tests/test_fix_round127.py`; found and fixed 2026-10-11)
+**Files:** `wiwi/wire/anthropic_messages.py:1054` (`ToolCallClose` arm), `:1141-1157` (`final_frame`)
+
+Two independent sites let buffered content drain while a parallel tool block
+was still open.
+
+The `ToolCallClose` guard tested `self._open_block != "tool"`, but
+`_open_block` names only the **most recently opened** block. The moment
+`_close_block(tool_index=…)` cleared it the guard passed — while sibling
+indices remained registered in `self._tool_blocks`, which is the actual set of
+open tool blocks:
+
+```python
+1054:  if self._open_block != "tool" and self._deferred:
+1055:      out.extend(self._flush_deferred())
+```
+
+And in `final_frame`, `_flush_deferred()` ran **before** the `sorted(self._tool_blocks)`
+sweep. The comment there claimed this was safe because "_flush_deferred closes
+whatever it needs and the tool indices are tracked separately from _open_block"
+— that separation is exactly what breaks.
+
+**Probe** (executed, two `tool_use` blocks open with text buffered between them):
+
+```
+before: OPEN 0 tool_use / OPEN 1 tool_use / CLOSE 1 / OPEN 2 text / DELTA 2 / CLOSE 2 / CLOSE 0
+after:  OPEN 0 tool_use / OPEN 1 tool_use / CLOSE 1 / CLOSE 0 / OPEN 2 text / DELTA 2 / CLOSE 2
+```
+
+Block 0's `content_block_stop` arrived **after** a whole text block had opened,
+been filled and closed inside it. Anthropic content blocks are strictly
+sequential, so this is SSE the API itself never emits and a strict client cannot
+parse. Reproduced end-to-end through the real gateway (`POST /v1/messages`,
+`stream:true`) against an Anthropic upstream that omits the parallel siblings'
+`content_block_stop` — the AUDIT #111 shape, which #111's own text calls "the
+live path".
+
+**Fix:** guard on `not self._tool_blocks` (the open *set*) instead of
+`_open_block != "tool"`, and move `_flush_deferred()` to after the sweep in
+`final_frame`. This mirrors the Responses encoder's existing
+`if not self._tools` guard (`wiwi/wire/openai_responses.py:697`). Both controls
+are pinned: the single-tool case and the no-tools case are byte-identical to
+their previous output.
+
+**Why not a known finding:** #178 (fixed) was `_emit_server_call` reusing the
+flushed text block's index — the same mechanism, single-tool only. #111 (fixed)
+added the `final_frame` sweep, but the sweep runs *after* the flush so it never
+covered this. #367 fixed this exact class in the *Responses* encoder; the
+Anthropic sibling was never given it. The comment at `:1050-1053` already stated
+the invariant the code did not implement.
+
+### 416. An unhashable `tool_use_id` in a `*_tool_result` block crashed the stream pump
+
+**Severity:** 🔴 High · **Status: fixed** — round 128 (`tests/test_fix_round128.py`; found and fixed 2026-10-11)
+**Files:** `wiwi/providers/anthropic_adapter.py:788`
+
+```python
+builtin=self._tool_names_by_id.get(cb.get("tool_use_id", ""))))
+```
+
+`.get(k, default)` defaults only a **missing** key. A list/dict
+`tool_use_id` was hashed straight into the dict lookup.
+
+**Probe** (executed, `fresh_adapter("anthropic")`):
+
+```
+tool_use_id=["x"]   -> TypeError: unhashable type: 'list'
+tool_use_id={"a":1} -> TypeError: unhashable type: 'dict'
+tool_use_id=5       -> OK (hashable; wrong-typed but not a crash)
+```
+
+Every sibling arm in that same branch already coerces — `as_str(cb.get("id"))`
+on the `tool_use` arm, `isinstance(cb.get("type"), str)` on the block type —
+so this was the one unguarded read.
+
+**Consequence, confirmed over the real app** (`LifespanManager` + `respx`, one
+Anthropic SSE stream carrying text + `server_tool_use` + a
+`web_search_tool_result` with `tool_use_id: ["x"]`, on `POST /v1/chat/completions`):
+
+```
+HTTP 200
+  data: {... "delta":{"content":"hi"} ...}
+  data: {"error":{"message":"unhashable type: 'list'","type":"api_error"}}
+GET /admin/providers -> {"healthy": false, "keys":[{"status":"cooling","err_count":1}]}
+```
+
+The client got a 200, partial content and an error frame; the healthy key was
+moved to `cooling`.
+
+**Fix:** coerce with the file's existing `as_str`-style guard before the lookup
+(`tid if isinstance(tid, str) else ""`).
+
+**Why not a known finding:** #384 (below) covers the `index` reads only and does
+not list this line; `_tool_names_by_id` appears nowhere else in this register.
+#331 covers the *inbound codec's* `tool_use_id` — a different site, fixed in
+round 118. Same defect class as #384, distinct unguarded read.
+
+### 417. `top_k: true` passed the `isinstance(..., int)` guard and reached the upstream
+
+**Severity:** ⚪ Low · **Status: fixed** — round 127 (`tests/test_fix_round127.py`)
+**Files:** `wiwi/wire/anthropic_messages.py:461`
+
+`isinstance(True, int)` is `True`, so the raw guard let a JSON `true` through:
+IR `top_k=True`, emitted upstream as `{"top_k": true}` (both verified by
+execution). The provider 400s naming a type the caller never sent.
+
+**Fix:** `ir.coerce_int(body.get("top_k"))` — the existing helper, which
+rejects bools explicitly.
+
+**Why not a known finding:** this is an **unfixed residual of #187**, which is
+marked fixed. #187's own fix sketch said `top_k=ir.coerce_int(body.get("top_k"))`;
+the implemented guard was a raw `isinstance(..., int)`, so the bool case the
+sketch would have closed was left open. #187 is corrected in place below.
+
+### 418. A non-dict `tool_use.input` reached the Anthropic upstream verbatim
+
+**Severity:** ⚪ Low · **Status: fixed** — round 127 (`tests/test_fix_round127.py`)
+**Files:** `wiwi/wire/anthropic_messages.py:157` and `:170`
+
+`args=b.get("input") or {}` catches only *falsy* values, so every truthy
+non-dict was forwarded. Verified end-to-end:
+
+| client `input` | upstream body |
+|---|---|
+| `"raw string"` | `{"type":"tool_use","id":"tu1","name":"f","input":"raw string"}` |
+| `[1,2]` | `..."input":[1,2]}` |
+| `5` | `..."input":5}` |
+
+Anthropic's `tool_use.input` is an **object**, so each produces a structurally
+invalid request rejected far from its origin. On the OpenAI path it degrades
+differently: `openai_chat.py` emits `"arguments": "\"raw string\""` — a
+JSON-encoded string, not an object — so the replayed history carries a tool
+call no client can parse.
+
+The identical `or {}` shape **is** guarded in `wiwi/wire/openai_chat.py:160`
+(`isinstance(raw_args, dict)`) and in the provider-side decoders, so the
+Anthropic inbound path was the outlier.
+
+**Fix:** `isinstance(..., dict)` guard on both arms, mirroring `openai_chat.py:160`.
+
+**Why not a known finding — and a correction to this register.** The
+*Disproven on retest* section below asserts that `input`/`args` are "all
+correctly guarded". **That is false for this codec.** That line is corrected in
+place below rather than left to mislead the next agent.
+
+**Stale statuses corrected in this round** (each re-verified by execution before
+editing, per the error-discovery rule): #351, #122, #123, #126, #9, #10 were all
+marked open but their code is already fixed. Their bodies are preserved and each
+gained a `**Status: fixed**` line naming the guard that fixed it.
+
+---
+
 ## ✅ Fixed — /console/oauth redesign (2026-10-11)
 
 Found while redesigning the console's connected-accounts page. Entries #399-#410 were
@@ -4479,10 +4646,16 @@ never remove reconciled `record_tokens` usage — it refunds estimates only).
 > repointed to #121 rather than left as dangling references.
 
 ### 122. System-list `text` blocks are never coerced — `system: [{"type":"text","text":null}]` 500s every adapter's encode
+
+**Status: fixed** — re-verified 2026-10-11 (round 127 sweep). `system: [{"type":"text","text":null}]` now decodes to `TextPart(text='')`, and the round-trip through `AnthropicAdapter.encode_request` succeeds. Body preserved unchanged.
+
 **File:** `wiwi/wire/anthropic_messages.py:26`
 The message-block path coerces (`raw_text if isinstance(raw_text, str) else ""`, line 53 — UPDATE.md §39.1) but the system branch stores the raw scalar. Verified: decode yields `TextPart(text=None)`; `OpenAIAdapter.encode_request` and `AnthropicAdapter.encode_request` both raise `TypeError` in `" ".join(...)`. `run_chat_like` catches only `(DialectError, ValueError)` at decode, so the sync path is an unhandled 500. Fix: same coercion as line 53.
 
 ### 123. Non-string `text` scalars inside list-form content crash decode — one root cause, four sites, all three surfaces 500 on replayed history
+
+**Status: fixed** — re-verified 2026-10-11 (round 127 sweep). `{"type":"text","text":5}` decodes to `TextPart(text='')` on all three surfaces and encodes cleanly. Body preserved unchanged.
+
 **Files:** `wiwi/wire/anthropic_messages.py:93-95` (tool_result content list), `wiwi/wire/openai_chat.py:127-129` (tool message content), `wiwi/wire/openai_responses.py:88-92` (`_item_text`), `:270` (reasoning summary)
 Each builds a text list via `b.get("text", "")` without an isinstance filter and joins it; `{"type":"text","text":5}` (or a dict) → `TypeError` out of `decode_request` → 500. Every sibling text scalar in these files is guarded; these four were missed. Fix: filter to `isinstance(t, str)` at each site (mirror of anthropic_messages.py:53).
 
@@ -4510,6 +4683,9 @@ Verified output for an upstream turn containing a redacted block: `[{'type': 'th
 **Status: fixed** — round 54. The mirror branch is in place; verified end-to-end (encode → client echoes history → `AnthropicAdapter.encode_request`) that the blob and the `redacted_thinking` type both survive to the upstream body. `tests/test_fix_round54.py` (`test_sync_anthropic_encode_preserves_redacted_thinking`, `test_redacted_thinking_survives_client_replay_round_trip`), with an ordinary-signed-thinking control.
 
 ### 126. ⚪ Tools loop lacks the `isinstance(ttype, str)` guard — non-string `type` crashes in `builtin_tools.canonical_for`
+
+**Status: fixed** — re-verified 2026-10-11 (round 127 sweep). `anthropic_messages.py` now guards `ttype` with `isinstance(ttype, str)` before `bt.canonical_for`, so `tools:[{"type":5}]` decodes to `tools=[]` instead of raising. Note: the *helper-level* guard this entry also suggested — making `canonical_for` itself total — was NOT done; both real callers pre-guard, so it remains unreachable rather than fixed at the source. See the ⚪ note under #418.
+
 **File:** `wiwi/wire/anthropic_messages.py:157` (crash at `wiwi/ir/builtin_tools.py:92`)
 `{"type": 5}` (or any non-str truthy type) in a tool entry passes `if not wire_type: return None`, misses both reverse maps, reaches the Anthropic family-prefix loop, and `5.startswith(...)` raises `AttributeError` → 500. The message-block loop got exactly this guard in the round-30 fix (line 44, with a comment explaining the 500 it prevents); the tools loop never did. Fix: skip non-string `ttype` like the block loop, or make `canonical_for` return None for non-str input.
 
@@ -5120,6 +5296,9 @@ The non-streaming path parses `Retry-After` at line 95-97 and sets `err.retry_af
 `effective_thinking_budget()` returns `None` for `'none'` → `if thinking_budget is not None` is `False` → `thinkingConfig` is never set → thinking stays at model default. Every other adapter (Anthropic, OpenAI, NIM, OpenRouter) explicitly disables reasoning for `'none'`. Gemini should set `thinkingConfig={"thinkingBudget": 0}`.
 
 ### 9. Anthropic cost double-subtracts cached tokens
+
+**Status: fixed** — re-verified 2026-10-11 (round 127 sweep). `wiwi/cost/pricing.py` now takes `prompt_includes_cached`, and `wiwi/core/gateway.py` derives it from the WIRE shape via `prompt_includes_cached(dep)` → `not _speaks_messages(dep)` rather than keying on `provider_type`. That is the documented #227 generalization. Body preserved unchanged.
+
 **File:** `wiwi/cost/pricing.py:49` + `wiwi/providers/anthropic_adapter.py:213`
 **Trigger:** any Anthropic response using prompt caching.
 
@@ -5128,6 +5307,9 @@ Anthropic's `input_tokens` **already excludes** `cache_read_input_tokens`. The a
 **Fix:** Anthropic should price `prompt_tokens` at full input rate (not minus cached) + `cached_tokens` at cache-read rate.
 
 ### 10. Anthropic cache-creation (cache-write) tokens billed at $0
+
+**Status: fixed** — re-verified 2026-10-11 (round 127 sweep). `wiwi/cost/pricing.py` now accepts `cache_creation_tokens` and prices them at `cache_creation_input_cost_per_token` (falling back to the input rate), so cache-write tokens are no longer billed at $0. Body preserved unchanged.
+
 **File:** `wiwi/cost/pricing.py` (no `cache_creation` field) + `wiwi/core/gateway.py:490-491, 515`
 
 `cache_creation_tokens` (Anthropic cache-write, populated at `anthropic_adapter.py:216`) is tracked in the IR and `UsageFinal`, but **never passed to `cost_with_status`** (gateway calls it with only `prompt/completion/cached`). There is no pricing field for it (`admin_put_pricing` only accepts `cache_read_per_1m`). Anthropic charges cache writes at ~1.25× input — these tokens are billed at **$0** (undercharge).
@@ -9197,6 +9379,14 @@ sequence (`tests/test_fix_round70.py`, 8 passing).
   field found only the sites recorded above. `role`, `tool_choice`,
   `input`/`args`, `tool_use_id`, `strict`, `defer_loading`, `cache_control`,
   stop-items and `response_format` are all correctly guarded.
+  - ⚠️ **Partially retracted 2026-10-11 (round 127):** `input`/`args` is **not**
+    correctly guarded on the *Anthropic inbound* path. `b.get("input") or {}`
+    in `wire/anthropic_messages.py` let every truthy non-dict through to the
+    upstream verbatim — see **#418**. The walk above evidently did not exercise
+    the *client-supplied* decode direction for this codec (the guards it did
+    find are in the adapter-side decoders). `tool_use_id` is separately wrong on
+    the *streaming* path — see **#416**. Treat the rest of this bullet as still
+    standing; re-verify rather than trusting it wholesale next time.
 - **Journal-replay gate with `stream_journal_enabled: false`** — hypothesised
   to return an empty 200 SSE. Not reproducible: `JournalStore.is_active` is
   process-local, so an "active" journal cannot be forged from outside.
@@ -12690,6 +12880,9 @@ loses context and appears to forget what it was asked, with no error anywhere.
 ---
 
 ### 351. A non-string `reasoning.effort` 500s every non-OpenAI deployment (the inbound half of #288)
+
+**Severity:** 🔴 Critical · **Status: fixed** — re-verified 2026-10-11 (round 127 sweep). `effort_to_thinking_budget` now guards with `isinstance(effort, str)` (`wiwi/ir/types.py`) and the Responses decoder coerces via `_effort_str` (`wiwi/wire/openai_responses.py`): `reasoning.effort` of `["low"]`/`{"a":1}`/`5` decodes to `reasoning_effort=None`, so nothing unhashable reaches an adapter. Body preserved unchanged.
+
 
 **Severity:** 🔴 Critical · **Status: open**
 

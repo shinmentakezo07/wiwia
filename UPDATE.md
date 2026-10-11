@@ -3607,3 +3607,159 @@ enabled key is reused across repeated requests, pinning against a
 re-mint-on-every-call over-correction.
 
 **Whole-branch**: 2932 tests pass, ruff clean.
+
+## Round 127/128 — Anthropic translation sweep: block ordering and typed-wrong scalars (2026-10-11)
+
+**Files:** `wiwi/wire/anthropic_messages.py` (`ToolCallClose` arm, `final_frame`,
+the `tool_use`/`server_tool_use` decode arms, the `top_k` read),
+`wiwi/providers/anthropic_adapter.py` (new `_block_index`, the `tool_use_id`
+lookup), `tests/test_fix_round127.py`, `tests/test_fix_round128.py`.
+**AUDIT:** #415, #416, #417, #418.
+
+Found by fuzzing the IR and the Anthropic codec/adapter with executed probes,
+not by reading. All four were confirmed by running the real encoder/decoder
+before and after the fix.
+
+### 127.1 Buffered content must not drain while a parallel tool block is open
+
+Two sites let the deferred text/thinking buffer flush in the middle of an open
+tool group.
+
+`self._open_block` names only the **most recently opened** block, so the
+`ToolCallClose` guard cleared as soon as that one closed — while siblings
+remained registered in `self._tool_blocks`, the actual open set:
+
+```python
+# before
+1049:  out = self._close_block(tool_index=d.index)
+1054:  if self._open_block != "tool" and self._deferred:
+1055:      out.extend(self._flush_deferred())
+
+# after — consult the open SET, not the last-opened block
+1049:  out = self._close_block(tool_index=d.index)
+        if not self._tool_blocks and self._deferred:
+            out.extend(self._flush_deferred())
+```
+
+And `final_frame` ran the flush **before** the sweep that closes the remaining
+parallel blocks:
+
+```python
+# before
+1147:  out = b"".join(self._flush_deferred())     # text opens here...
+1150:  out += b"".join(self._close_block())
+1156:  for idx in sorted(self._tool_blocks):       # ...tools close after
+1157:      out += b"".join(self._close_block(tool_index=idx))
+
+# after — tool group closes first, then the deferred content
+        out  = b"".join(self._close_block())
+        for idx in sorted(self._tool_blocks):
+            out += b"".join(self._close_block(tool_index=idx))
+        out += b"".join(self._flush_deferred())
+        out += b"".join(self._close_block())
+```
+
+Observed (executed, two `tool_use` blocks with text buffered between them):
+
+```
+before: OPEN 0 tool_use / OPEN 1 tool_use / CLOSE 1 / OPEN 2 text / DELTA 2 / CLOSE 2 / CLOSE 0
+after:  OPEN 0 tool_use / OPEN 1 tool_use / CLOSE 1 / CLOSE 0 / OPEN 2 text / DELTA 2 / CLOSE 2
+```
+
+Anthropic content blocks are strictly sequential, so the "before" trace is SSE
+the API itself never emits: block 0's stop arrived after a whole text block had
+opened, been filled and closed inside it. The Anthropic upstream omits
+`content_block_stop` for parallel siblings, which is what keeps both registered
+in `_tool_blocks` at the end of a turn — the live path, not a synthetic one.
+
+This mirrors the guard the Responses encoder already had
+(`openai_responses.py:697`, `if not self._tools:`). Both controls are pinned: the
+single-tool and no-tools outputs are byte-identical to their previous form.
+
+### 127.2 `top_k: true` passed the `isinstance(..., int)` guard
+
+```python
+# before
+top_k=body.get("top_k") if isinstance(body.get("top_k"), int) else None,
+# after
+top_k=ir.coerce_int(body.get("top_k")),
+```
+
+`isinstance(True, int)` is True, so a JSON `true` became IR `top_k=True` and
+reached the upstream as `{"top_k": true}`. `ir.coerce_int` is the existing
+helper and rejects bools explicitly — this was AUDIT #187's own fix sketch; the
+implemented guard missed the bool case.
+
+### 127.3 A non-dict `tool_use.input` reached the upstream verbatim
+
+```python
+# before
+args=b.get("input") or {},
+# after
+args=b.get("input") if isinstance(b.get("input"), dict) else {},
+```
+
+`or {}` catches only *falsy* values, so `"raw string"`, `[1,2]` and `5` all
+passed through. Anthropic's `tool_use.input` is an object, so each produced a
+structurally invalid request rejected far from its origin. On the OpenAI path
+the same input became `"arguments": "\"raw string\""` — a JSON-encoded string,
+not an object — so replayed history carried a tool call no client could parse.
+`openai_chat.py:160` already guarded this identical read; the Anthropic inbound
+path was the outlier. Both the `tool_use` and `server_tool_use`/`mcp_tool_use`
+arms carried it.
+
+This retires a claim in AUDIT.md's *Disproven on retest* list, which asserted
+`input`/`args` were "all correctly guarded". That is now corrected in place with
+a partial retraction.
+
+### 128.1 Unhashable `index` and `tool_use_id` crashed the stream pump
+
+`payload.get("index", 0)` defaults only a *missing* key, so an upstream frame
+(or a re-serializing proxy) carrying `"index": [0]` put a list into
+`self._tool_indices.add(idx)`; and the server-tool result arm had the same shape
+on `tool_use_id`:
+
+```python
+# before
+741:  self._tool_indices.add(idx)
+788:  builtin=self._tool_names_by_id.get(cb.get("tool_use_id", ""))))
+# after
+        self._tool_indices.add(self._block_index(payload))
+        tid = cb.get("tool_use_id")
+        builtin=self._tool_names_by_id.get(tid if isinstance(tid, str) else "")
+```
+
+with a new `_block_index(payload)` helper carrying the same rule as the
+openai/nim/openrouter decoders — including rejecting `bool`, since
+`isinstance(True, int)` is True and `True` would collide with `1` as a set
+member:
+
+```python
+@staticmethod
+def _block_index(payload: dict[str, Any]) -> int:
+    idx = payload.get("index", 0)
+    if not isinstance(idx, int) or isinstance(idx, bool):
+        return 0
+    return idx
+```
+
+This closes AUDIT #384, which had the Anthropic decoder as the last unguarded
+streaming decoder. The `tool_use_id` read is a second instance of the same
+class at a site #384 did not cover.
+
+**Why this class matters more than a 500.** A `TypeError` escaping
+`decode_stream_event` is not a clean failure: the pump's mid-stream handler
+converts it to a `StreamError`, bills the partial, calls `record_fail`, and moves
+a **healthy key to `cooling`**. Verified end-to-end over the real gateway — the
+client received HTTP 200, partial content and an `api_error` frame, and
+`/admin/providers` then reported the key `status:"cooling"`. A frame carrying no
+semantics penalized a healthy credential.
+
+**Tests:** `tests/test_fix_round127.py` (20) and `tests/test_fix_round128.py`
+(12), each written before the fix and confirmed failing against the original
+code. Every fix ships controls pinning the previously-correct cases —
+single-tool flush, no-tools, parallel-tools-without-deferred-text, genuine int
+`top_k`, genuine dict `input`, the normal open→args→close lifecycle, and
+server-tool-result pairing by id.
+
+**Whole-branch:** 3013 tests pass, ruff clean.

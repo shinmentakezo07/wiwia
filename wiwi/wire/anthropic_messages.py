@@ -154,7 +154,12 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                         # re-emitted upstream as ``"name": null`` (AUDIT #186).
                         # Coerce like the text fields above.
                         name=raw_name if isinstance(raw_name, str) else "",
-                        args=b.get("input") or {}))
+                        # Anthropic's ``tool_use.input`` is an OBJECT. ``or {}``
+                        # only caught falsy values, so every truthy non-dict
+                        # ("raw string", [1, 2], 5) was forwarded verbatim and
+                        # rejected upstream far from its origin. Guard like the
+                        # sibling read in openai_chat.py.
+                        args=b.get("input") if isinstance(b.get("input"), dict) else {}))
                 elif btype == "server_tool_use" or btype == "mcp_tool_use":
                     # Server-side tools (web_search, code_execution, mcp, ...):
                     # the PROVIDER executes these, so tag them builtin — the
@@ -167,7 +172,8 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                     name = raw_name if isinstance(raw_name, str) else ""
                     parts.append(ir.ToolUsePart(
                         id=b.get("id", ""), name=name,
-                        args=b.get("input") or {},
+                        # Same object guard as the client-dispatched arm above.
+                        args=b.get("input") if isinstance(b.get("input"), dict) else {},
                         builtin=name or "server_tool",
                         block_type=btype))
                 elif btype in ("search_result", "container_upload",
@@ -458,7 +464,11 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         thinking_type=thinking_type,
         reasoning_effort=reasoning_effort,
         effort=effort,
-        top_k=body.get("top_k") if isinstance(body.get("top_k"), int) else None,
+        # ``isinstance(True, int)`` is True, so a raw isinstance guard let
+        # ``"top_k": true`` through and emitted ``{"top_k": true}`` upstream.
+        # ``ir.coerce_int`` is the existing helper for this job and rejects
+        # bools explicitly — the fix AUDIT #187's own sketch named.
+        top_k=ir.coerce_int(body.get("top_k")),
         disable_parallel_tool_use=disable_parallel,
         response_format=response_format,
     )
@@ -1051,7 +1061,17 @@ class AnthropicStreamEncoder:
             # now be emitted — but only once NO tool block is open, so parallel
             # siblings keep their consecutive indices and a text block cannot
             # land in the middle of the tool group (AUDIT #156).
-            if self._open_block != "tool" and self._deferred:
+            #
+            # The test is ``_tool_blocks`` (the set of OPEN tool blocks), not
+            # ``_open_block != "tool"``. ``_open_block`` names only the most
+            # RECENTLY opened block, so it reads None the moment this close
+            # clears it — while a parallel sibling is still registered in
+            # ``_tool_blocks``. The old guard therefore let the buffer drain in
+            # the middle of the tool group, opening a text block that a sibling
+            # tool block then had to wrap (malformed: Anthropic content blocks
+            # are strictly sequential). Mirrors the Responses encoder's
+            # ``if not self._tools`` guard (AUDIT #367).
+            if not self._tool_blocks and self._deferred:
                 out.extend(self._flush_deferred())
             return b"".join(out)
         if isinstance(d, dl.ServerToolResultDelta):
@@ -1139,15 +1159,9 @@ class AnthropicStreamEncoder:
         return None
 
     def final_frame(self) -> bytes:
-        # Content buffered while a tool block was open is emitted first, as its
-        # own block, so it lands inside the message rather than being lost
-        # (AUDIT #156). Safe here: the tool blocks below are still open, but
-        # _flush_deferred closes whatever it needs and the tool indices are
-        # tracked separately from _open_block.
-        out = b"".join(self._flush_deferred())
         # A legal stream always closes the currently open content block before
         # the terminating message_delta, even when the last delta left one open.
-        out += b"".join(self._close_block())
+        out = b"".join(self._close_block())
         # Parallel tool calls are siblings: an adapter may end the message with
         # several tool_use blocks still open (the Anthropic upstream omits their
         # content_block_stop). _close_block() only closes the *current* one, so
@@ -1155,6 +1169,15 @@ class AnthropicStreamEncoder:
         # left with a tool_use block that never finishes (AUDIT #111).
         for idx in sorted(self._tool_blocks):
             out += b"".join(self._close_block(tool_index=idx))
+        # Content buffered while a tool block was open is emitted as its own
+        # block so it lands inside the message rather than being lost (AUDIT
+        # #156) — but ONLY after the whole tool group above has closed. The
+        # flush used to run first, on the reasoning that _flush_deferred closes
+        # whatever it needs; that is exactly what breaks, because a text block
+        # opened before the remaining tools closed and one of them then wrapped
+        # it. Order matters: tool group closed, then the deferred content.
+        out += b"".join(self._flush_deferred())
+        out += b"".join(self._close_block())
         # A signature still pending here has no later thinking block to ride on:
         # flush it as a late delta against the last thinking block rather than
         # dropping it (a dropped signature hard-400s the next turn's replay).
