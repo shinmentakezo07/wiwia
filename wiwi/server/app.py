@@ -1057,6 +1057,28 @@ class AppState:
         for p in data["providers"]:
             if p["name"] in self.router.providers:
                 continue  # YAML-sourced, skip
+            if p["provider_type"] not in PROVIDER_TYPES:
+                # Re-validate what the DB hands back. The YAML path enforces
+                # this (``ProviderDef.provider`` is ``Literal[PROVIDER_TYPES]``)
+                # and the admin create route does too (``app.py:3584``), but a
+                # row written by an older build, a hand edit, or a restore from
+                # a foreign dump can carry anything. An unvalidated type reaches
+                # ``registry.fresh_adapter`` inside the gateway, which raises a
+                # bare ``ValueError`` — and ``router.py`` catches only
+                # ``WiwiError`` and re-raises everything else, so it skips the
+                # retry/fallback machinery and surfaces as an unhandled 500
+                # instead of a clean "deployment unavailable" (AUDIT #394).
+                # Skip the provider so its deployments simply have no account to
+                # resolve against, which is the existing no-such-provider path.
+                # Local import: this method already binds the name ``structlog``
+                # in a nested scope, and the module-level one is not visible here.
+                import structlog as _sl
+
+                _sl.get_logger("wiwi.startup").warning(
+                    "db_provider_type_unknown",
+                    provider=p["name"], provider_type=p["provider_type"],
+                    known=sorted(PROVIDER_TYPES))
+                continue
             self.router.providers[p["name"]] = ProviderAccount(
                 name=p["name"], provider_type=p["provider_type"],
                 base_url=p["base_url"], timeout_s=p["timeout_s"],
@@ -1706,10 +1728,17 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
         Distinct from :func:`_abandon_journal`, which leaves the file on disk:
         this is the AUDIT #320 case, where the owner line could not be made
-        durable, so the file must not survive at all. The in-memory intent is
-        left in place (``release`` deliberately outlives it, AUDIT #175), which
-        means ``owner_of`` still reports the real owner rather than ``None`` —
-        so the replay gate stays correctly scoped even though the file is gone.
+        durable, so the file must not survive at all.
+
+        The in-memory intent is dropped too (``forget_owner``, AUDIT #395).
+        ``release`` deliberately keeps it for a *finished* journal, because that
+        file stays replayable for its whole TTL and still needs its owner to gate
+        it (AUDIT #175). Here there is no file and no replay to scope, and the
+        sweep only reclaims intents whose file it unlinks itself — so keeping it
+        leaked one entry per streamed request for the process lifetime in the
+        degraded-journal state this path exists for. The gate is unaffected:
+        ``owner_of`` on a nonexistent journal can only make a replay deny or miss,
+        never serve one key another key's bytes.
 
         Callers must ALSO pass ``journal_disabled=True`` to
         ``_stream_response``: ``journal=None`` alone would re-enter the
@@ -1723,6 +1752,15 @@ def create_app(config: WiwiConfig) -> FastAPI:
         state_.journals.release(journal_id)
         with contextlib.suppress(OSError):
             await asyncio.to_thread(journal.path.unlink, True)
+        # The intent is no longer needed once the FILE is gone: nothing can be
+        # replayed, so there is no owner left to scope a replay to. ``release``
+        # keeps it on purpose for a finished-but-still-replayable journal, and
+        # the sweep only reclaims intents whose file it unlinked itself — so
+        # without this the dropped journal's intent lived for the process
+        # lifetime, one leaked entry per streamed request in the degraded-journal
+        # state (AUDIT #395). The gate is unaffected: ``owner_of`` for a
+        # nonexistent journal only ever makes the replay deny or miss, never leak.
+        state_.journals.forget_owner(journal_id)
 
     async def json_body(request: Request) -> tuple[Any, ORJSONResponse | None]:
         """Parse the request body; malformed JSON is a client error (400)."""

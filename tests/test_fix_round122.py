@@ -374,15 +374,31 @@ async def test_abandon_journal_leaves_the_file_but_drop_journal_removes_it(
     store = JournalStore(tmp_path / "j", ttl_s=600.0, max_bytes=1 << 20)
     rid = "0d76f7149cb048dc"  # a conforming 16-hex request id
 
-    # _drop_journal's contract, at the store level: the file is gone and the
-    # in-memory intent survives (so owner_of still scopes the gate).
+    # _drop_journal's contract, at the store level: the file is gone AND the
+    # in-memory intent is forgotten. Keeping the intent here was #395 — the file
+    # no longer exists, so the sweep (which only reclaims intents whose file IT
+    # unlinked) never reclaimed it and the map grew one entry per streamed
+    # request for the process lifetime in the degraded-journal state this path
+    # exists for. ``release`` still keeps the intent on its own, which is what
+    # protects #175 for a finished-but-replayable journal.
     j = await store.open(rid, key_id="kid-A")
     with pytest.raises(OSError):
         # Simulate the unwritable directory at the one call that fsyncs.
         raise OSError(28, "No space left on device")
     j.path.unlink(missing_ok=True)
     store.release(rid)
-    assert store.owner_of(rid) == "kid-A", (
-        "the intent must outlive release — dropping it would re-open #175")
+    store.forget_owner(rid)
+    assert store.owner_of(rid) is None, (
+        "a dropped journal has no replay left to scope, so its intent must be "
+        "forgotten — keeping it leaked one map entry per streamed request (#395)")
     assert store.is_active(rid) is False
     assert await asyncio.to_thread(j.path.exists) is False
+
+    # Control: ``release`` alone still keeps the intent, which is what the
+    # finished-but-replayable path needs (#175). Only _drop_journal forgets it.
+    rid2 = "1a2b3c4d5e6f7081"
+    await store.open(rid2, key_id="kid-B")
+    store.release(rid2)
+    assert store.owner_of(rid2) == "kid-B", (
+        "release must NOT forget the owner — the file stays replayable for its "
+        "whole TTL and still needs the owner to gate it (#175)")

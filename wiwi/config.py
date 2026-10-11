@@ -609,8 +609,19 @@ def load_config(path: str | Path) -> WiwiConfig:
     p = Path(path)
     if not p.exists():
         raise ConfigError(f"config file not found: {p}")
+    # ``p.read_text()`` sits INSIDE this try, so an unreadable path raised its own
+    # OSError out of here: pointing --config at a directory gave
+    # ``IsADirectoryError``, a root-owned wiwi.yaml read by the non-root
+    # container user gave ``PermissionError``. Both escaped as a raw Python
+    # traceback, because the CLI (main.py) catches only ``ConfigError`` and turns
+    # that into a clean ``wiwi: config error: …`` line (AUDIT #392). Fold every
+    # I/O failure into the same error type the caller already knows how to
+    # report; the missing-file case above stays separate so its message keeps
+    # naming the more likely cause first.
     try:
         raw = yaml.safe_load(p.read_text()) or {}
+    except OSError as e:
+        raise ConfigError(f"cannot read config file {p}: {e}") from e
     except yaml.YAMLError as e:
         raise ConfigError(f"invalid YAML in {p}: {e}") from e
     if not isinstance(raw, dict):

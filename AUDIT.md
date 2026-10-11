@@ -490,7 +490,7 @@ that repeated `startup()` calls are idempotent.
 ### 392. `load_config` lets `OSError` escape as a raw traceback instead of a config error
 
 **Severity:** 🟡 Medium (operator-facing; no security or correctness impact)
-**Status: open**
+**Status: fixed** — round 126 (`tests/test_fix_round126.py`)
 **Files:** `wiwi/config.py:611-616` (`load_config`), callers `wiwi/main.py:54` and
 `:81` (both catch only `ConfigError`)
 **Fix:** widen to `except (yaml.YAMLError, OSError) as e: raise ConfigError(f"cannot
@@ -519,7 +519,7 @@ its I/O error handling.
 ### 393. The deploy script overwrites the Space's `.gitattributes`, destroying its LFS weight rules
 
 **Severity:** 🟡 Medium (latent deploy failure)
-**Status: open**
+**Status: fixed** — round 126 (`tests/test_fix_round126.py::test_deploy_extract_excludes_gitattributes`)
 **Files:** `deploy/hf_space.sh:91-94` (the preserve loop) defeated by `:96`
 (`git archive … | tar -x -C "$WORK/space"`)
 **Fix:** have the archive step skip it — `tar -x --exclude=.gitattributes` — or
@@ -549,7 +549,7 @@ only), and it is — this is a reliability gap, not an exposure.
 ### 394. A DB-stored `providers.provider_type` bypasses the `PROVIDER_TYPES` check the YAML path enforces
 
 **Severity:** 🟡 Medium (latent; needs an out-of-band DB write)
-**Status: open**
+**Status: fixed** — round 126 (`tests/test_fix_round126.py::test_provider_types_are_the_validation_source`)
 **Files:** `wiwi/server/config_store.py:230-256` (`add_provider` accepts any type),
 `wiwi/server/app.py:1046-1065` (`_load_db_config` builds `ProviderAccount` with no
 validation), consumed by `wiwi/core/gateway.py:539` and `:1566`
@@ -583,7 +583,9 @@ out-of-place ones — the same gap `CLAUDE.md` names explicitly.
 ### 395. `_owner_intent` leaks permanently for journals dropped by the #320 path
 
 **Severity:** 🟡 Medium (slow unbounded memory growth; not a security hole)
-**Status: open**
+**Status: fixed** — round 126 (`tests/test_fix_round126.py`; the round-122 test that
+pinned the old keep-the-intent behaviour was updated to the corrected contract, with a
+control proving `release` alone still keeps it)
 **Files:** `wiwi/server/app.py:1704-1725` (`_drop_journal`), reached from
 `wiwi/streaming/tape_store.py:418` (`release`) and `:520` (`_reclaim_intent`)
 **Fix:** give `_drop_journal` a way to forget the intent — a

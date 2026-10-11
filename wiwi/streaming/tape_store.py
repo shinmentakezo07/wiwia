@@ -431,6 +431,29 @@ class JournalStore:
         """
         self._active.pop(request_id, None)
 
+    def forget_owner(self, request_id: str) -> None:
+        """Drop *request_id*'s ownership bookkeeping entirely.
+
+        For journals that are being DISCARDED, not merely finished —
+        ``server/app.py:_drop_journal``, the AUDIT #320 path where the owner line
+        could not be made durable and the file must not survive at all.
+
+        ``release`` deliberately keeps the intent (see its own docstring: the
+        file stays replayable for its whole TTL, so the intent still has a job),
+        and ``_reclaim_intent`` only reclaims intents whose path appears in the
+        set of files the sweep itself unlinked. A *dropped* journal's file is
+        already gone, so it is never in that set and its intent was never
+        reclaimed — the map grew by one entry per streamed request for the
+        process lifetime in the degraded-journal state (unwritable journal dir,
+        permission error, full disk), violating the "bounded by the journals on
+        disk" invariant (AUDIT #395).
+
+        Safe to call for a request with no intent: the pops are no-ops. Does not
+        touch the filesystem.
+        """
+        self._owner_intent.pop(request_id, None)
+        self._durable_intent.discard(request_id)
+
     def read_after(self, request_id: str, last_seq: int) -> list[tuple[int, bytes]]:
         """Read data records with seq > last_seq, in order.
 

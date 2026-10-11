@@ -93,7 +93,16 @@ done
 shopt -u dotglob nullglob
 
 echo "==> unpacking into the Space tree"
-git -C "$ROOT" archive --format=tar HEAD | tar -x -C "$WORK/space"
+# --exclude is load-bearing, not tidy-up: the repo TRACKS its own
+# `.gitattributes` (the docs/assets/shots/*.png LFS rule), so a plain extract
+# unpacks it straight over the Space's copy — defeating the skip guard one block
+# above and discarding HF's own weight rules (*.bin, *.safetensors, *.gguf).
+# The `git lfs track "*.png"` below then appends to the REPO's file, so a future
+# commit adding a model weight would ship it as a raw binary and HF would reject
+# the push with "Your push was rejected because it contains binary files" — the
+# exact failure that line exists to prevent, but only for PNGs (AUDIT #393).
+git -C "$ROOT" archive --format=tar HEAD \
+  | tar -x -C "$WORK/space" --exclude=.gitattributes
 
 # The Space's README.md is its manifest (sdk: docker, app_port: 4000); the
 # repo's README is the project's front page. They are different documents, so
