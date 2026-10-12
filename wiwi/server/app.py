@@ -51,9 +51,17 @@ class RequestIdMiddleware:
     cancellation simply ends the response with no error traceback.
     """
 
+    #: Paths whose bodies legitimately exceed ``max_request_body_mb``.
+    #: Restoring a backup posts the whole document in one request, and a
+    #: configuration-plus-logs file is routinely larger than the 50 MiB default
+    #: would allow. The exemption is bounded, not open-ended — see
+    #: ``_backup_import_limit_mb`` — so an admin cannot OOM the gateway.
+    UNLIMITED_BODY_PATHS: frozenset[str] = frozenset({"/admin/backup/import"})
+
     def __init__(self, app: ASGIApp, *, max_body_mb: float) -> None:
         self.app = app
         self.max_body_bytes = int(max_body_mb * 1024 * 1024)
+        self.unlimited_body_paths = self.UNLIMITED_BODY_PATHS
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -63,6 +71,7 @@ class RequestIdMiddleware:
         # Normalize /V1/ → /v1/ for API routes — many clients and proxies send
         # uppercase path prefixes; FastAPI route matching is case-sensitive.
         path = scope.get("path", "")
+        exempt = path in self.unlimited_body_paths
         if path[:4] == "/V1/" or path == "/V1":
             scope["path"] = path[:1] + "v1" + path[3:]
             # raw_path follows the same pattern
@@ -84,7 +93,8 @@ class RequestIdMiddleware:
             if k == b"content-length":
                 cl = v
                 break
-        if cl is not None and cl.isdigit() and int(cl) > self.max_body_bytes:
+        if (cl is not None and cl.isdigit()
+                and int(cl) > self.max_body_bytes and not exempt):
             body = orjson.dumps(
                 {"error": {"message": f"request body exceeds {self.max_body_bytes // (1024 * 1024)} MiB",
                            "type": "invalid_request_error",
@@ -121,7 +131,7 @@ class RequestIdMiddleware:
             if message["type"] == "http.request":
                 chunk = message.get("body", b"") or b""
                 seen_bytes += len(chunk)
-                if seen_bytes > self.max_body_bytes:
+                if seen_bytes > self.max_body_bytes and not exempt:
                     body_too_large = True
                     # Flag the overage and stop growing the buffer, but keep
                     # the bytes we already have: json_body measures them to
@@ -149,6 +159,9 @@ from wiwi.config import (
     ModelAliasEntry,
     WiwiConfig,
     _interpolate,
+    alias_value_eq,
+    alias_value_to_json,
+    coerce_alias_value,
     load_config,
     load_env,
 )
@@ -164,11 +177,12 @@ from wiwi.cost.pricing import CostEngine
 from wiwi.ir import types as ir
 from wiwi.logging_core.events import LogEvent
 from wiwi.logging_core.subsystem import LoggingSubsystem, encode_sse, public_dict
-from wiwi.providers import cline_oauth, workbuddy_auth
+from wiwi.providers import cline_oauth, hermes_oauth, workbuddy_auth
 from wiwi.providers.base import ProviderKeyRef, WiwiError
 from wiwi.providers.registry import fresh_adapter, get_adapter
 from wiwi.providers.workbuddy_auto_refresh import refresh_key_now
 from wiwi.ratelimit.memory import RateLimiter
+from wiwi.server import backup
 
 
 class _SerializedAsyncEngine:
@@ -648,46 +662,6 @@ def _provider_models_url(provider_type: str, base_url: str) -> str:
 _ALIAS_CHAIN_MAX_HOPS = 8
 
 
-def _coerce_alias_value(v: object) -> str | ModelAliasEntry | None:
-    """Normalize a ``model_group_alias`` value to ``str | ModelAliasEntry``.
-
-    - ``str`` → returned as-is (back-compat for plain YAML aliases).
-    - ``ModelAliasEntry`` → returned as-is.
-    - ``dict`` (from JSON / DB overlay) → validated via ``ModelAliasEntry``;
-      returns ``None`` if the dict is malformed (caller treats as error).
-    Anything else returns ``None`` (caller treats as error)."""
-    if isinstance(v, ModelAliasEntry):
-        return v
-    if isinstance(v, str):
-        return v
-    if isinstance(v, dict):
-        try:
-            return ModelAliasEntry.model_validate(v)
-        except (ValueError, TypeError):
-            return None
-    return None
-
-
-def _alias_value_to_json(v: object) -> str | dict:
-    """Serialize a ``model_group_alias`` value for JSON output.
-
-    Plain strings pass through; ``ModelAliasEntry`` values are dumped via
-    ``model_dump`` so ``/admin/models`` and ``/public/models`` always emit a
-    consistent shape for clients to parse."""
-    if isinstance(v, ModelAliasEntry):
-        return v.model_dump()
-    return v  # str, or whatever was loaded (string back-compat)
-
-
-def _alias_value_eq(a: object, b: object) -> bool:
-    """Compare two alias values regardless of form (str vs ModelAliasEntry
-    vs dict). Used to compute the overlay diff at write time without
-    spuriously re-persisting values that didn't change form."""
-    a_d = _alias_value_to_json(a) if not isinstance(a, dict) else a
-    b_d = _alias_value_to_json(b) if not isinstance(b, dict) else b
-    return a_d == b_d
-
-
 def _alias_first_hop(entry_map: dict, name: str) -> str | ModelAliasEntry | None:
     """Look up the entry the client typed (first hop only). Returns
     ``None`` if the name is not a direct alias. Used to decide whether the
@@ -761,7 +735,7 @@ def _validate_alias_batch(current: dict, set_map: object, unset: object,
                               " string or null")
             if "fork" in raw and not isinstance(raw["fork"], bool):
                 return None, f"alias '{k}'.fork must be a boolean"
-        entry = _coerce_alias_value(raw)
+        entry = coerce_alias_value(raw)
         if entry is None:
             return None, (f"alias '{k}' has an invalid value; expected a"
                           f" string or {{target, force_mapping?,"
@@ -1152,7 +1126,7 @@ class AppState:
                 if _v is None:
                     merged.pop(_k, None)
                 else:
-                    coerced = _coerce_alias_value(_v)
+                    coerced = coerce_alias_value(_v)
                     if coerced is None:
                         # Malformed overlay entry — skip with a log so a
                         # bad row doesn't poison the whole merge.
@@ -1762,13 +1736,21 @@ def create_app(config: WiwiConfig) -> FastAPI:
         # nonexistent journal only ever makes the replay deny or miss, never leak.
         state_.journals.forget_owner(journal_id)
 
-    async def json_body(request: Request) -> tuple[Any, ORJSONResponse | None]:
-        """Parse the request body; malformed JSON is a client error (400)."""
+    async def json_body(request: Request, *, limit_mb: float | None = None
+                        ) -> tuple[Any, ORJSONResponse | None]:
+        """Parse the request body; malformed JSON is a client error (400).
+
+        *limit_mb* overrides the configured cap for callers that legitimately
+        post more than ``max_request_body_mb`` — the backup restore path, whose
+        bound is set by ``_backup_import_limit_mb`` rather than opened up.
+        """
         # Errors raised here happen before the surface is known to the handler,
         # so infer it from the path: each inbound dialect wants its own error
         # body shape (see _surface_for_path).
         surface = _surface_for_path(request.url.path)
-        limit = config.wiwi_settings.max_request_body_mb * 1024 * 1024
+        cap_mb = (limit_mb if limit_mb is not None
+                  else config.wiwi_settings.max_request_body_mb)
+        limit = cap_mb * 1024 * 1024
         try:
             raw = await request.body()
         except Exception:  # noqa: BLE001
@@ -1776,11 +1758,13 @@ def create_app(config: WiwiConfig) -> FastAPI:
         # Enforce the cap on what actually arrived. Content-Length is checked
         # in middleware, but chunked bodies declare no length — and the
         # middleware can only flag an overage, not guarantee the handler sees
-        # the flag. Measuring here closes that gap either way.
-        if len(raw) > limit or getattr(request.state, "body_too_large", False):
+        # the flag. Measuring here closes that gap either way. The middleware
+        # flag only applies when it was the one enforcing the default cap.
+        flagged = (limit_mb is None
+                   and getattr(request.state, "body_too_large", False))
+        if len(raw) > limit or flagged:
             return None, _err(413, "invalid_request_error",
-                              f"request body exceeds "
-                              f"{config.wiwi_settings.max_request_body_mb} MiB",
+                              f"request body exceeds {cap_mb:g} MiB",
                               request, surface)
         try:
             body = orjson.loads(raw) if raw else None
@@ -4233,6 +4217,106 @@ def create_app(config: WiwiConfig) -> FastAPI:
                                "imported_deployments": n_deps,
                                "providers": [p["name"] for p in parsed]})
 
+    # -- whole-gateway backup / restore ---------------------------------------
+    #
+    # The logic lives in wiwi/server/backup.py; these are thin wrappers so the
+    # admin-auth, audit, and error-shape conventions stay in one place.
+
+    def _backup_import_limit_mb() -> float:
+        """Bound for the restore path's oversized body.
+
+        Four times the configured cap, floored at 200 MiB. Enough for a
+        configuration-plus-logs restore; not so large that a single admin
+        request can exhaust the process's memory. Past it, import in sections.
+        """
+        return max(200.0, config.wiwi_settings.max_request_body_mb * 4)
+
+    @app.get("/admin/backup")
+    async def admin_export_backup(request: Request):
+        """Export every persisted table as one merge-restorable JSON document.
+
+        Query parameters (all optional):
+          ?include_secrets=1   provider key plaintexts and Cline refresh
+                               tokens. The only live credentials in the file.
+          ?include_bodies=1    request/response payload text — a SECOND,
+                               independent opt-in, so pulling credentials can
+                               never also pull user prompts.
+          ?sections=a,b        subset of the format's sections. Bulk sections
+                               (logs, rollups, audit, responses) are excluded
+                               by default; the file stays a size you can
+                               download and a browser can parse.
+          ?log_days=30         age bound on log sections; 0 means all time.
+          ?log_limit=0         cap on raw log rows; 0 means no cap. A cap that
+                               bites is reported in the document's `truncated`.
+
+        Virtual keys and user passwords travel as SHA-256 / PBKDF2 hashes and
+        restore BY HASH — the same plaintext key keeps working on the restored
+        gateway, but this file cannot reveal it.
+        """
+        resp = await require_admin_dep(request)
+        if resp:
+            return resp
+        qp = request.query_params
+        try:
+            sections = backup.parse_sections(qp.get("sections"))
+            doc = await backup.build_backup(
+                state,
+                include_secrets=backup.truthy(qp.get("include_secrets")),
+                include_bodies=backup.truthy(qp.get("include_bodies")),
+                sections=sections,
+                log_days=int(qp.get("log_days") or 30),
+                log_limit=int(qp.get("log_limit") or 0))
+        except backup.BackupError as exc:
+            return _err(exc.status, exc.etype, exc.message, request)
+        except ValueError as exc:
+            return _err(400, "invalid_request_error", str(exc), request)
+        actor = (await current_user(request)).username
+        await state.logs.log_audit(actor=actor, action="backup.export",
+                                   target=",".join(sections),
+                                   diff=doc["counts"])
+        # no-store: this response is a credential dump.
+        return ORJSONResponse(doc, headers={"Cache-Control": "no-store"})
+
+    @app.post("/admin/backup/import")
+    async def admin_import_backup(request: Request):
+        """Merge a backup document. MERGE ONLY — upsert by natural key, never
+        deletes.
+
+        The whole document is validated before anything is written; any error
+        rejects it with nothing applied. ``?dry_run=1`` runs that validation
+        and returns the per-section plan without writing — which is what the
+        console's Import panel shows before the Merge button enables.
+
+        The audit section is validated, counted, and reported but never
+        replayed: replaying another instance's mutation trail would forge this
+        one's operator history.
+        """
+        resp = await require_admin_dep(request)
+        if resp:
+            return resp
+        body, jerr = await json_body(request, limit_mb=_backup_import_limit_mb())
+        if jerr:
+            return jerr
+        dry_run = backup.truthy(request.query_params.get("dry_run"))
+        try:
+            sections = backup.parse_sections(
+                request.query_params.get("sections"))
+            plan = await backup.validate_backup(state, body, sections=sections)
+            if dry_run:
+                return ORJSONResponse({"dry_run": True, **backup.summarize(plan)})
+            result = await backup.apply_backup(state, plan)
+        except backup.BackupError as exc:
+            return _err(exc.status, exc.etype, exc.message, request)
+        cline_models = result.pop("cline_default_models", None)
+        if cline_models is not None:
+            # Reconciling Cline default models is an app.py-owned reconciler
+            # that mutates the router; backup.py must not reach across.
+            await _apply_cline_default_models(state, cline_models)
+        actor = (await current_user(request)).username
+        await state.logs.log_audit(actor=actor, action="backup.import", target="",
+                                   diff=result)
+        return ORJSONResponse(result)
+
     @app.get("/admin/providers/{name}/models")
     async def admin_provider_models(name: str, request: Request):
         """Fetch model ids live from the upstream provider (first available key)."""
@@ -4626,7 +4710,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             })
         settings = state.router.settings
         return ORJSONResponse({"groups": groups,
-                             "aliases": {k: _alias_value_to_json(v)
+                             "aliases": {k: alias_value_to_json(v)
                                           for k, v in settings.model_group_alias.items()},
                              "provider_aliases": dict(state.router.alias_to_provider),
                              "strategy": settings.routing_strategy})
@@ -4720,18 +4804,18 @@ def create_app(config: WiwiConfig) -> FastAPI:
         for k, v in base.items():
             if k not in new_live:
                 overlay[k] = None
-            elif not _alias_value_eq(new_live[k], v):
-                overlay[k] = _alias_value_to_json(new_live[k])
+            elif not alias_value_eq(new_live[k], v):
+                overlay[k] = alias_value_to_json(new_live[k])
         for k, v in new_live.items():
             if k not in base:
-                overlay[k] = _alias_value_to_json(v)
+                overlay[k] = alias_value_to_json(v)
         if state.config_store is not None:
             await state.config_store.set_setting("model_group_alias", overlay)
         await state.logs.log_audit(actor="master", action="aliases.update",
                                    target="model_group_alias",
                                    diff={"set": dict(set_map),
                                          "unset": list(unset)})
-        dumped = {k: _alias_value_to_json(v) for k, v in new_live.items()}
+        dumped = {k: alias_value_to_json(v) for k, v in new_live.items()}
         return ORJSONResponse({"aliases": dumped,
                                "set": dict(set_map),
                                "unset": list(unset)})
@@ -5779,7 +5863,242 @@ def create_app(config: WiwiConfig) -> FastAPI:
         await state.logs.log_audit(
             actor="master", action="cline_oauth.disconnect", target=provider)
         return ORJSONResponse({"provider": provider, "disconnected": True})
+    # -- Hermes (Nous Portal) OAuth — device-code flow ------------------------
+    # Nous Portal uses RFC 8628 device authorization (see
+    # wiwi.providers.hermes_oauth for the verified endpoint contract). The
+    # admin starts a device-code session, opens the verification URL in a
+    # browser, and wiwi polls the token endpoint until approval. The access
+    # token lands on the provider's first pool key prefixed ``hermes:``
+    # (HermesAdapter strips the prefix for the bearer); the refresh token is
+    # kept in the config store for on-demand refresh, mirroring the Cline flow.
+    def _hermes_oauth_setting_key(provider: str) -> str:
+        return f"hermes_oauth:{provider}"
 
+    @app.post("/admin/hermes/oauth/device-code")
+    async def hermes_oauth_device_code(request: Request):
+        """Start a device-code authorization; return the verification URL."""
+        resp = await require_admin_dep(request)
+        if resp:
+            return resp
+        provider = request.query_params.get("provider", "").strip()
+        if not provider:
+            return _err(400, "invalid_request_error",
+                        "provider is required", request)
+        acct = state.router.providers.get(provider)
+        if acct is None:
+            # OAuth bootstraps the account: there is nothing to add a key *to*
+            # yet, which is the entire point of device-code login. Create a
+            # Hermes account with a single placeholder pool key; /poll replaces
+            # that secret with the real ``hermes:<token>`` on approval. (Mirrors
+            # the WorkBuddy import, which also creates its account on first use.)
+            name = provider
+            base_url = None
+            label = "default"
+            secret = "hermes:pending"
+            state.router.providers[name] = ProviderAccount(
+                name=name, provider_type="hermes",
+                base_url=base_url or _default_base_url("hermes"),
+                keys=[ProviderKey(label=label, secret=secret)])
+            try:
+                if state.config_store:
+                    await state.config_store.add_provider(
+                        name, "hermes", base_url or _default_base_url("hermes"))
+                    await state.config_store.add_key(name, label, secret)
+            except Exception as e:  # noqa: BLE001 — YAML/DB path varies; in-memory is enough
+                structlog.get_logger("wiwi.hermes_oauth").warning(
+                    "hermes_oauth_bootstrap_db_write_failed provider=%s err=%s",
+                    name, e)
+            acct = state.router.providers[name]
+        if acct.provider_type != "hermes":
+            return _err(400, "invalid_request_error",
+                        f"provider '{provider}' is not a Hermes account", request)
+        if not acct.keys:
+            return _err(400, "invalid_request_error",
+                        f"provider '{provider}' has no keys — add a pool key "
+                        "first, then connect", request)
+        try:
+            device = hermes_oauth.request_device_code()
+        except httpx.HTTPError as e:
+            return _err(502, "upstream_error",
+                        f"Nous Portal device-code request failed: {e}", request)
+        # Stash the device code so /poll can exchange it; TTL 10 minutes,
+        # matching the Cline pending-session window.
+        token = secrets.token_urlsafe(24)
+        state.cline_pending[token] = {
+            "kind": "hermes_device_code",
+            "provider": provider,
+            "device_code": device["device_code"],
+            "interval": int(device["interval"]),
+            "created_at": time.time(),
+        }
+        return ORJSONResponse({
+            "state": token,
+            "provider": provider,
+            "user_code": device["user_code"],
+            "verification_uri": device["verification_uri"],
+            "verification_uri_complete": device["verification_uri_complete"],
+            "expires_in": int(device["expires_in"]),
+            "interval": int(device["interval"]),
+        })
+
+    @app.post("/admin/hermes/oauth/poll")
+    async def hermes_oauth_poll(request: Request):
+        """Poll the token endpoint once for a pending device-code session.
+
+        Returns ``{"pending": True}`` while the user has not approved yet, or
+        the connected account on success. One poll per call so the SPA drives
+        the cadence rather than wiwi holding a long-lived request open.
+        """
+        resp = await require_admin_dep(request)
+        if resp:
+            return resp
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        token = str(body.get("state") or "").strip()
+        sess = state.cline_pending.get(token)
+        if not sess or sess.get("kind") != "hermes_device_code":
+            return _err(404, "not_found_error", "unknown or expired session", request)
+        provider = sess["provider"]
+        if provider not in state.router.providers:
+            state.cline_pending.pop(token, None)
+            return _err(404, "not_found_error",
+                        f"unknown provider '{provider}'", request)
+        if time.time() - sess["created_at"] > 600:
+            state.cline_pending.pop(token, None)
+            return _err(410, "invalid_request_error",
+                        "device-code session expired; start a new one", request)
+        try:
+            tokens = hermes_oauth.poll_token(
+                sess["device_code"],
+                poll_interval=sess.get("interval", 5),
+                single_poll=True)
+        except hermes_oauth.HermesAuthError as e:
+            state.cline_pending.pop(token, None)
+            if e.relogin_required:
+                return _err(401, "authentication_error", str(e), request)
+            return _err(400, "invalid_request_error", str(e), request)
+        except httpx.HTTPError as e:
+            return _err(502, "upstream_error",
+                        f"Nous Portal token poll failed: {e}", request)
+        if tokens is None:
+            # authorization_pending: keep the session, tell the SPA to retry.
+            return ORJSONResponse({"pending": True})
+        state.cline_pending.pop(token, None)
+        access = tokens["access_token"]
+        if not await _update_provider_secret(provider, f"hermes:{access}"):
+            return _err(400, "invalid_request_error",
+                        f"provider '{provider}' has no keys — cannot store token",
+                        request)
+        expires_at = time.time() + int(tokens.get("expires_in", 0) or 0)
+        record = {
+            "refresh_token": tokens.get("refresh_token"),
+            "expires_at": expires_at,
+        }
+        if state.config_store:
+            await state.config_store.set_setting(
+                _hermes_oauth_setting_key(provider), record)
+        await state.logs.log_audit(
+            actor="master", action="hermes_oauth.connect", target=provider)
+        return ORJSONResponse({
+            "provider": provider,
+            "connected": True,
+            "access_token_masked": mask_key(access),
+            "expires_at": expires_at,
+        })
+
+    @app.get("/admin/hermes/oauth/status")
+    async def hermes_oauth_status(request: Request):
+        resp = await require_admin_dep(request)
+        if resp:
+            return resp
+        provider = request.query_params.get("provider", "").strip()
+        if not provider or provider not in state.router.providers:
+            return _err(404, "not_found_error",
+                        f"unknown provider '{provider}'", request)
+        record = None
+        if state.config_store:
+            record = await state.config_store.get_setting(
+                _hermes_oauth_setting_key(provider))
+        if not record:
+            return ORJSONResponse({"connected": False})
+        expires_at = record.get("expires_at")
+        needs_refresh = hermes_oauth.expires_within_lead(expires_at, time.time())
+        return ORJSONResponse({
+            "connected": True,
+            "expires_at": expires_at,
+            "needs_refresh": bool(needs_refresh),
+            "has_refresh_token": bool(record.get("refresh_token")),
+        })
+
+    @app.post("/admin/hermes/oauth/refresh")
+    async def hermes_oauth_refresh(request: Request):
+        resp = await require_admin_dep(request)
+        if resp:
+            return resp
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        provider = str(body.get("provider") or "").strip()
+        if provider not in state.router.providers:
+            return _err(404, "not_found_error",
+                        f"unknown provider '{provider}'", request)
+        record = None
+        if state.config_store:
+            record = await state.config_store.get_setting(
+                _hermes_oauth_setting_key(provider))
+        if not record or not record.get("refresh_token"):
+            return _err(400, "invalid_request_error",
+                        f"provider '{provider}' has no stored Hermes tokens; "
+                        "connect first", request)
+        try:
+            result = hermes_oauth.refresh_access_token(record["refresh_token"])
+        except hermes_oauth.HermesAuthError as e:
+            if e.relogin_required:
+                return _err(401, "authentication_error",
+                            f"Nous refresh token rejected — re-login required "
+                            f"({e.code})", request)
+            return _err(502, "upstream_error", str(e), request)
+        except httpx.HTTPError as e:
+            return _err(502, "upstream_error",
+                        f"Nous Portal token refresh failed: {e}", request)
+        access = result["access_token"]
+        if not await _update_provider_secret(provider, f"hermes:{access}"):
+            return _err(400, "invalid_request_error",
+                        f"provider '{provider}' has no keys — cannot store "
+                        "refreshed token", request)
+        record["refresh_token"] = result.get("refresh_token", record["refresh_token"])
+        expires_at = time.time() + int(result.get("expires_in", 0) or 0)
+        record["expires_at"] = expires_at
+        if state.config_store:
+            await state.config_store.set_setting(
+                _hermes_oauth_setting_key(provider), record)
+        await state.logs.log_audit(
+            actor="master", action="hermes_oauth.refresh", target=provider)
+        return ORJSONResponse({
+            "provider": provider,
+            "access_token_masked": mask_key(access),
+            "expires_at": expires_at,
+        })
+
+    @app.delete("/admin/hermes/oauth/disconnect")
+    async def hermes_oauth_disconnect(request: Request):
+        resp = await require_admin_dep(request)
+        if resp:
+            return resp
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        provider = str(body.get("provider") or "").strip()
+        if provider not in state.router.providers:
+            return _err(404, "not_found_error",
+                        f"unknown provider '{provider}'", request)
+        if state.config_store:
+            await state.config_store.delete_setting(
+                _hermes_oauth_setting_key(provider))
+        await state.logs.log_audit(
+            actor="master", action="hermes_oauth.disconnect", target=provider)
+        return ORJSONResponse({"provider": provider, "disconnected": True})
     # -- WorkBuddy accounts ---------------------------------------------------
     # WorkBuddy pool keys each hold a full account auth JSON (see
     # wiwi.providers.workbuddy_auth), so the admin surface here is about
@@ -5986,7 +6305,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             })
         return ORJSONResponse({
             "groups": groups,
-            "aliases": {k: _alias_value_to_json(v)
+            "aliases": {k: alias_value_to_json(v)
                         for k, v in state.router.settings.model_group_alias.items()},
         })
 
