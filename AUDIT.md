@@ -8,6 +8,54 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — round 134: Hermes OAuth auto-refresh (2026-10-12)
+
+Found by comparing the three OAuth providers' refresh machinery. One entry,
+#423.
+
+### 423. Hermes has no automatic token refresh — an expired token hard-401s and retires a healthy key
+
+**Severity:** 🟠 High · **Status: fixed** — round 134 (`tests/test_fix_round134.py`; found and fixed 2026-10-12)
+**Files:** (new) `wiwi/providers/hermes_auto_refresh.py`; `wiwi/server/app.py:1216` (lifespan wiring), `:1247-1260` (sweeper + 401 hook), `AppState.__init__` + teardown
+
+Cline and WorkBuddy each refresh proactively (a background sweeper that rotates
+tokens inside the lead window) **and** on demand (a gateway 401 hook). Hermes
+shipped with neither: `wiwi/providers/hermes_oauth.py` exposes a working
+`refresh_access_token`, and the admin API calls it from
+`/admin/hermes/oauth/refresh` (`app.py:6037`), but nothing rotated a token
+automatically. The lifespan block (`app.py:1216`) wires `ClineAutoRefresh`,
+`WorkBuddyAutoRefresh`, their 401 hooks (`gw._on_demand_cline_refresh`,
+`gw._on_demand_refresh_hooks["workbuddy"]`) — and has no Hermes equivalent.
+
+An access token that expired — or was invalidated upstream, the way Cline
+sometimes 401s a still-valid JWT (the AUDIT round-7 trigger) — mid-session
+produced a hard 401 to the caller with no rotation. Under the default
+`failover_mode == "any_error"` that 401 charged the key's error streak, and a
+401 counts double (`router.py:on_result`), so `key_max_consecutive_fails`
+(default 5) retires a healthy key after ~3 expired turns. On a Hermes pool with
+one key, every request then fails with "all keys cooling".
+
+Fix mirrors the Cline refresher exactly: a 60 s sweeper rotating tokens inside
+`hermes_oauth.REFRESH_LEAD_S`, plus a 401 hook rotating unconditionally. Both
+funnel through one `HermesAutoRefresh` worker (`_worker_for`) so they share one
+per-provider lock and one `CircuitBreaker` — Nous returns a fresh
+`refresh_token` per exchange, so a sweeper tick and a client 401 in the same
+window must not both present the same token or the loser's `invalid_grant`
+marks the provider dead (AUDIT #169). A dead grant (`invalid_grant` /
+revoked / reused) is terminal and marks the circuit dead; no retry storm. The
+synchronous `httpx.Client` in `hermes_oauth.refresh_access_token` is run via
+`asyncio.to_thread` so neither the sweeper nor the 401 hook blocks the event
+loop (the AUDIT #33 shape).
+
+**Coverage:** `tests/test_fix_round134.py` — (1) a 401 from Nous triggers the
+on-demand refresh and a one-shot retry, with the `hermes:`-prefixed rotated
+secret landing on the pool key and the new refresh token persisted; (2) the
+sweeper refreshes a token inside the lead window and an unknown expiry but
+skips a far-future one and a provider with no stored refresh token; (3) a dead
+grant is terminal and the 401 surfaces without a second POST.
+
+---
+
 ## ✅ Fixed — round 127/128: Anthropic translation sweep (2026-10-11)
 
 Found by fuzzing `wiwi/ir/` + the Anthropic codec and adapter with executed

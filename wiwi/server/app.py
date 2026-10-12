@@ -869,6 +869,7 @@ class AppState:
         self.cline_pending: dict[str, dict[str, Any]] = {}
         self.cline_refresh: Any = None
         self.workbuddy_refresh: Any = None
+        self.hermes_refresh: Any = None
         self.opencode_refresh: Any = None
         self.log_retention: Any = None
         self.cline_version_refresh: Any = None
@@ -1238,6 +1239,23 @@ async def lifespan(app: FastAPI):
     workbuddy_refresh_hook = workbuddy_refresh_for_provider(state)
     for gw in state.gateways.values():
         gw._on_demand_refresh_hooks["workbuddy"] = workbuddy_refresh_hook  # type: ignore[attr-defined]
+    # Hermes (Nous Portal) OAuth token refresh: same two-path contract as
+    # Cline/WorkBuddy. Hermes shipped with a working refresh protocol but no
+    # automation, so a token that expired (or was invalidated upstream)
+    # mid-session produced a hard 401 with no rotation, and the 401 charged a
+    # healthy key's error streak under the default any_error failover (AUDIT
+    # #423). The sweeper rotates inside the lead window; the hook rotates on a
+    # gateway 401. Both share one worker (one lock, one circuit) via
+    # _worker_for so a rotating refresh token is never presented twice.
+    from wiwi.providers.hermes_auto_refresh import HermesAutoRefresh
+    from wiwi.providers.hermes_auto_refresh import (
+        refresh_for_provider as hermes_refresh_for_provider,
+    )
+    state.hermes_refresh = HermesAutoRefresh(state)
+    state.hermes_refresh.start()
+    hermes_refresh_hook = hermes_refresh_for_provider(state)
+    for gw in state.gateways.values():
+        gw._on_demand_refresh_hooks["hermes"] = hermes_refresh_hook  # type: ignore[attr-defined]
     # OpenCode Zen live version: refresh the cached opencode/<version>
     # User-Agent every 5 min so Zen/Cloudflare never restricts traffic.
     # No restart or reload needed — the adapter reads the cache live.
@@ -1296,6 +1314,8 @@ async def lifespan(app: FastAPI):
         await state.workbuddy_version_refresh.stop()
     if state.workbuddy_refresh is not None:
         await state.workbuddy_refresh.stop()
+    if state.hermes_refresh is not None:
+        await state.hermes_refresh.stop()
     if state.log_retention is not None:
         await state.log_retention.stop()
     await state.cline_refresh.stop()
