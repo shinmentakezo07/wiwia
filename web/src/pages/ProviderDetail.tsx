@@ -26,8 +26,12 @@ import {
   addProviderKey,
   updateAliases,
   revealProviderKey,
+  hermesDisconnect,
+  hermesRefresh,
+  hermesStatus,
 } from "@/api/client";
 import type { ModelAliasEntry, PoolKey, Provider } from "@/api/types";
+import { HermesConnectDialog } from "@/pages/HermesOAuth";
 import {
   aliasDisplayName,
   aliasForceMapping,
@@ -1382,6 +1386,176 @@ function ClineOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
   );
 }
 
+// Hermes OAuth card — the device-code connect flow, right where the account is
+// managed. Reuses the shared HermesConnectDialog so the poll loop is defined
+// once (also used on /console/hermes-oauth). Connect bootstraps the account,
+// so no API key is needed up front; the token lands on the first pool key.
+function HermesOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
+  const qc = useQueryClient();
+  const [localError, setLocalError] = useState<string | null>(null);
+  const [connectOpen, setConnectOpen] = useState(false);
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  const qKey = ["hermes-oauth-status", props.p.name];
+
+  const statusQ = useQuery({
+    queryKey: qKey,
+    queryFn: () => hermesStatus(props.p.name),
+    refetchInterval: 30_000,
+    retry: 1,
+  });
+
+  const refresh = useMutation({
+    mutationFn: () => hermesRefresh(props.p.name),
+    onSuccess: () => {
+      setLocalError(null);
+      void qc.invalidateQueries({ queryKey: qKey });
+      void qc.invalidateQueries({ queryKey: ["providers"] });
+    },
+    onError: (e) => setLocalError(e.message),
+  });
+
+  const disconnect = useMutation({
+    mutationFn: () => hermesDisconnect(props.p.name),
+    onSuccess: () => {
+      setConfirmDisconnect(false);
+      setLocalError(null);
+      void qc.invalidateQueries({ queryKey: qKey });
+      void qc.invalidateQueries({ queryKey: ["providers"] });
+    },
+    onError: (e) => setLocalError(e.message),
+  });
+
+  const connected = statusQ.data?.connected ?? false;
+  const needsRefresh = statusQ.data?.needs_refresh ?? false;
+
+  const fmtExpiry = (epoch: number | null | undefined) => {
+    if (!epoch) return "—";
+    const d = new Date(epoch * 1000);
+    if (Number.isNaN(d.getTime())) return "—";
+    return d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  };
+
+  return (
+    <Card className="xl:col-span-3">
+      <CardHeader
+        title="Hermes OAuth"
+        subtitle="Nous Portal · device-code sign-in"
+        right={
+          statusQ.isLoading ? (
+            <Badge tone="gray">…</Badge>
+          ) : connected ? (
+            <Badge tone={needsRefresh ? "amber" : "green"}>
+              {needsRefresh ? "expires soon" : "connected"}
+            </Badge>
+          ) : (
+            <Badge tone="gray">not connected</Badge>
+          )
+        }
+      />
+      <div className="space-y-4 px-4 pb-4 pt-2">
+        {statusQ.isLoading && (
+          <div className="flex justify-center py-4"><Spinner /></div>
+        )}
+        {localError && <ErrorText>{localError}</ErrorText>}
+
+        {connected && (
+          <dl className="admin-dl">
+            <dt>Access token expires</dt>
+            <dd className="font-mono text-[12px] text-[var(--admin-text-muted)]">
+              {fmtExpiry(statusQ.data?.expires_at)}
+            </dd>
+          </dl>
+        )}
+
+        {!connected && !statusQ.isLoading && (
+          <div className="space-y-2">
+            <p className="text-[12px] text-[var(--admin-text-muted)]">
+              Sign in with your Nous Portal account via the OAuth 2.0
+              device-code flow — no API key needed. The account is created
+              automatically and the token lands on this provider's first pool
+              key.
+            </p>
+            <Button variant="primary" onClick={() => setConnectOpen(true)}>
+              <LogIn size={14} /> Connect with Nous Portal
+            </Button>
+          </div>
+        )}
+
+        {connected && (
+          <div className="space-y-2 border-t border-[var(--admin-border)] pt-3">
+            <p className="text-[12px] text-[var(--admin-text-muted)]">
+              The access token is refreshed automatically within the final
+              120 s before expiry; use this to force a rotation now.
+            </p>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                disabled={refresh.isPending || !statusQ.data?.has_refresh_token}
+                onClick={() => refresh.mutate()}
+              >
+                <RefreshCw size={14} className={refresh.isPending ? "animate-spin" : ""} />
+                {refresh.isPending ? "Refreshing…" : "Refresh token now"}
+              </Button>
+              <Button variant="ghost" onClick={() => void statusQ.refetch()}>
+                <RefreshCw size={14} /> Recheck status
+              </Button>
+              <Button
+                variant="danger"
+                disabled={disconnect.isPending}
+                onClick={() => setConfirmDisconnect(true)}
+              >
+                <Unlink size={14} /> Disconnect
+              </Button>
+            </div>
+          </div>
+        )}
+
+        <Dialog
+          open={confirmDisconnect}
+          title={`Disconnect Hermes OAuth for ${props.p.name}?`}
+          onClose={() => setConfirmDisconnect(false)}
+        >
+          <p className="text-[13px] text-[var(--admin-text-muted)]">
+            Clears the stored OAuth tokens. The pool key keeps its last access
+            token until you reconnect or replace it.
+          </p>
+          <div className="flex justify-end gap-2 pt-4">
+            <Button variant="ghost" onClick={() => setConfirmDisconnect(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              disabled={disconnect.isPending}
+              onClick={() => disconnect.mutate()}
+            >
+              {disconnect.isPending ? "Disconnecting…" : "Disconnect"}
+            </Button>
+          </div>
+        </Dialog>
+
+        <HermesConnectDialog
+          open={connectOpen}
+          provider={props.p.name}
+          onClose={() => setConnectOpen(false)}
+          onConnected={() => {
+            void qc.invalidateQueries({ queryKey: qKey });
+            void qc.invalidateQueries({ queryKey: ["providers"] });
+          }}
+        />
+
+        <p className="text-[11px] leading-relaxed text-[var(--admin-text-dim)]">
+          Hermes uses OAuth 2.0 device authorization (RFC 8628) with no
+          callback URL or client secret. The access token is stored on this
+          provider's first pool key (prefixed <code>hermes:</code>; the adapter
+          strips it for the bearer); the refresh token is kept server-side and
+          rotates on each refresh. A terminal grant (<code>invalid_grant</code>
+          / reused refresh token) requires reconnecting.
+        </p>
+      </div>
+    </Card>
+  );
+}
+
 // -- page -------------------------------------------------------------------------------
 
 export function ProviderDetailPage() {
@@ -1483,6 +1657,7 @@ export function ProviderDetailPage() {
       <div className="admin-stagger grid grid-cols-1 gap-4 xl:grid-cols-3">
         <AccountSettingsCard p={p} onError={setError} />
         {p.provider_type === "cline" && <ClineOAuthCard p={p} onError={setError} />}
+        {p.provider_type === "hermes" && <HermesOAuthCard p={p} onError={setError} />}
         <KeyPoolCard p={p} providerName={name} onError={setError} />
         <AddKeysCard provider={p.name} existing={p.keys.length} onError={setError} />
         <ModelPickerCard p={p} onError={setError} />

@@ -38,6 +38,17 @@ import {
 const DEFAULT_BASE_URL = "https://inference-api.nousresearch.com/v1";
 const POLL_INTERVAL_MS = 5000;
 
+/** First ``base``-suffixed name not already taken: ``hermes-main``, then
+ *  ``hermes-main-2``, ``hermes-main-3``… so a new account never silently
+ *  collides with (and replaces) an existing one. */
+function _uniqueName(base: string, existing: string[]): string {
+  const taken = new Set(existing);
+  if (!taken.has(base)) return base;
+  let n = 2;
+  while (taken.has(`${base}-${n}`)) n += 1;
+  return `${base}-${n}`;
+}
+
 function fmtExpiry(epoch: number | null | undefined): string {
   if (!epoch) return "unknown";
   const ms = epoch * 1000;
@@ -59,7 +70,7 @@ function useHermesStatus(provider: string) {
 
 // -- connect dialog ------------------------------------------------------------
 
-function ConnectDialog(props: {
+export function HermesConnectDialog(props: {
   open: boolean;
   provider: string;
   onClose: () => void;
@@ -67,7 +78,11 @@ function ConnectDialog(props: {
   /** Bootstrapping a brand-new account: prompt for a name first, then let the
    *  OAuth device flow create the account server-side (no API key needed). */
   isNew?: boolean;
+  /** Names already in use, so a new account can't collide with (and silently
+   *  replace) an existing one. */
+  existingNames?: string[];
 }) {
+  const existing = props.existingNames ?? [];
   const [name, setName] = useState<string | null>(null);
   const [draftName, setDraftName] = useState("hermes-main");
   const [dc, setDc] = useState<{
@@ -145,12 +160,21 @@ function ConnectDialog(props: {
       setDone(false);
       setError(null);
       setName(null);
-      setDraftName("hermes-main");
+      setDraftName(_uniqueName("hermes-main", existing));
     }
     return () => {
       if (pollRef.current) window.clearTimeout(pollRef.current);
     };
   }, [props.open]);
+
+  // When opening for a brand-new account, pre-fill a name that does not
+  // collide with an existing one (hermes-main, hermes-main-2, …).
+  useEffect(() => {
+    if (props.open && props.isNew && name === null) {
+      setDraftName(_uniqueName("hermes-main", existing));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.open, props.isNew]);
 
   const needsName = props.isNew && name === null;
 
@@ -189,10 +213,18 @@ function ConnectDialog(props: {
                   autoComplete="off"
                   className="min-h-11"
                 />
-                <p className="text-[12px] text-[var(--admin-text-muted)]">
-                  The account is created automatically when you sign in — no API
-                  key needed.
-                </p>
+                {existing.includes(draftName.trim()) ? (
+                  <p className="text-[12px] text-red-400">
+                    An account named “{draftName.trim()}” already exists. Pick a
+                    different name so this account is added alongside it, not in
+                    place of it.
+                  </p>
+                ) : (
+                  <p className="text-[12px] text-[var(--admin-text-muted)]">
+                    The account is created automatically when you sign in — no API
+                    key needed.
+                  </p>
+                )}
               </div>
             ) : dc ? (
               <>
@@ -233,7 +265,7 @@ function ConnectDialog(props: {
         {needsName ? (
           <Button
             className="min-h-11"
-            disabled={!draftName.trim()}
+            disabled={!draftName.trim() || existing.includes(draftName.trim())}
             onClick={() => setName(draftName.trim())}
           >
             <LogIn size={14} /> Continue
@@ -326,7 +358,7 @@ function HermesAccountCard(props: {
           </span>
         </div>
         {connectOpen && (
-          <ConnectDialog
+          <HermesConnectDialog
             open={connectOpen}
             provider={p.name}
             onClose={() => setConnectOpen(false)}
@@ -459,10 +491,11 @@ export function HermesOAuthPage() {
         </div>
       )}
 
-      <ConnectDialog
+      <HermesConnectDialog
         open={newOpen}
         provider=""
         isNew
+        existingNames={accounts.map((p) => p.name)}
         onClose={() => setNewOpen(false)}
         onConnected={() => {
           void q.refetch();

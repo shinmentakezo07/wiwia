@@ -5901,6 +5901,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 keys=[ProviderKey(label=label, secret=secret)])
             try:
                 if state.config_store:
+                    # This branch only runs when the account is absent from the
+                    # router, which is built from the DB at startup — so the DB
+                    # has no such row and this is a genuinely new account.
                     await state.config_store.add_provider(
                         name, "hermes", base_url or _default_base_url("hermes"))
                     await state.config_store.add_key(name, label, secret)
