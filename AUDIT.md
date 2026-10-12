@@ -517,6 +517,65 @@ verification plan before this page is considered done.
 
 ---
 
+## ✅ Fixed — round 133 (2026-10-12): tool-call-only streams reported no TPS
+
+Found by reading the two lines that bound the TPS generation window, then
+reproducing against the real gateway (`POST /v1/chat/completions`, `stream:true`,
+a paced tool-call-only SSE upstream). Covered by `tests/test_fix_round133.py`.
+
+### 422. A tool-call-only stream lost its generation-phase TPS
+
+**Severity:** 🟠 high · **Status: fixed** — round 133
+(`tests/test_fix_round133.py`)
+**Files:** `wiwi/core/gateway.py:1206` (`ToolCallOpen` arm of the stream consumer)
+
+`build_log_event` derives `stream_secs` from `last_token_at - first_token_at`,
+and both were stamped in one block. `first_token_at` was set on
+`TextDelta`/`ThinkingDelta`/`ToolCallOpen`, but `last_token_at` **only** on
+`TextDelta`/`ThinkingDelta`. A stream whose entire output is tool calls (a
+function-calling agent that never emits prose) therefore stamped
+`first_token_at` on the open and never advanced the other, collapsing
+`stream_secs` to `0.0`. The request reported `tps = 0.0` with a full
+`tok_out`, so it read as a real measurement rather than a missing one — TTFT
+survived, because the open stamp was always fine.
+
+**Probe** (executed, two paced tool calls, 50 completion tokens, ~0.3s apart):
+
+```
+before: status=200 tok_out=50 ttft_ms=318.2 tps=0.0
+after:  status=200 tok_out=50 ttft_ms=305.1 tps>0  (generation-phase)
+```
+
+The zero also fed the aggregates as an excluded sample while still counting in
+`tps_sample_ratio`'s denominator, so the coverage figure understated how much
+streaming traffic the TPS numbers described — the same silent-exclusion shape
+#320 existed to kill.
+
+**Fix:** stamp `last_token_at` on `ToolCallOpen` too, so the window is bounded
+by the first and last content-bearing delta of any kind. Args fragments stay
+out of the bound deliberately: each is one SSE frame, not one model token, so
+timing them would stretch the window across transport time. `ToolCallClose` is
+excluded because providers batch the closes of sibling tool calls at
+`finish_reason` — stamping the batch's arrival would measure the batch, not the
+generation.
+
+**Why not a known finding:** #319-#325 (round 117) fixed the
+streaming/non-streaming split and the missing denominator, and its prose
+("Requests with no separable generation phase report `tps = 0.0`") reads as
+though this case were intended. A tool-call-only stream *has* a separable
+generation phase; it was simply never bounded. No entry mentions
+`last_token_at` on the tool-call path.
+
+**One shape is still legitimately zero, and is now pinned as such:** the OpenAI
+adapter defers `ToolCallOpen` until the name is complete, which the first args
+fragment signals. A tool call sent with no args is held and flushed together
+with its siblings at `finish_reason`, so both bounds land in the same instant
+and the 0.05s floor correctly drops it. That is a stream with no measurable
+generation window, not a bug — `test_instant_tool_only_stream_still_reports_no_tps`
+keeps it that way.
+
+---
+
 ## 🟠 Open — sweep 2026-10-11 (upstream SSE reading path)
 
 Found by executing the real `LineSSEParser` + `Gateway.stream` pump against

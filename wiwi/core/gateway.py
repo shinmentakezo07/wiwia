@@ -1206,6 +1206,22 @@ class Gateway:
                     content_flowed = True
                 if isinstance(d, dl.ToolCallOpen):
                     content_flowed = True
+                    # Tool-call-open is a content-bearing delta like text or
+                    # thinking, so it bounds the generation window at both
+                    # ends. ``last_token_at`` was set only on TextDelta/
+                    # ThinkingDelta, so a tool-call-only stream (a
+                    # function-calling agent that emits no prose) stamped
+                    # ``first_token_at`` and never advanced the other, which
+                    # collapsed ``stream_secs`` to 0 and dropped the request's
+                    # TPS from every aggregate while still counting it in
+                    # ``tps_sample_ratio``'s denominator (round 133).
+                    # Args fragments stay out of the bound: each is one SSE
+                    # frame, not one model token, so timing them would stretch
+                    # the window across transport. Close is excluded too,
+                    # because providers batch the closes of sibling tool calls
+                    # at finish_reason — stamping the batch's arrival would
+                    # measure the batch, not the generation.
+                    ctx.last_token_at = time.monotonic()
                 # Record content-bearing deltas to the tape for resume/replay.
                 # Skipped when resume is off (the default): the tape is only
                 # read by _attempt_resume, so recording it is pure waste.
