@@ -20,6 +20,7 @@ from wiwi.providers.bai_adapter import BAIAdapter
 from wiwi.providers.base import ProviderAdapter
 from wiwi.providers.cline_adapter import ClineAdapter
 from wiwi.providers.gemini_adapter import GeminiAdapter
+from wiwi.providers.hermes_adapter import HermesAdapter
 from wiwi.providers.nim_adapter import NimAdapter
 from wiwi.providers.openai_adapter import OpenAIAdapter
 from wiwi.providers.opencode_adapter import OpencodeAdapter
@@ -33,6 +34,7 @@ _OPENAI_WIRE_TYPES = frozenset({"openai", "openai-compatible", "gmicloud", "bai"
 
 _SINGLETONS: dict[str, ProviderAdapter] = {
     "anthropic": AnthropicAdapter(),
+    "hermes": HermesAdapter(),
     "gemini": GeminiAdapter(),
     "openrouter": OpenRouterAdapter(),
     "nvidia-nim": NimAdapter(),
@@ -67,6 +69,8 @@ def fresh_adapter(provider_type: str) -> ProviderAdapter:
     instance exclusively. ``get_adapter``'s shared singleton is reset on every
     acquisition, which would wipe a concurrent in-flight stream's state.
     """
+    if provider_type == "hermes":
+        return HermesAdapter()
     if provider_type == "anthropic":
         return AnthropicAdapter()
     if provider_type == "gemini":
@@ -93,7 +97,7 @@ def fresh_adapter(provider_type: str) -> ProviderAdapter:
 # fallback. Catches drift at import time.
 _unhandled = set(PROVIDER_TYPES) - _OPENAI_WIRE_TYPES - {
     "anthropic", "gemini", "openrouter", "nvidia-nim", "cline", "workbuddy",
-    "opencode"}
+    "opencode", "hermes"}
 assert not _unhandled, (
     f"provider types {_unhandled} are in PROVIDER_TYPES but have no adapter "
     f"branch in get_adapter — add one"

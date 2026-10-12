@@ -1310,6 +1310,18 @@ BUILTIN_PROVIDER_TYPES: list[dict[str, str | list[str]]] = [
         "context_window": "varies per model",
         "docs_url": "https://opencode.ai/docs/zen",
     },
+    {
+        "provider_type": "hermes",
+        "label": "Hermes (Nous Portal)",
+        "default_base_url": "https://inference-api.nousresearch.com/v1",
+        "description": (
+            "Nous Portal inference API (OpenAI-compatible). Authenticate with "
+            "a Nous API key or an OAuth token from Hermes Agent."
+        ),
+        "latest_models": ["Hermes-4-405B", "Hermes-4-70B", "Hermes-4.3-36B"],
+        "context_window": "varies per model",
+        "docs_url": "https://hermes-agent.nousresearch.com/docs/",
+    },
 ]
 
 

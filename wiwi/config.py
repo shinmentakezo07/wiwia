@@ -46,6 +46,7 @@ PROVIDER_TYPES: tuple[str, ...] = (
     "cline",
     "workbuddy",
     "opencode",
+    "hermes",
 )
 
 
@@ -231,6 +232,54 @@ class ModelAliasEntry(BaseModel):
     force_mapping: bool = True
     display_name: str | None = None
     fork: bool = False
+
+
+# ``model_group_alias`` values exist in three shapes depending on where they
+# came from: a plain ``str`` in YAML, a ``ModelAliasEntry`` in the live router,
+# and a ``dict`` in JSON and in the DB overlay. Every consumer has to convert
+# between them. These three helpers live here, beside the type they normalize,
+# rather than in ``server/app.py`` — the backup/restore module needs them too
+# and ``app.py`` is not importable from a library module.
+
+
+def coerce_alias_value(v: object) -> str | ModelAliasEntry | None:
+    """Normalize a ``model_group_alias`` value to ``str | ModelAliasEntry``.
+
+    - ``str`` → returned as-is (back-compat for plain YAML aliases).
+    - ``ModelAliasEntry`` → returned as-is.
+    - ``dict`` (from JSON / DB overlay) → validated via ``ModelAliasEntry``;
+      returns ``None`` if the dict is malformed (caller treats as error).
+    Anything else returns ``None`` (caller treats as error)."""
+    if isinstance(v, ModelAliasEntry):
+        return v
+    if isinstance(v, str):
+        return v
+    if isinstance(v, dict):
+        try:
+            return ModelAliasEntry.model_validate(v)
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def alias_value_to_json(v: object) -> str | dict:
+    """Serialize a ``model_group_alias`` value for JSON output.
+
+    Plain strings pass through; ``ModelAliasEntry`` values are dumped via
+    ``model_dump`` so ``/admin/models`` and ``/public/models`` always emit a
+    consistent shape for clients to parse."""
+    if isinstance(v, ModelAliasEntry):
+        return v.model_dump()
+    return v  # str, or whatever was loaded (string back-compat)
+
+
+def alias_value_eq(a: object, b: object) -> bool:
+    """Compare two alias values regardless of form (str vs ModelAliasEntry
+    vs dict). Used to compute the overlay diff at write time without
+    spuriously re-persisting values that didn't change form."""
+    a_d = a if isinstance(a, dict) else alias_value_to_json(a)
+    b_d = b if isinstance(b, dict) else alias_value_to_json(b)
+    return a_d == b_d
 
 
 class RouterSettings(BaseModel):
