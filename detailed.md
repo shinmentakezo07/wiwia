@@ -513,7 +513,9 @@ Constructs a `LogEvent` from the context after the request completes:
 
 - `latency_ms`: wall time from `ctx.started` to now.
 - `ttft_ms`: time to first token (streaming only).
-- `tps`: `completion_tokens / stream_duration` (if stream > 0.05s).
+- `tps`: `completion_tokens / stream_duration` (if stream > 0.05s), where the
+  window is first-to-last content-bearing delta. See §13 for which deltas
+  bound it and why args fragments and tool-call closes do not.
 - Token breakdown: in, cached, reasoning, output.
 - `attempts`: List of `AttemptRecord` with deployment, provider, key, status, latency per attempt.
 
@@ -915,9 +917,30 @@ Pure functions over `LogEvent` lists — unit-testable without a DB.
 Events with `tps == 0` or `ttft_ms == 0` (non-streaming or missing timing) are excluded from those specific aggregates only.
 
 TPS is **output generation speed** — completion tokens over the span between
-first and last token, which excludes queueing and prefill. Only streaming
-requests have a separable generation phase, so only they report a TPS sample.
-Because that exclusion is structural rather than incidental, every TPS
+the first and last *content-bearing* delta, which excludes queueing and
+prefill. "Content-bearing" means `TextDelta`, `ThinkingDelta` or
+`ToolCallOpen`, so a stream whose entire output is tool calls (a
+function-calling agent that emits no prose) is measured too, bounded by its
+first and last tool-call open (round 133, AUDIT #422).
+
+Two deltas are deliberately outside the bound:
+
+- **`ToolCallArgsDelta`** — each is one SSE frame, not one model token, so
+  timing it would stretch the window across transport.
+- **`ToolCallClose`** — providers batch the closes of sibling tool calls at
+  `finish_reason`, so timing the batch would measure the batch, not the
+  generation.
+
+Non-streaming requests have no separable generation phase (the whole response
+arrives at once), so only streaming requests report a TPS sample. A streaming
+request whose window is under 0.05s also reports 0.0: that is a real
+measurement of a stream with no measurable generation phase, not a missing one.
+Note that the OpenAI adapter defers `ToolCallOpen` until the tool name is
+complete, which the first args fragment signals — a tool call sent with no
+args is held and flushed with its siblings at `finish_reason`, so both bounds
+land in one instant and the floor drops it.
+
+Because the exclusion is structural rather than incidental, every TPS
 aggregate ships with a `tps_sample_ratio` (0–1) stating what share of the
 window that figure actually describes.
 
