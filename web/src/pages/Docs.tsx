@@ -479,6 +479,7 @@ const PROVIDER_ASSETS: { label: string; src?: string; icon?: LucideIcon }[] = [
   { label: "WorkBuddy", src: "/logos/workbuddy.svg" },
   { label: "NVIDIA NIM", src: "/logos/nvidia-nim.png" },
   { label: "OpenCode", src: "/logos/opencode.svg" },
+  { label: "Hermes", src: "/logos/hermes.svg" },
   { label: "Cline", icon: Boxes },
 ];
 
@@ -487,7 +488,7 @@ function ProviderGrid() {
     <div className="mt-6">
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="admin-label">Provider ecosystem</h3>
-        <span className="text-[11px] text-[var(--admin-text-dim)]">11 provider types</span>
+        <span className="text-[11px] text-[var(--admin-text-dim)]">12 provider types</span>
       </div>
       <div className="docs-provider-grid">
         {PROVIDER_ASSETS.map((provider) => {
@@ -823,7 +824,7 @@ export function DocsPage() {
             <p className="admin-label">Facts</p>
             <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-[var(--admin-text-muted)]">
               <span>3 inbound dialects</span>
-              <span>11 provider types</span>
+              <span>12 provider types</span>
               <span>1 canonical IR</span>
               <span>SSE streaming</span>
             </div>

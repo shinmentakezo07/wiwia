@@ -305,6 +305,34 @@ export interface ClineRefreshResponse {
   access_token_masked: string;
   expires_at: string | null;
 }
+// -- Hermes (Nous Portal) OAuth (device-code flow) ---------------------------
+export interface HermesDeviceCodeResponse {
+  state: string;
+  provider: string;
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete: string;
+  expires_in: number;
+  interval: number;
+}
+export interface HermesPollResponse {
+  pending?: boolean;
+  provider?: string;
+  connected?: boolean;
+  access_token_masked?: string;
+  expires_at?: number | null;
+}
+export interface HermesStatusResponse {
+  connected: boolean;
+  expires_at?: number | null;
+  needs_refresh?: boolean;
+  has_refresh_token?: boolean;
+}
+export interface HermesRefreshResponse {
+  provider: string;
+  access_token_masked: string;
+  expires_at: number | null;
+}
 
 export interface ClineDisconnectResponse {
   provider: string;
@@ -402,4 +430,156 @@ export interface ProviderImportResponse {
   imported_keys: number;
   imported_deployments: number;
   providers: string[];
+}
+
+// -- Whole-gateway backup / restore --------------------------------------------
+//
+// Mirrors `wiwi/server/backup.py`. Sections are the unit of both the export
+// filter and the import filter; each upserts on its own natural key and none
+// of them ever deletes.
+
+export type BackupSections =
+  | "providers"
+  | "keys"
+  | "deployments"
+  | "aliases"
+  | "settings"
+  | "prices"
+  | "users"
+  | "vkeys"
+  | "logs"
+  | "rollups"
+  | "audit"
+  | "responses";
+
+export interface BackupProvider {
+  name: string;
+  provider_type: string;
+  base_url: string;
+  timeout_s?: number | null;
+  extra_headers?: Record<string, string> | null;
+  round_robin?: boolean | null;
+  alias_id?: string | null;
+}
+
+export interface BackupKey {
+  provider_name: string;
+  label: string;
+  /** Absent — not null — when the export ran without `include_secrets`. That
+   *  distinction is what lets a merge leave an existing secret alone instead
+   *  of blanking it. */
+  secret?: string;
+  weight?: number;
+  enabled?: boolean;
+}
+
+export interface BackupDeployment {
+  group_name: string;
+  provider_name: string;
+  model_id: string;
+  weight?: number;
+  rpm?: number | null;
+  tpm?: number | null;
+  timeout?: number | null;
+  max_tokens?: number | null;
+  prompt_cache?: boolean;
+  /** The source recorded this deployment as detached. Applying it is that
+   *  same removal — not a wipe. */
+  detached?: boolean;
+}
+
+/** `null` is a tombstone: an admin alias that removed a YAML-defined one. */
+export type BackupAliasValue = string | { target: string; [k: string]: unknown } | null;
+
+export interface BackupPrice {
+  model_id: string;
+  input_cost_per_token?: number | null;
+  output_cost_per_token?: number | null;
+  cache_read_input_cost_per_token?: number | null;
+  cache_creation_input_cost_per_token?: number | null;
+  max_input_tokens?: number | null;
+  max_output_tokens?: number | null;
+  mode?: string | null;
+  providers?: Record<string, Record<string, number | null>>;
+}
+
+export interface BackupUser {
+  id?: string;
+  username: string;
+  /** PBKDF2 digest, carried through verbatim. Opaque — never displayed. */
+  password_hash?: string | null;
+  role?: string;
+  disabled?: boolean;
+}
+
+/** A virtual key. `key_hash` is SHA-256 of a plaintext that is never stored,
+ *  so importing it restores a key that still authenticates — but no key can be
+ *  re-displayed after a restore. Merge key is `key_hash`. */
+export interface BackupVKey {
+  id?: string;
+  key_hash: string;
+  key_alias?: string;
+  models?: string[] | null;
+  max_budget?: number | null;
+  spend_to_date?: number;
+  budget_reserved?: number;
+  rpm?: number | null;
+  tpm?: number | null;
+  expires_at?: number | null;
+  disabled?: boolean;
+  owner_id?: string | null;
+  priority?: string | null;
+}
+
+export interface BackupLogRow {
+  request_id: string;
+  ts?: number;
+  [k: string]: unknown;
+}
+
+export interface BackupDocument {
+  kind: "wiwi.backup";
+  version: number;
+  exported_at: number;
+  sections: BackupSections[];
+  include_secrets: boolean;
+  include_bodies: boolean;
+  truncated?: Record<string, number>;
+  counts: Record<string, number | Record<string, number>>;
+  providers?: BackupProvider[];
+  keys?: BackupKey[];
+  deployments?: BackupDeployment[];
+  aliases?: Record<string, BackupAliasValue>;
+  settings?: Record<string, unknown>;
+  prices?: BackupPrice[];
+  users?: BackupUser[];
+  vkeys?: BackupVKey[];
+  logs?: { request_logs: BackupLogRow[] };
+  rollups?: { request_rollups: Record<string, unknown>[] };
+  audit?: { audit_logs: Record<string, unknown>[] };
+  responses?: { stored_responses: Record<string, unknown>[] };
+}
+
+/** What `POST /admin/backup/import?dry_run=1` returns: the per-section row
+ *  counts the merge would apply, with nothing written. */
+export interface BackupPlan {
+  dry_run: true;
+  sections: BackupSections[];
+  counts: Record<string, number | Record<string, number>>;
+}
+
+export interface BackupImportResult {
+  providers: number;
+  keys: number;
+  deployments: number;
+  aliases: number;
+  settings: number;
+  prices: number;
+  users: number;
+  vkeys: number;
+  logs: number;
+  rollups: number;
+  /** Audit rows the file carried that were deliberately NOT replayed. */
+  audit_skipped: number;
+  responses: number;
 }

@@ -118,7 +118,7 @@ Verify in a mobile-sized viewport and a desktop viewport; put a screenshot or sh
 | [QUICKSTART.md](QUICKSTART.md) | Install, run, first request |
 | [CONFIG.md](CONFIG.md) | `wiwi.yaml` reference, env vars |
 | [API_REFERENCE.md](API_REFERENCE.md) | All endpoints |
-| [PROVIDERS.md](PROVIDERS.md) | The 11 provider types, quirks, key pools |
+| [PROVIDERS.md](PROVIDERS.md) | The 12 provider types, quirks, key pools |
 | [STREAMING.md](STREAMING.md) | Delta taxonomy, pump, failover/journals, guards |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | System architecture, request pipeline, recovery |
 | [CORE.md](CORE.md) | Internal subsystem reference |

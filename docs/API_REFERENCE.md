@@ -152,7 +152,7 @@ request-log row is written per session.
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/admin/provider-catalog` | GET | Catalog of the 11 provider types (from `PROVIDER_TYPES`) with required fields. |
+| `/admin/provider-catalog` | GET | Catalog of the 12 provider types (from `PROVIDER_TYPES`) with required fields. |
 | `/admin/providers` | GET | List configured providers + key pools + health states. |
 | `/admin/providers` | POST | Add a provider account. |
 | `/admin/providers/{name}` | PATCH | Edit provider (name/type/base_url/timeout). |
@@ -164,6 +164,54 @@ request-log row is written per session.
 | `/admin/providers/{name}/models` | GET | Models the provider exposes (live fetch where supported). |
 | `/admin/providers/export` | GET | Export provider config (secrets masked or included per flag). |
 | `/admin/providers/import` | POST | Import provider config. |
+
+### Backup and restore
+
+Whole-gateway JSON, covering every table the console can mutate — not just
+providers. The logic is `wiwi/server/backup.py`; the console surfaces it at
+**Settings → Import / Export**.
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/admin/backup` | GET | Export the whole gateway as one merge-restorable document. |
+| `/admin/backup/import` | POST | Merge a document. Merge only — never deletes. |
+
+`GET /admin/backup` query parameters (all optional):
+
+| Param | Default | Description |
+|---|---|---|
+| `include_secrets` | off | Include plaintext provider key secrets and Cline refresh tokens. The only live credentials in the file. |
+| `include_bodies` | off | Include `request_body`/`response_body`. A **separate** opt-in, so pulling credentials can never also pull user prompts. |
+| `sections` | all non-bulk | Comma-separated subset of `providers,keys,deployments,aliases,settings,prices,users,vkeys,logs,rollups,audit,responses`. Bulk sections are excluded by default — the request log grows without limit. |
+| `log_days` | `30` | Age bound on log sections. `0` = all time. |
+| `log_limit` | `0` | Cap on raw log rows. `0` = no cap. A cap that bites is reported in `truncated`. |
+
+`POST /admin/backup/import` takes the document verbatim. `?dry_run=1` runs the
+full validation and returns the per-section plan **without writing** — the
+console's Import panel shows that before enabling its Merge button. Any
+validation error rejects the whole document with nothing applied.
+
+Merge keys, one per section: providers `name` · keys `(provider_name, label)` ·
+deployments `(group_name, provider_name, model_id)` · aliases the alias name ·
+settings the setting key · prices `model_id` (+ `(model_id, scope)` per scoped
+override) · users `username` · virtual keys `key_hash` · request logs
+`request_id` · rollups `(bucket_ts, key_id, model_group, provider, serving_model)`.
+
+Four things a backup deliberately does not do:
+
+- **It does not reveal virtual keys or passwords.** Only their hashes are
+  stored (`hash_key` is unsalted SHA-256), so the file carries digests.
+  Importing a digest *does* restore a working key — the same plaintext
+  authenticates on the target — but no key can be printed again afterwards.
+- **It never replays the audit log.** `audit_logs` has no natural key, and
+  restoring another instance's mutation trail would forge this one's operator
+  history. The rows are exported and reported as `audit_skipped`.
+- **It does not carry the master key.** That lives in `wiwi.yaml` and the
+  environment; a restored instance needs `WIWI_MASTER_KEY` set separately or
+  it fails closed at startup.
+- **It does not delete.** A deployment or alias the *source* recorded as
+  removed is removed here too, but nothing is ever dropped merely for being
+  absent from the file.
 
 ### OAuth providers (Cline, WorkBuddy)
 
@@ -179,6 +227,19 @@ request-log row is written per session.
 | `/admin/cline/oauth/refresh` | POST | Force token refresh. |
 | `/admin/cline/oauth/disconnect` | DELETE | Disconnect account. |
 | `/cline/oauth/callback` | GET | OAuth redirect target (browser). |
+
+### OAuth providers (Hermes / Nous Portal — device-code flow)
+
+Hermes uses OAuth 2.0 device authorization (RFC 8628). Unlike Cline's paste-code flow there is no callback URL: wiwi mints a device code and verification URL, the operator approves in a browser, and wiwi polls the token endpoint. On success the access token lands on the account's pool key (stored prefixed `hermes:`; the adapter strips it for the `Authorization: Bearer`), and the refresh token is persisted for on-demand refresh inside the 120 s lead window before expiry. **No API key is required** — the device-code call bootstraps the account (creating it with a placeholder key if it does not exist).
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/admin/hermes/oauth/device-code?provider=<name>` | POST | Start device authorization. Returns `{state, user_code, verification_uri, verification_uri_complete, expires_in, interval}`. Creates the account if it does not exist. |
+| `/admin/hermes/oauth/poll` | POST | One poll attempt for a pending session (`{"state": …}`). Returns `{"pending": true}` while unapproved, or the connected account (`{"connected": true, "access_token_masked", "expires_at"}`) on approval. `410` when the session's 10-minute TTL lapses; `404` for an unknown state. |
+| `/admin/hermes/oauth/status?provider=<name>` | GET | `{connected, expires_at, needs_refresh, has_refresh_token}`. |
+| `/admin/hermes/oauth/refresh` | POST | Force a token refresh (`{"provider": …}`). `401` on a terminal grant (`invalid_grant`/reused refresh token) — re-login required. |
+| `/admin/hermes/oauth/disconnect` | DELETE | Disconnect account; clears the stored token state. |
+
 | `/admin/workbuddy/accounts` | GET | List connected WorkBuddy accounts. |
 | `/admin/workbuddy/import` | POST | Import WorkBuddy account credentials. |
 | `/admin/workbuddy/export` | GET | Export account data. |
@@ -367,6 +428,17 @@ curl -X DELETE localhost:4000/admin/cline/oauth/disconnect -H "$MK" -d '{"provid
 curl localhost:4000/admin/cline/models -H "$MK"
 curl -X PUT localhost:4000/admin/cline/settings -H "$MK" \
   -d '{"default_models": ["anthropic/claude-sonnet-4-5", "openai/gpt-4o"]}'
+
+# Hermes (Nous Portal) — device-code OAuth. No API key needed: the first call
+# bootstraps the account. Open verification_uri_complete in a browser, approve,
+# then poll until it returns connected:true.
+curl -X POST "localhost:4000/admin/hermes/oauth/device-code?provider=hermes-main" -H "$MK"
+# -> {state, user_code, verification_uri_complete, expires_in, interval}
+curl -X POST localhost:4000/admin/hermes/oauth/poll -H "$MK" -d '{"state": "..."}'
+#   -> {"pending": true} until approved, then {"connected": true, ...}
+curl localhost:4000/admin/hermes/oauth/status?provider=hermes-main -H "$MK"
+curl -X POST localhost:4000/admin/hermes/oauth/refresh -H "$MK" -d '{"provider": "hermes-main"}'
+curl -X DELETE localhost:4000/admin/hermes/oauth/disconnect -H "$MK" -d '{"provider": "hermes-main"}'
 
 # WorkBuddy (CodeBuddy) — parallel API
 curl localhost:4000/admin/workbuddy/accounts -H "$MK"

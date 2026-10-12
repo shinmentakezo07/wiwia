@@ -1,6 +1,6 @@
 # wiwi — Provider Setup Guide
 
-wiwi ships **11 provider types** (`PROVIDER_TYPES` in `wiwi/config.py`): `openai`, `anthropic`, `gemini`, `openai-compatible`, `openrouter`, `gmicloud`, `bai`, `nvidia-nim`, `cline`, `workbuddy`, `opencode`. Each maps to an adapter in `wiwi/providers/` that encodes IR → provider wire format and decodes responses/stream events back to IR.
+wiwi ships **12 provider types** (`PROVIDER_TYPES` in `wiwi/config.py`): `openai`, `anthropic`, `gemini`, `openai-compatible`, `openrouter`, `gmicloud`, `bai`, `nvidia-nim`, `cline`, `workbuddy`, `opencode`, `hermes`. Each maps to an adapter in `wiwi/providers/` that encodes IR → provider wire format and decodes responses/stream events back to IR.
 
 Adding a provider = new adapter module + one branch in `get_adapter()` (`wiwi/providers/registry.py`) + the entry in `PROVIDER_TYPES`. The registry has an import-time assert that fails loudly if a type has no branch.
 
@@ -19,6 +19,7 @@ Adding a provider = new adapter module + one branch in `get_adapter()` (`wiwi/pr
 | `cline` | Chat Completions | WorkOS OAuth bearer (`workos:` prefix) | OAuth + live Cline CLI/core fingerprint + auto-refresh |
 | `workbuddy` | Chat Completions | Access token from auth JSON | Tencent CodeBuddy quirks + auto-refresh |
 | `opencode` | Per-model: 4 upstream protocols | Bearer key | Multi-protocol routing, live User-Agent refresh |
+| `hermes` | Chat Completions | Nous API key **or** OAuth device-code token (`hermes:` prefix) | Nous Portal (`inference-api.nousresearch.com`); no Realtime WS surface |
 
 ---
 
@@ -225,6 +226,75 @@ Config declares a **key pool** per provider account (one or more entries under `
 
 Router picks a deployment, then a key from that deployment's pool. Errors trigger cooldowns; cooldowns expire automatically once `cooldown_time` elapses. The optional HealthHealer probes sick keys with 1-token requests and restores them into `probation` (see [ARCHITECTURE.md](ARCHITECTURE.md) §Recovery).
 
+## `hermes`
+
+Hermes (Nous Portal, `inference-api.nousresearch.com`) speaks OpenAI Chat
+Completions, so `HermesAdapter` is a thin subclass of `OpenAIAdapter`. The only
+override is `realtime_url() -> None`: Portal exposes no Realtime WebSocket
+surface, so the adapter declines it rather than inheriting an OpenAI URL that
+would 404 mid-session (see § Realtime below). Everything else — tools,
+streaming, `reasoning_effort`, image inputs, prompt-cache usage — is the
+reference OpenAI behaviour.
+
+```yaml
+providers:
+  - name: hermes-main
+    provider: hermes
+    base_url: https://inference-api.nousresearch.com/v1   # default
+    keys:
+      - {label: main, key: os.environ/HERMES_API_KEY}
+```
+
+Authenticate with a Nous API key **or** connect through OAuth (device-code) so
+you never handle a key at all. Latest models: `Hermes-4-405B`, `Hermes-4-70B`,
+`Hermes-4.3-36B`.
+
+### Two ways to authenticate
+
+| Method | When to use | Where the credential lives |
+|---|---|---|
+| **API key** | Simple, scripted setups | A `keys[].key` entry (or the admin key pool) — sent as `Authorization: Bearer <key>` |
+| **OAuth (device-code)** | Sign in with a Nous Portal account; no key to paste or rotate | The account's pool key, stored prefixed `hermes:` (adapter strips the prefix); refresh token kept in the config store |
+
+### OAuth device-code flow (RFC 8628)
+
+Nous Portal implements OAuth 2.0 device authorization. There is **no callback
+URL** and **no client secret** — the flow is:
+
+1. **Start** — `POST /admin/hermes/oauth/device-code?provider=<name>`. wiwi asks
+   Portal for a device code and returns a verification URL plus a short user
+   code. If the account does not exist yet it is **created automatically** with a
+   placeholder pool key, so no API key is ever required up front.
+2. **Approve** — open `verification_uri_complete` in a browser and sign in to
+   Nous Portal. The user code is pre-filled by the link.
+3. **Poll** — `POST /admin/hermes/oauth/poll` with the returned `state`. wiwi
+   forwards one poll to Portal; while you have not approved it answers
+   `{"pending": true}` (the UI retries every ~5 s). Once approved it stores the
+   access token on the pool key as `hermes:<token>`, keeps the refresh token, and
+   returns `{"connected": true, "access_token_masked", "expires_at"}`.
+
+Do all of this from the admin UI at **`/console/hermes-oauth`** — the Connect
+button drives the three steps above and shows a live "waiting for approval"
+state until the browser sign-in completes.
+
+- **Refresh:** the access token is refreshed on demand when it is within 120 s of
+  expiry (`POST /admin/hermes/oauth/refresh`). A terminal grant (`invalid_grant`,
+  or a reused/revoked refresh token) returns `401` and requires a fresh
+  device-code login.
+- **Status / disconnect:** `GET /admin/hermes/oauth/status` and
+  `DELETE /admin/hermes/oauth/disconnect`.
+- **Bearer:** the stored token is sent upstream as `Authorization: Bearer <token>`;
+  the `hermes:` prefix is stripped by `HermesAdapter.headers()` so the credential
+  is never sent literally.
+
+The endpoint contract is implemented in `wiwi/providers/hermes_oauth.py`, verified
+against the Hermes Agent CLI's own OAuth client
+(`hermes_cli/auth_nous.py` + `auth_device_flow.py`) and the live Portal endpoints
+(`portal.nousresearch.com/api/oauth/device/code`, `…/api/oauth/token`). See
+[API_REFERENCE.md](API_REFERENCE.md) § OAuth providers (Hermes) for the full
+request/response shapes.
+
+
 ## Mixing providers in one model group
 
 ```yaml
@@ -302,8 +372,8 @@ The capability is per adapter, not per wire shape. The four OpenAI-shaped
 providers (`openai`, `openai-compatible`, `gmicloud`, `bai`) implement it;
 `openrouter`, `nvidia-nim`, `cline` and `workbuddy` share the chat wire shape
 but **not** the realtime protocol, and answer `501` rather than inheriting a URL
-that would 404 mid-session. `anthropic`, `gemini` and `opencode` have no
-realtime surface at all.
+that would 404 mid-session. `anthropic`, `gemini`, `opencode` and `hermes` have
+no realtime surface at all.
 
 Relays need `realtime.enabled` in the config (off by default). A session is
 admitted through the ordinary path — the same auth, budgets, cooldowns, key

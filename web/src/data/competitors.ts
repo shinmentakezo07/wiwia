@@ -37,7 +37,7 @@ export const COMPETITORS: Competitor[] = [
       { label: "Migration", value: "Base URL + key, model names configurable" },
     ],
     rows: [
-      { feature: "Model catalog", wiwi: "Your config (11 provider types)", them: "Curated marketplace", note: "They add models for you; you add them with a config line." },
+      { feature: "Model catalog", wiwi: "Your config (12 provider types)", them: "Curated marketplace", note: "They add models for you; you add them with a config line." },
       { feature: "Inbound dialects", wiwi: true, them: "OpenAI-shape only", note: "wiwi serves Chat, Responses, and Messages natively." },
       { feature: "Anthropic-native clients", wiwi: "First-class /v1/messages", them: "Via translation", note: "Claude Code can ride wiwi's Messages surface directly." },
       { feature: "Self-hosted", wiwi: true, them: false, note: "Keys, logs, and budgets stay on your infra." },

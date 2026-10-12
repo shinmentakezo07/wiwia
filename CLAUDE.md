@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-**wiwi** is a self-hosted unified LLM gateway proxy (LiteLLM-shaped): three inbound API dialects — OpenAI Chat, OpenAI Responses (Codex CLI), Anthropic Messages — all route through one canonical internal representation (IR) to any of eleven outbound provider types; responses are always re-encoded in the caller's inbound dialect (e.g. Claude Code backed by GPT). Adds virtual keys, budgets, rate limits, key pools with smooth weighted round-robin, retries/cooldowns/fallbacks, a health healer, cost tracking, request logs, and an admin web UI.
+**wiwi** is a self-hosted unified LLM gateway proxy (LiteLLM-shaped): three inbound API dialects — OpenAI Chat, OpenAI Responses (Codex CLI), Anthropic Messages — all route through one canonical internal representation (IR) to any of twelve outbound provider types; responses are always re-encoded in the caller's inbound dialect (e.g. Claude Code backed by GPT). Adds virtual keys, budgets, rate limits, key pools with smooth weighted round-robin, retries/cooldowns/fallbacks, a health healer, cost tracking, request logs, and an admin web UI.
 
 **Use the ambient `python3` (3.12) / `pytest` (9.1.1) / `ruff` (0.16.4) on PATH** — they have the project installed (`import wiwi` resolves to this checkout). There is **no usable `.venv`**: the directory does not exist in this checkout, and the docs that describe it as an empty uv-venv symlink are stale either way. Never invoke `.venv/bin/python`.
 
@@ -67,7 +67,7 @@ Adding an inbound surface = one new module in `wiwi/wire/`; adding a provider = 
 
 Inbound surfaces: `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages`, `POST /v1/messages/count_tokens`; plus `GET /v1/models`, `GET /public/models`, `GET /health`, a configurable Prometheus metrics path (`server/metrics.py`), `/admin/*` (master key), `/auth/*` (user sessions), `/cline/oauth/callback`.
 
-`PROVIDER_TYPES` (`wiwi/config.py`) is the outbound-type source of truth — eleven: `openai`, `anthropic`, `gemini`, `openai-compatible`, `openrouter`, `gmicloud`, `bai`, `nvidia-nim`, `cline`, `workbuddy`, `opencode`.
+`PROVIDER_TYPES` (`wiwi/config.py`) is the outbound-type source of truth — twelve: `openai`, `anthropic`, `gemini`, `openai-compatible`, `openrouter`, `gmicloud`, `bai`, `nvidia-nim`, `cline`, `workbuddy`, `opencode`, `hermes`.
 
 ### `wiwi/` layout
 

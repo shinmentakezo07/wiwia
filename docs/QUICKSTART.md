@@ -1,6 +1,6 @@
 # wiwi — Quick Start
 
-Self-hosted unified LLM gateway proxy. Three inbound dialects (OpenAI Chat Completions, OpenAI Responses, Anthropic Messages) flow through one canonical IR out to any of eleven provider adapters and re-encode in the caller's dialect on the way back.
+Self-hosted unified LLM gateway proxy. Three inbound dialects (OpenAI Chat Completions, OpenAI Responses, Anthropic Messages) flow through one canonical IR out to any of twelve provider adapters and re-encode in the caller's dialect on the way back.
 
 ## Prerequisites
 

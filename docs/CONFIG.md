@@ -385,7 +385,7 @@ To give a model a second name, use `router_settings.model_group_alias` — there
 
 ## `providers`
 
-**A list of provider *accounts*, not a map.** Each entry has a `name` (what `wiwi_params.provider` refers to) and a `provider` (one of the 11 `PROVIDER_TYPES`), plus a pool of `keys`.
+**A list of provider *accounts*, not a map.** Each entry has a `name` (what `wiwi_params.provider` refers to) and a `provider` (one of the 12 `PROVIDER_TYPES`), plus a pool of `keys`.
 
 ```yaml
 providers:
@@ -406,7 +406,7 @@ There is no `api_key` field and no `budget_cap` field on a provider — keys liv
 | Field | Default | Notes |
 |---|---|---|
 | `name` | — | **Required.** Unique account name. |
-| `provider` | — | **Required.** One of the 11 `PROVIDER_TYPES`. |
+| `provider` | — | **Required.** One of the 12 `PROVIDER_TYPES`. |
 | `base_url` | per type | See the table below. |
 | `timeout_s` | `None` | Falls back to `router_settings.timeout` when unset. |
 | `round_robin` | `true` | `true` selects keys by smooth weighted round-robin; `false` takes the first available key in label order. |
@@ -416,7 +416,7 @@ There is no `api_key` field and no `budget_cap` field on a provider — keys liv
 
 ### Provider types and default base URLs
 
-`provider:` must be one of the 11 entries in `PROVIDER_TYPES`. Defaults come from `BUILTIN_PROVIDER_TYPES` in `wiwi/router/router.py`.
+`provider:` must be one of the 12 entries in `PROVIDER_TYPES`. Defaults come from `BUILTIN_PROVIDER_TYPES` in `wiwi/router/router.py`.
 
 | `provider` | Default `base_url` | Auth |
 |---|---|---|
@@ -431,6 +431,7 @@ There is no `api_key` field and no `budget_cap` field on a provider — keys liv
 | `cline` | `https://api.cline.bot/api/v1` | OAuth → `Bearer workos:<token>` |
 | `workbuddy` | `https://copilot.tencent.com` | OAuth → access token |
 | `opencode` | `https://opencode.ai/zen/v1` | per-wire (Bearer / `x-api-key` / `x-goog-api-key`) |
+| `hermes` | `https://inference-api.nousresearch.com/v1` | `Authorization: Bearer` (API key or OAuth device-code token) |
 
 The `anthropic` default ends in `/v1` because the adapter appends only `/messages` — setting `https://api.anthropic.com` produces the invalid endpoint `api.anthropic.com/messages`.
 
@@ -446,7 +447,7 @@ providers:
 
 **`nvidia-nim`** has JSON Schema quirks: it rejects boolean subschemas (`"additionalProperties": true`) and parameters named `type`. wiwi adapts tool schemas automatically via `nim_tool_schema.py` / `nim_native_tools.py`. See [PROVIDERS.md](PROVIDERS.md).
 
-**`cline`** and **`workbuddy`** are OAuth, and there is **no** `client_id` / `client_secret` in config — `cline_oauth.py` states "no client_id / no PKCE" and `workbuddy_auth.py` reads no environment variables at all. Connect them through the admin UI or the OAuth endpoints, then the access/refresh token lands in the key pool. Tokens refresh on demand, which is what makes their requests survive a 401. See [PROVIDERS.md](PROVIDERS.md).
+**`cline`** and **`workbuddy`** are OAuth, and there is **no** `client_id` / `client_secret` in config — `cline_oauth.py` states "no client_id / no PKCE" and `workbuddy_auth.py` reads no environment variables at all. Connect them through the admin UI or the OAuth endpoints, then the access/refresh token lands in the key pool. Tokens refresh on demand, which is what makes their requests survive a 401. **`hermes`** (Nous Portal) connects the same way, but via OAuth 2.0 device authorization (`/console/hermes-oauth`); the device-code call bootstraps the account, so no key is needed up front. See [PROVIDERS.md](PROVIDERS.md).
 
 **`opencode`** routes per-model across four upstream protocols and refreshes its `opencode/<version>` User-Agent live.
 
@@ -512,7 +513,7 @@ All config is parsed through Pydantic v2 models in `wiwi/config.py`:
 - `DeploymentParams` — per-deployment overrides (`provider`, `model`, `weight`, `max_tokens`, `rpm`, `tpm`, `timeout`, `extra_headers`, `extra_body`, `prompt_cache`, …)
 - `ModelEntry` — model_list entry (`model_name`, `wiwi_params`)
 
-`PROVIDER_TYPES` is a module-level tuple in `config.py` listing all 11 provider types. It is the single source of truth — the router, admin API, and Pydantic schema all reference it.
+`PROVIDER_TYPES` is a module-level tuple in `config.py` listing all 12 provider types. It is the single source of truth — the router, admin API, and Pydantic schema all reference it.
 
 ## Validation at startup
 

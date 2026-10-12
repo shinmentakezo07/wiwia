@@ -238,6 +238,7 @@ _ADAPTERS = (
     ("workbuddy", "m"),
     ("anthropic", "claude-x"),
     ("gemini", "gemini-x"),
+    ("hermes", "Hermes-4-405B"),
 )
 
 def _encode_every_adapter(gen_params: ir.GenParams, parts: list) -> None:
@@ -248,7 +249,7 @@ def _encode_every_adapter(gen_params: ir.GenParams, parts: list) -> None:
         registry.fresh_adapter(provider).encode_request(req, model_id, {})
 
 def test_broken_thinking_budget_never_raises_in_any_adapter():
-    """A malformed budget must not 500 on any of the eight provider types.
+    """A malformed budget must not 500 on any of the nine provider types.
 
     This is the end-to-end pin for #388. Fixing the IR helper alone was not
     enough: the Anthropic adapter's ``max(budget, MIN_THINKING_BUDGET)`` and

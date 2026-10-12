@@ -96,6 +96,10 @@ import type {
   ClineRefreshResponse,
   ClineStatusResponse,
   DeploymentInfo,
+  HermesDeviceCodeResponse,
+  HermesPollResponse,
+  HermesRefreshResponse,
+  HermesStatusResponse,
   ModelAliasEntry,
   ModelPrice,
   ModelsResponse,
@@ -459,6 +463,31 @@ export const clineRefresh = (provider: string) =>
 
 export const clineDisconnect = (provider: string) =>
   api<ClineDisconnectResponse>("/admin/cline/oauth/disconnect", {
+    method: "DELETE",
+    body: JSON.stringify({ provider }),
+  });
+// -- Hermes (Nous Portal) OAuth (device-code flow) ---------------------------
+export const hermesDeviceCode = (provider: string) =>
+  api<HermesDeviceCodeResponse>(
+    `/admin/hermes/oauth/device-code?provider=${encodeURIComponent(provider)}`,
+    { method: "POST" },
+  );
+export const hermesPoll = (state: string) =>
+  api<HermesPollResponse>("/admin/hermes/oauth/poll", {
+    method: "POST",
+    body: JSON.stringify({ state }),
+  });
+export const hermesStatus = (provider: string) =>
+  api<HermesStatusResponse>(
+    `/admin/hermes/oauth/status?provider=${encodeURIComponent(provider)}`,
+  );
+export const hermesRefresh = (provider: string) =>
+  api<HermesRefreshResponse>("/admin/hermes/oauth/refresh", {
+    method: "POST",
+    body: JSON.stringify({ provider }),
+  });
+export const hermesDisconnect = (provider: string) =>
+  api<{ provider: string; disconnected: boolean }>("/admin/hermes/oauth/disconnect", {
     method: "DELETE",
     body: JSON.stringify({ provider }),
   });

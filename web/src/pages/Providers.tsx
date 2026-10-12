@@ -50,6 +50,7 @@ import {
   Select,
 } from "@/components/ui";
 import { fmtInt, fmtPct, fmtTokens, fmtUsd } from "@/lib/format";
+import { datedFilename, downloadJson } from "@/api/backup";
 
 const STATUS_TONE: Record<PoolKey["status"], "green" | "amber" | "red" | "gray"> = {
   active: "green",
@@ -70,6 +71,7 @@ const PROVIDER_ICON: Record<string, LucideIcon> = {
   workbuddy: Briefcase,
   cline: Link2,
   opencode: Layers,
+  hermes: Sparkles,
 };
 
 const PROVIDER_TYPE_OPTIONS = [
@@ -83,6 +85,7 @@ const PROVIDER_TYPE_OPTIONS = [
   { value: "workbuddy", label: "WorkBuddy" },
   { value: "cline", label: "Cline" },
   { value: "opencode", label: "OpenCode Zen" },
+  { value: "hermes", label: "Hermes (Nous Portal)" },
   { value: "openai-compatible", label: "OpenAI-compatible URL" },
 ];
 
@@ -419,17 +422,7 @@ export function ProvidersPage() {
   const doExport = async () => {
     try {
       const data = await exportProviders();
-      const blob = new Blob([JSON.stringify(data, null, 2)], {
-        type: "application/json",
-      });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `wiwi-providers-${new Date().toISOString().slice(0, 10)}.json`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      downloadJson(datedFilename("wiwi-providers"), data);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -616,7 +609,7 @@ export function ProvidersPage() {
               options={PROVIDER_TYPE_OPTIONS}
             />
           </Field>
-          <Field label="Base URL" hint="Optional for openai/anthropic/gemini/openrouter/gmicloud/bai/workbuddy/nvidia-nim/cline/opencode. Required for compatible URLs.">
+          <Field label="Base URL" hint="Optional for openai/anthropic/gemini/openrouter/gmicloud/bai/workbuddy/nvidia-nim/cline/opencode/hermes. Required for compatible URLs.">
             <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://…" />
           </Field>
           <Field label="First key label">

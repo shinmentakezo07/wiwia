@@ -76,7 +76,7 @@ npm run dev`,
       },
     ],
     why:
-      "Tool calls are where dialect differences bite: OpenAI Chat, OpenAI Responses, and Anthropic Messages encode functions differently, and streams fragment arguments differently. The gateway's IR normalizes the open/delta/close sequence per tool index, so one agent loop works on any of the eleven outbound types.",
+      "Tool calls are where dialect differences bite: OpenAI Chat, OpenAI Responses, and Anthropic Messages encode functions differently, and streams fragment arguments differently. The gateway's IR normalizes the open/delta/close sequence per tool index, so one agent loop works on any of the twelve outbound types.",
     githubUrl: "https://github.com/theopenco/llmgateway-templates/tree/main/agents/weather-agent",
   },
   {

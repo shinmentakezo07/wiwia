@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 Agent guide for **wiwi** — a self-hosted unified LLM gateway proxy (FastAPI, Python 3.12).
-Three inbound API dialects route through one canonical internal representation (IR) to eleven
+Three inbound API dialects route through one canonical internal representation (IR) to twelve
 outbound provider types; responses are always re-encoded in the caller's inbound dialect.
 
 ## Project Overview
@@ -49,11 +49,11 @@ stage (carries `surface`, params, auth, and the chosen dialect encoder).
 configurable Prometheus path (`server/metrics.py`), `/admin/*` (master key), `/auth/*` (user
 sessions), `/cline/oauth/callback`.
 
-### Outbound provider types (11)
+### Outbound provider types (12)
 
 `openai`, `openai-compatible`, `gmicloud`, `bai` (all four share the OpenAI wire shape —
 `registry._OPENAI_WIRE_TYPES`), `anthropic`, `gemini`, `openrouter`, `nvidia-nim`, `opencode`
-(Zen), `cline` (OAuth), `workbuddy` (OAuth).
+(Zen), `cline` (OAuth), `workbuddy` (OAuth), `hermes` (Nous Portal).
 
 ### Streaming contract (`wiwi/streaming/deltas.py`) — binding
 

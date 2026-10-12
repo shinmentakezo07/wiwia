@@ -7,7 +7,7 @@
 ### One gateway. Every dialect. Any provider.
 
 **Speak** OpenAI Chat · OpenAI Responses (Codex CLI) · Anthropic Messages (Claude Code) **on the inbound.**<br/>
-**Route to** OpenAI · Anthropic · Gemini · OpenRouter · NVIDIA NIM · Cline · WorkBuddy · GMI Cloud · B.AI · OpenCode Zen · any OpenAI-compatible endpoint.
+**Route to** OpenAI · Anthropic · Gemini · OpenRouter · NVIDIA NIM · Cline · WorkBuddy · GMI Cloud · B.AI · OpenCode Zen · Hermes (Nous Portal) · any OpenAI-compatible endpoint.
 
 <p>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-22c55e?style=for-the-badge&logo=opensourceinitiative&logoColor=white"></a>
@@ -24,7 +24,7 @@
   <img alt="60k lines of code" src="https://img.shields.io/badge/28.4k%20Python%20%2B%2031.3k%20TS-blue?style=for-the-badge">
 </p>
 
-**3 inbound dialects × 11 outbound providers — no pairwise converters, one canonical IR.**
+**3 inbound dialects × 12 outbound providers — no pairwise converters, one canonical IR.**
 
 </div>
 
@@ -72,7 +72,7 @@ Adding an inbound surface is one module in `wiwi/wire/`. Adding a provider is on
 
 | 😩 Problem | 💡 wiwi's answer |
 |---|---|
-| One client dialect, many models behind it | **Hub-and-spoke translation.** Any of 3 inbound dialects ↔ any of 11 outbound providers. N×M coverage from N+M modules. |
+| One client dialect, many models behind it | **Hub-and-spoke translation.** Any of 3 inbound dialects ↔ any of 12 outbound providers. N×M coverage from N+M modules. |
 | Rate-limit pain across many keys | **Smooth weighted round-robin** key pools, per-key cooldowns, `failover_mode`, retries. |
 | Reasoning params don't line up | IR collapses `reasoning_effort`, `thinking.budget_tokens`, OpenRouter's `reasoning{}` into one form. Multi-turn survives a mid-conversation model switch. |
 | Want a UI, not just YAML | Built-in dark console at `/console` — keys, providers, pools, live SSE logs, per-request TTFT/TPS/cost. |
@@ -183,7 +183,7 @@ Four things wiwi does that a config-file gateway doesn't.
 
 ### 🔁 Translation, both directions
 
-- **3 inbound dialects × 11 outbound providers**, with `drop_params` and `extra_headers` for the awkward edges.
+- **3 inbound dialects × 12 outbound providers**, with `drop_params` and `extra_headers` for the awkward edges.
 - **Builtin tool translation** — one canonical `web_search`, rendered natively per surface:
 
   | Canonical | Anthropic | Responses | Gemini | OpenRouter | OpenAI Chat |
