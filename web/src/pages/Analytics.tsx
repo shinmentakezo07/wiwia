@@ -67,6 +67,7 @@ import {
 } from "@/components/ui";
 import { fmtInt, fmtPct, fmtTokens, fmtUsd, groupBy, mean } from "@/lib/format";
 import { hourlySeries } from "@/lib/dashboard-metrics";
+import { downloadBlob } from "@/api/backup";
 import {
   GaugeRing,
   LivePulseMeter,
@@ -1169,15 +1170,10 @@ export function AnalyticsPage() {
   );
 
   const exportCsv = () => {
-    const blob = new Blob([toCsv(logs)], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `wiwi-analytics-${selectedModel}-${Date.now()}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    downloadBlob(
+      `wiwi-analytics-${selectedModel}-${Date.now()}.csv`,
+      new Blob([toCsv(logs)], { type: "text/csv;charset=utf-8" }),
+    );
   };
 
   const hotCol = "font-semibold text-blue-400";

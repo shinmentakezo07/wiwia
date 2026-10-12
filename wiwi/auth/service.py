@@ -385,6 +385,18 @@ class AuthService:
     def evict(self, plaintext: str) -> None:
         self._drop_cached(hash_key(plaintext))
 
+    def invalidate_cache(self) -> None:
+        """Drop every cached lookup and record that an eviction happened.
+
+        For bulk credential writes that bypass :meth:`evict` because they
+        operate on hashes, not plaintexts — the backup restore path upserting
+        ``vkeys.key_hash`` rows is the only caller. Without it a restored key
+        401s for up to ``_ttl`` (60s) on the stale negative entry an earlier
+        failed lookup left behind.
+        """
+        self._cache.clear()
+        self._evict_gen += 1
+
     def _drop_cached(self, h: str) -> None:
         """Drop *h*'s cached entry and record that an eviction happened.
 

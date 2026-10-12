@@ -20,6 +20,7 @@ import {
   workbuddyRefresh,
 } from "../api/client";
 import type { WorkBuddyAccount, WorkBuddyAuthFile } from "../api/types";
+import { datedFilename, downloadJson } from "@/api/backup";
 import {
   Badge,
   Button,
@@ -274,15 +275,9 @@ export function WorkBuddyAccountsPage() {
   const doExport = useMutation({
     mutationFn: () => workbuddyExport(),
     onSuccess: (d) => {
-      const blob = new Blob([JSON.stringify(d.accounts, null, 2)], {
-        type: "application/json",
-      });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `workbuddy-auths-${new Date().toISOString().slice(0, 10)}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
+      // The anchor was never attached to the document here, so Firefox
+      // ignored the click and the export silently did nothing.
+      downloadJson(datedFilename("workbuddy-auths"), d.accounts);
     },
     onError: (e) => setError(e.message),
   });

@@ -45,6 +45,7 @@ Admin-facing pages (under the guarded area; the sidebar is role-aware):
 | **Built-in Providers** | Catalog of the provider types that ship with wiwi; search box filtering by type, label, description, endpoint, or configured account/key name |
 | **Provider Detail** | Per-provider account settings, key pool management, live model list (`/admin/providers/{name}/models`) |
 | **Cline / WorkBuddy** | OAuth connect flows (login URL → callback `/cline/oauth/callback`), status/refresh/disconnect, account import/export, per-account settings |
+| **Hermes / Hermes OAuth** | Manage Hermes (Nous Portal) accounts; connect via OAuth 2.0 device-code (`/console/hermes-oauth`) — no API key needed — with status, refresh, and disconnect |
 | **Models** | Model groups + deployments; add/remove deployments; group patching; aliases (`/admin/aliases`) |
 | **Virtual Keys** | Mint (name, models, budget, rpm/tpm, expiry — plaintext shown once), patch, disable, delete |
 | **Usage** | Token analytics with 1h/24h/7d/30d/all-time ranges (short ranges from the in-memory ring, long ranges from DB aggregates; bucket size scales 1 min → 1 day) |
@@ -70,6 +71,43 @@ Public front pages (unauthenticated, `PublicLayout`): Landing, Models catalog (`
 3. **Health states**: `active | cooling | invalid | disabled`, updated live from request outcomes; Dashboard/Providers pages reflect cooldowns via SSE.
 4. **Model deployments**: Models → group → add deployment (provider + model_id + weight); WRR and failover pick these up on the next request. Edits are durable: weight changes and detaches are written to the `deployments` table (`detached=1` tombstones a detach), and a DB row overrides the YAML `model_list` entry for the same group/provider/model on restart.
 5. **Export/import**: `/admin/providers/export` / `import` for moving provider+key config between installs (secrets masked or included per flag).
+
+## 5a. Whole-gateway backup and restore
+
+`/admin/providers/export` covers only provider accounts, their key pools, and
+deployments. **Settings → Import / Export** covers everything the console can
+mutate — users, virtual keys, budgets, prices, alert rules, routing settings,
+aliases, and the usage log — as one JSON file.
+
+**Export** picks sections (bulk log sections off by default) and decides
+whether the file carries credentials or user prompts. Those are two
+independent toggles, both off by default: turning on secrets does not also pull
+request/response bodies.
+
+**Import** is merge-only. Pick a file, read the preview, then merge. The
+preview is a real server-side dry run — the whole document is validated before
+anything is written, and the Merge button stays disabled until it passes. Every
+section upserts on its natural key and nothing is deleted, so it is safe to run
+twice and safe against an instance that has moved on.
+
+Four things worth knowing before you rely on it:
+
+- **Virtual keys and user passwords restore by hash, and only by hash.** wiwi
+  stores a SHA-256 digest of each virtual key, never the key itself. Importing
+  that digest restores a key that still works — but no virtual key can be
+  re-displayed from a backup, and a password cannot be recovered. Re-issue
+  anything you need to read back.
+- **The audit log is exported but never merged.** Replaying another instance's
+  mutation trail would forge this one's operator history, so the console
+  reports those rows as `audit_skipped` instead of applying them.
+- **The master key is not in the file.** Set `WIWI_MASTER_KEY` on the target
+  separately, or it will refuse to start.
+- **OAuth accounts ride in the keys section.** Connected Cline, WorkBuddy, Hermes, and
+  OpenCode accounts are stored as provider keys, so they only appear when
+  plaintext secrets are included.
+
+Implementation is `wiwi/server/backup.py`; the endpoint reference (including
+the per-section merge keys) is in `docs/API_REFERENCE.md` §3.
 
 ## 6. Stats & data sources
 

@@ -175,6 +175,84 @@ gained a `**Status: fixed**` line naming the guard that fixed it.
 
 ---
 
+## ✅ Fixed — round 129: whole-gateway backup / restore (2026-10-11)
+
+Found while building the backup module, and — for #421 — found by *driving* the
+two-instance restore, which the unit tests had not done.
+
+### 421. A restored price entry made `GET /admin/pricing` return 500
+
+**Severity:** 🟠 High · **Status: fixed** — round 129 (`tests/test_fix_round129.py`)
+**Files:** `wiwi/server/backup.py` (`_validate_prices`), consumed at `wiwi/server/app.py:4966`
+
+The price map is rendered by `_entry_to_per_1m`, which branches on key
+**presence** and then multiplies:
+
+```python
+if "cache_read_input_cost_per_token" in p:
+    entry["cache_read_per_1m"] = round(p["cache_read_input_cost_per_token"] * 1_000_000, 6)
+```
+
+`validate_backup` built each parsed price by writing **every** field, filling
+absent ones with an explicit `None`. `_apply_prices` merged that into
+`state.cost.prices`, so the restored entry carried
+`cache_read_input_cost_per_token: None` — a key that is *present*, holding a
+value the renderer multiplies. Result: `TypeError: unsupported operand type(s)
+for *: 'NoneType' and 'int'`, a 500 on `/admin/pricing`.
+
+The blast radius is wider than the one endpoint. `cost.prices` is read by the
+cost engine on every request, so a null-valued rate is the kind of thing that
+surfaces later as a billing discrepancy rather than a stack trace. An operator
+migrating a gateway would hit the console page first.
+
+Why the surrounding code does not do this: `ConfigStore.load_prices` omits
+null columns rather than emitting them (`:544-553`), and `admin_put_pricing`
+only sets keys the caller actually supplied (`app.py:4951`). The restore was
+the only writer that normalized "absent" to "None".
+
+**Fix:** omit absent price fields instead of storing `None`, matching both
+existing conventions. The same applied to the per-scope rates.
+
+**How it was found — worth recording as method.** The 34 unit tests were green;
+this only appeared when a *bare* gateway was restored and then walked through
+the whole console (`test_a_restored_gateway_is_still_usable` now does exactly
+that, hitting eight `/admin/*` reads after a restore). A restore's real test is
+"is the result still a working gateway", not "does the data match".
+
+### 420. WorkBuddy account export silently did nothing in Firefox
+
+**Severity:** ⚪ Low · **Status: fixed** — round 129 (`web/src/api/backup.ts`)
+**Files:** `web/src/pages/WorkBuddyAccounts.tsx:276-281` (pre-fix)
+
+The export handler built an anchor, set `href`/`download`, and called
+`.click()` — but never appended it to the document:
+
+```js
+const a = document.createElement("a");
+a.href = url;
+a.download = `workbuddy-auths-${...}.json`;
+a.click();                    // <-- no appendChild, no remove
+URL.revokeObjectURL(url);
+```
+
+Chrome tolerates a click on a detached element; **Firefox does not**, and
+ignores it silently. The button reports success, the network tab shows
+nothing, and no file appears. WorkBuddy's OAuth tokens are the one account
+type an operator cannot re-derive, so a silently empty export is the worst
+possible failure mode for exactly the page that holds them.
+
+The sibling handlers were correct — `Providers.tsx` and `Analytics.tsx` both
+did `appendChild` + `remove()` — so this was a hand-copied variant that lost
+two lines rather than a shared bug.
+
+**Fix:** all three now call `downloadJson` / `downloadBlob` from
+`web/src/api/backup.ts`, which attaches the anchor before clicking. The
+blob→anchor→revoke sequence had been duplicated verbatim across the three
+pages; extracting it removed the second convention *and* the divergence that
+came with it.
+
+---
+
 ## ✅ Fixed — /console/oauth redesign (2026-10-11)
 
 Found while redesigning the console's connected-accounts page. Entries #399-#410 were
@@ -439,6 +517,132 @@ verification plan before this page is considered done.
 
 ---
 
+## 🟠 Open — sweep 2026-10-11 (upstream SSE reading path)
+
+Found by executing the real `LineSSEParser` + `Gateway.stream` pump against
+malformed-but-plausible upstream wire data (Anthropic inbound `/v1/messages`,
+mocked Anthropic/OpenAI upstreams). Entries #419-#420. The parsing layer itself
+held up under chunk-splitting, CRLF, multi-line `data:`, non-dict JSON and
+600 KB frames — both findings below are in what the pump does with a frame that
+*parsed* cleanly.
+
+### 419. A float `content_block_delta.index` is coerced to `0`, silently dropping or misrouting a tool-call args fragment
+
+**Severity:** 🟠 high · **Status: open**
+**Files:** `wiwi/providers/anthropic_adapter.py:706-709` (`_block_index` coercion),
+`:812-822` (`input_json_delta` arm — no membership test), landing in
+`wiwi/wire/anthropic_messages.py:1042-1049` (`_tool_blocks.get(d.index)`)
+**Fix:** reject rather than coerce — in the `input_json_delta` arm, gate on
+`idx in self._tool_indices` exactly as the `content_block_stop` arm does at
+`:827`, and have `_block_index` return `None` (frame dropped) instead of `0`
+for a typed-wrong index.
+
+**Why not #384/#416:** those were *crashes* (`TypeError` escaping the decoder) and
+are fixed. The `_block_index` guard added in `3adf761` **converted the crash into
+silent corruption**: a non-int index no longer raises, it is quietly rewritten to
+`0`, which is a *different tool call's* index. Same for `openai_adapter.py:615`
+and `nim_adapter.py:427` (`idx = i`).
+
+```python
+706:  idx = payload.get("index", 0)
+707:  if not isinstance(idx, int) or isinstance(idx, bool):
+708:      return 0          # <- lossy: 1.0 becomes block 0
+...
+821:  index=self._block_index(payload),   # no `idx in self._tool_indices` gate
+```
+
+JSON has no int/float distinction and `json.dumps(1.0)` emits `1.0`, so a
+re-serializing proxy or any upstream that computes the index as a float hits
+this. Note `hash(1) == hash(1.0)` is `True`, so a set/dict membership test alone
+would *not* catch it — the value must be rejected by type before it is used as a key.
+
+**Probe** (executed, `fresh_adapter("anthropic")`, block 1 opened, delta with `"index": 1.0`):
+
+```
+index=1 opened; delta with index=1.0 -> [ToolCallArgsDelta(index=0, args_fragment='X')]
+tool_indices={1}
+```
+
+**Consequence, executed end-to-end** (real app, `POST /v1/messages`, respx upstream,
+raw wire frames dumped). HTTP **200**, a clean `message_stop`, and **no error frame
+at all** in either shape:
+
+*Single tool at upstream index 1, no block 0 — fragment silently DROPPED:*
+```
+CONTROL  index=1   -> wire block 0 name='beta' args='{"city":"SF"}'   VALID
+TEST     index=1.0 -> wire block 0 name='beta' args='{"city":}'       *** INVALID JSON ***
+```
+The client is handed a truncated `input_json_delta` run and a normally-terminated
+stream, so it executes the tool with unparseable arguments.
+
+*Two tools at index 0 and 1 — fragment MISROUTED into the other tool call:*
+```
+CONTROL  index=1   -> alpha='{"who":"a"}'          beta='{"x":"LEAK"1}'  (attributed to beta)
+TEST     index=1.0 -> alpha='{"who":"a"}"LEAK"'   beta='{"x":1}'        (fragment went to alpha)
+```
+The raw wire dump shows `content_block_delta` for block **0** emitted *after* block 1
+was opened — the strictly-sequential block violation the comment at
+`anthropic_messages.py:925-933` says Claude Code rejects outright. Both tool
+argument streams are wrong.
+
+The OpenAI-wire family is louder: `openai_adapter.py:615` emits
+`ToolCallClose(index=0)` followed by a second `ToolCallOpen(index=0)`, splitting
+one provider tool call into two blocks.
+
+---
+
+### 420. `[DONE]` on an `anthropic`-typed upstream is dropped, producing a mid-stream `error` frame and cooling a healthy deployment
+
+**Severity:** 🟠 high · **Status: open**
+**Files:** `wiwi/providers/anthropic_adapter.py:711-715` (`orjson.JSONDecodeError ->
+return []` swallows the sentinel), consumed by `wiwi/core/gateway.py:2083-2093`
+(`if finish is None and not saw_terminal:` → `_fail_stream(..., price=False)`) and
+`:2245-2247` (`health_status == 502` → `dep.record_fail`)
+**Fix:** give the Anthropic decoder the terminator arm its OpenAI-wire siblings
+already have (`openai_adapter.py:514`, `nim_adapter.py:302`, `openrouter_adapter.py:320`,
+`opencode_adapter.py:514`) — on `data == "[DONE]"` flush open tool state and emit
+`Finish("stop") + StreamEnd` — so a `[DONE]`-terminated body ends cleanly instead of
+being mistaken for a truncation.
+
+**Why not #76:** #76 is the identical consequence shape (decoder returns `[]` for
+the terminal frame → `StreamError("upstream stream ended without completion")` plus
+`record_fail`) but for a **Gemini** candidate missing `finishReason`. This is the
+Anthropic decoder and a different frame class. `anthropic_adapter.py` has **no**
+`data == "[DONE]"` arm at all — grep confirms 0 occurrences, versus 1 each in the
+four OpenAI-wire decoders.
+
+**Probe** (executed, real app + respx, `message_start` + a text block + `"hi there"`,
+then the tail varies):
+
+```
+T1. normal: message_delta + message_stop -> error frames: 0
+T2. [DONE] INSTEAD of message_stop       -> error frames: 1
+     data: {"type":"error","error":{"type":"api_error",
+          "message":"upstream stream ended without completion"}}
+T3. message_delta only (no message_stop) -> error frames: 0   (message_delta carries the finish)
+T4. [DONE] appended AFTER a proper tail  -> error frames: 0
+```
+
+T2 is a byte-for-byte match for what Claude Code renders as **"API Error: Server
+error mid-response. The response above may be incomplete."** — an Anthropic `error`
+frame arriving *after* content was already delivered.
+
+**Trigger:** a provider entry typed `provider: anthropic` whose upstream emits
+OpenAI-shaped SSE — the common self-hosted-relay case (newapi/one-api/LiteLLM-style
+proxies that normalise every upstream to OpenAI shape, and append `[DONE]`
+universally). This is a config-shape mismatch, not a hypothetical.
+
+**Consequence, executed with a spy on `Deployment.record_fail`:**
+```
+CONTROL  proper anthropic tail : client_saw_error=False  record_fail calls=[]
+TEST     [DONE] instead of tail: client_saw_error=True   record_fail calls=[('claude-sonnet-4-5', 1)]
+```
+Every such response costs the deployment a fail; past `allowed_fails` the
+deployment is cooled and a perfectly healthy credential is retired, so a
+misconfigured relay produces a self-sustaining outage rather than one bad turn.
+
+---
+
 ## 🟠 Open — sweep 2026-10-09 (config, adapters)
 
 New findings from a fresh eight-subsystem sweep. Every one below was confirmed by
@@ -527,7 +731,12 @@ restore via the `CREDS_VALID_MODEL_BAD` verdict, not a zero `probes_to_restore`.
 
 ### 384. Anthropic streaming decoder never guards `content_block_*.index`; unhashable value crashes the pump
 
-**Severity:** 🟠 High · **Status: open**
+**Severity:** 🟠 High · **Status: fixed** — round 128 (`tests/test_fix_round128.py`; found
+2026-10-10, fixed 2026-10-11). The four cited reads now route through a new
+`AnthropicAdapter._block_index(payload)` helper carrying the same rule as the
+openai/nim/openrouter decoders, including rejecting `bool` (`isinstance(True, int)`
+is True, so `True` would collide with `1` as a set member). See #416 for the
+second instance of the same class, at a site this entry did not cover.
 **Files:** `wiwi/providers/anthropic_adapter.py:729, 741, 789, 794-795`
 **Fix:** lift the OpenAI-base/OpenRouter guard verbatim — `if not isinstance(idx, int) or
 isinstance(idx, bool): idx = 0` — before `self._tool_indices.add(idx)` at `:741` and the

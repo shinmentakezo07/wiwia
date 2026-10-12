@@ -1,11 +1,12 @@
 // Settings — tabbed console hub.
 //
-// Four sections backed by real logic where possible:
+// Five sections backed by real logic where possible:
 //  • General    — live gateway health polling + connection info
 //  • Appearance — client-side preferences (motion, density, clock) that take
 //                  effect app-wide via the prefs store + DOM classes
 //  • Security   — master-key reveal / copy / clear / sign-out + clear-cache
 //  • About      — version, surface count, retention notes, links
+//  • Backup     — whole-gateway JSON export / import (see Backup.tsx)
 //
 // Master key handling, health polling, and prefs all mirror the existing
 // Dra-style dark design system.
@@ -16,6 +17,7 @@ import {
   Activity,
   Boxes,
   Database,
+  DatabaseBackup,
   Eye,
   EyeOff,
   Info,
@@ -30,6 +32,7 @@ import { api } from "@/api/client";
 import { useAuth } from "@/api/auth";
 import { useQueryClient } from "@tanstack/react-query";
 import { useClientPrefs } from "@/lib/settings";
+import { BackupTab } from "@/pages/Backup";
 import {
   Badge,
   Button,
@@ -42,12 +45,13 @@ import {
 } from "@/components/ui";
 import type { LucideIcon } from "lucide-react";
 
-type Tab = "general" | "appearance" | "security" | "about";
+type Tab = "general" | "appearance" | "security" | "backup" | "about";
 
 const TABS: { id: Tab; label: string; icon: LucideIcon }[] = [
   { id: "general", label: "General", icon: Activity },
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "security", label: "Security", icon: ShieldCheck },
+  { id: "backup", label: "Import / Export", icon: DatabaseBackup },
   { id: "about", label: "About", icon: Info },
 ];
 
@@ -461,7 +465,7 @@ export function SettingsPage() {
     <div>
       <PageHeader
         title="Settings"
-        subtitle="console preferences, security, and gateway info"
+        subtitle="console preferences, security, backup, and gateway info"
       />
 
       <div className="mb-5 flex gap-2 overflow-x-auto">
@@ -486,6 +490,7 @@ export function SettingsPage() {
       {tab === "general" && <GeneralTab />}
       {tab === "appearance" && <AppearanceTab />}
       {tab === "security" && <SecurityTab />}
+      {tab === "backup" && <BackupTab />}
       {tab === "about" && <AboutTab />}
     </div>
   );
