@@ -7,16 +7,18 @@ needed at request-build time, so this adapter is a specialization of
 OpenAI Realtime WebSocket surface (which Portal does not expose).
 
 Auth: a plain Nous API key or a Portal OAuth access token both work as a bearer.
-An OAuth token stored by the connect flow lands on the key pool prefixed
-``hermes:`` (so it is distinguishable from a raw key); the prefix is stripped
-here so the upstream sees ``Authorization: Bearer <token>``.
+One provider pool key holds one Nous account: the secret is either a
+``hermes:<json>`` credential blob (:func:`wiwi.providers.hermes_oauth.encode_credential`,
+carrying the account's access + refresh token for multi-account rotation,
+AUDIT #427) or a bare ``hermes:<token>`` paste-a-token. Both resolve to the
+account's access token, which the inference API accepts on its own — the CLI's
+``agent_key`` is the same JWT as its ``access_token``.
 """
 
 
+from wiwi.providers import hermes_oauth
 from wiwi.providers.base import ProviderKeyRef
 from wiwi.providers.openai_adapter import OpenAIAdapter
-
-_OAUTH_PREFIX = "hermes:"
 
 
 class HermesAdapter(OpenAIAdapter):
@@ -26,9 +28,9 @@ class HermesAdapter(OpenAIAdapter):
 
     def headers(self, key: ProviderKeyRef) -> dict[str, str]:
         h = super().headers(key)
-        secret = key.secret
-        if secret.startswith(_OAUTH_PREFIX):
-            h["Authorization"] = f"Bearer {secret[len(_OAUTH_PREFIX):]}"
+        # One pool key = one Nous account; the bearer is that account's access
+        # token, whether the secret is a JSON blob or a bare hermes:<token>.
+        h["Authorization"] = f"Bearer {hermes_oauth.credential_bearer(key.secret)}"
         return h
 
     def realtime_url(self, base_url: str) -> str | None:

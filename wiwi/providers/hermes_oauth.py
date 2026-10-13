@@ -32,6 +32,7 @@ import time
 from typing import Any
 
 import httpx
+import orjson
 
 # Verified Nous Portal OAuth endpoints and client identity (from the Hermes CLI).
 PORTAL_BASE = "https://portal.nousresearch.com"
@@ -212,3 +213,66 @@ def compute_expires_at(expires_in: object, now: float | None = None,
     if seconds <= 0:
         return now + fallback_window
     return now + seconds
+
+
+# Prefix marking a pool-key secret as a Hermes OAuth credential rather than a
+# raw Nous API key. The adapter (hermes_adapter.py) and the connect flow both
+# use it; it is the same marker the single-account flow introduced, now also
+# able to carry a JSON blob (multi-account, AUDIT #427).
+_OAUTH_PREFIX = "hermes:"
+
+
+def encode_credential(access_token: str, refresh_token: str | None,
+                      expires_at: float | None, label: str | None = None) -> str:
+    """Serialize one Nous account's credential into a ``hermes:`` pool-key blob.
+
+    Each Nous account is a separate OAuth identity with its own rotating
+    refresh token and its own rate-limit bucket, so wiwi stores one account per
+    provider pool key. The blob is self-contained (access + refresh + expiry +
+    a human label), mirroring how WorkBuddy stores a per-key auth blob, so the
+    auto-refresh can rotate a single account without touching its siblings.
+    """
+    blob = {"access_token": access_token,
+            "refresh_token": refresh_token,
+            "expires_at": expires_at}
+    if label:
+        blob["label"] = label
+    return _OAUTH_PREFIX + orjson.dumps(blob).decode()
+
+
+def decode_credential(secret: str) -> dict[str, Any] | None:
+    """Parse a ``hermes:`` pool-key secret into its credential dict.
+
+    Returns None for a bare ``hermes:<token>`` (no JSON) — the paste-a-token
+    UX, which carries only an access token and no refresh grant, so it can
+    never be auto-refreshed. Callers treat None as "not a managed account" and
+    fall back to using the raw token as the bearer.
+    """
+    if not isinstance(secret, str) or not secret.startswith(_OAUTH_PREFIX):
+        return None
+    body = secret[len(_OAUTH_PREFIX):]
+    if not body or body[0] != "{":
+        return None  # bare hermes:<token>, not a JSON blob
+    try:
+        parsed = orjson.loads(body)
+    except ValueError:
+        return None
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("access_token"), str):
+        return None
+    return parsed
+
+
+def credential_bearer(secret: str) -> str:
+    """The inference bearer carried by a ``hermes:`` pool-key secret.
+
+    The inference API accepts the access token alone (verified: ``agent_key``
+    is the same JWT as ``access_token`` in the Hermes CLI, and ``GET /models``
+    returns 200 with it), so the bearer is always the access token — whether
+    the secret is a JSON blob or a bare ``hermes:<token>``.
+    """
+    cred = decode_credential(secret)
+    if cred is not None:
+        return cred["access_token"]
+    if isinstance(secret, str) and secret.startswith(_OAUTH_PREFIX):
+        return secret[len(_OAUTH_PREFIX):]
+    return secret

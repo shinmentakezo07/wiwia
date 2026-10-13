@@ -8,6 +8,57 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — round 136: multi-account Hermes (2026-10-13)
+
+Found while investigating how to beat the per-account ~50 RPM cap. Each Nous
+Portal account is a separate OAuth identity with its own rotating (single-use)
+refresh token and its own rate-limit bucket, so wiwi now stores **one account
+per provider pool key** as a self-contained ``hermes:<json>`` credential blob
+and lets the existing key pool + smooth weighted round-robin spread traffic
+across them. Entry #427.
+
+### 427. Hermes was single-account — one refresh token per provider, and a rotation clobbered every pool key
+
+**Severity:** 🟠 High · **Status: fixed** — round 136 (`tests/test_fix_round136.py`; fixed 2026-10-13)
+**Files:** `wiwi/providers/hermes_oauth.py` (`encode_credential`/`decode_credential`/`credential_bearer`), `wiwi/providers/hermes_adapter.py`, `wiwi/providers/hermes_auto_refresh.py`, `wiwi/server/app.py` (device-code/poll/status/refresh/disconnect)
+
+Before this, Hermes held one OAuth identity per provider: a single
+``hermes_oauth:<provider>`` settings record with one ``refresh_token``, and
+``_update_secret`` wrote the rotated access token to **every** pool key. Two
+consequences: a second account could not be added at all, and any refresh
+overwrote sibling keys with one account's token. The per-account rate limit
+(~50 RPM / 50k TPM) could therefore not be worked around.
+
+The inference endpoint contract was verified against the installed Hermes CLI
+and a live call: ``agent_key`` is the **same JWT** as ``access_token``
+(``_set_nous_agent_key_from_invoke_jwt`` sets ``agent_key = access_token``), and
+``GET /models`` returns 200 with the access token alone — so wiwi's existing
+single-token bearer is correct and no ``agent_key`` handling is needed. The gap
+was purely account multiplicity.
+
+Fix mirrors the WorkBuddy per-key-credential precedent. Each pool key's secret
+is a ``hermes:<json>`` blob (access + refresh + expiry + email label); the
+adapter resolves the bearer from it (a bare ``hermes:<token>`` still works for
+paste-a-token). ``HermesAutoRefresh`` now keys its locks, generation counters
+and circuit breakers on ``(provider, key_label)`` and reads/writes the live
+pool key, so each account rotates independently and a rotation never touches a
+sibling. The device-code ``/poll`` **appends** the approved account as a new
+pool key (labelled by its JWT email, de-duplicated) instead of overwriting key
+#0; ``/status`` lists every account; ``/refresh`` and ``/disconnect`` take an
+optional ``key_label`` to target one account (disconnect with no label removes
+the whole pool). A dead grant marks only that account's circuit dead, so the
+rest of the pool keeps serving.
+
+**Coverage:** `tests/test_fix_round136.py` — adapter bearer from blob + bare
+token; encode/decode round-trip; sweeper refreshes each account on its own
+due-check and leaves siblings byte-for-byte unchanged; one account's
+``invalid_grant`` does not block another's refresh; WRR distributes across ≥2
+account keys. `tests/test_fix_round132.py` and `test_fix_round134.py` updated to
+the per-account model (connect appends a key, status reports `accounts`,
+disconnect returns a count, refresh targets `key_label`).
+
+---
+
 ## 🔴 Open — Hermes integration sweep (2026-10-12)
 
 Found by reading the whole Hermes surface end to end (`hermes_adapter.py`,
@@ -965,7 +1016,12 @@ Only the unhashable crash is a live defect.
 
 ### 385. `openai_adapter` / `nim_adapter` do not coerce a JSON `null` tool-call `name`, emitting `ToolCallOpen(name="")`
 
-**Severity:** 🟡 Medium · **Status: open**
+**Severity:** 🟡 Medium · **Status: fixed** — re-verified 2026-10-13 (sweep).
+Both adapters now read the name through the existing `as_str` boundary guard
+(`openai_adapter.py:~622`, `nim_adapter.py:~435`), whose comments cite this
+entry: a JSON `null` / list / dict name collapses or coerces instead of
+poisoning `_tool_names` or emitting a non-str `ToolCallOpen.name`. Body
+preserved unchanged.
 **Files:** `wiwi/providers/openai_adapter.py:612`, `wiwi/providers/nim_adapter.py:430`
 **Fix:** `name_fragment = as_str(fn.get("name"))` — exactly the OpenRouter sibling
 (`openrouter_adapter.py:450`).
@@ -2204,6 +2260,12 @@ memory before the write and release it on failure.
 ---
 
 ### 374. Text deferred during a builtin (hosted) tool call is still dropped
+
+**Severity:** 🟠 High · **Status: fixed** — re-verified 2026-10-13 (sweep).
+Executed probe through the real `ResponsesStreamEncoder`: with
+`ToolCallOpen(builtin)` → `TextDelta("SEARCHING")` → `ToolCallClose`,
+"SEARCHING" now survives into the emitted SSE (the builtin return path
+flushes, per the #367 convention). Body preserved unchanged.
 
 **Severity:** 🟠 High · **Status: open**
 **Files:** `wiwi/wire/openai_responses.py` (`_close_tool`, the builtin early
@@ -13042,7 +13104,10 @@ budget-capped key and that a broken charge is counted, not silent.
 
 ### 346. A crash between reserve and settle leaks `budget_reserved` across restarts, permanently
 
-**Severity:** 🟠 High · **Status: open**
+**Severity:** 🟠 High · **Status: fixed** — re-verified 2026-10-13 (sweep).
+`AuthService.startup` runs `UPDATE vkeys SET budget_reserved = 0` on every boot
+(`wiwi/auth/service.py:270`): nothing is in flight at startup, so any non-zero
+value is by definition an orphan. Body preserved unchanged.
 
 **Files:** `wiwi/auth/service.py:657-681` (`release_budget_reservation`),
 `:614-655` (`reserve_budget`), `:114-121` (`over_budget`),
@@ -13241,7 +13306,15 @@ setting is off, rather than not registering it at all.
 
 ### 350. `previous_response_id` drops the entire user-side conversation history
 
-**Severity:** 🔴 Critical · **Status: open**
+**Severity:** 🔴 Critical · **Status: open** — re-tested 2026-10-13 (sweep).
+Code read of the live path: `_chat_like` loads the stored transcript before the
+codec and 404s on a store miss (`wiwi/server/app.py:1959-1976`), and
+`with_history` prepends the items / wraps a string input as a user message
+(`wiwi/wire/openai_responses.py:249-264`) — the "drops the entire history"
+shape is no longer reachable through the app. The register entry needs an
+end-to-end replay probe (two chained `previous_response_id` turns through a
+temporary app + ResponseStore) before it can be closed as fixed; until that
+runs, the status is not being flipped.
 
 **Files:** `wiwi/server/app.py:1867` (`codec_history(body, prev.output.get("output", []))`),
 `wiwi/wire/openai_responses.py:239-255` (`with_history`),
@@ -13328,7 +13401,10 @@ caller — and coerce at the two inbound decoders.
 
 ### 352. A non-list/non-string `input` is silently discarded; the gateway answers 200 with an empty prompt
 
-**Severity:** 🟠 High · **Status: open**
+**Severity:** 🟠 High · **Status: fixed** — re-verified 2026-10-13 (sweep).
+The missing guard now exists: `orp.decode_request({"model": "m", "input": {…}/123/true})`
+all raise ``DialectError("'input' must be a string or a list")", matching both
+siblings (executed probe, `openai_responses.py`). Body preserved unchanged.
 
 **Files:** `wiwi/wire/openai_responses.py:270-277` (`else: items = []`),
 `wiwi/server/app.py:1740-1752` (`_stored_input_items` → `[]`)

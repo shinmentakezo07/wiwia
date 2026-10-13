@@ -5912,6 +5912,46 @@ def create_app(config: WiwiConfig) -> FastAPI:
     def _hermes_oauth_setting_key(provider: str) -> str:
         return f"hermes_oauth:{provider}"
 
+    @staticmethod
+    def _hermes_account_label(access_token: str) -> str:
+        """Human label for a connected Nous account, from its JWT email.
+
+        The Hermes CLI labels credential-pool entries by account email; wiwi
+        mirrors that so a multi-account pool reads the same in the console.
+        Falls back to a short token fingerprint when the JWT carries no email
+        or is not decodable — never raises on a malformed token.
+        """
+        import base64
+
+        try:
+            payload = access_token.split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            claims = orjson.loads(base64.urlsafe_b64decode(payload))
+            email = claims.get("email") if isinstance(claims, dict) else None
+            if isinstance(email, str) and email:
+                return email
+        except Exception as e:  # noqa: BLE001 — label is best-effort, never fatal
+            structlog.get_logger("wiwi.hermes_oauth").debug(
+                "hermes_account_label_decode_failed", error=type(e).__name__)
+        return mask_key(access_token)
+
+    @staticmethod
+    def _unique_hermes_key_label(state, provider: str, base: str) -> str:
+        """First ``base``-suffixed pool-key label not already taken.
+
+        A second connect for the SAME account reuses its existing label (so a
+        re-login rotates that account in place), while a new account gets
+        ``base-2``, ``base-3``… so accounts never silently collide.
+        """
+        acct = state.router.providers.get(provider)
+        taken = {k.label for k in acct.keys} if acct is not None else set()
+        if base not in taken:
+            return base
+        n = 2
+        while f"{base}-{n}" in taken:
+            n += 1
+        return f"{base}-{n}"
+
     @app.post("/admin/hermes/oauth/device-code")
     async def hermes_oauth_device_code(request: Request):
         """Start a device-code authorization; return the verification URL."""
@@ -6032,24 +6072,34 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return ORJSONResponse({"pending": True})
         state.cline_pending.pop(token, None)
         access = tokens["access_token"]
-        if not await _update_provider_secret(provider, f"hermes:{access}"):
-            return _err(400, "invalid_request_error",
-                        f"provider '{provider}' has no keys — cannot store token",
-                        request)
         expires_at = hermes_oauth.compute_expires_at(
             tokens.get("expires_in"), time.time())
-        record = {
-            "refresh_token": tokens.get("refresh_token"),
-            "expires_at": expires_at,
-        }
-        if state.config_store:
-            await state.config_store.set_setting(
-                _hermes_oauth_setting_key(provider), record)
+        # Each Nous account is a separate OAuth identity with its own rotating
+        # refresh token and its own rate-limit bucket, so a connect APPENDS the
+        # account as a new pool key rather than overwriting key #0 — the key
+        # pool's WRR then spreads traffic across accounts (AUDIT #427).
+        secret = hermes_oauth.encode_credential(
+            access, tokens.get("refresh_token"), expires_at,
+            _hermes_account_label(access))
+        label = _unique_hermes_key_label(state, provider, secret)
+        acct = state.router.providers.get(provider)
+        if acct is None:
+            return _err(404, "not_found_error",
+                        f"unknown provider '{provider}'", request)
+        acct.keys.append(ProviderKey(label=label, secret=secret))
+        try:
+            if state.config_store:
+                await state.config_store.add_key(provider, label, secret)
+        except Exception as e:  # noqa: BLE001 — YAML/DB path varies; in-memory is enough
+            structlog.get_logger("wiwi.hermes_oauth").warning(
+                "hermes_oauth_account_db_write_failed provider=%s err=%s",
+                provider, e)
         await state.logs.log_audit(
             actor="master", action="hermes_oauth.connect", target=provider)
         return ORJSONResponse({
             "provider": provider,
             "connected": True,
+            "key_label": label,
             "access_token_masked": mask_key(access),
             "expires_at": expires_at,
         })
@@ -6060,22 +6110,35 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if resp:
             return resp
         provider = request.query_params.get("provider", "").strip()
-        if not provider or provider not in state.router.providers:
+        acct = state.router.providers.get(provider) if provider else None
+        if acct is None:
             return _err(404, "not_found_error",
                         f"unknown provider '{provider}'", request)
-        record = None
-        if state.config_store:
-            record = await state.config_store.get_setting(
-                _hermes_oauth_setting_key(provider))
-        if not record:
-            return ORJSONResponse({"connected": False})
-        expires_at = record.get("expires_at")
-        needs_refresh = hermes_oauth.expires_within_lead(expires_at, time.time())
+        # One account per pool key (AUDIT #427): report each with its own
+        # expiry/refresh state so the console shows the whole pool.
+        accounts = []
+        for k in acct.keys:
+            cred = hermes_oauth.decode_credential(k.secret)
+            if cred is None:
+                # A raw key or bare hermes:<token>: usable for inference, but
+                # not an auto-refreshable OAuth account.
+                accounts.append({"key_label": k.label, "managed": False})
+                continue
+            expires_at = cred.get("expires_at")
+            accounts.append({
+                "key_label": k.label,
+                "managed": True,
+                "label": cred.get("label"),
+                "expires_at": expires_at,
+                "needs_refresh": bool(
+                    hermes_oauth.expires_within_lead(expires_at, time.time())),
+                "has_refresh_token": bool(cred.get("refresh_token")),
+            })
+        if not any(a["managed"] for a in accounts):
+            return ORJSONResponse({"connected": False, "accounts": accounts})
         return ORJSONResponse({
             "connected": True,
-            "expires_at": expires_at,
-            "needs_refresh": bool(needs_refresh),
-            "has_refresh_token": bool(record.get("refresh_token")),
+            "accounts": accounts,
         })
 
     @app.post("/admin/hermes/oauth/refresh")
@@ -6087,50 +6150,77 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if jerr:
             return jerr
         provider = str(body.get("provider") or "").strip()
-        if provider not in state.router.providers:
+        acct = state.router.providers.get(provider)
+        if acct is None:
             return _err(404, "not_found_error",
                         f"unknown provider '{provider}'", request)
-        record = None
-        if state.config_store:
-            record = await state.config_store.get_setting(
-                _hermes_oauth_setting_key(provider))
-        if not record or not record.get("refresh_token"):
+        # Per-account: refresh one pool key (default: the first managed one).
+        label = str(body.get("key_label") or "").strip()
+        cred = None
+        for k in acct.keys:
+            if label and k.label != label:
+                continue
+            cred = hermes_oauth.decode_credential(k.secret)
+            if cred and cred.get("refresh_token"):
+                label = k.label
+                break
+        if not cred or not cred.get("refresh_token"):
             return _err(400, "invalid_request_error",
                         f"provider '{provider}' has no stored Hermes tokens; "
                         "connect first", request)
-        try:
-            # Synchronous httpx on a worker thread so the event loop is not
-            # stalled for the Nous round-trip (AUDIT #426), matching the
-            # round-134 auto-refresh's asyncio.to_thread call.
-            result = await asyncio.to_thread(
-                hermes_oauth.refresh_access_token, record["refresh_token"])
-        except hermes_oauth.HermesAuthError as e:
-            if e.relogin_required:
-                return _err(401, "authentication_error",
-                            f"Nous refresh token rejected — re-login required "
-                            f"({e.code})", request)
-            return _err(502, "upstream_error", str(e), request)
-        except httpx.HTTPError as e:
-            return _err(502, "upstream_error",
-                        f"Nous Portal token refresh failed: {e}", request)
-        access = result["access_token"]
-        if not await _update_provider_secret(provider, f"hermes:{access}"):
+        if not cred or not cred.get("refresh_token"):
             return _err(400, "invalid_request_error",
-                        f"provider '{provider}' has no keys — cannot store "
-                        "refreshed token", request)
-        record["refresh_token"] = result.get("refresh_token", record["refresh_token"])
-        expires_at = hermes_oauth.compute_expires_at(
-            result.get("expires_in"), time.time())
-        record["expires_at"] = expires_at
-        if state.config_store:
-            await state.config_store.set_setting(
-                _hermes_oauth_setting_key(provider), record)
+                        f"provider '{provider}' has no stored Hermes tokens; "
+                        "connect first", request)
+        # Delegate to the shared auto-refresh worker so this admin path and the
+        # gateway 401 hook share one per-account lock + circuit, and force past
+        # a tripped circuit (an operator asking for a rotation is the way out).
+        try:
+            fresh = await state.hermes_refresh._refresh_locked(
+                provider, label, require_due=False, force=True)
+        except AttributeError:
+            # Worker not initialized (pre-lifespan / minimal state): fall back
+            # to a direct threaded exchange.
+            fresh = None
+            try:
+                result = await asyncio.to_thread(
+                    hermes_oauth.refresh_access_token, cred["refresh_token"])
+                expires_at = hermes_oauth.compute_expires_at(
+                    result.get("expires_in"), time.time())
+                secret = hermes_oauth.encode_credential(
+                    result["access_token"], result.get("refresh_token"),
+                    expires_at, cred.get("label"))
+                await state.hermes_refresh._update_secret(provider, label, secret)
+                fresh = True
+            except hermes_oauth.HermesAuthError as e:
+                if e.relogin_required:
+                    return _err(401, "authentication_error",
+                                f"Nous refresh token rejected — re-login "
+                                f"required ({e.code})", request)
+                return _err(502, "upstream_error", str(e), request)
+            except httpx.HTTPError as e:
+                return _err(502, "upstream_error",
+                            f"Nous Portal token refresh failed: {e}", request)
+        if not fresh:
+            # A dead grant (invalid_grant / revoked / reused) marks the
+            # account's circuit dead and needs a human re-login — surface that
+            # as 401, not a generic 502.
+            if state.hermes_refresh._circuit.dead((provider, label)):
+                return _err(401, "authentication_error",
+                            "Nous refresh token rejected — re-login required",
+                            request)
+            return _err(502, "upstream_error",
+                        "refresh failed; the account's circuit may be tripped",
+                        request)
         await state.logs.log_audit(
             actor="master", action="hermes_oauth.refresh", target=provider)
+        new_cred = hermes_oauth.decode_credential(
+            next(k.secret for k in acct.keys if k.label == label))
         return ORJSONResponse({
             "provider": provider,
-            "access_token_masked": mask_key(access),
-            "expires_at": expires_at,
+            "key_label": label,
+            "access_token_masked": mask_key(new_cred.get("access_token", "")),
+            "expires_at": new_cred.get("expires_at"),
         })
 
     @app.delete("/admin/hermes/oauth/disconnect")
@@ -6142,15 +6232,32 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if jerr:
             return jerr
         provider = str(body.get("provider") or "").strip()
-        if provider not in state.router.providers:
+        acct = state.router.providers.get(provider)
+        if acct is None:
             return _err(404, "not_found_error",
                         f"unknown provider '{provider}'", request)
+        # Per-account: with ``key_label`` remove just that account's pool key;
+        # without it, remove every managed Hermes account (the whole-pool
+        # disconnect). Also clears the legacy single-account settings record.
+        label = str(body.get("key_label") or "").strip()
+        removed = 0
+        kept = []
+        for k in acct.keys:
+            if (not label or k.label == label) and hermes_oauth.decode_credential(
+                    k.secret) is not None:
+                removed += 1
+                continue
+            kept.append(k)
+        acct.keys = kept
         if state.config_store:
+            if label:
+                with contextlib.suppress(Exception):
+                    await state.config_store.delete_key(provider, label)
             await state.config_store.delete_setting(
                 _hermes_oauth_setting_key(provider))
         await state.logs.log_audit(
             actor="master", action="hermes_oauth.disconnect", target=provider)
-        return ORJSONResponse({"provider": provider, "disconnected": True})
+        return ORJSONResponse({"provider": provider, "disconnected": removed})
     # -- WorkBuddy accounts ---------------------------------------------------
     # WorkBuddy pool keys each hold a full account auth JSON (see
     # wiwi.providers.workbuddy_auth), so the admin surface here is about

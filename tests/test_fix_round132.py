@@ -98,10 +98,13 @@ async def test_device_code_bootstraps_account_without_prior_key(client):
     assert r.status_code == 200
     assert r.json()["connected"] is True
 
-    # The bootstrapped account now carries the token on its pool key.
-    r = await client.get("/admin/providers/hermes-new/keys/default/secret", headers=AUTH)
+    # The connect APPENDS the account as a new pool key (AUDIT #427); the poll
+    # response names that key, whose secret carries the access token.
+    label = r.json()["key_label"]
+    r = await client.get(f"/admin/providers/hermes-new/keys/{label}/secret",
+                         headers=AUTH)
     assert r.status_code == 200
-    assert r.json()["secret"] == "hermes:acc-tok"
+    assert "acc-tok" in r.json()["secret"]
 
 
 @respx.mock
@@ -125,17 +128,20 @@ async def test_device_code_then_poll_connects(client):
     assert body["user_code"] == "WXYZ-1234"
     assert body["verification_uri_complete"].startswith(hermes_oauth.PORTAL_BASE)
 
-    # 2. Poll once — approved, token lands on the pool key prefixed hermes:.
+    # 2. Poll once — approved, the account is appended as a new pool key whose
+    # secret is a hermes:<json> credential blob carrying the access token.
     r = await client.post("/admin/hermes/oauth/poll", headers=AUTH, json={"state": state})
     assert r.status_code == 200
     poll = r.json()
     assert poll["connected"] is True
     assert poll["access_token_masked"] != "acc-tok"  # masked, never raw
 
-    # The pool key now carries the token; reveal to confirm the hermes: prefix.
-    r = await client.get("/admin/providers/hermes-main/keys/default/secret", headers=AUTH)
+    # The account's pool key (named in the poll response) carries the token.
+    label = poll["key_label"]
+    r = await client.get(f"/admin/providers/hermes-main/keys/{label}/secret",
+                         headers=AUTH)
     assert r.status_code == 200
-    assert r.json()["secret"] == "hermes:acc-tok"
+    assert "acc-tok" in r.json()["secret"]
 
 
 @respx.mock
@@ -196,8 +202,10 @@ async def test_status_connected_after_poll(client):
     assert r.status_code == 200
     body = r.json()
     assert body["connected"] is True
-    assert body["has_refresh_token"] is True
-    assert body["needs_refresh"] is False  # 1h TTL, well outside the lead window
+    # Per-account model: status reports the account pool (AUDIT #427).
+    managed = [a for a in body["accounts"] if a["managed"]]
+    assert managed and managed[0]["has_refresh_token"] is True
+    assert managed[0]["needs_refresh"] is False  # 1h TTL, outside the lead
 
 
 # -- refresh ------------------------------------------------------------------
@@ -229,9 +237,12 @@ async def test_refresh_rotates_token_on_pool_key(client):
     r = await client.post("/admin/hermes/oauth/refresh", headers=AUTH,
                           json={"provider": "hermes-main"})
     assert r.status_code == 200
+    label = r.json()["key_label"]
 
-    r = await client.get("/admin/providers/hermes-main/keys/default/secret", headers=AUTH)
-    assert r.json()["secret"] == "hermes:acc-2"
+    # The rotation updates that account's pool-key secret to the new token.
+    r = await client.get(f"/admin/providers/hermes-main/keys/{label}/secret",
+                         headers=AUTH)
+    assert "acc-2" in r.json()["secret"]
 
 
 @respx.mock
@@ -272,7 +283,8 @@ async def test_disconnect_clears_status(client):
     r = await client.request("DELETE", "/admin/hermes/oauth/disconnect", headers=AUTH,
                              json={"provider": "hermes-main"})
     assert r.status_code == 200
-    assert r.json()["disconnected"] is True
+    # disconnect returns the count of accounts removed (per-account model).
+    assert r.json()["disconnected"] >= 1
 
     r = await client.get("/admin/hermes/oauth/status?provider=hermes-main", headers=AUTH)
     assert r.json()["connected"] is False

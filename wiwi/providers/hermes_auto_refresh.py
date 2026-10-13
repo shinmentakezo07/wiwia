@@ -1,35 +1,34 @@
-"""Background auto-refresh for Hermes (Nous Portal) OAuth tokens.
+"""Background + on-demand auto-refresh for Hermes (Nous Portal) OAuth accounts.
 
-Mirrors :mod:`wiwi.providers.cline_auto_refresh` and
-:mod:`wiwi.providers.workbuddy_auto_refresh`, which both refresh proactively
-(before expiry) *and* on demand (a gateway 401 mid-session). Hermes shipped with
-neither: :mod:`wiwi.providers.hermes_oauth` exposes a working
-``refresh_access_token`` and the admin API calls it from
-``/admin/hermes/oauth/refresh``, but nothing rotates a token automatically. An
-access token that expires (or is invalidated upstream) mid-session produced a
-hard 401 to the caller, and under the default ``failover_mode == "any_error"``
-that 401 charged the key's error streak — so a routine expiry could retire an
-otherwise healthy key (AUDIT #423).
+Each Nous Portal account is a separate OAuth identity with its own rotating
+(single-use) refresh token and its own rate-limit bucket (~50 RPM / 50k TPM).
+wiwi stores **one account per provider pool key** as a self-contained
+``hermes:<json>`` credential blob (see :func:`wiwi.providers.hermes_oauth.encode_credential`),
+so the existing key pool + smooth weighted round-robin spreads traffic across
+accounts and beats any single account's cap (AUDIT #427). This module rotates
+each account's tokens on its own.
 
-Two refreshers exist so the two failure windows are covered:
+Two refreshers cover the two failure windows:
 
-* a background sweeper that rotates tokens inside the lead window before
-  expiry (``hermes_oauth.REFRESH_LEAD_S``), and
+* a background sweeper that rotates an account whose access token is expired,
+  inside the lead window, or of unknown expiry (``hermes_oauth.REFRESH_LEAD_S``);
 * an on-demand hook the gateway calls on a 401, rotating unconditionally
   because the upstream just rejected a token whose nominal expiry was
   irrelevant.
 
 Both funnel through one :class:`HermesAutoRefresh` worker (via
-:func:`_worker_for`) so they share one per-provider lock and one circuit
-breaker — the same discipline Cline's rotating-token refresher needs (AUDIT
-#169). Nous returns a fresh ``refresh_token`` on each exchange, so a sweeper
-tick and a client 401 landing in the same window must not both present the
-same token: the loser's ``invalid_grant`` would mark the provider dead until a
-human re-authenticates.
+:func:`_worker_for`) so they share one **per-account** lock and one circuit
+breaker. Nous returns a fresh ``refresh_token`` per exchange, so a sweeper tick
+and a client 401 landing in the same window must not both present the same
+account's token: the loser's ``invalid_grant`` would mark that account dead
+until a human re-authenticates (AUDIT #169). Locks and circuits are keyed on
+``(provider, key_label)`` so one account's refresh never serializes or poisons
+another's.
 
-An ``invalid_grant`` / revoked / reused refresh token is terminal
-(``relogin_required``); the circuit is marked dead so the sweeper stops
-retrying and the operator is told to reconnect.
+An ``invalid_grant`` / revoked / reused refresh token is terminal for that
+account (``relogin_required``); only that account's circuit is marked dead, so
+the rest of the pool keeps serving while the operator reconnects the one dead
+credential.
 """
 
 from __future__ import annotations
@@ -55,17 +54,20 @@ CIRCUIT_CAP_S = 4 * 60 * 60
 
 
 class HermesAutoRefresh:
-    """Background task that proactively refreshes Hermes tokens before expiry."""
+    """Rotates each Hermes pool key's OAuth token, proactively and on 401."""
 
     def __init__(self, state: AppState) -> None:
         self._state = state
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
-        self._locks: dict[str, asyncio.Lock] = {}
-        # Successful-rotation counter per provider. The sweeper and the
-        # on-demand 401 hook share one worker, so this is how the loser of a
-        # lock race learns the winner already rotated (AUDIT #169).
-        self._generations: dict[str, int] = {}
+        # Per-account lock: one per (provider, key_label). A lock and circuit
+        # per account means refreshing one Nous account never blocks or
+        # trips another (AUDIT #427).
+        self._locks: dict[tuple[str, str], asyncio.Lock] = {}
+        # Successful-rotation counter per account. The sweeper and the 401 hook
+        # share one worker, so this is how the loser of a lock race learns the
+        # winner already rotated (AUDIT #169).
+        self._generations: dict[tuple[str, str], int] = {}
         self._circuit = CircuitBreaker(base_s=CIRCUIT_BASE_S, cap_s=CIRCUIT_CAP_S,
                                        clock=time.time)
 
@@ -101,193 +103,200 @@ class HermesAutoRefresh:
             pass
 
     async def _sweep(self) -> int:
-        """Iterate over all hermes providers with stored OAuth state.
+        """Refresh every Hermes pool key whose OAuth token is due.
 
-        Returns the number of providers checked.
+        Iterates the live key pools (one account per key), not a single
+        settings record, so every connected account is covered. Returns the
+        number of managed accounts checked.
         """
-        cs = self._state.config_store
-        if cs is None:
-            return 0
         checked = 0
         for name, acct in list(self._state.router.providers.items()):
             if acct.provider_type != "hermes":
                 continue
-            record = await cs.get_setting(f"hermes_oauth:{name}")
-            if not record or not record.get("refresh_token"):
-                continue
-            checked += 1
-            try:
-                await self._check_provider(name, record)
-            except Exception:
-                log.exception("hermes_auto_refresh_provider_error", provider=name)
+            for key in list(acct.keys):
+                cred = hermes_oauth.decode_credential(key.secret)
+                if not cred or not cred.get("refresh_token"):
+                    continue  # bare token or raw key: nothing to rotate
+                checked += 1
+                try:
+                    await self._check_account(name, key.label, cred)
+                except Exception:
+                    log.exception("hermes_auto_refresh_account_error",
+                                  provider=name, key=key.label)
         return checked
 
-    async def _check_provider(self, name: str, record: dict[str, Any]) -> None:
-        """Refresh one provider's token if it is expired or inside the lead."""
-        if not hermes_oauth.expires_within_lead(record.get("expires_at"),
-                                                time.time()):
+    async def _check_account(self, name: str, label: str,
+                             cred: dict[str, Any]) -> None:
+        """Refresh one account's token if it is expired or inside the lead."""
+        if not hermes_oauth.expires_within_lead(cred.get("expires_at"), time.time()):
             return  # not due for refresh
-        await self._refresh_locked(name, require_due=True)
+        await self._refresh_locked(name, label, require_due=True)
 
-    async def refresh_now(self, name: str) -> bool:
-        """On-demand refresh for the gateway's 401 hook.
+    async def refresh_now(self, name: str, label: str) -> bool:
+        """On-demand refresh for the gateway's 401 hook, for one account.
 
         The upstream rejected the access token, so the stored expiry is
         irrelevant — rotate unconditionally, under the same lock and circuit
-        breaker the sweeper uses. Returns True when the stored record is fresh
+        the sweeper uses. Returns True when the account's token is fresh
         afterwards (rotated here, or rotated by the sweeper while this call
         waited for the lock), so the caller may retry with it.
         """
-        return await self._refresh_locked(name, require_due=False)
+        return await self._refresh_locked(name, label, require_due=False)
 
-    async def _refresh_locked(self, name: str, *, require_due: bool) -> bool:
-        """Serialize a refresh for ``name`` through the shared lock + circuit.
+    async def _refresh_locked(self, name: str, label: str, *,
+                              require_due: bool, force: bool = False) -> bool:
+        """Serialize a refresh for one account through its lock + circuit.
 
         The sweep (``require_due=True``) and the on-demand 401 hook
         (``require_due=False``) funnel through here so both share one lock and
-        one circuit breaker. Nous returns a fresh ``refresh_token`` per
-        exchange, so the record is re-read *under* the lock: a rotation that
-        landed while we waited is honored instead of being repeated with the
-        token it just consumed (AUDIT #169).
+        one circuit per account. Nous returns a fresh ``refresh_token`` per
+        exchange, so the credential is re-read *under* the lock from the live
+        pool key: a rotation that landed while we waited is honored instead of
+        being repeated with the token it just consumed (AUDIT #169).
 
-        Returns True when the stored record is fresh afterwards (we rotated
+        ``force`` (the admin refresh path) bypasses the circuit breaker — an
+        operator asking for a rotation is the documented way out of a tripped
+        account (mirrors ``workbuddy_auto_refresh.refresh_key_now``).
+
+        Returns True when the account's token is fresh afterwards (we rotated
         it, or another caller did while we waited), False when nothing was
-        rotated — circuit-blocked, no stored refresh token, not due, or the
+        rotated — circuit-blocked, no stored refresh grant, not due, or the
         refresh failed.
         """
-        lock = self._locks.setdefault(name, asyncio.Lock())
-        generation = self._generations.get(name, 0)
+        ident = (name, label)
+        lock = self._locks.setdefault(ident, asyncio.Lock())
+        generation = self._generations.get(ident, 0)
         async with lock:
             # Circuit state is read under the lock so a failure that landed
             # while we waited (a sibling refresh tripping it) is honored.
-            if self._circuit.blocked(name):
+            if not force and self._circuit.blocked(ident):
                 return False
-            if self._generations.get(name, 0) != generation:
-                # Someone rotated while we waited for the lock: the record is
-                # already fresh, and the refresh_token we would present has
-                # been consumed by that rotation.
+            if self._generations.get(ident, 0) != generation:
+                # Someone rotated while we waited: the account is already
+                # fresh, and the refresh_token we would present has been
+                # consumed by that rotation.
                 return True
-            cs = self._state.config_store
-            if cs is None:
-                return False
-            record = await cs.get_setting(f"hermes_oauth:{name}")
-            if not record or not record.get("refresh_token"):
+            cred = self._live_credential(name, label)
+            if cred is None or not cred.get("refresh_token"):
                 return False
             if require_due and not hermes_oauth.expires_within_lead(
-                    record.get("expires_at"), time.time()):
+                    cred.get("expires_at"), time.time()):
                 return False
-            return await self._do_refresh(name, record)
+            return await self._do_refresh(name, label, cred)
 
-    async def _do_refresh(self, name: str, record: dict[str, Any]) -> bool:
-        """Call the Nous refresh endpoint and persist the result.
+    def _live_credential(self, provider: str, label: str) -> dict[str, Any] | None:
+        """The current credential blob for one pool key, read from the router.
 
-        Callers must hold ``self._locks[name]``. Returns True when the tokens
-        were rotated and stored.
+        Read from the live key rather than a cached record so a rotation by
+        another caller (or a manual admin refresh) is seen immediately.
+        """
+        acct = self._state.router.providers.get(provider)
+        if acct is None:
+            return None
+        for k in acct.keys:
+            if k.label == label:
+                return hermes_oauth.decode_credential(k.secret)
+        return None
+
+    async def _do_refresh(self, name: str, label: str,
+                          cred: dict[str, Any]) -> bool:
+        """Exchange one account's refresh token and persist the result.
+
+        Callers must hold ``self._locks[(name, label)]``. Returns True when the
+        account's tokens were rotated and stored.
         """
         # Nous refresh is synchronous httpx (the module is shared with the
         # CLI-facing connect flow), so run it on a worker thread: the sweeper
         # and the 401 hook both run on the event loop, and an inline network
         # POST would stall every concurrent request for its duration (the
         # AUDIT #33 shape the tiktoken estimator already hit).
+        ident = (name, label)
         try:
             result = await asyncio.to_thread(
-                hermes_oauth.refresh_access_token, record["refresh_token"])
+                hermes_oauth.refresh_access_token, cred["refresh_token"])
         except hermes_oauth.HermesAuthError as e:
             if e.relogin_required:
-                # The refresh grant is dead (revoked / reused / invalid_grant):
-                # stop retrying until a human re-authenticates.
-                self._circuit.mark_dead(name)
+                # This account's refresh grant is dead (revoked / reused /
+                # invalid_grant): stop retrying THIS account until a human
+                # re-authenticates it. The circuit is per-account, so sibling
+                # accounts keep serving (AUDIT #427).
+                self._circuit.mark_dead(ident)
                 log.error("hermes_auto_refresh_unrecoverable", provider=name,
-                          code=e.code)
+                          key=label, code=e.code)
             else:
-                self._trip_circuit(name)
+                self._trip_circuit(ident)
                 log.warning("hermes_auto_refresh_transient", provider=name,
-                            code=e.code)
+                            key=label, code=e.code)
             return False
         access = result.get("access_token")
         if not access:
-            self._trip_circuit(name)
-            log.warning("hermes_auto_refresh_no_access_token", provider=name)
+            self._trip_circuit(ident)
+            log.warning("hermes_auto_refresh_no_access_token", provider=name,
+                        key=label)
             return False
-        # Persist the OAuth record FIRST (new refresh token + a forward
-        # expires_at), then rotate the pool key. Order matters for two reasons:
-        #   1. The record write is what stops the #425 spin — if the pool-key
-        #      write below raises for a YAML-defined provider (no DB key row →
-        #      ConfigStoreNotFound), an out-of-order version never reached the
-        #      set_setting at all, so expires_at stayed in the past and the
-        #      sweeper re-refreshed the single-use grant every tick.
-        #   2. A crash between the two leaves a fresh refresh token on disk with
-        #      the old access token still live — recoverable on the next tick —
-        #      rather than the reverse, where a rotated key has no persisted
-        #      record to point the next refresh at.
-        if result.get("refresh_token"):
-            record["refresh_token"] = result["refresh_token"]
-        record["expires_at"] = hermes_oauth.compute_expires_at(
-            result.get("expires_in"))
-        try:
-            await self._state.config_store.set_setting(
-                f"hermes_oauth:{name}", record)
-        except Exception as e:  # noqa: BLE001 — a settings outage must not strand the key
-            # The rotation happened upstream; failing to persist the record is
-            # loud (it will re-refresh next tick) but must not abort the key
-            # update below — the live access token is still the one in use.
-            log.error("hermes_auto_refresh_record_persist_failed", provider=name,
-                      error=type(e).__name__, detail=str(e))
-        await self._update_secret(name, f"hermes:{access}")
-        self._generations[name] = self._generations.get(name, 0) + 1
-        self._circuit.clear(name)
-        log.info("hermes_auto_refreshed", provider=name)
+        # Build the new credential, preserving the account's label.
+        new_refresh = result.get("refresh_token") or cred.get("refresh_token")
+        expires_at = hermes_oauth.compute_expires_at(result.get("expires_in"))
+        secret = hermes_oauth.encode_credential(
+            access, new_refresh, expires_at, cred.get("label"))
+        # Persist the new secret to the pool key BEFORE anything that can
+        # raise for a YAML-defined provider, so a crash leaves the fresh token
+        # on the key rather than the reverse (see the #425/#319 ordering note).
+        await self._update_secret(name, label, secret)
+        self._generations[ident] = self._generations.get(ident, 0) + 1
+        self._circuit.clear(ident)
+        log.info("hermes_auto_refreshed", provider=name, key=label)
         return True
 
-    async def _update_secret(self, provider: str, secret: str) -> None:
-        """Rotate the provider's pool-key secret in memory + DB.
+    async def _update_secret(self, provider: str, label: str, secret: str) -> None:
+        """Rotate ONE pool key's secret in memory + DB.
 
-        The access token lands on the key pool prefixed ``hermes:`` (the
-        adapter strips the prefix for the bearer), matching the connect flow.
+        Only the named account's key is touched — a rotation must never
+        clobber a sibling account's credential (the single-account flow used to
+        write every key; AUDIT #427).
         """
         acct = self._state.router.providers.get(provider)
-        if acct is None or not acct.keys:
+        if acct is None:
             return
         for k in acct.keys:
+            if k.label != label:
+                continue
             k.secret = secret
             k.status = "active"
             k.cooldown_until = 0.0
             try:
                 await self._state.config_store.update_key_secret(
-                    provider, k.label, secret)
+                    provider, label, secret)
             except Exception as e:  # noqa: BLE001 — YAML-defined: no DB row
                 # YAML-defined provider: no DB row to update. The in-memory
                 # assignment above is still correct for this process; refusing
                 # here would break OAuth refresh on YAML-only deployments.
                 structlog.get_logger().warning(
-                    "oauth_secret_not_persisted", provider=provider,
+                    "oauth_secret_not_persisted", provider=provider, key=label,
                     reason="provider is YAML-defined; rotation is in-memory only",
                     error=type(e).__name__)
+            return
 
-    def _trip_circuit(self, name: str) -> None:
-        self._circuit.trip(name)
+    def _trip_circuit(self, ident: tuple[str, str]) -> None:
+        self._circuit.trip(ident)
 
 
 def refresh_for_provider(state) -> callable:
     """Build the async hook the gateway calls when a Hermes request 401s.
 
-    Returns ``hook(provider_name, key_label) -> bool``: True when the stored
-    access token was rotated and the caller should retry, False when nothing
-    was rotated (caller surfaces the original 401).
+    Returns ``hook(provider_name, key_label) -> bool``: True when that
+    account's access token was rotated and the caller should retry, False when
+    nothing was rotated (caller surfaces the original 401).
 
     The hook delegates to :func:`_worker_for` — the *same* worker the
-    background sweeper uses — so both paths share one per-provider lock and
-    one circuit breaker. Nous returns a fresh refresh token per exchange, so a
+    background sweeper uses — so both paths share one per-account lock and one
+    circuit breaker. Nous returns a fresh refresh token per exchange, so a
     sweeper tick and a client 401 landing in the same window must not both
-    POST the same token: the loser's ``invalid_grant`` would mark the provider
-    dead until a human re-authenticates (AUDIT #169).
-
-    The hook is injected into ``Gateway._on_demand_refresh_hooks["hermes"]``
-    at app startup so the gateway can call it without depending on the full
-    AppState — see ``wiwi.server.app`` for the wiring.
+    POST the same account's token: the loser's ``invalid_grant`` would mark
+    that account dead until a human re-authenticates (AUDIT #169).
     """
     async def hook(provider_name: str, key_label: str) -> bool:
-        return await _worker_for(state).refresh_now(provider_name)
+        return await _worker_for(state).refresh_now(provider_name, key_label)
 
     return hook
 
@@ -300,8 +309,8 @@ def _worker_for(state: AppState) -> HermesAutoRefresh:
 
     The lifespan-owned ``state.hermes_refresh`` wins when set, so the
     background sweeper, the gateway 401 hook, and any other caller share one
-    lock and one circuit breaker. Fallback (tests, pre-lifespan use): a
-    lazily cached instance.
+    lock and one circuit breaker per account. Fallback (tests, pre-lifespan
+    use): a lazily cached instance.
     """
     shared = getattr(state, "hermes_refresh", None)
     if shared is not None:

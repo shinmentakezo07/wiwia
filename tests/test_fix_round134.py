@@ -47,7 +47,7 @@ from wiwi.core.context import RequestContext
 from wiwi.core.gateway import Gateway
 from wiwi.cost.pricing import CostEngine
 from wiwi.ir import types as ir
-from wiwi.providers import hermes_auto_refresh
+from wiwi.providers import hermes_auto_refresh, hermes_oauth
 from wiwi.providers.hermes_oauth import TOKEN_URL
 from wiwi.router.router import Router
 from wiwi.server.config_store import ConfigStore
@@ -65,7 +65,12 @@ def _config() -> WiwiConfig:
         providers=[ProviderDef(
             name="hermes-prov", provider="hermes",
             base_url="https://inference-api.nousresearch.com/v1",
-            keys=[KeyDef(label="default", key="hermes:stale-access")])],
+            # One Nous account per pool key, stored as a hermes:<json> blob
+            # (AUDIT #427). The stale access token is what the first 401 hits.
+            keys=[KeyDef(label="default",
+                         key=hermes_oauth.encode_credential(
+                             "stale-access", "ref-active",
+                             time.time() + 3600, "acct@example.com"))])],
         model_list=[ModelEntry(
             model_name="hermes-model",
             wiwi_params=DeploymentParams(provider="hermes-prov",
@@ -82,7 +87,7 @@ def _build_gateway_with_store():
     """Return (gateway, mini_app_state, config_store).
 
     The gateway gets a config_store-bearing state so the on-demand hook can
-    find the stored refresh_token and write back the rotated secret.
+    find the account's refresh grant and write back the rotated secret.
     """
     config = _config()
     router = Router(config)
@@ -115,10 +120,24 @@ def _req() -> ir.Request:
         messages=[ir.Message(role="user", parts=[ir.TextPart("hi")])])
 
 
-async def _seed(cs, *, expires_at):
-    await cs.set_setting(
-        "hermes_oauth:hermes-prov",
-        {"refresh_token": "ref-active", "expires_at": expires_at})
+_UNSET = object()
+
+
+def _set_account(state, *, access="stale-access", refresh="ref-active",
+                 expires_at=_UNSET, label="acct@example.com"):
+    """Set the single pool key's credential blob (the per-account model).
+
+    ``expires_at`` defaults to a fresh future expiry, but an explicit ``None``
+    is honoured as "unknown expiry" (which reads as due for Hermes).
+    """
+    if expires_at is _UNSET:
+        expires_at = time.time() + 3600
+    state.router.providers["hermes-prov"].keys[0].secret = (
+        hermes_oauth.encode_credential(access, refresh, expires_at, label))
+
+
+async def _seed(state, *, expires_at):
+    _set_account(state, expires_at=expires_at)
 
 
 # -- 1. 401 from Nous triggers on-demand refresh + one-shot retry -------------
@@ -132,7 +151,7 @@ async def test_401_triggers_on_demand_refresh_and_retries():
     try:
         # Far-future expiry: the 401 hook must refresh UNCONDITIONALLY,
         # ignoring the stored expiry (AUDIT #169 rationale).
-        await _seed(cs, expires_at=time.time() + 3600)
+        await _seed(state, expires_at=time.time() + 3600)
 
         refresh_route = respx.post(TOKEN_URL).mock(
             return_value=httpx.Response(200, json={
@@ -155,16 +174,16 @@ async def test_401_triggers_on_demand_refresh_and_retries():
         assert turn.text == "hello"
         assert refresh_route.call_count == 1
         assert upstream.call_count == 2
-        # First call carries the stale bearer; the retry carries the fresh one,
-        # with the ``hermes:`` prefix stripped by the adapter.
+        # First call carries the stale bearer; the retry carries the fresh one
+        # (the access token is the bearer, prefix/JSON stripped by the adapter).
         assert upstream.calls[0].request.headers["Authorization"] == "Bearer stale-access"
         assert upstream.calls[1].request.headers["Authorization"] == "Bearer acc-fresh-abcdef"
-        # The pool key secret was rotated in memory.
-        assert state.router.providers["hermes-prov"].keys[0].secret == "hermes:acc-fresh-abcdef"
-        # The rotated refresh token and new expiry were persisted.
-        record = await cs.get_setting("hermes_oauth:hermes-prov")
-        assert record["refresh_token"] == "ref-rotated"
-        assert record["expires_at"] > time.time()
+        # The pool key's credential blob was rotated in memory.
+        cred = hermes_oauth.decode_credential(
+            state.router.providers["hermes-prov"].keys[0].secret)
+        assert cred["access_token"] == "acc-fresh-abcdef"
+        assert cred["refresh_token"] == "ref-rotated"
+        assert cred["expires_at"] > time.time()
     finally:
         await cs.engine.dispose()
         await gw.aclose()
@@ -188,18 +207,24 @@ async def test_sweeper_refreshes_only_when_due():
             }))
 
         # (a) expired / inside lead → refresh.
-        await _seed(cs, expires_at=time.time() - 1)
+        await _seed(state, expires_at=time.time() - 1)
         await worker._sweep()
         assert refresh_route.call_count == 1
-        assert state.router.providers["hermes-prov"].keys[0].secret == "hermes:acc-swept"
+        cred = hermes_oauth.decode_credential(
+            state.router.providers["hermes-prov"].keys[0].secret)
+        assert cred["access_token"] == "acc-swept"
 
         # (b) unknown expiry (None) → refresh (unknown = due for Hermes).
-        await _seed(cs, expires_at=None)
+        # A fresh worker so (a)'s rotation does not mark (b)'s reseed as
+        # "already rotated" via the per-account generation counter.
+        await _seed(state, expires_at=None)
+        worker = hermes_auto_refresh.HermesAutoRefresh(state)
         await worker._sweep()
         assert refresh_route.call_count == 2
 
         # (c) far future, outside the lead window → NOT refreshed.
-        await _seed(cs, expires_at=time.time() + 3600)
+        await _seed(state, expires_at=time.time() + 3600)
+        worker = hermes_auto_refresh.HermesAutoRefresh(state)
         await worker._sweep()
         assert refresh_route.call_count == 2  # unchanged
     finally:
@@ -209,7 +234,7 @@ async def test_sweeper_refreshes_only_when_due():
 
 @respx.mock
 async def test_sweeper_skips_providers_without_refresh_token():
-    """A provider with no stored OAuth state is skipped, never refreshed."""
+    """A pool key that is not a managed OAuth account is never refreshed."""
     gw, state, cs = _build_gateway_with_store()
     await cs.startup()
     try:
@@ -217,12 +242,14 @@ async def test_sweeper_skips_providers_without_refresh_token():
         refresh_route = respx.post(TOKEN_URL).mock(
             return_value=httpx.Response(200, json={"access_token": "x"}))
 
-        # No hermes_oauth:<name> record at all.
+        # A bare hermes:<token> key (no JSON blob / no refresh grant).
+        state.router.providers["hermes-prov"].keys[0].secret = "hermes:raw-key"
         assert await worker._sweep() == 0
         assert refresh_route.call_count == 0
 
-        # A record with no refresh_token is also skipped.
-        await cs.set_setting("hermes_oauth:hermes-prov", {"expires_at": 0})
+        # A blob with no refresh_token is also skipped.
+        state.router.providers["hermes-prov"].keys[0].secret = (
+            hermes_oauth.encode_credential("acc", None, time.time() - 1))
         assert await worker._sweep() == 0
         assert refresh_route.call_count == 0
     finally:
@@ -239,7 +266,7 @@ async def test_dead_refresh_grant_surfaces_401():
     gw, state, cs = _build_gateway_with_store()
     await cs.startup()
     try:
-        await _seed(cs, expires_at=time.time() + 3600)
+        await _seed(state, expires_at=time.time() + 3600)
 
         respx.post(TOKEN_URL).mock(
             return_value=httpx.Response(400, json={
@@ -262,7 +289,7 @@ async def test_dead_refresh_grant_surfaces_401():
         assert upstream.call_count == 1
         # The circuit is marked dead so the sweeper stops retrying the grant.
         worker = hermes_auto_refresh._worker_for(state)
-        assert worker._circuit.dead("hermes-prov")
+        assert worker._circuit.dead(("hermes-prov", "default"))
     finally:
         await cs.engine.dispose()
         await gw.aclose()
@@ -302,7 +329,7 @@ async def test_refresh_without_expires_in_does_not_spin_the_sweeper():
     await cs.startup()
     try:
         # Due now, so the first sweep refreshes.
-        await _seed(cs, expires_at=time.time() - 1)
+        await _seed(state, expires_at=time.time() - 1)
         refresh_route = respx.post(TOKEN_URL).mock(
             return_value=httpx.Response(200, json={
                 "access_token": "acc-no-exp",
@@ -314,11 +341,12 @@ async def test_refresh_without_expires_in_does_not_spin_the_sweeper():
         await worker._sweep()
         assert refresh_route.call_count == 1
 
-        # The stored expiry is now in the future (fallback window), so a second
-        # immediate sweep must NOT refresh again — the pre-#425 shape wrote
-        # ``time.time() + 0`` and the token read as permanently due.
-        record = await cs.get_setting("hermes_oauth:hermes-prov")
-        assert record["expires_at"] > time.time()
+        # The account's expiry is now in the future (fallback window), so a
+        # second immediate sweep must NOT refresh again — the pre-#425 shape
+        # wrote ``time.time() + 0`` and the token read as permanently due.
+        cred = hermes_oauth.decode_credential(
+            state.router.providers["hermes-prov"].keys[0].secret)
+        assert cred["expires_at"] > time.time()
         await worker._sweep()
         assert refresh_route.call_count == 1  # no second rotation
     finally:
