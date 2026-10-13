@@ -8,6 +8,80 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## 🔴 Open — Hermes integration sweep (2026-10-12)
+
+Found by reading the whole Hermes surface end to end (`hermes_adapter.py`,
+`hermes_oauth.py`, the `/admin/hermes/oauth/*` routes, the connect/refresh/
+disconnect handlers, and the catalog/registry wiring) and comparing each against
+how Cline and WorkBuddy handle the same shape. Registry dispatch, the OpenAI
+wire reuse, the adapter's `hermes:`-prefix stripping, the device-code connect
+flow, and the round-134 auto-refresh were all verified correct; the entries
+below are what the sweep found still wrong. Entries #424-#426.
+
+### 424. Hermes OAuth sessions reuse the Cline pending map and share its eviction, so a Cline sweep can drop a live Hermes login
+
+**Severity:** 🟠 Medium · **Status: open**
+**Files:** `wiwi/server/app.py:5971-5975` (device-code stash), `:5712-5716` (shared TTL sweep)
+
+The Hermes device-code session is stashed in `state.cline_pending[token]` with
+`kind: "hermes_device_code"`, and the eviction sweep iterates every entry in
+that map with a single `created_at > 600s` rule. Functionally correct today (the
+10-minute window matches Nous's `expires_in`, and the `kind` discriminator keeps
+the poll from cross-using a Cline session), but it couples two unrelated OAuth
+providers to one dict whose comment still says "Pending Cline OAuth sessions."
+The next provider added will land here too, and any Cline-specific change to the
+TTL or eviction silently changes Hermes's. This is the "no second convention
+beside an existing one" rule applied in reverse — the shared map is the
+*Cline* convention, and Hermes is piggybacking on it.
+
+**Fix sketch:** give Hermes its own `state.hermes_pending` dict (or a generic
+`state.oauth_pending: dict[str, dict]` keyed by a `kind` field that every OAuth
+provider uses), and have the sweep iterate it generically. Low urgency; a
+latent-coupling bug, not a live failure.
+
+### 425. A `poll`/`refresh` that returns no `expires_in` writes `expires_at = now`, so the round-134 sweeper immediately sees the token as due and re-refreshes on the next tick
+
+**Severity:** 🟡 Medium · **Status: fixed** — round 134 follow-up (`tests/test_fix_round134.py`; fixed 2026-10-12)
+**Files:** `wiwi/providers/hermes_oauth.py` (`compute_expires_at`), `wiwi/server/app.py` (poll + manual refresh), `wiwi/providers/hermes_auto_refresh.py:_do_refresh`
+
+All three write `expires_at = time.time() + <expires_in>` with `0` as the
+default. Nous always returns `expires_in` today, but if it ever omits it (or
+returns `0`), `expires_at` lands in the past, and `expires_within_lead(past,
+now)` is `True` — so the round-134 sweeper treats the token as permanently due
+and re-refreshes it every 60 s, burning the single-use refresh grant until
+`invalid_grant` marks the provider dead.
+
+Fix: a shared `hermes_oauth.compute_expires_at(expires_in, now)` resolves a
+missing / zero / non-numeric / bool `expires_in` to a forward window strictly
+beyond the lead (`2 * REFRESH_LEAD_S`), so the next `expires_within_lead` read
+is `False`. A usable value is honoured verbatim. All three sites call it.
+
+A second defect found while testing this one and fixed in the same pass: on a
+YAML-defined provider, `_do_refresh` called `_update_secret` (which raises
+`ConfigStoreNotFound` — no DB key row) *before* `set_setting`, so the exception
+aborted the rotation before the fresh `expires_at` was ever persisted; the
+record stayed in the past and the sweeper spun anyway. The order is now
+persist-record-first, then rotate the pool key, with the `set_setting` failure
+contained and logged rather than aborting the live-token update.
+
+### 426. `hermes_oauth_refresh` and `poll` call the synchronous `refresh_access_token`/`poll_token` on the event loop, stalling every concurrent request for the portal round-trip
+
+**Severity:** 🟡 Medium · **Status: fixed** — round 134 follow-up (`tests/test_fix_round134.py`; fixed 2026-10-12)
+**Files:** `wiwi/server/app.py:6013` (poll), `:6058` (refresh)
+
+The admin endpoints called `hermes_oauth`'s functions directly, and those use a
+synchronous `httpx.Client` (they are shared with the CLI-facing connect flow).
+The round-134 auto-refresh runs them via `asyncio.to_thread`, but these two
+handlers did not. A `POST /admin/hermes/oauth/refresh` blocked the uvicorn event
+loop for the full Nous round-trip (up to `_TIMEOUT_S = 30s`), stalling every
+in-flight completion and stream on the same worker.
+
+Fix: both calls are wrapped in `await asyncio.to_thread(...)`, matching
+`hermes_auto_refresh._do_refresh`. Covered by the existing round-134 admin/flow
+tests, which now exercise the threaded path.
+
+---
+
 ## ✅ Fixed — round 134: Hermes OAuth auto-refresh (2026-10-12)
 
 Found by comparing the three OAuth providers' refresh machinery. One entry,
@@ -15,8 +89,7 @@ Found by comparing the three OAuth providers' refresh machinery. One entry,
 
 ### 423. Hermes has no automatic token refresh — an expired token hard-401s and retires a healthy key
 
-**Severity:** 🟠 High · **Status: fixed** — round 134 (`tests/test_fix_round134.py`; found and fixed 2026-10-12)
-**Files:** (new) `wiwi/providers/hermes_auto_refresh.py`; `wiwi/server/app.py:1216` (lifespan wiring), `:1247-1260` (sweeper + 401 hook), `AppState.__init__` + teardown
+**Severity:** 🟠 High · **Status: fixed** — round 134 (`tests/test_fix_round134.py`; found and fixed 2026-10-12)**Files:** (new) `wiwi/providers/hermes_auto_refresh.py`; `wiwi/server/app.py:1216` (lifespan wiring), `:1247-1260` (sweeper + 401 hook), `AppState.__init__` + teardown
 
 Cline and WorkBuddy each refresh proactively (a background sweeper that rotates
 tokens inside the lead window) **and** on demand (a gateway 401 hook). Hermes
@@ -12880,7 +12953,7 @@ OpenAI Responses codec, and the middleware/lifespan). #345 is the
 
 ### 345. Realtime sessions are priced and logged but never charged to the key
 
-**Severity:** 🔴 Critical · **Status: open**
+**Severity:** 🔴 Critical · **Status: fixed** — round 135 (`tests/test_fix_round135.py`; fixed 2026-10-12)
 
 **Files:** `wiwi/server/app.py:515-517` (`_bill_realtime_session`),
 `wiwi/auth/service.py` (no such method)
@@ -12951,6 +13024,19 @@ reservation nor its release.
 
 **Test:** none exists — `tests/test_realtime.py` asserts the *peak-usage*
 selection (`:244`) and the relay, never that a key is charged.
+
+**Resolved in round 135** (`tests/test_fix_round135.py`). `_bill_realtime_session`
+now charges via `state.auth.apply_spend_trueup(info.key_id, priced)` — the
+unconditional true-up `record_spend` itself applies for an over-cap request
+(the upstream really served these tokens, so the cap records them and only
+blocks FUTURE requests) — and the bare `suppress` is replaced with the #179
+guard rails: a `realtime_spend_charge_failed` log plus a
+`spend_charge_failures` increment, so an unenforceable cap is visible in
+/health and /metrics instead of vanishing. Realtime still skips the
+admission-time `reserve_budget` (correct: it has no pre-flight estimate, and
+its charge is a single unconditional true-up at close), so no reservation leak
+is introduced. The regression test proves `spend_to_date` moves for a
+budget-capped key and that a broken charge is counted, not silent.
 
 ---
 

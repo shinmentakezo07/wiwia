@@ -266,3 +266,62 @@ async def test_dead_refresh_grant_surfaces_401():
     finally:
         await cs.engine.dispose()
         await gw.aclose()
+
+
+# -- 4. A refresh with no expires_in must not park expiry in the past ---------
+#    (AUDIT #425: time.time() + 0 lands in the past, so expires_within_lead is
+#    True forever and the sweeper re-refreshes the single-use grant every tick
+#    until invalid_grant marks the provider dead.)
+
+
+def test_compute_expires_at_falls_forward_when_expires_in_missing():
+    """The helper behind every expiry write: absent/zero/garbage → a short
+    forward window, never the past."""
+    from wiwi.providers import hermes_oauth
+    from wiwi.providers.hermes_oauth import compute_expires_at
+
+    now = 1_000_000.0
+    # Usable value honoured verbatim.
+    assert compute_expires_at(3600, now) == now + 3600
+    # Missing / None / zero / negative / garbage / bool → forward, not past,
+    # and strictly BEYOND the lead window so the next expires_within_lead read
+    # is False (a fallback of exactly REFRESH_LEAD_S lands on the boundary and
+    # still reads as due — the #425 spin by one second).
+    for bad in (None, 0, -5, "x", "", [], True):
+        expires_at = compute_expires_at(bad, now)
+        assert expires_at > now, f"{bad!r} produced a non-forward expiry"
+        assert expires_at == pytest.approx(now + 240)
+        assert not hermes_oauth.expires_within_lead(expires_at, now)
+
+
+@respx.mock
+async def test_refresh_without_expires_in_does_not_spin_the_sweeper():
+    """End-to-end guard for the #425 storm: a refresh response that omits
+    ``expires_in`` must leave the token NOT immediately due."""
+    gw, state, cs = _build_gateway_with_store()
+    await cs.startup()
+    try:
+        # Due now, so the first sweep refreshes.
+        await _seed(cs, expires_at=time.time() - 1)
+        refresh_route = respx.post(TOKEN_URL).mock(
+            return_value=httpx.Response(200, json={
+                "access_token": "acc-no-exp",
+                "refresh_token": "ref-no-exp",
+                # ``expires_in`` deliberately ABSENT.
+            }))
+        worker = hermes_auto_refresh.HermesAutoRefresh(state)
+
+        await worker._sweep()
+        assert refresh_route.call_count == 1
+
+        # The stored expiry is now in the future (fallback window), so a second
+        # immediate sweep must NOT refresh again — the pre-#425 shape wrote
+        # ``time.time() + 0`` and the token read as permanently due.
+        record = await cs.get_setting("hermes_oauth:hermes-prov")
+        assert record["expires_at"] > time.time()
+        await worker._sweep()
+        assert refresh_route.call_count == 1  # no second rotation
+    finally:
+        await cs.engine.dispose()
+        await gw.aclose()
+

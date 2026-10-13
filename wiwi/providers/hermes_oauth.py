@@ -179,3 +179,36 @@ def expires_within_lead(expires_at: float | None, now: float,
         return float(expires_at) - float(now) <= lead
     except (TypeError, ValueError):
         return True
+
+
+def compute_expires_at(expires_in: object, now: float | None = None,
+                       fallback_window: int = 2 * REFRESH_LEAD_S) -> float:
+    """Resolve a token payload's ``expires_in`` into an absolute ``expires_at``.
+
+    Nous returns ``expires_in`` on every device-code and refresh response today,
+    but the wire contract is not guaranteed, and a response that omits it — or
+    returns ``0`` / a non-number — must not be recorded as *already expired*.
+    ``time.time() + 0`` lands in the past, and ``expires_within_lead(past, now)``
+    is ``True``, so the round-134 sweeper would treat the token as permanently
+    due and re-refresh the single-use refresh grant every tick until
+    ``invalid_grant`` marked the provider dead (AUDIT #425).
+
+    A missing or unusable ``expires_in`` therefore falls back to a forward
+    window *strictly beyond the lead* (``2 * REFRESH_LEAD_S``) rather than the
+    past, so the very next ``expires_within_lead`` read is ``False``: one missing
+    field cannot turn into a refresh storm. It is deliberately only two lead
+    windows, not "never expires" — a token whose real expiry is unknown should
+    still be probed again soon. A usable value is honoured verbatim. ``bool`` is
+    rejected like any other non-number (``isinstance(True, int)`` is True, but
+    ``expires_in: true`` is a client/portal bug, not "1 second").
+    """
+    now = time.time() if now is None else now
+    if isinstance(expires_in, bool):
+        return now + fallback_window
+    try:
+        seconds = int(expires_in)
+    except (TypeError, ValueError):
+        return now + fallback_window
+    if seconds <= 0:
+        return now + fallback_window
+    return now + seconds

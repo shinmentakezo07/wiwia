@@ -209,13 +209,31 @@ class HermesAutoRefresh:
             self._trip_circuit(name)
             log.warning("hermes_auto_refresh_no_access_token", provider=name)
             return False
-        # Success — store the new access token on the pool key and the new
-        # refresh token in the OAuth record.
-        await self._update_secret(name, f"hermes:{access}")
+        # Persist the OAuth record FIRST (new refresh token + a forward
+        # expires_at), then rotate the pool key. Order matters for two reasons:
+        #   1. The record write is what stops the #425 spin — if the pool-key
+        #      write below raises for a YAML-defined provider (no DB key row →
+        #      ConfigStoreNotFound), an out-of-order version never reached the
+        #      set_setting at all, so expires_at stayed in the past and the
+        #      sweeper re-refreshed the single-use grant every tick.
+        #   2. A crash between the two leaves a fresh refresh token on disk with
+        #      the old access token still live — recoverable on the next tick —
+        #      rather than the reverse, where a rotated key has no persisted
+        #      record to point the next refresh at.
         if result.get("refresh_token"):
             record["refresh_token"] = result["refresh_token"]
-        record["expires_at"] = time.time() + int(result.get("expires_in", 0) or 0)
-        await self._state.config_store.set_setting(f"hermes_oauth:{name}", record)
+        record["expires_at"] = hermes_oauth.compute_expires_at(
+            result.get("expires_in"))
+        try:
+            await self._state.config_store.set_setting(
+                f"hermes_oauth:{name}", record)
+        except Exception as e:  # noqa: BLE001 — a settings outage must not strand the key
+            # The rotation happened upstream; failing to persist the record is
+            # loud (it will re-refresh next tick) but must not abort the key
+            # update below — the live access token is still the one in use.
+            log.error("hermes_auto_refresh_record_persist_failed", provider=name,
+                      error=type(e).__name__, detail=str(e))
+        await self._update_secret(name, f"hermes:{access}")
         self._generations[name] = self._generations.get(name, 0) + 1
         self._circuit.clear(name)
         log.info("hermes_auto_refreshed", provider=name)

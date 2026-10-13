@@ -527,8 +527,26 @@ async def _bill_realtime_session(state, info, ctx, dep,
     ctx.stop_reason = "realtime_session"
     ctx.status = 200
     if state.auth is not None:
-        with contextlib.suppress(Exception):
-            await state.auth.record_spend(info.key_id, priced, ctx)
+        # Charge the virtual key for real tokens consumed. This used to call
+        # ``state.auth.record_spend(...)`` — a method AuthService never had
+        # (its real surface is ``update_spend`` / ``apply_spend_trueup``), so
+        # every call raised AttributeError and the surrounding
+        # ``contextlib.suppress`` swallowed it: a session was priced, logged and
+        # shown in the console, but spend_to_date never moved, so a
+        # budget-capped key accrued realtime cost for free and its cap never
+        # tripped (AUDIT #345). Use the unconditional true-up, matching what
+        # ``record_spend`` applies for a request that already crossed its cap:
+        # the upstream really served these tokens, so the cap must not reject
+        # them; it only blocks FUTURE requests.
+        try:
+            await state.auth.apply_spend_trueup(info.key_id, priced)
+        except Exception as e:  # noqa: BLE001 — accounting must never break a served session
+            # Loud, counted, and never swallowed silently (AUDIT #179/#345): a
+            # realtime session that cannot be charged is money the budget cap
+            # is not enforcing, and it must be visible in /health and /metrics.
+            state.spend_charge_failures += 1
+            _rt_log.error("realtime_spend_charge_failed", key_id=info.key_id,
+                          cost=priced, error=type(e).__name__, detail=str(e))
     state.logs.log_request(build_log_event(ctx))
 
 
@@ -5992,7 +6010,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return _err(410, "invalid_request_error",
                         "device-code session expired; start a new one", request)
         try:
-            tokens = hermes_oauth.poll_token(
+            # Nous refresh is synchronous httpx (shared with the CLI connect
+            # flow), so run the single poll on a worker thread: an inline POST
+            # would stall the uvicorn event loop for the portal round-trip,
+            # blocking every in-flight completion and stream (AUDIT #426/#33).
+            tokens = await asyncio.to_thread(
+                hermes_oauth.poll_token,
                 sess["device_code"],
                 poll_interval=sess.get("interval", 5),
                 single_poll=True)
@@ -6013,7 +6036,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return _err(400, "invalid_request_error",
                         f"provider '{provider}' has no keys — cannot store token",
                         request)
-        expires_at = time.time() + int(tokens.get("expires_in", 0) or 0)
+        expires_at = hermes_oauth.compute_expires_at(
+            tokens.get("expires_in"), time.time())
         record = {
             "refresh_token": tokens.get("refresh_token"),
             "expires_at": expires_at,
@@ -6075,7 +6099,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         f"provider '{provider}' has no stored Hermes tokens; "
                         "connect first", request)
         try:
-            result = hermes_oauth.refresh_access_token(record["refresh_token"])
+            # Synchronous httpx on a worker thread so the event loop is not
+            # stalled for the Nous round-trip (AUDIT #426), matching the
+            # round-134 auto-refresh's asyncio.to_thread call.
+            result = await asyncio.to_thread(
+                hermes_oauth.refresh_access_token, record["refresh_token"])
         except hermes_oauth.HermesAuthError as e:
             if e.relogin_required:
                 return _err(401, "authentication_error",
@@ -6091,7 +6119,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         f"provider '{provider}' has no keys — cannot store "
                         "refreshed token", request)
         record["refresh_token"] = result.get("refresh_token", record["refresh_token"])
-        expires_at = time.time() + int(result.get("expires_in", 0) or 0)
+        expires_at = hermes_oauth.compute_expires_at(
+            result.get("expires_in"), time.time())
         record["expires_at"] = expires_at
         if state.config_store:
             await state.config_store.set_setting(
