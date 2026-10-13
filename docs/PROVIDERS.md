@@ -254,7 +254,23 @@ you never handle a key at all. Latest models: `Hermes-4-405B`, `Hermes-4-70B`,
 | Method | When to use | Where the credential lives |
 |---|---|---|
 | **API key** | Simple, scripted setups | A `keys[].key` entry (or the admin key pool) — sent as `Authorization: Bearer <key>` |
-| **OAuth (device-code)** | Sign in with a Nous Portal account; no key to paste or rotate | The account's pool key, stored prefixed `hermes:` (adapter strips the prefix); refresh token kept in the config store |
+| **OAuth (device-code)** | Sign in with a Nous Portal account; no key to paste or rotate | The account's own pool key, stored as a `hermes:<json>` credential blob (access + refresh + expiry); the adapter resolves the bearer from it |
+
+### Multiple accounts, one pool
+
+Each Nous Portal account is a **separate OAuth identity** with its own rotating
+(single-use) refresh token and its own rate-limit bucket (~50 RPM / 50k TPM).
+wiwi stores **one account per provider pool key** as a self-contained
+`hermes:<json>` blob, so the normal key pool and its smooth weighted
+round-robin spread traffic across every connected account and beat any single
+account's cap. Connecting a second account **appends** a new pool key (labelled
+by the account's email, de-duplicated `…-2`, `…-3`); it never overwrites an
+existing one. Each account's tokens are refreshed on its own — a rotation on one
+account never touches a sibling, and one account whose refresh grant dies
+(`invalid_grant`) is removed from rotation without affecting the rest.
+
+A bare `hermes:<token>` (paste-a-token, no JSON) still works for inference but
+carries no refresh grant, so it is never auto-refreshed.
 
 ### OAuth device-code flow (RFC 8628)
 
@@ -269,27 +285,35 @@ URL** and **no client secret** — the flow is:
    Nous Portal. The user code is pre-filled by the link.
 3. **Poll** — `POST /admin/hermes/oauth/poll` with the returned `state`. wiwi
    forwards one poll to Portal; while you have not approved it answers
-   `{"pending": true}` (the UI retries every ~5 s). Once approved it stores the
-   access token on the pool key as `hermes:<token>`, keeps the refresh token, and
-   returns `{"connected": true, "access_token_masked", "expires_at"}`.
+   `{"pending": true}` (the UI retries every ~5 s). Once approved it **appends
+   the account as a new pool key** holding a `hermes:<json>` credential blob and
+   returns `{"connected": true, "key_label", "access_token_masked", "expires_at"}`.
 
 Do all of this from the admin UI at **`/console/hermes-oauth`** — the Connect
 button drives the three steps above and shows a live "waiting for approval"
 state until the browser sign-in completes.
 
-- **Refresh:** the access token is refreshed on demand when it is within 120 s of
-  expiry (`POST /admin/hermes/oauth/refresh`). A terminal grant (`invalid_grant`,
-  or a reused/revoked refresh token) returns `401` and requires a fresh
-  device-code login.
-- **Status / disconnect:** `GET /admin/hermes/oauth/status` and
-  `DELETE /admin/hermes/oauth/disconnect`.
-- **Bearer:** the stored token is sent upstream as `Authorization: Bearer <token>`;
-  the `hermes:` prefix is stripped by `HermesAdapter.headers()` so the credential
-  is never sent literally.
+- **Refresh:** a background sweeper rotates each account ~2 minutes before its
+  access token expires (a ~60 s tick), and the gateway also rotates on a
+  mid-session `401` and retries once. You can force a rotation from
+  `POST /admin/hermes/oauth/refresh` (optionally `key_label` for one account). A
+  terminal grant (`invalid_grant`, or a reused/revoked refresh token) returns
+  `401`, stops that account's refresh retries, and requires a fresh device-code
+  login for it — the other accounts keep serving.
+- **Status / disconnect:** `GET /admin/hermes/oauth/status` lists every account
+  (`accounts[]`, each with its own expiry / `needs_refresh` / `has_refresh_token`).
+  `DELETE /admin/hermes/oauth/disconnect` removes one account (`key_label`) or,
+  with no label, the whole pool.
+- **Bearer:** the stored access token is sent upstream as
+  `Authorization: Bearer <token>`; `HermesAdapter.headers()` resolves it from the
+  blob (the `hermes:` prefix and JSON never reach the wire). Nous accepts the
+  access token alone — the CLI's `agent_key` is the same JWT — so no second
+  credential is needed.
 
-The endpoint contract is implemented in `wiwi/providers/hermes_oauth.py`, verified
-against the Hermes Agent CLI's own OAuth client
-(`hermes_cli/auth_nous.py` + `auth_device_flow.py`) and the live Portal endpoints
+The endpoint contract is implemented in `wiwi/providers/hermes_oauth.py` (plus
+`hermes_auto_refresh.py` for the per-account rotation), verified against the
+Hermes Agent CLI's own OAuth client (`hermes_cli/auth_nous.py` +
+`auth_device_flow.py`) and the live Portal endpoints
 (`portal.nousresearch.com/api/oauth/device/code`, `…/api/oauth/token`). See
 [API_REFERENCE.md](API_REFERENCE.md) § OAuth providers (Hermes) for the full
 request/response shapes.
@@ -381,6 +405,14 @@ rotation and `max_inflight` caps as an HTTP request — and then its frames pass
 through untouched. wiwi does not translate the session protocol: it is stateful
 and ordered, and reimplementing it would mean reimplementing the upstream's
 session store.
+
+Billing is on the session's **peak** usage, charged once at close: the peak
+(not the sum of its usage-bearing events, which restate overlapping windows) is
+priced and applied to the virtual key's spend, so a realtime session counts
+against its `max_budget` exactly like a completion. A session that fails to be
+charged (a transient write failure) is logged and counted in
+`spend_charge_failures` rather than silently dropped, so an unenforced cap stays
+visible in `/health` and `/metrics`.
 
 ## Provider quirks live in adapters — nowhere else
 

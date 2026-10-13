@@ -230,15 +230,15 @@ Four things a backup deliberately does not do:
 
 ### OAuth providers (Hermes / Nous Portal — device-code flow)
 
-Hermes uses OAuth 2.0 device authorization (RFC 8628). Unlike Cline's paste-code flow there is no callback URL: wiwi mints a device code and verification URL, the operator approves in a browser, and wiwi polls the token endpoint. On success the access token lands on the account's pool key (stored prefixed `hermes:`; the adapter strips it for the `Authorization: Bearer`), and the refresh token is persisted for on-demand refresh inside the 120 s lead window before expiry. **No API key is required** — the device-code call bootstraps the account (creating it with a placeholder key if it does not exist).
+Hermes uses OAuth 2.0 device authorization (RFC 8628). Unlike Cline's paste-code flow there is no callback URL: wiwi mints a device code and verification URL, the operator approves in a browser, and wiwi polls the token endpoint. On approval the account is **appended as its own pool key** holding a `hermes:<json>` credential blob (the adapter resolves the `Authorization: Bearer` from it), so multiple Nous accounts share one provider's key pool and round-robin — each account has its own rotating refresh token and its own rate-limit bucket. **No API key is required** — the device-code call bootstraps the account (creating it with a placeholder key if it does not exist). Tokens are rotated automatically by a background sweeper (~2 min before expiry) and on a mid-session `401`; the refresh endpoints below force one.
 
 | Endpoint | Method | Description |
 |---|---|---|
 | `/admin/hermes/oauth/device-code?provider=<name>` | POST | Start device authorization. Returns `{state, user_code, verification_uri, verification_uri_complete, expires_in, interval}`. Creates the account if it does not exist. |
-| `/admin/hermes/oauth/poll` | POST | One poll attempt for a pending session (`{"state": …}`). Returns `{"pending": true}` while unapproved, or the connected account (`{"connected": true, "access_token_masked", "expires_at"}`) on approval. `410` when the session's 10-minute TTL lapses; `404` for an unknown state. |
-| `/admin/hermes/oauth/status?provider=<name>` | GET | `{connected, expires_at, needs_refresh, has_refresh_token}`. |
-| `/admin/hermes/oauth/refresh` | POST | Force a token refresh (`{"provider": …}`). `401` on a terminal grant (`invalid_grant`/reused refresh token) — re-login required. |
-| `/admin/hermes/oauth/disconnect` | DELETE | Disconnect account; clears the stored token state. |
+| `/admin/hermes/oauth/poll` | POST | One poll attempt for a pending session (`{"state": …}`). Returns `{"pending": true}` while unapproved, or the connected account (`{"connected": true, "key_label", "access_token_masked", "expires_at"}`) on approval — the account is added as a new pool key. `410` when the session's 10-minute TTL lapses; `404` for an unknown state. |
+| `/admin/hermes/oauth/status?provider=<name>` | GET | `{connected, accounts[]}` — one entry per connected account with `{key_label, managed, label, expires_at, needs_refresh, has_refresh_token}`. |
+| `/admin/hermes/oauth/refresh` | POST | Force a token refresh (`{"provider": …, "key_label"?: …}`). `key_label` targets one account (default: the first managed one). `401` on a terminal grant (`invalid_grant`/reused refresh token) — that account needs re-login; others keep serving. |
+| `/admin/hermes/oauth/disconnect` | DELETE | Remove accounts (`{"provider": …, "key_label"?: …}`). With `key_label` removes just that account; without it, removes every managed account. Returns `{disconnected: <count>}`. |
 
 | `/admin/workbuddy/accounts` | GET | List connected WorkBuddy accounts. |
 | `/admin/workbuddy/import` | POST | Import WorkBuddy account credentials. |
@@ -431,14 +431,19 @@ curl -X PUT localhost:4000/admin/cline/settings -H "$MK" \
 
 # Hermes (Nous Portal) — device-code OAuth. No API key needed: the first call
 # bootstraps the account. Open verification_uri_complete in a browser, approve,
-# then poll until it returns connected:true.
+# then poll until it returns connected:true. Each approval ADDS an account as a
+# new pool key (key_label in the response); repeat to connect more accounts and
+# they round-robin. Tokens auto-refresh ~2 min before expiry and on a 401.
 curl -X POST "localhost:4000/admin/hermes/oauth/device-code?provider=hermes-main" -H "$MK"
 # -> {state, user_code, verification_uri_complete, expires_in, interval}
 curl -X POST localhost:4000/admin/hermes/oauth/poll -H "$MK" -d '{"state": "..."}'
-#   -> {"pending": true} until approved, then {"connected": true, ...}
+#   -> {"pending": true} until approved, then {"connected": true, "key_label": ...}
 curl localhost:4000/admin/hermes/oauth/status?provider=hermes-main -H "$MK"
-curl -X POST localhost:4000/admin/hermes/oauth/refresh -H "$MK" -d '{"provider": "hermes-main"}'
-curl -X DELETE localhost:4000/admin/hermes/oauth/disconnect -H "$MK" -d '{"provider": "hermes-main"}'
+#   -> {"connected": true, "accounts": [{"key_label", "expires_at", ...}, ...]}
+# Force a rotation for one account (key_label optional; defaults to the first):
+curl -X POST localhost:4000/admin/hermes/oauth/refresh -H "$MK" -d '{"provider": "hermes-main", "key_label": "acct@example.com"}'
+# Disconnect one account, or the whole pool when key_label is omitted:
+curl -X DELETE localhost:4000/admin/hermes/oauth/disconnect -H "$MK" -d '{"provider": "hermes-main", "key_label": "acct@example.com"}'
 
 # WorkBuddy (CodeBuddy) — parallel API
 curl localhost:4000/admin/workbuddy/accounts -H "$MK"
