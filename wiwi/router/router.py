@@ -1588,16 +1588,25 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                     await dep.provider.on_result_locked(key, status, e.retry_after,
                                                         failover_mode=failover_mode,
                                                         key_max_consecutive_fails=key_max_fails)
+                # The vendor's own label leads the line. `e.message` is wiwi's
+                # rendering, and for an entitlement refusal that rendering
+                # ("requires billing") reads like an account problem when the
+                # upstream may have meant "our request does not look like your
+                # client" — which is exactly how an OpenCode Zen free-model
+                # outage was misdiagnosed. `FreeTierError` and `CreditsError`
+                # are both 403 and want opposite fixes.
+                cause = f"{e.upstream_type}: " if e.upstream_type else ""
                 if e.etype == "permission_error" and e.status in (401, 402, 403):
                     # Account-level refusal (billing/policy): the pool was not
                     # charged, so say so and give the operator the real cause.
                     _proxy("warn",
                            f"{dep.provider.name} refused {dep.group}/{dep.model_id} "
-                           f"[{key.label}] — account entitlement ({e.status}): {e.message}")
+                           f"[{key.label}] — {cause}account entitlement "
+                           f"({e.status}): {e.message}")
                 elif status is not None:
                     _proxy("warn",
                            f"upstream {status} on {dep.group}/{dep.model_id} "
-                           f"[{dep.provider.name}/{key.label}]: {e.message}")
+                           f"[{dep.provider.name}/{key.label}]: {cause}{e.message}")
                 if status in (408, 500, 502, 503, 504, 529):
                     dep.record_fail(router.settings.allowed_fails,
                                     router.settings.cooldown_time)

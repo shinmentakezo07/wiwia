@@ -106,10 +106,12 @@ Verify in a mobile-sized viewport and a desktop viewport; put a screenshot or sh
 1. Read `AUDIT.md` first — avoid redoing a known fix; record any newly discovered bug there (severity badge, file:line, trigger, fix sketch) before or alongside fixing it, and mark fixed entries `**Status: fixed**`.
 2. Read `UPDATE.md` — the **binding changelog** for OpenAI ↔ Anthropic cross-provider translation, the OpenRouter adapter, and multi-turn conversation fixes. Required reading before touching `wiwi/wire/` codecs, the OpenAI/Anthropic/OpenRouter adapters, or anything handling `reasoning_effort`/`reasoning`, `tool_result`, `content: null`, `stream_options`, or upstream error extraction. Add an entry when a new fix lands in those areas.
 3. Follow systematic debugging — root cause before patching.
-4. Write the failing regression test FIRST into the next `test_fix_roundN.py`.
-5. Implement minimally and in-module (dialect → `wiwi/wire/`; provider → `wiwi/providers/` + registry branch).
-6. Self-review (requesting-code-review) before claiming done.
-7. Gate: `python3 -m pytest tests/ -q && ruff check wiwi/ tests/` both green; live-path smoke test for UI/server changes.
+4. **An upstream refusal (`4xx` you cannot explain) is its own workflow** — read [UPSTREAM_DIAGNOSIS.md](UPSTREAM_DIAGNOSIS.md) first. Do not act on the error text: wiwi's own error classification relabels causes, and "requires billing" has already meant "our request does not look like the vendor's client". Separate credential / entitlement / request-shape before patching, and never conclude that an offer was withdrawn on the strength of one failing probe.
+5. Write the failing regression test FIRST into the next `test_fix_roundN.py`.
+6. Implement minimally and in-module (dialect → `wiwi/wire/`; provider → `wiwi/providers/` + registry branch).
+7. Self-review (requesting-code-review) before claiming done.
+8. Gate: `python3 -m pytest tests/ -q && ruff check wiwi/ tests/` both green; live-path smoke test for UI/server changes.
+9. **When a fix changes what the code believes about an upstream** (a required request shape, a minimum client version, a retired model, a renamed field), correct every statement that is now false — docstrings, config comments, example configs, `AUDIT.md`, `UPDATE.md`, and tests that pinned the old behaviour. A stale comment is how the next person re-diagnoses the same bug looking correct.
 
 ## 9. Docs map
 
@@ -119,6 +121,8 @@ Verify in a mobile-sized viewport and a desktop viewport; put a screenshot or sh
 | [CONFIG.md](CONFIG.md) | `wiwi.yaml` reference, env vars |
 | [API_REFERENCE.md](API_REFERENCE.md) | All endpoints |
 | [PROVIDERS.md](PROVIDERS.md) | The 12 provider types, quirks, key pools |
+| [UPSTREAM_DIAGNOSIS.md](UPSTREAM_DIAGNOSIS.md) | Playbook for an unexplained upstream `4xx`: credential vs entitlement vs request shape |
+| [OPENCODE.md](OPENCODE.md) | OpenCode Console deep dive — the free-tier request-shape gate (worked example) |
 | [STREAMING.md](STREAMING.md) | Delta taxonomy, pump, failover/journals, guards |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | System architecture, request pipeline, recovery |
 | [CORE.md](CORE.md) | Internal subsystem reference |

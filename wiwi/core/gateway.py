@@ -156,6 +156,26 @@ def _end_attempt_span(span: Any, ctx: RequestContext, before: int) -> None:
         "wiwi.latency_ms": record.latency_ms if record else None})
 
 
+def _log_upstream_refusal(err: WiwiError, dep: Deployment) -> None:
+    """Log *why the vendor refused*, not only how wiwi rendered it.
+
+    The attempt line above says ``http_403`` and nothing else, which is the
+    whole reason an OpenCode Zen request-shape refusal read as a billing problem:
+    wiwi renders ``FreeTierError`` as ``402 … requires billing``, and without the
+    vendor's own label in the log the two are indistinguishable from the outside.
+
+    One debug line here turns "the provider is refusing" into a starting point:
+    ``FreeTierError`` → shape or entitlement; ``CreditsError`` → account;
+    ``Invalid credential`` → key; ``RegionError`` → geography. See
+    ``docs/UPSTREAM_DIAGNOSIS.md``.
+    """
+    log.debug("upstream_refused",
+              provider=dep.provider.name, model=dep.model_id,
+              status=err.status, wiwi_etype=err.etype,
+              upstream_type=err.upstream_type or "-",
+              retryable=err.retryable)
+
+
 def _log_attempt(router: Router, ctx: RequestContext, dep: Deployment,
                  key: ProviderKeyRef, status: str, latency_ms: int) -> None:
     """Emit a proxy-log line naming the provider and pool key that served an
@@ -595,6 +615,8 @@ class Gateway:
             _log_attempt(self.router, ctx, dep, key, f"http_{resp.status_code}", latency)
             err = error_from_provider_status(resp.status_code, resp.text,
                                              dep.provider.name)
+            _log_upstream_refusal(err, dep)
+            _log_upstream_refusal(err, dep)
             ra = _parse_retry_after(resp.headers.get("retry-after"))
             if ra is not None:
                 err.retry_after = ra
@@ -724,6 +746,10 @@ class Gateway:
             err = error_from_provider_status(resp.status_code,
                                              raw.decode(errors="replace"),
                                              dep.provider.name)
+            # The force_stream path (OpenCode, Cline, WorkBuddy) lands here, so
+            # without this line a structured refusal record would never exist for
+            # exactly the providers whose refusals are hardest to diagnose.
+            _log_upstream_refusal(err, dep)
             ra = _parse_retry_after(resp.headers.get("retry-after"))
             if ra is not None:
                 err.retry_after = ra
@@ -1818,6 +1844,7 @@ class Gateway:
                 err = error_from_provider_status(resp.status_code,
                                                  raw.decode(errors="replace"),
                                                  dep.provider.name)
+                _log_upstream_refusal(err, dep)
                 ra = _parse_retry_after(resp.headers.get("retry-after"))
                 if ra is not None:
                     err.retry_after = ra
@@ -1873,6 +1900,7 @@ class Gateway:
                             err = error_from_provider_status(
                                 resp.status_code, raw.decode(errors="replace"),
                                 dep.provider.name)
+                            _log_upstream_refusal(err, dep)
                             ra = _parse_retry_after(
                                 resp.headers.get("retry-after"))
                             if ra is not None:

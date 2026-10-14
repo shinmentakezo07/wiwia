@@ -548,7 +548,13 @@ class HealthHealer:
         err = error_from_provider_status(resp.status_code, resp.text,
                                          dep.provider.name)
         ra = parse_retry_after(resp.headers.get("retry-after"))
+        # The healer's verdict detail is what an operator reads when a provider
+        # looks unhealthy, so it must name the vendor's own refusal, not just the
+        # status: "FreeTierError" and "CreditsError" are both 403 and want
+        # opposite fixes. See docs/UPSTREAM_DIAGNOSIS.md.
         detail = f"retry_after={ra}" if ra is not None else err.message
+        if err.upstream_type:
+            detail = f"{err.upstream_type}: {detail}"
         return probe_verdict(resp.status_code, resp.content), detail, ra
 
     def _announce(self, message: str) -> None:

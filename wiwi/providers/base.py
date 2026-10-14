@@ -18,7 +18,8 @@ class WiwiError(Exception):
     """Normalized gateway error; rendered per-surface by wire codecs."""
 
     def __init__(self, status: int, etype: str, message: str,
-                 retryable: bool = False, retry_after: float | None = None):
+                 retryable: bool = False, retry_after: float | None = None,
+                 upstream_type: str | None = None):
         super().__init__(message)
         self.status = status
         self.etype = etype  # invalid_request_error | authentication_error | permission_error |
@@ -27,6 +28,16 @@ class WiwiError(Exception):
         self.message = message
         self.retryable = retryable
         self.retry_after = retry_after
+        # The upstream's own error type, verbatim ("FreeTierError",
+        # "CreditsError", "RegionError", ...), when the body named one.
+        #
+        # `etype` is wiwi's own classification and it is lossy in exactly the
+        # place that hurts: an OpenCode Zen request-shape refusal arrives as
+        # `permission_error` + 402 + "requires billing", which reads like an
+        # account problem and sent one investigation chasing keys instead of the
+        # request. Keeping the vendor's own label means the diagnostic starts
+        # from what the vendor actually said. See docs/UPSTREAM_DIAGNOSIS.md.
+        self.upstream_type = upstream_type
 
 
 RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504, 529}
@@ -236,6 +247,24 @@ def _entitlement_kind(body_text: str, msg: str) -> str | None:
 
 
 def error_from_provider_status(status: int, body_text: str, provider: str) -> WiwiError:
+    """Classify an upstream refusal, tagging it with the vendor's own label.
+
+    ``WiwiError.upstream_type`` carries whatever the provider named in its body
+    ("FreeTierError", "CreditsError", "RegionError", "ModelError", ...) so a log
+    line says *why the vendor refused* rather than only how wiwi chose to render
+    it. Set here, in one place, rather than at each ``return`` below: the
+    classifier has eight exits and a forgotten one is a silent gap in the very
+    field that exists to close gaps.
+    """
+    err = _classify_provider_status(status, body_text, provider)
+    # `or None` so the contract is honestly ``str | None``: the extractor returns
+    # "" for a body with no type (a proxy-level 403 page, say), and an empty
+    # string in a log field reads as a type that was found but unnamed.
+    err.upstream_type = _extract_error_type(body_text) or None
+    return err
+
+
+def _classify_provider_status(status: int, body_text: str, provider: str) -> WiwiError:
     msg = _extract_error_message(body_text) or f"{provider} returned HTTP {status}"
     if status == 401 or status == 403:
         # Distinguish a rejected credential from an account-level refusal.

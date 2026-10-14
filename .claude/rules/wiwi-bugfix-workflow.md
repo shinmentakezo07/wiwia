@@ -13,6 +13,9 @@ Binding project rules (arch layering, ruff, async, streaming contract, test conv
 - Use the ambient interpreter for tests and lint: `python3 -m pytest tests/ -q` and `ruff check wiwi/ tests/`. **Never** `.venv/bin/python` — the `.venv` symlink has no site-packages (see CLAUDE.md).
 - New bugfix tests go into thematic regression files (`test_fix_roundN.py`) rather than topic files — find the next unused N with `ls tests/test_fix_round*.py`, never assume one.
 - Verify before done: full pytest + ruff, both green, before claiming work finished or committing.
+- **An unexplained upstream `4xx` is not a normal bugfix** — read `docs/UPSTREAM_DIAGNOSIS.md` first. The error text picks the wrong cause (wiwi's own classification has renamed a request-shape refusal "requires billing"), and credential/entitlement/request-shape have different fixes. Get the raw upstream error type before theorising, and never conclude an offer was withdrawn from one failing probe or from a "control" that shared infrastructure with the path it was comparing against.
+- When a fix changes what the code believes about an upstream, correct every statement that is now false — docstrings, config comments, example configs, `AUDIT.md`, `UPDATE.md`, and tests that pinned the old behaviour.
+- Before touching the `opencode` provider adapter, read `docs/OPENCODE.md`: its access depends on the request shape matching the current OpenCode client, and that shape has already moved once.
 
 ## Known bug list
 The 2026-08-25 review list (H1 budget race, H4 plaintext keys, H5–H8 streaming hardening, H2/H3 locking, H10 Responses parallel tool calls) is **fully fixed** as of 2026-08-31 — verify against `tests/` if in doubt, and do not re-fix. Before starting a new bugfix, read `AUDIT.md` for currently open issues.

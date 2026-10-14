@@ -14,6 +14,11 @@ instead of probed, it says so.
 - [Re-deriving the shape when the client moves](#re-deriving-the-shape-when-the-client-moves)
 - [Not fixable here](#not-fixable-here)
 
+> This is the **worked example** for [UPSTREAM_DIAGNOSIS.md](UPSTREAM_DIAGNOSIS.md),
+> which is the provider-agnostic playbook: how to tell a credential refusal from
+> an entitlement one from a request-shape one, and how to isolate the cause. Read
+> that one first whenever *any* provider returns a `4xx` you cannot explain.
+
 ---
 
 ## What it is
