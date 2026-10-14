@@ -172,10 +172,12 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
   adapter, multi-turn fixes, `reasoning_effort`/`reasoning`, `tool_result`, `content: null`,
   `stream_options`, upstream error extraction). **Required reading before touching
   `wiwi/wire/` codecs or provider adapters**; add an entry when a fix lands there.
-- `docs/` — `QUICKSTART.md`, `CONFIG.md`, `API_REFERENCE.md`, `PROVIDERS.md`, `STREAMING.md`,
-  `ARCHITECTURE.md`, `CORE.md`, `ADMIN.md`, `DEVELOPMENT.md` (binding invariants §5, UI rule
-  §7, bugfix workflow §8), `TECHSTACK.md`, `PLAN.md`, `MVP.md`, `RESEARCH.md`;
-  `docs/superpowers/{specs,plans}/` is a historical record.
+- `docs/` — `QUICKSTART.md`, `CONFIG.md`, `API_REFERENCE.md`, `PROVIDERS.md`, `OPENCODE.md`,
+  `STREAMING.md`, `ARCHITECTURE.md`, `CORE.md`, `ADMIN.md`, `DEVELOPMENT.md` (binding invariants
+  §5, UI rule §7, bugfix workflow §8), `TECHSTACK.md`, `PLAN.md`, `MVP.md`, `RESEARCH.md`;
+  `docs/superpowers/{specs,plans}/` is a historical record. **Required reading before
+  touching the `opencode` adapter** — that provider's access depends on the request shape
+  matching the current OpenCode client, and the shape has already moved once.
 - `.claude/rules/wiwi-bugfix-workflow.md` — bugfix workflow rules.
 
 > **Docs run ahead of the code.** Some specs describe unbuilt pipelines. When docs and code
