@@ -9,7 +9,7 @@ and re-keying by hand.
 This module is the whole-inventory version of that pair — one document, one
 pass, every table the admin UI can mutate.
 
-Three design points worth knowing before editing:
+Five design points worth knowing before editing:
 
 **Export reads live merged state for routing, DB rows for everything else.**
 The router is built from ``wiwi.yaml`` at startup and DB rows are layered on
@@ -35,19 +35,38 @@ plaintext virtual key to this format; there is nothing to add.
 
 **Validate, then apply.** :func:`validate_backup` reads state but writes
 nothing, and returns a fully-parsed plan; :func:`apply_backup` consumes that
-plan. Any error aborts before a single row changes — the same discipline
-``admin_import_providers`` uses, made structural rather than conventional. It
-also makes ``?dry_run=1`` free, which the console uses to show the operator
-what a file will do before they commit to it.
+plan. Any *validation* error aborts before a single row changes — the same
+discipline ``admin_import_providers`` uses, made structural rather than
+conventional. It also makes ``?dry_run=1`` free, which the console uses to show
+the operator what a file will do before they commit to it.
+
+**The bulk sections are atomic with respect to each other and to everything
+before them.** ``logs``/``rollups``/``responses`` are applied first, in one
+transaction, because they are the only sections big enough to fail part-way
+through — and a per-page commit is how a malformed row 1 200 once left a
+gateway with half an import on disk and no way to tell how far it got. A
+failure there raises a 500 ``BackupError`` and rolls the whole pass back.
+Per-row failures inside ``rollups``/``responses`` are the one exception: each
+row gets its own SAVEPOINT and its failure is *counted and returned*
+(``{"written": n, "failed": n}``) rather than swallowed — see
+:func:`_apply_bulk`.
 
 Import is **merge-only**: every section upserts on its natural key and nothing
 is ever deleted. There is no replace mode — a typo cannot wipe a gateway. The
 two things that remove anything are both removals the *source* recorded as
 removals: a ``detached`` deployment and an ``alias: null`` tombstone.
+
+**What is not in the file is not round-trippable, so it is not in the file.**
+The export carries what the tables can hold. The five per-deployment limits
+(``rpm``/``tpm``/``timeout``/``max_tokens``/``prompt_cache``) are the standing
+example: ``deployments`` has no column for any of them, so exporting them
+promised a persistence the restore could not deliver — see
+:func:`_export_deployments`. Absent means *unknown*, never *reset*.
 """
 
 from __future__ import annotations
 
+import contextlib
 import time
 from typing import Any
 
@@ -164,23 +183,49 @@ def _engine(state):
                       etype="api_error")
 
 
-async def _table_columns(engine, table: str) -> set[str]:
+@contextlib.asynccontextmanager
+async def _write_scope(engine, conn=None):
+    """A write scope on *engine*: the caller's *conn* when one is open, else a
+    fresh transaction.
+
+    Every statement a section writes must go through one of these. A nested
+    ``engine.begin()`` would check out a *second* connection — which on a pooled
+    engine deadlocks against the outer transaction's row locks, and on a
+    single-connection pool (SQLAlchemy's ``StaticPool``, which is what an
+    in-memory SQLite database gets) hands out the same connection twice and lets
+    the inner commit publish the outer work.
+    """
+    if conn is not None:
+        yield conn
+    else:
+        async with engine.begin() as owned:
+            yield owned
+
+
+async def _conn_columns(conn, table: str) -> set[str]:
+    if conn.dialect.name == "postgresql":
+        rows = (await conn.execute(sa.text(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_schema = current_schema()"
+            " AND table_name = :t"), {"t": table})).all()
+        return {r[0] for r in rows}
+    rows = (await conn.execute(sa.text(
+        f"PRAGMA table_info({table})"))).all()
+    return {r[1] for r in rows}
+
+
+async def _table_columns(engine, table: str, *, conn=None) -> set[str]:
     """Column names of *table*, per dialect. Empty when it does not exist.
 
     Mirrors ``ConfigStore._table_columns`` — same two dialects, same ``(cid,
-    name)`` vs ``(column_name)`` indexing difference.
+    name)`` vs ``(column_name)`` indexing difference. Pass *conn* to read
+    through an already-open connection: while a write transaction is open that
+    is the only connection that is safe to use.
     """
-    if engine.dialect.name == "postgresql":
-        async with engine.connect() as conn:
-            rows = (await conn.execute(sa.text(
-                "SELECT column_name FROM information_schema.columns"
-                " WHERE table_schema = current_schema()"
-                " AND table_name = :t"), {"t": table})).all()
-        return {r[0] for r in rows}
-    async with engine.connect() as conn:
-        rows = (await conn.execute(sa.text(
-            f"PRAGMA table_info({table})"))).all()
-    return {r[1] for r in rows}
+    if conn is not None:
+        return await _conn_columns(conn, table)
+    async with engine.connect() as owned:
+        return await _conn_columns(owned, table)
 
 
 def truthy(raw: str | None) -> bool:
@@ -253,7 +298,9 @@ async def build_backup(state, *, include_secrets: bool = False,
     *include_bodies* adds ``request_body``/``response_body`` to log rows. Both
     default off. *log_days* bounds the log window (0 = all time) and
     *log_limit* caps raw log rows (0 = no cap); a cap that bites is recorded in
-    ``truncated`` so a restore knows the section is partial.
+    ``truncated`` — ``{"request_logs": <rows dropped>}``, per table, matching
+    the shape ``BackupDocument.truncated`` declares — so a restore knows the
+    section is partial instead of trusting a short file to be complete.
     """
     doc: dict[str, Any] = {
         "kind": "wiwi.backup",
@@ -282,7 +329,11 @@ async def build_backup(state, *, include_secrets: bool = False,
     for section in sections:
         doc[section] = await builders[section]()
         if section == "logs":
-            truncated = doc["logs"].pop("_truncated", {})
+            # Keyed by table name, not by section: ``counts`` uses the same
+            # inner keys, and ``BackupDocument.truncated`` is a per-table map.
+            dropped = doc["logs"].pop("_truncated", 0)
+            if dropped:
+                truncated["request_logs"] = dropped
     if truncated:
         doc["truncated"] = truncated
     doc["counts"] = _counts(doc)
@@ -290,15 +341,19 @@ async def build_backup(state, *, include_secrets: bool = False,
 
 
 def _counts(doc: dict) -> dict[str, Any]:
-    counts: dict[str, int] = {}
+    counts: dict[str, Any] = {}
     for section in SECTIONS:
         if section not in doc:
             continue
         value = doc[section]
-        if section == "logs":
-            counts[section] = {k: len(v) for k, v in value.items()}
-        elif isinstance(value, dict):
-            counts[section] = len(value)
+        # Every section is either a plain list of rows, or a wrapper dict of
+        # ``table_name -> [rows]`` (``logs`` carries a ``_truncated`` marker
+        # beside its row list). Counting the wrapper's *keys* reported ``1``
+        # for any wrapper section, so the export's counts disagreed with the
+        # dry-run preview, which counts rows per table via ``_plan_counts``.
+        if isinstance(value, dict):
+            counts[section] = {k: len(v) for k, v in value.items()
+                               if isinstance(v, list)}
         else:
             counts[section] = len(value)
     return counts
@@ -345,7 +400,19 @@ async def _export_keys(state, include_secrets: bool) -> list[dict]:
 
 
 async def _export_deployments(state) -> list[dict]:
-    """Model-group deployments (the provider/model combos)."""
+    """Model-group deployments (the provider/model combos).
+
+    Only what the ``deployments`` table can actually hold back: ``group_name``,
+    ``provider_name``, ``model_id``, ``weight``. The five per-deployment limits
+    — ``rpm``, ``tpm``, ``timeout``, ``max_tokens``, ``prompt_cache`` — are
+    deliberately **not** exported. They are real on the live ``Deployment``,
+    but the table has no column for any of them, so a restore could only ever
+    set them in memory and the next restart would rebuild them at their
+    defaults. Shipping them advertised a persistence the format cannot deliver:
+    a restored gateway looked throttled until it was rebooted. They are
+    YAML/``wiwi_params``-owned — ``model_list`` on the source is the durable
+    home for them, and it moves with the instance's config.
+    """
     out = []
     for gname in sorted(state.router.groups):
         for d in state.router.groups[gname]:
@@ -354,11 +421,6 @@ async def _export_deployments(state) -> list[dict]:
                 "provider_name": d.provider.name,
                 "model_id": d.model_id,
                 "weight": d.weight,
-                "rpm": d.rpm,
-                "tpm": d.tpm,
-                "timeout": d.timeout,
-                "max_tokens": d.max_tokens,
-                "prompt_cache": d.prompt_cache,
             })
     return out
 
@@ -570,9 +632,17 @@ def _cutoff(log_days: int) -> float | None:
     return (time.time() - log_days * 86400.0) if log_days > 0 else None
 
 
+#: ``request_logs`` columns the export carries. This must stay a superset-free
+#: mirror of ``db_sink._COLS`` minus ``BODY_COLUMNS``: the export filters this
+#: tuple against the live schema, so a column missing here is dropped from
+#: every backup with no error and no warning. ``error_message`` is included
+#: deliberately — it is an already-scrubbed diagnostic, not user content, so it
+#: must not sit behind ``include_bodies``. ``tests/test_fix_round141.py`` guards
+#: the two lists against drifting apart again.
 _REQUEST_LOG_COLUMNS = (
     "ts", "request_id", "surface", "key_alias", "key_id", "model_group",
-    "provider", "provider_key_label", "status", "error_code", "tok_in",
+    "provider", "provider_key_label", "status", "error_code",
+    "error_message", "tok_in",
     "tok_cached", "tok_cache_creation", "tok_reasoning", "tok_out",
     "usage_estimated", "tps", "ttft_ms", "latency_ms", "cost", "was_stream",
     "cache_hit", "cache_savings", "response_cache_hit", "attempts",
@@ -595,9 +665,21 @@ async def _read_all(engine, table: str, cols: list[str], *,
                     limit: int = 0) -> tuple[list[dict], int]:
     """Every row of *table*, one bounded page at a time.
 
-    Returns ``(rows, truncated)``; *truncated* is the number of rows dropped
-    by *limit*, so the caller can record that the section is partial rather
-    than silently short.
+    Returns ``(rows, truncated)``; *truncated* is the number of rows dropped by
+    *limit*, so the caller can record that the section is partial rather than
+    silently short.
+
+    The keyset column is projected **internally** and stripped again before the
+    row is handed back. Paging needs ``id``; requiring the caller to list it
+    made the export's correctness depend on every column tuple remembering to,
+    and neither ``_REQUEST_LOG_COLUMNS`` nor ``_ROLLUP_COLUMNS`` did — so the
+    cursor was always ``None`` and every bulk export shipped exactly one page,
+    the *oldest* 2000 rows, with no error and no ``truncated`` marker. A caller
+    that asks for ``id`` on purpose (``audit``, ``responses``, where it is part
+    of the record) keeps it.
+
+    A table with no ``id`` cannot be keyset at all, so it falls back to OFFSET
+    paging rather than silently returning its first page.
     """
     if not cols:
         return [], 0
@@ -605,18 +687,22 @@ async def _read_all(engine, table: str, cols: list[str], *,
     usable = [c for c in cols if c in present]
     if not usable:
         return [], 0
-    col_sql = ", ".join(usable)
+    has_id = "id" in present
+    strip_id = has_id and "id" not in usable
+    select_cols = (["id"] + usable) if strip_id else list(usable)
+    col_sql = ", ".join(select_cols)
     out: list[dict] = []
     cursor: Any = None
+    offset = 0
     truncated = 0
     first = True
     while True:
-        where = [] if first else ["id > :cursor"]
+        where = [] if first else (["id > :cursor"] if has_id else [])
         params: dict[str, Any] = {}
         if first and ts_cutoff is not None and ts_column in present:
             where.append(f"{ts_column} >= :cutoff")
             params["cutoff"] = ts_cutoff
-        if not first:
+        if not first and has_id:
             params["cursor"] = cursor
         page = _PAGE
         if limit and len(out) + page > limit:
@@ -625,19 +711,45 @@ async def _read_all(engine, table: str, cols: list[str], *,
         sql = (f"SELECT {col_sql} FROM {table}"
                + (f" WHERE {' AND '.join(where)}" if where else "")
                + " ORDER BY id LIMIT :limit")
+        if not has_id:
+            sql += " OFFSET :offset"
+            params["offset"] = offset
         async with engine.connect() as conn:
             rows = (await conn.execute(sa.text(sql), params)).all()
         if not rows:
             return out, truncated
-        out.extend(_coerce_row(dict(zip(usable, r)), usable) for r in rows)
+        for r in rows:
+            row = dict(zip(select_cols, r))
+            if strip_id:
+                row.pop("id", None)
+            out.append(_coerce_row(row, select_cols))
+        offset += len(rows)
         if limit and len(out) >= limit:
-            return out, truncated
+            # Only the capped path pays for a COUNT, so an unbounded export
+            # costs exactly what it did before.
+            total = await _count_where(engine, table, ts_cutoff=ts_cutoff,
+                                       ts_column=ts_column, present=present)
+            return out, max(0, total - len(out))
         if len(rows) < page:
             return out, truncated
-        cursor = rows[-1][usable.index("id")] if "id" in usable else None
-        if cursor is None:
-            return out, truncated
+        if has_id:
+            cursor = rows[-1][select_cols.index("id")]
         first = False
+
+
+async def _count_where(engine, table: str, *, ts_cutoff: float | None,
+                       ts_column: str, present: set[str]) -> int:
+    """Rows *table* would export under the same age bound — the denominator
+    behind ``truncated``."""
+    where = []
+    params: dict[str, Any] = {}
+    if ts_cutoff is not None and ts_column in present:
+        where.append(f"{ts_column} >= :cutoff")
+        params["cutoff"] = ts_cutoff
+    sql = (f"SELECT COUNT(*) FROM {table}"
+           + (f" WHERE {' AND '.join(where)}" if where else ""))
+    async with engine.connect() as conn:
+        return (await conn.execute(sa.text(sql), params)).scalar() or 0
 
 
 def _coerce_row(row: dict, cols: list[str]) -> dict:
@@ -858,7 +970,23 @@ def _validate_keys(state, doc: dict, plan: dict) -> None:
     plan["keys"] = out
 
 
+#: Deployment limits that exist on the live ``Deployment`` but have no column in
+#: the ``deployments`` table, and are therefore not exported (see
+#: :func:`_export_deployments`). A document may still carry them — an older
+#: export, or a hand-written one — and they are applied to the in-memory
+#: deployment so the file is honoured for the life of the process. Absent means
+#: *unknown*: the target's own value is left alone rather than reset to the
+#: default.
+_DEPLOYMENT_LIMITS = ("rpm", "tpm", "timeout", "max_tokens", "prompt_cache")
+
+
 def _validate_deployments(state, doc: dict, plan: dict) -> None:
+    """Parse the deployments section.
+
+    See :data:`_DEPLOYMENT_LIMITS`: only the fields the document actually
+    carries end up in the plan, so a merge cannot clobber a limit the target
+    set locally with a ``None`` the file never mentioned.
+    """
     raw = _section_list(doc, "deployments")
     known = _future_providers(state, {p["name"] for p in plan["providers"]})
     out: list[dict] = []
@@ -889,18 +1017,21 @@ def _validate_deployments(state, doc: dict, plan: dict) -> None:
                                      f"deployments[{i}].weight")),
         }
         for field in ("rpm", "tpm", "max_tokens"):
-            value = entry.get(field)
+            if field not in entry:
+                continue
+            value = entry[field]
             parsed[field] = (None if value is None
                              else _as_int(value, f"deployments[{i}].{field}"))
-        timeout = entry.get("timeout")
-        parsed["timeout"] = (None if timeout is None
-                             else _as_float(timeout,
-                                            f"deployments[{i}].timeout"))
-        cache = entry.get("prompt_cache", False)
-        if cache is None:
-            cache = False
-        parsed["prompt_cache"] = _as_bool(cache,
-                                          f"deployments[{i}].prompt_cache")
+        if "timeout" in entry:
+            timeout = entry["timeout"]
+            parsed["timeout"] = (None if timeout is None
+                                 else _as_float(timeout,
+                                                f"deployments[{i}].timeout"))
+        if "prompt_cache" in entry:
+            cache = entry["prompt_cache"]
+            parsed["prompt_cache"] = _as_bool(
+                False if cache is None else cache,
+                f"deployments[{i}].prompt_cache")
         detached = entry.get("detached", False)
         if detached is None:
             detached = False
@@ -1259,15 +1390,35 @@ def summarize(plan: dict) -> dict:
 async def apply_backup(state, plan: dict) -> dict:
     """Merge a validated plan into the gateway. Never deletes.
 
-    Sections are applied in :data:`SECTIONS` order so a run interrupted
-    partway still has resolvable references. Every per-record persistence
-    failure is logged and counted rather than raised: a YAML-defined provider
-    has no DB row by design, so its in-memory mutation is the whole story and
-    treating that as a 500 would make the import look broken when it worked.
+    The three bulk sections — ``logs``, ``rollups``, ``responses`` — are applied
+    **first**, in **one transaction**, before anything else is touched. Two
+    reasons, both learned the hard way:
+
+    * They are the only sections large enough to fail *mid-flight*. A per-page
+      or per-section commit meant a malformed row 1 200 left providers, keys,
+      users, vkeys and the first 1 000 log rows durable and then 500'd, with
+      nothing telling the operator how far it got. Now one failure rolls the
+      whole bulk pass back and nothing else has been written.
+    * They reference nothing this import creates. ``request_logs.key_id``,
+      ``request_rollups.key_id`` and ``stored_responses.key_id`` are free-form
+      strings, so running them first costs no resolvability.
+
+    Within that transaction each rollup/response row gets its own SAVEPOINT, so
+    one un-insertable row is rolled back alone and reported as ``failed``
+    instead of taking the section with it.
+
+    The configuration sections then run in :data:`SECTIONS` order. Every
+    per-record persistence failure there is logged and counted rather than
+    raised: a YAML-defined provider has no DB row by design, so its in-memory
+    mutation is the whole story and treating that as a 500 would make the
+    import look broken when it worked. Those sections persist through
+    ``ConfigStore``, which owns its own transactions, so a failure in one of
+    them does not roll back the ones before it.
     """
     if plan.get("_validated") is not True:
         raise BackupError("plan was not validated; call validate_backup first")
     result: dict[str, Any] = {}
+    result.update(await _apply_bulk(state, plan))
     result["providers"] = await _apply_providers(state, plan["providers"])
     result["keys"] = await _apply_keys(state, plan["keys"])
     result["deployments"] = await _apply_deployments(state, plan["deployments"])
@@ -1276,16 +1427,53 @@ async def apply_backup(state, plan: dict) -> dict:
     result["prices"] = await _apply_prices(state, plan["prices"])
     result["users"] = await _apply_users(state, plan["users"])
     result["vkeys"] = await _apply_vkeys(state, plan["vkeys"])
-    result["logs"] = await _apply_logs(state, plan["logs"])
-    result["rollups"] = await _apply_rollups(state, plan["rollups"])
     result["audit_skipped"] = len(plan["audit"]["audit_logs"])
-    result["responses"] = await _apply_responses(state,
-                                                  plan["responses"])
     if plan.get("cline_default_models") is not None:
         # Reconciling the Cline default models touches the router in a way that
         # belongs to app.py's helper, not here — the route calls it.
         result["cline_default_models"] = plan["cline_default_models"]
     return result
+
+
+async def _apply_bulk(state, plan: dict) -> dict[str, Any]:
+    """The bulk sections, in one transaction, as ``{section: {written, failed}}``.
+
+    A failure anywhere in the pass raises :class:`BackupError` with a 500, so
+    the route renders it and the operator learns the import was rolled back
+    rather than receiving a bare stack trace out of a half-written gateway.
+    """
+    engine = _engine(state)
+    store = state.response_store
+    # ResponseStore is built with the app's own engine, so this is the normal
+    # case. Guard anyway: a second engine cannot join this transaction, and
+    # silently pretending it did would be exactly the class of bug this
+    # function exists to remove.
+    shared = store is None or store.engine is engine
+    out: dict[str, Any] = {}
+    try:
+        async with engine.begin() as conn:
+            out["logs"] = await _apply_logs(state, plan["logs"], conn=conn)
+            out["rollups"] = await _apply_rollups(state, plan["rollups"],
+                                                   conn=conn)
+            if shared and store is not None:
+                out["responses"] = await _apply_responses(
+                    state, plan["responses"], conn=conn)
+        if store is not None and not shared:
+            log.warning("backup_responses_separate_engine")
+            out["responses"] = await _apply_responses(state, plan["responses"])
+    except BackupError:
+        raise
+    except Exception as exc:
+        raise BackupError(
+            f"import failed while writing the log/rollup/response sections and "
+            f"was rolled back in full: {exc}",
+            status=500, etype="api_error") from exc
+    # After the commit: invalidating the sink's query cache before it would
+    # advertise rows that the rollback then erased.
+    sink = state.logs.db_sink
+    if sink is not None:
+        sink.invalidate_cache()
+    return out
 
 
 async def _apply_providers(state, entries: list[dict]) -> int:
@@ -1367,6 +1555,15 @@ async def _apply_keys(state, entries: list[dict]) -> int:
 
 
 async def _apply_deployments(state, entries: list[dict]) -> int:
+    """Merge deployments, persisting only what the table can hold.
+
+    ``add_deployment`` takes ``(group, provider, model, weight)`` — the
+    ``deployments`` table has no column for the five limits in
+    :data:`_DEPLOYMENT_LIMITS`, so a document that carries them is honoured on
+    the in-memory ``Deployment`` for the life of the process and dropped from
+    there on restart. They are not exported any more
+    (:func:`_export_deployments`); this path only serves older files.
+    """
     from wiwi.router.router import Deployment
 
     store = state.config_store
@@ -1396,17 +1593,15 @@ async def _apply_deployments(state, entries: list[dict]) -> int:
         if existing is None:
             bucket.append(Deployment(
                 group=d["group_name"], provider=acct, model_id=d["model_id"],
-                weight=d["weight"], rpm=d["rpm"], tpm=d["tpm"],
-                timeout=d["timeout"], max_tokens=d["max_tokens"],
-                prompt_cache=d["prompt_cache"]))
+                weight=d["weight"],
+                **{f: d[f] for f in _DEPLOYMENT_LIMITS if f in d}))
             state.router.groups[d["group_name"]] = bucket
         else:
             existing.weight = d["weight"]
-            existing.rpm = d["rpm"]
-            existing.tpm = d["tpm"]
-            existing.timeout = d["timeout"]
-            existing.max_tokens = d["max_tokens"]
-            existing.prompt_cache = d["prompt_cache"]
+            for field in _DEPLOYMENT_LIMITS:
+                # Absent = unknown: leave whatever the target had.
+                if field in d:
+                    setattr(existing, field, d[field])
         if store is not None:
             # add_deployment is an upsert that clears any detached tombstone.
             await store.add_deployment(d["group_name"], d["provider_name"],
@@ -1597,8 +1792,25 @@ async def _apply_vkeys(state, entries: list[dict]) -> int:
 _JSON_COLUMNS = ("attempts", "translation_warnings", "diff", "p95_hist")
 
 
+def _union_columns(rows: list[dict]) -> list[str]:
+    """Every key any row carries, in first-seen order.
+
+    The column set used to be read off ``rows[0]`` alone. A document is not
+    required to be homogeneous — a hand-merged file, a section stitched from two
+    exports, or simply a row that never had the field — so that wrote the
+    *column default* for every row, losing the value with no error at all.
+    Verified: ``error_code='api_error'`` on the second row of a two-row document
+    was stored as ``''`` on both.
+    """
+    seen: dict[str, None] = {}
+    for row in rows:
+        for c in row:
+            seen.setdefault(c, None)
+    return list(seen)
+
+
 async def _insert_rows(engine, table: str, rows: list[dict], *,
-                       key: str, page: int = 500) -> int:
+                       key: str, page: int = 500, conn=None) -> int:
     """Insert rows whose *key* is not already present in *table*.
 
     ``request_logs.request_id`` has no unique constraint (``db_sink``'s index
@@ -1608,126 +1820,172 @@ async def _insert_rows(engine, table: str, rows: list[dict], *,
     theoretical window if the gateway writes a colliding request while the
     import runs — acceptable for a manual admin action, and far cheaper than
     one guarded statement per row.
+
+    The column set is the union of every row's keys (see :func:`_union_columns`)
+    intersected with the target's live schema. A row that lacks one of them
+    binds NULL for that row: *absent*, not *the column default*, which the two
+    are indistinguishable as afterwards.
+
+    Every page runs in one write scope, so a page that fails leaves none of the
+    pages before it committed. Pass *conn* to join a caller's transaction.
     """
     if not rows:
         return 0
-    present = await _table_columns(engine, table)
-    cols = [c for c in rows[0] if c in present]
-    if key not in cols:
-        return 0
-    col_sql = ", ".join(cols)
-
-    async with engine.connect() as conn:
-        existing = {r[0] for r in (await conn.execute(sa.text(
-            f"SELECT {key} FROM {table}"))).all()}
-
     written = 0
-    for start in range(0, len(rows), page):
-        params: dict[str, Any] = {}
-        tuples = []
-        for n, row in enumerate(rows[start:start + page]):
-            ident = row.get(key)
-            if ident in existing:
+    async with _write_scope(engine, conn) as c:
+        present = await _table_columns(engine, table, conn=c)
+        cols = [col for col in _union_columns(rows) if col in present]
+        if key not in cols:
+            return 0
+        col_sql = ", ".join(cols)
+        existing = {r[0] for r in (await c.execute(sa.text(
+            f"SELECT {key} FROM {table}"))).all()}
+        for start in range(0, len(rows), page):
+            params: dict[str, Any] = {}
+            tuples = []
+            for n, row in enumerate(rows[start:start + page]):
+                ident = row.get(key)
+                if ident in existing:
+                    continue
+                existing.add(ident)
+                for col in cols:
+                    value = row.get(col)
+                    if col in _JSON_COLUMNS and isinstance(value, (list, dict)):
+                        value = orjson.dumps(value).decode()
+                    params[f"c{n}_{col}"] = value
+                tuples.append("(" + ", ".join(
+                    f":c{n}_{col}" for col in cols) + ")")
+                written += 1
+            if not tuples:
                 continue
-            existing.add(ident)
-            for c in cols:
-                value = row.get(c)
-                if c in _JSON_COLUMNS and isinstance(value, (list, dict)):
-                    value = orjson.dumps(value).decode()
-                params[f"c{n}_{c}"] = value
-            tuples.append("(" + ", ".join(
-                f":c{n}_{c}" for c in cols) + ")")
-            written += 1
-        if not tuples:
-            continue
-        await _exec_insert(engine, (
-            f"INSERT INTO {table} ({col_sql}) VALUES {', '.join(tuples)}"),
-            params)
+            await c.execute(sa.text(
+                f"INSERT INTO {table} ({col_sql})"
+                f" VALUES {', '.join(tuples)}"), params)
     return written
 
 
-async def _exec_insert(engine, sql: str, params: dict[str, Any]) -> None:
-    async with engine.begin() as conn:
-        await conn.execute(sa.text(sql), params)
+async def _exec_insert(engine, sql: str, params: dict[str, Any], *,
+                       conn=None) -> None:
+    async with _write_scope(engine, conn) as c:
+        await c.execute(sa.text(sql), params)
 
 
-async def _apply_logs(state, entries: dict) -> int:
+async def _apply_logs(state, entries: dict, *, conn=None) -> int:
+    """Raw log rows. A page that cannot be inserted aborts the whole import."""
     rows = entries["request_logs"]
     if not rows:
         return 0
-    engine = _engine(state)
-    written = await _insert_rows(engine, "request_logs", rows,
-                                 key="request_id")
-    sink = state.logs.db_sink
-    if sink is not None:
-        # Otherwise the 5s query cache serves a dashboard that predates the
-        # import for that long.
-        sink.invalidate_cache()
-    return written
+    return await _insert_rows(_engine(state), "request_logs", rows,
+                              key="request_id", conn=conn)
 
 
-async def _apply_rollups(state, entries: dict) -> int:
+async def _apply_rollups(state, entries: dict, *, conn=None) -> dict[str, int]:
+    """Upsert hourly aggregates, one SAVEPOINT per row.
+
+    Returns ``{"written": n, "failed": n}``. The failure count used to be a
+    ``log.warning`` and nothing else, so a target whose ``request_rollups``
+    rejected every insert answered ``200 {"rollups": 0}`` -- indistinguishable
+    from a file that carried no buckets at all. Each row rolls back to its own
+    savepoint: on PostgreSQL a failed statement aborts the whole transaction,
+    so continuing without one would poison the import it is part of.
+    """
     rows = entries["request_rollups"]
-    if not rows:
-        return 0
     engine = _engine(state)
+    if not rows:
+        return {"written": 0, "failed": 0}
     is_pg = engine.dialect.name == "postgresql"
-    present = await _table_columns(engine, "request_rollups")
-    cols = [c for c in rows[0] if c in present]
-    written = 0
-    for row in rows:
-        clean = dict(row)
-        hist = clean.get("p95_hist")
-        if isinstance(hist, (list, dict)):
-            clean["p95_hist"] = orjson.dumps(hist).decode()
-        params = {c: clean.get(c) for c in cols}
-        col_sql = ", ".join(cols)
-        placeholders = ", ".join(f":{c}" for c in cols)
-        where = " AND ".join(f"{c} = :{c}" for c in _ROLLUP_KEY)
-        if is_pg:
-            # Upsert on the DB's own UNIQUE index so a re-import overwrites the
-            # same bucket rather than double-counting it.
-            sql = (f"INSERT INTO request_rollups ({col_sql})"
-                   f" VALUES ({placeholders})"
-                   f" ON CONFLICT (bucket_ts, key_id, model_group, provider,"
-                   " serving_model) DO UPDATE SET "
-                   + ", ".join(f"{c} = EXCLUDED.{c}"
-                               for c in cols if c not in _ROLLUP_KEY))
-        else:
-            sql = (f"INSERT OR REPLACE INTO request_rollups ({col_sql})"
-                   f" VALUES ({placeholders})")
-        try:
-            await _exec_insert(engine, sql, params)
-            written += 1
-        except Exception:
-            log.warning("backup_rollup_row_failed", row=where,
-                        exc_info=True)
-    sink = state.logs.db_sink
-    if sink is not None:
-        sink.invalidate_cache()
-    return written
+    written = failed = 0
+    async with _write_scope(engine, conn) as c:
+        present = await _table_columns(engine, "request_rollups", conn=c)
+        cols = [x for x in _union_columns(rows) if x in present]
+        for row in rows:
+            clean = dict(row)
+            hist = clean.get("p95_hist")
+            if isinstance(hist, (list, dict)):
+                clean["p95_hist"] = orjson.dumps(hist).decode()
+            params = {x: clean.get(x) for x in cols}
+            col_sql = ", ".join(cols)
+            placeholders = ", ".join(f":{x}" for x in cols)
+            where = " AND ".join(f"{x} = :{x}" for x in _ROLLUP_KEY)
+            if is_pg:
+                # Upsert on the DB's own UNIQUE index so a re-import overwrites
+                # the same bucket rather than double-counting it.
+                sql = (f"INSERT INTO request_rollups ({col_sql})"
+                       f" VALUES ({placeholders})"
+                       " ON CONFLICT (bucket_ts, key_id, model_group, provider,"
+                       " serving_model) DO UPDATE SET "
+                       + ", ".join(f"{x} = EXCLUDED.{x}"
+                                   for x in cols if x not in _ROLLUP_KEY))
+            else:
+                sql = (f"INSERT OR REPLACE INTO request_rollups ({col_sql})"
+                       f" VALUES ({placeholders})")
+            try:
+                async with c.begin_nested():
+                    result = await c.execute(sa.text(sql), params)
+                if result.rowcount == 0:
+                    # INSERT OR IGNORE / ON CONFLICT DO NOTHING swallow a row
+                    # that violates a constraint instead of raising. Counting
+                    # that as written is the same lie as the log.warning this
+                    # section used to hide behind.
+                    failed += 1
+                    log.warning("backup_rollup_row_ignored", row=where)
+                else:
+                    written += 1
+            except Exception:
+                failed += 1
+                log.warning("backup_rollup_row_failed", row=where,
+                            exc_info=True)
+    if failed:
+        log.warning("backup_rollup_rows_failed", failed=failed, written=written)
+    return {"written": written, "failed": failed}
 
 
-async def _apply_responses(state, entries: dict) -> int:
+async def _apply_responses(state, entries: dict, *,
+                           conn=None) -> dict[str, int]:
+    """Insert cached Responses-API rows, one SAVEPOINT per row.
+
+    Returns ``{"written": n, "failed": n}``. This section had no guard at all:
+    one un-insertable row raised out of the import and 500'd *after* ``logs``
+    and ``rollups`` were already committed, taking the response history of an
+    otherwise working gateway with it.
+    """
     rows = entries["stored_responses"]
     store = state.response_store
     if not rows or store is None:
-        return 0
+        return {"written": 0, "failed": 0}
     engine = store.engine
     is_pg = engine.dialect.name == "postgresql"
-    present = await _table_columns(engine, "stored_responses")
-    cols = [c for c in rows[0] if c in present]
-    written = 0
-    for row in rows:
-        params = {c: row.get(c) for c in cols}
+    written = failed = 0
+    async with _write_scope(engine, conn) as c:
+        present = await _table_columns(engine, "stored_responses", conn=c)
+        cols = [x for x in _union_columns(rows) if x in present]
         col_sql = ", ".join(cols)
-        placeholders = ", ".join(f":{c}" for c in cols)
+        placeholders = ", ".join(f":{x}" for x in cols)
         if is_pg:
             sql = (f"INSERT INTO stored_responses ({col_sql})"
                    f" VALUES ({placeholders}) ON CONFLICT (id) DO NOTHING")
         else:
             sql = (f"INSERT OR IGNORE INTO stored_responses ({col_sql})"
                    f" VALUES ({placeholders})")
-        await _exec_insert(engine, sql, params)
-        written += 1
-    return written
+        for row in rows:
+            params = {x: row.get(x) for x in cols}
+            try:
+                async with c.begin_nested():
+                    result = await c.execute(sa.text(sql), params)
+                if result.rowcount == 0:
+                    # OR IGNORE / ON CONFLICT DO NOTHING drop a row that breaks
+                    # a constraint rather than raising: without the rowcount
+                    # check a rejected row is reported as written.
+                    failed += 1
+                    log.warning("backup_response_row_ignored",
+                                response_id=row.get("id"))
+                else:
+                    written += 1
+            except Exception:
+                failed += 1
+                log.warning("backup_response_row_failed",
+                            response_id=row.get("id"), exc_info=True)
+    if failed:
+        log.warning("backup_response_rows_failed", failed=failed,
+                    written=written)
+    return {"written": written, "failed": failed}

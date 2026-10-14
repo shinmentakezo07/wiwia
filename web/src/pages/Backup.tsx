@@ -33,9 +33,9 @@ import type {
   BackupPlan,
   BackupSections,
 } from "@/api/types";
-import { Alert, Button, Card, CardHeader, ErrorText, Field, Toggle } from "@/components/ui";
+import { Alert, Badge, Button, Card, CardHeader, ErrorText, Field, Toggle } from "@/components/ui";
 
-type Counts = BackupPlan["counts"] | BackupImportResult | undefined;
+type Counts = BackupDocument["counts"] | undefined;
 
 function countOf(counts: Counts, section: string): number | undefined {
   if (!counts) return undefined;
@@ -49,7 +49,44 @@ function countOf(counts: Counts, section: string): number | undefined {
 }
 
 function plural(n: number, word: string): string {
-  return `${n} ${word}${n === 1 ? "" : "s"}`;
+  // Several section labels are already plural ("Usage rollups"), so a blind
+  // "s" suffix rendered "900 usage rollupss".
+  return `${n} ${n === 1 || word.endsWith("s") ? word : `${word}s`}`;
+}
+
+/** The two sections the server applies row-by-row, each row in its own
+ *  SAVEPOINT, so each can land *partially*. Every other section is applied
+ *  whole and answers with a plain count. */
+const PARTIAL_SECTIONS: { id: BackupSections; row: string }[] = [
+  { id: "rollups", row: "usage-rollup" },
+  { id: "responses", row: "stored-response" },
+];
+
+/** Rows a section actually put on disk. Never `written + failed` — summing a
+ *  per-row result reports a row the gateway rejected as though it had been
+ *  restored, which is the exact lie the backend counts exist to prevent. */
+function appliedOf(result: BackupImportResult, section: string): number | undefined {
+  const raw = result[section as keyof BackupImportResult];
+  if (typeof raw === "number") return raw;
+  if (raw && typeof raw === "object") return raw.written;
+  return undefined;
+}
+
+function failedOf(result: BackupImportResult, section: string): number {
+  const raw = result[section as keyof BackupImportResult];
+  return raw && typeof raw === "object" ? raw.failed : 0;
+}
+
+/** Rows an export left out because a cap bit, phrased for a human.
+ *
+ *  `truncated` is keyed by *table* (`request_logs`), not by section — the
+ *  server records the denominator it counted, so the number is "dropped", not
+ *  "total". */
+function droppedRows(truncated: Record<string, number> | undefined): string[] {
+  if (!truncated) return [];
+  return Object.entries(truncated)
+    .filter(([, n]) => n > 0)
+    .map(([table, n]) => `${n.toLocaleString()} ${n === 1 ? "row" : "rows"} of ${table.replace(/_/g, " ")}`);
 }
 
 function SectionPicker(props: {
@@ -89,6 +126,54 @@ function SectionPicker(props: {
   );
 }
 
+/** What a merge actually did.
+ *
+ *  `success` when every section landed whole. `warning` when one of the
+ *  per-row sections lost rows to its SAVEPOINTs — the merge did succeed, so
+ *  `danger` would be wrong, but reporting only the merged count would tell the
+ *  operator a partial restore was a complete one. The rejected rows are named
+ *  and counted, not summarised away. */
+function ImportSummary(props: { result: BackupImportResult; onDismiss: () => void }) {
+  const failures = describeFailures(props.result);
+  const skipped = props.result.audit_skipped;
+  return (
+    <Alert
+      tone={failures.length ? "warning" : "success"}
+      title={failures.length ? "Merged — some rows were rejected" : "Backup merged"}
+      onDismiss={props.onDismiss}
+    >
+      <p>{`Merged ${describeResult(props.result)}.`}</p>
+      {failures.length > 0 && (
+        <>
+          <p className="mt-1">
+            Rejected by this gateway and not written, so this import is partial:{" "}
+            <strong className="text-[var(--admin-text)]">
+              {failures.map((f) => f.text).join(", ")}
+            </strong>
+            . Everything else landed in full — check the gateway logs for the
+            reason before re-running the merge.
+          </p>
+          <ul className="mt-1.5 flex flex-wrap gap-1.5">
+            {failures.map((f) => (
+              <li key={f.id} className="flex items-center gap-1.5">
+                <Badge tone="amber">{plural(f.failed, "row")} failed</Badge>
+                <span className="text-[11px] text-[var(--admin-text-dim)]">{f.label}</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      {skipped > 0 && (
+        <p className="mt-1">
+          {plural(skipped, "audit record")} in the file{" "}
+          {skipped === 1 ? "was" : "were"} deliberately not replayed — the audit
+          trail stays export-only.
+        </p>
+      )}
+    </Alert>
+  );
+}
+
 export function BackupTab() {
   const qc = useQueryClient();
   const fileRef = useRef<HTMLInputElement>(null);
@@ -106,7 +191,11 @@ export function BackupTab() {
   const [plan, setPlan] = useState<BackupPlan | null>(null);
 
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ tone: "success" | "warning"; text: string } | null>(null);
+  // The merge outcome is kept structured rather than flattened into `notice`:
+  // a partial import has to be rendered in the warning tone *and* itemised, and
+  // a string set at the call site cannot carry either.
+  const [importResult, setImportResult] = useState<BackupImportResult | null>(null);
 
   const exportMutation = useMutation({
     mutationFn: () =>
@@ -120,7 +209,19 @@ export function BackupTab() {
     onSuccess: (doc) => {
       downloadJson(datedFilename("wiwi-backup"), doc);
       setError(null);
-      setNotice(`Downloaded a backup with ${describeCounts(doc.counts)}.`);
+      setImportResult(null);
+      // `logLimit` is 0 above, so this cannot bite today — but if a cap is ever
+      // wired to a control here, the operator has to hear about it from this
+      // page too, not only from whoever opens the file.
+      const capped = droppedRows(doc.truncated);
+      setNotice({
+        // A capped export is not a clean success, so it must not wear the green
+        // tone: the operator has to notice that the file is partial.
+        tone: capped.length ? "warning" : "success",
+        text:
+          `Downloaded a backup with ${describeCounts(doc.counts)}.` +
+          (capped.length ? ` Left out by a row cap, so the file is incomplete: ${capped.join(", ")}.` : ""),
+      });
     },
     onError: (e) => setError(e.message),
   });
@@ -144,12 +245,8 @@ export function BackupTab() {
     mutationFn: () => importBackup(picked!.doc, [...sections]),
     onSuccess: async (r) => {
       setError(null);
-      setNotice(
-        `Merged ${describeResult(r)}. ` +
-        (r.audit_skipped
-          ? `${plural(r.audit_skipped, "audit record")} were not replayed.`
-          : ""),
-      );
+      setNotice(null);
+      setImportResult(r);
       setPicked(null);
       setPlan(null);
       // Every console surface reads from these keys; the gateway just changed
@@ -164,6 +261,7 @@ export function BackupTab() {
   async function onPick(f: File) {
     setError(null);
     setNotice(null);
+    setImportResult(null);
     setPlan(null);
     try {
       const doc = JSON.parse(await f.text()) as BackupDocument;
@@ -180,15 +278,17 @@ export function BackupTab() {
   }
 
   const fileCounts = picked?.doc.counts;
+  const fileDropped = droppedRows(picked?.doc.truncated);
 
   return (
     <div className="space-y-4">
       {error && <ErrorText>{error}</ErrorText>}
       {notice && (
-        <Alert tone="success" onDismiss={() => setNotice(null)}>
-          {notice}
+        <Alert tone={notice.tone} onDismiss={() => setNotice(null)}>
+          {notice.text}
         </Alert>
       )}
+      {importResult && <ImportSummary result={importResult} onDismiss={() => setImportResult(null)} />}
 
       {/* -- export ---------------------------------------------------------- */}
       <Card>
@@ -302,6 +402,22 @@ export function BackupTab() {
                   {picked.doc.include_secrets ? " · carries plaintext secrets" : " · no secrets"}
                   {picked.doc.include_bodies ? " · carries request/response bodies" : ""}
                 </p>
+                {fileDropped.length > 0 && (
+                  <Alert
+                    tone="warning"
+                    title="This file is incomplete"
+                    className="mt-2.5"
+                  >
+                    The export hit a row cap, so the counts below are not the
+                    whole table. Left out of this file:{" "}
+                    <strong className="break-words text-[var(--admin-text)]">
+                      {fileDropped.join(", ")}
+                    </strong>
+                    . Merging restores only what the file carries — anything left
+                    out exists solely on the gateway that exported this, so do
+                    not read a complete history into a short count.
+                  </Alert>
+                )}
                 <dl className="admin-dl mt-2.5">
                   {BACKUP_SECTIONS.filter((s) => countOf(fileCounts, s.id) !== undefined).map(
                     (s) => (
@@ -390,7 +506,7 @@ export function BackupTab() {
   );
 }
 
-function describeCounts(counts: BackupPlan["counts"]): string {
+function describeCounts(counts: BackupDocument["counts"]): string {
   const parts = BACKUP_SECTIONS.map((s) => {
     const n = countOf(counts, s.id);
     return n === undefined || n === 0 ? null : plural(n, s.label.toLowerCase());
@@ -398,7 +514,25 @@ function describeCounts(counts: BackupPlan["counts"]): string {
   return parts.length ? parts.join(", ") : "nothing";
 }
 
+/** What a merge put on disk, in the same prose as `describeCounts` but read
+ *  through `appliedOf` — the two per-row sections answer with `written`, never
+ *  with the sum of written and failed. */
 function describeResult(r: BackupImportResult): string {
-  const counts = r as unknown as BackupPlan["counts"];
-  return describeCounts(counts);
+  const parts = BACKUP_SECTIONS.map((s) => {
+    const n = appliedOf(r, s.id);
+    return n === undefined || n === 0 ? null : plural(n, s.label.toLowerCase());
+  }).filter((p): p is string => p !== null);
+  return parts.length ? parts.join(", ") : "nothing";
+}
+
+/** The per-row sections that lost rows to their SAVEPOINTs. */
+function describeFailures(
+  r: BackupImportResult,
+): { id: BackupSections; label: string; text: string; failed: number }[] {
+  return PARTIAL_SECTIONS.map((s) => ({
+    id: s.id,
+    label: BACKUP_SECTIONS.find((x) => x.id === s.id)?.label ?? s.id,
+    text: plural(failedOf(r, s.id), `${s.row} row`),
+    failed: failedOf(r, s.id),
+  })).filter((f) => f.failed > 0);
 }
