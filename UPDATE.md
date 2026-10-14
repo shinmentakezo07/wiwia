@@ -3763,3 +3763,93 @@ single-tool flush, no-tools, parallel-tools-without-deferred-text, genuine int
 server-tool-result pairing by id.
 
 **Whole-branch:** 3013 tests pass, ruff clean.
+
+---
+
+## Round 147/149 — Zen's free-tier fingerprint, and the correction of round 147 (2026-10-14)
+
+**File**: `wiwi/providers/opencode_adapter.py` (+ `wiwi/providers/opencode_version.py`,
+`wiwi/config.py`, `wiwi/router/router.py`, `wiwi/core/gateway.py`,
+`wiwi.yaml.example`, `docs/PROVIDERS.md`)
+
+**Reported symptom** — unchanged throughout:
+
+```
+402 io requires billing (403): OpenCode's free tier can only be used from within OpenCode. Download it at https://opencode.ai and keep building.
+```
+
+### 149.1 Round 147 was wrong, and its control was the reason
+
+Round 147 concluded the free tier had been closed upstream, made the decoy cloak
+opt-**in**, and justified both with a control run of the real client: "the
+genuine unsigned-in opencode v2.0.26 fails identically from this host."
+
+That control was an artefact. It was executed from a scratch directory whose
+`opencode.json` overrode the provider `baseURL` to a local proxy, so the 403 it
+observed came from the broken override, not from the gate. Re-run from a clean
+directory, the same command answered **200** on the same model. The gate never
+closed — the client moved from v1 to v2 and this adapter kept speaking v1.
+
+**Carry this forward:** a control that shares infrastructure with the thing under
+test proves nothing. Re-run it in isolation before building on it.
+
+### 149.2 The v2 gate, measured by capture-and-bisect
+
+Captured the real client's outbound request through a logging proxy, replayed it
+verbatim (200), then removed one factor at a time. Required:
+
+- **`read` + `shell` in the tool payload, carrying the client's real parameter
+  schemas.** v1's pair was `bash`/`read`; v2 renamed `bash` → `shell`. The gate
+  reads the schemas, not the names or the count: six inert decoys 403, six real
+  tools renamed 403, and `read`+`shell` with `parameters` emptied 403. Swapping
+  only the *description* is enough (200) — which is why the decoys can still
+  tell the model the tools are unavailable while satisfying the gate.
+- **`Authorization` present.** The anonymous client sends `Bearer public`; the
+  adapter omitted the header for the `anonymous` sentinel, and the gate reads
+  its presence. Round 88's "keyless works, no credential on the wire" was right
+  about the value and wrong about the header.
+- **`x-opencode-session-id` alongside `x-opencode-session`.**
+- **`HTTP-Referer` and `x-opencode-request` absent.** The client sends neither;
+  adding either one alone turns a 200 into a 403. `X-Title` is kept — verified
+  harmless.
+
+Not required: `x-opencode-project`, `x-opencode-client`, `Accept`, `b3`,
+`traceparent`, `x-session-affinity`, `x-session-id`. The session id must stay the
+26-char `ses_`+12hex+14base62 form — the v2 CLI's own `^ses_[0-9a-f]{64}$` ids are
+a different id space and 403.
+
+`OPENCODE_REQUEST_RE`, `canonical_request_id()` and `_spoof_request` are removed
+with the header they existed for.
+
+### 149.3 The User-Agent fallback was a silent outage
+
+`opencode/<version>` is accepted (1.19.0 and 2.0.26 both 200; below ~1.19 is
+`426 UpgradeRequired`), but `opencode/unknown` is a **403**. The version helper
+fell back to `"unknown"`, so the first 10 s after boot — and every request while
+the npm registry was unreachable — 403'd all free-model traffic. `FALLBACK_VERSION`
+is now `"1.19.0"`: a version the upstream still accepts, replaced by the live
+sweep within seconds.
+
+### 149.4 The cloak is on by default again
+
+`opencode_free_tier_cloak` is an opt-**out** (`false` for a paid-only
+deployment). Round 147 made it opt-in on the belief the gate was gone; the gate
+needs the decoys, so defaulting them off bought nothing and risked breaking
+access. Round 89's call filter stays: a model that calls an injected `read`/`shell`
+is answered with `Finish("stop")`, because the client has no such tool.
+
+### 148 (companion) — per-model endpoint routing is a table
+
+Console publishes four wires off one base and the **qwen family straddles two**:
+`qwen3.8-max` is on `/chat/completions` while `qwen3.8-flash` and the
+qwen3.7/3.6/3.5 lines are on `/messages`. The old `"qwen"` prefix therefore sent
+`qwen3.8-max` to the Messages endpoint. Routing is now `_ROUTE_RULES`, a
+transcription of the docs table, falling through to chat. `models.dev` carries no
+per-model overrides, so that page is the only source. Default base moved to
+`https://opencode.ai/inference/v1` (the canonical root); the legacy `/zen/v1`
+still routes and existing configs keep working. Unverified: the account's funds
+check fires before route validation, so every route answers `402` for a paid
+model — confirming the table needs a funded account.
+
+**Tests:** `tests/test_fix_round149.py` (15), `tests/test_fix_round148.py` (58),
+with rounds 88/89 corrected in place.

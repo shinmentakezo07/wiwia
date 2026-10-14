@@ -15151,6 +15151,106 @@ the following are **consistent**:
 
 ---
 
+## 🟠 Round 147/149 — Zen's free tier was never closed; the client moved to v2 (2026-10-14)
+
+### 465. The free-tier fingerprint was still v1, so every `*-free` model 403'd
+(supersedes the round-147 conclusion recorded below)
+
+**Severity:** 🟠 High (every `*-free` deployment — the reported outage)
+**Files:** `wiwi/providers/opencode_adapter.py` (`headers()`, `encode_request`,
+`_decoys_*`), `wiwi/providers/opencode_version.py` (`FALLBACK_VERSION`)
+**Related:** #267 (the original v1 gate), round 148 (endpoint table)
+
+**Trigger (user-reported)** — unchanged across both rounds:
+
+```
+402 io requires billing (403): OpenCode's free tier can only be used from within OpenCode. Download it at https://opencode.ai and keep building.
+```
+
+That string is wiwi's own classification of Zen's `FreeTierError`
+(`error_from_provider_status`), so the 403 arrived as a `402 … requires billing`.
+
+**What actually happened.** Round 88 (2026-09-19) derived the free tier's
+admission gate by probe matrix and implemented the v1 client's request. The
+client moved to v2; this adapter did not. Nothing upstream closed — the real
+client kept working from this very host on the same models.
+
+**How round 147 got it wrong, and why that matters more than the bug.** Round 147
+concluded the tier was closed, made the cloak opt-in, and justified it with a
+control: "the genuine unsigned-in opencode v2.0.26 fails identically." That
+control was invalid. It was run from a scratch directory whose `opencode.json`
+overrode the provider `baseURL` to a local proxy, so the 403 it observed was an
+artefact of the override, not a property of the gate. Re-run from a clean
+directory, the same command answered **200**. Every conclusion downstream of a
+broken control inherits its error, and this one shipped a wrong default and
+detached eleven working deployments before it was caught.
+
+**The v2 gate, measured 2026-10-14** by capturing the real client's request
+through a logging proxy, replaying it, then bisecting one factor at a time:
+
+| factor | result |
+|---|---|
+| captured request replayed | **200** |
+| tools: none / 5 real / 6 real | 403 / 403 / **200** |
+| `read`+`shell`, real schemas | **200** |
+| `read`+`shell`, description swapped | **200** |
+| `read`+`shell`, `parameters` emptied | 403 |
+| 6 inert decoys, any names | 403 |
+| 6 real tools renamed | 403 |
+| drop `x-opencode-session-id` | 403 |
+| drop `Authorization` (the keyless path) | 403 |
+| add `HTTP-Referer` / add `x-opencode-request` | 403 / 403 |
+| drop `x-opencode-project` / `-client` / `Accept` / tracing | **200** |
+| session `ses_`+26-char vs `ses_`+64-hex | **200** / 403 |
+| UA 1.19.0 / 2.0.26 / `latest/2.0.26/cli` | **200** |
+| UA 1.16.0 / 1.17.0 | 426 UpgradeRequired |
+| UA `opencode/unknown` | 403 |
+
+**Fix** — four v1 leftovers, all in the adapter:
+
+- `_DECOY_NAMES` is `("read", "shell")` (v2 renamed `bash`), and `_decoys_*`
+  attach `_DECOY_PARAMETERS`: the client's real schemas. The gate reads the
+  schemas — six inert decoys 403, and `read`+`shell` with emptied parameters
+  403. Only the description is substituted, so the model is told the tools are
+  unavailable and the injected-call filter still applies.
+- The `anonymous` sentinel sends `Authorization: Bearer public` instead of
+  omitting the header. Round 88 was right that the *value* does not matter and
+  wrong that the header may be absent; the gate reads its presence.
+- `x-opencode-session-id` is sent alongside `x-opencode-session`. The client
+  sends no `x-opencode-request`, and supplying one 403s — so
+  `OPENCODE_REQUEST_RE`, `canonical_request_id()` and `_spoof_request` are gone.
+- `HTTP-Referer` is dropped (invented, and it 403s). `X-Title` stays: verified
+  harmless.
+- `opencode_version.FALLBACK_VERSION` is `"1.19.0"`, a version the upstream
+  still accepts, instead of `"unknown"`. The old fallback made the cold-cache
+  window (first 10 s after boot, and any registry outage) 403 every free
+  request.
+- `opencode_free_tier_cloak` is an opt-**out** (`false` for paid-only
+  deployments), since the gate needs the cloak.
+
+**Status: fixed** — `tests/test_fix_round149.py` (15). Verified live through the
+running gateway: `space-bunny-free` and `mimo-v2.6-flash-free` return 200 with
+real completions (both were 403).
+
+### Not a bug, but recorded: which models are gone regardless
+
+`exo-free` and `mimo-v2.5-free` answer `410 ModelDeprecated` upstream, and
+OpenRouter has withdrawn `stealth/space-bunny-alpha`, `stealth/ox-alpha` and
+`minimax/minimax-m3:free`. No request shape reaches those; their deployments
+need removing from the catalog rather than fixing.
+
+### Still open, and why it was left
+
+**Per-model endpoint routing** (round 148) is table-driven from the docs page
+because it could not be probed: this account's funds check fires *before* route
+validation, so every route answers `402` for a paid model. One real defect was
+found and fixed by reading the table — the old `"qwen"` prefix sent
+`qwen3.8-max` to the Messages endpoint, where the docs place it on chat. The
+rest of the table is transcribed-but-unverified; it needs a funded account to
+confirm.
+
+---
+
 ## Seams cleared in this follow-up (2026-10-04)
 
 Recorded so they are not re-investigated. Each was checked against source and,

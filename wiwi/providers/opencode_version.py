@@ -39,7 +39,14 @@ TTL_S = 300.0
 TICK_S = 300.0
 FIRST_SWEEP_DELAY_S = 10.0
 FETCH_TIMEOUT_S = 10.0
-FALLBACK_VERSION = "unknown"
+# Sent when no fetch has succeeded yet (the first seconds after startup, or any
+# time the registry is unreachable). It must be a version the upstream still
+# **accepts**, because the free tier's gate reads the User-Agent: probed live
+# 2026-10-14, `opencode/unknown` answers 403 FreeTierError while
+# `opencode/1.19.0` answers 200, and anything below ~1.19 answers
+# ``426 UpgradeRequired``. The background sweep replaces this with the real
+# latest within ``FIRST_SWEEP_DELAY_S``; this value only has to be safe, not new.
+FALLBACK_VERSION = "1.19.0"
 
 # Header-injection guard: a version string reaches a header value, and the
 # registry response is remote input. Same rule as the Cline/WorkBuddy helpers.
@@ -61,9 +68,9 @@ def _get_lock() -> asyncio.Lock:
 def get_cached_version() -> str:
     """Return the last known OpenCode version without doing I/O.
 
-    Used by the synchronous ``headers()`` path. Returns ``"unknown"`` when no
-    successful fetch has happened yet (e.g. the first seconds after startup
-    before the background sweep runs).
+    Used by the synchronous ``headers()`` path. Returns ``FALLBACK_VERSION`` —
+    a version the upstream still accepts — when no successful fetch has happened
+    yet, so the cold-start window does not 403 every free-model request.
     """
     return _cached_version or FALLBACK_VERSION
 

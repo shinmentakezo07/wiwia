@@ -46,21 +46,24 @@ providers:
   - name: opencode-zen
     provider: opencode
     base_url: https://opencode.ai/zen/v1
-    # A paid-model deployment carries a real Zen key. A free-tier `*-free`
-    # deployment instead uses the literal sentinel `anonymous` (omit
-    # Authorization entirely): the live catalog lists nine free models (eight
-    # `-free` suffixed plus the stealth `big-pickle`), and on 2026-09-19 all
-    # nine passed the admission gate keyless — seven answered 200, two failed
-    # upstream on their own account (500 / `server_error`). A real account key
-    # instead 429s FreeUsageLimitError once that account's free quota is spent,
-    # so a key is not what unlocks them. The 403 FreeTierError that used to be
-    # blamed on "a missing key" is a request-shape gate (forced SSE, a
-    # CLI-shaped `x-opencode-session`, and the CLI's `bash`/`read` decoy tools)
-    # that the adapter now satisfies on every free-model request. See
-    # opencode_adapter.py and AUDIT #267.
+    # Carries a real Console key for the paid models.
+    #
+    # The free tier is a request-shape gate, and the adapter satisfies it: a
+    # `*-free` request needs the client's own fingerprint — `read`/`shell` in the
+    # tool payload carrying that client's real parameter schemas, an
+    # `Authorization` header present (`Bearer public` for the `anonymous`
+    # sentinel below), `x-opencode-session-id` beside `x-opencode-session`, no
+    # `HTTP-Referer` and no `x-opencode-request`. The shape was re-derived
+    # 2026-10-14 by capturing the real client and bisecting its request; see
+    # opencode_adapter.py, AUDIT #465.
+    #
+    # A `403 FreeTierError` reaching a client means the shape drifted again (or
+    # the User-Agent fell back to a version the upstream rejects). wiwi reports
+    # it as `402 … requires billing (403)` and fails over without retiring the
+    # key.
     keys:
       - {label: main, key: os.environ/OPENCODE_API_KEY}
-      # free-tier-only setup:
+      # free models: the sentinel omits the account and sends `Bearer public`:
       # - {label: anon, key: anonymous}
 
 # Model groups: map a model_name clients request to one or more provider

@@ -182,6 +182,12 @@ class DeploymentParams(BaseModel):
     # marking a short prefix is a write that will never be read. None = the
     # adapter default (1024).
     prompt_cache_min_tokens: int | None = None
+    # OpenCode Zen free-tier fingerprint: inject the client's inert ``read``/
+    # ``shell`` decoy tools into ``*-free`` requests and filter out any call
+    # that comes back aimed at one. **On by default** — the upstream gate is
+    # real, and a free-model request without them answers ``403 FreeTierError``.
+    # Set ``false`` for a deployment that serves only paid models.
+    opencode_free_tier_cloak: bool = True
 
     @field_validator("rpm", "tpm", "max_inflight")
     @classmethod

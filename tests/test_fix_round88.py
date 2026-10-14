@@ -12,10 +12,10 @@ each row differing from the 200 row in exactly one factor:
 
 | request                                   | result                |
 |-------------------------------------------|-----------------------|
-| keyless, stream, CLI session, bash+read   | 200 SSE               |
+| keyless, stream, CLI session, shell+read  | 200 SSE               |
 | `stream: false`                           | 403 FreeTierError     |
 | no tools                                  | 403 FreeTierError     |
-| only `bash` (no `read`)                   | 403 FreeTierError     |
+| only `shell` (no `read`)                  | 403 FreeTierError     |
 | user tools only                           | 403 FreeTierError     |
 | session `ses_` + 24 hex (the pre-fix id)  | 403 FreeTierError     |
 | session 11-hex head + 15 upper            | 403 FreeTierError     |
@@ -62,10 +62,8 @@ from wiwi.providers import opencode_adapter as oa
 from wiwi.providers import opencode_version as ov
 from wiwi.providers.base import ProviderKeyRef
 from wiwi.providers.opencode_adapter import (
-    OPENCODE_REQUEST_RE,
     OPENCODE_SESSION_RE,
     OpencodeAdapter,
-    canonical_request_id,
     canonical_session_id,
     is_free_model,
 )
@@ -77,6 +75,11 @@ FREE_CHAT = "mimo-v2.5-free"
 FREE_RESPONSES = "muse-spark-1.3-contributor-free"
 FREE_RESPONSES_12 = "muse-spark-1.2-contributor-free"
 PAID_CHAT = "glm-5.3-flash"
+
+# Round 147 made the decoy cloak opt-in (``opencode_free_tier_cloak``): the
+# free-tier gate it satisfied is closed upstream as of 2026-10-14. These tests
+# still pin the machinery, so they ask for it explicitly.
+CLOAKED = {oa.FREE_TIER_CLOAK_PARAM: True}
 
 
 @pytest.fixture(autouse=True)
@@ -100,8 +103,10 @@ def _req(*, stream: bool = False, tools: bool = False) -> ir.Request:
     return oc.decode_request(body)
 
 
-def _keyed(model: str, req: ir.Request | None = None) -> dict:
-    return OpencodeAdapter().encode_request(req or _req(), model, {})
+def _keyed(model: str, req: ir.Request | None = None,
+           params: dict | None = None) -> dict:
+    return OpencodeAdapter().encode_request(req or _req(), model,
+                                           CLOAKED if params is None else params)
 
 
 def _names(tools: list[dict]) -> list[str]:
@@ -125,7 +130,6 @@ def test_is_free_model_reads_the_suffix_and_the_stealth_set():
 def test_canonical_ids_match_the_cli_patterns():
     for _ in range(25):
         assert OPENCODE_SESSION_RE.match(canonical_session_id())
-        assert OPENCODE_REQUEST_RE.match(canonical_request_id())
 
 
 def test_the_pre_fix_id_shape_fails_the_pattern_the_upstream_checks():
@@ -143,7 +147,6 @@ def test_the_pre_fix_id_shape_fails_the_pattern_the_upstream_checks():
 def test_the_pattern_and_the_minter_cannot_drift():
     # The minter builds from the same constants the pattern asserts.
     assert re.fullmatch(r"ses_[0-9a-f]{12}[0-9A-Za-z]{14}", canonical_session_id())
-    assert re.fullmatch(r"msg_[0-9a-f]{12}[0-9A-Za-z]{14}", canonical_request_id())
 
 
 # -- session reuse --------------------------------------------------------------
@@ -155,7 +158,9 @@ def test_session_is_shared_across_adapter_instances_of_one_credential():
     a = OpencodeAdapter().headers(ProviderKeyRef(label="anon", secret="anonymous"))
     b = OpencodeAdapter().headers(ProviderKeyRef(label="anon", secret="anonymous"))
     assert a["x-opencode-session"] == b["x-opencode-session"]
-    assert a["x-opencode-request"] != b["x-opencode-request"]
+    # v2 sends the session id on both headers, and no request-id header at all.
+    assert a["x-opencode-session-id"] == a["x-opencode-session"]
+    assert "x-opencode-request" not in a
 
 
 def test_session_is_isolated_per_credential():
@@ -183,30 +188,30 @@ def test_the_session_store_is_bounded():
 
 def test_free_chat_model_with_no_tools_gets_both_decoys():
     body = _keyed(FREE_CHAT)
-    assert set(_names(body["tools"])) == {"bash", "read"}
+    assert set(_names(body["tools"])) == {"read", "shell"}
     assert all("must not be used" in t["function"]["description"]
                for t in body["tools"])
 
 
 def test_free_chat_decoys_are_added_without_replacing_client_tools():
     body = _keyed(FREE_CHAT, _req(tools=True))
-    assert _names(body["tools"]) == ["get_weather", "bash", "read"]
+    assert _names(body["tools"]) == ["get_weather", "read", "shell"]
 
 
-def test_a_client_tool_named_bash_wins_over_the_decoy():
+def test_a_client_tool_named_shell_wins_over_the_decoy():
     req = _req(tools=True)
-    req.tools.append(ir.Tool(name="bash", description="the client's own bash",
+    req.tools.append(ir.Tool(name="shell", description="the client's own shell",
                              parameters_json_schema={"type": "object",
                                                      "properties": {}}))
     body = _keyed(FREE_CHAT, req)
-    bash = [t for t in body["tools"] if t["function"]["name"] == "bash"]
-    assert len(bash) == 1
-    assert bash[0]["function"]["description"] == "the client's own bash"
+    shell = [t for t in body["tools"] if t["function"]["name"] == "shell"]
+    assert len(shell) == 1
+    assert shell[0]["function"]["description"] == "the client's own shell"
 
 
 def test_free_responses_model_uses_the_flat_tool_shape():
     body = _keyed(FREE_RESPONSES)
-    assert {"bash", "read"} <= set(_names(body["tools"]))
+    assert {"read", "shell"} <= set(_names(body["tools"]))
     assert all("function" not in t and "parameters" in t for t in body["tools"])
 
 
@@ -214,7 +219,7 @@ def test_empty_tools_list_is_treated_as_no_tools():
     req = _req()
     req.tools = []
     body = _keyed(FREE_CHAT, req)
-    assert {"bash", "read"} <= set(_names(body["tools"]))
+    assert {"read", "shell"} <= set(_names(body["tools"]))
 
 
 # -- tool_choice ---------------------------------------------------------------
@@ -274,10 +279,12 @@ def _config() -> WiwiConfig:
                                keys=[KeyDef(label="anon", key="anonymous")])],
         model_list=[
             ModelEntry(model_name="free-chat",
-                       wiwi_params=DeploymentParams(provider="zen", model=FREE_CHAT)),
+                       wiwi_params=DeploymentParams(provider="zen", model=FREE_CHAT,
+                                                   opencode_free_tier_cloak=True)),
             ModelEntry(model_name="free-resp",
                        wiwi_params=DeploymentParams(provider="zen",
-                                                    model=FREE_RESPONSES)),
+                                                    model=FREE_RESPONSES,
+                                                    opencode_free_tier_cloak=True)),
         ],
         general_settings=GeneralSettings(master_key="sk-wiwi-master-test",
                                          database_url="sqlite+aiosqlite:///:memory:"),
@@ -316,12 +323,21 @@ async def test_free_chat_request_carries_every_gate_factor(zen_client):
     req = route.calls[0].request
     body = orjson.loads(req.content)
     assert body["stream"] is True                            # factor 1
-    assert {"bash", "read"} <= set(_names(body["tools"]))    # factor 3
+    assert {"read", "shell"} <= set(_names(body["tools"]))    # factor 3
     session = req.headers["x-opencode-session"]
     assert OPENCODE_SESSION_RE.match(session), session       # factor 2
     assert req.headers["user-agent"] == "opencode/1.18.31"   # factor 4
-    # Keyless is the working free-tier path: no credential on the wire.
-    assert "authorization" not in req.headers
+    # Round 149 corrected two of round 88's conclusions. The anonymous client
+    # does NOT omit the credential header — it sends `Bearer public`, and the
+    # gate reads its presence, so omitting it answers 403. And v2 rides the
+    # session id on a second header while sending no `x-opencode-request`.
+    assert req.headers["authorization"] == "Bearer public"
+    assert req.headers["x-opencode-session-id"] == session
+    assert "x-opencode-request" not in req.headers
+    # The decoys carry the client's real parameter schemas, not empty ones.
+    shell = next(t for t in body["tools"] if t["function"]["name"] == "shell")
+    assert set(shell["function"]["parameters"]["properties"]) == {
+        "command", "workdir", "timeout", "background"}
     assert r.json()["choices"][0]["message"]["content"] == "ok"
 
 
@@ -342,7 +358,7 @@ async def test_free_responses_request_carries_the_flat_tool_shape(zen_client):
     body = orjson.loads(route.calls[0].request.content)
     assert body["stream"] is True
     assert body["tool_choice"] == "auto"
-    assert {"bash", "read"} <= set(_names(body["tools"]))
+    assert {"read", "shell"} <= set(_names(body["tools"]))
     assert r.json()["choices"][0]["message"]["content"] == "ok"
 
 

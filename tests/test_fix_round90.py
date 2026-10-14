@@ -196,7 +196,13 @@ class _Dep:
     # Anthropic Messages usage EXCLUDES cache reads -> do not subtract.
     ("anthropic", "claude-3-5-sonnet", False),
     ("opencode", "claude-sonnet-5", False),
-    ("opencode", "qwen3-coder", False),
+    # Round 148: routing is table-driven from the docs endpoints page. `qwen3-coder`
+    # is deprecated upstream and has no row there, so it falls through to the chat
+    # wire, which *includes* cache reads — where the old `"qwen"` prefix would have
+    # put it on Messages. `qwen3.7-max` is a documented Messages model and is
+    # asserted separately below.
+    ("opencode", "qwen3-coder", True),
+    ("opencode", "qwen3.7-max", False),
     # OpenAI-wire usage INCLUDES cache reads -> subtract.
     ("opencode", "mimo-v2.5-free", True),
     ("openai", "gpt-4o", True),

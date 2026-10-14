@@ -393,6 +393,10 @@ class Deployment:
     # stable prefix (tools + system). Off by default.
     prompt_cache: bool = False
     prompt_cache_min_tokens: int | None = None
+    # OpenCode Zen free-tier fingerprint (decoy tool injection + the call
+    # filter that goes with it). On by default; the upstream gate it satisfies
+    # is real. See ``wiwi/config.py`` for the rationale.
+    opencode_free_tier_cloak: bool = True
     # cooldown / health
     fails: list[float] = field(default_factory=list)
     cooldown_until: float = 0.0
@@ -766,7 +770,8 @@ class Router:
                              extra_headers=dict(wp.extra_headers),
                              extra_body=dict(wp.extra_body),
                              prompt_cache=wp.prompt_cache,
-                             prompt_cache_min_tokens=wp.prompt_cache_min_tokens)
+                             prompt_cache_min_tokens=wp.prompt_cache_min_tokens,
+                             opencode_free_tier_cloak=wp.opencode_free_tier_cloak)
             self.groups.setdefault(entry.model_name, []).append(dep)
         # Cross-provider WRR is only meaningful for groups whose deployments
         # span at least two distinct provider accounts.  Single-provider
@@ -1289,7 +1294,11 @@ BUILTIN_PROVIDER_TYPES: list[dict[str, str | list[str]]] = [
     {
         "provider_type": "opencode",
         "label": "OpenCode Zen",
-        "default_base_url": "https://opencode.ai/zen/v1",
+        # Must track OPENCODE_ZEN_BASE in the adapter: the admin UI offers this
+        # as the base a new deployment gets, so a stale value here would create
+        # a provider pointing at the legacy root. Both roots route today; the
+        # canonical one is what models.dev and the docs table publish.
+        "default_base_url": "https://opencode.ai/inference/v1",
         "description": (
             "OpenCode Zen gateway (opencode.ai/zen) — curated coding models "
             "over four upstream protocols routed per model: Responses API "

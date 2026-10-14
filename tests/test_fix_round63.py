@@ -85,7 +85,7 @@ def _assert_messages_request(request, *, stream):
     assert body["stream"] is True
     headers = request.headers
     assert headers["x-opencode-session"].startswith("ses_")
-    assert headers["x-opencode-request"].startswith("msg_")
+    assert headers["x-opencode-session-id"].startswith("ses_")
     assert headers["x-opencode-client"] == "cli"
     assert headers["x-opencode-project"] == "global"
     assert headers["user-agent"] == "opencode/9.9.9"

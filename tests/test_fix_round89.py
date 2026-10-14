@@ -1,7 +1,7 @@
 """Round 89: the free-tier decoy tools must never answer as tool calls.
 
 Round 88's cloak satisfies the free tier's tool-payload condition by injecting
-`bash` and `read` into every free-model request. Injecting a tool the client
+`read` and `shell` into every free-model request. Injecting a tool the client
 never declared has a consequence the request side cannot fix: the model may
 *call* it. Probed live on 2026-09-19 — `mimo-v2.5-free`, asked "Read the file
 config.py.", answered with a `read` tool call — and a wiwi client has no `read`
@@ -9,7 +9,7 @@ implementation, so it would receive a call it cannot execute and a
 `tool_calls` finish it cannot resolve.
 
 The decoys therefore have to be filtered on the way out, keyed on the names
-*this request* injected: a client that declares its own `bash` keeps it, the
+*this request* injected: a client that declares its own `shell` keeps it, the
 cloak never replaces an existing entry, and its calls must reach the caller.
 Both decode paths need the rule (streaming deltas and the aggregated turn), the
 `Finish` reason has to follow the surviving calls, and a non-free request must
@@ -50,8 +50,14 @@ def _req(*, tools: list[str] | None = None) -> ir.Request:
 
 
 def _cloaked(model: str, req: ir.Request | None = None) -> oa.OpencodeAdapter:
+    """An adapter whose request asked for the decoy cloak.
+
+    Opt-in since round 147 (``opencode_free_tier_cloak``): the free-tier gate
+    the decoys satisfied is closed upstream as of 2026-10-14, so the filter
+    machinery is only armed when a deployment explicitly wants it.
+    """
     a = oa.OpencodeAdapter()
-    a.encode_request(req or _req(), model, {})
+    a.encode_request(req or _req(), model, {oa.FREE_TIER_CLOAK_PARAM: True})
     return a
 
 
@@ -64,14 +70,15 @@ def _open(index: int, name: str) -> dl.ToolCallOpen:
 
 def test_cloak_returns_the_names_it_injected():
     a = _cloaked(FREE_CHAT)
-    assert a._decoy_names == frozenset({"bash", "read"})
+    assert a._decoy_names == frozenset({"read", "shell"})
 
 
 def test_cloak_does_not_claim_a_name_the_client_already_owns():
-    # A client tool called `bash` is real: the cloak adds only `read`, so only
-    # `read` may be filtered. `bash` calls must still reach the caller.
-    req = _req(tools=["bash"])
-    body = oa.OpencodeAdapter().encode_request(req, FREE_CHAT, {})
+    # A client tool called `shell` is real: the cloak adds only `read`, so only
+    # `read` may be filtered. `shell` calls must still reach the caller.
+    req = _req(tools=["shell"])
+    body = oa.OpencodeAdapter().encode_request(req, FREE_CHAT,
+                                               {oa.FREE_TIER_CLOAK_PARAM: True})
     names = [t["function"]["name"] for t in body["tools"]]
     assert names.count("read") == 1
     a = _cloaked(FREE_CHAT, req)
@@ -85,10 +92,23 @@ def test_paid_request_arms_no_filter():
 
 def test_encode_resets_the_state_between_requests():
     a = _cloaked(FREE_CHAT)
-    assert a._decoy_names == frozenset({"bash", "read"})
+    assert a._decoy_names == frozenset({"read", "shell"})
     a.encode_request(_req(), PAID_CHAT, {})
     assert a._decoy_names == frozenset()
     assert a._decoy_indices == set()
+
+
+def test_the_cloak_can_be_turned_off_explicitly():
+    # Round 149 restored the cloak to on-by-default (the free-tier gate needs it).
+    # `opencode_free_tier_cloak: false` is the escape hatch for a deployment that
+    # serves only paid models, and it must disarm the filter so a client-declared
+    # `read`/`shell` call is never swallowed.
+    a = oa.OpencodeAdapter()
+    a.encode_request(_req(tools=["shell", "read"]), FREE_CHAT,
+                     {oa.FREE_TIER_CLOAK_PARAM: False})
+    assert a._decoy_names == frozenset()
+    got = a._filter_decoys([_open(0, "read"), dl.ToolCallClose(index=0)])
+    assert [type(x) for x in got] == [dl.ToolCallOpen, dl.ToolCallClose]
 
 
 # -- streaming decode ----------------------------------------------------------
@@ -124,10 +144,10 @@ def test_streaming_keeps_a_real_call_beside_a_decoy():
     assert 1 not in a._decoy_indices
 
 
-def test_client_owned_bash_call_passes_through():
-    req = _req(tools=["bash"])
+def test_client_owned_shell_call_passes_through():
+    req = _req(tools=["shell"])
     a = _cloaked(FREE_CHAT, req)
-    got = a._filter_decoys([_open(0, "bash"), dl.ToolCallClose(index=0)])
+    got = a._filter_decoys([_open(0, "shell"), dl.ToolCallClose(index=0)])
     assert [type(x) for x in got] == [dl.ToolCallOpen, dl.ToolCallClose]
 
 
@@ -141,7 +161,7 @@ def test_deltas_after_a_dropped_open_are_dropped():
     # The filter is fed one event at a time, so the ArgsDelta arrives without
     # the Open that already set the index.
     a = _cloaked(FREE_CHAT)
-    assert a._filter_decoys([_open(0, "bash")]) == []
+    assert a._filter_decoys([_open(0, "shell")]) == []
     assert a._filter_decoys([dl.ToolCallArgsDelta(index=0,
                                                   args_fragment="{}")]) == []
     assert a._filter_decoys([dl.ToolCallClose(index=0)]) == []
@@ -168,7 +188,7 @@ def test_aggregated_turn_drops_decoy_calls():
 
 def test_aggregated_turn_keeps_a_real_call_and_its_finish():
     a = _cloaked(FREE_CHAT)
-    turn = a._filter_decoys_turn(_turn(["bash", "get_weather"]))
+    turn = a._filter_decoys_turn(_turn(["shell", "get_weather"]))
     assert [c.name for c in turn.tool_calls] == ["get_weather"]
     assert turn.stop_reason == "tool_call"
 

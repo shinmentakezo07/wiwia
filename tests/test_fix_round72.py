@@ -141,12 +141,28 @@ def test_gemini_route_does_not_send_x_api_key():
 
 def test_anonymous_sentinel_still_omits_both_schemes():
     # The sentinel means "send no credential at all", on every route. This is
-    # what tests/test_fix_round63.py asserts for union-alpha, and it must keep
-    # holding: the sentinel is not a key, so it cannot authenticate either way.
-    for model in ["union-alpha", "mimo-v2.5-free"]:
+    # what tests/test_fix_round63.py asserts for union-alpha, and the invariant
+    # must keep holding: the sentinel is not a key, so it cannot authenticate
+    # either way.
+    #
+    # Round 149 refined the mechanism on the OpenAI wire only. The free tier's
+    # gate reads the *presence* of Authorization, and the anonymous client
+    # satisfies it with `Bearer public` — its own marker, not a credential. The
+    # Messages and Gemini front ends have no observed anonymous form, so they
+    # still go out with nothing at all.
+    for model in ["union-alpha", "gemini-3-flash"]:
         h = _headers_for(model, "anonymous")
         assert "Authorization" not in h, model
         assert "x-api-key" not in h, model
+        assert "x-goog-api-key" not in h, model
+    # On the chat wire the marker rides the OpenAI scheme, and no key rides it.
+    h = _headers_for("mimo-v2.5-free", "anonymous")
+    assert h["Authorization"] == "Bearer public"
+    assert "x-api-key" not in h
+    # A real key still uses the route's own scheme, never both.
+    h = _headers_for("mimo-v2.5-free", "sk-a-real-key")
+    assert h["Authorization"] == "Bearer sk-a-real-key"
+    assert "x-api-key" not in h
 
 
 def test_messages_route_still_carries_the_client_fingerprint():
@@ -155,7 +171,10 @@ def test_messages_route_still_carries_the_client_fingerprint():
     h = _headers_for("union-alpha")
     assert h["anthropic-version"] == "2023-06-01"
     assert h["x-opencode-session"].startswith("ses_")
-    assert h["x-opencode-request"].startswith("msg_")
+    # Round 149: v2 rides the session id on this second header and sends no
+    # `x-opencode-request` at all — supplying one answers 403 on the free tier.
+    assert h["x-opencode-session-id"] == h["x-opencode-session"]
+    assert "x-opencode-request" not in h
     assert h["x-opencode-client"] == "cli"
     assert h["x-opencode-project"] == "global"
     assert h["User-Agent"] == "opencode/1.18.31"

@@ -565,6 +565,8 @@ class Gateway:
                                   "drop_params": self.drop_params,
                                   "prompt_cache": dep.prompt_cache,
                                   "prompt_cache_min_tokens": dep.prompt_cache_min_tokens,
+                                  "opencode_free_tier_cloak":
+                                      dep.opencode_free_tier_cloak,
                                   "provider_type": dep.provider.provider_type}
         url = _build_url(adapter, dep, key, False)
         body = adapter.encode_request(ctx.ir_req, dep.model_id, params)
@@ -667,6 +669,8 @@ class Gateway:
                                   "drop_params": self.drop_params,
                                   "prompt_cache": dep.prompt_cache,
                                   "prompt_cache_min_tokens": dep.prompt_cache_min_tokens,
+                                  "opencode_free_tier_cloak":
+                                      dep.opencode_free_tier_cloak,
                                   "provider_type": dep.provider.provider_type}
         url = _build_url(adapter, dep, key, True)
         body = adapter.encode_request(ctx.ir_req, dep.model_id, params)
@@ -1604,6 +1608,8 @@ class Gateway:
                                   "drop_params": self.drop_params,
                                   "prompt_cache": dep.prompt_cache,
                                   "prompt_cache_min_tokens": dep.prompt_cache_min_tokens,
+                                  "opencode_free_tier_cloak":
+                                      dep.opencode_free_tier_cloak,
                                   "provider_type": dep.provider.provider_type}
         url = _build_url(adapter, dep, key, True)
         try:

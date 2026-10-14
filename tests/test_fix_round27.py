@@ -103,7 +103,7 @@ def test_fresh_adapter_returns_private_instance():
 def test_builtin_catalog_has_opencode_card():
     cards = {c["provider_type"]: c for c in BUILTIN_PROVIDER_TYPES}
     assert "opencode" in cards
-    assert cards["opencode"]["default_base_url"] == "https://opencode.ai/zen/v1"
+    assert cards["opencode"]["default_base_url"] == "https://opencode.ai/inference/v1"
 
 
 # -- live headers --------------------------------------------------------------
@@ -125,7 +125,7 @@ def test_headers_user_agent_follows_cache_refresh():
 def test_headers_fallback_when_never_fetched():
     ov._set_cached_for_tests(None, 0.0)
     h = OpencodeAdapter().headers(_key())
-    assert h["User-Agent"] == "opencode/unknown"
+    assert h["User-Agent"] == "opencode/1.19.0"
     assert h["Authorization"].startswith("Bearer ")
 
 
@@ -203,7 +203,7 @@ def test_build_url_gemini_stream_and_nonstream():
 
 def test_build_url_default_base_when_empty():
     a = OpencodeAdapter()
-    assert a.build_url("", "gpt-5.5", False).startswith("https://opencode.ai/zen/v1/")
+    assert a.build_url("", "gpt-5.5", False).startswith("https://opencode.ai/inference/v1/")
 
 
 # -- encode --------------------------------------------------------------------

@@ -8,7 +8,9 @@ in OpenCode") when it is absent (verified live 2026-09-07, re-verified
 on every request to an ``opencode``-provider model, paid or free:
 
 - ``x-opencode-session`` — per-session id
-- ``x-opencode-request`` — per-request id
+- ``x-opencode-session-id`` — the same id v2 rides on a second header
+  (round 149: v1's ``x-opencode-request`` per-request id is gone; supplying
+  one answers 403 on the free tier)
 - ``x-opencode-client`` — ``cli``
 - ``x-opencode-project`` — project id (the CLI's ``global`` fallback)
 
@@ -77,7 +79,7 @@ def _seed_version():
 
 
 def _metadata(h: dict[str, str]) -> dict[str, str]:
-    return {k: h[k] for k in ("x-opencode-session", "x-opencode-request",
+    return {k: h[k] for k in ("x-opencode-session", "x-opencode-session-id",
                               "x-opencode-client", "x-opencode-project")}
 
 
@@ -93,8 +95,7 @@ def test_every_model_carries_client_metadata():
         assert h["x-opencode-client"] == "cli", m
         assert h["x-opencode-project"] == "global", m
         assert h["x-opencode-session"].startswith("ses_"), m
-        assert h["x-opencode-request"].startswith("msg_"), m
-        assert h["x-opencode-session"] != h["x-opencode-request"], m
+        assert h["x-opencode-session-id"] == h["x-opencode-session"], m
 
 
 def test_headers_before_any_model_known_still_carry_metadata():
@@ -104,7 +105,7 @@ def test_headers_before_any_model_known_still_carry_metadata():
     h = a.headers(_key())
     assert h["x-opencode-client"] == "cli"
     assert h["x-opencode-session"].startswith("ses_")
-    assert h["x-opencode-request"].startswith("msg_")
+    assert h["x-opencode-session-id"] == h["x-opencode-session"]
     assert h["User-Agent"] == "opencode/9.9.9"
 
 
@@ -131,7 +132,8 @@ def test_session_is_reused_per_credential_and_the_request_id_is_fresh():
     a2.encode_request(_chat_req(), "mimo-v2.5-free", {})
     s1, s2 = a1.headers(_key()), a2.headers(_key())
     assert s1["x-opencode-session"] == s2["x-opencode-session"]
-    assert s1["x-opencode-request"] != s2["x-opencode-request"]
+    assert s1["x-opencode-session-id"] == s1["x-opencode-session"]
+    assert s2["x-opencode-session-id"] == s2["x-opencode-session"]
 
 
 def test_a_different_credential_gets_its_own_session():
@@ -154,29 +156,34 @@ def test_reset_rotates_the_request_id_and_keeps_the_session():
     a.reset()
     after = _metadata(a.headers(_key()))
     assert after["x-opencode-session"] == before["x-opencode-session"]
-    assert after["x-opencode-request"] != before["x-opencode-request"]
+    assert after["x-opencode-session-id"] == after["x-opencode-session"]
 
 
 # -- anonymous sentinel ---------------------------------------------------------
 
 
-def test_anonymous_key_omits_authorization():
+def test_anonymous_key_sends_the_clients_own_anonymous_marker():
     # Free models serve anonymous traffic; a keyless setup (config requires
-    # non-empty keys) declares intent with the literal `anonymous` sentinel,
-    # and the adapter then omits Authorization entirely — a placeholder
-    # bearer would be 401 Invalid API key.
+    # non-empty keys) declares intent with the literal `anonymous` sentinel.
+    #
+    # Round 149 corrected "omits Authorization entirely": the free tier's gate
+    # reads the header's *presence*, and the anonymous client satisfies it with
+    # `Bearer public` (captured 2026-10-14). That is the client's own marker,
+    # not a placeholder credential — an invented bearer would be
+    # ``401 Invalid API key``. What must never appear is a real key.
     a = OpencodeAdapter()
     a.encode_request(_chat_req(), "mimo-v2.5-free", {})
     h = a.headers(_key("anonymous"))
-    assert "Authorization" not in h
+    assert h["Authorization"] == "Bearer public"
+    assert "sk-" not in h["Authorization"]
     assert h["x-opencode-session"].startswith("ses_")
     assert h["User-Agent"] == "opencode/9.9.9"
 
 
-def test_anonymous_key_omits_authorization_case_insensitive():
+def test_anonymous_sentinel_is_case_insensitive():
     a = OpencodeAdapter()
     a.encode_request(_chat_req(), "big-pickle", {})
-    assert "Authorization" not in a.headers(_key("Anonymous"))
+    assert a.headers(_key("Anonymous"))["Authorization"] == "Bearer public"
 
 
 def test_real_key_keeps_authorization():
@@ -258,7 +265,8 @@ async def test_gateway_paid_model_sends_session_header(zen_client):
     assert route.called
     sent = route.calls[0].request.headers
     assert sent.get("x-opencode-session", "").startswith("ses_")
-    assert sent.get("x-opencode-request", "").startswith("msg_")
+    assert sent.get("x-opencode-session-id", "").startswith("ses_")
+    assert sent.get("x-opencode-request") is None, "v2 sends none"
     assert sent.get("x-opencode-client") == "cli"
     assert sent.get("x-opencode-project") == "global"
 

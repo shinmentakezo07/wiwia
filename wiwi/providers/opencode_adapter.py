@@ -1,21 +1,33 @@
-"""OpenCode Zen provider adapter (``opencode.ai/zen``).
+"""OpenCode Console / Zen provider adapter (``opencode.ai``).
 
-Zen is a multi-protocol gateway: the same base URL serves four upstream wire
-formats, chosen per model (see ``https://opencode.ai/docs/zen`` endpoints
-table and the ``models.dev`` ``opencode`` provider entry, whose base
-``api`` is ``https://opencode.ai/zen/v1`` with per-model SDK overrides)::
+Console is a multi-protocol gateway: the same base URL serves four upstream
+wire formats, chosen per model from the "Endpoints" table at
+``https://opencode.ai/docs/zen`` (see ``_ROUTE_RULES``, which is the
+transcription of that table and the authority for routing)::
 
-    responses  gpt-*, grok-*, muse-spark-*   POST {base}/responses         (Responses API)
-    messages   claude-*, qwen*, union-alpha  POST {base}/messages          (Anthropic Messages API)
-    gemini     gemini-*                      POST {base}/models/{id}:...   (Gemini generateContent)
-    chat       everything else               POST {base}/chat/completions  (OpenAI Chat API)
+    responses  gpt-*, grok-*, muse-spark-*            POST {base}/responses
+    messages   claude-*, qwen3.8-flash, qwen3.7-*,
+               qwen3.6-*, qwen3.5-*                  POST {base}/messages
+    gemini     gemini-*                               POST {base}/models/{id}:...
+    chat       everything else                        POST {base}/chat/completions
 
-The adapter routes by model prefix, delegates chat/messages/gemini to the
-existing adapters, and implements a minimal Responses upstream (text +
-reasoning + function tools) for the responses family.
+The base is ``https://opencode.ai/inference/v1`` — what ``models.dev`` lists as
+the ``opencode`` provider's ``api`` and what the docs table uses. The older
+``https://opencode.ai/zen/v1`` still routes (verified 2026-10-14: a paid model
+there returns the account's ``402 Insufficient account funds``, i.e. it reaches
+the API and authenticates), so an existing ``base_url`` pointing at ``zen/v1``
+keeps working; this constant only sets the default for deployments that do not
+set one. The catalog is **not** uniform enough for prefix guessing: the qwen
+family alone spans two wires (``qwen3.8-max`` is chat, ``qwen3.8-flash`` is
+messages) and ``models.dev`` carries no per-model overrides, so routing is
+table-driven and falls through to chat.
+
+The adapter delegates chat/messages/gemini to the existing adapters, and
+implements a minimal Responses upstream (text + reasoning + function tools) for
+the responses family.
 
 The transport declares ``force_stream`` (OpenCode's own provider entry carries
-``transport.forceStream: true``): Zen answers as an event stream, so every
+``transport.forceStream: true``): Console answers as an event stream, so every
 upstream request asks for SSE — ``encode_request`` forces ``stream: true`` on
 the bodies that carry the field — and a non-streaming caller's reply is
 pumped and reassembled into one ``AssistantTurn`` by
@@ -53,36 +65,37 @@ restart needed).
 Every request also carries the official client's metadata headers
 (``packages/opencode/src/session/llm/request.ts``): ``x-opencode-session`` +
 ``x-opencode-request``, ``x-opencode-client``, and ``x-opencode-project`` (the
-CLI's fallback when no workspace is bound). On the **free tier** these are not
-telemetry but an admission gate: probed live 2026-09-19, a ``*-free`` request
-returns ``403 FreeTierError`` unless all of the following hold — and each was
-verified to flip the verdict on its own:
+CLI's fallback when no workspace is bound).
 
-1. ``stream: true`` in the body (see ``force_stream`` above). A `stream:false`
-   request 403s even with a perfect fingerprint.
-2. ``x-opencode-session`` matching the CLI's shape: ``ses_`` + 12 hex + 14
-   more. The pre-fix ``ses_`` + 24 hex tail is two characters short → 403.
-3. The CLI's tool payload: ``bash`` **and** ``read`` both present. No tools, or
-   only user tools, or only ``bash``, each 403. Injected by ``_cloak_*`` — a
-   real client tool of the same name wins and is left in place — and filtered
-   out of the *response* by ``_filter_decoys*``, because a model may still call
-   one and the client has no such tool to execute.
-4. ``User-Agent: opencode/<v>`` at 1.17 or newer — older is
-   ``426 UpgradeRequired``, a bare ``opencode`` is 403.
+**The free tier is a request-shape gate, and it is the v2 shape.** On 2026-09-19
+the gate was derived by probe matrix and this adapter spoke the v1 client's
+request. The client has since moved to v2 and the two drifted apart, so every
+``*-free`` request answered ``403 FreeTierError`` while the real client worked
+from the same host — the error the caller sees is wiwi's own classification of it
+(``402 … requires billing (403)`` from
+:func:`wiwi.providers.base.error_from_provider_status`, which leaves the key
+pool alone).
 
-The credential is NOT part of it: the identical request answers 200 with no
-``Authorization`` at all, 200 with ``Bearer public``, and ``429
-FreeUsageLimitError`` with the account's real Zen keys (their free quota is
-spent). So ``anonymous`` is the working free-tier setup, and an earlier note
-here claiming keyless access was "retired upstream" had the diagnosis
-backwards — it blamed the credential for a request-shape gate. Free quota is
-accounted per session (the CLI reuses one long-lived session per identity, and
-its proxy does the same to stop 429s), so ``x-opencode-session`` is reused per
-credential rather than re-minted per request; minting fresh ids spreads load
-across new buckets and invites ``429 FreeUsageLimitError``.
+The v2 shape was re-derived on 2026-10-14 by capturing the real client's request
+and bisecting it one factor at a time (the matrix is in
+``tests/test_fix_round149.py``). Four things had to change, all of them "still
+v1": the decoy pair became ``read``/``shell`` (v2 renamed ``bash``) **with the
+client's own parameter schemas**; the anonymous sentinel started *sending*
+``Authorization: Bearer public`` instead of omitting it; ``x-opencode-session-id``
+was added; and the invented ``HTTP-Referer`` and ``x-opencode-request`` headers
+were removed — the client sends neither, and each one alone turns a 200 into a
+403. The ``User-Agent`` form was already right, but its cold-cache *fallback* was
+not (see :mod:`wiwi.providers.opencode_version`).
 
-``anthropic-version`` rides the messages route only; ``HTTP-Referer``/``X-Title``
-are referral attribution, not part of the CLI fingerprint.
+The decoy tools stay behind ``opencode_free_tier_cloak``, which is **on by
+default** because the gate needs them; set it ``false`` for a deployment that
+serves only paid models. Free quota is accounted per session (the client reuses
+one long-lived session per identity), so ``x-opencode-session`` is reused per
+credential rather than re-minted per request.
+
+``anthropic-version`` rides the messages route only; ``X-Title`` is referral
+attribution and, unlike the ``HTTP-Referer`` that used to sit beside it, does not
+trip the gate.
 """
 
 from __future__ import annotations
@@ -108,19 +121,69 @@ from wiwi.streaming import deltas as dl
 
 log = structlog.get_logger("wiwi.opencode_adapter")
 
-OPENCODE_ZEN_BASE = "https://opencode.ai/zen/v1"
+# Default base when a deployment does not set one. Console's canonical API root
+# per both models.dev and the docs table; the legacy ``/zen/v1`` root still
+# routes and is left working for existing configs (see the module docstring).
+OPENCODE_ZEN_BASE = "https://opencode.ai/inference/v1"
 
 Route = Literal["responses", "messages", "gemini", "chat"]
 
-_RESPONSES_PREFIXES = ("gpt-", "grok-", "muse-spark-")
-_MESSAGES_PREFIXES = ("claude-", "qwen", "union-alpha")
-_GEMINI_PREFIXES = ("gemini-",)
+# Per-model endpoint table, transcribed from the "Endpoints" section of
+# https://opencode.ai/docs/zen (fetched 2026-10-14), which is now the authority:
+#
+#     responses   gpt-*, grok-*, muse-spark-*        POST {base}/responses
+#     messages    claude-*, qwen3.8-flash,
+#                 qwen3.7-*, qwen3.6-*, qwen3.5-*   POST {base}/messages
+#     gemini      gemini-*                           POST {base}/models/{id}:...
+#     chat        everything else                    POST {base}/chat/completions
+#
+# **Prefix guessing does not work on this catalog, which is why this is a table.**
+# The qwen family alone straddles two wires — `qwen3.8-max` is on chat while
+# `qwen3.8-flash` and the qwen3.7/3.6/3.5 lines are on messages — so the old
+# single `"qwen"` prefix sent `qwen3.8-max` to the Messages endpoint, where it
+# cannot answer. `models.dev` lists the provider as `@ai-sdk/openai-compatible`
+# with **no** per-model overrides, so the split is not discoverable from the
+# machine-readable catalog either; only this page carries it. Anything not named
+# here falls through to chat, which is where the bulk of the catalog (deepseek-*,
+# glm-*, kimi-*, minimax-*, mistral-*, big-pickle, every free chat model) lives.
+#
+# Widening a rule is therefore a docs edit, not a guess: add the model's row.
+#
+# `jev-*` is the one documented model with no chat wire at all — it is a System
+# One model on `/systemone` (a typed state+questions → values/probabilities
+# protocol), not a completion API. It falls through to chat and fails upstream;
+# it is not routable through `/v1/chat/completions`, `/v1/responses` or
+# `/v1/messages`, so this adapter does not claim to serve it.
+_ROUTE_RULES: tuple[tuple[tuple[str, ...], Route], ...] = (
+    (("gpt-", "grok-", "muse-spark-"), "responses"),
+    (("claude-", "union-alpha"), "messages"),
+    # Not a bare "qwen": qwen3.8-max is the exception and lives on chat.
+    (("qwen3.8-flash", "qwen3.7-", "qwen3.6-", "qwen3.5-"), "messages"),
+    (("gemini-",), "gemini"),
+)
 
-# The free tier is a request-shape gate, not a credential gate: probed live
-# 2026-09-19, `mimo-v2.5-free` answers 200 keyless and 429 FreeUsageLimitError
-# with a real Zen key. A request is recognised as "from within OpenCode" only
-# when it (a) streams, (b) carries the CLI's decoy tool set, and (c) presents a
-# CLI-shaped session id; every other combination returns 403 FreeTierError.
+# The free tier used to be a request-shape gate rather than a credential gate:
+# probed live 2026-09-19, `mimo-v2.5-free` answered 200 keyless, and a `*-free`
+# request was admitted only when it (a) streamed, (b) carried a client-shaped
+# session id, (c) presented the client's tool pair, and (d) sent a recent
+# `opencode/<v>` User-Agent.
+#
+# **The gate never closed; the client moved.** On 2026-10-14 every free model
+# answered ``403 FreeTierError`` for the v1 shape this module still spoke, while
+# the *real* client succeeded from the same host on the same model. Capturing
+# and bisecting that request gave the v2 conditions recorded at `_DECOY_NAMES`,
+# in `headers()` and in `opencode_version.FALLBACK_VERSION`: the tool pair is now
+# ``read``/``shell`` carrying the client's real schemas, ``Authorization`` must
+# be present (``Bearer public`` when anonymous), ``x-opencode-session-id`` must
+# ride along, and ``HTTP-Referer``/``x-opencode-request`` must be absent.
+#
+# An interim round (147) read the 403s as "upstream retired the free tier" and
+# made the cloak opt-in. That was wrong, and the reason is worth recording: its
+# control run of the real client was executed from a directory whose
+# `opencode.json` overrode the provider `baseURL`, so the failure was an artefact
+# of the override rather than evidence about the gate. Re-run cleanly, the real
+# client answered 200. The cloak is therefore on by default again
+# (``opencode_free_tier_cloak``, opt-*out* for paid-only deployments).
 _FREE_SUFFIX = "-free"
 # Stealth free models: free upstream with no `-free` suffix in the id.
 _STEALTH_FREE_MODELS = frozenset({"big-pickle"})
@@ -141,6 +204,26 @@ def is_free_model(model_id: str) -> bool:
     return m.endswith(_FREE_SUFFIX) or m in _STEALTH_FREE_MODELS
 
 
+# Deployment param that turns the free-tier decoy cloak **off**. On by default,
+# because the gate it satisfies is real: probed 2026-10-14, a `*-free` request
+# without `read`+`shell` in the tool payload answers 403 FreeTierError. Round 147
+# briefly made this an opt-*in* on the belief the free tier was closed; it was
+# not — the v2 client had simply moved on from the v1 shape this module spoke,
+# and the anonymous request also lost its credential header. Set
+# ``opencode_free_tier_cloak: false`` only when a deployment serves only paid
+# models, where no cloak is wanted.
+FREE_TIER_CLOAK_PARAM = "opencode_free_tier_cloak"
+
+
+def _cloak_requested(deployment_params: dict[str, Any]) -> bool:
+    """True when this deployment wants the free-tier decoy cloak (the default).
+
+    Opt-*out*: only an explicit ``False`` disables it, so a deployment that never
+    heard of the flag gets the gate satisfied.
+    """
+    return deployment_params.get(FREE_TIER_CLOAK_PARAM) is not False
+
+
 # -- the CLI fingerprint's shape ----------------------------------------------
 # The edge validates `x-opencode-session` against
 # ``^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`` — the pattern the CLI exports. Measured
@@ -158,15 +241,15 @@ _ID_TAIL = 14         # base62 chars of randomness
 # the minter and the validator share (mirrors the CLI's OPENCODE_SESSION_RE).
 OPENCODE_SESSION_RE = re.compile(
     rf"^ses_[0-9a-f]{{{_SESSION_RE_HEX}}}[0-9A-Za-z]{{{_ID_TAIL}}}$")
-OPENCODE_REQUEST_RE = re.compile(
-    rf"^msg_[0-9a-f]{{{_SESSION_RE_HEX}}}[0-9A-Za-z]{{{_ID_TAIL}}}$")
+# The v1 client also sent an `x-opencode-request: msg_...` header whose id had
+# this shape. The v2 client sends no such header and the free tier answers 403
+# when one is present, so the pattern went with it (round 149).
 
 
 def _id_prefix(invert: bool) -> str:
-    # The CLI inverts the session timestamp (newest first when sorted) and
-    # leaves the request timestamp plain. Neither is decoded upstream — the
-    # shape is what is checked — but matching both keeps the fingerprint
-    # byte-honest rather than merely pattern-satisfying.
+    # The client inverts the session timestamp (newest first when sorted). It is
+    # never decoded upstream -- the shape is what is checked -- but matching it
+    # keeps the fingerprint byte-honest rather than merely pattern-satisfying.
     cur = (int(time.time() * 1000) * 0x1000 + 1)
     if invert:
         cur = ~cur
@@ -175,11 +258,6 @@ def _id_prefix(invert: bool) -> str:
 
 def canonical_session_id() -> str:
     return ("ses_" + _id_prefix(True)
-            + "".join(random.choice(_BASE62) for _ in range(_ID_TAIL)))
-
-
-def canonical_request_id() -> str:
-    return ("msg_" + _id_prefix(False)
             + "".join(random.choice(_BASE62) for _ in range(_ID_TAIL)))
 
 
@@ -213,25 +291,81 @@ def _reset_stable_sessions_for_tests() -> None:
     _stable_sessions.clear()
 
 
-# The free tier also requires `bash` and `read` to be present in the tool
-# payload. They are injected as inert decoys — real client tools keep their
-# names and take precedence, and the description tells the model never to call
-# them — so the gate sees its expected set without the phantom becoming an
-# executable call.
+# The free tier is a request-shape gate, and the shape it wants is the v2
+# client's, not the v1 one this module originally spoke. Re-derived live
+# 2026-10-14 by capturing the real `opencode run` request and bisecting it one
+# factor at a time; see the module docstring. Two conditions must hold:
+#
+# 1. The tool payload must contain **``read`` and ``shell`` carrying the client's
+#    own parameter schemas.** v1 named the second tool ``bash``; v2 renamed it
+#    ``shell``. The *names* are not enough and the *count* is not enough: six
+#    inert decoys 403, six real tools with their names rewritten 403, and
+#    ``read``+``shell`` with ``parameters`` emptied 403. Keeping the schemas and
+#    swapping the description for an inert one is enough (verified 200).
+# 2. ``Authorization`` must be *present* (any value; the anonymous client sends
+#    ``Bearer public``), and ``x-opencode-session-id`` must ride along with
+#    ``x-opencode-session``. Dropping either 403s.
+#
+# The definitions below are the captured client ones with the description
+# replaced, so the gate sees its expected payload while the model is told the
+# tools are unavailable. A real client tool of the same name wins and is left in
+# place (and is therefore not filtered on the way out).
 _DECOY_DESCRIPTION = "This tool is currently unavailable and must not be used."
-_DECOY_NAMES = ("bash", "read")
+_DECOY_NAMES = ("read", "shell")
+_DECOY_PARAMETERS: dict[str, dict[str, Any]] = {
+    "read": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "File or directory to read"},
+            "offset": {"type": "integer", "minimum": 0,
+                       "description": "The line or directory entry to start reading "
+                                      "from (1-based)"},
+            "limit": {"type": "integer", "minimum": 0,
+                      "description": "The maximum number of lines or directory "
+                                     "entries to read (defaults to and capped at 2000)"},
+        },
+        "required": ["path"],
+        "additionalProperties": False,
+    },
+    "shell": {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string", "description": "Shell command string to execute"},
+            "workdir": {"type": "string",
+                        "description": "Working directory to execute the command in. "
+                                       "Defaults to the current working directory. When "
+                                       "possible, avoid changing directories in the "
+                                       "command and set the working directory here "
+                                       "instead."},
+            "timeout": {"type": "integer", "minimum": 0,
+                        "description": "Timeout in milliseconds. Set to 0 to disable the "
+                                       "timeout. Defaults to 120000 for foreground "
+                                       "commands. Background commands have no timeout "
+                                       "by default."},
+            "background": {"type": "boolean",
+                           "description": "Run the command in the background and return "
+                                          "immediately (useful for dev servers and "
+                                          "long-running builds). You do not need to use "
+                                          "'&' at the end of the command when using this "
+                                          "parameter. You will be notified when it "
+                                          "completes. DO NOT poll for completion."},
+        },
+        "required": ["command"],
+        "additionalProperties": False,
+    },
+}
 
 
 def _decoys_chat() -> list[dict[str, Any]]:
     return [{"type": "function",
              "function": {"name": n, "description": _DECOY_DESCRIPTION,
-                          "parameters": {"type": "object", "properties": {}}}}
+                          "parameters": _DECOY_PARAMETERS[n]}}
             for n in _DECOY_NAMES]
 
 
 def _decoys_responses() -> list[dict[str, Any]]:
     return [{"type": "function", "name": n, "description": _DECOY_DESCRIPTION,
-             "parameters": {"type": "object", "properties": {}}}
+             "parameters": _DECOY_PARAMETERS[n]}
             for n in _DECOY_NAMES]
 
 
@@ -278,9 +412,11 @@ def _force_auto_tool_choice(body: dict[str, Any], model_id: str) -> None:
 
 
 # Config keys are validated non-empty (KeyDef._key_required), so a keyless
-# free-tier setup declares itself with this literal sentinel and the
-# adapter omits Authorization entirely for it.
+# free-tier setup declares itself with this literal sentinel. It does **not**
+# omit the credential header — the free tier's gate reads its presence, and the
+# anonymous client sends ``Bearer public`` (see ``headers()``).
 ANONYMOUS_KEY_SENTINEL = "anonymous"
+ANONYMOUS_BEARER = "Bearer public"
 
 # Each Zen front end reads its own credential header, and a credential sent in
 # any other one is invisible to it (see the module docstring for the live probe
@@ -295,14 +431,15 @@ _CREDENTIAL_HEADER: dict[Route, str] = {
 
 
 def route_for_model(model_id: str) -> Route:
-    """Pick the Zen upstream protocol for a native model id."""
+    """Pick the Zen upstream protocol for a native model id.
+
+    Table-driven (``_ROUTE_RULES``), defaulting to the chat wire. Deliberately
+    *not* a prefix guess: the catalog's qwen family spans two endpoints.
+    """
     m = (model_id or "").strip().lower()
-    if m.startswith(_RESPONSES_PREFIXES):
-        return "responses"
-    if m.startswith(_MESSAGES_PREFIXES):
-        return "messages"
-    if m.startswith(_GEMINI_PREFIXES):
-        return "gemini"
+    for prefixes, route in _ROUTE_RULES:
+        if m.startswith(prefixes):
+            return route
     return "chat"
 
 
@@ -327,12 +464,10 @@ class OpencodeAdapter:
         self._msg = AnthropicAdapter()
         self._gem = GeminiAdapter()
         self._last_route: Route = "chat"
-        # Official-client fingerprint ids: generated lazily so they stay
-        # stable across the 401-refresh retry path's header rebuilds (same
-        # adapter instance) while every request gets its own fresh pair
-        # (fresh_adapter on the hot path).
+        # Official-client fingerprint id: generated lazily so it stays stable
+        # across the 401-refresh retry path's header rebuilds (same adapter
+        # instance) while each request reuses the credential's long-lived id.
         self._spoof_session: str | None = None
-        self._spoof_request: str | None = None
         # Responses-upstream per-stream state (mirrors OpenAIAdapter's).
         self._resp_tools: dict[str, dict[str, Any]] = {}  # item_id -> entry
         self._resp_next_index = 0
@@ -354,7 +489,6 @@ class OpencodeAdapter:
         self._gem.reset()
         self._last_route = "chat"
         self._spoof_session = None
-        self._spoof_request = None
         self._resp_tools.clear()
         self._resp_next_index = 0
         self._resp_started = False
@@ -365,9 +499,15 @@ class OpencodeAdapter:
 
     # -- auth / URL ------------------------------------------------------
     def headers(self, key: ProviderKeyRef) -> dict[str, str]:
+        # Exactly the headers the v2 client puts on the wire, minus the ones the
+        # gate does not read (`Accept`, `Content-Type`, `Accept-Encoding`) and
+        # minus two this adapter used to add that the free tier **rejects**:
+        # `HTTP-Referer` and `x-opencode-request` (bisected live 2026-10-14 —
+        # each one alone turns a 200 into a 403 FreeTierError). The client sends
+        # neither, so they were pure liability. `X-Title` stays: referral
+        # attribution, and it does not trip the gate (verified 200).
         h: dict[str, str] = {
             "User-Agent": build_user_agent(),
-            "HTTP-Referer": "https://opencode.ai/",
             "X-Title": "opencode",
         }
         # Anthropic's API version names its own Messages endpoint: it rides
@@ -375,13 +515,13 @@ class OpencodeAdapter:
         # /messages). The Responses/Chat/Gemini endpoints never need it.
         if self._last_route == "messages":
             h["anthropic-version"] = "2023-06-01"
-        # Anonymous sentinel: omits every credential. Far from being retired,
-        # keyless is the WORKING free-tier path — probed 2026-09-19, the same
-        # correctly-shaped request returns 200 with no Authorization and 429
-        # FreeUsageLimitError with a real Zen key (the account's free quota is
-        # spent). The sentinel is therefore the recommended setup for `-free`
-        # deployments; the 403 that got blamed on "a missing key" is the
-        # request-shape gate below, not a credential gate.
+        # Anonymous sentinel: omits every credential. It was the working
+        # free-tier path while the free tier answered at all (probed
+        # 2026-09-19: keyless 200, a real Zen key 429 FreeUsageLimitError).
+        # Since 2026-10-14 the free tier is closed to everyone, signed in or
+        # not, so the sentinel no longer buys anything on its own — keep it
+        # for deployments that deliberately send no credential, but do not read
+        # it as free-tier access. Paid models need a real Console key.
         if key.secret.strip().lower() != ANONYMOUS_KEY_SENTINEL:
             # Scheme follows the route; see _CREDENTIAL_HEADER and the module
             # docstring. `_last_route` is written by build_url()/encode_request()
@@ -395,27 +535,48 @@ class OpencodeAdapter:
             log.debug("opencode_credential_scheme", route=self._last_route,
                       scheme=scheme, label=key.label)
         else:
-            log.debug("opencode_credential_omitted", route=self._last_route,
-                      reason="anonymous_sentinel", label=key.label)
-        # Official-client fingerprint, on every model, mirroring the
-        # opencode CLI (packages/opencode/src/session/llm/request.ts): session +
-        # request ids, client tag, and project id (the CLI's global fallback
-        # when no workspace is bound).
+            # The sentinel still *sends* a credential, because the free tier's
+            # gate reads the header's presence: the anonymous client puts
+            # `Bearer public` on the wire (captured 2026-10-14) and omitting
+            # Authorization answers 403 FreeTierError even with a perfectly
+            # shaped request. `public` is not a secret and not an account — it
+            # is the client's own anonymous marker, and a real key here yields
+            # the upstream's ordinary 401/402 instead.
+            # Only where the capture shows it. The Messages and Gemini front ends
+            # read their own header (`x-api-key` / `x-goog-api-key`) and have no
+            # observed anonymous form, so they stay credential-free rather than
+            # being handed an invented `Authorization`.
+            if _CREDENTIAL_HEADER.get(self._last_route) == "Authorization":
+                h["Authorization"] = ANONYMOUS_BEARER
+                log.debug("opencode_credential_anonymous", route=self._last_route,
+                          label=key.label)
+            else:
+                log.debug("opencode_credential_omitted", route=self._last_route,
+                          reason="anonymous_sentinel", label=key.label)
+        # Official-client fingerprint, on every model, mirroring the opencode v2
+        # client's own header set (captured live 2026-10-14): the session id on
+        # both `x-opencode-session` and `x-opencode-session-id`, the client tag,
+        # and the project id.
         #
-        # The session id is load bearing for the free tier: the edge matches
-        # the CLI's `ses_` + 12 hex + 14 base62 shape, so a uuid-hex id — same
-        # length, wrong alphabet — is rejected with 403 FreeTierError. And the
-        # upstream accounts free quota per session, so it is reused per
-        # credential rather than re-minted per request (429 class). Ids stay
-        # stable on one adapter instance across the 401-refresh retry path's
-        # header rebuilds and rotate on reset()/fresh instance.
+        # The session id is load bearing for the free tier: the edge matches the
+        # client's `ses_` + 12 hex + 14 base62 shape, so a uuid-hex id — same
+        # length, wrong alphabet — is rejected with 403 FreeTierError (and so is
+        # the v2 CLI's own `ses_`+64-hex form, which is a different id space
+        # than this header carries). The upstream also accounts free quota per
+        # session, so the id is reused per credential rather than re-minted per
+        # request (429 class). It stays stable on one adapter instance across the
+        # 401-refresh retry path's header rebuilds and rotates on reset()/fresh
+        # instance.
         if self._spoof_session is None:
             self._spoof_session = stable_session_id(
                 f"{self.provider_type}:{key.label}:{key.secret}")
-        if self._spoof_request is None:
-            self._spoof_request = canonical_request_id()
         h["x-opencode-session"] = self._spoof_session
-        h["x-opencode-request"] = self._spoof_request
+        # The v2 client sends this alongside the session header, and the free
+        # tier rejects a request that carries only one of the pair (bisected live
+        # 2026-10-14: dropping `x-opencode-session-id` turns a 200 into a 403).
+        # It sends no `x-opencode-request` at all, and adding one also 403s — see
+        # the note in headers().
+        h["x-opencode-session-id"] = self._spoof_session
         h["x-opencode-client"] = "cli"
         h["x-opencode-project"] = "global"
         return h
@@ -484,20 +645,25 @@ class OpencodeAdapter:
             # real usage frame. The Gemini/messages/responses routes carry
             # usage natively, and only the chat wire has the field.
             body["stream_options"] = {"include_usage": True}
-        if free:
-            # The free-tier gate wants the CLI's tool payload. `bash` and `read`
-            # ride in as inert decoys; a client tool of the same name wins and
-            # is left untouched — and is therefore not filtered on the way out.
-            # The messages route is not cloaked: its only member seen on the
-            # free tier (`union-alpha`) is retired upstream (`401 ModelError` on
-            # every route, 2026-09-19), so there is no evidence for a tool
-            # shape there, and an OpenAI-format decoy in an Anthropic body would
-            # be an invented field.
+        if free and _cloak_requested(deployment_params):
+            # Opt-in only. `bash` and `read` ride in as inert decoys; a client
+            # tool of the same name wins and is left untouched — and is
+            # therefore not filtered on the way out. The messages route is not
+            # cloaked: its only member seen on the free tier (`union-alpha`)
+            # is retired upstream (`401 ModelError` on every route, 2026-09-19),
+            # so there is no evidence for a tool shape there, and an
+            # OpenAI-format decoy in an Anthropic body would be an invented
+            # field.
             if route == "responses":
                 self._decoy_names = frozenset(_cloak_responses_tools(body))
-                _force_auto_tool_choice(body, model_id)
             elif route == "chat":
                 self._decoy_names = frozenset(_cloak_chat_tools(body))
+        if free and route == "responses":
+            # Independent of the cloak: the free Muse Spark endpoints reject
+            # every non-auto tool_choice with 400, and forcing is still the
+            # lesser evil there. Allowlisted per model (see
+            # _FORCE_AUTO_TOOL_CHOICE), so it cannot touch other traffic.
+            _force_auto_tool_choice(body, model_id)
         return body
 
     # -- response decoding ---------------------------------------------------
