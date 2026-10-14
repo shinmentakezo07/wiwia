@@ -22,6 +22,14 @@ class LogEvent:
     provider_key_label: str = ""
     status: int = 200
     error_code: str = ""
+    # The exact upstream error message this gateway returned to the caller.
+    # ``error_code`` is only the coarse ``etype`` (rate_limit_error,
+    # api_error…); the message the caller actually saw — "openai-main rate
+    # limited: You exceeded your current quota…" — was discarded, so the
+    # request log could never reproduce it and an operator had to chase the
+    # same failure through provider consoles. Populated by ``build_log_event``
+    # from ``ctx.error.message`` (credential-scrubbed); empty on success.
+    error_message: str = ""
     tok_in: int = 0
     tok_cached: int = 0
     tok_cache_creation: int = 0

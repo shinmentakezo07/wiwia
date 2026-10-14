@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
   provider_key_label TEXT DEFAULT '',
   status INTEGER DEFAULT 200,
   error_code TEXT DEFAULT '',
+  error_message TEXT DEFAULT '',
   tok_in INTEGER DEFAULT 0,
   tok_cached INTEGER DEFAULT 0,
   tok_cache_creation INTEGER DEFAULT 0,
@@ -71,6 +72,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
   provider_key_label TEXT DEFAULT '',
   status INTEGER DEFAULT 200,
   error_code TEXT DEFAULT '',
+  error_message TEXT DEFAULT '',
   tok_in INTEGER DEFAULT 0,
   tok_cached INTEGER DEFAULT 0,
   tok_cache_creation INTEGER DEFAULT 0,
@@ -365,7 +367,8 @@ def merge_percentile(samples: list[float],
     return hist_mod.percentile_with_samples(samples, series_hist)
 
 _COLS = ("ts", "request_id", "surface", "key_alias", "key_id", "model_group",
-         "provider", "provider_key_label", "status", "error_code", "tok_in",
+         "provider", "provider_key_label", "status", "error_code",
+         "error_message", "tok_in",
          "tok_cached", "tok_cache_creation", "tok_reasoning", "tok_out",
          "usage_estimated", "tps",
          "ttft_ms", "latency_ms", "cost", "was_stream", "cache_hit",
@@ -731,7 +734,8 @@ class DBSink:
                           ("tok_cache_creation", "INTEGER DEFAULT 0"),
                           ("response_cache_hit", "INTEGER DEFAULT 0"),
                           ("translation_warnings", "TEXT DEFAULT '[]'"),
-                          ("usage_estimated", "INTEGER DEFAULT 0")]:
+                          ("usage_estimated", "INTEGER DEFAULT 0"),
+                          ("error_message", "TEXT DEFAULT ''")]:
             if col not in cols:
                 await conn.execute(
                     sa.text(f"ALTER TABLE request_logs ADD COLUMN {col} {decl}"))
@@ -799,6 +803,7 @@ class DBSink:
             "model_group": evt.model_group,
             "provider": evt.provider, "provider_key_label": evt.provider_key_label,
             "status": evt.status, "error_code": evt.error_code,
+            "error_message": evt.error_message,
             "tok_in": evt.tok_in, "tok_cached": evt.tok_cached,
             "tok_cache_creation": evt.tok_cache_creation,
             "tok_reasoning": evt.tok_reasoning, "tok_out": evt.tok_out,
@@ -1254,6 +1259,7 @@ class DBSink:
             d.update({"request_id": "", "surface": "", "key_alias": "",
                       "key_id": "", "model_group": "", "provider": "",
                       "provider_key_label": "", "status": 200, "error_code": "",
+                      "error_message": "",
                       "tok_in": 0, "tok_cached": 0, "tok_cache_creation": 0,
                       "tok_reasoning": 0, "tok_out": 0, "usage_estimated": False,
                       "tps": 0.0, "ttft_ms": 0.0, "latency_ms": 0.0, "cost": 0.0,

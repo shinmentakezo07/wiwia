@@ -97,6 +97,11 @@ export interface VirtualKey {
   tpm: number | null;
   expires_at: number | null;
   disabled: boolean;
+  owner_id?: string | null;
+  budget_reserved?: number;
+  /** Concurrency lane this key is routed in (`RouterSettings.priority_lanes`).
+   *  `null` = unset, which the router resolves to `default_lane`. */
+  priority?: string | null;
 }
 
 export interface Attempt {
@@ -126,22 +131,38 @@ export interface RequestLogEntry {
   request_id: string;
   surface: string;
   key_alias: string;
+  /** Virtual key id this request was billed to (empty for master-key traffic). */
+  key_id: string;
   model_group: string;
   provider: string;
   provider_key_label: string;
   status: number;
   error_code: string;
+  /** Exact upstream error message returned to the caller (empty on success). */
+  error_message: string;
   tok_in: number;
   tok_cached: number;
+  /** Cache-*creation* tokens, billed above the cached-read rate. Distinct from
+   *  `tok_cached` — Anthropic reports both on one request. */
+  tok_cache_creation: number;
   tok_reasoning: number;
   tok_out: number;
+  /** True when usage was estimated rather than reported by the provider. */
+  usage_estimated: boolean;
   tps: number;
   ttft_ms: number;
   latency_ms: number;
   cost: number;
   was_stream: boolean;
+  /** Provider prompt-cache hit (feeds `wiwi_prompt_cache_hits_total`). */
   cache_hit: boolean;
   cache_savings: number;
+  /** Served from wiwi's own exact-match response cache. NOT the same as
+   *  `cache_hit` — a response-cache hit must leave `cache_hit` false. */
+  response_cache_hit: boolean;
+  /** Non-fatal notes from the dialect translation layer (dropped params,
+   *  lossy re-encodes). Empty when the request round-tripped cleanly. */
+  translation_warnings: string[];
   attempts: Attempt[];
   /** Raw request body (only when store_prompts_in_spend_logs is enabled). */
   request_body?: Record<string, unknown> | unknown[] | null;
@@ -322,16 +343,40 @@ export interface HermesPollResponse {
   access_token_masked?: string;
   expires_at?: number | null;
 }
-export interface HermesStatusResponse {
-  connected: boolean;
+/** One pool key's Hermes (Nous Portal) account state. A wiwi provider pool can
+ *  hold several Nous identities (one per key, AUDIT #427), so the status route
+ *  reports a list rather than a single flat account. ``managed: false`` means
+ *  the key holds a raw Nous API key / bare token: usable for inference but
+ *  never auto-refreshable. ``expires_at`` is epoch *seconds* (nullable when the
+ *  credential carries no known expiry). */
+export interface HermesAccountStatus {
+  key_label: string;
+  managed: boolean;
+  /** Nous account email, when the OAuth credential recorded one. */
+  label?: string | null;
   expires_at?: number | null;
+  /** True when the token is expired or within the refresh lead window. */
   needs_refresh?: boolean;
   has_refresh_token?: boolean;
 }
+export interface HermesStatusResponse {
+  /** True when at least one account in the pool is an OAuth-managed account. */
+  connected: boolean;
+  accounts?: HermesAccountStatus[];
+}
 export interface HermesRefreshResponse {
   provider: string;
+  /** The pool key that was actually refreshed (server picks the first managed
+   *  one when the request omits a ``key_label``). */
+  key_label?: string;
   access_token_masked: string;
   expires_at: number | null;
+}
+export interface HermesDisconnectResponse {
+  provider: string;
+  /** How many managed accounts were removed (0 for the whole pool when nothing
+   *  was OAuth-managed). */
+  disconnected: number;
 }
 
 export interface ClineDisconnectResponse {
@@ -568,6 +613,19 @@ export interface BackupPlan {
   counts: Record<string, number | Record<string, number>>;
 }
 
+/** A bulk section's merge outcome.
+ *
+ *  Every row in these sections runs in its own SAVEPOINT, so one
+ *  un-insertable row rolls back alone instead of taking the section — and is
+ *  then *counted* rather than swallowed. `failed > 0` means the file carried
+ *  rows this gateway refused and they were never written, so the console has
+ *  to report it: a merged count alone would read as "everything restored".
+ *  Mirrors `_apply_rollups` / `_apply_responses` in `wiwi/server/backup.py`. */
+export interface BackupSectionResult {
+  written: number;
+  failed: number;
+}
+
 export interface BackupImportResult {
   providers: number;
   keys: number;
@@ -577,9 +635,11 @@ export interface BackupImportResult {
   prices: number;
   users: number;
   vkeys: number;
+  /** Raw log rows, applied as one bulk page-insert: all or nothing, so a plain
+   *  count. */
   logs: number;
-  rollups: number;
+  rollups: BackupSectionResult;
   /** Audit rows the file carried that were deliberately NOT replayed. */
   audit_skipped: number;
-  responses: number;
+  responses: BackupSectionResult;
 }

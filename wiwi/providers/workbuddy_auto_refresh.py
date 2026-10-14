@@ -236,6 +236,41 @@ class WorkBuddyAutoRefresh:
     def _trip_circuit(self, ident: tuple[str, str]) -> None:
         self._circuit.trip(ident)
 
+    def forget(self, provider: str, label: str) -> None:
+        """Drop all per-account state for one ``(provider, key_label)``.
+
+        ``mark_dead`` is permanent: ``CircuitBreaker._dead`` is only cleared by
+        ``clear()``, which only runs AFTER a successful rotation — and
+        ``_rotate_locked``'s ``blocked()`` gate short-circuits *before* any
+        rotation is attempted, so a dead ``(provider, label)`` blocks the
+        sweeper and the 401 hook forever. WorkBuddy labels are derived from the
+        account (``nickname or uid``), so deleting a key and re-importing a
+        fresh auth for the same account reuses the label and would inherit the
+        corpse: the only escape was the admin force-refresh button. The admin
+        delete/disconnect handlers call this so a re-created account starts
+        clean.
+
+        ``_locks`` / ``_generations`` are reclaimed too — nothing else ever
+        popped them, so every import-then-delete cycle leaked a lock and a
+        counter.
+
+        A refresh that is *in flight* keeps its entry. Popping it mid-refresh
+        would hand the next caller a brand-new lock and a zeroed generation
+        counter: the in-flight holder captured the generation *before* entering
+        and re-checks it under the lock to learn that a sibling already rotated
+        the single-use grant, so a zeroed counter would make it present that
+        same consumed grant a second time. The entry is reclaimed on a later,
+        idle call — and it is reused verbatim if the operator reconnects the
+        same account label in the meantime.
+        """
+        ident = (provider, label)
+        lock = self._locks.get(ident)
+        if lock is not None and lock.locked():
+            return
+        self._locks.pop(ident, None)
+        self._generations.pop(ident, None)
+        self._circuit.clear(ident)
+
 
 def refresh_for_provider(state: AppState) -> Any:
     """Build the on-demand refresh hook the gateway calls on a 401.
@@ -275,7 +310,7 @@ async def refresh_key_now(state: AppState, provider_name: str,
     return {"ok": True, "error": ""}
 
 
-_workers: dict[int, WorkBuddyAutoRefresh] = {}
+_FALLBACK_ATTR = "_workbuddy_refresh_fallback"
 
 
 def _worker_for(state: AppState) -> WorkBuddyAutoRefresh:
@@ -284,9 +319,26 @@ def _worker_for(state: AppState) -> WorkBuddyAutoRefresh:
     The lifespan-owned ``state.workbuddy_refresh`` wins when set, so the
     background sweeper, the gateway 401 hook, and admin refresh calls all
     share one per-key lock and one circuit breaker. Fallback (tests,
-    pre-lifespan use): a lazily cached instance.
+    pre-lifespan use): a lazily created worker.
+
+    The fallback is cached **on the state object itself**, not in a
+    module-global ``dict[int, WorkBuddyAutoRefresh]`` keyed on ``id(state)``.
+    That global was wrong twice over: entries were never evicted (a leak — one
+    worker per ``AppState`` ever built), and CPython recycles ``id()``, so a
+    re-created ``AppState`` could be handed a worker bound to a **dead** state
+    and inherit its locks and dead circuits. Anchoring the cache to the state
+    makes the worker unreachable — and collectable — as soon as the state dies.
     """
     shared = getattr(state, "workbuddy_refresh", None)
     if shared is not None:
         return shared
-    return _workers.setdefault(id(state), WorkBuddyAutoRefresh(state))
+    worker = getattr(state, _FALLBACK_ATTR, None)
+    if worker is None:
+        worker = WorkBuddyAutoRefresh(state)
+        try:
+            setattr(state, _FALLBACK_ATTR, worker)
+        except AttributeError:
+            # A slotted/frozen stand-in (some tests build a minimal state):
+            # a fresh worker per call is the old behaviour, not a cache bug.
+            pass
+    return worker

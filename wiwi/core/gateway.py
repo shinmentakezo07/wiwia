@@ -26,6 +26,7 @@ from wiwi.logging_core.events import LogEvent
 from wiwi.providers.base import (
     ProviderKeyRef,
     WiwiError,
+    _scrub_credentials,
     error_from_provider_status,
     status_for_key_pool,
     take_adapter_warnings,
@@ -59,6 +60,21 @@ def _record_translation_warnings(ctx: RequestContext, adapter: Any) -> None:
     """
     for msg in take_adapter_warnings(adapter):
         ctx.metadata.setdefault("translation_warnings", []).append(msg)
+
+
+def _error_message_for_log(err: Any) -> str:
+    """The caller-visible error message for the request log, credential-scrubbed.
+
+    ``WiwiError.message`` is what the client received, but it is assembled from
+    the provider's error body and can quote the rejected key verbatim — and the
+    request log is shown to every admin (and mirrored into backups), so it gets
+    the same ``_scrub_credentials`` treatment the response path applies before
+    the caller ever sees it. Bounded so a pathological upstream body cannot
+    balloon the log row.
+    """
+    if not isinstance(err, WiwiError) or not err.message:
+        return ""
+    return _scrub_credentials(str(err.message))[:2000]
 
 
 def _speaks_messages(dep: Deployment) -> bool:
@@ -2543,6 +2559,7 @@ def build_log_event(ctx: RequestContext) -> LogEvent:
                                                if ctx.deployment else ""),
         provider_key_label=(getattr(ctx.provider_key, "label", "") if ctx.provider_key else ""),
         status=ctx.status, error_code=(ctx.error.etype if ctx.error else ""),
+        error_message=_error_message_for_log(ctx.error),
         tok_in=u.prompt_tokens if u else 0,
         tok_cached=u.cached_tokens if u else 0,
         tok_cache_creation=u.cache_creation_tokens if u else 0,

@@ -408,6 +408,22 @@ def _request_is_https(request: Request,
 
 _rt_log = structlog.get_logger("wiwi.realtime")
 
+# Process-lifetime realtime loss counters, surfaced on /health next to
+# ``spend_charge_failures``. They cannot be derived from the request-log ring:
+# a session wiwi could not price is precisely one that is *absent* from it, so
+# without a counter the gap between wiwi's books and the upstream's is
+# invisible (AUDIT #347). Module-level rather than on ``AppState`` so the
+# realtime relay — which runs on both the HTTP and the WebSocket path — has one
+# counter regardless of which surface is looking.
+_RT_COUNTERS: dict[str, int] = {"usage_missing": 0}
+
+# How long the upstream pump is given to deliver a trailing frame after
+# ``max_session_s`` cuts the session. ``response.done`` — the frame that carries
+# the turn's usage, and always the LAST frame of that turn — is exactly the one
+# a cap firing mid-turn is likely to interrupt, so cancelling both pumps the
+# instant the cap fires bills real tokens at $0.
+_RT_USAGE_GRACE_S = 0.75
+
 
 async def _close_quietly(ws) -> None:
     """Close *ws*, tolerating an already-closed peer.
@@ -459,6 +475,34 @@ async def _realtime_relay(client_ws, upstream_ws, rt_settings) -> tuple[int, int
     """
     peak: list[tuple[int, int]] = []
 
+    async def absorb_upstream_frame(frame) -> None:
+        """Forward one upstream frame verbatim, remembering any usage it bears.
+
+        ``websockets.connect`` is opened without ``decode=True``, so ``recv()``
+        yields ``str | bytes`` — and the realtime protocol is not all-JSON:
+        audio responses arrive as binary frames. The two pump directions used
+        to disagree about that: the client side iterated ``iter_text()`` while
+        the upstream side assumed ``str``. One binary frame therefore raised
+        ``TypeError: a bytes-like object is required`` on ``'"usage"' in frame``,
+        the blanket ``except`` swallowed it, and the ``finally`` closed the
+        *client* socket — a single audio chunk killed a live session, logged at
+        ``debug`` where nothing in a default configuration could see it
+        (AUDIT #347). Only a ``str`` can carry a JSON usage event.
+        """
+        if isinstance(frame, (bytes, bytearray, memoryview)):
+            await client_ws.send_bytes(bytes(frame))
+            return
+        # Bill on the peak, never the sum. response.done and the
+        # preceding item-done events restate overlapping windows of the
+        # same conversation, and a resumed response restates its input,
+        # so summing inflates every multi-turn session.
+        if '"usage"' in frame:
+            got = _realtime_usage(frame)
+            if got is not None and (
+                    not peak or got[0] + got[1] > peak[0][0] + peak[0][1]):
+                peak[:] = [got]
+        await client_ws.send_text(frame)
+
     async def from_client() -> None:
         try:
             async for frame in client_ws.iter_text():
@@ -474,18 +518,13 @@ async def _realtime_relay(client_ws, upstream_ws, rt_settings) -> tuple[int, int
     async def from_upstream() -> None:
         try:
             async for frame in upstream_ws:
-                # Bill on the peak, never the sum. response.done and the
-                # preceding item-done events restate overlapping windows of the
-                # same conversation, and a resumed response restates its input,
-                # so summing inflates every multi-turn session.
-                if '"usage"' in frame:
-                    got = _realtime_usage(frame)
-                    if got is not None and (
-                            not peak or got[0] + got[1] > peak[0][0] + peak[0][1]):
-                        peak[:] = [got]
-                await client_ws.send_text(frame)
+                await absorb_upstream_frame(frame)
         except Exception as exc:  # noqa: BLE001
-            _rt_log.debug("realtime upstream stream ended", error=str(exc)[:200])
+            # Raised to info from debug (AUDIT #347): an unexpected end of the
+            # upstream direction closes the client socket from under a live
+            # session, and at debug it was indistinguishable from silence.
+            _rt_log.info("realtime upstream stream ended",
+                         error=str(exc)[:200], error_type=type(exc).__name__)
         finally:
             await _close_quietly(client_ws)
 
@@ -494,6 +533,15 @@ async def _realtime_relay(client_ws, upstream_ws, rt_settings) -> tuple[int, int
     try:
         await asyncio.wait(tasks, timeout=rt_settings.max_session_s,
                            return_when=asyncio.FIRST_COMPLETED)
+        # ``max_session_s`` fired with both directions still live: the turn in
+        # flight is cut mid-stream, and the usage event pricing it may be
+        # trailing right behind. Give the upstream pump a short grace window
+        # before cancelling, or a session cut at the cap bills real tokens at
+        # $0 and leaves no row to reconcile (AUDIT #347). Only on the timeout
+        # path — when a direction genuinely finished, there is nothing to wait
+        # for and holding the session open would be a behaviour change.
+        if all(not task.done() for task in tasks):
+            await asyncio.wait([tasks[1]], timeout=_RT_USAGE_GRACE_S)
     finally:
         for task in tasks:
             task.cancel()
@@ -502,7 +550,9 @@ async def _realtime_relay(client_ws, upstream_ws, rt_settings) -> tuple[int, int
 
 
 async def _bill_realtime_session(state, info, ctx, dep,
-                                 usage: tuple[int, int]) -> None:
+                                 usage: tuple[int, int] | None,
+                                 *, status: int = 200,
+                                 stop_reason: str = "realtime_session") -> None:
     """Price one realtime session and write its single request-log row.
 
     Billed on the *peak* usage the upstream reported, not the sum of its events,
@@ -510,9 +560,35 @@ async def _bill_realtime_session(state, info, ctx, dep,
     audio-chunk batch and make the request log unreadable; per-turn charges
     would double-count, because the realtime protocol restates overlapping
     windows of the same conversation across several events.
+
+    *usage* is None — or a zero pair — when the session produced no usage
+    event at all: the handshake failed or timed out, upstream answered 401/5xx,
+    or ``max_session_s`` cut the session before a ``response.done``. This used
+    to ``return`` *before* the log write, and the route additionally gated the
+    whole call on ``if usage is not None``, so those sessions left no row, no
+    status, no stop reason and no counter (AUDIT #347). A key whose only
+    traffic was realtime then showed a permanently flat ``spend_to_date`` and
+    an empty Request Logs tab, with nothing to reconcile against the upstream
+    bill. Every session that passed admission is now logged; the missing usage
+    is itself the thing an operator has to be able to see. Every HTTP surface
+    has always logged unconditionally.
     """
-    prompt_tokens, completion_tokens = usage
+    ctx.deployment = dep
+    ctx.status = status
+    ctx.stop_reason = stop_reason
+    prompt_tokens, completion_tokens = usage if usage is not None else (0, 0)
     if prompt_tokens <= 0 and completion_tokens <= 0:
+        # Nothing to price, but the session happened. The zero counts are
+        # marked *estimated*: they are zero because nothing was reported, not
+        # because the provider said zero, and a spend report must never present
+        # the latter as fact (AUDIT #131).
+        ctx.usage = ir.Usage(prompt_tokens=0, completion_tokens=0, estimated=True)
+        _RT_COUNTERS["usage_missing"] += 1
+        _rt_log.warning("realtime session closed with no usage",
+                        request_id=ctx.request_id, status=status,
+                        key_id=getattr(info, "key_id", ""),
+                        model_group=ctx.group)
+        state.logs.log_request(build_log_event(ctx))
         return
     model_key = f"{dep.provider.provider_type}/{dep.model_id}"
     priced = state.cost.cost(
@@ -521,11 +597,8 @@ async def _bill_realtime_session(state, info, ctx, dep,
         provider_name=dep.provider.name)
     ctx.usage = ir.Usage(prompt_tokens=prompt_tokens,
                          completion_tokens=completion_tokens)
-    ctx.deployment = dep
     dep.settle_tokens(ctx.request_id, prompt_tokens + completion_tokens)
     ctx.cost = priced
-    ctx.stop_reason = "realtime_session"
-    ctx.status = 200
     if state.auth is not None:
         # Charge the virtual key for real tokens consumed. This used to call
         # ``state.auth.record_spend(...)`` — a method AuthService never had
@@ -1602,10 +1675,28 @@ def create_app(config: WiwiConfig) -> FastAPI:
         # ``spend_to_date + cost <= max_budget``, which a stale reservation
         # would make spuriously fail. Release first, then charge once.
         if ctx.budget_reserved > 0:
-            with contextlib.suppress(Exception):
-                await state.auth.release_budget_reservation(
-                    key_id, ctx.budget_reserved)
-            ctx.budget_reserved = 0.0
+            reserved = ctx.budget_reserved
+            try:
+                await state.auth.release_budget_reservation(key_id, reserved)
+            except Exception as e:  # noqa: BLE001 — see below for why this counts
+                # A stranded reservation is an *additive* term in over_budget
+                # (auth/service.py), so losing this release permanently shrinks
+                # the key's headroom for the life of the process. Pre-fix this
+                # was a bare suppress: no log, no counter, no operator surface
+                # at all. Count it alongside the charge failures — it is the
+                # same class of silent accounting loss.
+                state.spend_charge_failures += 1
+                import structlog as _sl
+                _sl.get_logger("wiwi.spend").error(
+                    "spend_reservation_release_failed", key_id=key_id,
+                    reserved=reserved, error=type(e).__name__, detail=str(e))
+                # Deliberately NOT cleared: the reservation really is still held
+                # in the database, so leaving ctx.budget_reserved set is what
+                # lets a later release path (_release_tpm_reservation, the
+                # stream teardown) retry it. Zeroing it here would strand the
+                # dollars permanently and invisibly.
+            else:
+                ctx.budget_reserved = 0.0
         try:
             recorded = await state.auth.update_spend(key_id, cost)
         except Exception as e:  # noqa: BLE001 — accounting must never 500 a served turn
@@ -1626,8 +1717,22 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 return False
             return True
         if not recorded:
-            with contextlib.suppress(Exception):
+            # Over-cap crossing (or a vanished key). The charge was *refused*,
+            # not lost — the upstream already billed it — so the unconditional
+            # true-up is what keeps spend_to_date honest and makes the *next*
+            # request fail admission (AUDIT_REPORT C1). This used to sit under a
+            # bare contextlib.suppress, the second half of AUDIT #179: a raising
+            # true-up lost the charge silently, leaving spend_to_date below
+            # max_budget so over_budget never tripped and the key was admitted
+            # indefinitely, with no log and spend_charge_failures stuck at 0.
+            try:
                 await state.auth.apply_spend_trueup(key_id, cost)
+            except Exception as e:  # noqa: BLE001 — the charge is genuinely lost
+                state.spend_charge_failures += 1
+                import structlog as _sl
+                _sl.get_logger("wiwi.spend").error(
+                    "spend_charge_unrecorded", key_id=key_id, cost=cost,
+                    error=type(e).__name__, detail=str(e))
         return recorded
 
     async def _release_tpm_reservation(info, ctx) -> None:
@@ -2915,6 +3020,33 @@ def create_app(config: WiwiConfig) -> FastAPI:
                              f"budget exhausted ({info.spend_to_date:.4f}"
                              f"/{info.max_budget})")
             return
+        # The unpriced-model gate of AUDIT #323. It used to live ONLY in the
+        # HTTP admission closure ``authenticate()``; this route authenticates
+        # its own socket credential and hand-rolled the other three checks
+        # (disabled/expires, over_budget, model allowlist) but not this one, so
+        # with ``unpriced_model_policy=reject`` a budget-capped key was refused
+        # on /v1/chat/completions and admitted over WS. The session then priced
+        # at $0, ``apply_spend_trueup`` no-ops on a non-positive amount, and the
+        # cap never tripped — the one control that stops unpriced spend was a
+        # no-op on the easiest surface to bypass (AUDIT #347).
+        #
+        # This is a deliberate mirror, not a shared helper: ``authenticate()``
+        # renders its verdict as an HTTP error body and this one cannot reuse
+        # it. It MUST stay in lockstep with ``authenticate()`` — the guard, the
+        # ``model != "*"`` scope and the ``max_budget is not None`` narrowing
+        # alike. ``test_the_unpriced_gate_reads_identically_on_both_surfaces``
+        # in tests/test_fix_round139.py pins the two verdicts together, and
+        # ``test_an_uncapped_key_is_not_refused_by_the_unpriced_gate`` pins the
+        # narrowing, so a one-sided change fails instead of drifting.
+        if (model and model != "*" and info.max_budget is not None
+                and config.general_settings.unpriced_model_policy == "reject"
+                and await _model_group_is_unpriced(model)):
+            await _ws_refuse(ws, 503, "unpriced_model_error",
+                             f"model '{model}' has no pricing entry;"
+                             " budget-capped keys are refused until an admin"
+                             " prices it"
+                             " (general_settings.unpriced_model_policy=reject)")
+            return
         if info.models and model and model != "*" and model not in info.models:
             await _ws_refuse(ws, 403, "permission_error",
                              f"key not allowed for model '{model}'")
@@ -2964,8 +3096,34 @@ def create_app(config: WiwiConfig) -> FastAPI:
                              " has no realtime surface")
             return
 
+        # Key-level RPM/TPM. ``enforce_rate_limit`` owns the reservation and its
+        # only call site was the HTTP path, so a realtime session — the one
+        # surface that can hold a deployment slot for an hour — ran entirely
+        # unthrottled at the key level; ``pick_deployment`` above enforces only
+        # the *per-deployment* caps, and a single uncapped deployment therefore
+        # let a key open unlimited concurrent sessions (AUDIT #347).
+        #
+        # Reserved with est_tokens=0 and reconciled exactly once, after the
+        # session, below: the limiter replaces the reservation tagged with
+        # ``ctx.request_id`` rather than appending beside it, so however long
+        # the session ran its tokens are counted once, never twice. Placed after
+        # the deployment/key/url lookups so the only thing between the
+        # reservation and the session itself is this one refusal.
+        allowed, retry_after = await state.limiter.check(
+            info.key_id, info.rpm, info.tpm,
+            est_tokens=0, request_id=ctx.request_id)
+        if not allowed:
+            _refund_deployment_slot(dep, ctx)
+            await _ws_refuse(ws, 429, "rate_limit_error",
+                             f"rate limit exceeded, retry in {retry_after}s",
+                             retry_after=retry_after)
+            return
+
         # From here the session exists upstream; every path must close it.
         dep.inflight += 1  # hold the slot for the whole session, not one turn
+        usage: tuple[int, int] | None = None
+        status = 200
+        stop_reason = "realtime_session"
         try:
             # Accept can fail if the client disconnects during the handshake;
             # keep it inside the slot's finally (AUDIT #363).
@@ -2983,13 +3141,27 @@ def create_app(config: WiwiConfig) -> FastAPI:
             _rt_log.warning("realtime upstream connection failed",
                             error=str(exc)[:200], model=model)
             usage = None
+            # The session was admitted and then never served. That is the case
+            # the early return used to swallow whole: no charge, no row, no
+            # status. Recorded as a failed session instead (AUDIT #347).
+            status = 502
+            stop_reason = "realtime_upstream_error"
         finally:
             dep.inflight -= 1
             _refund_deployment_slot(dep, ctx)
             with contextlib.suppress(Exception):
                 await ws.close()
-        if usage is not None:
-            await _bill_realtime_session(state, info, ctx, dep, usage)
+        # Unconditional: every session that passed admission gets a row,
+        # including the ones with no usage to price.
+        await _bill_realtime_session(state, info, ctx, dep, usage,
+                                     status=status, stop_reason=stop_reason)
+        if status >= 400:
+            # Never served, so the reservation is phantom: refund it rather
+            # than confirming a zero-token one (the HTTP path's release on a
+            # failed request, same shape).
+            await state.limiter.release(info.key_id, ctx.request_id)
+        else:
+            await _record_tpm_usage(info, ctx)
 
     @app.get("/health")
     async def health():
@@ -3037,6 +3209,15 @@ def create_app(config: WiwiConfig) -> FastAPI:
             # non-zero value means the budget cap was not enforced for that
             # many requests, which is an accounting incident, not a warning.
             "spend_charge_failures": app.state.wiwi.spend_charge_failures,
+            # Realtime sessions that ended without a single usage event
+            # (AUDIT #347): a failed handshake, an upstream 401/5xx, or the
+            # ``max_session_s`` cap cutting the session before a
+            # ``response.done``. Each one is a session wiwi served but could
+            # not price, so this is a reconciliation gap against the upstream
+            # bill rather than a warning — and by definition it cannot be
+            # derived from the ring, since an unpriced session is the one row
+            # whose counts are not provider-reported.
+            "realtime_usage_missing": _RT_COUNTERS["usage_missing"],
         }
 
     # -- metrics ---------------------------------------------------------------
@@ -3055,6 +3236,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
             # definition, and a ring-derived total decreases on every eviction
             # (AUDIT #180), which makes PromQL read each eviction as a process
             # restart. Both are passed in from the subsystem that owns them.
+            # ``_RT_COUNTERS`` is the same object /health reads, so the two
+            # operator surfaces cannot disagree (AUDIT #347).
             text = render_metrics(
                 events,
                 state.logs.dropped_request_logs,
@@ -3062,7 +3245,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 state.logs.failed_request_log_writes,
                 state.logs.dropped_proxy_logs,
                 state.logs.failed_audit_log_writes,
-                state.spend_charge_failures)
+                state.spend_charge_failures,
+                _RT_COUNTERS["usage_missing"])
             return PlainTextResponse(text, media_type="text/plain; version=0.0.4")
 
     # -- admin -------------------------------------------------------------------
@@ -3602,6 +3786,30 @@ def create_app(config: WiwiConfig) -> FastAPI:
                             provider=name, label=label,
                             reason="provider is YAML-defined; delete is "
                                    "in-memory only and will not survive restart")
+        # Reclaim the WorkBuddy per-account lock / generation counter / circuit
+        # entry. ``mark_dead`` is permanent (only a successful rotation calls
+        # ``CircuitBreaker.clear``, and ``_rotate_locked``'s ``blocked()`` gate
+        # short-circuits *before* any rotation is attempted), while a WorkBuddy
+        # label is derived from the account (``nickname or uid``) — so deleting
+        # the key and importing a fresh auth for the same account reuses the
+        # label and would inherit the corpse, leaving the sweeper and the 401
+        # hook reporting "blocked by the refresh circuit breaker" forever until
+        # the admin force-refresh button. A dead account must become reclaimable
+        # the moment its credential is replaced.
+        if acct.provider_type == "workbuddy":
+            from wiwi.providers.workbuddy_auto_refresh import (
+                _worker_for as workbuddy_worker_for,
+            )
+            workbuddy_worker_for(state).forget(name, label)
+        # Same reclaim for Cline: the pool its OAuth record wrote into just
+        # changed shape, so a dead Cline circuit must not survive the key it
+        # belonged to. ``forget`` skips while a rotation holds the lock, so an
+        # in-flight single-use refresh keeps its generation bookkeeping.
+        if acct.provider_type == "cline":
+            from wiwi.providers.cline_auto_refresh import (
+                forget_provider as cline_forget_provider,
+            )
+            cline_forget_provider(state, name)
         await state.logs.log_audit(actor="master", action="provider_key.delete",
                                    target=f"{name}/{label}")
         return ORJSONResponse({"deleted": True, "label": label})
@@ -3703,16 +3911,26 @@ def create_app(config: WiwiConfig) -> FastAPI:
         acct = state.router.providers.get(name)
         if acct is None:
             return _err(404, "not_found_error", f"unknown provider '{name}'", request)
-        # Block if any model group still references this provider.
-        referencing = sorted(
-            gname for gname, deps in state.router.groups.items()
-            if any(d.provider is acct for d in deps)
-        )
-        if referencing:
-            return _err(409, "invalid_request_error",
-                        f"provider still referenced by groups: "
-                        f"{', '.join(referencing)} — remove those deployments first",
-                        request)
+        # Cascade: every model group this account feeds loses it. The delete
+        # used to refuse with 409 and make the operator remove the
+        # deployments one at a time from the provider-detail UI first, which
+        # was both tedious and easy to get stuck in — a YAML ``model_list``
+        # deployment has no DB row, so the only way to detach it was the
+        # Combos page, and nothing in the 409 message said so.
+        #
+        # ``ConfigStore.delete_provider`` already DELETEs this account's
+        # ``deployments`` rows, so the only thing that could resurrect a
+        # YAML-sourced deployment is the *absence* of a tombstone for it.
+        # Re-writing each removed triple through ``delete_deployment``
+        # (``detached=1``) is what keeps them gone across a restart
+        # (AUDIT #297) — do it after the cascade delete so the tombstones
+        # are not deleted along with the rest.
+        detached: list[tuple[str, str]] = [
+            (gname, d.model_id)
+            for gname, deps in state.router.groups.items()
+            for d in deps
+            if d.provider.name == name
+        ]
         # Persist FIRST, then mutate in-memory routing — the same order
         # ``POST /admin/providers`` and ``DELETE /admin/keys/...`` already use.
         # This path used to delete from ``router.providers`` (and the alias and
@@ -3724,6 +3942,18 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if state.config_store:
             await state.config_store.delete_provider(name)
             await state.config_store.delete_setting(_cline_oauth_setting_key(name))
+        # Deleting the account deletes the credential, so the Cline refresh
+        # state must go with it: the OAuth record is already being dropped, and
+        # ``CircuitBreaker._dead`` survives forever (nothing else popped it), so
+        # re-creating a Cline provider under the same name inherited the corpse
+        # and the sweeper reported "blocked by the refresh circuit breaker"
+        # permanently. Guarded on the provider type so a non-Cline delete does
+        # not manufacture a worker for it.
+        if acct.provider_type == "cline":
+            from wiwi.providers.cline_auto_refresh import (
+                forget_provider as cline_forget_provider,
+            )
+            cline_forget_provider(state, name)
         # drop any alias_id entry that points at this provider
         for k, v in list(state.router.alias_to_provider.items()):
             if v == name:
@@ -3735,9 +3965,47 @@ def create_app(config: WiwiConfig) -> FastAPI:
         # provider later created under the freed name (AUDIT #149).
         for _entry in state.cost.prices.values():
             (_entry.get("providers") or {}).pop(name, None)
+        if acct.provider_type == "workbuddy":
+            # Purge every account's refresh state, not just the routable keys:
+            # each WorkBuddy pool key is its own OAuth account with its own
+            # permanent ``mark_dead`` entry, and re-importing under the same
+            # provider name reuses the labels (``nickname or uid``). See the
+            # delete-key handler for the full argument.
+            from wiwi.providers.workbuddy_auto_refresh import (
+                _worker_for as workbuddy_worker_for,
+            )
+            wb_worker = workbuddy_worker_for(state)
+            for gone in [k.label for k in acct.keys]:
+                wb_worker.forget(name, gone)
         del state.router.providers[name]
-        await state.logs.log_audit(actor="master", action="provider.delete", target=name)
-        return ORJSONResponse({"deleted": True, "name": name})
+        # Detach the cascaded deployments in memory. A group left with no
+        # deployments is popped outright, matching ``admin_delete_deployment``
+        # — an empty group would linger as a routable-but-failing target.
+        for gname, model_id in detached:
+            deps = state.router.groups.get(gname)
+            if deps is None:
+                continue
+            remaining = [d for d in deps
+                         if not (d.provider.name == name and d.model_id == model_id)]
+            if remaining:
+                state.router.groups[gname] = remaining
+            else:
+                state.router.groups.pop(gname, None)
+        state.router.rebuild_cross_provider_pools()
+        # Tombstone the cascaded YAML-sourced deployments so they do not
+        # reappear on the next restart (see the note above). Order matters:
+        # ``delete_provider`` has already removed this account's rows, and
+        # each call here re-inserts one detached row.
+        if state.config_store:
+            for gname, model_id in detached:
+                await state.config_store.delete_deployment(gname, name, model_id)
+        await state.logs.log_audit(
+            actor="master", action="provider.delete", target=name,
+            diff={"detached_deployments": [
+                {"group": g, "model_id": m} for g, m in detached]})
+        return ORJSONResponse({"deleted": True, "name": name,
+                               "detached_deployments": [
+                                   {"group": g, "model_id": m} for g, m in detached]})
 
     @app.patch("/admin/providers/{name}")
     async def admin_patch_provider(name: str, request: Request):
@@ -5587,43 +5855,72 @@ def create_app(config: WiwiConfig) -> FastAPI:
     def _cline_oauth_setting_key(provider: str) -> str:
         return f"cline_oauth:{provider}"
 
-    async def _update_provider_secret(provider: str, secret: str) -> bool:
-        """Replace the secret of the provider's first key, in memory and DB.
+    async def _cline_oauth_record(provider: str) -> dict[str, Any] | None:
+        """The provider's stored Cline OAuth record, or None when unset."""
+        if not state.config_store:
+            return None
+        return await state.config_store.get_setting(
+            _cline_oauth_setting_key(provider))
 
-        Returns False when the provider has no keys (caller should reject the
-        connect/refresh rather than store tokens with no key to land them on).
+    async def _cline_store_access_token(provider: str, secret: str,
+                                        owned: str | None) -> bool:
+        """Write *secret* into every pool key this OAuth record owns.
+
+        Replaces the old private ``_update_provider_secret``, which wrote
+        ``acct.keys[0]`` and nothing else — the exact bug
+        :meth:`wiwi.providers.cline_auto_refresh.ClineAutoRefresh.store_access_token`
+        documents fixing. On a 2-key pool that single-key write left the
+        sibling holding the stale access token; the round-robin cursor then
+        handed the next request to that sibling, it 401'd, and the on-demand
+        hook burned a *second* rotation of the single-use grant the operator
+        had just consumed — ``invalid_grant``, then a dead provider.
+
+        ``owned`` is the ``access_fingerprint`` the record carried *before*
+        this token replaced it. Passing the post-rotation fingerprint instead
+        would match nothing (so only ``keys[0]`` would be written — the bug
+        again), and omitting it would clobber raw API keys the operator added
+        to the pool, which are not this record's to overwrite.
+
+        Returns False when the provider has no keys to land the token on.
         """
-        acct = state.router.providers.get(provider)
-        if acct is None or not acct.keys:
-            return False
-        key0 = acct.keys[0]
-        # Persist BEFORE touching memory. A YAML-defined provider has no DB
-        # row, so the write raises; the old ordering had already assigned
-        # ``key0.secret``, leaving the process running on a token that a
-        # restart would silently revert (AUDIT #319). Returning False makes
-        # the OAuth/refresh caller reject the connect rather than report
-        # success on a write that went nowhere.
-        if state.config_store:
-            try:
-                await state.config_store.update_key_secret(provider, key0.label, secret)
-            except ConfigStoreNotFound:
-                # YAML-defined account. Applying it in memory is still correct
-                # for the running process, and refusing here would break OAuth
-                # entirely on YAML-only deployments (the HF Space). Say so.
-                import structlog
-                structlog.get_logger().warning("provider_secret_not_persisted", provider=provider,
-                            label=key0.label,
-                            reason="provider is YAML-defined; rotation is "
-                                   "in-memory only and will not survive restart")
-                key0.secret = secret
-                key0.status = "active"
-                key0.cooldown_until = 0.0
-                return True
-        key0.secret = secret
-        # Reset runtime cooldown state — the credential just changed.
-        key0.status = "active"
-        key0.cooldown_until = 0.0
-        return True
+        from wiwi.providers.cline_auto_refresh import (
+            _worker_for as cline_worker_for,
+        )
+        written = await cline_worker_for(state).store_access_token(
+            provider, secret, owned=owned)
+        return written > 0
+
+    async def _cline_connect_record(provider: str,
+                                    tokens: dict[str, Any]) -> dict[str, Any]:
+        """The OAuth record to persist for a freshly exchanged auth code.
+
+        ``cline_oauth.exchange_code`` deliberately returns ``None`` for fields
+        a truncated Google-OAuth code has swallowed (see its docstring — the
+        signature eats the closing quote of ``accessToken`` and every field
+        after it, so a truncated code yields a usable access token and **no**
+        ``refreshToken``). Writing that ``None`` over a working record
+        disarmed auto-refresh silently: ``_sweep`` skips any provider whose
+        record has no ``refresh_token``, so the account survived until token
+        expiry and then died with no recovery but another manual paste.
+
+        Every field the exchange legitimately omits therefore falls back to
+        what is already stored, and the fingerprint of the token this record
+        issues is stamped so a later rotation knows which pool keys it owns.
+        """
+        existing = await _cline_oauth_record(provider) or {}
+        return {
+            "refresh_token": (tokens.get("refresh_token")
+                              or existing.get("refresh_token")),
+            "email": tokens.get("email") or existing.get("email"),
+            # A truncated code has no expiresAt either. Resolving it through
+            # the shared helper gives a forward window; *preserving* the old
+            # (already-stale) one would leave the record permanently due and
+            # re-present the single-use grant on every 60 s tick.
+            "expires_at": (tokens.get("expires_at")
+                           or cline_oauth.resolve_expires_at(None)),
+            "access_fingerprint": cline_oauth.access_fingerprint(
+                tokens["access_token"]),
+        }
 
     @app.post("/admin/cline/oauth/login-url")
     async def cline_oauth_login_url(request: Request):
@@ -5660,24 +5957,35 @@ def create_app(config: WiwiConfig) -> FastAPI:
         except ValueError as e:
             return _err(400, "invalid_request_error",
                         f"invalid Cline code: {e}", request)
-        if not await _update_provider_secret(provider, tokens["access_token"]):
+        # Reject an empty pool BEFORE persisting anything: the OAuth state must
+        # not survive a connect that had nowhere to land the token.
+        acct = state.router.providers[provider]
+        if not acct.keys:
             return _err(400, "invalid_request_error",
                         f"provider '{provider}' has no keys — add a pool key "
                         f"first, then connect", request)
-        record = {
-            "refresh_token": tokens["refresh_token"],
-            "expires_at": tokens.get("expires_at"),
-            "email": tokens.get("email"),
-        }
+        # The record (which carries the single-use grant) is persisted first,
+        # the pool keys second — the same ordering the refresh worker uses,
+        # because the record is the only copy of the replacement grant.
+        record = await _cline_connect_record(provider, tokens)
+        # Capture the fingerprint this record issued *previously*: it is what
+        # tells ``store_access_token`` which keys the new token may overwrite.
+        previous = await _cline_oauth_record(provider) or {}
+        owned = previous.get("access_fingerprint")
         if state.config_store:
             await state.config_store.set_setting(
                 _cline_oauth_setting_key(provider), record)
+        if not await _cline_store_access_token(
+                provider, tokens["access_token"], owned):
+            return _err(400, "invalid_request_error",
+                        f"provider '{provider}' has no keys — add a pool key "
+                        f"first, then connect", request)
         await state.logs.log_audit(
             actor="master", action="cline_oauth.connect", target=provider,
-            diff={"email": tokens.get("email")})
+            diff={"email": record.get("email")})
         return ORJSONResponse({
             "provider": provider,
-            "email": tokens.get("email"),
+            "email": record.get("email"),
             "access_token_masked": mask_key(tokens["access_token"]),
         })
 
@@ -5757,22 +6065,24 @@ def create_app(config: WiwiConfig) -> FastAPI:
         except ValueError as e:
             return _cline_callback_redirect(return_path, provider,
                                              error=f"invalid code: {e}")
-        if not await _update_provider_secret(provider, tokens["access_token"]):
+        if not state.router.providers[provider].keys:
             return _cline_callback_redirect(return_path, provider,
                                              error="provider has no pool keys")
-        record = {
-            "refresh_token": tokens["refresh_token"],
-            "expires_at": tokens.get("expires_at"),
-            "email": tokens.get("email"),
-        }
+        record = await _cline_connect_record(provider, tokens)
+        previous = await _cline_oauth_record(provider) or {}
+        owned = previous.get("access_fingerprint")
         if state.config_store:
             await state.config_store.set_setting(
                 _cline_oauth_setting_key(provider), record)
+        if not await _cline_store_access_token(
+                provider, tokens["access_token"], owned):
+            return _cline_callback_redirect(return_path, provider,
+                                             error="provider has no pool keys")
         await state.logs.log_audit(
             actor="master", action="cline_oauth.connect", target=provider,
-            diff={"email": tokens.get("email"), "flow": "auto"})
+            diff={"email": record.get("email"), "flow": "auto"})
         return _cline_callback_redirect(return_path, provider,
-                                         email=tokens.get("email"))
+                                         email=record.get("email"))
 
     def _request_base(request: Request) -> str:
         """Absolute base URL (scheme + host) for building callback URLs.
@@ -5848,39 +6158,48 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if provider not in state.router.providers:
             return _err(404, "not_found_error",
                         f"unknown provider '{provider}'", request)
-        record = None
-        if state.config_store:
-            record = await state.config_store.get_setting(
-                _cline_oauth_setting_key(provider))
+        record = await _cline_oauth_record(provider)
         if not record or not record.get("refresh_token"):
             return _err(400, "invalid_request_error",
                         f"provider '{provider}' has no stored Cline tokens; "
                         "connect first", request)
-        result = await cline_oauth.refresh_token(record["refresh_token"])
-        if result is None:
-            return _err(502, "upstream_error",
-                        "Cline token refresh failed (transient); retry later",
-                        request)
-        if result.get("error") == "unrecoverable_refresh_error":
-            return _err(401, "authentication_error",
-                        f"Cline refresh token rejected — re-login required "
-                        f"(code: {result.get('code')})", request)
-        if not await _update_provider_secret(provider, result["access_token"]):
-            return _err(400, "invalid_request_error",
-                        f"provider '{provider}' has no keys — cannot write "
-                        f"refreshed token", request)
-        record["refresh_token"] = result["refresh_token"]
-        if result.get("expires_at"):
-            record["expires_at"] = result["expires_at"]
-        if state.config_store:
-            await state.config_store.set_setting(
-                _cline_oauth_setting_key(provider), record)
+        # Delegate to the shared auto-refresh worker so this admin path and the
+        # 60 s sweeper / gateway 401 hook share one per-provider lock and one
+        # circuit breaker — the same convention as the WorkBuddy and Hermes
+        # admin refresh endpoints.
+        #
+        # It used to call ``cline_oauth.refresh_token`` itself: a fourth
+        # rotation path with no lock and no circuit. Cline's refreshToken is
+        # single-use, so an operator clicking "Refresh" while the sweeper held
+        # the wire made both POST the same grant; the loser's ``invalid_grant``
+        # called ``mark_dead`` and the provider stayed dead until a human
+        # re-authenticated. Worse, the admin path never touched the circuit,
+        # so its own ``invalid_grant`` did not even record the death — it
+        # failed silently while the sweeper kept burning grants.
+        #
+        # ``force=True`` inside the worker is deliberate and matches WorkBuddy:
+        # an explicit operator rotation is the documented way out of a tripped
+        # (or dead) circuit. It still takes the lock and still honors the
+        # single-use-grant bookkeeping.
+        from wiwi.providers.cline_auto_refresh import (
+            refresh_key_now as cline_refresh_key_now,
+        )
+        result = await cline_refresh_key_now(state, provider)
+        if not result["ok"]:
+            # A permanently rejected grant needs a human re-login — surface it
+            # as 401, not a generic 502.
+            if result["relogin_required"]:
+                return _err(401, "authentication_error", result["error"], request)
+            return _err(502, "upstream_error", result["error"], request)
         await state.logs.log_audit(
             actor="master", action="cline_oauth.refresh", target=provider)
+        acct = state.router.providers[provider]
+        fresh = await _cline_oauth_record(provider) or {}
         return ORJSONResponse({
             "provider": provider,
-            "access_token_masked": mask_key(result["access_token"]),
-            "expires_at": result.get("expires_at"),
+            "access_token_masked": mask_key(
+                next((k.secret for k in acct.keys), "")),
+            "expires_at": fresh.get("expires_at"),
         })
 
     @app.delete("/admin/cline/oauth/disconnect")
@@ -5898,6 +6217,17 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if state.config_store:
             await state.config_store.delete_setting(
                 _cline_oauth_setting_key(provider))
+        # Reclaim the per-provider lock / generation counter / dead-code entry
+        # and — the point of this call — clear the refresh circuit. Nothing
+        # else ever popped them, so ``CircuitBreaker._dead`` survived forever:
+        # the operator disconnected, re-pasted a valid code, and the sweeper
+        # still reported "blocked by the refresh circuit breaker" because the
+        # new credential inherited the *old* grant's death. A Cline account
+        # must be reclaimable the moment its credential is replaced.
+        from wiwi.providers.cline_auto_refresh import (
+            forget_provider as cline_forget_provider,
+        )
+        cline_forget_provider(state, provider)
         await state.logs.log_audit(
             actor="master", action="cline_oauth.disconnect", target=provider)
         return ORJSONResponse({"provider": provider, "disconnected": True})
@@ -5939,9 +6269,18 @@ def create_app(config: WiwiConfig) -> FastAPI:
     def _unique_hermes_key_label(state, provider: str, base: str) -> str:
         """First ``base``-suffixed pool-key label not already taken.
 
-        A second connect for the SAME account reuses its existing label (so a
-        re-login rotates that account in place), while a new account gets
-        ``base-2``, ``base-3``… so accounts never silently collide.
+        *base* is the ACCOUNT label (an email, or a masked token fingerprint),
+        never the credential blob: pool-key labels are not masked — unlike
+        ``secret`` — and are echoed verbatim by ``/poll``, ``/status``,
+        ``/admin/providers``, generic key listings and every request log row, so
+        a blob here would publish the plaintext access + refresh tokens and keep
+        publishing them after a rotation (which only rewrites ``k.secret``).
+
+        A re-login for the SAME account does not come through here at all:
+        ``/poll`` finds the existing key by its decoded credential label and
+        rotates it in place. This only guarantees that a genuinely NEW account
+        whose label collides with a taken one gets ``base-2``, ``base-3``… so
+        accounts never silently collide.
         """
         acct = state.router.providers.get(provider)
         taken = {k.label for k in acct.keys} if acct is not None else set()
@@ -5966,13 +6305,17 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if acct is None:
             # OAuth bootstraps the account: there is nothing to add a key *to*
             # yet, which is the entire point of device-code login. Create a
-            # Hermes account with a single placeholder pool key; /poll replaces
-            # that secret with the real ``hermes:<token>`` on approval. (Mirrors
+            # Hermes account with a single placeholder pool key; /poll DROPS
+            # that placeholder (memory + DB) and appends the real credential on
+            # approval — it appends, it does not replace. A surviving
+            # placeholder is enabled+active in smooth-WRR rotation and decodes
+            # to no credential, so it would send ``Authorization: Bearer
+            # pending`` — one guaranteed upstream 401 per cycle, forever. (Mirrors
             # the WorkBuddy import, which also creates its account on first use.)
             name = provider
             base_url = None
             label = "default"
-            secret = "hermes:pending"
+            secret = hermes_oauth.HERMES_PLACEHOLDER_SECRET
             state.router.providers[name] = ProviderAccount(
                 name=name, provider_type="hermes",
                 base_url=base_url or _default_base_url("hermes"),
@@ -5998,7 +6341,13 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         f"provider '{provider}' has no keys — add a pool key "
                         "first, then connect", request)
         try:
-            device = hermes_oauth.request_device_code()
+            # Sync httpx with a 30 s timeout, on a worker thread: inline this
+            # POST would stall the uvicorn event loop for the whole portal
+            # round-trip, blocking every in-flight completion and stream. AUDIT
+            # #426 threaded the /poll and /refresh call sites but missed this
+            # one — the FIRST endpoint of the connect flow, so the stall landed
+            # on the very request the operator was waiting on.
+            device = await asyncio.to_thread(hermes_oauth.request_device_code)
         except httpx.HTTPError as e:
             return _err(502, "upstream_error",
                         f"Nous Portal device-code request failed: {e}", request)
@@ -6078,22 +6427,69 @@ def create_app(config: WiwiConfig) -> FastAPI:
         # refresh token and its own rate-limit bucket, so a connect APPENDS the
         # account as a new pool key rather than overwriting key #0 — the key
         # pool's WRR then spreads traffic across accounts (AUDIT #427).
-        secret = hermes_oauth.encode_credential(
-            access, tokens.get("refresh_token"), expires_at,
-            _hermes_account_label(access))
-        label = _unique_hermes_key_label(state, provider, secret)
         acct = state.router.providers.get(provider)
         if acct is None:
             return _err(404, "not_found_error",
                         f"unknown provider '{provider}'", request)
-        acct.keys.append(ProviderKey(label=label, secret=secret))
-        try:
-            if state.config_store:
-                await state.config_store.add_key(provider, label, secret)
-        except Exception as e:  # noqa: BLE001 — YAML/DB path varies; in-memory is enough
-            structlog.get_logger("wiwi.hermes_oauth").warning(
-                "hermes_oauth_account_db_write_failed provider=%s err=%s",
-                provider, e)
+        # Drop the bootstrap placeholder /device-code seeded (memory AND DB).
+        # "hermes:pending" decodes to no credential, so credential_bearer falls
+        # through and sends ``Authorization: Bearer pending`` — and since
+        # ProviderKey defaults to enabled=True/status="active", it would sit in
+        # smooth-WRR rotation for the life of the process, burning one
+        # guaranteed-401 upstream request (plus a refresh hook that can never
+        # succeed) on every cycle. /poll only APPENDED, so nothing ever removed it.
+        for gone in [k.label for k in acct.keys
+                     if hermes_oauth.is_placeholder(k.secret)]:
+            acct.keys[:] = [k for k in acct.keys if k.label != gone]
+            try:
+                if state.config_store:
+                    await state.config_store.delete_key(provider, gone)
+            except Exception as e:  # noqa: BLE001 — YAML/DB path varies
+                structlog.get_logger("wiwi.hermes_oauth").warning(
+                    "hermes_oauth_placeholder_db_delete_failed provider=%s "
+                    "key=%s err=%s", provider, gone, e)
+        account_label = _hermes_account_label(access)
+        secret = hermes_oauth.encode_credential(
+            access, tokens.get("refresh_token"), expires_at, account_label)
+        # The pool-key label is the ACCOUNT label — never the credential blob.
+        # Labels are not masked (unlike ``secret``) and are returned verbatim by
+        # /poll, /status, the generic key listings, every LogEvent row and the
+        # auto-refresh log line; a blob there published both plaintext tokens and
+        # kept publishing the ORIGINAL (now-dead) ones, because a rotation only
+        # rewrites k.secret.
+        existing = next(
+            (k for k in acct.keys
+             if (prev := hermes_oauth.decode_credential(k.secret)) is not None
+             and prev.get("label") == account_label),
+            None)
+        if existing is not None:
+            # Re-login of an account already in the pool: rotate it IN PLACE.
+            # Appending instead left the old key holding a single-use grant that
+            # this very login had already consumed — the sweeper would later
+            # present it, get ``invalid_grant``, and that account's circuit would
+            # stay dead until a human re-authenticated it.
+            label = existing.label
+            existing.secret = secret
+            existing.status = "active"
+            existing.cooldown_until = 0.0
+            try:
+                if state.config_store:
+                    await state.config_store.update_key_secret(
+                        provider, label, secret)
+            except Exception as e:  # noqa: BLE001 — YAML/DB path varies
+                structlog.get_logger("wiwi.hermes_oauth").warning(
+                    "hermes_oauth_rotate_db_write_failed provider=%s key=%s "
+                    "err=%s", provider, label, e)
+        else:
+            label = _unique_hermes_key_label(state, provider, account_label)
+            acct.keys.append(ProviderKey(label=label, secret=secret))
+            try:
+                if state.config_store:
+                    await state.config_store.add_key(provider, label, secret)
+            except Exception as e:  # noqa: BLE001 — YAML/DB path varies; in-memory is enough
+                structlog.get_logger("wiwi.hermes_oauth").warning(
+                    "hermes_oauth_account_db_write_failed provider=%s err=%s",
+                    provider, e)
         await state.logs.log_audit(
             actor="master", action="hermes_oauth.connect", target=provider)
         return ORJSONResponse({
@@ -6168,50 +6564,34 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return _err(400, "invalid_request_error",
                         f"provider '{provider}' has no stored Hermes tokens; "
                         "connect first", request)
-        if not cred or not cred.get("refresh_token"):
-            return _err(400, "invalid_request_error",
-                        f"provider '{provider}' has no stored Hermes tokens; "
-                        "connect first", request)
         # Delegate to the shared auto-refresh worker so this admin path and the
         # gateway 401 hook share one per-account lock + circuit, and force past
         # a tripped circuit (an operator asking for a rotation is the way out).
-        try:
-            fresh = await state.hermes_refresh._refresh_locked(
-                provider, label, require_due=False, force=True)
-        except AttributeError:
-            # Worker not initialized (pre-lifespan / minimal state): fall back
-            # to a direct threaded exchange.
-            fresh = None
-            try:
-                result = await asyncio.to_thread(
-                    hermes_oauth.refresh_access_token, cred["refresh_token"])
-                expires_at = hermes_oauth.compute_expires_at(
-                    result.get("expires_in"), time.time())
-                secret = hermes_oauth.encode_credential(
-                    result["access_token"], result.get("refresh_token"),
-                    expires_at, cred.get("label"))
-                await state.hermes_refresh._update_secret(provider, label, secret)
-                fresh = True
-            except hermes_oauth.HermesAuthError as e:
-                if e.relogin_required:
-                    return _err(401, "authentication_error",
-                                f"Nous refresh token rejected — re-login "
-                                f"required ({e.code})", request)
-                return _err(502, "upstream_error", str(e), request)
-            except httpx.HTTPError as e:
-                return _err(502, "upstream_error",
-                            f"Nous Portal token refresh failed: {e}", request)
-        if not fresh:
-            # A dead grant (invalid_grant / revoked / reused) marks the
-            # account's circuit dead and needs a human re-login — surface that
-            # as 401, not a generic 502.
-            if state.hermes_refresh._circuit.dead((provider, label)):
+        #
+        # The worker is resolved through the module's own ``_worker_for``, never
+        # through ``state.hermes_refresh``: that attribute is None before the
+        # lifespan runs (and in minimal test states), and the previous code
+        # papered over it with ``except AttributeError`` — then called
+        # ``state.hermes_refresh._update_secret`` on the very object it had just
+        # proven was None, and dereferenced ``state.hermes_refresh._circuit``
+        # unconditionally. Both raised only AFTER the threaded exchange had
+        # already rotated Nous's single-use refresh grant, so the fresh token was
+        # discarded, the pool key kept the now-consumed grant, and the next
+        # refresh came back invalid_grant -> a dead circuit and a forced
+        # re-login from one admin click. It also masked genuine AttributeErrors
+        # raised inside ``_refresh_locked`` after the grant was spent.
+        from wiwi.providers.hermes_auto_refresh import (
+            refresh_key_now as hermes_refresh_key_now,
+        )
+        result = await hermes_refresh_key_now(state, provider, label)
+        if not result["ok"]:
+            # A dead grant (invalid_grant / revoked / reused) needs a human
+            # re-login — surface that as 401, not a generic 502.
+            if result["relogin_required"]:
                 return _err(401, "authentication_error",
                             "Nous refresh token rejected — re-login required",
                             request)
-            return _err(502, "upstream_error",
-                        "refresh failed; the account's circuit may be tripped",
-                        request)
+            return _err(502, "upstream_error", result["error"], request)
         await state.logs.log_audit(
             actor="master", action="hermes_oauth.refresh", target=provider)
         new_cred = hermes_oauth.decode_credential(
@@ -6239,22 +6619,49 @@ def create_app(config: WiwiConfig) -> FastAPI:
         # Per-account: with ``key_label`` remove just that account's pool key;
         # without it, remove every managed Hermes account (the whole-pool
         # disconnect). Also clears the legacy single-account settings record.
+        # An un-bootstrapped ``hermes:pending`` placeholder counts as removable
+        # too: it holds no credential, so requiring one left the operator unable
+        # to clear the key that /device-code created and /poll may never have
+        # replaced (e.g. the login was abandoned).
         label = str(body.get("key_label") or "").strip()
         removed = 0
+        removed_labels: list[str] = []
         kept = []
         for k in acct.keys:
-            if (not label or k.label == label) and hermes_oauth.decode_credential(
-                    k.secret) is not None:
+            removable = hermes_oauth.decode_credential(k.secret) is not None \
+                or hermes_oauth.is_placeholder(k.secret)
+            if (not label or k.label == label) and removable:
                 removed += 1
+                removed_labels.append(k.label)
                 continue
             kept.append(k)
-        acct.keys = kept
+        acct.keys[:] = kept
         if state.config_store:
-            if label:
-                with contextlib.suppress(Exception):
-                    await state.config_store.delete_key(provider, label)
-            await state.config_store.delete_setting(
-                _hermes_oauth_setting_key(provider))
+            # Every label actually removed must be deleted from the DB, not just
+            # the requested one: the router is rebuilt from ``provider_keys`` at
+            # startup (``ConfigStore.load_all``), so a whole-pool disconnect that
+            # only filtered the in-memory list brought every account straight
+            # back after a restart.
+            for gone in removed_labels:
+                try:
+                    await state.config_store.delete_key(provider, gone)
+                except Exception as e:  # noqa: BLE001 — YAML/DB path varies
+                    structlog.get_logger("wiwi.hermes_oauth").warning(
+                        "hermes_oauth_delete_key_failed provider=%s key=%s "
+                        "err=%s", provider, gone, e)
+            with contextlib.suppress(Exception):
+                await state.config_store.delete_setting(
+                    _hermes_oauth_setting_key(provider))
+        # Reclaim the per-account lock / generation counter / circuit entry, or
+        # they accumulate for every account ever connected (nothing else ever
+        # popped them).
+        if removed_labels:
+            from wiwi.providers.hermes_auto_refresh import (
+                _worker_for as hermes_worker_for,
+            )
+            worker = hermes_worker_for(state)
+            for gone in removed_labels:
+                worker.forget(provider, gone)
         await state.logs.log_audit(
             actor="master", action="hermes_oauth.disconnect", target=provider)
         return ORJSONResponse({"provider": provider, "disconnected": removed})
@@ -6311,8 +6718,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
         auth object (nested ``{auth, account}`` or flat) or a list of them.
         Each entry becomes one pool key on the target provider (created on
         first import with the default WorkBuddy base URL). Import succeeds
-        only if every entry parses; partial failures are rejected so the
-        admin can fix the file rather than end up with a half-imported set.
+        only if every entry parses AND every derived label is free — including
+        labels repeated *within* the batch — so the admin can fix the file
+        rather than end up with a half-imported set. Persistence happens
+        before the router is touched, and a failed write is rolled back, so
+        memory and DB never disagree about what was imported.
         """
         resp = await require_admin_dep(request)
         if resp:
@@ -6362,21 +6772,63 @@ def create_app(config: WiwiConfig) -> FastAPI:
                             f"account label '{label}' already exists on "
                             f"provider '{provider}' — nothing imported",
                             request)
-        if existing is None:
+            # Claim the label *inside* the loop. ``taken`` used to be a
+            # snapshot of the pre-existing pool only, so two entries in ONE
+            # batch sharing a nickname both passed: both were appended in
+            # memory under the same label, while ``add_key`` (INSERT OR
+            # REPLACE / ON CONFLICT DO UPDATE) kept only the last in the DB.
+            # ``router.get_key(label)`` then resolved the first forever, so
+            # _rotate_locked / refresh_now / the admin refresh could rotate
+            # only that one — the other account kept an expiry that ran out
+            # and 401'd permanently. Rejecting here keeps memory, DB and the
+            # router in agreement.
+            taken.add(label)
+        # Persist FIRST, mutate routing only once every write has landed — the
+        # same order ``POST /admin/providers`` and ``DELETE /admin/providers``
+        # use (AUDIT #181). This handler used to append to ``existing.keys``
+        # *before* ``await config_store.add_key(...)`` with no ``try`` at all:
+        # a failure on the 3rd of 5 keys left all five live in memory, only two
+        # in the DB, and answered an unhandled 500 with no audit row — so on
+        # restart the account silently reverted to the first two.
+        written: list[str] = []
+        created_provider = existing is None
+        try:
+            if state.config_store:
+                if created_provider:
+                    await state.config_store.add_provider(provider, "workbuddy",
+                                                          base_url)
+                for label, secret in parsed:
+                    await state.config_store.add_key(provider, label, secret)
+                    written.append(label)
+        except Exception as e:  # noqa: BLE001 — DB/constraint/driver varies
+            # Undo the writes that did land so a retry is not shadowed by them.
+            if state.config_store:
+                for label in written:
+                    with contextlib.suppress(Exception):
+                        await state.config_store.delete_key(provider, label)
+                if created_provider:
+                    with contextlib.suppress(Exception):
+                        await state.config_store.delete_provider(provider)
+            structlog.get_logger("wiwi.workbuddy").error(
+                "workbuddy_import_persist_failed", provider=provider,
+                written=len(written), error=type(e).__name__)
+            with contextlib.suppress(Exception):
+                await state.logs.log_audit(
+                    actor="master", action="workbuddy.import.failed",
+                    target=provider,
+                    diff={"accounts": len(parsed), "persisted": len(written)})
+            return _err(500, "api_error",
+                        f"failed to persist {len(parsed)} WorkBuddy account(s) "
+                        f"to provider '{provider}' — nothing was imported",
+                        request)
+        if created_provider:
             state.router.providers[provider] = ProviderAccount(
                 name=provider, provider_type="workbuddy", base_url=base_url,
                 keys=[ProviderKey(label=label, secret=secret) for label,
                       secret in parsed])
-            if state.config_store:
-                await state.config_store.add_provider(provider, "workbuddy",
-                                                      base_url)
-                for label, secret in parsed:
-                    await state.config_store.add_key(provider, label, secret)
-        else:
-            for label, secret in parsed:
-                existing.keys.append(ProviderKey(label=label, secret=secret))
-                if state.config_store:
-                    await state.config_store.add_key(provider, label, secret)
+        elif existing is not None:
+            existing.keys.extend(
+                ProviderKey(label=label, secret=secret) for label, secret in parsed)
         await state.logs.log_audit(
             actor="master", action="workbuddy.import", target=provider,
             diff={"accounts": len(parsed)})

@@ -67,11 +67,51 @@ async def test_delete_provider_key_requires_admin(client):
     assert r.status_code == 401
 
 
-async def test_delete_provider_referenced_by_group(client):
-    """Provider still used by a model group → 409 with group names in the message."""
+async def test_delete_provider_cascades_group_deployments(client):
+    """A provider feeding a model group is deleted, and the group loses it."""
     r = await client.delete("/admin/providers/p1", headers=H)
-    assert r.status_code == 409
-    assert "gpt-4o" in r.json()["error"]["message"]
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["deleted"] is True
+    assert body["detached_deployments"] == [{"group": "gpt-4o", "model_id": "gpt-4o"}]
+    # group dropped entirely (it held only that deployment), provider gone
+    models = (await client.get("/admin/models", headers=H)).json()
+    assert [g["name"] for g in models["groups"]] == []
+    listing = (await client.get("/admin/providers", headers=H)).json()
+    assert [p["name"] for p in listing["providers"]] == []
+
+async def test_delete_provider_cascade_keeps_sibling_deployments(client):
+    """Deleting one of two providers in a group keeps the other one routable."""
+    await client.post("/admin/providers", json={
+        "name": "p2", "provider_type": "openai",
+        "label": "a", "key": "sk-x"}, headers=H)
+    r = await client.post("/admin/model-groups/combo/deployments", json={
+        "group": "combo", "provider": "p2", "model_id": "gpt-4o-mini"},
+        headers=H)
+    assert r.status_code == 201, r.text
+    d = await client.delete("/admin/providers/p1", headers=H)
+    assert d.status_code == 200, d.text
+    assert d.json()["detached_deployments"] == [
+        {"group": "gpt-4o", "model_id": "gpt-4o"}]
+    models = (await client.get("/admin/models", headers=H)).json()
+    by_name = {g["name"]: g["deployments"] for g in models["groups"]}
+    assert "gpt-4o" not in by_name            # emptied group was dropped
+    assert [x["provider"] for x in by_name["combo"]] == ["p2"]
+
+async def test_delete_provider_cascade_partial_group(client):
+    """A group holding two providers loses only the deleted one's entry."""
+    await client.post("/admin/providers", json={
+        "name": "p2", "provider_type": "openai",
+        "label": "a", "key": "sk-x"}, headers=H)
+    r = await client.post("/admin/model-groups/gpt-4o/deployments", json={
+        "group": "gpt-4o", "provider": "p2", "model_id": "gpt-4o-mini"},
+        headers=H)
+    assert r.status_code == 201, r.text
+    d = await client.delete("/admin/providers/p1", headers=H)
+    assert d.status_code == 200, d.text
+    models = (await client.get("/admin/models", headers=H)).json()
+    by_name = {g["name"]: g for g in models["groups"]}
+    assert [x["provider"] for x in by_name["gpt-4o"]["deployments"]] == ["p2"]
 
 
 async def test_delete_provider_happy(client):
@@ -93,12 +133,58 @@ async def test_delete_provider_happy(client):
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
             r = await c.delete("/admin/providers/orphan", headers=H)
             assert r.status_code == 200, r.text
-            assert r.json() == {"deleted": True, "name": "orphan"}
+            assert r.json() == {"deleted": True, "name": "orphan",
+                                "detached_deployments": []}
             listing = (await c.get("/admin/providers", headers=H)).json()
             names = [p["name"] for p in listing["providers"]]
             assert "orphan" not in names
             assert "p1" in names
 
+
+async def test_delete_provider_cascade_survives_restart(tmp_path):
+    """A cascaded YAML-sourced deployment must not come back on restart.
+
+    The deployment comes from the YAML ``model_list``, so it has no DB row:
+    without the ``detached=1`` tombstone the cascade writes, the next startup
+    rebuilds it from YAML and it fails routing against a provider that no
+    longer exists (AUDIT #297, same class as a manual deployment detach).
+    """
+    import httpx
+    from asgi_lifespan import LifespanManager
+
+    db = tmp_path / "cascade.db"
+
+    def _boot() -> tuple:
+        cfg = WiwiConfig(
+            providers=[ProviderDef(name="p1", provider="openai",
+                                   keys=[KeyDef(label="a", key="k1")])],
+            model_list=[ModelEntry(model_name="gpt-4o",
+                                   wiwi_params=DeploymentParams(
+                                       provider="p1", model="gpt-4o"))],
+            general_settings=GeneralSettings(
+                master_key="sk-wiwi-master-test",
+                database_url=f"sqlite+aiosqlite:///{db}"),
+        )
+        app = create_app(cfg)
+        lm = LifespanManager(app)
+        return app, lm
+
+    app1, lm1 = _boot()
+    async with lm1:
+        transport = httpx.ASGITransport(app=app1)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.delete("/admin/providers/p1", headers=H)
+            assert r.status_code == 200, r.text
+
+    # Simulate a restart: brand-new app over the same DB.
+    app2, lm2 = _boot()
+    async with lm2:
+        transport = httpx.ASGITransport(app=app2)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            models = (await c.get("/admin/models", headers=H)).json()
+            assert [g["name"] for g in models["groups"]] == [], (
+                "cascaded YAML deployment returned after restart: "
+                f"{models['groups']}")
 
 async def test_delete_provider_unknown(client):
     r = await client.delete("/admin/providers/nope", headers=H)

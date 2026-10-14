@@ -52,12 +52,49 @@ export function clearToken(): void {
   notifyTokenChanged();
 }
 
-export async function api<T>(path: string, init?: RequestInit): Promise<T> {
+/** A 401 that is *not* an admin-session failure: an endpoint whose 401 is
+ *  about the upstream credential rather than the caller's key. Hermes answers
+ *  `/admin/hermes/oauth/{refresh,poll}` with 401 "Nous refresh token rejected —
+ *  re-login required" when one *account's* grant is dead, which is exactly the
+ *  case the per-account Refresh button exists to recover from. The global
+ *  mutation/query error handler (redirectOnAuthError in main.tsx) treats every
+ *  `ApiError` with status 401 as an expired admin session — it clears the token
+ *  and hard-navigates to /login — so an operator clicking Refresh to fix one
+ *  dead account would be signed out of the console instead. Endpoints with an
+ *  upstream 401 pass `{ upstream401: true }` and get this type instead: same
+ *  status and message plumbing, no session redirect. */
+export class UpstreamAuthError extends Error {
+  readonly status = 401;
+  constructor(message: string) {
+    super(message);
+    this.name = "UpstreamAuthError";
+  }
+}
+
+/** Pull the human message out of a wire error body, falling back to the raw
+ *  text for a non-JSON body. */
+async function readErrorMessage(resp: Response): Promise<string> {
+  const text = await resp.text();
+  if (!text) return `HTTP ${resp.status}`;
+  try {
+    const body = JSON.parse(text) as { error?: { message?: string } };
+    return body.error?.message ?? text;
+  } catch {
+    // plain-text error body
+    return text;
+  }
+}
+
+export async function api<T>(
+  path: string,
+  init?: RequestInit & { upstream401?: boolean },
+): Promise<T> {
   const headers = new Headers(init?.headers);
   headers.set("Authorization", `Bearer ${getToken()}`);
   if (init?.body != null && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
+  const upstream401 = init?.upstream401 === true;
   let resp: Response;
   try {
     // credentials:"include" carries the HttpOnly session cookie alongside the
@@ -69,6 +106,11 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(0, `network error: ${String(e)}`);
   }
   if (resp.status === 401) {
+    if (upstream401) {
+      // Keep the server's message — it names the failing account ("re-login
+      // required", the Nous error code) instead of blaming the admin key.
+      throw new UpstreamAuthError(await readErrorMessage(resp));
+    }
     throw new ApiError(401, "master key required or invalid");
   }
   const text = await resp.text();
@@ -97,6 +139,7 @@ import type {
   ClineStatusResponse,
   DeploymentInfo,
   HermesDeviceCodeResponse,
+  HermesDisconnectResponse,
   HermesPollResponse,
   HermesRefreshResponse,
   HermesStatusResponse,
@@ -476,20 +519,29 @@ export const hermesPoll = (state: string) =>
   api<HermesPollResponse>("/admin/hermes/oauth/poll", {
     method: "POST",
     body: JSON.stringify({ state }),
+    // A rejected device code is a 401 about the Nous grant, not the admin key.
+    upstream401: true,
   });
 export const hermesStatus = (provider: string) =>
   api<HermesStatusResponse>(
     `/admin/hermes/oauth/status?provider=${encodeURIComponent(provider)}`,
   );
-export const hermesRefresh = (provider: string) =>
+// ``key_label`` targets one account in the pool; omitting it makes the server
+// pick the first managed account (refresh) or remove every managed account
+// (disconnect) — see wiwi/server/app.py's /admin/hermes/oauth/{refresh,disconnect}.
+export const hermesRefresh = (provider: string, keyLabel?: string) =>
   api<HermesRefreshResponse>("/admin/hermes/oauth/refresh", {
     method: "POST",
-    body: JSON.stringify({ provider }),
+    body: JSON.stringify({ provider, ...(keyLabel ? { key_label: keyLabel } : {}) }),
+    // A terminal grant answers 401 "re-login required" — that is the state the
+    // operator is trying to escape from, so it must not read as "your admin key
+    // is invalid" (see UpstreamAuthError).
+    upstream401: true,
   });
-export const hermesDisconnect = (provider: string) =>
-  api<{ provider: string; disconnected: boolean }>("/admin/hermes/oauth/disconnect", {
+export const hermesDisconnect = (provider: string, keyLabel?: string) =>
+  api<HermesDisconnectResponse>("/admin/hermes/oauth/disconnect", {
     method: "DELETE",
-    body: JSON.stringify({ provider }),
+    body: JSON.stringify({ provider, ...(keyLabel ? { key_label: keyLabel } : {}) }),
   });
 
 // -- WorkBuddy accounts (auths/ JSON import/export) ---------------------------

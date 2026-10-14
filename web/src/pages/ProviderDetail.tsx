@@ -26,11 +26,13 @@ import {
   addProviderKey,
   updateAliases,
   revealProviderKey,
-  hermesDisconnect,
-  hermesRefresh,
-  hermesStatus,
 } from "@/api/client";
 import type { ModelAliasEntry, PoolKey, Provider } from "@/api/types";
+import {
+  HermesAccountList,
+  useHermesAccountActions,
+  useHermesStatusQuery,
+} from "@/components/HermesAccounts";
 import { HermesConnectDialog } from "@/pages/HermesOAuth";
 import {
   aliasDisplayName,
@@ -1388,52 +1390,35 @@ function ClineOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
 
 // Hermes OAuth card — the device-code connect flow, right where the account is
 // managed. Reuses the shared HermesConnectDialog so the poll loop is defined
-// once (also used on /console/hermes-oauth). Connect bootstraps the account,
-// so no API key is needed up front; the token lands on the first pool key.
+// once (also used on /console/hermes-oauth), and the shared HermesAccountList so
+// a multi-account pool (one Nous identity per key, AUDIT #427) reads the same
+// here as on the console. Connect bootstraps the account, so no API key is
+// needed up front; the token lands on the first pool key.
 function HermesOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
   const qc = useQueryClient();
   const [localError, setLocalError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [connectOpen, setConnectOpen] = useState(false);
-  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  /** ``null`` = closed; ``{}`` = whole pool; ``{ keyLabel }`` = one account. */
+  const [confirmDisconnect, setConfirmDisconnect] = useState<{ keyLabel?: string } | null>(null);
   const qKey = ["hermes-oauth-status", props.p.name];
 
-  const statusQ = useQuery({
-    queryKey: qKey,
-    queryFn: () => hermesStatus(props.p.name),
-    refetchInterval: 30_000,
-    retry: 1,
-  });
+  const statusQ = useHermesStatusQuery(props.p.name);
 
-  const refresh = useMutation({
-    mutationFn: () => hermesRefresh(props.p.name),
-    onSuccess: () => {
-      setLocalError(null);
-      void qc.invalidateQueries({ queryKey: qKey });
-      void qc.invalidateQueries({ queryKey: ["providers"] });
-    },
-    onError: (e) => setLocalError(e.message),
-  });
-
-  const disconnect = useMutation({
-    mutationFn: () => hermesDisconnect(props.p.name),
-    onSuccess: () => {
-      setConfirmDisconnect(false);
-      setLocalError(null);
-      void qc.invalidateQueries({ queryKey: qKey });
-      void qc.invalidateQueries({ queryKey: ["providers"] });
-    },
-    onError: (e) => setLocalError(e.message),
-  });
-
+  const accounts = statusQ.data?.accounts ?? [];
+  const managed = accounts.filter((a) => a.managed);
   const connected = statusQ.data?.connected ?? false;
-  const needsRefresh = statusQ.data?.needs_refresh ?? false;
+  const needsRefresh = managed.some((a) => a.needs_refresh);
 
-  const fmtExpiry = (epoch: number | null | undefined) => {
-    if (!epoch) return "—";
-    const d = new Date(epoch * 1000);
-    if (Number.isNaN(d.getTime())) return "—";
-    return d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-  };
+  const actions = useHermesAccountActions(props.p.name, {
+    onError: (m) => {
+      if (m === null) setNotice(null);
+      setLocalError(m);
+      if (m !== null) props.onError(m);
+    },
+    onNotice: setNotice,
+    onDisconnected: () => setConfirmDisconnect(null),
+  });
 
   return (
     <Card className="xl:col-span-3">
@@ -1443,10 +1428,15 @@ function HermesOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
         right={
           statusQ.isLoading ? (
             <Badge tone="gray">…</Badge>
+          ) : statusQ.isError ? (
+            <Badge tone="red">status unavailable</Badge>
           ) : connected ? (
-            <Badge tone={needsRefresh ? "amber" : "green"}>
-              {needsRefresh ? "expires soon" : "connected"}
-            </Badge>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {managed.length > 1 && <Badge tone="blue">{managed.length} accounts</Badge>}
+              <Badge tone={needsRefresh ? "amber" : "green"}>
+                {needsRefresh ? "expires soon" : "connected"}
+              </Badge>
+            </div>
           ) : (
             <Badge tone="gray">not connected</Badge>
           )
@@ -1457,14 +1447,26 @@ function HermesOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
           <div className="flex justify-center py-4"><Spinner /></div>
         )}
         {localError && <ErrorText>{localError}</ErrorText>}
+        {notice && !localError && (
+          <p className="text-[12px] text-emerald-400">{notice}</p>
+        )}
 
-        {connected && (
-          <dl className="admin-dl">
-            <dt>Access token expires</dt>
-            <dd className="font-mono text-[12px] text-[var(--admin-text-muted)]">
-              {fmtExpiry(statusQ.data?.expires_at)}
-            </dd>
-          </dl>
+        {accounts.length > 0 && (
+          <div className="space-y-2">
+            {connected && (
+              <p className="text-[12px] text-[var(--admin-text-muted)]">
+                Each pool key is one Nous account with its own rotating refresh
+                token. Refresh forces a rotation now; the gateway already refreshes
+                automatically within the final 120 s before expiry.
+              </p>
+            )}
+            <HermesAccountList
+              accounts={accounts}
+              actions={actions}
+              disconnectVariant="danger"
+              onRequestDisconnect={(keyLabel) => setConfirmDisconnect({ keyLabel })}
+            />
+          </div>
         )}
 
         {!connected && !statusQ.isLoading && (
@@ -1472,63 +1474,57 @@ function HermesOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
             <p className="text-[12px] text-[var(--admin-text-muted)]">
               Sign in with your Nous Portal account via the OAuth 2.0
               device-code flow — no API key needed. The account is created
-              automatically and the token lands on this provider's first pool
+              automatically and the token lands on this provider&apos;s first pool
               key.
             </p>
-            <Button variant="primary" onClick={() => setConnectOpen(true)}>
+            <Button variant="primary" className="min-h-11" onClick={() => setConnectOpen(true)}>
               <LogIn size={14} /> Connect with Nous Portal
             </Button>
           </div>
         )}
 
         {connected && (
-          <div className="space-y-2 border-t border-[var(--admin-border)] pt-3">
-            <p className="text-[12px] text-[var(--admin-text-muted)]">
-              The access token is refreshed automatically within the final
-              120 s before expiry; use this to force a rotation now.
-            </p>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                disabled={refresh.isPending || !statusQ.data?.has_refresh_token}
-                onClick={() => refresh.mutate()}
-              >
-                <RefreshCw size={14} className={refresh.isPending ? "animate-spin" : ""} />
-                {refresh.isPending ? "Refreshing…" : "Refresh token now"}
-              </Button>
-              <Button variant="ghost" onClick={() => void statusQ.refetch()}>
-                <RefreshCw size={14} /> Recheck status
-              </Button>
+          <div className="flex flex-wrap items-center gap-2 border-t border-[var(--admin-border)] pt-3">
+            <Button variant="ghost" className="min-h-11" onClick={() => void statusQ.refetch()}>
+              <RefreshCw size={14} /> Recheck status
+            </Button>
+            {managed.length > 1 && (
               <Button
                 variant="danger"
-                disabled={disconnect.isPending}
-                onClick={() => setConfirmDisconnect(true)}
+                className="min-h-11"
+                disabled={actions.pending?.kind === "disconnect"}
+                onClick={() => setConfirmDisconnect({})}
               >
-                <Unlink size={14} /> Disconnect
+                <Unlink size={14} /> Disconnect all {managed.length} accounts
               </Button>
-            </div>
+            )}
           </div>
         )}
 
         <Dialog
-          open={confirmDisconnect}
-          title={`Disconnect Hermes OAuth for ${props.p.name}?`}
-          onClose={() => setConfirmDisconnect(false)}
+          open={confirmDisconnect !== null}
+          title={
+            confirmDisconnect?.keyLabel
+              ? `Disconnect Hermes account “${confirmDisconnect.keyLabel}”?`
+              : `Disconnect all Hermes accounts for ${props.p.name}?`
+          }
+          onClose={() => setConfirmDisconnect(null)}
         >
           <p className="text-[13px] text-[var(--admin-text-muted)]">
-            Clears the stored OAuth tokens. The pool key keeps its last access
-            token until you reconnect or replace it.
+            {confirmDisconnect?.keyLabel
+              ? "Clears the stored OAuth tokens for this account only; its sibling accounts keep working. The pool key keeps its last access token until you reconnect or replace it."
+              : `Clears the stored OAuth tokens for all ${managed.length} managed account${managed.length === 1 ? "" : "s"} in this pool. Each pool key keeps its last access token until you reconnect or replace it.`}
           </p>
           <div className="flex justify-end gap-2 pt-4">
-            <Button variant="ghost" onClick={() => setConfirmDisconnect(false)}>
+            <Button variant="ghost" onClick={() => setConfirmDisconnect(null)}>
               Cancel
             </Button>
             <Button
               variant="danger"
-              disabled={disconnect.isPending}
-              onClick={() => disconnect.mutate()}
+              disabled={actions.pending?.kind === "disconnect"}
+              onClick={() => actions.disconnect(confirmDisconnect?.keyLabel)}
             >
-              {disconnect.isPending ? "Disconnecting…" : "Disconnect"}
+              {actions.pending?.kind === "disconnect" ? "Disconnecting…" : "Disconnect"}
             </Button>
           </div>
         </Dialog>
@@ -1545,11 +1541,13 @@ function HermesOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
 
         <p className="text-[11px] leading-relaxed text-[var(--admin-text-dim)]">
           Hermes uses OAuth 2.0 device authorization (RFC 8628) with no
-          callback URL or client secret. The access token is stored on this
-          provider's first pool key (prefixed <code>hermes:</code>; the adapter
-          strips it for the bearer); the refresh token is kept server-side and
-          rotates on each refresh. A terminal grant (<code>invalid_grant</code>
-          / reused refresh token) requires reconnecting.
+          callback URL or client secret. Each account is stored on its own pool
+          key (prefixed <code>hermes:</code>; the adapter strips it for the
+          bearer), so a multi-account pool gives each Nous identity its own
+          refresh grant and rate-limit bucket; the refresh token is kept
+          server-side and rotates on each refresh. A terminal grant (
+          <code>invalid_grant</code> / reused refresh token) requires
+          reconnecting that account.
         </p>
       </div>
     </Card>
@@ -1637,8 +1635,8 @@ export function ProviderDetailPage() {
       {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
       <Dialog open={delOpen} title={`Delete provider ${p.name}?`} onClose={() => setDelOpen(false)}>
         <p className="text-[13px] text-[var(--admin-text-muted)]">
-          This removes the account and all its keys from the live pool. If any
-          model group still references it, deletion will be blocked.
+          This removes the account and all its keys from the live pool. Any
+          model group that referenced it will have those deployments removed.
         </p>
         {delProvider.error && (
           <div className="mt-3">

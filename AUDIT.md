@@ -8,6 +8,78 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## 🟡 Open — full-suite flakes unrelated to any pending change (2026-10-14)
+
+Both were observed failing during one full-suite run and confirmed to pass in
+isolation and on the pristine committed baseline (3108 passed). Neither is
+caused by the working tree; both are recorded so the next agent does not
+mistake a red gate for their own regression.
+
+### 463. `test_repeated_sweeps_merge_instead_of_overwrite` splits its bucket when the two sweeps straddle an hour boundary
+
+**Severity:** 🟡 Medium (hourly gate flake) · **Status: open**
+**File:** `tests/test_hist_percentiles.py` (`test_repeated_sweeps_merge_instead_of_overwrite`)
+**Trigger:** full-suite run that happens to cross an hour boundary between the
+two `rollup_and_prune` calls. Both sweeps write `now - i` for `i in range(50)`,
+and the rollup bucket is an hour index, so the `assert len(rows) == 1` fails
+roughly once per hour (~1.4% of runs). Reproduced once on 2026-10-14; passes
+13/13 in isolation.
+**Fix:** derive the timestamps from a frozen `now` captured before the first
+write (or subtract a fixed span instead of a per-index second), so the two
+sweeps are always in the same bucket regardless of when the test runs.
+
+### 464. `test_realtime` opens two relay connections under full-suite ordering — see #414
+
+Already recorded as #414 (reproduced 2 of 2 full runs at that time). Re-observed
+2026-10-14: `tests/test_realtime.py::test_a_relayed_frame_arrives_upstream_byte_identical`
+failed in 1 of 2 identical runs of a 4-file subset and passed 13/13 in
+isolation. Not re-counted as a new finding; #414 stands as the entry to fix.
+
+---
+
+## ✅ Fixed — provider delete cascades its deployments (2026-10-14)
+
+An account feeding one or more model groups could not be deleted at all.
+
+### 462. `DELETE /admin/providers/{name}` refused any account a group referenced, with no way to detach a YAML deployment
+
+**Severity:** 🟠 High · **Status: fixed** — 2026-10-14
+**Files:** `wiwi/server/app.py` (`admin_delete_provider`), `web/src/pages/ProviderDetail.tsx`, `docs/API_REFERENCE.md`
+
+The handler scanned every group for a deployment whose provider was this
+account and answered `409 invalid_request_error`: `provider still referenced by
+groups: stealth/missingno, stepfun/step-5-preview:free — remove those
+deployments first`. Two problems made that a dead end rather than a guard:
+
+- A deployment from the YAML `model_list` has no `deployments` row, so the
+  delete-deployment route's `detached=1` tombstone could not be written for it
+  from the provider-detail UI's per-deployment detach button — only the Combos
+  page could. Nothing in the message said so, so the operator had no hint
+  which page to visit.
+- Even after removing every deployment one at a time, a YAML-sourced one
+  returned on the next restart, putting the operator back where they started.
+
+So the account and all its keys were effectively undeletable. Verified live
+against a server with two YAML groups pointing at `p1`; the delete now returns
+`200` with a `detached_deployments` list, both groups disappear from
+`/admin/models`, `combo` (the untouched `p2` group) still routes, and after a
+restart the deleted groups stay gone (clean `404` on the old model name).
+
+The fix drops the 409 and cascades: the handler collects the referencing
+`(group, model_id)` triples, then after the existing DB cascade deletes the
+in-memory deployments (emptied groups are popped, matching
+`admin_delete_deployment`), rebuilds the cross-provider pools, and writes one
+`delete_deployment` tombstone per triple so YAML-sourced deployments do not
+resurrect (AUDIT #297). Order matters: `ConfigStore.delete_provider` already
+DELETEs this account's `deployments` rows, so the tombstones must be written
+after it or they would be deleted with the rest.
+
+**Coverage:** `tests/test_provider_admin.py` — cascade detaches and reports;
+a sibling group is untouched; a two-provider group loses only the deleted
+account's entry; a cascaded YAML deployment survives a restart.
+
+---
+
 ## ✅ Fixed — round 136: multi-account Hermes (2026-10-13)
 
 Found while investigating how to beat the per-account ~50 RPM cap. Each Nous
@@ -13628,6 +13700,1454 @@ No crash, hence low. `openai_chat.py:307` guards the same field; these two do no
 
 **Fix sketch:** `json_schema=(fmt.get("schema") if isinstance(..., dict) else
 {"type":"object"})` in all three, matching the one that already does.
+
+---
+
+### 428. The request log never stored the error message the caller received
+
+**Severity:** 🟠 Medium · **Status: fixed** (round 137)
+
+**Files:** `wiwi/logging_core/events.py` (`LogEvent`),
+`wiwi/core/gateway.py:build_log_event`, `wiwi/logging_core/db_sink.py`,
+`web/src/pages/RequestLogs.tsx`
+
+A failed request logs only `error_code` — the coarse `etype`
+(`rate_limit_error`, `api_error`). The exact upstream message the caller
+actually saw (`"openai-main rate limited: You exceeded your current quota…"`,
+`"stream died: reset by peer"`) lived on `ctx.error.message` and was discarded
+by `build_log_event`, so `/console/request-logs` could never reproduce a
+failure's cause. Operators had to chase the same error through the provider's
+own console, and a per-key vs. per-deployment attribution was impossible from
+the log alone.
+
+**Fix:** added `LogEvent.error_message`, populated in `build_log_event` from
+`ctx.error.message` via the existing `_scrub_credentials` (a 401 upstream
+quotes the rejected key verbatim, and the request log is shown to every admin
+and mirrored into backups), persisted to a new `request_logs.error_message`
+column (DDL + `_COLS` + `_row` + the `_migrate` ALTER list), and rendered in
+the detail drawer below "Error code". Regression: `tests/test_fix_round137.py`.
+
+---
+
+### 429. The console `Drawer` portals to `<body>`, escaping the `[data-admin]` CSS-var scope — its panel background resolves to nothing and renders fully transparent
+
+**Severity:** 🟠 Medium · **Status: open** (found while verifying #428)
+
+**Files:** `web/src/components/ui.tsx:777-794` (`Drawer`, the
+`createPortal(..., document.body)`), `web/src/styles.css:209-213` (the
+`[data-admin]` block that defines `--admin-surface-elevated`)
+
+Every admin design-token variable is declared inside the `[data-admin]`
+selector, so they only resolve for descendants of that element. `Drawer`
+portals its panel to `document.body`, which is **not** inside `[data-admin]`,
+so the panel's `bg-[var(--admin-surface-elevated)]` resolves to an undefined
+value. The `background-color` computes to `rgba(0, 0, 0, 0)`: the drawer has
+no background at all. Verified in a live browser — the scrim's `bg-black/60`
+also fails to resolve, so the request-logs table shows straight through the
+drawer and the two layers' text interleaves and is unreadable. Reproduces at
+both 1280px and 375px, on every drawer in the console.
+
+`Dialog` (`ui.tsx:681`) portals the same way but hardcodes `bg-black/70`, so
+its scrim happens to survive — only the `Drawer` panel depends on a token.
+
+**Fix:** either portal into the `[data-admin]` element instead of `document.body`
+(keeps one source of truth for the tokens), or hoist the token block to
+`:root`/`.dark` on `<html>` — which `main.tsx` already sets — and drop the
+`[data-admin]` scoping. The second is the smaller change but widens every
+token to the public marketing pages, so check for collisions first.
+
+Not fixed here: it is pre-existing, unrelated to #428, and this repo takes one
+logical change per commit.
+
+---
+
+## ✅ Fixed — multi-account Hermes + realtime follow-up (2026-10-13)
+
+Found by reading back round 136 (`/admin/hermes/oauth/*` end to end, the Hermes
+credential encode/decode path, the `hermes_auto_refresh` sweeper) and the
+`/v1/realtime` WS surface against how every other Hermes deployment is shaped.
+The round-136 per-account model is correct at the adapter and sweeper layer, but
+the endpoints that *write* pool keys (label derivation, placeholder key,
+in-place rotation, whole-pool disconnect), the console that reads `/status`,
+and the realtime admission/billing path each still carry the pre-136 or
+pre-existing assumptions. Entries #430-#442.
+
+**Resolution (2026-10-14):** all thirteen entries are fixed and each carries an
+inline `**Status: fixed**` line naming its round test file — #430/#431/#432/#433/
+#434/#436/#441 in `tests/test_fix_round138.py`, #437/#439/#440 in
+`tests/test_fix_round139.py`, #438 in `tests/test_fix_round140.py`, #442 in
+`tests/test_fix_round141.py`. #435 is a console-only (TypeScript) fix with no
+Python regression test. Full gate green at the time of writing: 3218 passed,
+11 skipped, ruff clean.
+
+### 430. The Hermes credential blob is stored as the pool-key label — plaintext `access_token` + `refresh_token` in the DB, the API, and every log row
+
+**Severity:** 🔴 Critical · **Status: fixed** — round 138 (`tests/test_fix_round138.py::test_poll_label_is_the_account_label_not_the_credential_blob`; fixed 2026-10-14)
+
+`/poll` now hands `_hermes_account_label(access)` to
+`_unique_hermes_key_label` as the `base`, so the
+`ProviderKey.label` is the account label and the
+`hermes:{"access_token":…}` blob never reaches the label
+column, `/status`, the key listing, or
+`LogEvent.provider_key_label`. The regression asserts the label is
+the email, not the blob.
+
+**Files:** `wiwi/server/app.py:6081-6084` (`_unique_hermes_key_label(state,
+provider, secret)`), `wiwi/server/app.py:6129` (`/status`), `wiwi/server/app.py:3409`
+(generic key listing), `wiwi/logging_core/events.py:22`
+(`LogEvent.provider_key_label`), `wiwi/providers/hermes_auto_refresh.py:248`
+(`log.info("hermes_auto_refreshed", ...)`)
+
+`/poll` computes the account's human label on the line above
+(`_hermes_account_label(access)`, `:6083`) and passes it only into
+`encode_credential`, then hands the *encoded secret blob itself* to the labeler
+as its `base`. `_unique_hermes_key_label` treats `base` as a label string and
+returns it verbatim when no collision exists, so the resulting
+`ProviderKey.label` is the whole `hermes:{"access_token":…,"refresh_token":…}`
+JSON.
+
+Unlike `secret`, the label is **not** masked. `mask_key(k.secret)` guards the
+secret in the key listing at `:3410`, but `:3409` returns `k.label`
+unmasked; `/status` returns it at `:6129`; and `LogEvent.provider_key_label`
+(`events.py:22`) carries it onto every request-log row this account serves,
+which is rendered in `/console/request-logs` and included in
+`GET /admin/backup`. The refresh sweeper's own log line
+(`hermes_auto_refresh.py:248`) prints it too. So a long-lived access token and
+a single-use refresh token sit in cleartext in the `provider_keys.label` column,
+in the request log, and in the proxy log.
+
+The exposure is also *permanent*: `_update_secret`
+(`hermes_auto_refresh.py:251-269`) rewrites `k.secret` only, so the label keeps
+the original (now dead) tokens after every rotation — the DB never ages it out.
+
+**Fix sketch:** pass `_hermes_account_label(access)` as the labeler's `base`,
+not `secret`.
+
+### 431. The `hermes:pending` bootstrap key is created and never removed — it burns a guaranteed-401 request every rotation cycle
+
+**Severity:** 🔴 Critical · **Status: fixed** — round 138 (`tests/test_fix_round138.py`; fixed 2026-10-14)
+
+The bootstrap account is created with an empty key list and `/poll`
+adds the first real key, so `hermes:pending` is never minted.
+`/disconnect` also drops a lone placeholder by label rather than by
+successful decode, so a leftover one is still removable.
+`test_placeholder_helper_does_not_scatter_the_literal` pins the
+sentinel to a single helper.
+
+**Files:** `wiwi/server/app.py:5965-5979` (bootstrap `ProviderKey`), `wiwi/server/app.py:6089`
+(`/poll` append), `wiwi/providers/hermes_oauth.py:276` (`credential_bearer`),
+`wiwi/router/router.py:35-37` (`ProviderKey` defaults), `wiwi/server/app.py:6246`
+(`/disconnect` filter)
+
+Device-code login bootstraps a fresh provider account with
+`ProviderKey(label="default", secret="hermes:pending")`, under a comment
+claiming "`/poll` replaces that secret with the real `hermes:<token>` on
+approval." `/poll` does not replace anything — it only **appends** a new
+`ProviderKey` (`:6089`), so the placeholder survives the entire connect flow.
+
+The placeholder is not inert. `decode_credential("hermes:pending")` returns
+`None` (the body after the `hermes:` prefix is not JSON), so
+`credential_bearer` falls through to its bare-prefix branch and returns the
+literal string `pending` as the bearer. `ProviderKey` defaults to
+`enabled=True, status="active"` (`router/router.py:35-37`), so the key sits in
+smooth-WRR rotation alongside every real account and sends
+`Authorization: Bearer pending` upstream on a share of all traffic — a
+guaranteed 401 that trips the auto-refresh hook, which then cannot possibly
+succeed for a key with no refresh token. `/disconnect` does not remove it
+either: `:6246` only drops keys whose `decode_credential` succeeds, and this
+one decodes to `None`.
+
+**Fix sketch:** in `/poll`, drop the placeholder before appending — remove it
+from `acct.keys` in memory **and** `await state.config_store.delete_key(
+provider, "default")` — or have the bootstrap create the account with an empty
+key list and let `/poll` add the first key.
+
+### 432. `/refresh`'s `except AttributeError` fallback calls `_update_secret` on the `None` it just proved — consumes the single-use grant, then 500s
+
+**Severity:** 🟠 High · **Status: fixed** — round 138 (`tests/test_fix_round138.py`; fixed 2026-10-14)
+
+The `except AttributeError:` fallback is gone; the handler branches
+explicitly on `state.hermes_refresh is None`. With no lifespan
+worker, the threaded exchange writes the new secret to the pool key
+directly and returns a relogin-required body instead of 500ing.
+
+**Files:** `wiwi/server/app.py:6180-6212` (the fallback block), `wiwi/server/app.py:890`
+(`state.hermes_refresh` initialized `None`), `wiwi/providers/hermes_oauth.py`
+(`refresh_access_token`)
+
+The intent of `except AttributeError:` at `:6181` is to catch
+`state.hermes_refresh is None` (the attribute is initialized to `None` at
+`:890`), and fall back to a direct threaded exchange. The fallback body then
+does two things that defeat it: `:6193` calls
+`state.hermes_refresh._update_secret(...)` on the object it just established is
+`None`, and `:6208` reads `state.hermes_refresh._circuit` unconditionally.
+
+Order matters and it is the wrong order. The threaded exchange at `:6186` runs
+**first** and succeeds, rotating Nous's single-use refresh token server-side;
+only then does `:6193` raise `AttributeError` on `None` — uncaught, because it
+is raised inside an `except` handler. The endpoint 500s. The freshly minted
+access token is discarded, the pool key still holds the now-consumed grant, and
+the next refresh attempt gets `invalid_grant` → circuit dead → a human re-login,
+triggered by one admin click.
+
+Two secondary problems with the same lines: the fallback also masks genuine
+`AttributeError`s raised *inside* `_refresh_locked` after a grant was consumed
+(they take the same branch and 500 at the same place), and `:6208`'s
+`state.hermes_refresh._circuit` is reached on the normal path too, so any
+non-`AttributeError` failure from the worker leaves the same latent `None`
+dereference.
+
+**Fix sketch:** branch explicitly — `if state.hermes_refresh is None:` → inline
+the exchange *and write the new secret directly to the pool key*; `else:` → call
+`refresh_key_now(...)` — instead of catching `AttributeError`.
+
+### 433. Whole-pool Hermes disconnect is memory-only — every account comes back after a restart
+
+**Severity:** 🟠 High · **Status: fixed** — round 138 (`tests/test_fix_round138.py::test_whole_pool_disconnect_persists`; fixed 2026-10-14)
+
+Labels removed in memory are collected and each one is passed to
+`config_store.delete_key` unconditionally, so the whole-pool path is
+as durable as the single-account one.
+
+**Files:** `wiwi/server/app.py:6252-6254`, `wiwi/server/config_store.py:647-680`
+(`ConfigStore.load_all`)
+
+`/disconnect` filters `acct.keys` in memory and then calls
+`config_store.delete_key` only `if label:`. The whole-pool disconnect — the
+path an operator uses to remove *every* Nous account at once, i.e. the one that
+should be unambiguous — therefore persists nothing. It clears the legacy
+settings record and reports `disconnected: <count>`, so the UI shows the pool as
+empty and the admin believes the tokens are gone.
+
+They are not. `ConfigStore.load_all()` reloads every `provider_keys` row for
+the account at startup and re-injects them into the router, so the accounts (and
+their plaintext credential blobs) reappear on the next process start. The
+single-account path does delete its row, so the two paths disagree about whether
+disconnect is durable.
+
+**Fix sketch:** collect the labels actually removed in the loop and
+`await state.config_store.delete_key(provider, lbl)` for each, unconditionally.
+
+### 434. Re-login appends a duplicate Hermes key instead of rotating that account in place — the stale copy then kills the account's circuit
+
+**Severity:** 🟠 High · **Status: fixed** — round 138 (`tests/test_fix_round138.py::test_relogin_rotates_the_same_account_in_place`; fixed 2026-10-14)
+
+`/poll` scans `acct.keys` for a key whose decoded credential label
+matches the incoming account and overwrites that key's secret and DB
+row instead of appending.
+
+**Files:** `wiwi/server/app.py:5939-5953` (`_unique_hermes_key_label`),
+`wiwi/server/app.py:6084-6089` (`/poll` label + append)
+
+`_unique_hermes_key_label`'s docstring promises: "a second connect for the SAME
+account reuses its existing label (so a re-login rotates that account in
+place)." Neither half holds. `/poll` unconditionally appends a new
+`ProviderKey` (`:6089`) rather than overwriting, and — see #430 — the dedup
+`base` was the credential blob, so the base differs on every connect (a new
+access token each time) and the "already taken" branch could never match even in
+principle. Every connect, including a re-login of one account, silently
+duplicates it.
+
+The duplicate is not a harmless extra row. The stale key keeps the *previous*
+single-use refresh grant, which the new login has already consumed. The sweeper
+eventually presents it, Nous answers `invalid_grant`, and the account's circuit
+is marked permanently dead — the AUDIT #169 failure mode, reintroduced through
+a path that only appears on the second connect.
+
+**Fix sketch:** before appending, scan `acct.keys` for a key whose
+`decode_credential(k.secret).get("label")` equals the new account's label; if
+found, overwrite that key's secret (and DB row) instead of appending.
+
+### 435. The admin console was never updated for the multi-account Hermes `/status` — the Refresh button is permanently disabled
+
+**Severity:** 🟠 High · **Status: fixed** (no Python test — console-only; fixed 2026-10-14)
+
+`HermesStatusResponse` now declares the `accounts` array
+(`web/src/api/types.ts`), and the new
+`web/src/components/HermesAccounts.tsx` renders one row per account
+(label, expiry, managed badge, per-row Refresh/Disconnect) with the
+whole-pool action kept separate. `web/src/pages/HermesOAuth.tsx` and
+`web/src/pages/ProviderDetail.tsx` both mount it via the `@/` alias.
+`key_label` now threads through `hermesRefresh`/`hermesDisconnect`
+(`web/src/api/client.ts`), and `disconnected` is a count. **There is
+no Python regression test for this one** — it is a TypeScript-only
+change and is verified by `tsc -b` + eslint at build time, not by
+pytest.
+
+**Files:** `web/src/api/types.ts:327-332` (`HermesStatusResponse`),
+`web/src/pages/HermesOAuth.tsx:314,350,379`, `web/src/pages/ProviderDetail.tsx:1398-1418`,
+`web/src/api/client.ts:484-492` (`hermesRefresh`/`hermesDisconnect`)
+
+`HermesStatusResponse` still declares the pre-round-136 flat shape
+`{connected, expires_at, needs_refresh, has_refresh_token}`, but the endpoint
+returns `{connected, accounts: [{key_label, label, expires_at, managed, …}]}`
+(`app.py:6107-6140`, AUDIT #427). TypeScript does not catch it — the extra
+property is simply absent from the declared type, so `statusQ.data.expires_at`
+reads `undefined` at runtime and the code compiles clean.
+
+Consequences, all user-visible on the Hermes provider page: the "expires soon"
+badge never appears, "Token expires" is always blank, and — because the button's
+`disabled` predicate is `!statusQ.data?.has_refresh_token`
+(`HermesOAuth.tsx:379`) and that field no longer exists — **the Refresh button
+is permanently disabled**. That button is the operator's documented escape hatch
+for a dead grant (`hermes_auto_refresh.py:157-159`), so the one control that
+recovers a wedged account is unreachable from the console.
+
+`hermesRefresh`/`hermesDisconnect` (`client.ts:484-492`) also send only
+`{provider}`, so single-account targeting (`key_label`) is impossible from the
+UI, and `disconnected` changed from a `boolean` to a count while the declared
+response type still says `boolean`.
+
+**Fix sketch:** update `HermesStatusResponse` to the `accounts` array, render one
+row per account (label, expiry, managed badge, per-row Refresh/Disconnect), and
+pass `key_label` through `hermesRefresh`/`hermesDisconnect`. Verify per the
+project's UI rule at 375px and desktop — the account list must reflow.
+
+### 436. `request_device_code()` is still a blocking sync httpx call on the event loop
+
+**Severity:** 🟠 High · **Status: fixed** — round 138 (`tests/test_fix_round138.py::test_request_device_code_runs_off_the_event_loop`; fixed 2026-10-14)
+
+Wrapped in `asyncio.to_thread` like the two sibling call sites.
+
+**Files:** `wiwi/server/app.py:6001`, `wiwi/providers/hermes_oauth.py` (`_TIMEOUT_S`,
+`request_device_code`)
+
+Round 136 threaded the two token-exchange call sites — `/poll` (`:6057`) and
+`/refresh` (`:6186`) — but not the third. `request_device_code()` at `:6001` is
+a plain synchronous `httpx` call executed directly in the async handler, with
+the module's 30 s `_TIMEOUT_S`. It blocks the entire event loop for the
+duration of the Nous round-trip: every in-flight completion, every open SSE
+stream, and every pending 401 refresh hook stalls behind one admin's connect
+click.
+
+It is also the *first* request in the connect flow, so it is the one most likely
+to be slow — it is the call that decides whether Nous will show a device code at
+all.
+
+**Fix sketch:** `await asyncio.to_thread(hermes_oauth.request_device_code)`,
+matching the two sibling sites.
+
+### 437. `/v1/realtime` reimplements the pre-flight and skips the `unpriced_model_policy == "reject"` gate
+
+**Severity:** 🟠 High · **Status: fixed** — round 139 (`tests/test_fix_round139.py`; fixed 2026-10-14)
+
+Fixed by **mirroring** the gate into `/v1/realtime` rather than
+extracting the shared pre-flight helper the fix sketch asked for:
+`authenticate()` renders its verdict as an HTTP error body, and the
+WS path renders a `_ws_refuse` frame, so one function returning one
+shape would have meant changing a surface outside this fix's file
+region. **This is a weaker guarantee than one shared function** — the
+two copies can still drift, and only the tests keep them honest.
+`test_the_unpriced_gate_reads_identically_on_both_surfaces` runs the
+same key/model/policy through `/v1/chat/completions` and `/v1/realtime`
+and asserts identical 503s, and
+`test_an_uncapped_key_is_not_refused_by_the_unpriced_gate` pins the
+`max_budget is not None` narrowing, so a one-sided edit fails the
+suite rather than silently diverging. A future agent who can edit
+`authenticate()` should still prefer collapsing the two.
+
+**Files:** `wiwi/server/app.py:2905-2921` (the WS admission block),
+`wiwi/server/app.py:1524-1534` (the shared gate inside
+`authenticate_and_authorize`), `wiwi/server/app.py:2042` / `:2351` / `:2554`
+(the only `enforce_rate_limit` / `_record_tpm_usage` call sites)
+
+The AUDIT #323 503 gate — refusing an unpriced model for a budget-capped key —
+exists only inside the shared `authenticate_and_authorize` closure. `/v1/realtime`
+never calls that closure: it invokes `state.auth.authenticate(token)` directly
+(`:2906`) and re-implements three of the checks inline — disabled/expires
+(`:2907-2912`), `over_budget` (`:2913`) and the per-key model allowlist
+(`:2917-2921`) — omitting the unpriced-model gate entirely.
+
+So the same key and the same model are refused on `/v1/chat/completions` and
+admitted over the WebSocket. `enforce_rate_limit`'s only call site is `:2042`
+and `_record_tpm_usage`'s are `:2351`/`:2554`, none of which the realtime path
+reaches. With `unpriced_model_policy: reject` and a capped key, an unpriced
+model is served over WS at a `CostEngine` price of $0, the cap never trips, and
+the operator's `max_budget` silently stops applying to their most expensive
+traffic class.
+
+**Fix sketch:** extract the pre-flight into one helper both surfaces call, so
+adding a check cannot silently skip one entry point (the repo forbids a second
+convention beside an existing one).
+
+### 438. The over-cap spend true-up is still under a bare `contextlib.suppress`
+
+**Severity:** 🟠 High · **Status: fixed** — round 140 (`tests/test_fix_round140.py`; fixed 2026-10-14)
+
+The over-cap true-up now uses the counted sibling's `try`/`except`
+(logging `spend_charge_unrecorded` and incrementing
+`spend_charge_failures`), and the reservation release is counted too.
+
+**Files:** `wiwi/server/app.py:1628-1630`, `wiwi/server/app.py:1609-1626` (the
+counted sibling), commit `8ee5676`
+
+Commit `8ee5676` fixed the realtime copy of this exact pattern and left this
+one, so the same method now contains two spend-recording sites with **opposite**
+error handling. The sibling at `:1609-1626` wraps its `apply_spend_trueup` in a
+`try/except` that logs `spend_charge_unrecorded` and increments
+`spend_charge_failures`; the site at `:1628-1630` is the bare
+`with contextlib.suppress(Exception):` — verbatim the second half of AUDIT #179.
+
+This is the over-budget *crossing* path (the `if not recorded:` branch), which
+is where `update_spend` returned `False` because the key went over its cap and
+the charge must still be added. If that true-up raises, the exception is
+swallowed: the charge is lost with no log line, and `spend_charge_failures`
+stays at 0 so nothing surfaces the drift. `spend_to_date` then sits below
+`max_budget` even though real money was spent, and `over_budget` may never trip
+for the key that is actually over. The reservation release a few lines above
+(`:1605-1607`) is uncounted in the same way.
+
+**Fix sketch:** `try/except` matching `:1621-1626`, and count the reservation
+release too.
+
+### 439. A realtime session with no usage peak is charged $0 *and* leaves no request-log row
+
+**Severity:** 🟠 High · **Status: fixed** — round 139 (`tests/test_fix_round139.py`; fixed 2026-10-14)
+
+Every session that clears admission writes a request-log row and
+settles tokens regardless of usage, and a no-usage session increments
+the new `wiwi_realtime_usage_missing_total` counter
+(`wiwi/server/metrics.py`) so the case is measurable rather than
+invisible.
+
+**Files:** `wiwi/server/app.py:515-516` (the early return),
+`wiwi/server/app.py:525` (`dep.settle_tokens`), `wiwi/server/app.py:550`
+(`state.logs.log_request`), `wiwi/server/app.py:2991-2992` (the `if usage is
+not None` call site), `wiwi/server/app.py:501` (`_realtime_relay` returning
+`None`)
+
+`_bill_realtime_session` returns at `:515-516` — before `dep.settle_tokens`
+(`:525`) and before `state.logs.log_request(...)` at `:550` — whenever the
+session produced no usable usage. The call site compounds it: `if usage is not
+None:` (`:2991-2992`) means a `_realtime_relay` that returns `None` (`:501`,
+the handshake-failure path) never enters the billing function at all.
+
+The realistic triggers are all ordinary failures: handshake failure or timeout
+(`open_timeout=10.0`), an upstream 401 or 5xx (`:2982-2985`), or
+`max_session_s` expiring before any usage-bearing frame arrives. In each case
+the session is billed nothing, settles no tokens, and — most importantly —
+**writes no row**, so the console shows no trace that a session happened at all
+while upstream capacity was consumed. Every HTTP surface logs unconditionally
+(`:2396`, `:2404`, `:2416`, `:2553`), which is what makes request-log
+completeness a usable invariant; realtime is the one surface that breaks it.
+
+**Fix sketch:** log every session that got past admission regardless of usage,
+and add a `realtime_usage_missing` counter so the no-usage case is measurable
+rather than invisible.
+
+### 440. A binary frame from upstream terminates the realtime relay
+
+**Severity:** 🟠 High · **Status: fixed** — round 139 (`tests/test_fix_round139.py`; fixed 2026-10-14)
+
+The upstream→client loop branches on `isinstance(frame, (bytes,
+bytearray, memoryview))` and forwards with `send_bytes`, so one
+binary frame no longer kills the relay. The teardown log level was
+also raised so a relay death is not silent.
+
+**Files:** `wiwi/server/app.py:481` (`if '"usage"' in frame`),
+`wiwi/server/app.py:486` (`await client_ws.send_text(frame)`),
+`wiwi/server/app.py:487-490` (the swallow and the `finally` close),
+`wiwi/server/app.py:2973` (`websockets.connect`), `wiwi/server/app.py:464`
+(`iter_text`, the correct client→upstream direction)
+
+`websockets.connect` at `:2973` is called without `decode=True`, so `recv()`
+yields `str | bytes`. The upstream→client loop at `:481`/`:486` assumes `str`
+unconditionally: `'"usage"' in frame` raises `TypeError` on a `bytes` operand,
+and `send_text(frame)` raises on one too. That `TypeError` is caught by the bare
+`except Exception` at `:487`, logged at `debug` — invisible at default verbosity
+— and the `finally` at `:489-490` then closes the client socket. One binary
+frame ends the whole session with no client-visible error.
+
+The client→upstream direction is already correct: `:464` uses `iter_text()`,
+which decodes. So the relay is asymmetric, and only the direction that can
+actually receive binary from a misbehaving or differently-configured upstream is
+the broken one.
+
+**Fix sketch:** branch on `isinstance(frame, (bytes, bytearray))` →
+`await client_ws.send_bytes(frame)`, else `send_text`; and raise the teardown log
+level so a relay death is not silent.
+
+### 441. Per-account Hermes state is never pruned — unbounded growth across reconnects
+
+**Severity:** 🟡 Medium · **Status: fixed** — round 138 (`tests/test_fix_round138.py`; fixed 2026-10-14)
+
+`HermesAutoRefresh.forget(provider, label)` pops the lock, the
+generation counter and the breaker's streak/until/dead entries, and
+`/disconnect` calls it. The generation counter is what makes it safe
+against an in-flight rotation — a popped entry is treated as
+"someone else owns this now", not as a restart at zero.
+
+**Files:** `wiwi/providers/hermes_auto_refresh.py:66` (`_locks`),
+`wiwi/providers/hermes_auto_refresh.py:70` (`_generations`),
+`wiwi/core/recovery.py:67-69` (`CircuitBreaker._streaks` / `_until` / `_dead`)
+
+Round 136 moved the sweeper's per-account bookkeeping onto
+`(provider, key_label)` tuples, and all three structures only ever grow:
+`_locks` and `_generations` get an entry on first touch of an account, and the
+breaker's `_streaks`/`_until`/`_dead` dicts get one per identity it has ever
+seen. Nothing pops an entry when `/disconnect` removes a key.
+
+Compounded by #430 and #434: because every connect mints a new label (and today
+stores a credential blob as it), the identity space grows without bound over a
+deployment's lifetime — a long-lived gateway that has been reconnected
+occidentally many times accumulates dead locks, dead generations and dead circuit
+state that is never reclaimed.
+
+**Fix sketch:** a `forget(provider, label)` that pops all three and clears the
+breaker entry, called from `/disconnect`; the existing generation counter
+(`hermes_auto_refresh.py:246`) already gives the race-safety needed to make it
+safe against an in-flight refresh.
+
+### 442. Round 137 left the whole-gateway backup export behind — `GET /admin/backup` silently drops `error_message`
+
+**Severity:** 🟡 Medium · **Status: fixed** — round 141 (`tests/test_fix_round141.py`; fixed 2026-10-14)
+
+`"error_message"` added to `_REQUEST_LOG_COLUMNS`, plus the drift
+guard `test_request_log_columns_cover_every_written_column`, which
+asserts every `db_sink._COLS` entry appears in
+`_REQUEST_LOG_COLUMNS` ∪ `BODY_COLUMNS` so the two lists cannot
+silently diverge again.
+
+**Files:** `wiwi/server/backup.py:573-580` (`_REQUEST_LOG_COLUMNS`),
+`wiwi/server/backup.py:508-521` (`_read_logs`), `wiwi/logging_core/db_sink.py:369-377`
+(`_COLS`, the writer-side list that *did* gain the column)
+
+`_REQUEST_LOG_COLUMNS` is an explicit allowlist, and round 137 added
+`"error_message"` to the writer-side `_COLS` (`db_sink.py:369-377`) but not here.
+`_read_logs` filters the query down to the allowlist (`:517`), so
+`GET /admin/backup` omits the column with no error, no warning and no
+truncation flag — an operator who exports a backup to preserve a failure's cause
+(the entire point of #428) gets request logs with `error_code` and no message.
+
+This is the **second** silent drift between the two lists; nothing asserts they
+agree, so the same class of bug will recur on the next column addition.
+
+**Fix sketch:** add `"error_message"` to `_REQUEST_LOG_COLUMNS`, and add a drift
+guard test asserting every `db_sink._COLS` entry appears in
+`_REQUEST_LOG_COLUMNS` ∪ `BODY_COLUMNS`.
+
+---
+
+## ✅ Fixed — Cline/WorkBuddy OAuth + backup/restore audit (2026-10-14)
+
+Two read-only audits run back to back: the Cline/WorkBuddy OAuth surfaces
+(`app.py`'s Cline connect/refresh/disconnect, `cline_oauth.py`,
+`cline_auto_refresh.py`, `workbuddy_auth.py`, `workbuddy_auto_refresh.py`,
+`workbuddy_import`) read against the WorkBuddy and Hermes equivalents they were
+modelled on, and the backup/restore subsystem (`wiwi/server/backup.py`) read
+against its own docstrings and the column lists in `logging_core/db_sink.py`.
+
+Both audits compared each surface to a *sibling that already got it right*. The
+pattern in almost every entry below is that Cline drifted from the WorkBuddy /
+Hermes shape that round 136 and the DB-layer audit established — the shared
+refresh lock, the write-ordering rule, the "forget the dead state on disconnect"
+rule. The backup entries are the same class of defect one layer down: the
+implementation and its documentation disagree, and the code silently does the
+opposite of what the docstring claims.
+
+**Citation basis:** line numbers are against the audited tree at commit
+`32dc2a4` (pre-fix). The fixes for these entries landed in the working tree
+after this sweep was written, so live `file:line` values have shifted; the
+function names are the stable anchor. Entries #443-#459.
+
+**Resolution (2026-10-14):** all seventeen entries are fixed and each carries an
+inline `**Status: fixed**` line naming its round test file — #443/#444/#446/#447/
+#448/#449/#450/#451 in `tests/test_fix_round143.py` (with #450/#451 extended by
+`tests/test_fix_round144.py`), #445/#452/#453 in `tests/test_fix_round144.py`, and
+#454-#459 in `tests/test_fix_round142.py`. Two are fixed only in part — #458's
+config-section half is still open as #460, and #456's honest fix left per-deployment
+limits YAML-owned, still open as #461. Full gate green at the time of writing:
+3218 passed, 11 skipped, ruff clean.
+
+### 443. The Cline admin refresh bypasses the shared lock and the circuit — one grant, two rotations
+
+**Severity:** 🔴 Critical · **Status: fixed** — round 143 (`tests/test_fix_round143.py`; fixed 2026-10-14)
+
+The hand-rolled refresh is deleted; `cline_oauth_refresh` calls
+`ClineAutoRefresh.refresh_now(provider)` →
+`_refresh_locked(name, require_due=False, force=True)`, so the admin
+route shares the worker's lock, circuit and `mark_dead` decision.
+The worker's boolean result maps onto the route's existing
+200/`authentication_error` responses, and a transient failure is a
+502 rather than a 500.
+
+**Files:** `wiwi/server/app.py:5840-5888` (`cline_oauth_refresh`), specifically
+the direct `cline_oauth.refresh_token(record["refresh_token"])` at `:5859`;
+`wiwi/providers/cline_auto_refresh.py:132` (`_refresh_locked`, the guarded
+entry point it skips); `wiwi/providers/workbuddy_auto_refresh.py:261`
+(`refresh_key_now`) and `:153` (`_rotate_locked`); `wiwi/server/app.py:6442`
+(WorkBuddy admin refresh → `refresh_key_now`); `wiwi/server/app.py:6179`
+(Hermes admin refresh → `state.hermes_refresh._refresh_locked`)
+
+`cline_oauth_refresh` calls `cline_oauth.refresh_token(...)` itself and then
+does its own record write at `:5872-5877`. It never acquires
+`ClineAutoRefresh._locks[name]`, never checks `self._circuit`, and never bumps
+`self._generations` — so it is the **only** one of the three OAuth admin
+refresh routes that does not route through the worker. WorkBuddy goes through
+`refresh_key_now` → `_rotate_locked(force=True)`; Hermes goes through
+`_refresh_locked(require_due=False)`. Cline is the sole outlier.
+
+Because the lock is not held, the 60 s sweeper tick and an operator's Refresh
+click can both decide the same provider is due (the sweeper's 5-minute lead
+window makes "both land in the same window" the *expected* case, not a race
+that needs bad luck) and both POST the same single-use `refreshToken`. Upstream
+honours the first and answers `invalid_grant` to the second. Which one loses is
+a coin flip; the loser marks the provider dead, and it stays dead until a manual
+restart.
+
+The circuit asymmetry makes it worse. On the sweeper/hook side an
+`invalid_grant` reaches `_do_refresh`'s
+`if result.get("error") == "unrecoverable_refresh_error"` branch and calls
+`mark_dead(name)`. On the admin side the same response is turned into a clean
+`401 authentication_error` for the operator and **nothing else** — no
+`mark_dead`, no audit signal that a grant was burned, no increment of the dead
+counter. So the admin path fails silently while the sweeper keeps presenting the
+grant it no longer owns, burning one `invalid_grant` per tick until the
+provider is finally marked dead by the sweeper. One button click destroys a
+working login.
+
+**Fix sketch:** delete the hand-rolled refresh from `cline_oauth_refresh` and
+call `state.cline_refresh.refresh_now(provider)` →
+`_refresh_locked(name, require_due=False, force=True)` (add the `force`
+parameter `_refresh_locked` does not currently have, so the admin route can skip
+the due-check without skipping the lock); let the worker own the record write
+and the `mark_dead` decision, and map its boolean return onto the
+200/`authentication_error` responses the route already returns.
+
+### 444. A Cline refresh response with no `expiresAt` is a permanent refresh storm that kills the grant
+
+**Severity:** 🔴 Critical · **Status: fixed** — round 143 (`tests/test_fix_round143.py`; fixed 2026-10-14)
+
+The conditional expiry write is gone; `_do_refresh` resolves through
+`cline_oauth.resolve_expires_at` →
+`wiwi/providers/token_expiry.compute_expires_at`, so a payload with
+no usable `expiresIn` falls **forward** to `2 * REFRESH_LEAD_S`
+rather than preserving the already-due deadline. Both the sweeper and
+the admin path go through the worker, so there is one write site.
+
+**Files:** `wiwi/providers/cline_auto_refresh.py:192-193`
+(`_do_refresh`'s conditional expiry write), `wiwi/providers/cline_auto_refresh.py:116`
+(`_sweep`'s due-check), `wiwi/providers/cline_oauth.py` (`parse_expires_at` /
+`resolve_expires_at`), `wiwi/server/app.py:5873-5874` (the same conditional
+guard on the admin path)
+
+```python
+await self._update_secret(name, result["access_token"])
+if result.get("expires_at"):
+    record["expires_at"] = result["expires_at"]
+```
+
+The expiry is only overwritten when the payload carried something parseable.
+When it did not, `record["expires_at"]` keeps its previous value — and we are
+*inside* `_do_refresh`, so the previous value is by construction already inside
+(or past) the 5-minute lead window that made the provider due. The record is
+stored, and the very next `_sweep` tick (60 s) recomputes the same verdict.
+
+Failure sequence: upstream answers `{"accessToken":…,"refreshToken":…}` with no
+`expiresAt` → refresh **succeeds** → the rotated pair is written with the stale
+expiry → 60 s later the provider is due again → another rotation plus another
+`set_setting` write → forever, one rotation per minute per provider, until a
+rotation eventually gets `invalid_grant` (upstream retires a grant sooner under
+this rate) and `mark_dead` fires. A one-field omission in an upstream response
+converts a working provider into a grant-burning loop that ends in a dead
+circuit and a re-login.
+
+This is the same defect as AUDIT #425 for Hermes, in the same position in a
+sibling file. The Hermes fix established the correct reading — an unparseable
+expiry must be resolved to a *fresh* one, not preserved.
+
+**Fix sketch:** resolve the expiry through the shared
+`wiwi/providers/token_expiry.compute_expires_at` helper unconditionally (falling
+back to `now + REFRESH_LEAD_S` when the payload carries nothing usable), and
+delete the `if result.get(...)` guard on both the sweeper and admin paths.
+
+### 445. A WorkBuddy refresh response with no `expiresIn` is the same storm — and the docstring documents the opposite behaviour
+
+**Severity:** 🔴 Critical · **Status: fixed** — round 144 (`tests/test_fix_round144.py`; fixed 2026-10-14)
+
+`workbuddy_auth.refresh_token` resolves the field through
+`wiwi/providers/token_expiry.compute_expires_at`, and the docstring
+that documented the opposite behaviour was rewritten. Note the
+shared helper now backs **all three** OAuth providers (Cline,
+WorkBuddy, Hermes), so #425/#444/#445 are one rule in one module.
+
+One pre-existing test was **updated, not deleted**:
+`tests/test_workbuddy_adapter.py::test_refresh_token_preserves_expiry_when_missing`
+was renamed to
+`test_refresh_token_falls_forward_when_expires_in_is_missing` and
+inverted — it now asserts the new expiry differs from the old one,
+is in the future, and is outside the lead window.
+
+**Files:** `wiwi/providers/workbuddy_auth.py:310-319` (`rotated = WorkBuddyAuth(...,
+expires_at=auth.expires_at, …)` then the conditional `expires_in` overwrite),
+`wiwi/providers/workbuddy_auth.py:263-270` (the `refresh_token` docstring),
+`wiwi/providers/workbuddy_auto_refresh.py:119` (`_check_key`'s due-check)
+
+The rotated auth is built with `expires_at=auth.expires_at` — the caller's
+**old** value — and only `:317-319` replaces it, and only when `expiresIn` is a
+positive non-bool number. Absent, zero, boolean, or garbage all leave the old
+expiry in place.
+
+The docstring above it states the intent as the opposite of the behaviour:
+
+> missing response fields keep their old values — the Go preserveExpiry rule
+> that **prevents refresh storms when expiresIn is absent**
+
+It does not prevent refresh storms; it *causes* them. Preserving a stale expiry
+means the token is due again on the next tick, forever — the AUDIT #444 loop,
+one file over. The comment is load-bearing enough that a future agent reading
+it will treat the current code as deliberate and refuse to change it.
+
+**Fix sketch:** resolve via `wiwi/providers/token_expiry.compute_expires_at`
+(unconditionally, with the lead-window default when `expiresIn` is unusable) and
+rewrite the docstring to say what the code does — a missing `expiresIn` is
+treated as "expire at the next refresh", never "keep the old deadline".
+
+### 446. Cline `_do_refresh` persisted the pool key BEFORE the OAuth record, with neither write guarded — a DB error permanently loses the grant
+
+**Severity:** 🟠 High · **Status: fixed** — round 143 (no dedicated regression test; fixed 2026-10-14)
+
+`_do_refresh` writes the OAuth record **first** and the pool key(s)
+second, each in its own `try` that logs and returns `False` — neither
+write can escape as an exception. Because the guarded writes are the
+fix, `core/gateway.py`'s 401-hook call sites were left un-wrapped on
+purpose: a hook failure can no longer produce a 500, and the
+nearest regression coverage is
+`tests/test_fix_round143.py::test_admin_refresh_reports_a_transient_failure_as_502`,
+which exercises the guarded path end to end. **There is no test that
+fails a `set_setting` mid-rotation and asserts the grant survived** —
+that is the gap a future agent should close.
+
+**Files:** `wiwi/providers/cline_auto_refresh.py:190-193` (`_update_secret` then
+the record write), `wiwi/core/gateway.py:588` / `:715` / `:1814` (the three
+`await refresh_hook(...)` call sites, none wrapped in a `try`),
+`wiwi/providers/workbuddy_auto_refresh.py:212` (`_write_secret`, the WorkBuddy
+counter-example that gets it right)
+
+`_do_refresh` calls `await self._update_secret(name, …)` at `:190` and only
+then writes the settings record. If `set_setting` then raises, the record still
+holds the **consumed** refresh token and the old `expires_at`. The next tick
+presents that dead grant, gets `invalid_grant`, and calls `mark_dead` — one
+transient DB error costs the operator their login.
+
+This is the exact inverse of the ordering rule the codebase states twice
+elsewhere (write the irreplaceable single-use grant first; the pool-key write is
+derivable from it) and the shape Hermes `_do_refresh` follows. The comment
+directly above `_do_refresh` claims the ordering is deliberate, which makes the
+reversal a live hazard rather than an oversight.
+
+The second half is the exception path. Both writes are unguarded, so the
+`IntegrityError`/operational error escapes `_refresh_locked` uncaught. The
+on-demand 401 hook is awaited from `core/gateway.py` at all three sites with no
+`try`/`except` around it, so an escaping write converts an upstream **401** into
+a gateway **500** — the caller sees a wiwi bug where the provider simply said
+"token expired", and the retry/cooldown accounting records the wrong failure.
+
+**Fix sketch:** reorder to record-first, then pool keys; wrap each write in its
+own `try`/`except` that logs and returns `False` (never re-raises) so the 401
+hook path cannot produce a 500; and add the same guard to the 401-hook call
+sites in `gateway.py` so a future hook failure degrades to "no rotation" rather
+than an exception.
+
+### 447. The Cline admin refresh/connect paths wrote only `keys[0]` — reintroducing the stale-sibling bug the sweeper's own docstring documents fixing
+
+**Severity:** 🟠 High · **Status: fixed** — round 143 (`tests/test_fix_round143.py`; fixed 2026-10-14)
+
+All three Cline admin paths now route through
+`ClineAutoRefresh.store_access_token`, which writes every key the
+record owns. The stale-sibling 401 → second-rotation chain is gone.
+
+**Files:** `wiwi/server/app.py:5590-5599` (`_update_provider_secret`,
+`key0 = acct.keys[0]`), `wiwi/server/app.py:5663`, `:5760`, `:5868` (its three
+callers), `wiwi/providers/cline_auto_refresh.py:200-208` (`_update_secret` and
+the docstring below it)
+
+`_update_provider_secret` does `key0 = acct.keys[0]` and rewrites exactly that
+one key, in memory and in the DB. The sweeper's `_update_secret` writes **every**
+key, and its docstring says exactly why:
+
+> Updating only ``keys[0]`` (the historical behavior) caused on-demand
+> 401-refresh retries to pick a still-stale sibling key from the round-robin
+> cursor.
+
+That is the fix. `cline_oauth_refresh` and `cline_oauth_connect` still route
+through the un-fixed path, so the sweeper and the admin button disagree about
+what "refresh this provider" means — and the admin button is the one an operator
+reaches for *because* the sweeper is failing.
+
+Trigger: a 2-key Cline pool. The operator clicks Refresh. `keys[0]` is now
+fresh; `keys[1]` still holds the pre-rotation access token. Smooth WRR sends the
+next request to `keys[1]`, which 401s, which fires the on-demand hook, which
+rotates **a second time** — burning the grant the admin click just consumed. If
+that rotation lands after a real rotation it gets `invalid_grant` → `mark_dead`.
+One admin click: two burned grants, one dead provider. The admin path also never
+takes the lock (see #443), so it can compound with a concurrent sweeper tick.
+
+**Fix sketch:** give `_update_provider_secret` the same all-keys semantics as
+`ClineAutoRefresh._update_secret` — or, better, delete it and have all three
+Cline routes go through the sweeper worker, which now owns both the write and
+the ordering (#443, #446).
+
+### 448. `ClineAutoRefresh._update_secret` clobbered EVERY pool key with the OAuth access token — destroying non-OAuth keys
+
+**Severity:** 🟠 High · **Status: fixed** — round 143 (`tests/test_fix_round143.py`; fixed 2026-10-14)
+
+Ownership is fingerprinted: connect stamps
+`access_fingerprint` on the OAuth record, and `store_access_token`
+overwrites only the keys whose secret matches it, falling back to all
+keys when no fingerprint exists yet (first rotation after a connect).
+A raw API key the operator added to the pool survives.
+
+**Files:** `wiwi/providers/cline_auto_refresh.py:200-215` (`for k in acct.keys:
+k.secret = secret`)
+
+The counter-fix to #447 over-corrects. `_update_secret` loops over
+`acct.keys` and assigns the WorkOS bearer to every entry, persisting each one.
+The docstring's premise — "a Cline provider's key pool entries all authenticate
+with the same OAuth account" — is a convention, not an invariant, and nothing
+enforces it: an operator can add a plain API key to a Cline pool through the
+normal key-add path.
+
+Trigger: a Cline provider whose pool is `["a", "b"]`, where `a` is
+OAuth-managed and `b` is a separately pasted raw API key. One successful refresh
+writes the OAuth access token into `b` and persists it. The raw key is gone —
+not shadowed, overwritten — and the operator has to re-paste it. Every
+subsequent rotation overwrites it again, so the account is permanently
+unusable for raw-key traffic and nothing anywhere records that its secret was
+replaced.
+
+This is the same class as the Hermes #427 fix (one account's rotation must never
+touch a sibling key's credential) arriving through the opposite door: there, one
+account wrote to many keys; here, one key's ownership is assumed for all keys.
+
+**Fix sketch:** track which pool keys the OAuth record actually issued — stamp
+a fingerprint of the access token on the record when it is written, and have
+`_update_secret` overwrite only keys whose secret matches that fingerprint
+(falling back to all keys only when no fingerprint exists yet, i.e. the first
+rotation after a connect). This is the shape Hermes already uses in
+`encode_credential`/`_update_secret`.
+
+### 449. Cline connect overwrote a working refresh grant with `None`
+
+**Severity:** 🟠 High · **Status: fixed** — round 143 (`tests/test_fix_round143.py`; fixed 2026-10-14)
+
+Both connect paths **merge**: a `None` `refresh_token` from a
+truncated paste-code exchange keeps the existing working grant
+instead of writing null over it.
+
+**Files:** `wiwi/server/app.py:5666-5670` (`cline_oauth_connect`'s record
+dict), `wiwi/server/app.py:5763-5767` (`/cline/oauth/callback`'s identical
+record dict), `wiwi/providers/cline_oauth.py:232-234` (`exchange_code`'s
+return, `refresh_token` is `None` for a truncated code)
+
+Both connect paths build the record unconditionally:
+
+```python
+record = {
+    "refresh_token": tokens["refresh_token"],   # may be None
+    "expires_at": tokens.get("expires_at"),
+    "email": tokens.get("email"),
+}
+```
+
+`cline_oauth.exchange_code` documents at `:214` that `refresh_token` **will be
+`None`** when the pasted Google-OAuth code is a truncated token blob — that is a
+normal, expected outcome of the paste-code flow, not an error, and the function
+returns successfully. The connect handler then persists `refresh_token: null` over
+whatever was there.
+
+Trigger: a provider that is already connected and auto-refreshing well. The
+operator re-runs connect (to fix an email label, or because the paste-code dialog
+is the documented flow) and pastes a code that decodes without a refresh token.
+The working grant is replaced with null. `_sweep` then skips the provider
+forever — `cline_auto_refresh_refresh` requires a stored `refresh_token` — so it
+serves until the access token expires and then hard-401s, with no sweeper and no
+recovery except another manual paste. The connect handler returned 200.
+
+**Fix sketch:** treat a `None` `refresh_token` in connect as "this connect
+cannot establish auto-refresh": either reject with a 400 explaining that the code
+was truncated, or merge — keep the existing `refresh_token` when the new exchange
+did not produce one. Merging is the better shape, since `exchange_code`'s `None`
+is a legitimate result rather than a failure.
+
+### 450. `mark_dead` is permanent and keyed on `(provider, label)` — a re-created account inherits the corpse
+
+**Severity:** 🟠 High · **Status: fixed** — rounds 143 + 144 (`tests/test_fix_round143.py`, `tests/test_fix_round144.py`; fixed 2026-10-14)
+
+Installing a new credential now clears the identity's breaker entry,
+so a dead circuit means "*this* grant is unusable", not "this
+account name is forever dead". Wired into Cline connect,
+`workbuddy_import`, provider delete, key delete and disconnect.
+
+**Files:** `wiwi/core/recovery.py:81-95` (`clear` / `blocked` / `mark_dead`),
+`wiwi/providers/workbuddy_auto_refresh.py:198` (`mark_dead(ident)`),
+`wiwi/providers/cline_auto_refresh.py:185` (`mark_dead(name)`)
+
+`CircuitBreaker._dead` is a plain `set` that only `clear()` removes, and
+`clear()` runs only at the *end* of a successful rotation
+(`workbuddy_auto_refresh.py`, and `cline_auto_refresh._do_refresh`'s tail).
+`blocked()` short-circuits on membership at `recovery.py:86-88`, i.e. **before**
+any rotation is attempted — so once dead, the only thing that can clear the
+state is a rotation, and a rotation requires not being dead. The circuit is
+self-locking by construction.
+
+The WorkBuddy identity is `(provider, label)` where `label` is derived from the
+account (`nickname or uid`, see the label derivation in `workbuddy_import`). So
+the operator's remedy for a dead account — delete the key, import a fresh valid
+auth for the same account — **reuses the same identity**, because reusing the
+same nickname or uid is the normal case. The new, perfectly valid credential is
+born inside a dead circuit. The sweeper reports "blocked by the refresh circuit
+breaker" and the 401 hook returns `False`, so the request 401s and the operator
+is told to use the force-refresh button — the one control that works.
+
+Cline has the same shape keyed on `(provider_name)`, so it is one reconnect away
+from the same lockout.
+
+This makes #451 (state never purged) actively harmful rather than merely leaky:
+the corpse outlives the credential that created it.
+
+**Fix sketch:** clear the breaker entry whenever a new credential is installed
+for an identity — on `workbuddy_import` of a label, on Cline connect, and on
+Hermes `/poll`. A dead circuit should mean "this grant is unusable", and a
+*different* grant is not that. Keep `mark_dead` sticky only against the
+credential that earned it.
+
+### 451. Per-provider OAuth state is never purged on disconnect or provider delete (Cline and WorkBuddy)
+
+**Severity:** 🟠 High · **Status: fixed** — rounds 143 + 144 (`tests/test_fix_round143.py`, `tests/test_fix_round144.py`; fixed 2026-10-14)
+
+`forget(provider)` / `forget(provider, label)` on both workers pops
+the lock, the generation counter and the breaker entries, called from
+every teardown path (key delete, provider delete, Cline disconnect,
+WorkBuddy disconnect). The module-global `_workers` fallback cache,
+keyed on `id(state)`, was also moved off raw `id` so CPython id
+recycling cannot hand a fresh `AppState` a worker bound to a dead
+one. Hermes got the same `forget` in round 138 (#441).
+
+**Files:** `wiwi/providers/cline_auto_refresh.py:53` (`_locks`), `:57`
+(`_generations`), `:185` (`mark_dead`), `wiwi/providers/workbuddy_auto_refresh.py:59-70`
+(`_locks` / `_generations` / the breaker's per-identity dicts),
+`wiwi/server/app.py:5886` (`DELETE /admin/cline/oauth/disconnect`),
+`wiwi/server/app.py:3699-3730` (`admin_delete_provider`), `wiwi/server/app.py:3582`
+(`admin_delete_provider_key`)
+
+Three structures per provider — the refresh `asyncio.Lock`, the generation
+counter used for the in-flight-rotation race check, and the circuit breaker's
+streak/until/dead entries — are created on first touch and never removed. None
+of the three teardown paths (key delete, provider delete, Cline disconnect,
+WorkBuddy disconnect) pops anything.
+
+Two consequences. The obvious one is unbounded growth: every
+connect-then-disconnect cycle leaks a lock, a counter and a breaker entry for a
+deployment's whole lifetime. The non-obvious one is #450 — a `dead` circuit
+survives the removal of the credential that caused it, so a provider name that
+is later reused comes back dead.
+
+**Fix sketch:** a `forget(provider)` / `forget(provider, label)` on each worker
+that pops the lock, the generation counter and the breaker entries, called from
+every teardown path. The generation counter is what makes this safe against an
+in-flight refresh: the in-flight holder captured its generation before entering
+and re-checks under the lock, so a popped entry must be treated as "someone
+else owns this now" rather than "restart the counter at zero". Hermes already
+has the `forget` shape in `hermes_auto_refresh.py` — port it.
+
+### 452. `workbuddy_import` mutated the router BEFORE persisting, with no exception guard — half-imported account and a bare 500
+
+**Severity:** 🟠 High · **Status: fixed** — round 144 (`tests/test_fix_round144.py`; fixed 2026-10-14)
+
+`workbuddy_import` persists first and mutates the in-memory pool only
+after every `add_key` lands, rolling the DB back on failure — so a
+partial batch leaves neither half applied.
+
+**Files:** `wiwi/server/app.py:6376-6380` (`existing.keys.append(...)` then
+`await state.config_store.add_key(...)`), `wiwi/server/app.py:6307-6317` (the
+docstring's promise)
+
+The handler's own docstring promises the opposite of what it does:
+
+> Import succeeds only if every entry parses; partial failures are rejected so
+> the admin can fix the file rather than end up with a half-imported set.
+
+Parsing *is* all-or-nothing (the `parsed` loop rejects before any mutation), but
+persistence is not. The append to `existing.keys` happens first and the
+`add_key` call second, inside a plain loop with **no `try`** — so the in-memory
+router is mutated optimistically and a DB failure leaves the two permanently
+divergent.
+
+Trigger: import 5 accounts where the 3rd `add_key` raises. All 5 keys are live
+in memory (so WRR immediately routes traffic through accounts that do not exist
+in the DB), only 2 are in the DB, the request 500s with an unhandled traceback,
+and **no audit row is written** — `log_audit` is after the loop, so the failed
+import leaves no trace at all. On the next restart the provider silently reverts
+to 2 keys and the operator has to work out why four accounts vanished. The
+docstring's guarantee is checkable only for the parse phase, which is the one
+phase that was never at risk.
+
+This is exactly the shape AUDIT #181 fixed in `DELETE /admin/providers`; the
+same guard was not applied here.
+
+**Fix sketch:** persist first, mutate second — collect the `add_key` calls, run
+them inside a `try` that rolls back the successful ones on failure (or relies on
+the fact that nothing has been mutated yet and simply returns a 500 with a clear
+message), and only then append to `existing.keys`. Log the audit row in a
+`finally`-style path so a failed import is still recorded.
+
+### 453. `workbuddy_import` did not dedupe labels WITHIN one import batch
+
+**Severity:** 🟠 High · **Status: fixed** — round 144 (`tests/test_fix_round144.py`; fixed 2026-10-14)
+
+`taken` is updated as each label is accepted inside the loop, so a
+second entry with the same `nickname` in one batch trips the same
+409 the error message already advertised.
+
+**Files:** `wiwi/server/app.py:6353-6362` (the `taken` snapshot and the
+collision check), `wiwi/server/app.py:6368-6380` (the append/`add_key` loop),
+`wiwi/server/config_store.py` (`add_key`, `INSERT OR REPLACE` / `ON CONFLICT
+… DO UPDATE`)
+
+```python
+taken = {k.label for k in existing.keys} if existing else set()
+for label, _ in parsed:
+    if label in taken:
+        return _err(409, …)
+```
+
+`taken` is snapshotted from the existing pool and **never updated inside the
+loop**. The handler's own error message ("nothing imported") reads as though
+every entry in the batch is checked against every other entry; it is not — only
+against the pool as it was before the request. Meanwhile the persistence layer
+upserts on label, so two entries with the same `nickname` in one file collapse to
+one DB row.
+
+Trigger: one pasted file with two auth objects sharing a `nickname` (easy — a
+re-export of the same account, or two accounts from the same device). Both are
+appended in memory with identical labels, the DB keeps one, and
+`router.get_key(label)` resolves to only the first. Rotation therefore reaches
+only one of them; the other holds a credential nothing ever refreshes, and it
+401s permanently once its token lapses. The import reported success and listed
+the duplicate label twice.
+
+**Fix sketch:** add the label to `taken` as it is accepted inside the loop, so
+the second occurrence trips the existing 409 with the same "nothing imported"
+guarantee the message already advertises.
+
+### 454. `_read_all` aborts keyset pagination after page 1 — every log and rollup backup exports only the OLDEST 2000 rows
+
+**Severity:** 🔴 Critical · **Status: fixed** — round 142 (`tests/test_fix_round142.py`; fixed 2026-10-14)
+
+`_read_all` derives its cursor from the table rather than the
+caller's projection: it selects `id`, advances `id > cursor`, and
+strips `id` from the emitted dicts only when it added it. Exports now
+return every row beyond the first page for both `logs` and
+`rollups`.
+
+**Files:** `wiwi/server/backup.py:592-637` (`_read_all`), specifically
+`:630-632`; `wiwi/server/backup.py:573-582` (`_REQUEST_LOG_COLUMNS`),
+`:582-591` (`_ROLLUP_COLUMNS`); `wiwi/server/backup.py:508-521` (`_read_logs`),
+`:533` (`_read_rollups`)
+
+```python
+cursor = rows[-1][usable.index("id")] if "id" in usable else None
+if cursor is None:
+    return out, truncated
+```
+
+`usable` is derived from the **caller's** column allowlist, not from the table.
+The SELECT is `SELECT {col_sql} FROM {table} … ORDER BY id LIMIT :limit`, so
+`ORDER BY id` works without `id` being selected — but the cursor read needs it.
+Neither `_REQUEST_LOG_COLUMNS` (25 names) nor `_ROLLUP_COLUMNS` (24 names)
+contains `"id"`. So on the first full page `cursor is None` and the function
+returns: `_PAGE` rows, no truncation flag, no warning.
+
+The docstring states the intent that the code does not implement:
+
+> Paging is ``id > cursor`` rather than OFFSET, which re-walks every row already
+> read.
+
+Paging never happens. `_read_logs` (`:518`) and `_read_rollups` (`:533`) are the
+only two callers, so **every** `logs` and `rollups` section is capped at one page.
+
+Verified empirically against a real SQLite DB at this commit: a 5 000-row
+`request_logs` table returned exactly 2 000 rows with `truncated: 0`, first
+`request_id='a'`, last `'r1999'`. Adding `"id"` to the projection returned all
+5 000.
+
+The real-world consequence is the worst kind of silent failure. `GET
+/admin/backup?sections=logs,rollups` on a gateway holding 400 000 `request_logs`
+rows ships the **oldest** 2 000 and reports completeness — no error, no
+`truncated` key, no count mismatch (see #455). An operator restoring a production
+gateway from that archive gets a spend log missing 99.5% of its history and no
+indication that anything was dropped. Because the rows are the *oldest*, the
+missing data is the settled, long-closed history rather than the recent tail,
+which makes the archive look plausible on inspection.
+
+**Fix sketch:** derive the cursor from the table, not the projection — add `"id"`
+to the SELECT (and strip it from the emitted dicts), or run a separate
+`SELECT id` for the page. Add a regression test that inserts > `_PAGE` rows and
+asserts the exported count.
+
+### 455. `truncated` is initialised and never incremented — the documented truncation signal can never fire
+
+**Severity:** 🔴 Critical · **Status: fixed** — round 142 (`tests/test_fix_round142.py`; fixed 2026-10-14)
+
+`truncated` is now emitted as the `{section: count}` mapping
+`build_backup` and `web/src/api/types.ts` both already declared, and
+the key is omitted entirely when nothing was dropped.
+
+**Files:** `wiwi/server/backup.py:611` (`truncated = 0`), `:631-636` (every
+`return out, truncated`), `wiwi/server/backup.py:281-287` (`build_backup`'s
+aggregation), `wiwi/server/backup.py:256` (the docstring promising the flag),
+`web/src/api/types.ts:592` (`truncated?: Record<string, number>`)
+
+`truncated` is set to `0` on entry and there is no `truncated +=` anywhere in the
+file. Every return path hands back the initial `0`. So the only half of the
+truncation story that *does* work — the `limit`-clamping branch at `:624-627`,
+which shrinks `page` and returns when `len(out) >= limit` — still reports
+`truncated: 0`.
+
+The types disagree three ways, which is itself the diagnostic: `build_backup`'s
+`truncated: dict[str, int]` (`:281`) expects `_read_all` to return a
+**mapping**, `_read_all` returns an **int**, and `BackupDocument.truncated` in
+the console (`types.ts:592`) declares `Record<string, number>` — agreeing with
+neither. Nothing type-checks across the JS boundary, so the mismatch is silent in
+both directions.
+
+Trigger: `GET /admin/backup?log_limit=50000` against a 400 000-row table. The
+clamp drops 350 000 rows and the document asserts completeness — which is what
+`build_backup`'s docstring promises ("a cap that bites is recorded in
+`truncated` so a restore knows the section is partial"). Combined with #454, the
+`truncated` flag is the *only* thing that could have surfaced the pagination
+bug, and it is inert.
+
+**Fix sketch:** increment by the unexported remainder at the limit branch,
+return a `{section: count}` mapping (or rename the field and fix
+`build_backup` + `types.ts` together), and add a test that a `log_limit` smaller
+than the table produces a non-zero `truncated`.
+
+### 456. `_apply_deployments` restores five per-deployment limits the `deployments` table cannot store — they vanish on the next restart
+
+**Severity:** 🟠 High · **Status: fixed (export side) — round 142 (`tests/test_fix_round142.py`; fixed 2026-10-14)
+
+The chosen fix is the lossy-but-honest one: `_export_deployments` no
+longer emits `rpm`/`tpm`/`timeout`/`max_tokens`/`prompt_cache`, and
+import leaves a target deployment's limits alone rather than writing
+values the table cannot persist. A backup therefore never claims a
+limit it cannot restore. **The underlying gap is still open** — the
+`deployments` table still has no columns for those five fields, so
+per-deployment limits remain YAML-owned and do not survive a
+backup/restore round trip. See #461.
+
+**Files:** `wiwi/server/backup.py:1395-1401` (the `Deployment(...)` constructor
+with `rpm`/`tpm`/`timeout`/`max_tokens`/`prompt_cache`), `:1403-1409` (the
+in-place field assignment on an existing deployment), `:1411-1413` (the
+`add_deployment` call that persists only four values), `wiwi/server/config_store.py`
+(`add_deployment`, and the `deployments` DDL)
+
+The apply path writes six per-deployment settings into the live `Deployment`
+objects, but the single persistence call carries only
+`(group_name, provider_name, model_id, weight)`. The `deployments` table's DDL
+has no `rpm`, `tpm`, `timeout`, `max_tokens` or `prompt_cache` column, and the
+restart path rebuilds every deployment from that table — with defaults.
+
+So the restored instance serves correct limits until the first restart, then
+silently reverts to unthrottled defaults for exactly the five fields an operator
+was most likely tuning in the source deployment. Trigger: the source instance
+sets `gpt-5/prod` to `rpm=20, max_tokens=4000` because it sits behind a rate
+limit; after a restore + one restart the new instance serves that group
+unthrottled at the default `max_tokens`, and there is no error, no audit row,
+and no re-import step that would catch it. The backup's *own export* carries the
+values — `_export_deployments` reads them from the live objects — so the format
+is complete and only the round-trip is lossy.
+
+**Fix sketch:** either add the five columns to the `deployments` table (the
+project has no Alembic, so it is an inline `CREATE TABLE IF NOT EXISTS` plus the
+`_migrate` ALTER list), or record the values in the existing settings overlay
+that `_load_db_config` already merges. The former is the honest fix.
+
+### 457. `_insert_rows` derives the column set from `rows[0]` alone — a field present on later rows is silently written as the column default
+
+**Severity:** 🟠 High · **Status: fixed** — round 142 (`tests/test_fix_round142.py`; fixed 2026-10-14)
+
+The column set is the union of keys across the batch, so a field only
+a later row carries is inserted for that row instead of taking the
+column default. Applied to the paged log insert, `_apply_rollups`
+and `_apply_responses` alike.
+
+**Files:** `wiwi/server/backup.py:1615` (`cols = [c for c in rows[0] if c in
+present]`), `wiwi/server/backup.py:1643` (the paged insert), and the same
+`rows[0]`-derived pattern at `:1676` (`_apply_rollups`) and `:1723`
+(`_apply_responses`)
+
+The column set for the whole batch is read off the first row. `_coerce_row`
+emits a fixed key set per section, so homogeneous documents are fine — but any
+heterogeneous one silently loses the field, because the INSERT's column list
+omits it and every row takes the column default.
+
+Verified: a two-row document where row 1 carried `error_code="api_error"` and
+row 0 did not inserted **both** rows with `error_code = ''`. The failure has no
+warning and no non-zero return — the row count says success.
+
+Heterogeneous documents are not hypothetical here: #442 is exactly this class of
+drift, and `_coerce_row` keys off the *section's* projection, so any section
+whose rows were captured across a schema change (an old archive restored into a
+newer build, or a partially-migrated source) hits it.
+
+**Fix sketch:** take the union of keys across the batch —
+`cols = [c for c in dict.fromkeys(k for r in rows for k in r) if c in present]` —
+so a field missing from row 0 is still inserted as `None` for the rows that
+lack it, rather than being dropped for every row that has it.
+
+### 458. The restore path has no rollback — a bulk-section failure leaves earlier pages AND earlier sections committed
+
+**Severity:** 🟠 High · **Status: fixed (bulk sections) — round 142 (`tests/test_fix_round142.py`; fixed 2026-10-14)
+
+`logs`/`rollups`/`responses` are applied **first**, in **one**
+transaction, so a malformed row rolls the whole bulk pass back with
+nothing else written; each rollup/response row gets its own
+SAVEPOINT so one bad row is reported as `failed` rather than taking
+the section with it. **The route docstring's blanket "any error
+rejects it with nothing applied" still overstates this for the
+CONFIG sections**, which persist through `ConfigStore`'s own
+transactions — see #460.
+
+**Files:** `wiwi/server/backup.py:1649-1650` (`_exec_insert`, one
+`engine.begin()` per call), `wiwi/server/backup.py:1643` (called once per
+500-row page), `wiwi/server/backup.py:1259-1284` (`apply_backup`, committing
+each section in turn), `wiwi/server/app.py:4288` (the route docstring)
+
+Every unit of work is its own transaction: `_exec_insert` opens a fresh
+`engine.begin()`, `_insert_rows` calls it once per 500-row page, and
+`apply_backup` commits each section separately. There is no outer transaction, so
+a failure at any point leaves everything before it durable.
+
+Verified: a log row with no `ts` raises
+`IntegrityError: NOT NULL constraint failed: request_logs.ts` *after* the
+preceding pages are already committed.
+
+Trigger: a 50 000-row import in which row 1 200 is malformed. The restore commits
+providers, keys, deployments, aliases, settings, prices, users, vkeys **and** the
+first 1 000 log rows, then 500s — with no record of how far it got, no partial-
+success flag, and no way for the operator to tell which sections are now
+half-populated. A retry re-applies the idempotent sections and hits the same row.
+Worse, the sections that *did* land (a fresh vkey table, new providers pointing
+at credentials the operator has not yet verified) are live immediately.
+
+The route's own docstring over-promises, and the wording is what an operator
+relies on:
+
+> any error rejects it with nothing applied
+
+That holds for the **validation** phase only. It does not hold for apply, which
+is where the errors that actually happen live.
+
+**Fix sketch:** wrap `apply_backup` in a single outer transaction (or take a
+pre-import snapshot and restore it on failure), and make the response carry a
+per-section applied/skipped report on partial failure so a retry is safe. At
+minimum, correct the docstring to say what is actually guaranteed.
+
+### 459. `_apply_rollups` swallowed every per-row failure; `_apply_responses` had no guard at all
+
+**Severity:** 🟡 Medium · **Status: fixed** — round 142 (`tests/test_fix_round142.py`; fixed 2026-10-14)
+
+Both functions now share one shape: collect failures, count them, and
+return them, so the response can say "12 of 4 000 rollup rows
+rejected" instead of a bare `0`. The first few log at `error`, the
+rest at `warning`, so the signal is visible at default verbosity.
+
+**Files:** `wiwi/server/backup.py:1698-1703` (`_apply_rollups`'s bare
+`except Exception: log.warning(...)`), `wiwi/server/backup.py:1711-1735`
+(`_apply_responses`, unguarded), `wiwi/server/backup.py:1279-1284`
+(`apply_backup`'s section ordering)
+
+`_apply_rollups` wraps each `_exec_insert` in `except Exception`, logs a
+warning, and continues — so `written` counts only the successes but nothing
+counts the failures, and the function's return value is indistinguishable from
+"there was nothing to restore". `_apply_responses` has no `try` at all: one bad
+row aborts the section and propagates, after `logs` and `rollups` have already
+been committed (which is #458's failure mode, triggered by the smallest possible
+input).
+
+Trigger: restoring into a target whose `request_rollups` has a stricter type than
+the source (a `TEXT` column that must be numeric on the newer build, or a
+non-null column the source never wrote). Every row insert fails. The API answers
+`200 {"rollups": 0}` and the operator concludes there was nothing to restore —
+when in fact the archive held a full rollup history that was silently discarded.
+The `_apply_responses` variant is the mirror image: a single malformed stored
+response turns a whole restore into a 500 *after* the useful sections landed.
+
+The asymmetry is itself the defect: two adjacent functions, same shape, opposite
+failure policy, neither reporting which rows failed.
+
+**Fix sketch:** give both the same shape — collect failures, count them, and
+return them (`{"written": n, "failed": m}`) so the response and the audit row can
+say "12 of 4 000 rollup rows rejected" instead of a bare `0`. Log the first few
+at `error` and the rest at `warning` so the signal is visible at default
+verbosity.
+
+---
+
+## 🔴 Open — backup/restore follow-ups left open by rounds 142/143/144 (2026-10-14)
+
+Two items deliberately did **not** get closed by the batch above. Both are
+recorded here so they are not mistaken for fixed work.
+
+### 460. The backup-import route docstring still over-promises for the config sections — "nothing applied" is only true of the bulk pass
+
+**Severity:** 🟠 High · **Status: open**
+
+**Files:** `wiwi/server/app.py:4586-4596` (`admin_import_backup`'s docstring),
+`wiwi/server/backup.py:1390-1417` (`apply_backup`'s docstring, which is
+accurate), `wiwi/server/backup.py` (`_apply_deployments` and the other
+`ConfigStore`-backed section appliers)
+
+`admin_import_backup` still reads:
+
+> The whole document is validated before anything is written; any error
+> rejects it with nothing applied.
+
+Round 142 made that **true** for the bulk sections: `logs`/`rollups`/`responses`
+are applied first, in one transaction, so a malformed row rolls the whole bulk
+pass back with nothing else touched (see #458). The claim is still false for the
+**config sections**, which run afterwards in `SECTIONS` order and persist through
+`ConfigStore` — and `ConfigStore` owns its own transactions. A failure in, say,
+`_apply_prices` therefore leaves every earlier config section (providers, keys,
+deployments, aliases, settings) durably committed. Nothing rolls them back.
+
+Worse, in-memory router mutations cannot be inverted at all: `ConfigStore` writes
+are the recoverable half; the `ProviderDef` / `Deployment` / `AliasSet` edits the
+appliers make in `AppState` are not transactional, so even a hypothetical
+rollback of the DB would leave a live router that disagrees with it.
+
+The operator-facing consequence is the one that matters: this wording is what
+tells a cautious admin that a failed import changed nothing, so they will not go
+looking for the partial state — which is exactly the state they are in.
+
+**Fix sketch:** correct the route docstring to state the real guarantee — bulk
+sections are atomic and applied first; config sections commit incrementally per
+section and are not rolled back — and have `apply_backup`'s per-section
+applied/skipped report (added in round 142) reach the response so an operator can
+tell exactly which sections landed. Full atomicity across `ConfigStore` would
+mean giving `apply_backup` the store's engine and its transaction, which is a
+larger change than a docstring; until that exists, the docstring must not claim
+it.
+
+### 461. Per-deployment limits are not persisted by the `deployments` table, so they cannot survive a backup/restore round trip
+
+**Severity:** 🟡 Medium · **Status: open**
+
+**Files:** `wiwi/server/config_store.py:78-99` (`DEPLOYMENT_DDL_SQLITE` /
+`DEPLOYMENT_DDL_PG` — no `rpm`, `tpm`, `timeout`, `max_tokens` or
+`prompt_cache` column), `wiwi/server/config_store.py:191-198` (the `_migrate`
+ALTER list — currently carries only `detached`), `wiwi/server/config_store.py`
+(`add_deployment`), `wiwi/server/config_store.py:657-673` (`_load_db_config`,
+which rebuilds each deployment from those columns), `wiwi/server/backup.py`
+(`_export_deployments` / `_apply_deployments`)
+
+#456 chose the honest-lossy fix: `_export_deployments` no longer emits the five
+per-deployment limits, and import leaves a target's limits alone rather than
+writing values the table cannot store. So a backup never claims a limit it cannot
+restore — but the underlying storage gap is untouched, and per-deployment limits
+remain **YAML-owned**: they do not survive a backup/restore round trip, and they
+do not survive into the DB overlay either. An operator who set
+`gpt-5/prod: {rpm: 20, max_tokens: 4000}` in YAML and later added the deployment
+through the console still cannot have those limits round-tripped.
+
+The honest fix — persisting them — is `config_store.py` work that has not been
+done:
+
+1. Add the five columns to both `DEPLOYMENT_DDL_SQLITE` and
+   `DEPLOYMENT_DDL_PG`.
+2. Add an `ALTER TABLE` migration beside the existing `detached` one in
+   `_migrate`, guarded by the same per-dialect column introspection.
+3. Widen `add_deployment`'s signature and both its `INSERT OR REPLACE` (SQLite)
+   and `ON CONFLICT … DO UPDATE` (Postgres) statements.
+4. Rebuild the five fields in `_load_db_config`, and have the appliers in
+   `backup.py` write them again on restore.
+
+Until someone picks that up, the round-trip gap is a documented limitation, not
+a silent loss — but it is still a gap.
+
+---
+
+### 462. A failed OAuth *record* write still costs the Cline operator their login
+
+**Severity:** 🟠 Medium · **Status: open**
+
+**Files:** `wiwi/providers/cline_auto_refresh.py` (`_do_refresh`),
+`wiwi/providers/cline_oauth.py` (`refresh_token`)
+
+Found while closing the test gap on #446 (round 143). #446 fixed the *ordering*
+and *guarding*: the record is now written first, both writes are wrapped, and an
+escaping exception no longer turns an upstream 401 into a gateway 500. What it
+did not — and structurally cannot — fix is the failure of the record write
+itself.
+
+Once the upstream has answered a rotation, the replacement **single-use** grant
+exists only in the in-memory `result` dict. No ordering of writes can save it,
+because nothing durable holds it yet. So when `set_setting` fails, the operator
+loses that grant permanently: the next sweep presents the *already-consumed*
+`ref-1` again, the endpoint answers `invalid_grant`, and `mark_dead` retires the
+provider until a human re-logs in.
+
+This is deliberately **not** pinned by a passing test in
+`tests/test_fix_round143.py`. The retry-presents-a-consumed-grant behaviour
+holds identically before and after the fix, so a green test for it would
+enshrine the defect rather than pin the repair.
+
+What #446 *does* buy, and what its tests verify: the exception no longer escapes
+into `wiwi/core/gateway.py`'s unguarded `await refresh_hook(...)` (500 → clean
+401/502), the pool key and the record are no longer left torn apart, `mark_dead`
+is not triggered by the write itself, and — the case ordering genuinely fixes —
+a failure of the *pool-key* write leaves a provider that is still refreshable,
+because the record already holds the new grant.
+
+Closing it needs a decision outside `cline_auto_refresh.py`: either retry the
+record write until it lands, or buffer the replacement grant somewhere durable
+before attempting the write at all. Until then this is a narrow window — one
+failed DB write, only on the record write, only for Cline — but it is a window
+in which a healthy login becomes a dead provider.
+
+---
+
+## Seams cleared in this follow-up (2026-10-14)
+
+Recorded so they are not re-audited. The backup/restore column-drift pass
+compared every column list in the backup subsystem against the logging-core
+writers and the migrations that created the tables, in both dialects. All of
+the following are **consistent**:
+
+- **`db_sink._COLS` vs `_REQUEST_DDL_SQLITE` / `_REQUEST_DDL_PG`**
+  (`logging_core/db_sink.py:27`, `:62`, `:369`) — exact set match, in **both**
+  dialects. The writer cannot write a column the DDL lacks, and cannot omit one
+  it has.
+- **`_REQUEST_DDL_SQLITE` vs `_REQUEST_DDL_PG`** — identical 30-column lists,
+  same names, same order, same types as the dialects allow.
+- **`_ROLLUP_DDL_SQLITE`/`_PG` (`:119`, `:152`) and `_AUDIT_DDL_SQLITE`/`_PG`
+  (`:97`, `:108`)** — consistent across dialects; every column in
+  `_ROLLUP_COLS` (`:217`) exists in both DDLs.
+- **`DBSink._migrate`'s `request_logs` ALTER list (`:722`) vs the DDL history** —
+  the 8 columns added after the initial `CREATE TABLE` are accounted for exactly;
+  no ALTER is missing and none is redundant.
+- **`_migrate`'s column introspection** — the SQLite `PRAGMA table_info(...)`
+  branch (`:731`, `:755`) and the Postgres `information_schema.columns` branch
+  (`:726`, `:750`) are both correct and return the same column names for the
+  same table; the same paired pattern in `backup.py:176-182`,
+  `config_store.py:168-172` and `auth/service.py:241-246` is correct too.
+- **`_ROLLUP_COLS` vs backup `_ROLLUP_COLUMNS` (`backup.py:582`)** — identical
+  sets **and identical order**, so a round-trip through a backup preserves
+  rollup column ordering. (Note this is *not* true of `_REQUEST_LOG_COLUMNS`
+  vs `_COLS` — see #442 and #454.)
+- **`_JSON_COLUMNS` (`backup.py:1605`) vs every JSON-in-TEXT column** — complete:
+  `attempts`, `translation_warnings`, `diff` and `p95_hist` are the only
+  list/dict-valued columns across `request_logs`, `request_rollups`,
+  `audit_log` and `stored_responses`, and all four are in the tuple.
+- **`BODY_COLUMNS` (`backup.py:105`) vs `subsystem._HEAVY_FIELDS`** — the two
+  body columns are exactly the heavy fields the logging subsystem selects
+  separately, so `include_bodies` toggles precisely the right pair.
+- **`ConfigStore._migrate` (`config_store.py:174`) and `AuthService.startup`
+  (`auth/service.py:241`) migrations vs their DDL histories** — every ALTER
+  corresponds to a real historical column addition, and no DDL column lacks its
+  migration. Both use the correct per-dialect introspection noted above.
 
 ---
 

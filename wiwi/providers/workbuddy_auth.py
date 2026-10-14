@@ -28,6 +28,7 @@ import httpx
 import orjson
 import structlog
 
+from wiwi.providers.token_expiry import compute_expires_at
 from wiwi.providers.workbuddy_version import client_user_agent
 
 log = structlog.get_logger("wiwi.workbuddy_auth")
@@ -263,10 +264,13 @@ async def refresh_token(auth: WorkBuddyAuth,
                         client: httpx.AsyncClient | None = None) -> RefreshOutcome:
     """Rotate the access token via POST {chatBase}/v2/plugin/auth/token/refresh.
 
-    On success returns a *new* WorkBuddyAuth with rotated tokens (missing
-    response fields keep their old values — the Go preserveExpiry rule that
-    prevents refresh storms when expiresIn is absent). Never mutates the
-    caller's object.
+    On success returns a *new* WorkBuddyAuth with rotated tokens; missing
+    response fields keep their old values, except ``expiresIn``: it is resolved
+    through :func:`wiwi.providers.token_expiry.compute_expires_at`, so an
+    absent / zero / non-numeric / bool field falls FORWARD to
+    ``2 * REFRESH_LEAD_S`` instead of parking the token inside (or past) the
+    lead window where every sweep tick would rotate the single-use grant again.
+    Never mutates the caller's object.
     """
     if not auth.refresh_token.strip():
         return RefreshOutcome(ok=False, unrecoverable=True, error="no refreshToken")
@@ -307,14 +311,22 @@ async def refresh_token(auth: WorkBuddyAuth,
     rotated = WorkBuddyAuth(
         access_token=new_access,
         refresh_token=data.get("refreshToken") or auth.refresh_token,
-        expires_at=auth.expires_at,
         domain=data.get("domain") or auth.domain,
         uid=auth.uid,
         enterprise_id=auth.enterprise_id,
         nickname=auth.nickname,
     )
-    expires_in = data.get("expiresIn")
-    if (isinstance(expires_in, (int, float)) and not isinstance(expires_in, bool)
-            and expires_in > 0):
-        rotated.expires_at = int(time.time() + expires_in)
+    # The wire contract for an access-token lifetime is not guaranteed: an
+    # upstream that omits ``expiresIn`` (or sends 0 / a bool / garbage) used to
+    # leave ``expires_at`` at the OLD value. That is the opposite of what it
+    # looked like it achieved — the preserved expiry is by construction already
+    # inside (usually past) ``REFRESH_LEAD_S``, because the refresh only runs
+    # when the key is due. So the very next sweeper tick rotated again, and
+    # again every ``TICK_S``, burning WorkBuddy's single-use refresh grant until
+    # the upstream answered "session dead" and the key was marked dead. This is
+    # the WorkBuddy instance of AUDIT #425; resolve the field through the shared
+    # rule instead, which falls forward to ``2 * REFRESH_LEAD_S`` for any
+    # unusable value so the next due-check reads False.
+    rotated.expires_at = int(compute_expires_at(
+        data.get("expiresIn"), lead_s=REFRESH_LEAD_S))
     return RefreshOutcome(ok=True, auth=rotated)

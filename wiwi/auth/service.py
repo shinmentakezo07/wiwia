@@ -66,6 +66,31 @@ def _coerce_limit(value: object, name: str) -> float | None:
     return num
 
 
+def _coerce_lane(value: object) -> str | None:
+    """Validate a virtual key's concurrency-lane name.
+
+    ``priority`` is the one ``UPDATABLE_FIELDS`` entry that is not a limit: it
+    names a lane in ``RouterSettings.priority_lanes``, and the router does
+    ``getattr(auth, "priority", None) or settings.default_lane``. It therefore
+    needs string validation rather than ``_coerce_limit``'s numeric one — the
+    mismatch is what made ``PATCH /admin/keys/{id}`` answer 400 for every
+    priority value.
+
+    A number is rejected rather than coerced: ``float(2)`` would store a lane
+    named ``"2.0"``, which matches no configured lane and silently degrades to
+    ``default_lane``. An empty or whitespace-only name is rejected for the same
+    reason — ``or default_lane`` would swallow it. ``None`` clears the lane.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("priority must be a lane name string")  # noqa: TRY004
+    name = value.strip()
+    if not name:
+        raise ValueError("priority must be a non-empty lane name")
+    return name
+
+
 def _coerce_models(value: object) -> list[str] | None:
     """Normalize the models allowlist.
 
@@ -426,6 +451,7 @@ class AuthService:
         tpm = _coerce_limit(tpm, "tpm")
         max_budget = _coerce_limit(max_budget, "max_budget")
         ttl_seconds = _coerce_limit(ttl_seconds, "ttl_seconds")
+        priority = _coerce_lane(priority)
         kid = "k" + secrets_hex()
         now = time.time()
         # ``ttl_seconds is not None`` (not a truthy test): 0 is rejected by
@@ -570,6 +596,14 @@ class AuthService:
                 else:
                     sets["expires_at"] = None
                 continue
+            elif name == "priority":
+                # A lane is a *name*, not a number. This fell through to
+                # _coerce_limit, which rejected ``"interactive"`` with
+                # ``priority must be a number`` — so the field was in
+                # UPDATABLE_FIELDS and PATCH accepted the key, then always
+                # answered 400 and the lane could never be set through the
+                # admin API at all.
+                val = _coerce_lane(val)
             elif val is not None:
                 # Validate rather than letting float()/int() raise: a malformed
                 # value used to escape as an uncaught ValueError/TypeError and
@@ -749,28 +783,33 @@ class AuthService:
         async with self.engine.connect() as conn:
             rows = (await conn.execute(
                 sa.text("SELECT id, key_alias, models, max_budget, spend_to_date, rpm, tpm,"
-                        " expires_at, disabled, owner_id, budget_reserved"
+                        " expires_at, disabled, owner_id, budget_reserved, priority"
                         " FROM vkeys ORDER BY created_at DESC"))).all()
         import json as _json
         return [
             {"id": r[0], "alias": r[1], "models": _json.loads(r[2]), "max_budget": r[3],
              "spend_to_date": r[4], "rpm": r[5], "tpm": r[6],
              "expires_at": r[7], "disabled": bool(r[8]), "owner_id": r[9],
-             "budget_reserved": float(r[10] or 0.0)}
+             "budget_reserved": float(r[10] or 0.0), "priority": r[11]}
             for r in rows
         ]
 
     async def list_keys_for_owner(self, owner_id: str) -> list[dict]:
+        # Same projection as list_keys, minus owner_id (the WHERE clause has
+        # already fixed it) — keeping the two in step is deliberate: they used
+        # to diverge, and priority/budget_reserved were visible to admins but
+        # invisible to the tenant the same row describes.
         async with self.engine.connect() as conn:
             rows = (await conn.execute(
                 sa.text("SELECT id, key_alias, models, max_budget, spend_to_date,"
-                        " rpm, tpm, expires_at, disabled FROM vkeys"
-                        " WHERE owner_id = :o ORDER BY created_at DESC"),
+                        " rpm, tpm, expires_at, disabled, budget_reserved, priority"
+                        " FROM vkeys WHERE owner_id = :o ORDER BY created_at DESC"),
                 {"o": owner_id})).all()
         import json as _json
         return [{"id": r[0], "alias": r[1], "models": _json.loads(r[2]),
                  "max_budget": r[3], "spend_to_date": r[4], "rpm": r[5],
-                 "tpm": r[6], "expires_at": r[7], "disabled": bool(r[8])}
+                 "tpm": r[6], "expires_at": r[7], "disabled": bool(r[8]),
+                 "budget_reserved": float(r[9] or 0.0), "priority": r[10]}
                 for r in rows]
 
     async def count_keys(self, owner_id: str | None, alias: str | None = None) -> int:

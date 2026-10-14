@@ -938,6 +938,18 @@ function LogDetail(props: { log: RequestLogEntry; onClose: () => void }) {
               <span className="text-[var(--admin-text-dim)]">—</span>
             )}
           </DetailRow>
+          {l.error_message && (
+            <DetailRow label="Error message">
+              <span className="flex items-start gap-1.5">
+                <span className="min-w-0 flex-1 whitespace-pre-wrap break-words font-mono text-[12px] text-[var(--admin-danger)]">
+                  {l.error_message}
+                </span>
+                <span className="mt-0.5">
+                  <InlineCopy text={l.error_message} />
+                </span>
+              </span>
+            </DetailRow>
+          )}
         </DetailSection>
 
         {/* Retry chain */}

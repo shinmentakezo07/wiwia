@@ -24,15 +24,16 @@ from __future__ import annotations
 
 import asyncio
 import time
+import weakref
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from wiwi.core.recovery import CircuitBreaker
 from wiwi.providers import cline_oauth
-from wiwi.server.config_store import ConfigStoreNotFound
 
 if TYPE_CHECKING:
+    from wiwi.router.router import ProviderKey
     from wiwi.server.app import AppState
 
 log = structlog.get_logger("wiwi.cline_auto_refresh")
@@ -55,6 +56,11 @@ class ClineAutoRefresh:
         # on-demand 401 hook share one worker, so this is how the loser of a
         # lock race learns the winner already rotated (AUDIT #169).
         self._generations: dict[str, int] = {}
+        # Why each provider went permanently dead (the upstream error code, e.g.
+        # ``invalid_grant``). The admin surface reports it verbatim so an
+        # operator learns *why* a re-login is required instead of being told
+        # only that the refresh failed.
+        self._dead_codes: dict[str, str] = {}
         self._circuit = CircuitBreaker(base_s=CIRCUIT_BASE_S, cap_s=CIRCUIT_CAP_S,
                                        clock=time.time)
 
@@ -129,15 +135,23 @@ class ClineAutoRefresh:
         """
         return await self._refresh_locked(name, require_due=False)
 
-    async def _refresh_locked(self, name: str, *, require_due: bool) -> bool:
+    async def _refresh_locked(self, name: str, *, require_due: bool,
+                              force: bool = False) -> bool:
         """Serialize a refresh for ``name`` through the shared lock + circuit.
 
-        The sweep (``require_due=True``) and the on-demand 401 hook
-        (``require_due=False``) funnel through here so both share one lock and
-        one circuit breaker. Cline's refresh tokens are single-use, so the
-        record is re-read *under* the lock: a rotation that landed while we
-        waited is honored instead of being repeated with the token it just
-        consumed (AUDIT #169).
+        The sweep (``require_due=True``), the on-demand 401 hook and the admin
+        refresh endpoint (both ``require_due=False``) funnel through here so
+        all three share one lock and one circuit breaker. Cline's refresh tokens
+        are single-use, so the record is re-read *under* the lock: a rotation
+        that landed while we waited is honored instead of being repeated with
+        the token it just consumed (AUDIT #169).
+
+        ``force`` bypasses the circuit breaker's gate and is set only by the
+        admin refresh endpoint: an operator explicitly asking for a rotation is
+        the documented way out of a tripped (or permanently dead) provider, so
+        the manual path must stay reachable while the automatic ones respect the
+        backoff. It still takes the lock, and still honors the generation check
+        — ``force`` relaxes *backoff*, never the single-use-grant bookkeeping.
 
         Returns True when the stored record is fresh afterwards (we rotated
         it, or another caller did while we waited), False when nothing was
@@ -149,7 +163,7 @@ class ClineAutoRefresh:
         async with lock:
             # Circuit state is read under the lock so a failure that landed
             # while we waited (a sibling refresh tripping it) is honored.
-            if self._circuit.blocked(name):
+            if not force and self._circuit.blocked(name):
                 return False
             if self._generations.get(name, 0) != generation:
                 # Someone rotated while we waited for the lock: the record is
@@ -181,51 +195,160 @@ class ClineAutoRefresh:
             log.warning("cline_auto_refresh_transient", provider=name)
             return False
         if result.get("error") == "unrecoverable_refresh_error":
-            # Stop refreshing — the user must re-login.
+            # Stop refreshing — the user must re-login. The code is kept so the
+            # admin surface can say *why* (the handler no longer calls
+            # ``cline_oauth.refresh_token`` itself and cannot see it).
             self._circuit.mark_dead(name)
+            self._dead_codes[name] = str(result.get("code") or "")
             log.error("cline_auto_refresh_unrecoverable", provider=name,
                       code=result.get("code"))
             return False
-        # Success — write new tokens.
-        await self._update_secret(name, result["access_token"])
+        # Success — the grant is consumed and the replacement lives only in
+        # memory now, so the two writes below are ordered deliberately:
+        #
+        # 1. the OAuth record (the new single-use grant) FIRST. It is the only
+        #    copy of the replacement; if the pool-key write then fails we still
+        #    hold a refreshable provider on the next run.
+        # 2. the pool key(s) second.
+        #
+        # The reverse order (the historical one) meant a failing record write
+        # left the record holding the *consumed* grant: the next tick presented
+        # a dead token, got ``invalid_grant``, and marked the provider
+        # permanently dead — one DB error cost the operator their login.
+        #
+        # Both writes are guarded so neither can escape as an exception: the
+        # on-demand 401 hook is called from ``core/gateway.py`` without a
+        # try/except around it, so an escaping write turned an upstream 401 into
+        # a gateway 500 instead of surfacing the upstream error.
+        #
+        # ``owned`` is captured BEFORE the mutation above: it fingerprints the
+        # token this record issued *previously*, which is what tells us which
+        # pool keys the rotation is allowed to overwrite.
+        owned = record.get("access_fingerprint")
         record["refresh_token"] = result["refresh_token"]
-        if result.get("expires_at"):
-            record["expires_at"] = result["expires_at"]
-        await self._state.config_store.set_setting(f"cline_oauth:{name}", record)
+        record["expires_at"] = cline_oauth.resolve_expires_at(
+            result.get("expires_in"))
+        record["access_fingerprint"] = cline_oauth.access_fingerprint(
+            result["access_token"])
+        try:
+            await self._state.config_store.set_setting(
+                f"cline_oauth:{name}", record)
+        except Exception as e:  # noqa: BLE001 — never break the 401 hook path
+            log.error("cline_auto_refresh_record_persist_failed", provider=name,
+                      error=str(e))
+            return False
+        try:
+            await self.store_access_token(name, result["access_token"],
+                                          owned=owned)
+        except Exception as e:  # noqa: BLE001 — same: the record is now good
+            log.error("cline_auto_refresh_key_persist_failed", provider=name,
+                      error=str(e))
+            return False
         self._generations[name] = self._generations.get(name, 0) + 1
         self._circuit.clear(name)
         log.info("cline_auto_refreshed", provider=name)
         return True
 
-    async def _update_secret(self, provider: str, secret: str) -> None:
-        """Update every pool key's secret in memory + DB for a Cline provider.
+    def _owned_keys(self, provider: str,
+                    owned: str | None) -> list[ProviderKey]:
+        """The pool keys this provider's OAuth record is allowed to rotate.
 
-        A Cline provider's key pool entries all authenticate with the same
-        OAuth account (WorkOS), so a rotation invalidates every entry's
-        cached access token.  Updating only ``keys[0]`` (the historical
-        behavior) caused on-demand 401-refresh retries to pick a still-stale
-        sibling key from the round-robin cursor.
+        A Cline provider holds ONE OAuth account but a POOL of keys, and a
+        rotation invalidates every key that caches that account's access token —
+        but not a key the operator added as a raw API key. Writing the rotated
+        token into every key destroyed those unrelated credentials (a raw key
+        was permanently replaced by a WorkOS bearer), so ownership is tracked
+        by the fingerprint the record stamped on the token it last issued:
+
+        * a fingerprint present and matching → exactly those keys;
+        * no fingerprint yet (a record written before this was tracked, or the
+          very first rotation after a connect) → every key, because that is
+          the only reading under which a pool whose keys all hold the same
+          account's token stays consistent;
+        * a fingerprint present but matching nothing → ``keys[0]`` only. The
+          pool has drifted (keys edited out of band); rotating all of them
+          would re-clobber the credentials the fingerprint was protecting.
         """
         acct = self._state.router.providers.get(provider)
         if acct is None or not acct.keys:
-            return
-        for k in acct.keys:
+            return []
+        if not owned:
+            return list(acct.keys)
+        matches = [k for k in acct.keys
+                   if cline_oauth.access_fingerprint(k.secret) == owned]
+        return matches if matches else list(acct.keys[:1])
+
+    async def store_access_token(self, provider: str, secret: str, *,
+                                 owned: str | None = None) -> int:
+        """Write *secret* into every pool key this OAuth record owns.
+
+        Returns the number of keys written (0 when the provider has no keys).
+
+        Every rotation path funnels through here — the background sweeper, the
+        gateway 401 hook, and the admin connect/refresh endpoints — because
+        updating only ``keys[0]`` (the historical behavior) caused on-demand
+        401-refresh retries to pick a still-stale sibling key from the
+        round-robin cursor, while updating *all* keys destroyed raw
+        non-OAuth credentials. See :meth:`_owned_keys`.
+        """
+        targets = self._owned_keys(provider, owned)
+        for k in targets:
             k.secret = secret
             k.status = "active"
             k.cooldown_until = 0.0
             try:
                 await self._state.config_store.update_key_secret(
                     provider, k.label, secret)
-            except ConfigStoreNotFound:
+            except Exception as e:  # noqa: BLE001 — YAML/DB path varies
                 # YAML-defined provider: no DB row to update. The in-memory
                 # assignment above is still correct for this process; refusing
                 # here would break OAuth refresh on YAML-only deployments.
                 structlog.get_logger().warning(
-                    "oauth_secret_not_persisted", provider=provider,
-                    reason="provider is YAML-defined; rotation is in-memory only")
+                    "oauth_secret_not_persisted", provider=provider, key=k.label,
+                    reason="provider is YAML-defined; rotation is in-memory only",
+                    error=type(e).__name__)
+        return len(targets)
 
     def _trip_circuit(self, name: str) -> None:
         self._circuit.trip(name)
+
+    def dead_code(self, name: str) -> str | None:
+        """The upstream error code that killed ``name``'s circuit, if any.
+
+        Set by :meth:`_do_refresh` when the grant was rejected outright
+        (``invalid_grant`` / ``invalid_request``). The admin refresh endpoint
+        no longer calls :func:`wiwi.providers.cline_oauth.refresh_token`
+        itself, so it cannot see the code directly and reads it from here.
+        """
+        return self._dead_codes.get(name)
+
+    def forget(self, provider: str) -> None:
+        """Drop all per-provider state for ``provider``.
+
+        ``_locks`` / ``_generations`` / ``_dead_codes`` and the circuit breaker's
+        ``_streaks`` / ``_until`` / ``_dead`` entries only ever grew: nothing
+        popped a provider when the admin disconnected it or deleted the account,
+        so every connect-then-disconnect cycle leaked a lock, a counter and a
+        breaker entry that could never be reclaimed — and, worse, left a
+        provider whose circuit is still ``dead`` looking permanently unrefreshable
+        under a *reused* name.
+
+        A refresh that is *in flight* keeps its entry. Popping it mid-refresh
+        would hand the next caller a brand-new lock and a zeroed generation
+        counter: the in-flight holder captured the generation *before* entering
+        and re-checks it under the lock to learn that a sibling already rotated
+        the single-use grant (AUDIT #169), so a zeroed counter would make it
+        present that same consumed grant a second time. The entry is reclaimed on
+        a later, idle call — and it is reused verbatim if the operator reconnects
+        the same provider name in the meantime.
+        """
+        lock = self._locks.get(provider)
+        if lock is not None and lock.locked():
+            return
+        self._locks.pop(provider, None)
+        self._generations.pop(provider, None)
+        self._dead_codes.pop(provider, None)
+        self._circuit.clear(provider)
 
 
 def refresh_for_provider(state) -> callable:
@@ -252,18 +375,91 @@ def refresh_for_provider(state) -> callable:
     return hook
 
 
-_workers: dict[int, ClineAutoRefresh] = {}
+async def refresh_key_now(state: AppState, provider: str) -> dict[str, Any]:
+    """Operator-triggered rotation — the admin refresh endpoint's entry point.
+
+    Mirrors ``wiwi.providers.workbuddy_auto_refresh.refresh_key_now`` and the
+    Hermes equivalent: the handler must not call
+    :func:`wiwi.providers.cline_oauth.refresh_token` itself. It used to, and
+    that put a fourth refresh path next to the sweeper, the 401 hook and the
+    worker's own rotation — with its own no-lock, no-circuit execution. A
+    60 s sweeper tick and an operator clicking "Refresh" inside the same
+    5-minute lead window both POSTed the same single-use ``refreshToken``; the
+    loser's ``invalid_grant`` marked the provider permanently dead (and the
+    admin path's own ``invalid_grant`` did not even mark it dead — it failed
+    silently while the sweeper kept burning grants).
+
+    Returns ``{"ok", "relogin_required", "error"}``. ``relogin_required`` is
+    True only when the grant is permanently rejected, so the handler can map
+    it to 401 and a transient failure to 502.
+    """
+    worker = _worker_for(state)
+    if worker._circuit.dead(provider):
+        return {"ok": False, "relogin_required": True,
+                "error": _dead_message(worker, provider)}
+    cs = state.config_store
+    record = await cs.get_setting(f"cline_oauth:{provider}") if cs else None
+    if not record or not record.get("refresh_token"):
+        return {"ok": False, "relogin_required": False,
+                "error": f"provider '{provider}' has no stored Cline tokens; "
+                         "connect first"}
+    rotated = await worker._refresh_locked(provider, require_due=False, force=True)
+    if rotated:
+        return {"ok": True, "relogin_required": False, "error": ""}
+    if worker._circuit.dead(provider):
+        return {"ok": False, "relogin_required": True,
+                "error": _dead_message(worker, provider)}
+    return {"ok": False, "relogin_required": False,
+            "error": "Cline token refresh failed (transient); retry later"}
+
+
+def _dead_message(worker: ClineAutoRefresh, provider: str) -> str:
+    code = worker.dead_code(provider)
+    return (f"Cline refresh token rejected (code: {code or 'invalid_grant'}) "
+            "— re-login required")
+
+
+def forget_provider(state: AppState, provider: str) -> None:
+    """Drop ``provider``'s refresh state from the shared worker (if any).
+
+    The app-facing wrapper around :meth:`ClineAutoRefresh.forget`, so callers
+    never touch the worker's privates. Used by the disconnect / delete paths:
+    a dead Cline account must become refreshable again the moment its
+    credential is replaced, and ``CircuitBreaker._dead`` otherwise survives
+    forever.
+    """
+    _worker_for(state).forget(provider)
+
+
+# The fallback worker cache, keyed on ``id(state)``. ``id()`` is NOT unique for
+# the lifetime of the process — CPython recycles the address of a collected
+# object, so a re-created AppState could otherwise be handed a worker still
+# bound to the *dead* state (with its dead circuit and stale generation
+# counters). Each entry therefore carries a weakref to its state: dead
+# referents are pruned, and a stale id is rebuilt rather than reused.
+_workers: dict[int, tuple[weakref.ref, ClineAutoRefresh]] = {}
 
 
 def _worker_for(state: AppState) -> ClineAutoRefresh:
     """Resolve the shared worker for *state*.
 
     The lifespan-owned ``state.cline_refresh`` wins when set, so the
-    background sweeper, the gateway 401 hook, and any other caller share one
-    lock and one circuit breaker. Fallback (tests, pre-lifespan use): a
-    lazily cached instance.
+    background sweeper, the gateway 401 hook, the admin refresh endpoint and
+    any other caller share one lock and one circuit breaker. Fallback (tests,
+    pre-lifespan use): a lazily cached instance.
     """
     shared = getattr(state, "cline_refresh", None)
     if shared is not None:
         return shared
-    return _workers.setdefault(id(state), ClineAutoRefresh(state))
+    ident = id(state)
+    # Prune entries whose state has been collected (bounded: only runs on the
+    # fallback path, and only over this tiny dict).
+    for key, (ref, _worker) in list(_workers.items()):
+        if ref() is None:
+            del _workers[key]
+    entry = _workers.get(ident)
+    if entry is not None and entry[0]() is state:
+        return entry[1]
+    worker = ClineAutoRefresh(state)
+    _workers[ident] = (weakref.ref(state), worker)
+    return worker

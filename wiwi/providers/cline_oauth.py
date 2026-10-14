@@ -18,14 +18,17 @@ Cline (WorkOS-backed) auth works differently from standard OAuth2:
 from __future__ import annotations
 
 import base64
+import hashlib
 import re
 import time
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
 import httpx
 import orjson
+
+from wiwi.providers import token_expiry
 
 CLINE_APP_BASE = "https://app.cline.bot"
 CLINE_API_BASE = "https://api.cline.bot/api/v1"
@@ -302,6 +305,51 @@ def _extract_error_code(body_text: str) -> str | None:
     if isinstance(err, dict):
         err = err.get("code") or err.get("type")
     return str(err) if isinstance(err, str) else None
+
+
+def resolve_expires_at(expires_in: object, now: float | None = None) -> str:
+    """Absolute ISO-8601 ``expires_at`` for an access token with *expires_in*
+    seconds of life.
+
+    Cline's wire contract for the access-token lifetime is not guaranteed: a
+    refresh (or exchange) response can come back with ``accessToken`` and
+    ``refreshToken`` and nothing else. The historical Cline code only
+    *overwrote* the stored ``expires_at`` when the response carried a parseable
+    ``expiresAt``, so a response without one left the previous value in place —
+    and because a refresh is only ever issued when the stored token is already
+    inside the 5-minute lead, that preserved value is *always* due again on the
+    very next 60 s tick. One missing field became a rotation + a DB write per
+    tick forever, until ``invalid_grant`` marked the provider dead.
+
+    So every write of an ``expires_at`` from a response goes through here, which
+    resolves the missing value to a forward window strictly beyond
+    ``REFRESH_LEAD_S`` (via :mod:`wiwi.providers.token_expiry`) instead of
+    leaving the stale one behind. A usable ``expires_in`` is honoured verbatim,
+    so a genuinely short-lived token is still recorded as short-lived.
+
+    Returned as an ISO string because the ``cline_oauth:<provider>`` record has
+    always stored ``expiresAt`` verbatim and :func:`parse_expires_at` reads it.
+    """
+    epoch = token_expiry.compute_expires_at(expires_in, now, lead_s=REFRESH_LEAD_S)
+    return datetime.fromtimestamp(epoch, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def access_fingerprint(access_token: str) -> str:
+    """Stable, non-reversible id of the access token an OAuth record issued.
+
+    Cline holds ONE OAuth record per *provider* while a provider owns a *pool*
+    of keys, and a rotation invalidates the cached access token of every key
+    that key pool holds — but not of a key the operator added as a raw API key.
+    Writing the rotated token into every key destroyed those unrelated
+    credentials, so the record has to be able to say *which* keys are its own.
+
+    Cline access tokens carry no marker (no ``workos:`` prefix is stored, unlike
+    Hermes' ``hermes:`` blob), so ownership is tracked by fingerprint: the keys
+    holding the token this record last wrote are the keys it owns. A SHA-256 of
+    a high-entropy token is not reversible, so it is safe to keep next to the
+    grant in the settings record.
+    """
+    return hashlib.sha256(access_token.encode("utf-8")).hexdigest()
 
 
 def expires_within_lead(expires_at_epoch: float, now: float | None = None) -> bool:

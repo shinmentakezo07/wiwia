@@ -20,6 +20,9 @@ Exposes gateway metrics in the Prometheus text exposition format:
 - ``wiwi_log_events_dropped_total``: sum of the four loss counters above
 - ``wiwi_spend_charge_failures_total``: counter of spend charges that failed to
   persist, i.e. requests whose budget cap was not enforced (AUDIT #179)
+- ``wiwi_realtime_usage_missing_total``: counter of realtime sessions that
+  ended without a usage event, i.e. sessions wiwi served but could not price
+  (AUDIT #347)
 
 Counters versus window values
 -----------------------------
@@ -40,7 +43,8 @@ exist here:
   working; only the data source moved off the ring.
   ``wiwi_spend_charge_failures_total`` is the same kind of value, passed in
   from ``AppState`` (it counts a non-log event, so the logging subsystem does
-  not own it).
+  not own it), as is ``wiwi_realtime_usage_missing_total`` — a realtime
+  session wiwi could not price is precisely one *absent* from the ring.
 - Series that are honestly per-scrape window values stay ring-derived and are
   declared ``gauge`` (``wiwi_prompt_cache_hit_rate``, ``wiwi_tps_sample_ratio``,
   ``wiwi_requests_by_status``, ``wiwi_requests_by_provider``) or ``summary``
@@ -79,20 +83,23 @@ def render_metrics(events: list[LogEvent],
                    failed_request_log_writes: int = 0,
                    dropped_proxy_logs: int = 0,
                    failed_audit_log_writes: int = 0,
-                   spend_charge_failures: int = 0) -> str:
+                   spend_charge_failures: int = 0,
+                   realtime_usage_missing: int = 0) -> str:
     """Render Prometheus-format metrics from a list of LogEvents.
 
     *events* is the request-stream ring window: it is the only source for the
     quantile summaries, the status/provider breakdowns and the cache hit rate,
     all of which are honestly per-scrape values.
 
-    The four loss counters, *totals* and *spend_charge_failures* cannot be
+    The four loss counters, *totals*, *spend_charge_failures* and
+    *realtime_usage_missing* cannot be
     derived from *events* — a lost event is absent from the ring by
     definition, and a counter that is re-derived from a 500-event ring
     decreases on every eviction — so the caller passes them in from the
     subsystem that owns them for the process lifetime
     (:class:`wiwi.logging_core.subsystem.LoggingSubsystem` for the log
-    counters, ``AppState`` for the spend failures). Without them a saturated
+    counters, ``AppState`` for the spend failures, the module-level
+    ``_RT_COUNTERS`` for realtime). Without them a saturated
     log queue, an unavailable DB or a silently failing spend charge would
     under-report on every operator surface.
 
@@ -113,6 +120,10 @@ def render_metrics(events: list[LogEvent],
         f"wiwi_audit_logs_failed_total {int(failed_audit_log_writes)}",
         f"wiwi_log_events_dropped_total {lost}",
         f"wiwi_spend_charge_failures_total {int(spend_charge_failures)}",
+        # Unpriced realtime sessions (AUDIT #347). Exported unconditionally,
+        # like every other loss counter: a counter that is absent at zero makes
+        # `rate()`/`increase()` return nothing for a healthy gateway.
+        f"wiwi_realtime_usage_missing_total {int(realtime_usage_missing)}",
     ]
     if total == 0 and totals is None:
         lines.append("# wiwi no requests in window")
@@ -235,6 +246,8 @@ _HEADER = """# HELP wiwi_requests_total Total number of requests.
 # TYPE wiwi_log_events_dropped_total counter
 # HELP wiwi_spend_charge_failures_total Spend charges that failed to persist (the budget cap was not enforced).
 # TYPE wiwi_spend_charge_failures_total counter
+# HELP wiwi_realtime_usage_missing_total Realtime sessions that ended without a usage event (served but not priced).
+# TYPE wiwi_realtime_usage_missing_total counter
 # HELP wiwi_request_duration_ms Request latency in milliseconds (scrape-time quantiles).
 # TYPE wiwi_request_duration_ms summary
 # HELP wiwi_ttft_ms Time to first token in milliseconds (scrape-time quantiles).

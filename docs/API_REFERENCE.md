@@ -156,7 +156,7 @@ request-log row is written per session.
 | `/admin/providers` | GET | List configured providers + key pools + health states. |
 | `/admin/providers` | POST | Add a provider account. |
 | `/admin/providers/{name}` | PATCH | Edit provider (name/type/base_url/timeout). |
-| `/admin/providers/{name}` | DELETE | Delete provider + its keys. |
+| `/admin/providers/{name}` | DELETE | Delete provider + its keys, cascading away its deployments. |
 | `/admin/providers/{name}/keys` | POST | Add a key to the provider's pool (label, secret, weight). |
 | `/admin/providers/{name}/keys/{label}` | PATCH | Enable/disable, adjust weight. |
 | `/admin/providers/{name}/keys/{label}` | DELETE | Remove one key from the pool. |
