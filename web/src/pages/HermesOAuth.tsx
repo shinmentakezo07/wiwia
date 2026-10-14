@@ -12,16 +12,18 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { ExternalLink, Loader2, LogIn, RefreshCcw, Unlink } from "lucide-react";
+import { ExternalLink, Loader2, LogIn } from "lucide-react";
 import {
   getProviders,
   hermesDeviceCode,
-  hermesDisconnect,
   hermesPoll,
-  hermesRefresh,
-  hermesStatus,
 } from "@/api/client";
 import type { Provider } from "@/api/types";
+import {
+  HermesAccountList,
+  useHermesAccountActions,
+  useHermesStatusQuery,
+} from "@/components/HermesAccounts";
 import {
   Alert,
   Badge,
@@ -47,25 +49,6 @@ function _uniqueName(base: string, existing: string[]): string {
   let n = 2;
   while (taken.has(`${base}-${n}`)) n += 1;
   return `${base}-${n}`;
-}
-
-function fmtExpiry(epoch: number | null | undefined): string {
-  if (!epoch) return "unknown";
-  const ms = epoch * 1000;
-  const d = new Date(ms);
-  if (Number.isNaN(d.getTime())) return "unknown";
-  const days = (ms - Date.now()) / 86_400_000;
-  const rel = days >= 1 ? `${Math.floor(days)}d` : `${Math.max(0, Math.floor(days * 24))}h`;
-  return `${d.toLocaleDateString()} (${rel})`;
-}
-
-function useHermesStatus(provider: string) {
-  return useQuery({
-    queryKey: ["hermes-oauth-status", provider],
-    queryFn: () => hermesStatus(provider),
-    refetchInterval: 30_000,
-    retry: 1,
-  });
 }
 
 // -- connect dialog ------------------------------------------------------------
@@ -284,43 +267,41 @@ export function HermesConnectDialog(props: {
 
 function HermesAccountCard(props: {
   p: Provider;
-  onError: (m: string) => void;
+  /** ``null`` clears a stale message after a successful action. */
+  onError: (m: string | null) => void;
   onChanged: () => void;
 }) {
   const [connectOpen, setConnectOpen] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const qc = useQueryClient();
-  const statusQ = useHermesStatus(props.p.name);
-
-  const refresh = useMutation({
-    mutationFn: () => hermesRefresh(props.p.name),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["hermes-oauth-status", props.p.name] });
-      void qc.invalidateQueries({ queryKey: ["providers"] });
-    },
-    onError: (e) => props.onError(e.message),
-  });
-
-  const disconnect = useMutation({
-    mutationFn: () => hermesDisconnect(props.p.name),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["hermes-oauth-status", props.p.name] });
-      void qc.invalidateQueries({ queryKey: ["providers"] });
-    },
-    onError: (e) => props.onError(e.message),
-  });
+  const statusQ = useHermesStatusQuery(props.p.name);
 
   const p = props.p;
+  const accounts = statusQ.data?.accounts ?? [];
+  const managed = accounts.filter((a) => a.managed);
   const connected = statusQ.data?.connected ?? false;
-  const needsRefresh = statusQ.data?.needs_refresh ?? false;
+  const needsRefresh = managed.some((a) => a.needs_refresh);
+  const actions = useHermesAccountActions(p.name, {
+    onError: (m) => {
+      if (m === null) setNotice(null);
+      props.onError(m);
+    },
+    onNotice: setNotice,
+  });
+
+  const onConnect = () => {
+    void qc.invalidateQueries({ queryKey: ["hermes-oauth-status", p.name] });
+    void qc.invalidateQueries({ queryKey: ["providers"] });
+  };
 
   return (
     <Card className="flex flex-col">
       <div className="flex items-start gap-3 border-b border-[var(--admin-border)] px-5 py-4">
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Link
               to={`/console/providers/${encodeURIComponent(p.name)}`}
-              className="truncate text-[14px] font-semibold tracking-[-0.01em] text-[var(--admin-text)] transition-colors hover:text-blue-400"
+              className="min-w-0 break-all text-[14px] font-semibold tracking-[-0.01em] text-[var(--admin-text)] transition-colors hover:text-blue-400"
             >
               {p.name}
             </Link>
@@ -335,23 +316,32 @@ function HermesAccountCard(props: {
             ) : (
               <Badge tone="green">connected</Badge>
             )}
+            {managed.length > 1 && (
+              <Badge tone="blue" title="OAuth accounts in this provider's key pool">
+                {managed.length} accounts
+              </Badge>
+            )}
           </div>
-          <code className="mt-0.5 block truncate font-mono text-[11px] text-[var(--admin-text-dim)]">
+          <code className="mt-0.5 block break-all font-mono text-[11px] text-[var(--admin-text-dim)]">
             {p.base_url || DEFAULT_BASE_URL}
           </code>
         </div>
       </div>
 
-      <div className="flex flex-1 flex-col gap-2 px-5 py-4">
-        {connected && (
-          <div className="flex items-center justify-between text-[12px]">
-            <span className="admin-label">Token expires</span>
-            <span className="font-mono tabular-nums text-[var(--admin-text-dim)]">
-              {fmtExpiry(statusQ.data?.expires_at)}
-            </span>
-          </div>
+      <div className="flex flex-1 flex-col gap-3 px-5 py-4">
+        {statusQ.isLoading && <Spinner />}
+        {!statusQ.isLoading && !statusQ.isError && accounts.length > 0 && (
+          <HermesAccountList accounts={accounts} actions={actions} />
         )}
-        <div className="flex items-center justify-between text-[12px]">
+        {!statusQ.isLoading && !statusQ.isError && accounts.length === 0 && (
+          <p className="text-[12px] text-[var(--admin-text-muted)]">
+            This provider has no pool keys. Connect an account to create one.
+          </p>
+        )}
+        {notice && (
+          <p className="text-[12px] text-emerald-400">{notice}</p>
+        )}
+        <div className="flex items-center justify-between gap-2 text-[12px]">
           <span className="admin-label">Pool keys</span>
           <span className="font-mono tabular-nums text-[var(--admin-text-dim)]">
             {p.keys.length}
@@ -363,8 +353,8 @@ function HermesAccountCard(props: {
             provider={p.name}
             onClose={() => setConnectOpen(false)}
             onConnected={() => {
-              void qc.invalidateQueries({ queryKey: ["hermes-oauth-status", p.name] });
-              void qc.invalidateQueries({ queryKey: ["providers"] });
+              onConnect();
+              props.onChanged();
             }}
           />
         )}
@@ -372,27 +362,16 @@ function HermesAccountCard(props: {
 
       <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--admin-border)] px-5 py-3">
         {connected ? (
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
+            {/* Whole-pool disconnect: no key_label, so every managed account
+                is removed. Per-account disconnect lives on each row above. */}
             <Button
               variant="ghost"
               className="min-h-11"
-              disabled={refresh.isPending || !statusQ.data?.has_refresh_token}
-              onClick={() => refresh.mutate()}
+              disabled={actions.pending?.kind === "disconnect"}
+              onClick={() => actions.disconnect()}
             >
-              {refresh.isPending ? (
-                <Loader2 size={14} className="animate-spin motion-reduce:animate-none" />
-              ) : (
-                <RefreshCcw size={14} />
-              )}
-              Refresh token
-            </Button>
-            <Button
-              variant="ghost"
-              className="min-h-11"
-              disabled={disconnect.isPending}
-              onClick={() => disconnect.mutate()}
-            >
-              <Unlink size={14} /> Disconnect
+              Disconnect all
             </Button>
           </div>
         ) : (
@@ -405,7 +384,7 @@ function HermesAccountCard(props: {
           </Button>
         )}
         <Link to={`/console/providers/${encodeURIComponent(p.name)}`} className="inline-flex">
-          <Button variant="ghost">
+          <Button variant="ghost" className="min-h-11">
             Manage keys
           </Button>
         </Link>

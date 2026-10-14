@@ -34,6 +34,8 @@ from typing import Any
 import httpx
 import orjson
 
+from wiwi.providers import token_expiry
+
 # Verified Nous Portal OAuth endpoints and client identity (from the Hermes CLI).
 PORTAL_BASE = "https://portal.nousresearch.com"
 CLIENT_ID = "hermes-cli"
@@ -203,16 +205,8 @@ def compute_expires_at(expires_in: object, now: float | None = None,
     rejected like any other non-number (``isinstance(True, int)`` is True, but
     ``expires_in: true`` is a client/portal bug, not "1 second").
     """
-    now = time.time() if now is None else now
-    if isinstance(expires_in, bool):
-        return now + fallback_window
-    try:
-        seconds = int(expires_in)
-    except (TypeError, ValueError):
-        return now + fallback_window
-    if seconds <= 0:
-        return now + fallback_window
-    return now + seconds
+    return token_expiry.compute_expires_at(
+        expires_in, now, fallback_window, lead_s=REFRESH_LEAD_S)
 
 
 # Prefix marking a pool-key secret as a Hermes OAuth credential rather than a
@@ -220,6 +214,26 @@ def compute_expires_at(expires_in: object, now: float | None = None,
 # use it; it is the same marker the single-account flow introduced, now also
 # able to carry a JSON blob (multi-account, AUDIT #427).
 _OAUTH_PREFIX = "hermes:"
+
+# Secret of the placeholder pool key created to bootstrap a Hermes account
+# before any OAuth credential exists (``/admin/hermes/oauth/device-code`` on an
+# account with no keys). It is deliberately NOT a decodable credential:
+# ``decode_credential`` returns None for it, so the adapter's
+# ``credential_bearer`` would fall through and send ``Authorization: Bearer
+# pending`` — a guaranteed upstream 401. ``ProviderKey`` defaults to
+# enabled+active, so a surviving placeholder sits in smooth-WRR rotation forever,
+# burning one doomed request per cycle. The connect flow must therefore drop it,
+# and the disconnect flow must be able to clear it.
+HERMES_PLACEHOLDER_SECRET = "hermes:pending"
+
+
+def is_placeholder(secret: object) -> bool:
+    """True when *secret* is the un-bootstrapped ``hermes:pending`` marker.
+
+    The literal lives here so ``/poll`` and ``/disconnect`` never re-type it and
+    drift apart again.
+    """
+    return isinstance(secret, str) and secret == HERMES_PLACEHOLDER_SECRET
 
 
 def encode_credential(access_token: str, refresh_token: str | None,

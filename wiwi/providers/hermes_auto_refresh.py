@@ -280,6 +280,32 @@ class HermesAutoRefresh:
     def _trip_circuit(self, ident: tuple[str, str]) -> None:
         self._circuit.trip(ident)
 
+    def forget(self, provider: str, label: str) -> None:
+        """Drop all per-account state for one ``(provider, key_label)``.
+
+        ``_locks`` / ``_generations`` and the circuit breaker's ``_streaks`` /
+        ``_until`` / ``_dead`` entries only ever grew: nothing popped an account
+        when the admin disconnected it, so every connect-then-disconnect cycle
+        leaked a lock, a counter and a breaker entry that could never be
+        reclaimed.
+
+        A refresh that is *in flight* keeps its entry. Popping it mid-refresh
+        would hand the next caller a brand-new lock and a zeroed generation
+        counter: the in-flight holder captured the generation *before* entering
+        and re-checks it under the lock to learn that a sibling already rotated
+        the single-use grant (AUDIT #169), so a zeroed counter would make it
+        present that same consumed grant a second time. The entry is reclaimed
+        on a later, idle call — and it is reused verbatim if the operator
+        reconnects the same account label in the meantime.
+        """
+        ident = (provider, label)
+        lock = self._locks.get(ident)
+        if lock is not None and lock.locked():
+            return
+        self._locks.pop(ident, None)
+        self._generations.pop(ident, None)
+        self._circuit.clear(ident)
+
 
 def refresh_for_provider(state) -> callable:
     """Build the async hook the gateway calls when a Hermes request 401s.
@@ -299,6 +325,42 @@ def refresh_for_provider(state) -> callable:
         return await _worker_for(state).refresh_now(provider_name, key_label)
 
     return hook
+
+
+async def refresh_key_now(state: AppState, provider_name: str,
+                          key_label: str) -> dict[str, Any]:
+    """Rotate one pool key's token on demand (admin API surface).
+
+    Mirrors :func:`wiwi.providers.workbuddy_auto_refresh.refresh_key_now`, and
+    resolves the worker through :func:`_worker_for` rather than reaching for
+    ``state.hermes_refresh`` directly. That distinction is load-bearing: the
+    lifespan-owned attribute is ``None`` before startup (and in minimal test
+    states), and the admin endpoint used to ``except AttributeError`` around the
+    missing worker and then call ``state.hermes_refresh._update_secret`` — on the
+    very object it had just proven was ``None``, *after* Nous had already rotated
+    the account's single-use refresh grant. The fresh token was discarded with a
+    500, the pool key kept the consumed grant, and the next refresh came back
+    ``invalid_grant``: one admin click, one permanently dead account.
+
+    Shares the per-account lock with the background sweeper and the 401 hook, and
+    deliberately overrides the circuit breaker — an operator asking for a
+    rotation is the documented way out of a tripped account.
+    """
+    worker = _worker_for(state)
+    fresh = await worker._refresh_locked(provider_name, key_label,
+                                         require_due=False, force=True)
+    if fresh:
+        return {"ok": True, "error": "", "relogin_required": False}
+    # A dead grant (invalid_grant / revoked / reused) is terminal: the admin
+    # surface must say "re-login" (401), not "try again" (502).
+    relogin = worker._circuit.dead((provider_name, key_label))
+    return {
+        "ok": False,
+        "error": ("refresh token rejected; a fresh device-code login is required"
+                  if relogin else
+                  "refresh failed; the account's circuit may be tripped"),
+        "relogin_required": relogin,
+    }
 
 
 _workers: dict[int, HermesAutoRefresh] = {}

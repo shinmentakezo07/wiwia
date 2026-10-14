@@ -19,8 +19,10 @@ from wiwi.providers.workbuddy_adapter import (
     _sanitize_text,
 )
 from wiwi.providers.workbuddy_auth import (
+    REFRESH_LEAD_S,
     WorkBuddyAuthError,
     chat_headers,
+    expires_within_lead,
     parse_auth,
     refresh_headers,
     refresh_token,
@@ -371,12 +373,25 @@ async def test_refresh_token_session_dead_unrecoverable():
 
 
 @respx.mock
-async def test_refresh_token_preserves_expiry_when_missing():
+async def test_refresh_token_falls_forward_when_expires_in_is_missing():
+    """A missing ``expiresIn`` must NOT preserve the old (already due) expiry.
+
+    The refresh only runs when the key is due, so the preserved expiry was by
+    construction inside the 5-minute lead window: every sweep tick rotated the
+    single-use grant again until the upstream called the session dead. The
+    field resolves through ``compute_expires_at`` and falls forward to
+    ``2 * REFRESH_LEAD_S`` (AUDIT #425 / round 144).
+    """
     auth = parse_auth(NESTED_SECRET)
     respx.post("https://www.workbuddy.ai/v2/plugin/auth/token/refresh") \
         .respond(json={"code": 0, "data": {"accessToken": "at-2"}})
     outcome = await refresh_token(auth)
-    assert outcome.ok and outcome.auth.expires_at == auth.expires_at
+    assert outcome.ok
+    assert outcome.auth.expires_at != auth.expires_at, (
+        "the old expiry was preserved — that is the round-144 refresh storm")
+    assert outcome.auth.expires_at > time.time()
+    assert not expires_within_lead(outcome.auth.expires_at,
+                                    REFRESH_LEAD_S)
 
 
 async def test_refresh_without_refresh_token_is_unrecoverable():
