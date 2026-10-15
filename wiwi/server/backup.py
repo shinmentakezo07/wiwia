@@ -699,7 +699,13 @@ async def _read_all(engine, table: str, cols: list[str], *,
     while True:
         where = [] if first else (["id > :cursor"] if has_id else [])
         params: dict[str, Any] = {}
-        if first and ts_cutoff is not None and ts_column in present:
+        # Every page carries the age bound, not just the first. The cursor is
+        # ``id``-ordered, so a page after the first is not a contiguous
+        # continuation of the rows the cutoff admitted: leaving the predicate
+        # off lets rows older than the requested window ride along on page 2
+        # and later, which is a window that reports one thing and exports
+        # another.
+        if ts_cutoff is not None and ts_column in present:
             where.append(f"{ts_column} >= :cutoff")
             params["cutoff"] = ts_cutoff
         if not first and has_id:

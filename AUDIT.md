@@ -8,6 +8,18 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — usage and stats export: the window, the file, and the picker (2026-10-15)
+
+### 467. `_read_all` dropped the `log_days` bound after page 1 — a `logs`/`rollups` export shipped rows older than the window it reported
+
+**Severity:** 🟡 Medium (the export *adds* rows rather than losing them, so nothing looks short; the file misstates its own window) · **Status: fixed** — 2026-10-15, `tests/test_fix_round152.py`
+**Files:** `wiwi/server/backup.py:708-710` (`_read_all`'s WHERE builder), reached from `_export_logs` (`wiwi/server/backup.py:580`, `ts`/`log_days`) and `_export_rollups` (`:596`, `bucket_ts`/`log_days`)
+**Trigger:** any `GET /admin/backup?sections=logs` or `?sections=rollups` whose `log_days` admits enough rows to fill the first page (2 000, `_PAGE`). The predicate `ts >= :cutoff` was appended only when `first` was true; pages 2..n ran `WHERE id > :cursor` alone. Verified against a live SQLite gateway at this commit: 3 000 in-window rows followed by 1 000 rows 30 days old, requested with `log_days=1`, exported **4 000 rows — every one of the 1 000 ancient rows included**. Page 1 has to come back *full* for this to show, which is why it survived #454's fix: the pagination bug and this one hid behind each other, and fixing the cursor alone only made the leak reachable.
+**Why it matters beyond a row count:** `rollups` is the surviving usage record once `rollup_and_prune` trims `request_logs` under the retention window, so a window that leaks and does not say so misstates spend on exactly the long-lived instances the section exists for — and the file is the artefact an operator restores onto a second gateway.
+**Fix:** the age bound is appended on every page, not just the first. The keyset cursor is `id`-ordered, so a later page is not a continuation of the rows the cutoff admitted — the predicate has to be re-applied with the cursor, not instead of it. Regression: `tests/test_fix_round152.py` (2 tests, one per time column, both asserting on exported rows rather than on the SQL).
+
+---
+
 ## ✅ Fixed — Zen relayed "Client metadata is not supported." for the caller's `metadata` (2026-10-15)
 
 ### 466. `metadata` from the inbound request was forwarded to Zen, whose upstreams refuse it
