@@ -11,6 +11,7 @@ decided before a single frame moves.
 import asyncio
 import contextlib
 import threading
+import time
 
 import pytest
 import websockets
@@ -201,12 +202,36 @@ async def test_a_relayed_frame_arrives_upstream_byte_identical(upstream):
                  '{"modalities":["text","audio"]}}')
         await ws.send(frame)
         assert await asyncio.wait_for(ws.recv(), 5) == frame
+        # The relay must be connected upstream before it is cancelled, or the
+        # assertion below counts only the CLIENT's connection and passes for
+        # the wrong reason. The test used to cancel immediately and require
+        # ``connections == 1`` — a value that only held when the relay's
+        # handshake had not been scheduled yet, so the test failed roughly half
+        # the time depending on how the fake server's handler loop got its turn
+        # (AUDIT #414). Wait for the handshake, then assert the true count.
+        await _wait_for_connections(upstream, 2)
         relay.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await relay
     assert upstream.received == [frame]
-    assert upstream.connections == 1
+    assert upstream.connections == 2
     assert RealtimeSettings().max_session_s > 0
+
+
+async def _wait_for_connections(upstream: FakeRealtimeServer, expected: int,
+                                 timeout: float = 5.0) -> None:
+    """Block until the fake server has accepted *expected* connections.
+
+    ``FakeRealtimeServer.connections`` is incremented inside the handler
+    coroutine, which runs on the server's own loop, so acceptance is not
+    observable at the instant ``websockets.connect`` returns on this side.
+    """
+    deadline = time.monotonic() + timeout
+    while upstream.connections < expected and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+    assert upstream.connections == expected, (
+        f"fake upstream accepted {upstream.connections} connections, "
+        f"expected {expected}")
 
 
 async def _run_relay(client_ws, upstream_url, **rt):

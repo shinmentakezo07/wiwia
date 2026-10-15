@@ -83,6 +83,17 @@ is, including the two adapter-specific overrides and `reset()` — a leftover id
 would make the first chunk of the next request on a reused singleton look like a
 continuation.
 
+### 414 / #464 — `test_realtime`'s connection assertion raced the fake server
+
+**Status: fixed** — the assertion, not the relay. `test_realtime.py:208`
+cancelled the relay immediately and then required `upstream.connections == 1`, a
+value that only held when the relay's handshake had not yet been scheduled on the
+fake server's own loop — so it failed about half the time, in isolation as well as
+under the full suite. Measured 3/6 passes with the round-156 changes, 4/6 without,
+which is the same coin flip in both directions. The test now waits for the relay's
+connection to be accepted (`_wait_for_connections`) and asserts the true count of
+2; 6/6 passes.
+
 ---
 
 ## ✅ Fixed — round 154: five `wiwi/wire/` defects (2026-10-16)
@@ -276,6 +287,11 @@ directly, `_run_relay` at `:217` opens the relay's own upstream socket), and
 `FakeRealtimeServer.connections` only increments once the server's handler
 coroutine is scheduled (`:44`). `assert upstream.connections == 1` therefore
 races the fake server's scheduling rather than testing relay behaviour.
+
+**Status: fixed** — round 156, with #414. The diagnosis above was right and the
+fix was the assertion: the test now waits for the relay's connection to be
+accepted and requires 2. 6/6 passes where it previously failed about half the
+time in isolation.
 
 ---
 
@@ -963,17 +979,20 @@ visual fix can surface a state the API does not return.
 
 ### 414. `test_realtime` opens two relay connections under full-suite ordering
 
-**Severity:** 🟡 Medium (the binding gate is not reproducible-green on `main`) · **Status: open**
+**Severity:** 🟡 Medium (the binding gate is not reproducible-green on `main`) · **Status: fixed** — round 156 (2026-10-16)
 **File:** `tests/test_realtime.py:208` (`assert upstream.connections == 1`), with a
 cascading teardown error at `:101`
 **Trigger:** full-suite `python3 -m pytest tests/ -q`. Reproduced on 2 of 2 full runs;
 `tests/test_realtime.py` passes 13/13 in isolation, and
 `test_fix_round10.py::TestLoopDetector::test_per_token_cost_is_bounded` is the same
 class of flake (failed run 1, passed run 2, 65/65 in isolation).
-**Fix:** give each `FakeRealtimeServer` a per-test unique identity (or reset
+**Fix:** ~~give each `FakeRealtimeServer` a per-test unique identity (or reset
 `connections` in `startup`) so an event-loop/task leaked by an earlier test cannot
-reconnect to the next test's server. Not fixed here: this redesign changed no Python,
-and the Python tree is byte-identical to HEAD — the failure predates it.
+reconnect to the next test's server.~~ The diagnosed cause in #464 is the one that
+applied: the assertion itself, not a leaked connection. The test cancelled the relay
+and then required the count to still be 1 — true only when the relay's handshake had
+not been scheduled on the fake server's own loop. It now waits for the handshake
+(`_wait_for_connections`) and asserts 2. 6/6 passes, full suite green.
 
 ### Verification status (important caveat)
 
