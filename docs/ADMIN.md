@@ -147,7 +147,7 @@ way to move history between installs (that is Settings → Import / Export,
 | 30 d | DB aggregates | 6 h |
 | All-time | DB aggregates | 1 day |
 
-`percentile()` in `server/stats.py` is the single source of truth for p50/p95 so admin rollups and the Prometheus exporter cannot drift. Events with `tps == 0` / `ttft_ms == 0` are excluded from those aggregates only (non-streaming, or a streaming window too short to measure). A tool-call-only stream is measured, not excluded: its generation window is bounded by its tool-call opens.
+`percentile()` in `server/stats.py` is the single source of truth for p50/p95 so admin rollups and the Prometheus exporter cannot drift. Events with `tps == 0` / `ttft_ms == 0` are excluded from those aggregates only (non-streaming, or a streaming window too short to measure). A tool-call-only stream is measured, not excluded: its generation window is bounded by its tool-call deltas — the open *and* the argument fragments, which is what the numerator counts.
 
 ## 7. UI/UX compatibility rule (binding)
 

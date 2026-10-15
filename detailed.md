@@ -292,7 +292,7 @@ def get_adapter(provider_type: str) -> ProviderAdapter:
 - **URL**: `{base_url}/chat/completions`
 - **Encode**: Builds OpenAI Chat Completions body — messages (with multipart content for images), tools, tool_choice, gen params, `stream_options`, and `response_format`. `drop_params` controls whether unmapped extras are forwarded.
 - **Decode response**: Parses `choices[0].message`, tool calls, `finish_reason` → IR `stop_reason`, `usage` with token details.
-- **Decode stream**: Parses SSE chunks. `reasoning_content` → `ThinkingDelta`. Tool calls tracked by index with open/close state machine. `usage` may appear in any chunk (OpenAI/OpenRouter behavior) — parsed whenever present.
+- **Decode stream**: Parses SSE chunks. `reasoning_content` → `ThinkingDelta`. Tool calls tracked by index with open/close state machine — one open/close pair per *call*: a repeated `id` on an open index continues that call (OpenAI sends `id`+`name` only on a call's first chunk, but several OpenAI-compatible upstreams echo both on every arguments chunk), and only a different `id` closes the previous call and opens a new one. `usage` may appear in any chunk (OpenAI/OpenRouter behavior) — parsed whenever present.
 
 ### anthropic_adapter.py
 
@@ -514,8 +514,9 @@ Constructs a `LogEvent` from the context after the request completes:
 - `latency_ms`: wall time from `ctx.started` to now.
 - `ttft_ms`: time to first token (streaming only).
 - `tps`: `completion_tokens / stream_duration` (if stream > 0.05s), where the
-  window is first-to-last content-bearing delta. See §13 for which deltas
-  bound it and why args fragments and tool-call closes do not.
+  window is first-to-last content-bearing delta — text, thinking, a tool-call
+  open or a tool-call arguments fragment. See §13 for which deltas bound it and
+  why tool-call closes do not.
 - Token breakdown: in, cached, reasoning, output.
 - `attempts`: List of `AttemptRecord` with deployment, provider, key, status, latency per attempt.
 
@@ -918,15 +919,20 @@ Events with `tps == 0` or `ttft_ms == 0` (non-streaming or missing timing) are e
 
 TPS is **output generation speed** — completion tokens over the span between
 the first and last *content-bearing* delta, which excludes queueing and
-prefill. "Content-bearing" means `TextDelta`, `ThinkingDelta` or
-`ToolCallOpen`, so a stream whose entire output is tool calls (a
-function-calling agent that emits no prose) is measured too, bounded by its
-first and last tool-call open (round 133, AUDIT #422).
+prefill. "Content-bearing" means `TextDelta`, `ThinkingDelta`,
+`ToolCallOpen` or `ToolCallArgsDelta`, so a stream whose entire output is tool
+calls (a function-calling agent that emits no prose) is measured too, bounded
+by its first and last tool-call delta (round 133, AUDIT #422; arguments added
+in round 155, AUDIT #474).
 
-Two deltas are deliberately outside the bound:
+The arguments belong in the bound because the numerator counts their tokens.
+`completion_tokens` is the provider's count and includes every token of a tool
+call's arguments, so a window that stopped at the open divided 8000 tokens by
+the few hundred milliseconds up to it and reported a rate no generation could
+produce — growing with args size while the window did not.
 
-- **`ToolCallArgsDelta`** — each is one SSE frame, not one model token, so
-  timing it would stretch the window across transport.
+One delta is deliberately outside the bound:
+
 - **`ToolCallClose`** — providers batch the closes of sibling tool calls at
   `finish_reason`, so timing the batch would measure the batch, not the
   generation.

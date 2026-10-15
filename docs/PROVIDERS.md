@@ -58,6 +58,8 @@ providers:
 
 Model groups can mix cloud + local deployments under one `model_name`; the router failovers across them.
 
+Upstreams here vary more than the cloud APIs do, and the adapter absorbs the differences. One worth knowing about when reading a stream on the wire: OpenAI sends a tool call's `id` and `name` only on its **first** chunk, while several of these servers repeat both on *every* arguments chunk. That is read as one continuing tool call, not one call per chunk, so a call streamed over N fragments stays a single `tool_use` block with the arguments accumulated into it. A genuinely new call on the same index — a different `id` — still closes the previous one and opens its own block.
+
 ## `anthropic`
 
 Native Messages API (not the OpenAI-compat shim), so Anthropic-only features survive translation in both directions.

@@ -590,7 +590,7 @@ wiwi/                      36.4k lines of Python across 80 modules
 
 `StreamStart` → `TextDelta` · `ThinkingDelta` → `ToolCallOpen` → `ToolCallArgsDelta`* → `ToolCallClose` → `UsageFinal` → `Finish` → `StreamEnd`
 
-<sub>tool blocks nest strictly per index · exactly one start, one usage, one finish · one terminal</sub>
+<sub>tool blocks nest strictly per index, one open/close pair per call · exactly one start, one usage, one finish · one terminal</sub>
 
 </div>
 

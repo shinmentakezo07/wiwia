@@ -27,7 +27,7 @@ How streaming works end-to-end: the IR delta taxonomy, the pump, failover/resume
 ```
 StreamStart  (exactly one, first)
   TextDelta* | ThinkingDelta*
-  ToolCallOpen → ToolCallArgsDelta* → ToolCallClose   (per index; parallel calls are SIBLINGS)
+  ToolCallOpen → ToolCallArgsDelta* → ToolCallClose   (per index, one pair per call; parallel calls are SIBLINGS)
 UsageFinal   (at least one; the LAST one wins)
 Finish       (exactly one)
 StreamEnd xor StreamError
@@ -64,7 +64,9 @@ All delta variants are `@dataclass(frozen=True)` — adapters hold mutable per-s
 
 Client disconnect: the surface sets `ctx.cancel`; the pump notices, releases the upstream connection (grace window `_PUMP_CANCEL_GRACE_S = 1.0` before hard cancel), and stops.
 
-**Tool-call framing in adapters** (`openai_adapter.py` reference): index-tracked `ToolCallOpen`/`Close`; re-open of a same index closes the previous; all parallel tools close at `finish_reason`; `raw_args` preserved on `ToolUsePart`.
+**What the TPS window measures** (`build_log_event`): `completion_tokens / (last_token_at - first_token_at)`, i.e. the *generation phase only* — queueing and prefill are excluded, which is why it is not a request-level average. `first_token_at` is stamped on the first text, thinking or tool-call delta; `last_token_at` on every one of those **plus** `ToolCallArgsDelta`. The arguments must be in the bound because the numerator counts their tokens: leaving them out divides 8000 tokens by the few hundred milliseconds up to the tool-call open and reports a rate no generation can produce. `ToolCallClose` is deliberately excluded — providers batch the closes of sibling calls at `finish_reason`, so stamping them would measure the batch. A non-streaming request has no separable generation phase and reports `tps = 0`, excluded from TPS aggregates; `tps_sample_ratio` reports how much of the traffic a TPS figure describes.
+
+**Tool-call framing in adapters** (`openai_adapter.py` reference): index-tracked `ToolCallOpen`/`Close`, **one pair per call**; a repeated `id` on an open index continues that call (OpenAI sends `id`+`name` only on a call's first chunk, but several OpenAI-compatible upstreams echo both on every arguments chunk), and only a *different* id closes the previous call and opens a new one; all parallel tools close at `finish_reason`; `raw_args` preserved on `ToolUsePart`.
 
 ---
 
