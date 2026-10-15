@@ -10,6 +10,73 @@ Each entry below records the before→after state, the exact files and lines cha
 
 ---
 
+## Round 156 — An echoed tool-call `id` reopened the call on every arguments chunk (2026-10-16)
+
+### 156.1 A repeated `id` on an open index is a continuation, not a second call
+
+**Files**: `wiwi/providers/openai_adapter.py` (`_tool_call_continues()`, `_open_tool_ids`, the `tc.get("id")` branch of `decode_stream_event`, `reset()`, `_flush_open_tools()`, the `finish_reason` sweep); `wiwi/providers/openrouter_adapter.py` and `wiwi/providers/nim_adapter.py` (the same branch); `AUDIT.md` #473.
+
+**Symptom**: a single tool call streamed over N arguments chunks arrived on the
+Anthropic surface as N `tool_use` content blocks, **all carrying the same
+`id`**. The Arguments of the tool call were duplicated across blocks too.
+
+**Before** — in all three OpenAI-shaped adapters:
+
+```python
+if tc.get("id"):
+    ...
+    # a new tool call opening on the same index closes the previous one
+    if idx in self._open_tool_indices:
+        ...
+        out.append(dl.ToolCallClose(index=idx))
+    self._open_tool_indices.add(idx)
+    self._tool_names[idx] = name_fragment or ""
+    self._pending_opens[idx] = (tc["id"], self._tool_names[idx])
+```
+
+OpenAI's own streaming sends `id`+`name` only on a call's **first** chunk, so
+this branch is only reached by the OpenAI-compatible upstreams that echo both on
+**every** arguments chunk — and by wiwi's own test fixtures, which had all been
+written in that shape, which is why the defect survived so long.
+
+**After**:
+
+```python
+if self._tool_call_continues(idx, tc["id"]):
+    # same call, still open; only a deferred Open's name can still grow
+    ...
+else:
+    # a new tool call opening on the same index closes the previous one
+    ...
+```
+
+`_tool_call_continues(idx, call_id)` is `bool(call_id) and self._open_tool_ids.get(idx) == call_id`.
+A *different* id on an open index still takes the close/reopen path, so genuine
+index reuse and parallel indices are unchanged — both covered by tests.
+
+**Invariants this must not break** (all covered in `tests/test_fix_round156.py`):
+
+- A tool call's arguments are fragments of **one** JSON document. Duplicating the
+  header must not duplicate the fragments; they belong to the single Open/Close
+  pair for that index.
+- `ToolCallOpen.index` is the tool call's identity, not a fragment counter. An
+  encoder maps IR index → client block index, so a second Open for the same index
+  orphans the first block and re-points the args at the new one.
+- Anthropic `tool_use` ids must be unique within one assistant message. The
+  echoed-id shape violated that before the fix.
+
+**Tests**: `tests/test_fix_round156.py` (22) — one Open/Close per call across the
+OpenAI, OpenRouter and NIM adapters; the Open name/args survive; a different id on
+the same index still opens a second call; parallel indices untouched; OpenAI's own
+id-on-first-chunk-only shape unchanged; `reset()` clears the ids; and end to end
+through `/v1/messages` both the block count and the TPS window.
+
+**Metric side effect**: this churn was stamping the gateway's `last_token_at` on
+every fragment, which is why the round-155 TPS window fix appeared not to matter
+for these providers. See `AUDIT.md` #474.
+
+---
+
 ## Round 151 — Zen refuses the caller's client-metadata block (2026-10-15)
 
 ### 151.1 A caller's `metadata` must not reach Zen

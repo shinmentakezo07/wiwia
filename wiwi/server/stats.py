@@ -173,8 +173,20 @@ def timeseries(events: list[LogEvent], bucket: str, metric: str, minutes: int,
     req_buckets = [0 for _ in range(n_buckets)]
     for e in win:
         idx = int((e.ts - first_t) // size)
-        if not 0 <= idx < n_buckets:
-            continue
+        # A row inside the window must appear in *some* bucket. The grid is
+        # bucket-aligned while ``window_events`` admits everything from
+        # ``now - minutes*60``, so when ``now`` falls mid-bucket the grid's
+        # first bucket starts ABOVE the cutoff and the leading rows compute a
+        # negative index — which the bounds check used to drop, so the chart
+        # under-reported the very totals the panel above it prints (AUDIT
+        # #396). Clamp instead: those rows belong to the leading edge of the
+        # window, which the first bucket represents. The clamp is at most one
+        # bucket wide, so the placement error is bounded by the bucket size and
+        # no request is lost.
+        if idx < 0:
+            idx = 0
+        elif idx >= n_buckets:
+            idx = n_buckets - 1
         b = token_buckets[idx]
         b[0] += e.tok_in
         b[1] += e.tok_cached

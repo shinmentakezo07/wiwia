@@ -8,6 +8,83 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — rounds 155/156: the TPS meter, and the tool-call churn behind it (2026-10-16)
+
+Found while auditing the generation-throughput meter. #474 is the metric bug
+proper; #473 is the adapter defect that was quietly carrying the metric, and
+which also broke the Anthropic wire for a whole class of upstreams.
+
+### 474. The TPS window excluded the tool-call argument tokens it was divided by
+
+**Severity:** 🟠 High (a reported rate no generation can produce, growing without
+bound) · **Status: fixed** — round 155 (`tests/test_fix_round155.py`)
+**Files:** `wiwi/core/gateway.py` (`build_log_event`, and the `last_token_at`
+stamps in the stream consumer)
+
+`build_log_event` computes `tps = completion_tokens / (last_token_at -
+first_token_at)`. The numerator is the provider's count, which includes every
+token of a tool call's arguments; the denominator was stamped only on
+`TextDelta`/`ThinkingDelta` (round 133) and `ToolCallOpen`. Round 133 left
+`ToolCallArgsDelta` out of the bound on the reasoning that each args frame is an
+SSE frame rather than a model token — which is true of the *window* and false of
+the *ratio*. A stream whose bulk of output is one large tool call therefore
+divided 8000 tokens by the few hundred milliseconds up to the open and reported
+~26,000 tok/s for a request whose own round-trip rate was ~11,000 tok/s, growing
+with args size while the window did not.
+
+**Fix:** stamp `last_token_at` on `ToolCallArgsDelta` too, so the window closes on
+the last content-bearing delta of any kind. `ToolCallClose` stays out: providers
+batch sibling closes at `finish_reason`, so stamping them would measure the
+batch rather than the generation.
+
+### 473. An echoed tool-call `id` closed and reopened the call on every arguments chunk
+
+**Severity:** 🔴 Critical on the Anthropic surface (duplicate `tool_use` ids in
+one assistant message are rejected; a lenient client executes the tool N times) ·
+**Status: fixed** — round 156 (`tests/test_fix_round156.py`)
+**Files:** `wiwi/providers/openai_adapter.py` (`decode_stream_event`, plus the new
+`_tool_call_continues` helper and `_open_tool_ids`), `openrouter_adapter.py` and
+`nim_adapter.py` (the same branch, both subclasses of `OpenAIAdapter`)
+
+Each OpenAI-shaped adapter treated *any* chunk carrying an `id` on an
+already-open index as a new tool call: flush the deferred Open, emit
+`ToolCallClose`, then a fresh `ToolCallOpen`, then the arguments. OpenAI itself
+sends `id`+`name` only on a call's first chunk, so the branch is reached only by
+the OpenAI-compatible upstreams that echo both on *every* arguments chunk.
+
+**Probe** (executed — real `decode_stream_event`, 3 args chunks, one call):
+
+```
+OpenAIAdapter      echoed id: opens=3 closes=3
+OpenAIAdapter   OpenAI shape: opens=1 closes=1
+```
+
+Through `AnthropicStreamEncoder` that became three `content_block_start` events
+carrying `id: "call_1"` each — the same id three times in one assistant message,
+each block receiving a copy of the arguments:
+
+```
+start 1 tool_use call_1 write_file
+start 2 tool_use call_1 write_file
+start 3 tool_use call_1 write_file
+```
+
+It also masked #474: the reopen churn stamped `last_token_at` on every fragment,
+so for these providers the window ended in the right place for the wrong reason
+— turn the round-155 stamp off and the numbers still looked right, which is why
+the churn survived a round of metric work.
+
+**Fix:** `OpenAIAdapter._tool_call_continues(idx, call_id)` — a chunk whose id
+matches the call already open on that index continues it. Only a *different* id,
+or an index that is not open, takes the close/reopen path, so genuine index reuse
+(`test_a_different_id_on_the_same_index_still_starts_a_new_call`) and parallel
+indices are unchanged. `_open_tool_ids` is swept wherever `_synthesized_opens`
+is, including the two adapter-specific overrides and `reset()` — a leftover id
+would make the first chunk of the next request on a reused singleton look like a
+continuation.
+
+---
+
 ## ✅ Fixed — round 154: five `wiwi/wire/` defects (2026-10-16)
 
 Found by a source review of the wire codecs, then reproduced against the real
@@ -1538,7 +1615,8 @@ functions rather than trusting the subagent report. Findings #396-#398.
 ### 396. `stats.timeseries` silently drops the oldest in-window requests on the ring backend
 
 **Severity:** 🔴 High (a chart that under-reports its own panel's totals)
-**Status: open**
+**Status: fixed** — round 155 (`tests/test_fix_round155.py::test_ring_timeseries_tps_coverage_matches_overview`
+and the sibling grid tests); the ring `idx` bounds check became a clamp
 **Files:** `wiwi/server/stats.py:160-176` (the grid alignment vs the `idx` guard at
 `:175`)
 **Fix:** extend the grid one bucket left when `first_t > cutoff` (or clamp `idx` to
@@ -1579,7 +1657,8 @@ populated leading-edge bucket.
 ### 397. `DBSink.read_timeseries` emits `n_buckets + 1`, breaking the fixed-grid contract
 
 **Severity:** 🟠 High (backend parity violation; a client indexing `buckets[-1]` is
-off by one) · **Status: open**
+off by one) · **Status: fixed** — round 155 (`tests/test_fix_round155.py`; `by_t`
+is filtered to the grid after the merge)
 **Files:** `wiwi/logging_core/db_sink.py:1832-1848` (`first_t`/`n_fill` vs the emit
 at `:1848-1859`)
 **Fix:** filter `by_t` to `first_t <= t < first_t + n_fill * bucket_seconds` before

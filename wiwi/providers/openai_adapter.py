@@ -475,6 +475,27 @@ class OpenAIAdapter:
         # with no id (see decode_stream_event). A real id arriving later must
         # be adopted, not open a second tool call on the same index.
         self._synthesized_opens: set[int] = set()
+        # Id of the call currently open on each index. OpenAI's own stream
+        # carries ``id``+``name`` only on a call's first chunk, but several
+        # OpenAI-compatible upstreams echo both on *every* arguments chunk, so
+        # the id is what separates "the same call, still being filled in" from
+        # "a new call reused this index" (AUDIT #473).
+        self._open_tool_ids: dict[int, str] = {}
+
+    def _tool_call_continues(self, idx: int, call_id: str) -> bool:
+        """True when this chunk re-states the id of the call already open on ``idx``.
+
+        A repeated id on an open index is the upstream echoing the call's
+        header alongside each arguments fragment, not a second call. Treating
+        it as a new call closed and reopened the index on every fragment, which
+        emitted one Open/Args/Close triple per fragment: on the Anthropic
+        surface that became N ``tool_use`` blocks carrying the *same* ``id``
+        (duplicate ids in one assistant message are rejected, and a lenient
+        client executes the tool N times), and it made the gateway's
+        ``last_token_at`` ride the churn instead of the arguments themselves
+        (AUDIT #473).
+        """
+        return bool(call_id) and self._open_tool_ids.get(idx) == call_id
 
     def reset(self) -> None:
         """Drop all per-stream state so the adapter can serve another stream.
@@ -487,6 +508,7 @@ class OpenAIAdapter:
         self._tool_names.clear()
         self._pending_opens.clear()
         self._synthesized_opens.clear()
+        self._open_tool_ids.clear()
 
     def _flush_open_tools(self) -> list[dl.IRStreamDelta]:
         """Close every still-open tool call, flushing deferred Opens first.
@@ -508,6 +530,7 @@ class OpenAIAdapter:
         self._tool_names.clear()
         self._pending_opens.clear()
         self._synthesized_opens.clear()
+        self._open_tool_ids.clear()
         return out
 
     def decode_stream_event(self, event: str, data: str) -> list[dl.IRStreamDelta]:
@@ -636,27 +659,40 @@ class OpenAIAdapter:
                     # (tool_result correlation) and keep the call open.
                     self._synthesized_opens.discard(idx)
                     self._tool_names[idx] = name_fragment or ""
+                    # Remember the real id so the chunks that follow — which
+                    # may echo it — are read as continuations rather than as
+                    # new calls on this index (AUDIT #473).
+                    self._open_tool_ids[idx] = tc["id"]
                     if fn.get("arguments"):
                         out.append(dl.ToolCallArgsDelta(
                             index=idx,
                             args_fragment=coerce_args_fragment(fn["arguments"])))
                     continue
-                # a new tool call opening on the same index closes the previous one
-                if idx in self._open_tool_indices:
-                    # The superseded call's Open may still be deferred (id
-                    # seen, args not yet). Flush it before closing, or the
-                    # stream carries a Close for an index that never opened.
+                if self._tool_call_continues(idx, tc["id"]):
+                    # Same call, still open (AUDIT #473): only a deferred
+                    # Open's name can still grow here. Nothing is closed and
+                    # nothing is reopened — the args fall through below.
                     if idx in self._pending_opens:
-                        cid, cname = self._pending_opens.pop(idx)
-                        out.append(dl.ToolCallOpen(index=idx, id=cid, name=cname))
-                    out.append(dl.ToolCallClose(index=idx))
-                self._open_tool_indices.add(idx)
-                # Accumulate name: some providers send the full name on the
-                # first chunk, others fragment it across subsequent deltas.
-                self._tool_names[idx] = name_fragment or ""
-                # Defer emitting ToolCallOpen until the name is complete — the
-                # first args fragment or finish signals name completion.
-                self._pending_opens[idx] = (tc["id"], self._tool_names[idx])
+                        cid, _ = self._pending_opens[idx]
+                        self._pending_opens[idx] = (cid, name_fragment or "")
+                else:
+                    # a new tool call opening on the same index closes the previous one
+                    if idx in self._open_tool_indices:
+                        # The superseded call's Open may still be deferred (id
+                        # seen, args not yet). Flush it before closing, or the
+                        # stream carries a Close for an index that never opened.
+                        if idx in self._pending_opens:
+                            cid, cname = self._pending_opens.pop(idx)
+                            out.append(dl.ToolCallOpen(index=idx, id=cid, name=cname))
+                        out.append(dl.ToolCallClose(index=idx))
+                    self._open_tool_indices.add(idx)
+                    self._open_tool_ids[idx] = tc["id"]
+                    # Accumulate name: some providers send the full name on the
+                    # first chunk, others fragment it across subsequent deltas.
+                    self._tool_names[idx] = name_fragment or ""
+                    # Defer emitting ToolCallOpen until the name is complete — the
+                    # first args fragment or finish signals name completion.
+                    self._pending_opens[idx] = (tc["id"], self._tool_names[idx])
             elif name_fragment and idx in self._open_tool_indices:
                 # Name fragment on a subsequent delta (no id): accumulate.
                 self._tool_names[idx] = self._tool_names.get(idx, "") + name_fragment
@@ -681,6 +717,10 @@ class OpenAIAdapter:
                     self._open_tool_indices.add(idx)
                     self._tool_names[idx] = name_fragment or ""
                     self._synthesized_opens.add(idx)
+                    # No id yet: record the empty one so a later chunk's id is
+                    # compared against "" and takes the adopt branch above,
+                    # never the continuation branch (AUDIT #473).
+                    self._open_tool_ids[idx] = ""
                     # Carry the name fragment we just stored: emitting an
                     # empty name left the client with a tool_use block whose
                     # name is "", so it could not dispatch the call at all
@@ -706,6 +746,7 @@ class OpenAIAdapter:
             # "adopt the real id" branch — emitting ToolCallArgsDelta with no
             # preceding ToolCallOpen, which the encoders drop (AUDIT #129).
             self._synthesized_opens.clear()
+            self._open_tool_ids.clear()
             out.append(dl.Finish(tr.normalize_finish_reason(fr)))
         return out
 

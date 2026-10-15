@@ -296,6 +296,7 @@ class NimAdapter(OpenAIAdapter):
         self._pending_opens.clear()
         self._buffered_args.clear()
         self._synthesized_opens.clear()
+        self._open_tool_ids.clear()
         return out
 
     def decode_stream_event(self, event: str, data: str) -> list[dl.IRStreamDelta]:
@@ -441,6 +442,7 @@ class NimAdapter(OpenAIAdapter):
                     # contract (AUDIT #88, mirroring OpenAIAdapter).
                     self._synthesized_opens.discard(idx)
                     self._tool_names[idx] = name_fragment or ""
+                    self._open_tool_ids[idx] = tc["id"]
                     if fn.get("arguments"):
                         if self._tool_aliases.get(self._tool_names.get(idx, "")):
                             self._buffered_args[idx] = (
@@ -451,28 +453,37 @@ class NimAdapter(OpenAIAdapter):
                                 index=idx,
                                 args_fragment=coerce_args_fragment(fn["arguments"])))
                     continue
-                if idx in self._open_tool_indices:
-                    # The superseded call's Open may still be deferred (id
-                    # seen, args not yet). Flush it before closing, or the
-                    # stream carries a Close for an index that never opened:
-                    # the Anthropic encoder drops the close entirely and the
-                    # client is left with a ``content_block_start`` whose name
-                    # is "", undispatchable. Mirrors OpenAIAdapter's branch
-                    # (AUDIT #196).
+                if self._tool_call_continues(idx, tc["id"]):
+                    # Same call, still open — the upstream echoed its header on
+                    # an arguments chunk (AUDIT #473). Only a deferred Open's
+                    # name can still grow; the args fall through below.
                     if idx in self._pending_opens:
-                        cid, cname = self._pending_opens.pop(idx)
-                        out.append(dl.ToolCallOpen(index=idx, id=cid, name=cname))
-                    # Buffered (aliased) args belong to the superseded call, so
-                    # they drain before the Close and while ``_tool_names[idx]``
-                    # still holds that call's name — the alias lookup below
-                    # keys on it.
-                    self._flush_buffered_args(idx, out)
-                    out.append(dl.ToolCallClose(index=idx))
-                self._open_tool_indices.add(idx)
-                self._tool_names[idx] = name_fragment or ""
-                # Defer emitting ToolCallOpen until the name is complete — the
-                # first args fragment or finish signals name completion.
-                self._pending_opens[idx] = (tc["id"], self._tool_names[idx])
+                        cid, _ = self._pending_opens[idx]
+                        self._pending_opens[idx] = (cid, name_fragment or "")
+                else:
+                    if idx in self._open_tool_indices:
+                        # The superseded call's Open may still be deferred (id
+                        # seen, args not yet). Flush it before closing, or the
+                        # stream carries a Close for an index that never opened:
+                        # the Anthropic encoder drops the close entirely and the
+                        # client is left with a ``content_block_start`` whose name
+                        # is "", undispatchable. Mirrors OpenAIAdapter's branch
+                        # (AUDIT #196).
+                        if idx in self._pending_opens:
+                            cid, cname = self._pending_opens.pop(idx)
+                            out.append(dl.ToolCallOpen(index=idx, id=cid, name=cname))
+                        # Buffered (aliased) args belong to the superseded call, so
+                        # they drain before the Close and while ``_tool_names[idx]``
+                        # still holds that call's name — the alias lookup below
+                        # keys on it.
+                        self._flush_buffered_args(idx, out)
+                        out.append(dl.ToolCallClose(index=idx))
+                    self._open_tool_indices.add(idx)
+                    self._open_tool_ids[idx] = tc["id"]
+                    self._tool_names[idx] = name_fragment or ""
+                    # Defer emitting ToolCallOpen until the name is complete — the
+                    # first args fragment or finish signals name completion.
+                    self._pending_opens[idx] = (tc["id"], self._tool_names[idx])
             elif name_fragment and idx in self._open_tool_indices:
                 self._tool_names[idx] = self._tool_names.get(idx, "") + name_fragment
                 if idx in self._pending_opens:
@@ -492,6 +503,7 @@ class NimAdapter(OpenAIAdapter):
                     self._open_tool_indices.add(idx)
                     self._tool_names[idx] = name_fragment or ""
                     self._synthesized_opens.add(idx)
+                    self._open_tool_ids[idx] = ""
                     # Carry the name we were given, not a literal empty string
                     # (AUDIT #143). The fragment is already stored one line
                     # above; discarding it here made the Anthropic encoder

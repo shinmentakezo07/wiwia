@@ -1261,13 +1261,25 @@ class Gateway:
                     # collapsed ``stream_secs`` to 0 and dropped the request's
                     # TPS from every aggregate while still counting it in
                     # ``tps_sample_ratio``'s denominator (round 133).
-                    # Args fragments stay out of the bound: each is one SSE
-                    # frame, not one model token, so timing them would stretch
-                    # the window across transport. Close is excluded too,
-                    # because providers batch the closes of sibling tool calls
-                    # at finish_reason — stamping the batch's arrival would
-                    # measure the batch, not the generation.
                     ctx.last_token_at = time.monotonic()
+                if isinstance(d, dl.ToolCallArgsDelta):
+                    # Args fragments bound the window too (round 155). Leaving
+                    # them out was defensible for the *window* — each is one SSE
+                    # frame, not one model token — but not for the *ratio*:
+                    # ``build_log_event`` divides the provider's
+                    # ``completion_tokens``, which counts every token of a tool
+                    # call's arguments, by this window. A call whose args carry
+                    # the bulk of the output therefore divided 8000 tokens by
+                    # the few hundred milliseconds up to the open and reported
+                    # a rate above the request's own round-trip rate — a figure
+                    # no generation could produce, growing without bound as the
+                    # args grew while the window did not. The window must cover
+                    # the tokens it is charged for.
+                    ctx.last_token_at = time.monotonic()
+                # ``ToolCallClose`` deliberately stays out of the bound:
+                # providers batch the closes of sibling calls at
+                # ``finish_reason``, so stamping the batch's arrival would
+                # measure the batch rather than the generation.
                 # Record content-bearing deltas to the tape for resume/replay.
                 # Skipped when resume is off (the default): the tape is only
                 # read by _attempt_resume, so recording it is pure waste.

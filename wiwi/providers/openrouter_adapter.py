@@ -372,6 +372,7 @@ class OpenRouterAdapter(OpenAIAdapter):
                 self._open_tool_indices.clear()
                 self._tool_names.clear()
                 self._pending_opens.clear()
+                self._open_tool_ids.clear()
             return out
 
         out: list[dl.IRStreamDelta] = []
@@ -464,25 +465,35 @@ class OpenRouterAdapter(OpenAIAdapter):
                     # OpenAIAdapter (AUDIT #135).
                     self._synthesized_opens.discard(idx)
                     self._tool_names[idx] = name_fragment
+                    self._open_tool_ids[idx] = call_id
                     if fn.get("arguments"):
                         out.append(dl.ToolCallArgsDelta(
                             index=idx,
                             args_fragment=coerce_args_fragment(fn["arguments"])))
                     continue
-                if idx in self._open_tool_indices:
-                    # The superseded call's Open may still be deferred (id
-                    # seen, args not yet). Flush it before closing, or the
-                    # stream carries a Close for an index that never opened
-                    # and the encoder silently drops it (AUDIT #74).
+                if self._tool_call_continues(idx, call_id):
+                    # Same call, still open — the upstream echoed its header on
+                    # an arguments chunk (AUDIT #473). Only a deferred Open's
+                    # name can still grow; the args fall through below.
                     if idx in self._pending_opens:
-                        cid, cname = self._pending_opens.pop(idx)
-                        out.append(dl.ToolCallOpen(index=idx, id=cid, name=cname))
-                    out.append(dl.ToolCallClose(index=idx))
-                self._open_tool_indices.add(idx)
-                self._tool_names[idx] = name_fragment
-                # Defer emitting ToolCallOpen until the name is complete — the
-                # first args fragment or finish signals name completion.
-                self._pending_opens[idx] = (call_id, self._tool_names[idx])
+                        cid, _ = self._pending_opens[idx]
+                        self._pending_opens[idx] = (cid, name_fragment)
+                else:
+                    if idx in self._open_tool_indices:
+                        # The superseded call's Open may still be deferred (id
+                        # seen, args not yet). Flush it before closing, or the
+                        # stream carries a Close for an index that never opened
+                        # and the encoder silently drops it (AUDIT #74).
+                        if idx in self._pending_opens:
+                            cid, cname = self._pending_opens.pop(idx)
+                            out.append(dl.ToolCallOpen(index=idx, id=cid, name=cname))
+                        out.append(dl.ToolCallClose(index=idx))
+                    self._open_tool_indices.add(idx)
+                    self._open_tool_ids[idx] = call_id
+                    self._tool_names[idx] = name_fragment
+                    # Defer emitting ToolCallOpen until the name is complete — the
+                    # first args fragment or finish signals name completion.
+                    self._pending_opens[idx] = (call_id, self._tool_names[idx])
             elif name_fragment and idx in self._open_tool_indices:
                 self._tool_names[idx] = self._tool_names.get(idx, "") + name_fragment
                 if idx in self._pending_opens:
@@ -507,6 +518,7 @@ class OpenRouterAdapter(OpenAIAdapter):
                     self._open_tool_indices.add(idx)
                     self._tool_names[idx] = name_fragment or ""
                     self._synthesized_opens.add(idx)
+                    self._open_tool_ids[idx] = ""
                     # Carry the name fragment we just stored — an empty name
                     # leaves the client with a tool_use block it cannot
                     # dispatch (AUDIT #135).
@@ -533,6 +545,7 @@ class OpenRouterAdapter(OpenAIAdapter):
             # inherits that; this override re-implemented the sweep without it
             # (AUDIT #156).
             self._synthesized_opens.clear()
+            self._open_tool_ids.clear()
             # AUDIT #270: shared map (handles the non-standard spellings and
             # maps OpenRouter's "error" to "stop" as this inline copy did).
             out.append(dl.Finish(tr.normalize_finish_reason(fr)))

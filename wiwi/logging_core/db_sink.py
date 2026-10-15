@@ -268,6 +268,18 @@ class _BucketSum:
                            getattr(b, "tps_max", 0) or 0)
 
 
+def _merge_bucket(by_t: dict, target_t: int, source_t: int) -> None:
+    """Fold the bucket at *source_t* into *target_t*, dropping the source key.
+
+    Used by the timeseries reader to clamp a populated bucket onto the fixed
+    grid (AUDIT #397). Both sides are either a raw row, a rollup row, or an
+    existing ``_BucketSum``, so one merge helper covers every combination.
+    """
+    source = by_t.pop(source_t)
+    existing = by_t.get(target_t)
+    by_t[target_t] = source if existing is None else _BucketSum(existing, source)
+
+
 def _slash_tails(value: str) -> set[str]:
     """Every suffix of *value* that starts at a "/" boundary, plus the whole.
 
@@ -1846,6 +1858,21 @@ class DBSink:
             n_fill = (max(by_t) - first_t) // bucket_seconds + 1
         else:
             n_fill = 0
+        if n_fill > 0:
+            # A populated bucket can sit BELOW the grid's first slot: the raw
+            # and rollup selects admit every row past ``ts >= cutoff``, which on
+            # a cutoff falling mid-bucket starts before the bucket-aligned grid.
+            # Emitting those verbatim answered with ``n_buckets + 1`` entries —
+            # one more than the fixed grid the shape contract promises and one
+            # more than the ring backend returns for the same request (AUDIT
+            # #397). Fold them into the first grid slot rather than dropping
+            # them: they are real traffic that ``overview`` counts, so
+            # discarding them would trade a shape bug for an accounting one.
+            last_t = first_t + (n_fill - 1) * bucket_seconds
+            for t in [t for t in by_t if t < first_t]:
+                _merge_bucket(by_t, first_t, t)
+            for t in [t for t in by_t if t > last_t]:
+                _merge_bucket(by_t, last_t, t)
         for i in range(n_fill):
             t = first_t + i * bucket_seconds
             if t not in by_t:
