@@ -363,18 +363,41 @@ async def refresh_key_now(state: AppState, provider_name: str,
     }
 
 
-_workers: dict[int, HermesAutoRefresh] = {}
+_FALLBACK_ATTR = "_hermes_refresh_fallback"
 
 
 def _worker_for(state: AppState) -> HermesAutoRefresh:
     """Resolve the shared worker for *state*.
 
     The lifespan-owned ``state.hermes_refresh`` wins when set, so the
-    background sweeper, the gateway 401 hook, and any other caller share one
-    lock and one circuit breaker per account. Fallback (tests, pre-lifespan
-    use): a lazily cached instance.
+    background sweeper, the gateway 401 hook, the admin refresh endpoint and
+    any other caller share one lock and one circuit breaker per account.
+    Fallback (tests, pre-lifespan use): a lazily created worker.
+
+    The fallback is cached **on the state object itself**, not in a
+    module-global ``dict[int, HermesAutoRefresh]` keyed on ``id(state)``. That
+    global was wrong twice over (AUDIT #471): the worker holds a strong
+    reference to the state, so the global rooted every AppState that ever took
+    the fallback path and ``gc.collect()`` could not reclaim it; and CPython
+    recycles ``id()``, so a re-created ``AppState`` landing on a dead state's
+    address inherited its ``_locks``, ``_generations`` and ``CircuitBreaker
+    _dead`` — for Hermes the worst case of the three refreshers, because an
+    inherited ``mark_dead`` makes a legitimately reconnected account read as
+    permanently unreloginable. Anchoring the cache to the state makes the worker
+    unreachable — and collectable — as soon as the state dies. Mirrors
+    ``workbuddy_auto_refresh._worker_for`` (the same shape
+    ``cline_auto_refresh`` reaches with a weakref-carrying entry).
     """
     shared = getattr(state, "hermes_refresh", None)
     if shared is not None:
         return shared
-    return _workers.setdefault(id(state), HermesAutoRefresh(state))
+    worker = getattr(state, _FALLBACK_ATTR, None)
+    if worker is None:
+        worker = HermesAutoRefresh(state)
+        try:
+            setattr(state, _FALLBACK_ATTR, worker)
+        except AttributeError:
+            # A slotted/frozen stand-in (some tests build a minimal state):
+            # a fresh worker per call is the old behaviour, not a cache bug.
+            pass
+    return worker

@@ -8,6 +8,72 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — round 153: the Hermes worker cache (2026-10-15)
+
+Found by diffing the three OAuth refreshers' `_worker_for` fallbacks against
+each other after a report of bugs in the refresh logic. One entry, #471.
+
+### 471. Hermes' `_worker_for` fallback still keys a strong-ref cache on `id(state)` — every AppState leaks, and a recycled id inherits a dead worker's locks
+
+**Severity:** 🟠 High · **Status: fixed** — round 153 (`tests/test_fix_round153.py`; found and fixed 2026-10-15)
+**Files:** `wiwi/providers/hermes_auto_refresh.py:366` (`_workers`), `:367-381` (`_worker_for`)
+
+AUDIT #451 moved Cline and WorkBuddy's module-global `_workers` fallback off
+raw `id(state)` — Cline to a `weakref`-carrying entry that prunes dead
+referents, WorkBuddy to a cache anchored **on the state object** itself. Both
+call out why: `id()` is not unique for a process lifetime, so a re-created
+`AppState` could be handed a worker bound to a *dead* state and inherit its
+locks, dead circuits and stale generation counters.
+
+**Hermes was never given the same treatment** — it was a third OAuth provider
+added after #451's fix and kept the original shape:
+
+```python
+_workers: dict[int, HermesAutoRefresh] = {}
+
+def _worker_for(state):
+    shared = getattr(state, "hermes_refresh", None)
+    if shared is not None:
+        return shared
+    return _workers.setdefault(id(state), HermesAutoRefresh(state))
+```
+
+Two distinct failures, both confirmed by execution:
+
+1. **Permanent leak, worse than a cache miss.** `HermesAutoRefresh.__init__`
+   stores `self._state = state`, and `_workers` holds the worker, so the module
+   global roots every `AppState` that ever took the fallback path. Dropping all
+   local references and running `gc.collect()` left every state alive:
+
+   ```
+   states still alive after dropping every local ref: [True, True, True]
+   _workers[0x774e421852e0] -> worker._state = FakeState (alive=True)
+   ```
+
+   The comment on the fallback ("tests, pre-lifespan use") is exactly where this
+   bites: the test suite builds a fresh mini-state per test file, so a long
+   run accumulates one pinned worker — with its config-store engine reference —
+   per state.
+
+2. **Recycled-id inheritance.** An entry is reused purely on numeric address
+   equality, with no check that the referent is still the same object, so a new
+   state landing on a dead state's address inherits that worker's `_locks`,
+   `_generations` and `CircuitBreaker._dead`. For Hermes this is the worst
+   instance of the three: a poisoned `mark_dead(("provider", "acct"))` would
+   make a *legitimately reconnected* account read as permanently unreloginable,
+   and the inherited generation counter is the counter that guards the
+   single-use refresh grant against double presentation (AUDIT #169).
+
+Fix mirrors WorkBuddy's (the stronger of the two): anchor the fallback worker on
+the state object itself, so it becomes unreachable — and collectable — the
+moment the state dies. No module global, no `id()` at all, so neither failure
+mode has anything to attach to. `AppState` is a normal class, so `setattr`
+succeeds; the `AttributeError` guard keeps a slotted/frozen test stand-in on
+the old behaviour (a fresh worker per call), which is a correctness-neutral
+fallback rather than a cache bug.
+
+---
+
 ## ✅ Fixed — usage and stats export: the window, the file, and the picker (2026-10-15)
 
 ### 467. `_read_all` dropped the `log_days` bound after page 1 — a `logs`/`rollups` export shipped rows older than the window it reported
