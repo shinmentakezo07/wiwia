@@ -2,11 +2,14 @@
 
 Deep dive for the one provider whose access depends on the *shape* of the
 request rather than on a credential. Everything here was measured against the
-live upstream on **2026-10-14**; where a claim is transcribed from documentation
-instead of probed, it says so.
+live upstream on **2026-10-14**; the client fingerprint and the client-metadata
+refusal were re-probed on **2026-10-15** (see
+[Re-verified 2026-10-15](#re-verified-2026-10-15-the-fingerprint-itself-is-current)).
+Where a claim is transcribed from documentation instead of probed, it says so.
 
 - [What it is](#what-it-is)
 - [The free-tier admission gate](#the-free-tier-admission-gate)
+- [The caller's `metadata` block is refused upstream](#the-callers-metadata-block-is-refused-upstream)
 - [How the shape was derived](#how-the-shape-was-derived)
 - [What changed, and why](#what-changed-and-why)
 - [Code map](#code-map)
@@ -33,9 +36,17 @@ URL. Which wire a model uses is **published per model**, not derived:
 | gemini | `gemini-*` | `{base}/models/{id}:generateContent` | `x-goog-api-key` |
 | chat | everything else | `{base}/chat/completions` | `Authorization: Bearer` |
 
-Base: `https://opencode.ai/inference/v1` (canonical — what models.dev and the docs
-table publish). The legacy `https://opencode.ai/zen/v1` **still routes** and
-existing configs keep working; only the default moved.
+Base: `https://opencode.ai/inference/v1` (canonical — what models.dev, the docs
+table, and the client itself publish: `packages/ai/src/providers/opencode.ts`).
+The legacy `https://opencode.ai/zen/v1` **still routes** and existing configs
+keep working; only the default moved.
+
+The legacy base is for **paid** models. Probed 2026-10-15 with this adapter's
+exact request shape, the same anonymous request that answers 200 on
+`/inference/v1` answers `403 FreeTierError` on `/zen/v1` (`space-bunny-free` and
+`muse-spark-1.3-contributor-free`, both directions). So a free-tier deployment
+pointed at `/zen/v1` 403s for a reason that has nothing to do with the
+fingerprint — check `base_url` before bisecting headers.
 
 Two consequences of the table that are easy to get wrong:
 
@@ -124,6 +135,100 @@ request — fresh ids spread traffic over new buckets and invite
 
 ---
 
+## The caller's `metadata` block is refused upstream
+
+A free-model request can come back as:
+
+```
+400 <account>: Upstream request failed: [unsupported_metadata] Client metadata is not supported.
+```
+
+Three layers are stacked in that one line, and separating them *is* the
+diagnosis:
+
+| layer | contributes |
+|---|---|
+| Console (Zen) | `Upstream request failed: <…>` — its wrapper for a refusal by the provider behind it. Codes outside Console's allow-list are dropped and the original is kept as a `[code]` label in the message; opencode's own client pins that format (`packages/ai/test/provider-error.test.ts`: *"Zen drops upstream codes outside its allow-list and replaces the type, but `Protocol.errorMessage` keeps the original code as a `[code]` prefix"*). |
+| the provider behind Zen | `unsupported_metadata` · "Client metadata is not supported." |
+| wiwi | `<provider account>: <message>` — `base.py`'s 400 branch renders `f"{provider}: {msg}"`, so the prefix names the *account*, not the model group. |
+
+The refused field is the **caller's**, not the adapter's fingerprint: both
+inbound codecs capture a top-level `metadata` into `req.extras`, and both
+delegates forward it (`openai_adapter._STANDARD`,
+`anthropic_adapter._ANTHROPIC_STANDARD`) — right for the vendors that support
+the field, wrong behind Zen. Zen's own client puts no `metadata` on the wires
+this adapter speaks: its request builder attaches one only on the Responses
+protocol, and only when provider options set it. So the upstream never sees the
+field from a real client, and sees it from us.
+
+`_drop_client_metadata()` therefore removes a *caller-supplied* `metadata` from
+every body this adapter sends — free and paid alike, because this is a provider
+fact rather than a tier gate — and logs `opencode_client_metadata_dropped` with
+the route. An operator who wants the field on the wire anyway declares it
+themselves: `extra_body: {metadata: …}` is left alone and wins over the caller's
+copy.
+
+Two other proxies hit the same refusal class and fixed it the same way —
+openclaw #73963 (`{"detail":"Unsupported parameter: metadata"}` from the ChatGPT
+Codex backend) and CLIProxyAPI #5112.
+
+**One caveat, stated so it is not mistaken for a general fix:** the Responses
+route never forwarded extras, so if the failing deployment is the one
+responses-route free model (`muse-spark-*-contributor-free`), the caller's
+`metadata` was never on that wire and something else is refusing it. Get the raw
+upstream type before assuming this entry covers it.
+
+### Re-verified 2026-10-15: the fingerprint itself is current
+
+The report arrived framed as "our client metadata is stale, refresh it from the
+client", so the fingerprint was re-derived from the client's own source
+(`sst/opencode` at commit `4397ee4`, the head on 2026-10-15) and probed row by
+row. It is **not** stale — every value the gate reads is the one the current
+client sends:
+
+| our value | current client | probe |
+|---|---|---|
+| `x-opencode-session` = `x-opencode-session-id` = `ses_` + 12 hex + 14 base62 | same shape: `Identifier.descending()` (`packages/schema/src/identifier.ts`) mints exactly that | 200 |
+| `x-opencode-project: global` | `ProjectID.global` is the literal `global` (`packages/schema/src/project-id.ts`) | 200 |
+| `x-opencode-client: cli` | `app.name` | 200 |
+| `User-Agent: opencode/<version>` | `opencode/<channel>/<version>/<name>` | both 200 |
+| no `x-opencode-request` | none sent | adding one still 403s |
+
+The request *builder* now lives at `packages/core/src/session/model-request.ts`;
+the path the 2026-09 capture read (`packages/opencode/src/session/llm/request.ts`)
+no longer exists. It also sets `x-session-affinity`, `X-Session-Id`,
+`x-opencode-parent-session-id` and a body `promptCacheKey` — none load-bearing
+(probed: 200 with and without).
+
+Sweep of every current free model with the adapter's exact shape: **200** for the
+nine servable ones, end-to-end through the gateway as well as direct (2026-10-15,
+caller `metadata` block included, chat / messages / responses inbound all three
+answer). The two that are not servable are not shape failures: `jev-1.13-free`
+is the System One model above — chat and responses both answer
+`400 ModelProtocolUnsupported` — and `step-5-preview-free` intermittently
+answers `429 … Endpoint is unavailable.` from its own upstream. (`exo-free` and
+`mimo-v2.5-free` have since left the catalog.) Ablations that still 403: a
+`ses_`+64-hex id in `x-opencode-session-id`, a `prj_`-style
+`x-opencode-project`, and (as before) dropping the metadata headers. Ablations
+that change nothing on the anonymous path: a body `metadata`, `store` or
+`prompt_cache_key`.
+
+**A single upstream 429 can read as a whole-tier outage.** Every free
+deployment shares the `anonymous` marker, and a 429 is a key-health signal
+(`base.status_for_key_pool`): the router cools *that key* for its `Retry-After`,
+else 30 s (`wiwi/router/router.py`, standard mode — `cooldown_time` is not the
+knob on that path). Measured 2026-10-15 through the gateway: with **one**
+`anonymous` key entry, one model's `429 … Endpoint is unavailable.`
+(`step-5-preview-free`) left the next 16 consecutive requests — every other free
+model, all three inbound dialects — answering `503 no healthy deployment for
+'<group>'`, and a second run lost 25 the same way. With **two** entries for the
+marker the same blip cost three requests. The sentinel is not an account, so
+"cooling the key" retires the only path every free model shares. Serve free
+models for real? Declare more than one entry for `anonymous`. Tracked as
+`AUDIT.md` #469.
+
+---
+
 ## How the shape was derived
 
 The method matters as much as the result, because the obvious one produced a
@@ -189,6 +294,7 @@ npm was unreachable — failed all free-model traffic.
 | cloak switch | `FREE_TIER_CLOAK_PARAM`, `_cloak_requested()` |
 | decoy call suppression | `_filter_decoys()`, `_filter_decoys_turn()` |
 | session id | `canonical_session_id()`, `OPENCODE_SESSION_RE`, `stable_session_id()` |
+| caller's `metadata` drop | `_drop_client_metadata()` |
 | User-Agent | `wiwi/providers/opencode_version.py` — `build_user_agent()`, `FALLBACK_VERSION` |
 | per-deployment flag | `DeploymentParams.opencode_free_tier_cloak` → `Deployment` → the gateway's params dict |
 
@@ -229,6 +335,12 @@ policy refusal never retires a healthy key, and the request fails over to
 another deployment instead. So **this message always means "the request shape
 was refused"**, never "your key is wrong" and never "the tier is closed".
 
+A **`400 <account>: Upstream request failed: [unsupported_metadata] Client
+metadata is not supported.`** is a different refusal — Console relaying the
+provider behind it, which objects to the caller's `metadata` block, not to the
+fingerprint. See
+[The caller's `metadata` block is refused upstream](#the-callers-metadata-block-is-refused-upstream).
+
 **Triage order** when a `*-free` model suddenly 403s — check the cheap ones
 first:
 
@@ -248,6 +360,7 @@ opencode_credential_anonymous   route=chat   reason: Bearer public sent
 opencode_credential_omitted     route=...    reason=anonymous_sentinel
 opencode_credential_scheme      route=... scheme=...   (a wrong scheme is silently unread upstream)
 opencode_decoy_call_dropped     tool=... index=...
+opencode_client_metadata_dropped route=...    (a caller's `metadata` block, refused upstream)
 opencode_version_refreshed      version=...
 ```
 

@@ -8,6 +8,31 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — Zen relayed "Client metadata is not supported." for the caller's `metadata` (2026-10-15)
+
+### 466. `metadata` from the inbound request was forwarded to Zen, whose upstreams refuse it
+
+**Severity:** 🟠 High (every chat/messages-route request carrying a client `metadata` block answers `400`) · **Status: fixed** — 2026-10-15
+**Files:** `wiwi/providers/opencode_adapter.py` — `_drop_client_metadata()`, called from `encode_request()`
+**Trigger:** an inbound request whose body carries a top-level `metadata` (a Claude Code `metadata.user_id`, an OpenAI-Chat client's `metadata`, an Anthropic-dialect `metadata`), routed to an `opencode` deployment on the chat or messages route. Both inbound codecs capture the field into `req.extras` and both delegates forward it (`openai_adapter._STANDARD`, `anthropic_adapter._ANTHROPIC_STANDARD`), so it reached Zen's `/chat/completions` and `/messages`. The provider behind Zen answers `400` with the code `unsupported_metadata` and Console relays it as `Upstream request failed: [unsupported_metadata] Client metadata is not supported.` — the bracketed code is the *upstream's*, preserved because Console drops codes outside its own allow-list (opencode's client pins that format in `packages/ai/test/provider-error.test.ts`) — and wiwi's 400 branch renders it as `<provider account>: <message>`, which is where the `io:`-style prefix in the report comes from.
+**Fix:** drop a caller-supplied `metadata` in the adapter before the body is sent, and log `opencode_client_metadata_dropped` (debug) with the route. An operator who wants the field on the wire declares it with `extra_body: {metadata: …}`, which is left alone. Regression: `tests/test_fix_round151.py` (11 tests).
+**Caveat — this is not a fix for every model on the account.** The Responses route never forwarded extras, so a failure on the one responses-route free model (`muse-spark-*-contributor-free`) has a different cause; that path needs the raw upstream type before it is touched.
+**Checked and *not* the cause, so it does not need re-investigating:** the client fingerprint. Re-derived from the client's own source (`sst/opencode` @ `4397ee4`, 2026-10-15): the `ses_` + 12 hex + 14 base62 id, `x-opencode-project: global`, the `read`/`shell` decoy pair and the absent `x-opencode-request` all still match the current client, and every servable free model answers `200` to the adapter's exact shape — swept 2026-10-15 through the gateway as well as directly, with a caller `metadata` block on every request: 9 of the 11 current free models on all three inbound dialects, while `jev-1.13-free` is the catalog's System One model with no completion wire and `step-5-preview-free` intermittently answers `429 … Endpoint is unavailable.` from its own upstream. Matrix in `docs/OPENCODE.md`.
+
+---
+
+## 🟡 Open — a shared anonymous Zen key turns one model's 429 into a whole-tier 503 (2026-10-15)
+
+### 469. One upstream 429 cools the `anonymous` key and retires every free Zen deployment
+
+**Severity:** 🟡 Medium (a single flawed upstream model becomes a whole-tier outage for the length of the key's cooldown) · **Status: open**
+**Files:** `wiwi/router/router.py` — `if status == 429: key.mark_cooling(retry_after if retry_after and retry_after > 0 else 30.0)` (standard mode, ~line 263); `wiwi/providers/base.py:67-68` — `status_for_key_pool()` reports 429 for any 429; `wiwi/providers/opencode_adapter.py` — the `anonymous` sentinel is one credential shared by every free deployment.
+**Trigger:** any free Zen model whose upstream answers 429 while the pool declares a single `anonymous` key entry — the shape `wiwi.yaml.example` recommends. Measured live 2026-10-15 through `create_app` (one key): `step-5-preview-free` answered `429 … Upstream request failed: Endpoint is unavailable.` and the **next 16 consecutive requests** — nine other free models across all three inbound dialects — answered `503 no healthy deployment for '<group>'`. A second run lost 25 the same way after `cat-jam-free` 429'd. Declaring two `anonymous` entries cut the same blip to three requests. The sentinel is not an account, so cooling "the key" retires the single path every free deployment shares, and this 429 is an upstream-availability blip rather than a quota signal about the credential.
+**Fix sketch:** decide the cooldown's scope from the error, not the status: a 429 carrying no `Retry-After` and no quota wording should cool the *deployment* (as `record_fail` already does for 5xx) and leave the key in rotation — or let an adapter declare a credential non-coolable when it is a shared anonymous marker. Regression to write: two deployments on one sentinel key, one answers 429, the other must still serve without a cold window.
+**Repro + workaround:** recorded in `docs/OPENCODE.md` (the free-tier section's "one 429 can read as a whole-tier outage" paragraph). No code change yet.
+
+---
+
 ## 🟡 Open — full-suite flakes unrelated to any pending change (2026-10-14)
 
 Both were observed failing during one full-suite run and confirmed to pass in

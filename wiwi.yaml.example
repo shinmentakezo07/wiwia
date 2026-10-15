@@ -45,7 +45,16 @@ providers:
 
   - name: opencode-zen
     provider: opencode
-    base_url: https://opencode.ai/zen/v1
+    # Leave `base_url` unset: the adapter defaults to
+    # https://opencode.ai/inference/v1, the base the client itself uses
+    # (packages/ai/src/providers/opencode.ts). The legacy
+    # https://opencode.ai/zen/v1 still routes for a paid model, but it answers
+    # the **free tier** `403 FreeTierError` — probed 2026-10-15 with this
+    # adapter's exact request shape: anonymous, `space-bunny-free` and
+    # `muse-spark-1.3-contributor-free` both returned 200 on /inference/v1 and
+    # 403 on /zen/v1. If you copied this block from an older example, delete
+    # the `base_url: .../zen/v1` line.
+    # base_url: https://opencode.ai/zen/v1
     # Carries a real Console key for the paid models.
     #
     # The free tier is a request-shape gate, and the adapter satisfies it: a
@@ -58,7 +67,8 @@ providers:
     # opencode_adapter.py, AUDIT #465.
     #
     # A `403 FreeTierError` reaching a client means the shape drifted again (or
-    # the User-Agent fell back to a version the upstream rejects). wiwi reports
+    # the User-Agent fell back to a version the upstream rejects, or the
+    # deployment still points at the legacy /zen/v1 base above). wiwi reports
     # it as `402 … requires billing (403)` and fails over without retiring the
     # key.
     keys:

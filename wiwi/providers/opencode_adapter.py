@@ -62,10 +62,19 @@ Every request also carries a live
 :mod:`wiwi.providers.opencode_version` (5-min TTL background refresh, no
 restart needed).
 
-Every request also carries the official client's metadata headers
-(``packages/opencode/src/session/llm/request.ts``): ``x-opencode-session`` +
-``x-opencode-request``, ``x-opencode-client``, and ``x-opencode-project`` (the
-CLI's fallback when no workspace is bound).
+Every request also carries the official client's fingerprint headers, re-checked
+against the client's own source on 2026-10-15 (``packages/core/src/session/
+model-request.ts``, commit ``4397ee4``; the path in the 2026-09 docs —
+``packages/opencode/src/session/llm/request.ts`` — is where it used to live):
+``x-opencode-session`` + ``x-opencode-session-id`` carrying one ``ses_`` + 12 hex
++ 14 base62 id, ``x-opencode-client``, and ``x-opencode-project``. No
+``x-opencode-request`` — the v2 client sends none and the free tier 403s when one
+is present.
+
+The client's request *bodies* on these wires carry no client ``metadata`` block,
+and Zen's upstreams refuse one (``400 [unsupported_metadata] Client metadata is
+not supported.``). A caller's ``metadata`` therefore never goes upstream from
+here — see :func:`_drop_client_metadata`.
 
 **The free tier is a request-shape gate, and it is the v2 shape.** On 2026-09-19
 the gate was derived by probe matrix and this adapter spoke the v1 client's
@@ -410,6 +419,41 @@ def _force_auto_tool_choice(body: dict[str, Any], model_id: str) -> None:
         body["tool_choice"] = "auto"
 
 
+def _drop_client_metadata(body: dict[str, Any], req: ir.Request,
+                          deployment_params: dict[str, Any], route: Route) -> None:
+    """Drop the caller's client-metadata block before it reaches Zen.
+
+    Zen's upstreams answer a client-supplied ``metadata`` object with
+    ``400 [unsupported_metadata] Client metadata is not supported.`` Console
+    relays that as ``Upstream request failed: [unsupported_metadata] Client
+    metadata is not supported.``, keeping the *upstream's* code in brackets
+    because it strips codes outside its own allow-list — opencode's own client
+    pins that format in ``packages/ai/test/provider-error.test.ts`` ("Zen drops
+    upstream codes outside its allow-list and replaces the type, but
+    ``Protocol.errorMessage`` keeps the original code as a ``[code]`` prefix").
+    Observed on this adapter 2026-10-15 against a free model (reported with the
+    Console wrapper above, wiwi rendering it as ``<account>: <message>``).
+
+    The block is the *caller's*, not ours: the inbound codecs capture a
+    top-level ``metadata`` into ``req.extras`` and both delegates forward it
+    (``openai_adapter._STANDARD``, ``anthropic_adapter._ANTHROPIC_STANDARD``) —
+    correct for the vendors that support the field, wrong here. Zen's own client
+    puts no ``metadata`` on these wires (its request builder attaches one only on
+    the Responses protocol, and only when provider options set it), so nothing
+    downstream is waiting for it.
+
+    An operator who wants the field on the wire anyway declares it explicitly
+    with ``extra_body: {metadata: ...}`` on the deployment; that is left alone.
+    """
+    if "metadata" not in req.extras:
+        return
+    if "metadata" in (deployment_params.get("extra_body") or {}):
+        return
+    if "metadata" in body:
+        body.pop("metadata")
+        log.debug("opencode_client_metadata_dropped", route=route)
+
+
 
 # Config keys are validated non-empty (KeyDef._key_required), so a keyless
 # free-tier setup declares itself with this literal sentinel. It does **not**
@@ -629,6 +673,10 @@ class OpencodeAdapter:
             params = dict(deployment_params)
             params["provider_type"] = "openai"
             body = self._chat.encode_request(req, model_id, params)
+        # Zen refuses the caller's client-metadata block on every route that can
+        # carry one (see _drop_client_metadata). The Gemini route returns above
+        # and the Responses encoder never forwards extras, so neither can.
+        _drop_client_metadata(body, req, deployment_params, route)
         # force_stream transport: the declaration above only moves the gateway
         # onto the pump; the request still has to ask for SSE. The client's own
         # flag is irrelevant — the pump reassembles either way — so it is

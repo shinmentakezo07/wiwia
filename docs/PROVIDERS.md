@@ -208,7 +208,7 @@ The decoys are inert — the description is replaced so the model is told not to
 providers:
   - name: opencode-main
     provider: opencode
-    base_url: https://opencode.ai/zen/v1     # default
+    base_url: https://opencode.ai/inference/v1   # default; legacy /zen/v1 403s the free tier
     keys:
       - {label: main, key: os.environ/OPENCODE_API_KEY}
 ```

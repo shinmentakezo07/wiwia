@@ -341,7 +341,7 @@ without a matching adapter.
 | `workbuddy` | `https://copilot.tencent.com` | WorkBuddy / CodeBuddy (Tencent); stream-only upstream, business errors ride HTTP 200 |
 | `gmicloud` | `https://api.gmi-serving.com/v1` | GMI Cloud serving endpoint |
 | `bai` | `https://api.b.ai/v1` | one key across Chat / Responses / Messages |
-| `opencode` | `https://opencode.ai/zen/v1` | per-model protocol routing with a live `User-Agent` |
+| `opencode` | `https://opencode.ai/inference/v1` | per-model protocol routing with a live `User-Agent` |
 | `hermes` | `https://inference-api.nousresearch.com/v1` | Nous Portal; API key or OAuth device-code token (`hermes:` prefix); declines Realtime |
 | `openai-compatible` | *(you supply it)* | any URL — Ollama, vLLM, LM Studio, Together, Groq, DeepSeek |
 

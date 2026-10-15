@@ -10,6 +10,59 @@ Each entry below records the before→after state, the exact files and lines cha
 
 ---
 
+## Round 151 — Zen refuses the caller's client-metadata block (2026-10-15)
+
+### 151.1 A caller's `metadata` must not reach Zen
+
+**Files**: `wiwi/providers/opencode_adapter.py` (`_drop_client_metadata()`, called from `encode_request()`); `docs/OPENCODE.md`; `AUDIT.md` #466.
+
+**Symptom** (reported 2026-10-15, `*-free` model):
+
+```
+400 <account>: Upstream request failed: [unsupported_metadata] Client metadata is not supported.
+```
+
+**Before**: the chat and messages routes delegate to `openai_adapter` /
+`anthropic_adapter`, and both forward a caller-supplied `metadata` from
+`req.extras` (`_STANDARD` / `_ANTHROPIC_STANDARD`). That is correct for the
+vendors that support the field and wrong behind Zen: Console relays the body to
+the provider serving the model, that provider refuses the block, and Console
+wraps the refusal as `Upstream request failed: [<code>] <message>` — the
+bracketed code is the *upstream's*, preserved because Console strips codes
+outside its own allow-list (opencode's client pins the format in
+`packages/ai/test/provider-error.test.ts`). wiwi's 400 branch then renders it as
+`<provider account>: <message>`.
+
+**After**:
+
+```python
+# encode_request(), after the delegate builds the body
+_drop_client_metadata(body, req, deployment_params, route)
+```
+
+It removes `metadata` **only when the caller supplied it** (`"metadata" in
+req.extras`) and leaves an operator's `extra_body: {metadata: …}` untouched, so a
+deployment that deliberately puts the field on the wire still can. No route gate
+is needed: the Responses encoder never forwarded extras, and the Gemini route
+returns before the call.
+
+**Why the field rather than the fingerprint**: the report arrived framed as "our
+client metadata is stale, refresh it from the client", so the fingerprint was
+re-derived from the client's own source (`sst/opencode` @ `4397ee4`) —
+`Identifier.descending()` still mints `ses_` + 12 hex + 14 base62,
+`ProjectID.global` is literally `global`, and the client sends no
+`x-opencode-request` — and every value was probed. The only client metadata wiwi
+put on the wire that the real client does not is the caller's `metadata` block.
+The one path this does **not** cover is the Responses route (see AUDIT #466).
+
+**Tests**: `tests/test_fix_round151.py` (11) — the drop on the chat and messages
+routes, provider-wide (paid models too), `metadata: null`, the Responses-route
+no-op, the other extras still forwarded, the debug log line, the `extra_body`
+escape hatch, and the boundary (native OpenAI/Anthropic adapters still forward
+the field).
+
+---
+
 ## Round 96 — OpenRouter repair fidelity and request-schema guards (2026-09-24)
 
 ### 96.1 Repaired tool arguments must cross every wire as parsed IR
