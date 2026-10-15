@@ -1,20 +1,28 @@
-// Pricing — three deployment tiers (Self-host, BYOK, Cloud), a feature
-// comparison matrix, FAQ accordion, and a closing CTA. Matches the dark
-// design system shared with the admin console; reuses the animated beam
-// backdrop and ambient glow language from the Landing page.
+// Pricing — three deployment tiers (Self-host, BYOK, Cloud), a "what you
+// actually pay" receipt visual, a feature comparison matrix, FAQ accordion,
+// and a closing CTA. Matches the dark design system shared with the admin
+// console; reuses the animated beam backdrop and ambient glow language from
+// the Landing page.
 
 import { Link } from "react-router-dom";
 import {
+  Activity,
   ArrowRight,
+  Boxes,
+  CalendarX2,
   Check,
+  ChevronDown,
+  CreditCard,
+  GitBranch,
+  Infinity as InfinityIcon,
   KeyRound,
   Minus,
   Server,
+  ShieldCheck,
   Sparkles,
   Wallet,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { Card } from "@/components/ui";
 import { HERO_BEAMS_COMPACT, HeroBeamBackdrop } from "@/components/HeroBeamBackdrop";
 
 const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
@@ -22,10 +30,16 @@ const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
 interface Tier {
   icon: LucideIcon;
   name: string;
+  tag: string;
+  /** The headline number — deliberately `$0` on every tier, because "no platform
+   *  fee" is the claim this page exists to make. `payFor` says what you *do*
+   *  pay, so the zero is never mistaken for "the product is free to run". */
   price: string;
   priceNote: string;
+  payFor: string;
   features: string[];
   cta: { label: string; to: string };
+  accent: string;
   featured?: boolean;
 }
 
@@ -33,8 +47,11 @@ const TIERS: Tier[] = [
   {
     icon: Server,
     name: "Self-host",
-    price: "Free forever",
-    priceNote: "AGPLv3 — run it anywhere",
+    tag: "Open source",
+    price: "$0",
+    priceNote: "forever",
+    payFor: "You pay for your own infrastructure",
+    accent: "#34d399",
     features: [
       "Full gateway, dashboard, and API on your own infra",
       "Three inbound dialects, every outbound provider",
@@ -47,8 +64,11 @@ const TIERS: Tier[] = [
   {
     icon: KeyRound,
     name: "Bring your own keys",
-    price: "Free",
-    priceNote: "Pay providers directly",
+    tag: "No platform fee",
+    price: "$0",
+    priceNote: "platform fee",
+    payFor: "You pay providers directly",
+    accent: "#a855f7",
     features: [
       "Route through your own provider API keys",
       "Unified analytics, caching, and failover included",
@@ -61,8 +81,11 @@ const TIERS: Tier[] = [
   {
     icon: Wallet,
     name: "Cloud",
-    price: "Pay-as-you-go",
-    priceNote: "Provider rates, no markup on tokens",
+    tag: "Most popular",
+    price: "$0",
+    priceNote: "markup on tokens",
+    payFor: "You pay each provider's own token rates",
+    accent: "#60a5fa",
     features: [
       "Managed gateway — no infra to run",
       "Pay per-token at each provider's own rates",
@@ -137,20 +160,6 @@ const COLS = [
   { key: "cloud" as const, name: "Cloud" },
 ];
 
-function CellMark({ value }: { value: Cell }) {
-  if (value === true)
-    return <Check size={15} className="mx-auto text-emerald-400" />;
-  if (value === false)
-    return <Minus size={15} className="mx-auto text-[var(--admin-text-dim)]" />;
-  if (value === "partial")
-    return <span className="text-[var(--admin-text-muted)]">~</span>;
-  return (
-    <span className="font-mono text-[12px] text-[var(--admin-text-muted)]" style={{ fontFamily: MONO }}>
-      {value}
-    </span>
-  );
-}
-
 // ── FAQ ──────────────────────────────────────────────────────────────────
 
 interface FaqItem {
@@ -181,68 +190,109 @@ const FAQ_ITEMS: FaqItem[] = [
   },
 ];
 
+// ── hero trust content ───────────────────────────────────────────────────
 
 const TRUST_STATS = [
-  { value: "40+", label: "Providers" },
-  { value: "200+", label: "Models" },
-  { value: "100B+", label: "Tokens routed" },
-  { value: "99.9999%", label: "Uptime" },
+  { icon: Boxes, value: "40+", label: "Providers" },
+  { icon: Sparkles, value: "200+", label: "Models" },
+  { icon: Activity, value: "100B+", label: "Tokens routed" },
+  { icon: ShieldCheck, value: "99.9999%", label: "Uptime" },
 ];
 
-const BADGES = ["No credit card required", "AGPLv3 open source", "Cancel anytime"];
+const BADGES: { icon: LucideIcon; label: string }[] = [
+  { icon: CreditCard, label: "No credit card required" },
+  { icon: GitBranch, label: "AGPLv3 open source" },
+  { icon: CalendarX2, label: "Cancel anytime" },
+];
+
+/** The three zeros this page argues for, restated as facts rather than claims. */
+const ZERO_FACTS = [
+  { label: "Platform fee", value: "$0" },
+  { label: "Token markup", value: "0%" },
+  { label: "Seats & minimums", value: "None" },
+];
+
+/** Sample month used by the receipt visual. Illustrative, and labelled as such. */
+const SAMPLE_BILL = {
+  provider: "$1,000.00",
+  fee: "$0.00",
+  total: "$1,000.00",
+};
+
+/** `rgba()` string from a 6-digit hex plus an alpha, for the per-tier washes. */
+function withAlpha(hex: string, alpha: number) {
+  const r = hex.slice(1, 3);
+  const g = hex.slice(3, 5);
+  const b = hex.slice(5, 7);
+  return `rgba(${parseInt(r, 16)}, ${parseInt(g, 16)}, ${parseInt(b, 16)}, ${alpha})`;
+}
+
+// ── page ──────────────────────────────────────────────────────────────────
 
 export function PricingPage() {
   return (
-    <div className="space-y-20 pb-20">
+    <div className="space-y-24 pb-24">
       {/* ════════ hero ════════ */}
-      <section className="relative overflow-hidden pt-6 pb-2">
+      <section className="relative overflow-hidden pt-10 pb-2">
         <HeroBeamBackdrop beams={HERO_BEAMS_COMPACT} className="opacity-60" />
-        {/* soft radial glow behind the headline */}
+        {/* drifting colour wash — gives the black a sense of depth behind the
+            headline without competing with it for attention */}
+        <div className="wiwi-aurora pointer-events-none absolute -top-24 left-[12%] h-64 w-64 rounded-full opacity-40" style={{ background: "rgba(59,130,246,0.22)" }} aria-hidden />
+        <div className="wiwi-aurora pointer-events-none absolute -top-10 right-[10%] h-56 w-56 rounded-full opacity-40" style={{ background: "rgba(168,85,247,0.18)", animationDelay: "-7s" }} aria-hidden />
         <div
-          className="pointer-events-none absolute left-1/2 top-10 h-72 w-[640px] max-w-full -translate-x-1/2 rounded-full"
+          className="pointer-events-none absolute left-1/2 top-16 h-80 w-[720px] max-w-full -translate-x-1/2 rounded-full"
           style={{ background: "radial-gradient(circle, rgba(59,130,246,0.10) 0%, transparent 65%)" }}
           aria-hidden
         />
+
         <div className="relative z-10 mx-auto max-w-3xl text-center">
-          <span className="admin-badge admin-badge-blue mb-5">
+          <span className="admin-badge admin-badge-blue mb-6 inline-flex">
             <Sparkles size={12} />
             Pricing
           </span>
-          <h1 className="text-4xl font-bold tracking-[-0.02em] text-[var(--admin-text)] sm:text-5xl md:text-6xl">
+          <h1 className="text-4xl font-bold leading-[1.05] tracking-[-0.03em] text-[var(--admin-text)] sm:text-5xl md:text-6xl">
             Three ways to run it.{" "}
-            <span className="bg-gradient-to-r from-blue-400 via-violet-400 to-fuchsia-400 bg-clip-text text-transparent">
-              Two are free.
-            </span>
+            <span className="hero-gradient-text">Two are free.</span>
           </h1>
-          <p className="mx-auto mt-5 max-w-xl text-[15px] leading-relaxed text-[var(--admin-text-muted)] sm:text-base">
+          <p className="mx-auto mt-6 max-w-xl text-[15px] leading-relaxed text-[var(--admin-text-muted)] sm:text-base">
             No seats, no minimums, no token markup. Start free and only pay for
             tokens when you use the managed cloud.
           </p>
+
           {/* trust badges */}
-          <div className="mt-7 flex flex-wrap items-center justify-center gap-2.5">
-            {BADGES.map((b) => (
+          <div className="mt-8 flex flex-wrap items-center justify-center gap-2.5">
+            {BADGES.map(({ icon: Icon, label }) => (
               <span
-                key={b}
-                className="inline-flex items-center gap-1.5 rounded-full border border-[var(--admin-border)] bg-white/[0.02] px-3 py-1.5 text-[12px] text-[var(--admin-text-muted)]"
+                key={label}
+                className="inline-flex items-center gap-1.5 rounded-full border border-[var(--admin-border)] bg-white/[0.02] px-3.5 py-2 text-[12px] text-[var(--admin-text-muted)] transition-colors hover:border-[var(--admin-border-hover)] hover:bg-white/[0.04] hover:text-[var(--admin-text)]"
               >
-                <Check size={12} className="text-emerald-400/80" />
-                {b}
+                <Icon size={12} className="text-emerald-400/80" aria-hidden />
+                {label}
               </span>
             ))}
           </div>
         </div>
+
         {/* trust stats */}
-        <div className="relative z-10 mx-auto mt-12 grid max-w-3xl grid-cols-2 gap-4 sm:grid-cols-4">
-          {TRUST_STATS.map((s) => (
-            <div key={s.label} className="text-center">
+        <div className="relative z-10 mx-auto mt-14 grid max-w-4xl grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
+          {TRUST_STATS.map(({ icon: Icon, value, label }) => (
+            <div
+              key={label}
+              className="group relative overflow-hidden rounded-2xl border border-[var(--admin-border)] bg-[var(--admin-surface)] px-4 py-6 text-center transition-all duration-200 hover:-translate-y-0.5 hover:border-white/[0.12] hover:bg-white/[0.03] hover:shadow-lg hover:shadow-blue-500/5"
+            >
+              <span
+                className="pointer-events-none absolute -top-10 left-1/2 h-20 w-20 -translate-x-1/2 rounded-full bg-brand-500/20 opacity-0 blur-2xl transition-opacity duration-300 group-hover:opacity-100"
+                aria-hidden
+              />
+              <Icon className="relative mx-auto h-4 w-4 text-blue-400/70" aria-hidden />
               <div
-                className="font-mono text-2xl font-semibold text-[var(--admin-text)] sm:text-3xl"
+                className="relative mt-3 bg-gradient-to-b from-[var(--admin-text)] to-[var(--admin-text-muted)] bg-clip-text text-2xl font-bold tabular-nums text-transparent sm:text-3xl"
                 style={{ fontFamily: MONO }}
               >
-                {s.value}
+                {value}
               </div>
-              <div className="mt-1 text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--admin-text-dim)]">
-                {s.label}
+              <div className="relative mt-1.5 text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--admin-text-dim)]">
+                {label}
               </div>
             </div>
           ))}
@@ -251,103 +301,82 @@ export function PricingPage() {
 
       {/* ════════ tiers ════════ */}
       <section className="scroll-reveal">
-        <div className="mx-auto grid max-w-6xl grid-cols-1 gap-5 md:grid-cols-3">
-          {TIERS.map((tier, idx) => {
-            const Icon = tier.icon;
-            const featured = tier.featured;
-            return (
-              <div
-                key={tier.name}
-                className="admin-stagger"
-                style={{ animationDelay: `${idx * 80}ms` }}
-              >
-                <Card
-                  className={`relative flex h-full flex-col p-7 ${
-                    featured
-                      ? "ring-1 ring-blue-500/25"
-                      : ""
-                  }`}
-                >
-                  {featured && (
-                    <>
-                      {/* brand glow behind the featured card */}
-                      <div
-                        className="pointer-events-none absolute -inset-px rounded-[var(--admin-radius)] opacity-60"
-                        style={{
-                          background:
-                            "radial-gradient(120% 80% at 50% 0%, rgba(59,130,246,0.10) 0%, transparent 60%)",
-                        }}
-                        aria-hidden
-                      />
-                      <span className="admin-badge admin-badge-blue absolute -top-3 left-1/2 -translate-x-1/2 shadow-lg shadow-blue-500/10">
-                        <Sparkles size={12} />
-                        Most popular
-                      </span>
-                    </>
-                  )}
-                  <div className="relative z-10 flex h-full flex-col">
-                    <div className="mb-5 flex items-center gap-3">
-                      <span
-                        className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-[12px] ring-1 ring-white/[0.06] ${
-                          featured
-                            ? "bg-gradient-to-br from-blue-500/20 to-violet-500/20"
-                            : "bg-gradient-to-br from-blue-500/10 to-violet-500/10"
-                        }`}
-                      >
-                        <Icon
-                          className="h-5 w-5"
-                          style={{ color: featured ? "rgba(96,165,250,0.95)" : "rgba(59,130,246,0.85)" }}
-                        />
-                      </span>
-                      <h3 className="text-[17px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
-                        {tier.name}
-                      </h3>
-                    </div>
-                    <div className="mb-1">
-                      <span
-                        className="font-mono text-[22px] font-semibold text-blue-400"
-                        style={{ fontFamily: MONO }}
-                      >
-                        {tier.price}
-                      </span>
-                    </div>
-                    <p className="mb-5 text-[12px] text-[var(--admin-text-dim)]">{tier.priceNote}</p>
-                    <div className="mb-6 h-px w-full bg-gradient-to-r from-transparent via-[var(--admin-border)] to-transparent" />
-                    <ul className="mb-7 flex-1 space-y-3">
-                      {tier.features.map((f) => (
-                        <li key={f} className="flex items-start gap-2.5">
-                          <span
-                            className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full ${
-                              featured ? "bg-blue-500/15" : "bg-emerald-500/10"
-                            }`}
-                          >
-                            <Check
-                              size={11}
-                              className={featured ? "text-blue-300" : "text-emerald-400"}
-                            />
-                          </span>
-                          <span className="text-[13px] leading-relaxed text-[var(--admin-text-muted)]">
-                            {f}
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
-                    <Link
-                      to={tier.cta.to}
-                      className={`inline-flex h-11 items-center justify-center gap-2 rounded-[10px] text-[13px] font-medium transition-[filter,background-color,border-color] duration-150 ${
-                        featured
-                          ? "bg-gradient-to-b from-brand-500 to-brand-700 px-5 text-white shadow-lg shadow-brand-600/25 hover:brightness-110"
-                          : "border border-white/[0.08] bg-white/[0.02] px-5 text-[var(--admin-text)] hover:border-white/[0.14] hover:bg-white/[0.04]"
-                      }`}
-                    >
-                      {tier.cta.label}
-                      <ArrowRight size={14} />
-                    </Link>
-                  </div>
-                </Card>
-              </div>
-            );
-          })}
+        <div className="mb-10 text-center">
+          <span className="admin-label">Plans</span>
+          <h2 className="mt-2 text-2xl font-semibold tracking-[-0.01em] text-[var(--admin-text)] sm:text-3xl">
+            Pick where it runs, not what you pay
+          </h2>
+        </div>
+
+        <div className="mx-auto grid max-w-6xl grid-cols-1 gap-5 md:grid-cols-3 md:py-6">
+          {TIERS.map((tier, idx) => (
+            <div
+              key={tier.name}
+              className="admin-stagger relative"
+              style={{ animationDelay: `${idx * 80}ms` }}
+            >
+              <TierCard tier={tier} />
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* ════════ what you actually pay ════════ */}
+      <section className="scroll-reveal relative mx-auto max-w-5xl">
+        <div
+          className="pointer-events-none absolute inset-x-0 -top-10 h-40 opacity-70"
+          style={{ background: "radial-gradient(60% 100% at 50% 100%, rgba(59,130,246,0.07) 0%, transparent 70%)" }}
+          aria-hidden
+        />
+        <div className="relative mb-10 text-center">
+          <span className="admin-label">The whole pitch, in one number</span>
+          <h2 className="mt-2 text-2xl font-semibold tracking-[-0.01em] text-[var(--admin-text)] sm:text-3xl">
+            What you actually pay
+          </h2>
+          <p className="mx-auto mt-3 max-w-xl text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
+            The number that matters is the one on your provider bill. wiwi never
+            changes it — routing through the gateway costs the same as not using it.
+          </p>
+        </div>
+
+        <div className="relative grid grid-cols-1 gap-4 md:grid-cols-[1fr_auto_1fr] md:items-center">
+          <Receipt title="Straight to your provider" subtitle="No gateway in the path" />
+          <div className="flex items-center justify-center md:py-8">
+            <span
+              className="flex h-11 w-11 items-center justify-center rounded-full border border-[var(--admin-border)] bg-[var(--admin-surface-elevated)] text-[15px] font-semibold text-[var(--admin-text-muted)]"
+              style={{ fontFamily: MONO }}
+              aria-hidden
+            >
+              =
+            </span>
+          </div>
+          <Receipt
+            title="Through wiwi"
+            subtitle="Routing, retries, analytics, failover"
+            accent
+          />
+        </div>
+
+        <p className="mt-4 text-center text-[12px] text-[var(--admin-text-dim)]">
+          Illustrative month at $1,000 of provider usage.
+        </p>
+
+        {/* the three zeros */}
+        <div className="mt-8 grid grid-cols-1 gap-3 sm:grid-cols-3">
+          {ZERO_FACTS.map(({ label, value }) => (
+            <div
+              key={label}
+              className="flex items-center justify-between gap-3 rounded-[12px] border border-[var(--admin-border)] bg-[var(--admin-surface)] px-5 py-4"
+            >
+              <span className="flex items-center gap-2 text-[13px] text-[var(--admin-text-muted)]">
+                <InfinityIcon size={14} className="text-emerald-400/80" aria-hidden />
+                {label}
+              </span>
+              <span className="text-[17px] font-semibold text-emerald-400" style={{ fontFamily: MONO }}>
+                {value}
+              </span>
+            </div>
+          ))}
         </div>
       </section>
 
@@ -363,19 +392,25 @@ export function PricingPage() {
             handles the infrastructure.
           </p>
         </div>
-        <Card className="overflow-hidden p-0">
+        <div className="overflow-hidden rounded-[var(--admin-radius)] border border-[var(--admin-border)] bg-[var(--admin-surface)]">
           <div className="overflow-x-auto admin-scroll">
             <table className="w-full min-w-[640px] border-collapse text-left">
               <thead>
                 <tr className="border-b border-[var(--admin-border)]">
-                  <th className="px-5 py-4 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--admin-text-dim)]">
+                  <th
+                    scope="col"
+                    className="sticky left-0 z-10 bg-[var(--admin-surface)] px-5 py-4 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--admin-text-dim)] shadow-[6px_0_10px_-8px_rgba(0,0,0,0.9)]"
+                  >
                     Feature
                   </th>
                   {COLS.map((c, i) => (
                     <th
                       key={c.key}
-                      className={`px-5 py-4 text-center text-[13px] font-semibold text-[var(--admin-text)] ${
-                        i === COLS.length - 1 ? "text-blue-400" : ""
+                      scope="col"
+                      className={`px-5 py-4 text-center text-[13px] font-semibold ${
+                        i === COLS.length - 1
+                          ? "text-blue-400"
+                          : "text-[var(--admin-text)]"
                       }`}
                     >
                       {c.name}
@@ -390,7 +425,12 @@ export function PricingPage() {
               </tbody>
             </table>
           </div>
-        </Card>
+        </div>
+        {/* The table scrolls horizontally on a phone; say so rather than letting
+            the reader discover it by dragging. */}
+        <p className="mt-3 text-center text-[12px] text-[var(--admin-text-dim)] sm:hidden">
+          Swipe the table sideways to compare all three plans →
+        </p>
       </section>
 
       {/* ════════ FAQ ════════ */}
@@ -407,10 +447,13 @@ export function PricingPage() {
               key={item.question}
               className="group rounded-[12px] border border-[var(--admin-border)] bg-[var(--admin-surface)] transition-colors hover:border-[var(--admin-border-hover)] [&_summary]:list-none"
             >
-              <summary className="flex cursor-pointer items-center justify-between gap-3 px-5 py-4 text-[14px] font-medium text-[var(--admin-text)]">
+              <summary className="flex cursor-pointer items-center justify-between gap-3 px-5 py-4 text-[14px] font-medium text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/25">
                 {item.question}
-                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-[var(--admin-border)] text-[var(--admin-text-dim)] transition-all duration-200 group-open:rotate-45 group-open:border-blue-500/30 group-open:text-blue-400">
-                  <span className="text-[16px] leading-none">+</span>
+                <span
+                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[var(--admin-border)] text-[var(--admin-text-dim)] transition-all duration-200 group-open:border-blue-500/30 group-open:bg-blue-500/10 group-open:text-blue-400"
+                  aria-hidden
+                >
+                  <ChevronDown size={14} className="transition-transform duration-200 group-open:rotate-180" />
                 </span>
               </summary>
               <div className="border-t border-[var(--admin-border)] px-5 py-4">
@@ -425,14 +468,18 @@ export function PricingPage() {
 
       {/* ════════ final CTA ════════ */}
       <section className="scroll-reveal mx-auto max-w-5xl">
-        <div className="relative overflow-hidden rounded-[var(--admin-radius-lg)] border border-[var(--admin-border)] bg-[var(--admin-surface)] px-6 py-14 text-center sm:px-12">
-          {/* ambient glow */}
+        <div className="relative overflow-hidden rounded-[var(--admin-radius-lg)] border border-[var(--admin-border)] bg-[var(--admin-surface)] px-6 py-16 text-center sm:px-12">
+          <HeroBeamBackdrop beams={HERO_BEAMS_COMPACT} className="opacity-40" />
           <div
             className="pointer-events-none absolute left-1/2 top-0 h-64 w-[520px] max-w-full -translate-x-1/2 rounded-full"
-            style={{ background: "radial-gradient(circle, rgba(124,58,237,0.10) 0%, transparent 65%)" }}
+            style={{ background: "radial-gradient(circle, rgba(124,58,237,0.12) 0%, transparent 65%)" }}
             aria-hidden
           />
           <div className="relative z-10">
+            <span className="admin-badge admin-badge-blue mb-5 inline-flex">
+              <Sparkles size={12} />
+              Free to start
+            </span>
             <h2 className="text-2xl font-semibold tracking-[-0.01em] text-[var(--admin-text)] sm:text-3xl">
               Ready to start?
             </h2>
@@ -440,17 +487,17 @@ export function PricingPage() {
               Create a free account in seconds — no credit card, no commitment.
               Upgrade to managed cloud only if you want us to run it.
             </p>
-            <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
+            <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
               <Link
                 to="/signup"
-                className="inline-flex h-11 items-center justify-center gap-2 rounded-[10px] bg-gradient-to-b from-brand-500 to-brand-700 px-6 text-[13px] font-medium text-white shadow-lg shadow-brand-600/25 transition-[filter] duration-150 hover:brightness-110"
+                className="wiwi-shimmer group inline-flex h-12 w-full items-center justify-center gap-2 rounded-[10px] bg-gradient-to-b from-brand-500 to-brand-700 px-6 text-[13px] font-medium text-white shadow-lg shadow-brand-600/25 transition-[filter] duration-150 hover:brightness-110 sm:w-auto"
               >
                 Get started free
-                <ArrowRight size={14} />
+                <ArrowRight size={14} className="transition-transform duration-150 group-hover:translate-x-0.5" />
               </Link>
               <Link
                 to="/docs"
-                className="inline-flex h-11 items-center justify-center gap-2 rounded-[10px] border border-white/[0.08] bg-white/[0.02] px-6 text-[13px] font-medium text-[var(--admin-text)] transition-colors hover:border-white/[0.14] hover:bg-white/[0.04]"
+                className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-[10px] border border-white/[0.08] bg-white/[0.02] px-6 text-[13px] font-medium text-[var(--admin-text)] transition-colors hover:border-white/[0.14] hover:bg-white/[0.04] sm:w-auto"
               >
                 Read the docs
               </Link>
@@ -462,29 +509,247 @@ export function PricingPage() {
   );
 }
 
+// ── tier card ────────────────────────────────────────────────────────────
+
+function TierCard({ tier }: { tier: Tier }) {
+  const Icon = tier.icon;
+  const featured = Boolean(tier.featured);
+  return (
+    <div
+      className={`group relative flex h-full flex-col rounded-[var(--admin-radius-lg)] p-7 transition-all duration-300 hover:-translate-y-1 ${
+        featured
+          ? "border border-blue-500/25 bg-[var(--admin-surface-elevated)] shadow-2xl shadow-blue-500/[0.08] md:scale-[1.03] md:hover:scale-[1.04]"
+          : "border border-[var(--admin-border)] bg-[var(--admin-surface)] hover:border-[var(--admin-border-hover)] hover:shadow-xl hover:shadow-black/30"
+      }`}
+    >
+      {/* accent wash, keyed to the tier's own colour */}
+      <span
+        className="pointer-events-none absolute inset-0 opacity-70 transition-opacity duration-300 group-hover:opacity-100"
+        style={{
+          background: `radial-gradient(110% 70% at 50% 0%, ${withAlpha(tier.accent, featured ? 0.12 : 0.07)} 0%, transparent 60%)`,
+        }}
+        aria-hidden
+      />
+      {/* top specular edge */}
+      <span
+        className="pointer-events-none absolute inset-x-6 top-0 h-px"
+        style={{ background: `linear-gradient(90deg, transparent, ${withAlpha(tier.accent, 0.55)}, transparent)` }}
+        aria-hidden
+      />
+
+      {featured && (
+        <span className="absolute -top-3 right-6 inline-flex items-center gap-1.5 rounded-full border border-blue-500/30 bg-blue-500/15 px-3 py-1 text-[11px] font-medium text-blue-300">
+          <Sparkles size={11} aria-hidden />
+          Most popular
+        </span>
+      )}
+
+      <div className="relative z-10 flex h-full flex-col">
+        <div className="mb-6 flex items-center gap-3">
+          <span
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[12px] border transition-transform duration-300 group-hover:scale-105"
+            style={{
+              background: withAlpha(tier.accent, 0.1),
+              borderColor: withAlpha(tier.accent, 0.22),
+              color: tier.accent,
+            }}
+          >
+            <Icon className="h-5 w-5" aria-hidden />
+          </span>
+          <div className="min-w-0">
+            <h3 className="text-[17px] font-semibold leading-tight tracking-[-0.01em] text-[var(--admin-text)]">
+              {tier.name}
+            </h3>
+            <span className="mt-0.5 block text-[11px] uppercase tracking-[0.12em]" style={{ color: withAlpha(tier.accent, 0.85) }}>
+              {tier.tag}
+            </span>
+          </div>
+        </div>
+
+        {/* price block */}
+        <div className="rounded-[12px] border border-white/[0.05] bg-white/[0.02] px-4 py-4">
+          <div className="flex items-baseline gap-2">
+            <span className="text-[40px] font-bold leading-none tracking-[-0.03em] tabular-nums" style={{ fontFamily: MONO, color: tier.accent }}>
+              {tier.price}
+            </span>
+            <span className="text-[12px] leading-tight text-[var(--admin-text-dim)]">
+              {tier.priceNote}
+            </span>
+          </div>
+          <p className="mt-2.5 flex items-start gap-1.5 text-[12px] leading-snug text-[var(--admin-text-muted)]">
+            <ArrowRight size={12} className="mt-0.5 shrink-0" style={{ color: withAlpha(tier.accent, 0.8) }} aria-hidden />
+            {tier.payFor}
+          </p>
+        </div>
+
+        <div className="my-6 h-px w-full bg-gradient-to-r from-transparent via-[var(--admin-border)] to-transparent" />
+
+        <ul className="mb-7 flex-1 space-y-3">
+          {tier.features.map((f) => (
+            <li key={f} className="flex items-start gap-2.5">
+              <span
+                className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full"
+                style={{ background: withAlpha(tier.accent, 0.14) }}
+              >
+                <Check size={10} style={{ color: tier.accent }} aria-hidden />
+              </span>
+              <span className="text-[13px] leading-relaxed text-[var(--admin-text-muted)]">
+                {f}
+              </span>
+            </li>
+          ))}
+        </ul>
+
+        <Link
+          to={tier.cta.to}
+          className={`inline-flex h-11 w-full items-center justify-center gap-2 rounded-[10px] px-5 text-[13px] font-medium transition-all duration-150 ${
+            featured
+              ? "wiwi-shimmer bg-gradient-to-b from-brand-500 to-brand-700 text-white shadow-lg shadow-brand-600/25 hover:brightness-110"
+              : "border border-white/[0.08] bg-white/[0.02] text-[var(--admin-text)] hover:border-white/[0.14] hover:bg-white/[0.05]"
+          }`}
+        >
+          {tier.cta.label}
+          <ArrowRight size={14} />
+        </Link>
+      </div>
+    </div>
+  );
+}
+
+// ── receipt ──────────────────────────────────────────────────────────────
+
+function Receipt({
+  title,
+  subtitle,
+  accent = false,
+}: {
+  title: string;
+  subtitle: string;
+  accent?: boolean;
+}) {
+  return (
+    <div
+      className={`rounded-[14px] border p-5 transition-colors sm:p-6 ${
+        accent
+          ? "border-blue-500/25 bg-[var(--admin-surface-elevated)] shadow-lg shadow-blue-500/[0.06]"
+          : "border-[var(--admin-border)] bg-[var(--admin-surface)]"
+      }`}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[13px] font-semibold text-[var(--admin-text)]">{title}</div>
+          <div className="mt-0.5 text-[11px] text-[var(--admin-text-dim)]">{subtitle}</div>
+        </div>
+        {accent && (
+          <span className="admin-badge admin-badge-blue shrink-0">
+            <Check size={11} aria-hidden />
+            No markup
+          </span>
+        )}
+      </div>
+
+      <dl className="mt-5 space-y-2.5">
+        <ReceiptRow label="Provider usage" value={SAMPLE_BILL.provider} />
+        <ReceiptRow label="wiwi platform fee" value={SAMPLE_BILL.fee} muted />
+        <div className="!mt-4 flex items-baseline gap-3 border-t border-dashed border-[var(--admin-border)] pt-3.5">
+          <dt className="text-[12px] font-medium text-[var(--admin-text-muted)]">Total</dt>
+          <span
+            className="mx-1 h-px flex-1 translate-y-[-3px]"
+            style={{
+              backgroundImage:
+                "radial-gradient(circle, var(--admin-text-dim) 1px, transparent 1px)",
+              backgroundSize: "6px 6px",
+            }}
+            aria-hidden
+          />
+          <dd className="text-[19px] font-semibold tabular-nums text-[var(--admin-text)]" style={{ fontFamily: MONO }}>
+            {SAMPLE_BILL.total}
+          </dd>
+        </div>
+      </dl>
+    </div>
+  );
+}
+
+function ReceiptRow({
+  label,
+  value,
+  muted = false,
+}: {
+  label: string;
+  value: string;
+  muted?: boolean;
+}) {
+  return (
+    <div className="flex items-baseline gap-2">
+      <dt className="shrink-0 text-[12px] text-[var(--admin-text-dim)]">{label}</dt>
+      <span
+        className="mx-1 h-px flex-1 translate-y-[-3px]"
+        style={{
+          backgroundImage:
+            "radial-gradient(circle, var(--admin-text-dim) 1px, transparent 1px)",
+          backgroundSize: "6px 6px",
+        }}
+        aria-hidden
+      />
+      <dd
+        className={`shrink-0 text-[12px] tabular-nums ${
+          muted ? "text-emerald-400" : "text-[var(--admin-text-muted)]"
+        }`}
+        style={{ fontFamily: MONO }}
+      >
+        {value}
+      </dd>
+    </div>
+  );
+}
+
+// ── comparison table helpers ─────────────────────────────────────────────
+
+function CellMark({ value }: { value: Cell }) {
+  if (value === true)
+    return (
+      <span className="mx-auto flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500/12">
+        <Check size={12} className="text-emerald-400" aria-label="Included" />
+      </span>
+    );
+  if (value === false)
+    return (
+      <span className="mx-auto flex h-5 w-5 items-center justify-center">
+        <Minus size={14} className="text-[var(--admin-text-dim)]" aria-label="Not included" />
+      </span>
+    );
+  if (value === "partial")
+    return <span className="text-[var(--admin-text-muted)]">~</span>;
+  return (
+    <span className="text-[12px] text-[var(--admin-text-muted)]" style={{ fontFamily: MONO }}>
+      {value}
+    </span>
+  );
+}
+
 function GroupBlock({ group }: { group: CompareGroup }) {
   return (
     <>
-      <tr className="border-b border-[var(--admin-border)] bg-white/[0.012]">
-        <td
+      <tr>
+        <th
+          scope="colgroup"
           colSpan={4}
-          className="px-5 py-2.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--admin-text-dim)]"
+          className="sticky left-0 border-b border-[var(--admin-border)] bg-[#0b0b0b] px-5 py-2.5 text-left text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--admin-text-dim)]"
         >
           {group.heading}
-        </td>
+        </th>
       </tr>
-      {group.rows.map((row, i) => (
-        <tr
-          key={row.label}
-          className={`border-b border-[var(--admin-border)] transition-colors hover:bg-white/[0.015] ${
-            i === group.rows.length - 1 ? "border-b-0" : ""
-          }`}
-        >
-          <td className="px-5 py-3.5 text-[13px] text-[var(--admin-text-muted)]">
+      {group.rows.map((row) => (
+        <tr key={row.label} className="group transition-colors hover:bg-white/[0.02]">
+          <th
+            scope="row"
+            className="sticky left-0 z-10 border-b border-[var(--admin-border)] bg-[var(--admin-surface)] px-5 py-3.5 text-left text-[13px] font-normal text-[var(--admin-text-muted)] shadow-[6px_0_10px_-8px_rgba(0,0,0,0.9)] transition-colors group-hover:bg-[#0d0d0d] group-hover:text-[var(--admin-text)]"
+          >
             {row.label}
-          </td>
+          </th>
           {COLS.map((c) => (
-            <td key={c.key} className="px-5 py-3.5 text-center">
+            <td key={c.key} className="border-b border-[var(--admin-border)] px-5 py-3.5 text-center">
               <CellMark value={row[c.key]} />
             </td>
           ))}
