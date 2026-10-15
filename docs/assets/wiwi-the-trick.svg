@@ -1,0 +1,138 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="660" viewBox="0 0 1280 660" role="img" aria-label="The trick drawn out: Claude Code posts an Anthropic Messages body, wiwi decodes it into the canonical IR, encodes it as an OpenAI Chat Completions body for GPT, then re-encodes the reply back into an Anthropic message the client understands">
+  <defs>
+    <radialGradient id="ta" cx="14%" cy="14%" r="52%"><stop offset="0" stop-color="#6366f1" stop-opacity=".28"/><stop offset="1" stop-color="#6366f1" stop-opacity="0"/></radialGradient>
+    <radialGradient id="tb" cx="88%" cy="84%" r="55%"><stop offset="0" stop-color="#a855f7" stop-opacity=".22"/><stop offset="1" stop-color="#a855f7" stop-opacity="0"/></radialGradient>
+    <radialGradient id="tc" cx="56%" cy="2%" r="44%"><stop offset="0" stop-color="#38bdf8" stop-opacity=".16"/><stop offset="1" stop-color="#38bdf8" stop-opacity="0"/></radialGradient>
+    <pattern id="tgrid" width="64" height="64" patternUnits="userSpaceOnUse"><path d="M64 0H0v64" fill="none" stroke="#ffffff" stroke-opacity=".045"/></pattern>
+    <linearGradient id="tline" gradientUnits="userSpaceOnUse" x1="1226" y1="0" x2="74" y2="0"><stop offset="0" stop-color="#d946ef" stop-opacity=".55"/><stop offset=".5" stop-color="#8b5cf6"/><stop offset="1" stop-color="#6366f1" stop-opacity=".6"/></linearGradient>
+    <marker id="tsend" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#a78bfa"/>
+    </marker>
+    <style>
+      .flow { fill: none; stroke: #c4b5fd; stroke-width: 2.2; stroke-linecap: round; stroke-dasharray: 12 76; animation: tflow 1.5s linear infinite; }
+      @keyframes tflow { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -88; } }
+      .back { fill: none; stroke: #a78bfa; stroke-width: 1.6; stroke-dasharray: 6 7; opacity: .5; animation: tback 1.4s linear infinite; }
+      @keyframes tback { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -13; } }
+      .core { animation: tcore 4s ease-in-out infinite; }
+      @keyframes tcore { 0%, 100% { stroke-opacity: .45; } 50% { stroke-opacity: .9; } }
+      @media (prefers-reduced-motion: reduce) { .flow, .back, .core { animation: none; } }
+    </style>
+  </defs>
+
+  <rect width="1280" height="660" fill="#07070c"/>
+  <rect width="1280" height="660" fill="url(#tgrid)"/>
+  <rect width="1280" height="660" fill="url(#ta)"/>
+  <rect width="1280" height="660" fill="url(#tb)"/>
+  <rect width="1280" height="660" fill="url(#tc)"/>
+
+  <text x="54" y="46" font-family="Inter,Arial,sans-serif" font-size="19" font-weight="800" fill="#f4f4f6">The trick, drawn out</text>
+  <text x="54" y="68" font-family="Inter,Arial,sans-serif" font-size="12.5" fill="#8b93a5">Claude Code asks in the Anthropic dialect. GPT answers in the OpenAI dialect. The client only ever sees Anthropic.</text>
+
+  <!-- ============ 01 · CLIENT SPEAKS ============ -->
+  <g>
+    <rect x="54" y="100" width="356" height="400" rx="16" fill="#0e0e16" stroke="#ffffff" stroke-opacity=".10"/>
+    <rect x="54" y="100" width="3" height="400" rx="1.5" fill="#cc7c5e"/>
+    <text x="74" y="134" font-family="ui-monospace,Menlo,monospace" font-size="10" letter-spacing="1.6" fill="#6b7280">01 · CLIENT SPEAKS</text>
+    <text x="74" y="160" font-family="Inter,Arial,sans-serif" font-size="14" font-weight="700" fill="#f0a58a">Anthropic Messages</text>
+    <text x="74" y="180" font-family="Inter,Arial,sans-serif" font-size="11" fill="#8b93a5">Claude Code · anthropic SDK</text>
+    <line x1="74" y1="196" x2="390" y2="196" stroke="#ffffff" stroke-opacity=".07"/>
+
+    <g font-family="ui-monospace,Menlo,monospace" font-size="11" fill="#94a3b8">
+      <text x="74" y="220" fill="#e5e7eb">POST /v1/messages</text>
+      <text x="74" y="238">x-api-key: sk-wiwi-…</text>
+      <text x="74" y="256">anthropic-version: 2023-06-01</text>
+      <text x="74" y="292">{</text>
+      <text x="74" y="310">  "model": "gpt-4o",</text>
+      <text x="74" y="328">  "system": "be brief",</text>
+      <text x="74" y="346">  "messages": [</text>
+      <text x="74" y="364">    {"role": "user",</text>
+      <text x="74" y="382">     "content": [{"type": "text",</text>
+      <text x="74" y="400">                  "text": "hi"}]}</text>
+      <text x="74" y="418">  ],</text>
+      <text x="74" y="436">  "thinking": {"type": "enabled",</text>
+      <text x="74" y="454">               "budget_tokens": 8000}</text>
+      <text x="74" y="472">}</text>
+    </g>
+  </g>
+
+  <!-- request hop 1 -->
+  <g>
+    <text x="436" y="284" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="9.5" fill="#818cf8">decode</text>
+    <line x1="416" y1="300" x2="454" y2="300" stroke="#a78bfa" stroke-opacity=".55" stroke-width="1.6" marker-end="url(#tsend)"/>
+    <path class="flow" d="M 416 300 L 454 300"/>
+  </g>
+
+  <!-- ============ 02 · WIWI ============ -->
+  <g>
+    <rect x="462" y="100" width="356" height="400" rx="16" fill="#0d0d18" stroke="#6366f1" stroke-opacity=".5" stroke-width="1.5"/>
+    <rect class="core" x="462" y="100" width="356" height="400" rx="16" fill="none" stroke="#6366f1" stroke-width="1.5"/>
+    <text x="482" y="134" font-family="ui-monospace,Menlo,monospace" font-size="10" letter-spacing="1.6" fill="#6b7280">02 · WIWI</text>
+    <text x="482" y="160" font-family="Inter,Arial,sans-serif" font-size="14" font-weight="700" fill="#a5b4fc">Canonical IR</text>
+    <text x="482" y="180" font-family="Inter,Arial,sans-serif" font-size="11" fill="#8b93a5">decode → route → encode, once per request</text>
+    <line x1="482" y1="196" x2="798" y2="196" stroke="#312e81"/>
+
+    <g font-family="ui-monospace,Menlo,monospace" font-size="11">
+      <text x="482" y="222" fill="#94a3b8">system: "be brief"</text>
+      <text x="482" y="240" fill="#34d399">   ↳ messages[0].role: system</text>
+
+      <text x="482" y="266" fill="#94a3b8">content: [ {type: "text"} ]</text>
+      <text x="482" y="284" fill="#22d3ee">   ↳ content: "hi" — flat</text>
+
+      <text x="482" y="310" fill="#94a3b8">thinking.budget_tokens: 8000</text>
+      <text x="482" y="328" fill="#f472b6">   ↳ reasoning_effort: "medium"</text>
+
+      <line x1="482" y1="354" x2="798" y2="354" stroke="#312e81"/>
+      <text x="482" y="376" font-size="10" letter-spacing="1.2" fill="#6b7280">ON THE WAY BACK</text>
+      <text x="482" y="400" fill="#fbbf24">stop_reason    ← finish_reason</text>
+      <text x="482" y="418" fill="#a78bfa">input_tokens   ← prompt_tokens</text>
+      <text x="482" y="436" fill="#a78bfa">output_tokens  ← completion_tokens</text>
+    </g>
+  </g>
+
+  <!-- request hop 2 -->
+  <g>
+    <text x="844" y="284" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="9.5" fill="#818cf8">encode</text>
+    <line x1="824" y1="300" x2="862" y2="300" stroke="#a78bfa" stroke-opacity=".55" stroke-width="1.6" marker-end="url(#tsend)"/>
+    <path class="flow" d="M 824 300 L 862 300"/>
+  </g>
+
+  <!-- ============ 03 · UPSTREAM SEES ============ -->
+  <g>
+    <rect x="870" y="100" width="356" height="400" rx="16" fill="#0e0e16" stroke="#ffffff" stroke-opacity=".10"/>
+    <rect x="870" y="100" width="3" height="400" rx="1.5" fill="#10a37f"/>
+    <text x="890" y="134" font-family="ui-monospace,Menlo,monospace" font-size="10" letter-spacing="1.6" fill="#6b7280">03 · UPSTREAM SEES</text>
+    <text x="890" y="160" font-family="Inter,Arial,sans-serif" font-size="14" font-weight="700" fill="#34d399">OpenAI Chat Completions</text>
+    <text x="890" y="180" font-family="Inter,Arial,sans-serif" font-size="11" fill="#8b93a5">gpt-4o · api.openai.com</text>
+    <line x1="890" y1="196" x2="1206" y2="196" stroke="#ffffff" stroke-opacity=".07"/>
+
+    <g font-family="ui-monospace,Menlo,monospace" font-size="11" fill="#94a3b8">
+      <text x="890" y="220" fill="#e5e7eb">POST /v1/chat/completions</text>
+      <text x="890" y="256">{</text>
+      <text x="890" y="274">  "model": "gpt-4o",</text>
+      <text x="890" y="292" fill="#f472b6">  "reasoning_effort": "medium",</text>
+      <text x="890" y="310">  "messages": [</text>
+      <text x="890" y="328" fill="#34d399">    {"role": "system",</text>
+      <text x="890" y="346" fill="#34d399">     "content": "be brief"},</text>
+      <text x="890" y="364">    {"role": "user",</text>
+      <text x="890" y="382" fill="#22d3ee">     "content": "hi"}</text>
+      <text x="890" y="400">  ]</text>
+      <text x="890" y="418">}</text>
+    </g>
+  </g>
+
+  <!-- ============ return leg ============ -->
+  <g>
+    <rect x="54" y="518" width="1172" height="118" rx="14" fill="#0b0b14" stroke="#ffffff" stroke-opacity=".08"/>
+    <text x="640" y="532" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="10" fill="#6b7280">the reply travels back — re-encoded in the caller&#8217;s dialect</text>
+    <line x1="1216" y1="542" x2="74" y2="542" stroke="url(#tline)" stroke-opacity=".4" stroke-width="1.4" marker-end="url(#tsend)"/>
+    <path class="back" d="M 1216 542 L 74 542"/>
+
+    <text x="74" y="566" font-family="ui-monospace,Menlo,monospace" font-size="10" letter-spacing="1.2" fill="#6b7280">OPENAI REPLY</text>
+    <text x="200" y="566" font-family="ui-monospace,Menlo,monospace" font-size="11" fill="#64748b">{"choices":[{"index":0,"message":{"role":"assistant",<tspan fill="#22d3ee">"content":"hi!"</tspan>},</text>
+    <text x="206" y="584" font-family="ui-monospace,Menlo,monospace" font-size="11" fill="#64748b"><tspan fill="#fbbf24">"finish_reason":"stop"</tspan>}],"usage":{<tspan fill="#a78bfa">"prompt_tokens":8,"completion_tokens":2</tspan>}}}</text>
+
+    <text x="74" y="610" font-family="ui-monospace,Menlo,monospace" font-size="10" letter-spacing="1.2" fill="#6b7280">CLIENT GETS</text>
+    <text x="200" y="610" font-family="ui-monospace,Menlo,monospace" font-size="11" fill="#64748b">{"id":"msg_1","type":"message","role":"assistant",<tspan fill="#22d3ee">"content":[{"type":"text",</tspan></text>
+    <text x="206" y="628" font-family="ui-monospace,Menlo,monospace" font-size="11" fill="#64748b"><tspan fill="#22d3ee">"text":"hi!"</tspan>}],<tspan fill="#fbbf24">"stop_reason":"end_turn"</tspan>,"usage":{<tspan fill="#a78bfa">"input_tokens":8,"output_tokens":2</tspan>}}}</text>
+  </g>
+</svg>

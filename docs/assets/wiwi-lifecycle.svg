@@ -7,6 +7,15 @@
     <marker id="larw2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
       <path d="M 0 1 L 9 5 L 0 9 z" fill="#a78bfa"/>
     </marker>
+    <style>
+      .hl { fill: none; stroke: #c4b5fd; stroke-width: 1.6; opacity: 0; animation: lhl 6.3s linear infinite; }
+      @keyframes lhl { 0% { opacity: .95; } 12% { opacity: 0; } 100% { opacity: 0; } }
+      .flow { fill: none; stroke: #ddd6fe; stroke-width: 2.2; stroke-linecap: round; stroke-dasharray: 5 11; animation: lflow .55s linear infinite; }
+      @keyframes lflow { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -16; } }
+      .rflow { fill: none; stroke: #c4b5fd; stroke-width: 2; stroke-linecap: round; stroke-dasharray: 16 84; animation: rflow 2.2s linear infinite; }
+      @keyframes rflow { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -100; } }
+      @media (prefers-reduced-motion: reduce) { .hl, .flow, .rflow { animation: none; } }
+    </style>
   </defs>
 
   <rect width="1280" height="250" fill="#07070c"/>
@@ -61,4 +70,22 @@
 
   <path d="M 1162 172 C 1162 214 118 214 118 172" fill="none" stroke="url(#life)" stroke-width="1.8" marker-end="url(#larw2)" stroke-opacity=".8"/>
   <text x="640" y="234" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="11.5" fill="#a78bfa">response returns in the caller&#8217;s own dialect · every reply carries x-wiwi-request-id and x-wiwi-latency-ms</text>
+<path class="rflow" d="M 1162 172 C 1162 214 118 214 118 172"/>
+  <g>
+    <rect class="hl" x="43" y="92" width="150" height="78" rx="12"/>
+    <rect class="hl" style="animation-delay:.9s" x="217" y="92" width="150" height="78" rx="12"/>
+    <rect class="hl" style="animation-delay:1.8s" x="391" y="92" width="150" height="78" rx="12"/>
+    <rect class="hl" style="animation-delay:2.7s" x="565" y="92" width="150" height="78" rx="12"/>
+    <rect class="hl" style="animation-delay:3.6s" x="739" y="92" width="150" height="78" rx="12"/>
+    <rect class="hl" style="animation-delay:4.5s" x="913" y="92" width="150" height="78" rx="12"/>
+    <rect class="hl" style="animation-delay:5.4s" x="1087" y="92" width="150" height="78" rx="12"/>
+  </g>
+  <g>
+    <line class="flow" x1="197" y1="131" x2="213" y2="131"/>
+    <line class="flow" style="animation-delay:-.09s" x1="371" y1="131" x2="387" y2="131"/>
+    <line class="flow" style="animation-delay:-.18s" x1="545" y1="131" x2="561" y2="131"/>
+    <line class="flow" style="animation-delay:-.27s" x1="719" y1="131" x2="735" y2="131"/>
+    <line class="flow" style="animation-delay:-.36s" x1="893" y1="131" x2="909" y2="131"/>
+    <line class="flow" style="animation-delay:-.45s" x1="1067" y1="131" x2="1083" y2="131"/>
+  </g>
 </svg>

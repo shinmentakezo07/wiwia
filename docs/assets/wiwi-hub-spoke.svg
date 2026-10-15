@@ -7,6 +7,19 @@
     <linearGradient id="wiwi-brand" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#6366f1"/><stop offset=".55" stop-color="#8b5cf6"/><stop offset="1" stop-color="#a855f7"/>
     </linearGradient>
+    <style>
+      .flow { fill: none; stroke: #ddd6fe; stroke-width: 2.2; stroke-linecap: round; stroke-dasharray: 12 78; animation: hsflow 1.6s linear infinite; }
+      @keyframes hsflow { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -90; } }
+      .pick { fill: none; stroke: #c4b5fd; stroke-width: 1.5; opacity: 0; animation: hspick 6s linear infinite; }
+      @keyframes hspick { 0% { opacity: .95; } 6% { opacity: 0; } 100% { opacity: 0; } }
+      .p1 { animation: hsphase 4.5s linear infinite; }
+      .p2 { animation: hsphase 4.5s linear infinite; animation-delay: -1.5s; }
+      .p3 { animation: hsphase 4.5s linear infinite; animation-delay: -3s; }
+      @keyframes hsphase { 0%, 22% { opacity: 1; } 30%, 100% { opacity: .38; } }
+      .irp { animation: hsirp 4s ease-in-out infinite; }
+      @keyframes hsirp { 0%, 100% { stroke-opacity: .5; } 50% { stroke-opacity: .95; } }
+      @media (prefers-reduced-motion: reduce) { .flow, .pick, .p1, .p2, .p3, .irp { animation: none; } }
+    </style>
   </defs>
 
   <rect width="1280" height="660" fill="#07070c"/>
@@ -67,19 +80,25 @@
   <line x1="444" y1="244" x2="816" y2="244" stroke="#312e81" stroke-width="1"/>
 
   <g font-family="ui-monospace,Menlo,monospace" font-size="11.5">
+    <g class="p1">
     <text x="452" y="276" fill="#818cf8">▸ decode</text>
     <text x="452" y="298" fill="#94a3b8">wire/{chat,responses,messages}</text>
     <text x="452" y="320" fill="#e2e8f0">→ IRRequest</text>
+    </g>
 
+    <g class="p2">
     <text x="452" y="352" fill="#818cf8">▸ execute</text>
     <text x="452" y="374" fill="#94a3b8">auth · budgets · rate limits</text>
     <text x="452" y="396" fill="#94a3b8">WRR key pools · retries</text>
     <text x="452" y="418" fill="#94a3b8">cooldowns · fallbacks</text>
     <text x="452" y="440" fill="#e2e8f0">→ provider adapter</text>
+    </g>
 
+    <g class="p3">
     <text x="452" y="472" fill="#818cf8">▸ encode</text>
     <text x="452" y="494" fill="#94a3b8">IRStreamDelta* → wire</text>
     <text x="452" y="516" fill="#e2e8f0">back in the caller&#8217;s dialect</text>
+    </g>
   </g>
 
   <line x1="444" y1="540" x2="816" y2="540" stroke="#312e81" stroke-width="1"/>
@@ -112,5 +131,27 @@
     <g><rect x="1030" y="527" width="190" height="30" rx="8" fill="#101018" stroke="#ffffff" stroke-opacity=".09"/><text x="1046" y="547" fill="#cbd5e1">opencode</text></g>
     <g><rect x="1030" y="565" width="190" height="30" rx="8" fill="#101018" stroke="#ffffff" stroke-opacity=".09"/><text x="1046" y="585" fill="#cbd5e1">hermes</text></g>
     <g><rect x="1030" y="603" width="190" height="30" rx="8" fill="#101018" stroke="#a78bfa" stroke-opacity=".35"/><text x="1046" y="623" fill="#a78bfa">+ openai-compatible</text></g>
+  </g>
+<rect class="irp" x="420" y="185" width="420" height="448" rx="18" fill="none" stroke="#818cf8" stroke-width="1.6"/>
+  <g>
+    <path class="flow" d="M 240 250 C 330 250 330 260 420 260"/>
+    <path class="flow" style="animation-delay:-.53s" d="M 240 409 C 330 409 330 409 420 409"/>
+    <path class="flow" style="animation-delay:-1.07s" d="M 240 568 C 330 568 330 558 420 558"/>
+    <path class="flow" style="animation-delay:-.4s" d="M 840 409 C 900 409 930 409 975 409"/>
+    <path class="flow" style="animation-delay:-.8s" d="M 975 409 L 975 200"/>
+  </g>
+  <g>
+    <rect class="pick" x="1030" y="185" width="190" height="30" rx="8"/>
+    <rect class="pick" style="animation-delay:.5s" x="1030" y="223" width="190" height="30" rx="8"/>
+    <rect class="pick" style="animation-delay:1s" x="1030" y="261" width="190" height="30" rx="8"/>
+    <rect class="pick" style="animation-delay:1.5s" x="1030" y="299" width="190" height="30" rx="8"/>
+    <rect class="pick" style="animation-delay:2s" x="1030" y="337" width="190" height="30" rx="8"/>
+    <rect class="pick" style="animation-delay:2.5s" x="1030" y="375" width="190" height="30" rx="8"/>
+    <rect class="pick" style="animation-delay:3s" x="1030" y="413" width="190" height="30" rx="8"/>
+    <rect class="pick" style="animation-delay:3.5s" x="1030" y="451" width="190" height="30" rx="8"/>
+    <rect class="pick" style="animation-delay:4s" x="1030" y="489" width="190" height="30" rx="8"/>
+    <rect class="pick" style="animation-delay:4.5s" x="1030" y="527" width="190" height="30" rx="8"/>
+    <rect class="pick" style="animation-delay:5s" x="1030" y="565" width="190" height="30" rx="8"/>
+    <rect class="pick" style="animation-delay:5.5s" x="1030" y="603" width="190" height="30" rx="8"/>
   </g>
 </svg>

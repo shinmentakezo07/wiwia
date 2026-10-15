@@ -5,6 +5,13 @@
     <marker id="arw" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
       <path d="M 0 1 L 9 5 L 0 9 z" fill="#a78bfa"/>
     </marker>
+    <style>
+      .irp { animation: swpulse 4s ease-in-out infinite; }
+      @keyframes swpulse { 0%, 100% { stroke-opacity: .5; } 50% { stroke-opacity: 1; } }
+      .flow { fill: none; stroke: #ddd6fe; stroke-width: 2.2; stroke-linecap: round; stroke-dasharray: 6 12; animation: swflow .9s linear infinite; }
+      @keyframes swflow { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -18; } }
+      @media (prefers-reduced-motion: reduce) { .irp, .flow { animation: none; } }
+    </style>
   </defs>
 
   <rect width="1280" height="470" fill="#07070c"/>
@@ -95,4 +102,11 @@
     <circle cx="1108" cy="380" r="11"/><circle cx="1154" cy="380" r="11"/><circle cx="1199" cy="380" r="11"/>
   </g>
   <text x="930" y="424" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="12" fill="#a78bfa">3 codecs + 12 adapters = 15 modules</text>
+<rect class="irp" x="706" y="250" width="448" height="54" rx="12" fill="none" stroke="#a5b4fc" stroke-width="1.5"/>
+  <g>
+    <line class="flow" x1="776" y1="212" x2="776" y2="246"/>
+    <line class="flow" style="animation-delay:-.3s" x1="930" y1="212" x2="930" y2="246"/>
+    <line class="flow" style="animation-delay:-.6s" x1="1084" y1="212" x2="1084" y2="246"/>
+    <line class="flow" style="animation-delay:-.15s" x1="930" y1="304" x2="930" y2="336"/>
+  </g>
 </svg>
