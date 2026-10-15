@@ -41,6 +41,7 @@ import {
 } from "lucide-react";
 import {
   deletePricing,
+  getAllRequestLogs,
   getModels,
   getRequestLogs,
   getPricing,
@@ -49,6 +50,7 @@ import {
 import { useLiveInvalidation } from "@/api/stream";
 import type { ModelPrice, RequestLogEntry } from "@/api/types";
 import {
+  Alert,
   Badge,
   Button,
   Card,
@@ -66,6 +68,7 @@ import {
   TD,
 } from "@/components/ui";
 import { fmtInt, fmtPct, fmtTokens, fmtUsd, groupBy, mean } from "@/lib/format";
+import { logsToCsv } from "@/lib/csv";
 import { hourlySeries } from "@/lib/dashboard-metrics";
 import { downloadBlob } from "@/api/backup";
 import {
@@ -165,31 +168,6 @@ function groupKeyOf(l: RequestLogEntry, dim: GroupDim): string {
   if (dim === "model") return l.model_group;
   if (dim === "key") return l.key_alias;
   return l.provider;
-}
-
-function csvEscape(v: string | number): string {
-  const s = String(v);
-  return /[",\n\r]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
-}
-
-function toCsv(logs: RequestLogEntry[]): string {
-  const header = [
-    "time", "key", "model", "provider", "status",
-    "tok_in", "cached", "reasoning", "out",
-    "tps", "ttft_ms", "latency_ms", "cost",
-  ];
-  const lines = [header.join(",")];
-  for (const l of logs) {
-    lines.push(
-      [
-        new Date(l.ts * 1000).toISOString(),
-        l.key_alias, l.model_group, l.provider, l.status,
-        l.tok_in, l.tok_cached, l.tok_reasoning, l.tok_out,
-        l.tps, l.ttft_ms, l.latency_ms, l.cost,
-      ].map(csvEscape).join(","),
-    );
-  }
-  return lines.join("\n");
 }
 
 /** Interpolate a color between blue and violet by t in [0,1]. */
@@ -939,6 +917,8 @@ export function AnalyticsPage() {
   const [groupDim, setGroupDim] = useState<GroupDim>("model");
   const [metric, setMetric] = useState<Metric>("requests");
   const [selectedModel, setSelectedModel] = useState<string>("all");
+  const [exporting, setExporting] = useState(false);
+  const [exportNote, setExportNote] = useState<string | null>(null);
 
   const logsQuery = useQuery({
     queryKey: ["request-logs"],
@@ -1169,11 +1149,38 @@ export function AnalyticsPage() {
     [logs],
   );
 
-  const exportCsv = () => {
-    downloadBlob(
-      `wiwi-analytics-${selectedModel}-${Date.now()}.csv`,
-      new Blob([toCsv(logs)], { type: "text/csv;charset=utf-8" }),
-    );
+  /** Export the *history*, not the viewport.
+   *
+   *  The table renders `logs`, which is a single page of the log — plenty to
+   *  look at, a lie in a file. So the export walks the whole log server-side
+   *  and then applies the same model filter the table does, so the file and
+   *  the screen still agree on which rows are in scope; what changes is that
+   *  the file is no longer bounded by what fits in a page. */
+  const exportCsv = async () => {
+    setExporting(true);
+    setExportNote(null);
+    try {
+      const { logs: all, truncated } = await getAllRequestLogs();
+      const rows = selectedModel === "all"
+        ? all
+        : all.filter((l) => l.model_group === selectedModel);
+      downloadBlob(
+        `wiwi-analytics-${selectedModel}-${Date.now()}.csv`,
+        new Blob([logsToCsv(rows)], { type: "text/csv;charset=utf-8" }),
+      );
+      if (truncated) {
+        // An export that stopped early has to say so, or the operator reads a
+        // short file as a small gateway.
+        setExportNote(
+          `Exported the newest ${fmtInt(rows.length)} rows — this gateway holds more ` +
+          `history than one export loads, so the file is partial.`,
+        );
+      }
+    } catch (e) {
+      setExportNote(`Export failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setExporting(false);
+    }
   };
 
   const hotCol = "font-semibold text-blue-400";
@@ -1275,14 +1282,20 @@ export function AnalyticsPage() {
               onChange={setSelectedModel}
               options={modelSelectOptions}
             />
-            <Button onClick={exportCsv} disabled={logs.length === 0}>
-              <Download size={14} /> Export CSV
+            <Button onClick={exportCsv} disabled={exporting || logs.length === 0}>
+              <Download size={14} /> {exporting ? "Preparing…" : "Export CSV"}
             </Button>
           </div>
         }
       />
 
       {logsQuery.error && <ErrorText>{logsQuery.error.message}</ErrorText>}
+
+      {exportNote && (
+        <Alert tone="warning" onDismiss={() => setExportNote(null)}>
+          {exportNote}
+        </Alert>
+      )}
 
       {/* ── Stat cards ─────────────────────────────────────────────────── */}
       <div className="admin-stagger grid grid-cols-2 gap-3 lg:grid-cols-4">

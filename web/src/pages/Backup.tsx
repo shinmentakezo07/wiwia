@@ -16,7 +16,7 @@
 
 import { useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Download, FileJson, ShieldAlert, Upload } from "lucide-react";
+import { DatabaseZap, Download, FileJson, ShieldAlert, Upload } from "lucide-react";
 
 import {
   BACKUP_SECTIONS,
@@ -186,6 +186,11 @@ export function BackupTab() {
   const [includeBodies, setIncludeBodies] = useState(false);
   const [logDays, setLogDays] = useState(30);
 
+  // The sections that carry usage and stats, as opposed to configuration.
+  // Called out in the hint because the default export omits them, and "the
+  // file has no usage data in it" is the surprise this page exists to avoid.
+  const hasUsageData = sections.has("logs") || sections.has("rollups");
+
   // -- import state
   const [picked, setPicked] = useState<{ name: string; doc: BackupDocument } | null>(null);
   const [plan, setPlan] = useState<BackupPlan | null>(null);
@@ -297,9 +302,53 @@ export function BackupTab() {
           subtitle="Download this gateway's configuration as one JSON file."
         />
         <div className="space-y-4 p-4 pt-0">
-          <Field label="Sections" hint="Bulk sections are excluded by default — the request log grows without limit.">
-            <SectionPicker selected={sections} onChange={setSections} disabled={busy} />
-          </Field>
+          {/* The quick-select buttons sit *beside* the `Field`, not inside it.
+              `Field` renders its children inside a `<label>`, and a button
+              nested in a label takes the label's whole text as its accessible
+              name — every section name plus the hint, announced on focus. */}
+          <div className="space-y-2">
+            {/* The bulk sections hold the usage history and are off by
+                default — a sound default, but it means the plain download
+                carries no usage data at all, and the boxes that would add it
+                are the four marked "optional". One click each way, so a file
+                without the history is a choice rather than the default. */}
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                className="min-h-[44px]"
+                disabled={busy}
+                onClick={() => {
+                  setSections(new Set(BACKUP_SECTIONS.map((s) => s.id)));
+                  // "Everything" has to mean it: the log window defaults to
+                  // 30 days, and leaving it there would export a file that
+                  // claims completeness while holding a slice.
+                  setLogDays(0);
+                }}
+              >
+                <DatabaseZap size={14} /> All data — usage &amp; stats
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                className="min-h-[44px]"
+                disabled={busy}
+                onClick={() => setSections(new Set(DEFAULT_BACKUP_SECTIONS))}
+              >
+                Configuration only
+              </Button>
+            </div>
+            <Field
+              label="Sections"
+              hint={
+                hasUsageData
+                  ? "Usage and stats are included — the request log and usage rollups travel in this file."
+                  : "Usage and stats are NOT in this file: they live in the request log and usage rollups sections, which are excluded by default because the log grows without limit."
+              }
+            >
+              <SectionPicker selected={sections} onChange={setSections} disabled={busy} />
+            </Field>
+          </div>
 
           <div className="space-y-2.5 rounded-[10px] border border-[var(--admin-border)] bg-white/[0.015] p-3">
             <Toggle

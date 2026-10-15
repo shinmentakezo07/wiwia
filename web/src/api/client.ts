@@ -349,6 +349,16 @@ export const getTimeseries = (metric: TimeseriesMetric, minutes: number) =>
     `/admin/stats/timeseries?bucket=minute&metric=${metric}&minutes=${minutes}`,
   );
 
+/** Rows per request the console asks for, and the page size the export walk
+ *  below advances by. The endpoint's own ceiling is 50 000 (a runaway-caller
+ *  guard), so this leaves room to page rather than sitting on the limit. */
+const LOG_PAGE_LIMIT = 10_000;
+
+/** Rows the export walk will load before it stops and says so. A gateway with
+ *  more history than this still exports — it just reports the file as partial
+ *  rather than fetching unboundedly in one click. */
+const LOG_EXPORT_CEILING = 200_000;
+
 /** Request-log rows, newest-first.
  *
  *  The zero-argument call keeps its exact historical request
@@ -362,9 +372,12 @@ export const getTimeseries = (metric: TimeseriesMetric, minutes: number) =>
 export const getRequestLogs = (opts?: {
   minutes?: number;
   offset?: number;
+  limit?: number;
   signal?: AbortSignal;
 }) => {
-  const params = new URLSearchParams({ limit: "10000" });
+  const params = new URLSearchParams({
+    limit: String(opts?.limit ?? LOG_PAGE_LIMIT),
+  });
   if (opts?.minutes !== undefined) params.set("minutes", String(opts.minutes));
   if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
   return api<{ logs: RequestLogEntry[] }>(
@@ -372,6 +385,39 @@ export const getRequestLogs = (opts?: {
     { signal: opts?.signal },
   );
 };
+
+/** Every log row the gateway will hand out, paging until the server runs dry.
+ *
+ *  `getRequestLogs` fetches one page — enough for the pages the console
+ *  *renders*, which is why they pass a limit and stop. An export is the one
+ *  caller that has to agree with the database instead of with the viewport: a
+ *  CSV built from the rendered page covers only the newest rows and, before
+ *  this existed, said nothing about the rest. So the walk advances `offset`
+ *  until a short page ends it.
+ *
+ *  Returns `truncated: true` when `LOG_EXPORT_CEILING` stopped the walk, so the
+ *  caller can label the file partial — an export that cannot finish must not
+ *  look like one that did. */
+export async function getAllRequestLogs(opts?: {
+  minutes?: number;
+  signal?: AbortSignal;
+}): Promise<{ logs: RequestLogEntry[]; truncated: boolean }> {
+  const logs: RequestLogEntry[] = [];
+  for (let offset = 0; ; offset += LOG_PAGE_LIMIT) {
+    const page = (await getRequestLogs({
+      minutes: opts?.minutes,
+      offset,
+      // Stated rather than inherited from the default: the walk's step and the
+      // size it asks for have to be the same number, and a silent change to one
+      // would turn every page short and end the walk early.
+      limit: LOG_PAGE_LIMIT,
+      signal: opts?.signal,
+    })).logs;
+    logs.push(...page);
+    if (page.length < LOG_PAGE_LIMIT) return { logs, truncated: false };
+    if (logs.length >= LOG_EXPORT_CEILING) return { logs, truncated: true };
+  }
+}
 
 export const getPricing = () =>
   api<{ models: ModelPrice[] }>("/admin/pricing");

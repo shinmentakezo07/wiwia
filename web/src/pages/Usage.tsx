@@ -10,6 +10,7 @@ import {
   ArrowUpFromLine,
   Brain,
   DollarSign,
+  Download,
   Gauge,
   KeyRound,
   Percent,
@@ -33,11 +34,14 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { getOverview, getRequestLogs, getTimeseries } from "@/api/client";
+import { getAllRequestLogs, getOverview, getRequestLogs, getTimeseries } from "@/api/client";
+import { downloadBlob } from "@/api/backup";
 import { useLiveInvalidation } from "@/api/stream";
 import type { RequestLogEntry, TpsBucket } from "@/api/types";
 import {
+  Alert,
   Badge,
+  Button,
   Card,
   CardHeader,
   EmptyState,
@@ -60,6 +64,7 @@ import {
   groupBy,
   mean,
 } from "@/lib/format";
+import { logsToCsv } from "@/lib/csv";
 import { deltaVsPrevHour, hourlySeries } from "@/lib/dashboard-metrics";
 import {
   GaugeRing,
@@ -204,6 +209,37 @@ function latencyBuckets(
   }));
 }
 
+/** Rows inside the selected range, judged by this client's own clock.
+ *
+ *  The server applies the same window (`minutes=range`); comparing here as
+ *  well is what makes the boundary independent of when a response happened to
+ *  be built, and covers the placeholderData window right after a range switch,
+ *  when the held rows may belong to a wider range than the one now selected. */
+function inRange(logs: RequestLogEntry[], minutes: number): RequestLogEntry[] {
+  if (minutes === 0) return logs; // all-time: no cutoff
+  const cutoff = Math.floor(Date.now() / 1000) - minutes * 60;
+  return logs.filter((l) => l.ts >= cutoff);
+}
+
+/** Rows in the table's current sort order.
+ *
+ *  Shared by the rendered table and the CSV export, so a file downloaded from
+ *  a sorted view comes out in that order instead of in a second convention
+ *  invented by the exporter. */
+function sortRows(rows: RequestLogEntry[], key: SortKey, dir: SortDir): RequestLogEntry[] {
+  const out = [...rows];
+  out.sort((a, b) => {
+    const va = sortValue(a, key);
+    const vb = sortValue(b, key);
+    const cmp =
+      typeof va === "number" && typeof vb === "number"
+        ? va - vb
+        : String(va).localeCompare(String(vb));
+    return dir === "asc" ? cmp : -cmp;
+  });
+  return out;
+}
+
 function groupKeyOf(l: RequestLogEntry, dim: GroupDim): string {
   if (dim === "model") return l.model_group;
   if (dim === "key") return l.key_alias;
@@ -279,6 +315,8 @@ export function UsagePage() {
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [latencyMetric, setLatencyMetric] = useState<LatencyMetric>("ttft");
   const [filterGroup, setFilterGroup] = useState<{ dim: GroupDim; name: string } | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportNote, setExportNote] = useState<string | null>(null);
 
   useEffect(() => {
     try {
@@ -312,17 +350,12 @@ export function UsagePage() {
   // request lands, instead of waiting up to 15s for the next poll.
   const connected = useLiveInvalidation(["overview", "tps-ts", "usage-logs"]);
 
-  // The server already applies the range window (`minutes=range`), so this
-  // filter is a belt-and-braces guard: it keeps the client's own clock the
-  // authoritative boundary (identical to the pre-change client-side filter)
-  // and covers the placeholderData window right after a range switch, when the
-  // held rows may belong to a wider range than the one now selected.
-  const allLogs = useMemo(() => {
-    const all = logsQuery.data?.logs ?? [];
-    if (range === 0) return all; // all-time: no cutoff
-    const cutoff = Math.floor(Date.now() / 1000) - range * 60;
-    return all.filter((l) => l.ts >= cutoff);
-  }, [logsQuery.data, range]);
+  // Range-scoped by the same helper the export uses — see `inRange` for why the
+  // client re-checks a window the server already applied.
+  const allLogs = useMemo(
+    () => inRange(logsQuery.data?.logs ?? [], range),
+    [logsQuery.data, range],
+  );
 
   // The grouped summary is computed from the unfiltered set (it is the filter
   // control surface); everything else uses this filtered view.
@@ -366,19 +399,10 @@ export function UsagePage() {
     return t;
   }, [logs]);
 
-  const sorted = useMemo(() => {
-    const rows = [...logs];
-    rows.sort((a, b) => {
-      const va = sortValue(a, sortKey);
-      const vb = sortValue(b, sortKey);
-      const cmp =
-        typeof va === "number" && typeof vb === "number"
-          ? va - vb
-          : String(va).localeCompare(String(vb));
-      return sortDir === "asc" ? cmp : -cmp;
-    });
-    return rows;
-  }, [logs, sortKey, sortDir]);
+  const sorted = useMemo(
+    () => sortRows(logs, sortKey, sortDir),
+    [logs, sortKey, sortDir],
+  );
 
   // Render at most `visible` rows. A 24h window on a busy gateway is tens of
   // thousands of requests, and every row is ~15 DOM nodes: at 9k rows the
@@ -393,6 +417,43 @@ export function UsagePage() {
     () => (sorted.length > visible ? sorted.slice(0, visible) : sorted),
     [sorted, visible],
   );
+
+  /** Download every row the table is scoped to — the selected range and the
+   *  active drill-down, in the current sort order.
+   *
+   *  Deliberately not `visibleRows`: the table renders 250 rows at a time and
+   *  the query behind it holds one page, so exporting what is rendered would
+   *  hand back a fraction of the window under a filename that implies all of
+   *  it. The walk pages the log server-side instead. */
+  const exportCsv = async () => {
+    setExporting(true);
+    setExportNote(null);
+    try {
+      const { logs: all, truncated } = await getAllRequestLogs(
+        range === 0 ? undefined : { minutes: range },
+      );
+      const scoped = filterGroup
+        ? inRange(all, range).filter(
+            (l) => groupKeyOf(l, filterGroup.dim) === filterGroup.name,
+          )
+        : inRange(all, range);
+      const rows = sortRows(scoped, sortKey, sortDir);
+      downloadBlob(
+        `wiwi-usage-${range === 0 ? "all-time" : `${range}m`}-${Date.now()}.csv`,
+        new Blob([logsToCsv(rows)], { type: "text/csv;charset=utf-8" }),
+      );
+      if (truncated) {
+        setExportNote(
+          `Exported ${fmtInt(rows.length)} rows — this gateway holds more than one ` +
+          `export loads, so the file is partial. Narrow the range to get the rest.`,
+        );
+      }
+    } catch (e) {
+      setExportNote(`Export failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const groupRows = useMemo<GroupRow[]>(() => {
     const rows: GroupRow[] = [];
@@ -601,11 +662,20 @@ export function UsagePage() {
               onChange={(v) => setRange(Number(v))}
               options={RANGE_OPTIONS}
             />
+            <Button onClick={exportCsv} disabled={exporting || sorted.length === 0}>
+              <Download size={14} /> {exporting ? "Preparing…" : "Export CSV"}
+            </Button>
           </div>
         }
       />
 
       {logsQuery.error && <ErrorText>{logsQuery.error.message}</ErrorText>}
+
+      {exportNote && (
+        <Alert tone="warning" onDismiss={() => setExportNote(null)}>
+          {exportNote}
+        </Alert>
+      )}
 
       {/* Hero row: 4 featured stat cards with icons, sparklines, deltas */}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
