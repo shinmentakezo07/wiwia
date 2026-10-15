@@ -68,7 +68,12 @@ import {
   TD,
 } from "@/components/ui";
 import { fmtInt, fmtPct, fmtTokens, fmtUsd, groupBy, mean } from "@/lib/format";
-import { logsToCsv } from "@/lib/csv";
+import { logsToCsv, mergeLogs } from "@/lib/csv";
+import {
+  ImportCsvButton,
+  ImportedCsvNotice,
+  useImportedCsv,
+} from "@/components/ImportedLogsCsv";
 import { hourlySeries } from "@/lib/dashboard-metrics";
 import { downloadBlob } from "@/api/backup";
 import {
@@ -919,6 +924,7 @@ export function AnalyticsPage() {
   const [selectedModel, setSelectedModel] = useState<string>("all");
   const [exporting, setExporting] = useState(false);
   const [exportNote, setExportNote] = useState<string | null>(null);
+  const importedCsv = useImportedCsv();
 
   const logsQuery = useQuery({
     queryKey: ["request-logs"],
@@ -935,7 +941,12 @@ export function AnalyticsPage() {
   // lands, instead of waiting up to 15s for the next poll.
   const connected = useLiveInvalidation(["request-logs"]);
 
-  const allLogs = useMemo(() => logsQuery.data?.logs ?? [], [logsQuery.data]);
+  // Rows picked from an exported CSV are folded into the fetched log before any
+  // filter runs, so the charts, the table and the export all see one set.
+  const allLogs = useMemo(
+    () => mergeLogs(logsQuery.data?.logs ?? [], importedCsv.rows),
+    [logsQuery.data, importedCsv.rows],
+  );
   const pricingMap = useMemo(() => {
     const m = new Map<string, ModelPrice>();
     for (const p of pricingQuery.data?.models ?? []) m.set(p.model_id, p);
@@ -978,6 +989,17 @@ export function AnalyticsPage() {
     if (selectedModel === "all") return allLogs;
     return allLogs.filter((l) => l.model_group === selectedModel);
   }, [allLogs, selectedModel]);
+
+  // How much of an import the model selector is hiding. Same reasoning as
+  // Usage's range note: a table that stays empty after a successful import
+  // reads as a broken import rather than as a filter doing its job.
+  const importedScopeNote = useMemo(() => {
+    if (importedCsv.rows.length === 0 || selectedModel === "all") return null;
+    const hidden = importedCsv.rows.filter((l) => l.model_group !== selectedModel).length;
+    return hidden === 0
+      ? null
+      : `${fmtInt(hidden)} of them are for other models — switch the model filter to see the rest.`;
+  }, [importedCsv.rows, selectedModel]);
 
   // Selected model's pricing entry.
   const selectedPrice = useMemo(() => {
@@ -1160,7 +1182,11 @@ export function AnalyticsPage() {
     setExporting(true);
     setExportNote(null);
     try {
-      const { logs: all, truncated } = await getAllRequestLogs();
+      const { logs: fetched, truncated } = await getAllRequestLogs();
+      // Imported rows are part of what this view shows, so they are part of
+      // what it hands back: an Import → Export round trip that quietly dropped
+      // them would be worse than no export at all.
+      const all = mergeLogs(fetched, importedCsv.rows);
       const rows = selectedModel === "all"
         ? all
         : all.filter((l) => l.model_group === selectedModel);
@@ -1285,6 +1311,7 @@ export function AnalyticsPage() {
             <Button onClick={exportCsv} disabled={exporting || logs.length === 0}>
               <Download size={14} /> {exporting ? "Preparing…" : "Export CSV"}
             </Button>
+            <ImportCsvButton csv={importedCsv} />
           </div>
         }
       />
@@ -1296,6 +1323,11 @@ export function AnalyticsPage() {
           {exportNote}
         </Alert>
       )}
+
+      <ImportedCsvNotice
+        csv={importedCsv}
+        scopeNote={importedScopeNote}
+      />
 
       {/* ── Stat cards ─────────────────────────────────────────────────── */}
       <div className="admin-stagger grid grid-cols-2 gap-3 lg:grid-cols-4">

@@ -48,8 +48,8 @@ Admin-facing pages (under the guarded area; the sidebar is role-aware):
 | **Hermes / Hermes OAuth** | Manage Hermes (Nous Portal) accounts; connect via OAuth 2.0 device-code (`/console/hermes-oauth`) — no API key needed — with status, refresh, and disconnect |
 | **Models** | Model groups + deployments; add/remove deployments; group patching; aliases (`/admin/aliases`) |
 | **Virtual Keys** | Mint (name, models, budget, rpm/tpm, expiry — plaintext shown once), patch, disable, delete |
-| **Usage** | Token analytics with 1h/24h/7d/30d/all-time ranges (short ranges from the in-memory ring, long ranges from DB aggregates; bucket size scales 1 min → 1 day) |
-| **Analytics** | Deep-dive charts + CSV exports; per-key/per-model/per-deployment latency and token breakdowns |
+| **Usage** | Token analytics with 1h/24h/7d/30d/all-time ranges (short ranges from the in-memory ring, long ranges from DB aggregates; bucket size scales 1 min → 1 day); CSV import/export |
+| **Analytics** | Deep-dive charts + CSV import/export; per-key/per-model/per-deployment latency and token breakdowns |
 | **Request Logs** | Paginated request log with key/model/status/time filters — time range defaults to the **last 30 minutes**, switchable to 5m/15m/30m/1h/6h/24h/7d/All time; per-request detail (attempts, TPS, TTFT, cost, stop reason) |
 | **Proxy Logs** | Upstream request/response metadata stream |
 | **Pricing** | DB-backed `model_prices`: per-model token prices, overrides, delete-to-fallback |
@@ -108,6 +108,35 @@ Four things worth knowing before you rely on it:
 
 Implementation is `wiwi/server/backup.py`; the endpoint reference (including
 the per-section merge keys) is in `docs/API_REFERENCE.md` §3.
+
+## 5b. Log CSV import/export
+
+**Usage** and **Analytics** both export the request log to CSV, and both accept
+a CSV back. This is a *view* operation, not a restore: imported rows are merged
+into what the page is rendering and live in that browser tab only. Nothing is
+written to the gateway, so an import can never corrupt the log — and it is not a
+way to move history between installs (that is Settings → Import / Export,
+§5a).
+
+- **The reader is the writer.** `web/src/lib/csv.ts` owns both directions;
+  columns are matched by header name, so a file that has been through a
+  spreadsheet still imports. Quoted cells, CRLF and a BOM are handled.
+- **The round trip is lossy in the file's favour.** A log entry carries ~30
+  fields and the CSV carries 13. An imported row has blanks for request id,
+  error text, attempts and cache flags — good for counts, tokens, spend,
+  latency and status, which is what these pages chart. `cache_hit` stays false
+  rather than being guessed.
+- **A row is identified by** second + key + model + provider + status + token
+  and cost figures. Re-importing a file is idempotent, and two different
+  requests that share a second are not collapsed into one.
+- **Export includes what is on screen.** After an import, exporting folds the
+  imported rows into the file, so Import → Export is not silently lossy.
+- **Filters still apply, and say so.** Imported history is usually older than the
+  selected range (Usage) or model filter (Analytics); the import notice reports
+  how many rows the current filter hides, so an empty table after a successful
+  import reads as a filter, not a failure.
+- **Files over 32 MB are refused** rather than parsed — parsing them would lock
+  the browser. Export a narrower range instead.
 
 ## 6. Stats & data sources
 

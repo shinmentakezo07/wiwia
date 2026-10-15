@@ -64,7 +64,12 @@ import {
   groupBy,
   mean,
 } from "@/lib/format";
-import { logsToCsv } from "@/lib/csv";
+import { logsToCsv, mergeLogs } from "@/lib/csv";
+import {
+  ImportCsvButton,
+  ImportedCsvNotice,
+  useImportedCsv,
+} from "@/components/ImportedLogsCsv";
 import { deltaVsPrevHour, hourlySeries } from "@/lib/dashboard-metrics";
 import {
   GaugeRing,
@@ -317,6 +322,7 @@ export function UsagePage() {
   const [filterGroup, setFilterGroup] = useState<{ dim: GroupDim; name: string } | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportNote, setExportNote] = useState<string | null>(null);
+  const importedCsv = useImportedCsv();
 
   useEffect(() => {
     try {
@@ -350,12 +356,29 @@ export function UsagePage() {
   // request lands, instead of waiting up to 15s for the next poll.
   const connected = useLiveInvalidation(["overview", "tps-ts", "usage-logs"]);
 
+  // Rows picked from an exported CSV, merged into the fetched log before any
+  // filter runs, so every breakdown below them sees the same set. The range
+  // window applies to imported rows too — hence `importedScopeNote` below, which
+  // says how many the window hides instead of letting the count surprise them.
+  const serverLogs = useMemo(
+    () => mergeLogs(logsQuery.data?.logs ?? [], importedCsv.rows),
+    [logsQuery.data, importedCsv.rows],
+  );
+
   // Range-scoped by the same helper the export uses — see `inRange` for why the
   // client re-checks a window the server already applied.
-  const allLogs = useMemo(
-    () => inRange(logsQuery.data?.logs ?? [], range),
-    [logsQuery.data, range],
-  );
+  const allLogs = useMemo(() => inRange(serverLogs, range), [serverLogs, range]);
+
+  // How much of an import the selected range is hiding. Imported history is
+  // usually older than a 15–60 min window, and a table that stays empty after a
+  // successful import reads as a broken import rather than as a filter.
+  const importedScopeNote = useMemo(() => {
+    if (importedCsv.rows.length === 0 || range === 0) return null;
+    const hidden = importedCsv.rows.length - inRange(importedCsv.rows, range).length;
+    if (hidden === 0) return null;
+    const label = RANGE_OPTIONS.find((o) => o.value === String(range))?.label ?? `${range} min`;
+    return `${fmtInt(hidden)} of them fall outside “${label}” — widen the range to see the rest.`;
+  }, [importedCsv.rows, range]);
 
   // The grouped summary is computed from the unfiltered set (it is the filter
   // control surface); everything else uses this filtered view.
@@ -429,9 +452,13 @@ export function UsagePage() {
     setExporting(true);
     setExportNote(null);
     try {
-      const { logs: all, truncated } = await getAllRequestLogs(
+      const { logs: fetched, truncated } = await getAllRequestLogs(
         range === 0 ? undefined : { minutes: range },
       );
+      // Imported rows are part of what this view shows, so they are part of
+      // what it hands back: an Import → Export round trip that quietly dropped
+      // them would be worse than no export at all.
+      const all = mergeLogs(fetched, importedCsv.rows);
       const scoped = filterGroup
         ? inRange(all, range).filter(
             (l) => groupKeyOf(l, filterGroup.dim) === filterGroup.name,
@@ -665,6 +692,7 @@ export function UsagePage() {
             <Button onClick={exportCsv} disabled={exporting || sorted.length === 0}>
               <Download size={14} /> {exporting ? "Preparing…" : "Export CSV"}
             </Button>
+            <ImportCsvButton csv={importedCsv} />
           </div>
         }
       />
@@ -676,6 +704,8 @@ export function UsagePage() {
           {exportNote}
         </Alert>
       )}
+
+      <ImportedCsvNotice csv={importedCsv} scopeNote={importedScopeNote} />
 
       {/* Hero row: 4 featured stat cards with icons, sparklines, deltas */}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">

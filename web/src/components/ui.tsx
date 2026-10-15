@@ -65,7 +65,10 @@ export function PageHeader(props: { title: ReactNode; subtitle?: ReactNode; righ
           </p>
         )}
       </div>
-      <div className="flex items-center gap-2">{props.right}</div>
+      {/* Wraps: the header row carries up to four controls (status badge, a
+          select and the export/import pair) and must not overflow a 375px
+          viewport. */}
+      <div className="flex flex-wrap items-center justify-end gap-2">{props.right}</div>
     </div>
   );
 }
