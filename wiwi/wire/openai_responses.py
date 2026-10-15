@@ -505,8 +505,21 @@ def _reasoning_item(text: str, req_id: str, n: int) -> dict[str, Any]:
             "summary": [{"type": "summary_text", "text": text}]}
 
 
-def _message_item(text: str, req_id: str) -> dict[str, Any]:
-    return {"type": "message", "id": f"msg_{req_id}", "status": "completed",
+def _message_item_id(req_id: str, n: int) -> str:
+    """The output item id for a streamed message item.
+
+    Streaming emits one message item per interleaved text run, so the id has to
+    be per-item: a bare ``msg_<req>`` gave a text run before a tool call and the
+    one flushed after it the same id, and a client accumulating output items by
+    id cannot tell two items with one name apart (AUDIT #375). The non-stream
+    path keeps the plain ``msg_<req>`` spelling.
+    """
+    return f"msg_{req_id}_{n}"
+
+
+def _message_item(text: str, req_id: str, n: int | None = None) -> dict[str, Any]:
+    item_id = _message_item_id(req_id, n) if n is not None else f"msg_{req_id}"
+    return {"type": "message", "id": item_id, "status": "completed",
             "role": "assistant",
             "content": [{"type": "output_text", "text": text, "annotations": []}]}
 
@@ -682,18 +695,23 @@ class ResponsesStreamEncoder:
             item = _builtin_call_item(t["call_id"] or f"ws_{self.req_id}_{n}",
                                       _builtin_query(t["args"]),
                                       t.get("builtin"))
-            return [self._item_done(idx, item)]
-        item_id = f"fc_{self.req_id}_{n}"
-        item = _function_call_item(item_id, t["call_id"], t["name"], t["args"])
-        out = [self._evt("response.function_call_arguments.done", {
-                    "item_id": item_id, "output_index": idx,
-                    "arguments": t["args"]}),
-               self._item_done(idx, item)]
+            out = [self._item_done(idx, item)]
+        else:
+            item_id = f"fc_{self.req_id}_{n}"
+            item = _function_call_item(item_id, t["call_id"], t["name"], t["args"])
+            out = [self._evt("response.function_call_arguments.done", {
+                        "item_id": item_id, "output_index": idx,
+                        "arguments": t["args"]}),
+                   self._item_done(idx, item)]
         # Once the LAST open tool is closed the buffer is safe to emit (AUDIT
         # #367). It goes after the tool's own done event, preserving the order
         # the client saw the content in. With a parallel sibling still open the
         # flush waits for it: a message item emitted between the two tools'
         # done events would interleave output items mid-call.
+        #
+        # This runs for a hosted (builtin) close too — that branch used to
+        # return early, so narrative text written around a `web_search_call`
+        # was buffered and never emitted (AUDIT #374).
         if not self._tools:
             out.extend(self._flush_deferred())
         return out
@@ -705,6 +723,13 @@ class ResponsesStreamEncoder:
         the front so the newest content survives, and trim the boundary entry
         from its head rather than dropping it whole, so the buffer always ends
         up within the cap even when one delta is itself larger than it.
+
+        The overshoot handling mirrors the Anthropic encoder's ``_defer``: a
+        pop that takes the total *below* the cap put back that entry's tail,
+        because the pop removed more than the cap required. Without it a single
+        oversized delta was popped whole and the loop then had nothing left to
+        trim, so an over-cap chunk emptied the ENTIRE buffer — discarding prior
+        in-flight content that was nowhere near the cap (AUDIT #376).
         """
         if not text:
             return
@@ -713,13 +738,12 @@ class ResponsesStreamEncoder:
         while total > MAX_DEFERRED_CHARS and self._deferred:
             k, t = self._deferred.pop(0)
             total -= len(t)
-        while total > MAX_DEFERRED_CHARS and self._deferred:
-            k, t = self._deferred[0]
-            if len(t) <= total - MAX_DEFERRED_CHARS:
+            if total < MAX_DEFERRED_CHARS:
+                keep = MAX_DEFERRED_CHARS - total
+                if keep > 0 and t:
+                    self._deferred.insert(0, (k, t[-keep:]))
+                    total += keep
                 break
-            trimmed = t[-(total - MAX_DEFERRED_CHARS):]
-            self._deferred[0] = (k, trimmed)
-            total -= len(t) - len(trimmed)
         self._deferred_chars = total
 
     def _flush_deferred(self) -> list[bytes]:
@@ -729,35 +753,50 @@ class ResponsesStreamEncoder:
         because one was. Consecutive same-kind entries coalesce into one item,
         so text-then-thinking yields two items and thinking-then-text yields
         two, matching how the real API interleaves content around a tool call.
+        Emitting one item per *entry* instead produced one item per streamed
+        chunk, all sharing an id (AUDIT #375).
         """
         if not self._deferred:
             return []
-        out: list[bytes] = []
+        # Merge adjacent same-kind entries into runs first, so a text run that
+        # the adapter split across deltas becomes a single output item.
+        runs: list[list[str]] = []
         for kind, text in self._deferred:
+            if runs and runs[-1][0] == kind:
+                runs[-1][1] += text
+            else:
+                runs.append([kind, text])
+        out: list[bytes] = []
+        for kind, text in runs:
             if kind == "thinking":
-                oi = self._next_output_index()
-                item_id = f"rs_{self.req_id}_{oi}"
-                out.append(self._evt("response.output_item.added", {
-                    "output_index": oi,
-                    "item": {"type": "reasoning", "id": item_id, "summary": []}}))
-                out.append(self._evt("response.reasoning_summary_text.delta", {
-                    "item_id": item_id, "output_index": oi, "delta": text}))
-                out.append(self._evt("response.reasoning_summary_text.done", {
-                    "item_id": item_id, "output_index": oi, "text": text}))
-                # _item_done, not a bare event: it records the item so the
-                # terminal response.completed output array carries it too.
-                out.append(self._item_done(
-                    oi, _reasoning_item(text, self.req_id, oi)))
+                out.extend(self._reasoning_item_events(text))
             else:
                 out.extend(self._message_item_events(text))
         self._deferred.clear()
         self._deferred_chars = 0
         return out
 
+    def _reasoning_item_events(self, text: str) -> list[bytes]:
+        """add → summary delta → summary done → item.done for a reasoning item."""
+        oi = self._next_output_index()
+        item_id = f"rs_{self.req_id}_{oi}"
+        return [
+            self._evt("response.output_item.added", {
+                "output_index": oi,
+                "item": {"type": "reasoning", "id": item_id, "summary": []}}),
+            self._evt("response.reasoning_summary_text.delta", {
+                "item_id": item_id, "output_index": oi, "delta": text}),
+            self._evt("response.reasoning_summary_text.done", {
+                "item_id": item_id, "output_index": oi, "text": text}),
+            # _item_done, not a bare event: it records the item so the
+            # terminal response.completed output array carries it too.
+            self._item_done(oi, _reasoning_item(text, self.req_id, oi)),
+        ]
+
     def _message_item_events(self, text: str) -> list[bytes]:
         """add → content_part.added → text.done → content_part.done → item.done."""
         oi = self._next_output_index()
-        item_id = f"msg_{self.req_id}"
+        item_id = _message_item_id(self.req_id, oi)
         return [
             self._evt("response.output_item.added", {
                 "output_index": oi,
@@ -780,7 +819,7 @@ class ResponsesStreamEncoder:
                 "item_id": item_id, "output_index": oi,
                 "content_index": 0,
                 "part": {"type": "output_text", "text": text, "annotations": []}}),
-            self._item_done(oi, _message_item(text, self.req_id)),
+            self._item_done(oi, _message_item(text, self.req_id, oi)),
         ]
 
     def _close_item(self) -> list[bytes]:
@@ -791,7 +830,7 @@ class ResponsesStreamEncoder:
         self._item_open = None
         if kind == "message":
             text = "".join(self._text_buf)
-            item_id = f"msg_{self.req_id}"
+            item_id = _message_item_id(self.req_id, idx)
             part = {"type": "output_text", "text": text, "annotations": []}
             return [self._evt("response.output_text.done", {
                         "item_id": item_id, "output_index": idx,
@@ -799,7 +838,7 @@ class ResponsesStreamEncoder:
                     self._evt("response.content_part.done", {
                         "item_id": item_id, "output_index": idx,
                         "content_index": 0, "part": part}),
-                    self._item_done(idx, _message_item(text, self.req_id))]
+                    self._item_done(idx, _message_item(text, self.req_id, idx))]
         if kind == "thinking":
             think = "".join(self._think_buf)
             item = _reasoning_item(think, self.req_id, idx)
@@ -835,20 +874,22 @@ class ResponsesStreamEncoder:
             if self._item_open != "message":
                 out.extend(self._close_item())
                 oi = self._next_output_index()
+                item_id = _message_item_id(self.req_id, oi)
                 out.append(self._evt("response.output_item.added", {
                     "output_index": oi,
-                    "item": {"type": "message", "id": f"msg_{self.req_id}",
+                    "item": {"type": "message", "id": item_id,
                              "status": "in_progress", "role": "assistant",
                              "content": []}}))
                 out.append(self._evt("response.content_part.added", {
-                    "item_id": f"msg_{self.req_id}", "output_index": oi,
+                    "item_id": item_id, "output_index": oi,
                     "content_index": 0,
                     "part": {"type": "output_text", "text": "", "annotations": []}}))
                 self._item_open = "message"
                 self._text_buf = []
             self._text_buf.append(d.text)
             out.append(self._evt("response.output_text.delta", {
-                "item_id": f"msg_{self.req_id}", "output_index": self._open_out,
+                "item_id": _message_item_id(self.req_id, self._open_out),
+                "output_index": self._open_out,
                 "content_index": 0, "delta": d.text}))
             return b"".join(out)
         if isinstance(d, dl.ThinkingDelta):

@@ -8,6 +8,44 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — round 154: five `wiwi/wire/` defects (2026-10-16)
+
+Found by a source review of the wire codecs, then reproduced against the real
+encoders before fixing. Four were already on this register (#374, #375, #376,
+#398) and one is new (#472). All five are covered by
+`tests/test_fix_round154.py` — every test in that file failed before its fix.
+
+### 472. The Anthropic `document` decode arm forwards a non-string `title`/`context` into the IR
+
+**Severity:** 🟡 Medium · **Status: fixed** — round 154 (`tests/test_fix_round154.py::test_anthropic_document_non_str_title_and_context_are_dropped`)
+**Files:** `wiwi/wire/anthropic_messages.py` (the `btype == "document"` arms, both
+the `base64` and `url` branches)
+
+`DocumentPart.name`/`.context` are typed `str | None`, but decode passed
+`b.get("title")` / `b.get("context")` straight through, and
+`anthropic_adapter.py:359-362` copies them verbatim onto the outbound block. A
+client sending `{"type": "document", "source": {...}, "title": 5}` got an
+upstream 400 naming a field that looked fine to the caller, and because the junk
+was stored in the IR it was re-sent on every later turn of that conversation.
+
+**Probe** (executed — real `decode_request` + real `AnthropicAdapter.encode_request`):
+
+```
+IR DocumentPart.name=5  context=['a','b']
+OUTBOUND: {'type':'document', ..., 'title': 5, 'context': ['a','b']}
+```
+
+This is the Anthropic twin of **#184**: the Responses codec guards the identical
+field that way (`openai_responses.py:83-85`), and the `media_type` read two lines
+above in this same arm is guarded too. Only this arm was missed.
+
+**Fix:** `isinstance(..., str)` on both reads; junk becomes absent (`None`)
+rather than `""`, matching its sibling guards. Legitimate metadata is unaffected
+(`test_anthropic_document_real_title_and_context_survive`), and both
+`DocumentPart` arms are covered (`test_anthropic_document_url_arm_is_guarded_too`).
+
+---
+
 ## ✅ Fixed — round 153: the Hermes worker cache (2026-10-15)
 
 Found by diffing the three OAuth refreshers' `_worker_for` fallbacks against
@@ -151,6 +189,16 @@ Already recorded as #414 (reproduced 2 of 2 full runs at that time). Re-observed
 2026-10-14: `tests/test_realtime.py::test_a_relayed_frame_arrives_upstream_byte_identical`
 failed in 1 of 2 identical runs of a 4-file subset and passed 13/13 in
 isolation. Not re-counted as a new finding; #414 stands as the entry to fix.
+
+Re-observed 2026-10-15 (full-suite run, `connections == 2`), with one new detail:
+the test also fails when run as the **single node id** — 2 of 2 runs — while
+`tests/test_realtime.py` as a whole passes 13/13 twice. That points away from
+suite ordering and at the assertion itself: this test opens two connections to
+the fake server by construction (`tests/test_realtime.py:198` connects the client
+directly, `_run_relay` at `:217` opens the relay's own upstream socket), and
+`FakeRealtimeServer.connections` only increments once the server's handler
+coroutine is scheduled (`:44`). `assert upstream.connections == 1` therefore
+races the fake server's scheduling rather than testing relay behaviour.
 
 ---
 
@@ -1568,11 +1616,11 @@ leading-edge bucket producing an extra grid slot.
 ### 398. The Anthropic streaming path drops `output_tokens_details.thinking_tokens`
 
 **Severity:** 🟡 Medium (same turn, two different token counts)
-**Status: open**
-**Files:** `wiwi/wire/anthropic_messages.py:1162-1169` (`final_frame`'s
-`message_delta` usage omits `u.reasoning`); the sync twin at `:625-627` emits it
-**Fix:** add `"output_tokens_details": {"thinking_tokens": u.reasoning} if
-u.reasoning else {}` to the `message_delta` usage, mirroring `:625`.
+**Status: fixed** — round 154 (`tests/test_fix_round154.py`)
+**Files:** `wiwi/wire/anthropic_messages.py` (`final_frame`'s `message_delta`
+usage omitted `u.reasoning`); the sync twin in `encode_response` emits it
+**Fix:** added `"output_tokens_details": {"thinking_tokens": u.reasoning} if
+u.reasoning else {}` to the `message_delta` usage, mirroring the sync path.
 
 **Probe** (executed — real `encode_response` vs the real stream encoder, same turn):
 
@@ -2450,49 +2498,91 @@ memory before the write and release it on failure.
 
 ### 374. Text deferred during a builtin (hosted) tool call is still dropped
 
-**Severity:** 🟠 High · **Status: fixed** — re-verified 2026-10-13 (sweep).
-Executed probe through the real `ResponsesStreamEncoder`: with
-`ToolCallOpen(builtin)` → `TextDelta("SEARCHING")` → `ToolCallClose`,
-"SEARCHING" now survives into the emitted SSE (the builtin return path
-flushes, per the #367 convention). Body preserved unchanged.
+**Severity:** 🟠 High · **Status: fixed** — round 154 (`tests/test_fix_round154.py`)
+**Files:** `wiwi/wire/openai_responses.py` (`_close_tool`)
 
-**Severity:** 🟠 High · **Status: open**
-**Files:** `wiwi/wire/openai_responses.py` (`_close_tool`, the builtin early
-return)
+The #367 flush lived only on the function-call return path; the builtin branch
+returned before it, so text arriving while a `web_search_call` was open was
+buffered and never emitted.
 
-The #367 flush lives only on the function-call return path; the builtin branch
-returns before it. Text arriving while a `web_search_call` is open is buffered
-and never emitted.
+**Probe (before the fix):** `ToolCallOpen(builtin="web_search")` →
+`TextDelta("SEARCHING")` → `ToolCallClose` → `"SEARCHING"` absent from the whole
+stream, including `response.completed`. The identical shape with a function tool
+preserved it — the asymmetry is the bug.
 
-**Probe:** `ToolCallOpen(builtin="web_search")` → `TextDelta("SEARCHING")` →
-`ToolCallClose` → `"SEARCHING"` absent from the whole stream, including
-`response.completed`.
+**Fix:** the builtin branch no longer returns early. It builds its
+`output_item.done` and falls through to the shared `if not self._tools: flush`
+tail, so a hosted close flushes deferred content too and still waits for a
+parallel sibling. Tests:
+`test_responses_builtin_tool_close_flushes_deferred_text`,
+`test_responses_builtin_flush_waits_for_a_parallel_sibling`,
+`test_responses_function_tool_close_still_flushes`.
 
-**Fix sketch:** flush (when no tool remains open) on the builtin return too.
+> **Register note:** this entry carried two contradictory `Status` lines — a
+> "fixed" claim from the 2026-10-13 sweep sitting above the still-`open` body.
+> The re-verification was wrong: a probe through the real encoder still showed
+> the text dropped, because the flush had in fact been left on the
+> function-call path only. The two are now collapsed into this one entry so the
+> next agent is not told a live bug is closed.
 
 ---
 
 ### 375. Deferred Responses text is one item per chunk, all sharing one id
 
-**Severity:** 🟡 Medium · **Status: open**
-**Files:** `wiwi/wire/openai_responses.py` (`_flush_deferred`)
+**Severity:** 🟡 Medium · **Status: fixed** — round 154 (`tests/test_fix_round154.py`)
+**Files:** `wiwi/wire/openai_responses.py` (`_flush_deferred`, `_message_item`)
 
-The docstring promises consecutive same-kind entries coalesce; the loop emits
-one item per entry. Four chunks → four `message` items, every one `msg_<req>`.
+The docstring promised consecutive same-kind entries coalesce; the loop emitted
+one item per entry, every one sharing the id `msg_<req>`.
 
-**Fix sketch:** merge adjacent same-kind entries before emitting.
+**Probe (before the fix):** two adjacent text chunks during an open tool →
+2 `message` items, both id `msg_R`.
+
+**Fix:** adjacent same-kind entries are merged into runs before emitting, so a
+text run the adapter split across deltas becomes a single output item
+(`_message_item_events` / `_reasoning_item_events`; a text→thinking→text
+sequence still yields three items, matching how the real API interleaves
+content around a tool call).
+
+The shared id was fixed with it, and it was **broader than this entry recorded**:
+a text run *before* a tool call and the one flushed *after* it already collided
+on the bare `msg_<req>`. Streaming message items now use
+`msg_<req>_<output_index>` via the new `_message_item_id` helper, with the
+`output_item.added` / `output_text.delta` / `output_text.done` /
+`content_part.*` ids all emitted from the same helper so they always agree. The
+non-stream path (`encode_response`) keeps the plain `msg_<req>` spelling.
+
+Tests: `test_responses_deferred_text_coalesces_adjacent_chunks`,
+`test_responses_deferred_all_text_run_collapses`,
+`test_responses_kind_change_still_splits_items`,
+`test_responses_unique_item_ids_across_coalesced_runs`,
+`test_responses_unique_item_ids_across_a_tool_boundary`,
+`test_responses_added_and_done_ids_agree`.
 
 ---
 
 ### 376. A single deferred chunk larger than the cap is dropped whole
 
-**Severity:** 🟡 Medium · **Status: open**
+**Severity:** 🟡 Medium · **Status: fixed** — round 154 (`tests/test_fix_round154.py`)
 **Files:** `wiwi/wire/openai_responses.py` (`_defer`)
 
-The first eviction loop pops the oversized entry entirely, so the trim loop
-has nothing to trim. The Anthropic encoder keeps the entry's tail instead.
+The first eviction loop popped the oversized entry entirely, so the trim loop
+had nothing to trim. **Worse than recorded:** the loop kept popping past the
+cap, so an over-cap chunk emptied the *entire* buffer, discarding prior
+in-flight content that was nowhere near the cap.
 
-**Fix sketch:** port the Anthropic `_defer` overshoot handling (put the tail back).
+**Probe (before the fix, cap 65536):** buffer `KEEPME`, then a 65541-char chunk
+→ Responses `entries=0` (both gone); the Anthropic encoder → `entries=1`,
+bounded at the cap.
+
+**Fix:** ported the Anthropic `_defer` overshoot handling — a pop that takes the
+total below the cap puts that entry's TAIL back, so the buffer always lands
+exactly at the cap instead of losing content it had room for. Tests:
+`test_responses_defer_keeps_tail_of_oversized_chunk`,
+`test_responses_defer_oversized_chunk_does_not_empty_the_buffer`,
+`test_responses_defer_still_evicts_from_the_head_within_the_cap`,
+`test_responses_defer_never_exceeds_cap`,
+`test_responses_defer_oversized_chunk_is_still_flushed`.
 
 ---
 

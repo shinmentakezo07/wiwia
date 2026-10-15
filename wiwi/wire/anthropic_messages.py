@@ -120,6 +120,19 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                     src = b.get("source") or {}
                     if not isinstance(src, dict):
                         continue  # same non-dict source guard as the image arm
+                    # ``name``/``context`` are typed ``str | None`` and the
+                    # adapter copies them straight onto the outbound block
+                    # (``anthropic_adapter.py:359-362``), so a client sending
+                    # ``"title": 5`` had the junk stored in the IR and re-sent
+                    # on every later turn — an upstream 400 naming a field that
+                    # looked fine to the caller. The Responses codec guards the
+                    # identical field this way (AUDIT #184); the ``media_type``
+                    # read below is guarded in this same arm. Junk becomes
+                    # absent rather than "".
+                    raw_title = b.get("title")
+                    raw_ctx = b.get("context")
+                    name = raw_title if isinstance(raw_title, str) else None
+                    context = raw_ctx if isinstance(raw_ctx, str) else None
                     if src.get("type") == "base64":
                         raw_b64 = src.get("data")
                         if not isinstance(raw_b64, str) or not raw_b64:
@@ -129,15 +142,14 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                             b64=raw_b64,
                             mime=(raw_mime if isinstance(raw_mime, str)
                                   else "application/pdf"),
-                            name=b.get("title"), context=b.get("context"),
+                            name=name, context=context,
                             cache_control=b.get("cache_control")))
                     elif src.get("type") == "url":
                         raw_url = src.get("url")
                         if not isinstance(raw_url, str) or not raw_url:
                             continue
                         parts.append(ir.DocumentPart(
-                            url=raw_url, name=b.get("title"),
-                            context=b.get("context"),
+                            url=raw_url, name=name, context=context,
                             cache_control=b.get("cache_control")))
                 elif btype == "tool_use":
                     raw_name = b.get("name")
@@ -1189,7 +1201,18 @@ class AnthropicStreamEncoder:
             "usage": {"output_tokens": u.output,
                       "input_tokens": u.prompt,
                       "cache_read_input_tokens": u.cached,
-                      "cache_creation_input_tokens": u.cache_creation}})
+                      "cache_creation_input_tokens": u.cache_creation,
+                      # The sync twin emits this and the streaming path did
+                      # not, so a client metering thinking tokens read zero on
+                      # streamed turns and the real count on non-streamed ones
+                      # for the same request (AUDIT #398). Four adapters report
+                      # reasoning tokens, so the Messages surface reaches this
+                      # on real traffic. Same `if u.reasoning else {}` shape as
+                      # `encode_response`: a zero must not become a phantom
+                      # `thinking_tokens: 0`.
+                      "output_tokens_details": {
+                          "thinking_tokens": u.reasoning,
+                      } if u.reasoning else {}}})
 
 
 def _stream_error_type(d: dl.StreamError) -> str:
