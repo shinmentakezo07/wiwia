@@ -9,20 +9,18 @@ import {
   ArrowRight,
   ArrowDown,
   BookOpen,
-  Building2,
   Check,
   ChevronDown,
   Copy,
   KeyRound,
-  Lock,
   Minus,
   Server,
   Terminal,
   Wallet,
-  Zap,
 } from "lucide-react";
 import { Card } from "@/components/ui";
 import { GraphSection, OpenAIIcon, AnthropicIcon, GeminiIcon, OpenRouterIcon, MoonshotIcon } from "@/components/AnimatedBeam";
+import { EnterpriseShowcase } from "@/components/landing/EnterpriseShowcase";
 import { HERO_BEAMS_FULL, HeroBeamBackdrop } from "@/components/HeroBeamBackdrop";
 
 const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
@@ -69,15 +67,6 @@ const TESTIMONIALS = [
   { handle: "@ossalternative", name: "OpenAlternative", text: "🚀 Just published: LLM Gateway @llmgateway — Unified API for all LLM providers with analytics. Route, manage, and analyze LLM requests across multiple providers with one API." },
   { handle: "@Andy_AJT", name: "Andy T", text: "Wow. What a night, incredible builders, incredible venue & incredible team. The AI Hack Night was a complete success! Feeling incredibly grateful to @llmgateway for making it so easy for us to hack with any model." },
   { handle: "@iTanayVaswani", name: "Tanay Vaswani", text: "List 10 great open-source repositories 👇🏻 I will go first: - @calcom - @mail0dotcom - @cap - @documenso - @aisdk (by @vercel) - @onyx_dot_app - @daytonaio - @langfuse - @llmgateway - @qdrant_engine" },
-];
-
-// ── Enterprise capabilities ────────────────────────────────────────────────
-
-const ENTERPRISE_CAPS = [
-  { icon: Lock, title: "Enterprise SSO", description: "SAML & OIDC single sign-on with role-based access control" },
-  { icon: Server, title: "Self-hosted or Managed", description: "Deploy on your infrastructure or let us handle it with 99.9% SLA" },
-  { icon: Zap, title: "Volume Pricing", description: "Custom rate limits and pricing that scales with your usage" },
-  { icon: Building2, title: "White-label Ready", description: "White-label gateway and chat app with your own branding" },
 ];
 
 // ── Platform Capabilities (ported from llmgateway-ref features.tsx) ────────
@@ -1017,64 +1006,8 @@ export function LandingPage() {
         </div>
       </section>
 
-      {/* ══ enterprise CTA ══ */}
-      <section className="scroll-reveal relative overflow-hidden py-24 md:py-32">
-        <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[var(--admin-border)] to-transparent" />
-        <div className="absolute inset-0 bg-gradient-to-b from-white/[0.03] via-white/[0.05] to-white/[0.03]" />
-        <div className="absolute inset-0 bg-[radial-gradient(ellipse_80%_50%_at_50%_-20%,rgba(59,130,246,0.08),transparent)]" />
-        <div className="relative mx-auto max-w-6xl px-4">
-          <div className="mb-16 text-center">
-            <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-blue-500/20 bg-blue-500/5 px-4 py-1.5">
-              <span className="font-mono text-xs font-medium tracking-wider text-blue-400 uppercase">Enterprise</span>
-            </div>
-            <h2 className="text-3xl font-bold tracking-tight text-[var(--admin-text)] md:text-4xl lg:text-5xl">
-              Built for teams that
-              <br />ship at scale
-            </h2>
-            <p className="mx-auto mt-4 max-w-2xl text-lg text-[var(--admin-text-muted)]">
-              When your LLM infrastructure becomes mission-critical, you need dedicated support,
-              compliance controls, and infrastructure that matches your ambitions.
-            </p>
-          </div>
-
-          {/* Capability cards */}
-          <div className="mb-12 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            {ENTERPRISE_CAPS.map((cap) => {
-              const Icon = cap.icon;
-              return (
-                <div key={cap.title} className="group rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] p-6 transition-all duration-300 hover:border-blue-500/30 hover:shadow-lg hover:shadow-blue-500/5">
-                  <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-lg border border-[var(--admin-border)] bg-white/[0.02] transition-colors group-hover:border-blue-500/30 group-hover:bg-blue-500/5">
-                    <Icon className="h-5 w-5 text-[var(--admin-text-dim)] transition-colors group-hover:text-blue-400" />
-                  </div>
-                  <h3 className="mb-1.5 text-base font-semibold tracking-tight text-[var(--admin-text)]">{cap.title}</h3>
-                  <p className="text-sm leading-relaxed text-[var(--admin-text-muted)]">{cap.description}</p>
-                </div>
-              );
-            })}
-          </div>
-
-          {/* CTA row */}
-          <div className="flex flex-col items-center justify-center gap-4 sm:flex-row">
-            <Link to="/contact" className="inline-flex h-12 items-center justify-center gap-2 rounded-[10px] bg-[var(--admin-text)] px-8 text-base font-medium text-[var(--admin-bg)] transition-opacity hover:opacity-90">
-              Talk to Sales <ArrowRight size={16} />
-            </Link>
-            <Link to="/enterprise" className="inline-flex h-12 items-center justify-center gap-2 rounded-[10px] border border-[var(--admin-border)] bg-transparent px-8 text-base font-medium text-[var(--admin-text)] transition-colors hover:bg-white/[0.04]">
-              Explore Enterprise
-            </Link>
-          </div>
-
-          {/* Trust line */}
-          <div className="mt-8 flex flex-wrap items-center justify-center gap-6 text-sm text-[var(--admin-text-dim)]">
-            <span>Custom SLAs</span>
-            <span className="h-3 w-px bg-[var(--admin-border)]" />
-            <span>Priority support</span>
-            <span className="h-3 w-px bg-[var(--admin-border)]" />
-            <span>SOC 2 Type II certified</span>
-            <span className="hidden h-3 w-px bg-[var(--admin-border)] sm:block" />
-            <span className="hidden sm:inline">On-boarding assistance</span>
-          </div>
-        </div>
-      </section>
+      {/* ══ enterprise showcase ══ */}
+      <EnterpriseShowcase />
 
       {/* ══ final CTA ══ */}
       <section className="relative overflow-hidden py-32 md:py-40">
