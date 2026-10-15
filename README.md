@@ -10,23 +10,57 @@
 **Route to** OpenAI · Anthropic · Gemini · OpenRouter · NVIDIA NIM · Cline · WorkBuddy · GMI Cloud · B.AI · OpenCode Zen · Hermes (Nous Portal) · any OpenAI-compatible endpoint.
 
 <p>
-  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-22c55e?style=for-the-badge&logo=opensourceinitiative&logoColor=white"></a>
-  <a href="#-quickstart"><img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white"></a>
-  <a href="#-quickstart"><img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white"></a>
-  <a href="#-quickstart"><img alt="React 19" src="https://img.shields.io/badge/React_19-Vite_6-149eca?style=for-the-badge&logo=react&logoColor=white"></a>
-  <a href="#-quickstart"><img alt="Self-hosted" src="https://img.shields.io/badge/self--hosted-one%20process-F59E0B?style=for-the-badge&logo=docker&logoColor=white"></a>
+  <a href="#-quickstart"><img alt="Get started" src="https://img.shields.io/badge/get%20started-%20quickstart-6366f1?style=for-the-badge"></a>
+  <a href="docs/API_REFERENCE.md"><img alt="API reference" src="https://img.shields.io/badge/API%20reference-docs-8b5cf6?style=for-the-badge"></a>
+  <a href="docs/CONFIG.md"><img alt="Configuration" src="https://img.shields.io/badge/config-full%20reference-docs-a855f7?style=for-the-badge"></a>
 </p>
 
 <p>
-  <img alt="2729 tests passing, 5 skipped" src="https://img.shields.io/badge/tests-2729%20passing-34d399?style=for-the-badge&logo=pytest&logoColor=white">
-  <img alt="152 test files" src="https://img.shields.io/badge/test%20files-152-7C3AED?style=for-the-badge">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-22c55e?style=for-the-badge&logo=opensourceinitiative&logoColor=white"></a>
+  <img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white">
+  <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white">
+  <img alt="React 19" src="https://img.shields.io/badge/React_19-Vite_6-149eca?style=for-the-badge&logo=react&logoColor=white">
+  <img alt="Self-hosted" src="https://img.shields.io/badge/self--hosted-one%20process-F59E0B?style=for-the-badge&logo=docker&logoColor=white">
+</p>
+
+<p>
+  <img alt="3317 tests collected" src="https://img.shields.io/badge/tests-3317-34d399?style=for-the-badge&logo=pytest&logoColor=white">
+  <img alt="196 test files" src="https://img.shields.io/badge/test%20files-196-7C3AED?style=for-the-badge">
   <img alt="ruff clean" src="https://img.shields.io/badge/lint-ruff%20clean-9CA3AF?style=for-the-badge&logo=ruff&logoColor=white">
-  <img alt="60k lines of code" src="https://img.shields.io/badge/28.4k%20Python%20%2B%2031.3k%20TS-blue?style=for-the-badge">
+  <img alt="36.2k lines of Python and 36.1k lines of TS" src="https://img.shields.io/badge/36.2k%20Python%20%2B%2036.1k%20TS-blue?style=for-the-badge">
 </p>
 
 **3 inbound dialects × 12 outbound providers — no pairwise converters, one canonical IR.**
 
 </div>
+
+---
+
+## 🗺️ Contents
+
+<table>
+<tr><td valign="top" width="50%">
+
+**Understand it**
+- [🪄 The trick](#-the-trick) — point Claude Code at GPT
+- [✨ Why wiwi?](#-why-wiwi) — what a config-file gateway can't do
+- [🎛️ The control plane](#-the-control-plane) — translation, routing, keys, observability
+- [🗺️ How it's put together](#-how-its-put-together) — modules, the streaming contract
+- [🧭 Request lifecycle](#-request-lifecycle) — the seven stages of a call
+
+</td><td valign="top" width="50%">
+
+**Run it**
+- [⚡ Quickstart](#-quickstart) — install, mint a key, connect a client
+- [📡 What ships](#-what-ships) — inbound surfaces and outbound providers
+- [⚙️ Configuration](#-configuration) — the annotated `wiwi.yaml`
+- [🔌 API surface](#-api-surface) — every route group
+
+**Go deeper**
+- [🧪 Development](#-development) · [📚 Docs](#-docs) · [🛡️ Guardrails](#-guardrails) · [📜 License](#-license)
+
+</td></tr>
+</table>
 
 ---
 
@@ -47,22 +81,11 @@ curl http://localhost:4000/v1/messages \
 non-Anthropic model served it. The client never learns. Same in reverse: send OpenAI Chat to a Claude model and
 the envelope is OpenAI's.
 
-That works because nothing is written pairwise. Every direction goes **dialect → IR → provider**:
+<img alt="Hub-and-spoke architecture: three inbound dialects decode into one canonical IR, which the router dispatches to twelve outbound providers" src="docs/assets/wiwi-hub-spoke.svg" width="100%">
 
-```
-Client (openai SDK / Codex CLI / Claude Code)
-   │  inbound dialect
-   ▼
-wiwi/wire/*  ──decode──►  Canonical IR (wiwi/ir)  ──►  router
-                                                        │  key pools, WRR,
-                                                        │  retries, cooldowns
-                                                        ▼
-                                                  providers/*  ──► upstream
-Client  ◄──  wire encoder  ◄──  IRStreamDelta*  ◄──  adapter.decode
-```
-
-Adding an inbound surface is one module in `wiwi/wire/`. Adding a provider is one adapter in `wiwi/providers/`.
-**Core code never branches on dialect or provider name.**
+That works because nothing is written pairwise. Adding an inbound surface is one module in `wiwi/wire/`; adding a
+provider is one adapter in `wiwi/providers/`. **Core code never branches on dialect or provider name** — and that
+constraint is enforced by an import-time `assert` in the registry, not by convention alone.
 
 ---
 
@@ -195,6 +218,9 @@ Four things wiwi does that a config-file gateway doesn't.
 - Anthropic `cache_control` blocks pass through untouched; cache hits and savings appear in stats.
 - Multimodal parts (image, audio, document) wired through the IR; `count_tokens` for the Anthropic surface.
 - Anthropic native `output_config` for `json_schema` structured outputs.
+- **Realtime** — `/v1/realtime` relays WebSocket frames byte-for-byte upstream and back, with usage extracted from
+  the stream for costing. Adapters opt in per provider; `hermes` declines it (Nous Portal exposes no Realtime surface)
+  rather than inheriting a URL that would 404 mid-session.
 
 ### 🛟 Routing & self-healing
 
@@ -239,6 +265,16 @@ Four things wiwi does that a config-file gateway doesn't.
 
 ---
 
+## 🧭 Request lifecycle
+
+<img alt="Request lifecycle: decode, auth, rate limit, journal replay check, route, serve, encode" src="docs/assets/wiwi-lifecycle.svg" width="100%">
+
+`server/app.py` is ~4.5k lines and `core/gateway.py` ~1.9k — don't read either top to bottom. Start at
+`run_chat_like` and follow the pipeline it names; `RequestContext` (`core/context.py`, ~83 lines) is the single
+mutable object threaded through every stage, so reading its fields tells you what the pipeline carries.
+
+---
+
 ## 📡 What ships
 
 ### Inbound surfaces
@@ -249,6 +285,8 @@ Four things wiwi does that a config-file gateway doesn't.
 | <img src="docs/assets/inbound/openai-responses.svg" width="26" height="26" alt="Responses"> | `/v1/responses` | 🟣 **OpenAI Responses** | Codex CLI (`base_url` → wiwi) |
 | <img src="docs/assets/inbound/anthropic-messages.svg" width="26" height="26" alt="Anthropic"> | `/v1/messages` | 🟠 **Anthropic Messages** | Claude Code (`ANTHROPIC_BASE_URL` → wiwi), anthropic SDK |
 | <img src="docs/assets/inbound/anthropic-messages.svg" width="26" height="26" alt="count"> | `/v1/messages/count_tokens` | 🟠 Anthropic | token counting, no inference |
+| 🔌 | `WS /v1/realtime` | realtime | bidirectional audio/text, relayed upstream |
+| 🧾 | `GET/DELETE /v1/responses/{id}` | 🟣 Responses | retrieve or drop a stored response |
 | 📋 | `GET /v1/models` · `GET /public/models` | model list | all |
 | 💚 | `GET /health` | liveness | `{status, groups, providers}` |
 | 📈 | `GET /metrics` | Prometheus | opt-in, master-key gated |
@@ -258,15 +296,15 @@ Four things wiwi does that a config-file gateway doesn't.
 
 Any inbound dialect works with any outbound provider — the IR handles translation, so the matrix is all ✅:
 
-| ↓ In ╲ Out → | OpenAI | Anthropic | Gemini | OpenRouter | NIM | Cline | B.AI | GMI | WorkBuddy | OpenAI-compat | OpenCode |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| 🟢 **OpenAI Chat**        | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 🟣 **OpenAI Responses**   | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 🟠 **Anthropic Messages** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| ↓ In ╲ Out → | OpenAI | Claude | Gemini | OpenRouter | NIM | Cline | B.AI | GMI | WorkBuddy | Compat | OpenCode | Hermes |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| 🟢 **OpenAI Chat**        | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 🟣 **OpenAI Responses**   | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 🟠 **Anthropic Messages** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 ### Outbound providers
 
-All 11 types live in `wiwi/config.py:PROVIDER_TYPES`, the single source of truth. The router catalog, admin
+All 12 types live in `wiwi/config.py:PROVIDER_TYPES`, the single source of truth. The router catalog, admin
 validation, and the Pydantic schema all reference it, and import-time `assert`s fail loudly if a type is added
 without a matching adapter.
 
@@ -285,7 +323,10 @@ without a matching adapter.
     <td align="center"><img src="docs/assets/providers/bai.svg" width="84" alt="B.AI"><br/><sub><b>B.AI</b></sub></td>
     <td align="center"><img src="docs/assets/providers/opencode.svg" width="84" alt="OpenCode Zen"><br/><sub><b>OpenCode Zen</b></sub></td>
     <td align="center"><img src="docs/assets/providers/openai-compatible.svg" width="84" alt="OpenAI-compatible"><br/><sub><b>OpenAI-compat</b></sub></td>
-    <td align="center"><img src="docs/assets/wiwi-mark.svg" width="84" alt="you"><br/><sub><b>+ yours</b></sub></td>
+    <td align="center"><sub style="font-size:1.6rem;font-weight:800;color:#a78bfa">◇</sub><br/><sub><b>Hermes</b></sub></td>
+  </tr>
+  <tr>
+    <td align="center" colspan="6"><sub>…plus <b>+ yours</b> — any URL behind <code>openai-compatible</code></sub></td>
   </tr>
 </table>
 
@@ -301,6 +342,7 @@ without a matching adapter.
 | `gmicloud` | `https://api.gmi-serving.com/v1` | GMI Cloud serving endpoint |
 | `bai` | `https://api.b.ai/v1` | one key across Chat / Responses / Messages |
 | `opencode` | `https://opencode.ai/zen/v1` | per-model protocol routing with a live `User-Agent` |
+| `hermes` | `https://inference-api.nousresearch.com/v1` | Nous Portal; API key or OAuth device-code token (`hermes:` prefix); declines Realtime |
 | `openai-compatible` | *(you supply it)* | any URL — Ollama, vLLM, LM Studio, Together, Groq, DeepSeek |
 
 > 🔐 Provider keys enter as `os.environ/NAME` in YAML. **Nothing is committed** — `wiwi.yaml`, `wiwi.db`, `.env`,
@@ -321,7 +363,8 @@ A `.env` in the cwd loads first, so real environment variables always win.
 providers:              # named provider accounts, each with a pool of keyed entries
   - name: openai-main
     provider: openai    # openai | anthropic | gemini | openai-compatible | openrouter
-                        # | gmicloud | bai | nvidia-nim | cline | workbuddy | opencode
+                        # | gmicloud | bai | nvidia-nim | cline | workbuddy
+                        # | opencode | hermes
     keys:
       - {label: main,   key: os.environ/OPENAI_API_KEY,   weight: 3}
       - {label: backup, key: os.environ/OPENAI_API_KEY_2, weight: 1}
@@ -372,6 +415,18 @@ general_settings:
   max_keys_per_user: 50
   # trusted_proxies: ["10.0.0.0/8"]       # set when TLS terminates at a reverse proxy
 
+cache_settings:         # opt-in exact-match response cache — off by default
+  enabled: false
+  ttl_s: 3600
+  max_entries: 256
+  bypass_header: x-wiwi-no-cache
+
+healer:                 # opt-in background prober — off by default, it spends money
+  enabled: false
+  tick_s: 30
+  probe_timeout_s: 10
+  max_probes_per_sweep: 8
+
 wiwi_settings:
   drop_params: true            # silently drop params the target provider doesn't support
   max_request_body_mb: 50
@@ -397,6 +452,8 @@ wiwi_settings:
 - **Only non-streaming, deterministic requests are cached** (`temperature` unset or `0`, `n == 1`). Bypass one
   call with `X-Wiwi-No-Cache: true`. (`wiwi/ratelimit/redis.py` exists but is *not* wired in — rate limiting is
   always the in-memory limiter.)
+- **Two different cache-hit flags.** `cache_hit` = the *provider's* prompt cache; `response_cache_hit` = wiwi's
+  own cache. Only the first feeds prompt-cache metrics.
 - **Stream journals are on by default** (dir `.wiwi/journals`, 600 s TTL, 1 MiB cap) and are key-scoped: readable
   only by the virtual key that created them.
 - **`extra_body`** on a deployment merges raw JSON into the upstream body at encode time — for provider-specific
@@ -409,8 +466,10 @@ wiwi_settings:
 
 ## 🗺️ How it's put together
 
+<img alt="Pairwise converters compared with hub-and-spoke translation" src="docs/assets/wiwi-spoke-why.svg" width="100%">
+
 ```
-wiwi/                      28.4k lines of Python across 72 modules
+wiwi/                      36.2k lines of Python across 80 modules
 ├── main.py                CLI entrypoint (wiwi --config …)
 ├── config.py              YAML → pydantic; env interpolation; PROVIDER_TYPES
 ├── ir/                    Canonical IR: types.py (tagged parts, messages, tools, params) + builtin_tools.py
@@ -423,17 +482,14 @@ wiwi/                      28.4k lines of Python across 72 modules
 ├── ratelimit/ · cache/ · cost/ · logging_core/
 └── server/                app.py (FastAPI factory + /admin/*) · stats.py · metrics.py · config_store.py
 
-web/                       31.3k lines of TS/TSX — 71 .tsx files, 70 SPA routes
-tests/                     152 test files — unit (respx), ASGI e2e, Hypothesis
+web/                       36.1k lines of TS/TSX — 78 .tsx components, 72 SPA routes
+tests/                     196 test files — unit (respx), ASGI e2e, Hypothesis
 ```
 
 **The streaming contract** is one frozen tagged union, `IRStreamDelta` in `streaming/deltas.py` — `StreamStart`,
 `TextDelta`, `ThinkingDelta`, `ToolCallOpen`/`ArgsDelta`/`Close`, `UsageFinal`, `Finish`, `StreamEnd`/`StreamError`.
 Adapters guarantee legality; encoders never defend against malformed sequences. One asymmetry: `StreamError` may
 terminate at **any** point and needs no preceding `Finish`.
-
-`server/app.py` is ~4.5k lines and `core/gateway.py` ~1.9k — don't read either top to bottom. Start at
-`run_chat_like` and follow the pipeline it names.
 
 → Full detail in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/STREAMING.md`](docs/STREAMING.md) ·
 [`docs/CORE.md`](docs/CORE.md).
@@ -446,12 +502,14 @@ All `/admin/*` requires the master key (`Authorization: Bearer …`) or an admin
 
 | Route | Purpose |
 |---|---|
-| **Proxy** | `POST /v1/chat/completions` · `/v1/responses` · `/v1/messages` · `/v1/messages/count_tokens` · `GET /v1/models` · `GET /health` · `GET /metrics` · `GET /public/models` |
+| **Proxy** | `POST /v1/chat/completions` · `/v1/responses` · `/v1/messages` · `/v1/messages/count_tokens` · `WS /v1/realtime` · `GET/DELETE /v1/responses/{id}` · `GET /v1/models` · `GET /health` · `GET /metrics` · `GET /public/models` |
+| **Playground** | `POST /v1/playground/completions` · `POST /auth/playground-key` |
 | **Virtual keys** | `POST /admin/keys/generate` · `GET /admin/keys` · `PATCH/DELETE /admin/keys/{id}` · `POST /admin/keys/{id}/disable` |
 | **Providers** | `GET /admin/provider-catalog` · `GET /admin/providers` · `POST/PATCH/DELETE /admin/providers/{name}` · key-pool CRUD under `…/keys/{label}` · `GET …/secret` (audit-logged) |
+| **Backup** | `GET /admin/backup` · `POST /admin/backup/import` · `GET /admin/providers/export` · `POST /admin/providers/import` |
 | **Models & routing** | `GET /admin/models` · `PATCH /admin/model-groups/{name}` · `POST/DELETE …/deployments` · `POST /admin/aliases` · `GET/PUT/DELETE /admin/pricing/{id}` |
-| **Logs & stats** | `GET /admin/logs/{requests,proxy}` · `GET /admin/stream` (SSE) · `GET /admin/stats/{overview,timeseries}` · `GET/PUT /admin/alert-rules` |
-| **Users & sessions** | `GET /admin/users` · `PATCH /admin/users/{uid}` · `POST /auth/{signup,login,logout}` · `GET /auth/me` · `POST /auth/playground-key` |
+| **Logs & stats** | `GET /admin/logs/{requests,proxy,audit}` · `GET /admin/logs/requests/{id}/metrics` · `GET /admin/stream` (SSE) · `GET /admin/stats/{overview,timeseries}` · `GET/PUT /admin/alert-rules` |
+| **Users & sessions** | `GET /admin/users` · `PATCH /admin/users/{uid}` · `POST /auth/{signup,login,logout}` · `GET /auth/me` |
 | **OAuth** | `/admin/cline/oauth/*` · `/cline/oauth/callback` · `/admin/workbuddy/*` |
 
 → Every endpoint, field, and a runnable `curl` for each → [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md).
@@ -461,8 +519,8 @@ All `/admin/*` requires the master key (`Authorization: Bearer …`) or an admin
 ## 🧪 Development
 
 ```bash
-python3 -m pytest tests/ -q                                 # 2729 passed, 5 skipped
-python3 -m pytest tests/test_fix_round110.py -q            # latest regression file
+python3 -m pytest tests/ -q                                 # 3317 collected
+python3 -m pytest tests/test_fix_round150.py -q            # latest regression file
 python3 -m pytest tests/test_router.py -k cooldown -q      # by name
 
 ruff check wiwi/ tests/                                     # line-length 100, target py311
@@ -476,7 +534,7 @@ The suite mixes **unit tests** (`respx` HTTP mocks), **ASGI end-to-end** runs th
 write bare `async def test_…`, no decorator. There is no `conftest.py`; each file builds its own config factory
 and ASGI client.
 
-Bugfix regressions land in the next thematic `test_fix_roundN.py` — **round 110 is current**. Gaps in the numbering
+Bugfix regressions land in the next thematic `test_fix_roundN.py` — **round 150 is current**. Gaps in the numbering
 are real; find the next unused N with `ls tests/test_fix_round*.py`, never assume one.
 
 > The counts in this README are checked in periodically. Re-derive them with
