@@ -1318,7 +1318,90 @@ select.admin-input option {
   min-width: 0;
 }
 
-/* Provider ecosystem: hairline-separated tiles (gap-px over a border fill). */
+/* Provider ecosystem: hairline-separated tiles (gap-px over a border fill),
+   each carrying the hue of the wire family it belongs to. The legend above the
+   grid states the same mapping in words, so the hue is decoration and the dot
+   is never the only way to read a tile. */
+.docs-provider-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.docs-provider-sub {
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: var(--admin-text-muted);
+}
+/* The header reuses the section-aside chip, but its text sits on the muted
+   token — the default dim (#6b7280) fails 4.5:1 at this size. */
+.docs-provider-head .docs-count-chip {
+  color: var(--admin-text-muted);
+}
+
+.docs-provider-legend {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1px;
+  margin-bottom: 10px;
+  overflow: hidden;
+  border: 1px solid var(--admin-border);
+  border-radius: 12px;
+  background: var(--admin-border);
+  list-style: none;
+}
+@media (min-width: 768px) {
+  .docs-provider-legend {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+.docs-provider-legend-item {
+  min-width: 0;
+  padding: 10px 12px 11px;
+  background: var(--admin-surface);
+}
+.docs-provider-legend-top {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.docs-provider-legend-label {
+  min-width: 0;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--admin-text);
+}
+/* Count chip: the one saturated element in the legend, so the eye pairs it
+   with the dots in the grid below. */
+.docs-provider-legend-count {
+  margin-left: auto;
+  padding: 1px 7px;
+  border: 1px solid hsl(var(--f-hue) 80% 62% / 0.24);
+  border-radius: 999px;
+  background: hsl(var(--f-hue) 80% 62% / 0.1);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+  color: hsl(var(--f-hue) 55% 84%);
+}
+.docs-provider-legend-note {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--admin-text-muted);
+}
+.docs-provider-dot {
+  flex: 0 0 auto;
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: hsl(var(--f-hue) 80% 62%);
+  box-shadow: 0 0 7px hsl(var(--f-hue) 85% 62% / 0.6);
+}
+
 .docs-provider-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1334,11 +1417,82 @@ select.admin-input option {
   }
 }
 .docs-provider-item {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 0;
+  min-height: 96px;
+  padding: 14px 10px 12px;
   background: var(--admin-surface);
-  transition: background-color 0.2s ease;
+  transition: background-color 0.25s ease;
 }
 .docs-provider-item:hover {
-  background: rgba(255, 255, 255, 0.028);
+  background: hsl(var(--f-hue) 22% 8%);
+}
+/* The logo keeps its own brand colours; the chip around it is what carries the
+   family tint, so twelve brands do not fight twelve washes. */
+.docs-provider-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  padding: 8px;
+  border: 1px solid var(--admin-border);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.022);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  transition:
+    transform 0.25s ease,
+    border-color 0.25s ease,
+    background-color 0.25s ease,
+    box-shadow 0.25s ease;
+}
+.docs-provider-item:hover .docs-provider-logo {
+  transform: translateY(-1px);
+  border-color: hsl(var(--f-hue) 85% 70% / 0.45);
+  background: hsl(var(--f-hue) 80% 62% / 0.15);
+  box-shadow:
+    0 0 22px -7px hsl(var(--f-hue) 85% 62% / 0.6),
+    inset 0 1px 0 hsl(var(--f-hue) 90% 85% / 0.12);
+}
+.docs-provider-name {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--admin-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The provider type as it is written in `wiwi.yaml`. Dim (#6b7280) fails at
+   this size, so the mono line uses the muted token. */
+.docs-provider-id {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+}
+.docs-provider-id-text {
+  overflow: hidden;
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  color: var(--admin-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Tile entrance: the same stagger the feature grid uses, compressed — this
+   grid is read as a map, so twelve tiles should not take a second to arrive. */
+@media (prefers-reduced-motion: no-preference) {
+  .docs-provider-grid.is-revealed .docs-provider-item {
+    animation: docs-tile-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+    animation-delay: calc(var(--f-i, 0) * 28ms);
+  }
 }
 
 /* -- docs §08 Features ------------------------------------------------------
@@ -1378,9 +1532,10 @@ select.admin-input option {
   background: var(--admin-surface);
   transition: background-color 0.25s ease;
 }
-/* Pointer-tracked spotlight. Negative z-index keeps it above the tile's own
-   background (painted first inside this stacking context) but under the text. */
-.docs-feature-spot {
+/* Pointer-tracked spotlight, shared by the feature and provider tiles.
+   Negative z-index keeps it above the tile's own background (painted first
+   inside this stacking context) but under the text. */
+.docs-spotlight {
   position: absolute;
   inset: 0;
   z-index: -1;
@@ -1393,7 +1548,8 @@ select.admin-input option {
   transition: opacity 0.3s ease;
   pointer-events: none;
 }
-.docs-feature:hover .docs-feature-spot {
+.docs-feature:hover .docs-spotlight,
+.docs-provider-item:hover .docs-spotlight {
   opacity: 1;
 }
 /* Left spine, lit in the tile's hue */
@@ -1529,8 +1685,9 @@ select.admin-input option {
   background: var(--admin-border);
 }
 
-/* Tile entrance: staggered once the grid scrolls into view. */
-@keyframes docs-feature-in {
+/* Tile entrance: staggered once the grid scrolls into view. Shared by the
+   feature grid and the provider grid. */
+@keyframes docs-tile-in {
   from {
     opacity: 0;
     transform: translateY(10px);
@@ -1542,7 +1699,7 @@ select.admin-input option {
 }
 @media (prefers-reduced-motion: no-preference) {
   .docs-feature-grid.is-revealed .docs-feature {
-    animation: docs-feature-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+    animation: docs-tile-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
     animation-delay: calc(var(--f-i, 0) * 45ms);
   }
 }
@@ -1552,7 +1709,8 @@ select.admin-input option {
   .docs-feature::before {
     opacity: 1;
   }
-  .docs-feature-spot {
+  .docs-feature .docs-spotlight,
+  .docs-provider-item .docs-spotlight {
     opacity: 0.5;
   }
 }

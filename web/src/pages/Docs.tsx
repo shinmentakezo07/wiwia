@@ -468,45 +468,145 @@ print(resp.content[0].text)`,
 
 // ── provider ecosystem map ────────────────────────────────────────────────
 
-const PROVIDER_ASSETS: { label: string; src?: string; icon?: LucideIcon }[] = [
-  { label: "OpenAI", src: "/logos/openai.png" },
-  { label: "Anthropic", src: "/logos/anthropic.png" },
-  { label: "Gemini", src: "/logos/gemini.png" },
-  { label: "OpenRouter", src: "/logos/openrouter.png" },
-  { label: "OpenAI-compatible", src: "/logos/openai-compatible.png" },
-  { label: "GMI Cloud", src: "/logos/gmicloud.png" },
-  { label: "BAI", src: "/logos/bai.png" },
-  { label: "WorkBuddy", src: "/logos/workbuddy.svg" },
-  { label: "NVIDIA NIM", src: "/logos/nvidia-nim.png" },
-  { label: "OpenCode", src: "/logos/opencode.svg" },
-  { label: "Hermes", src: "/logos/hermes.svg" },
-  { label: "Cline", icon: Boxes },
+// How wiwi speaks to each provider type upstream. The grouping is read off the
+// adapters rather than invented: most types share one Chat Completions codec
+// (`registry._OPENAI_WIRE_TYPES` plus the OpenAI-adapter specializations),
+// `anthropic` and `gemini` speak their vendor's own protocol, and the three
+// adapters that declare `force_stream = True` have no non-streaming upstream
+// mode. A tile's dot and wash take its family's hue; the legend above the grid
+// spells the same mapping out in text, so hue is never the only carrier.
+type WireFamily = "chat" | "native" | "sse";
+
+const WIRE_FAMILIES: { id: WireFamily; label: string; note: string; hue: number }[] = [
+  {
+    id: "chat",
+    label: "OpenAI Chat wire",
+    note: "The upstream speaks Chat Completions. Per-vendor quirks live in the adapter, not in core.",
+    hue: 213,
+  },
+  {
+    id: "native",
+    label: "Native protocol",
+    note: "The upstream speaks its own protocol — Anthropic Messages, Gemini generateContent.",
+    hue: 156,
+  },
+  {
+    id: "sse",
+    label: "SSE-only upstream",
+    note: "No non-streaming upstream mode; the gateway reassembles a reply for non-streaming callers.",
+    hue: 27,
+  },
+];
+
+// Derived, so the tile accents can never drift from the legend above them.
+const FAMILY_HUE = Object.fromEntries(
+  WIRE_FAMILIES.map((f) => [f.id, f.hue]),
+) as Record<WireFamily, number>;
+const FAMILY_LABEL = Object.fromEntries(
+  WIRE_FAMILIES.map((f) => [f.id, f.label]),
+) as Record<WireFamily, string>;
+
+// `id` is the value a reader puts in `provider:` in wiwi.yaml — it is the
+// provider type from `wiwi/config.py:PROVIDER_TYPES`, listed in the same order.
+const PROVIDERS: {
+  label: string;
+  id: string;
+  src?: string;
+  icon?: LucideIcon;
+  family: WireFamily;
+}[] = [
+  { label: "OpenAI", id: "openai", src: "/logos/openai.png", family: "chat" },
+  {
+    label: "OpenAI-compatible",
+    id: "openai-compatible",
+    src: "/logos/openai-compatible.png",
+    family: "chat",
+  },
+  { label: "GMI Cloud", id: "gmicloud", src: "/logos/gmicloud.png", family: "chat" },
+  { label: "B.AI", id: "bai", src: "/logos/bai.png", family: "chat" },
+  { label: "OpenRouter", id: "openrouter", src: "/logos/openrouter.png", family: "chat" },
+  { label: "NVIDIA NIM", id: "nvidia-nim", src: "/logos/nvidia-nim.png", family: "chat" },
+  { label: "Hermes", id: "hermes", src: "/logos/hermes.svg", family: "chat" },
+  { label: "Anthropic", id: "anthropic", src: "/logos/anthropic.png", family: "native" },
+  { label: "Gemini", id: "gemini", src: "/logos/gemini.png", family: "native" },
+  { label: "Cline", id: "cline", icon: Boxes, family: "sse" },
+  { label: "WorkBuddy", id: "workbuddy", src: "/logos/workbuddy.svg", family: "sse" },
+  { label: "OpenCode Zen", id: "opencode", src: "/logos/opencode.svg", family: "sse" },
 ];
 
 function ProviderGrid() {
+  const gridRef = useRef<HTMLDivElement>(null);
+  const revealed = useInViewOnce(gridRef);
+
   return (
     <div className="mt-6">
-      <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-        <h3 className="admin-label">Provider ecosystem</h3>
-        <span className="text-[11px] text-[var(--admin-text-dim)]">12 provider types</span>
+      <div className="docs-provider-head">
+        <div className="min-w-0">
+          <h3 className="admin-label">Provider ecosystem</h3>
+          <p className="docs-provider-sub">
+            Where each type lands on the wire — grouped by what the upstream actually speaks.
+          </p>
+        </div>
+        <span className="docs-count-chip">
+          <b>{PROVIDERS.length}</b> provider types
+          <span className="docs-count-sep" aria-hidden />
+          <b>{WIRE_FAMILIES.length}</b> wire families
+        </span>
       </div>
-      <div className="docs-provider-grid">
-        {PROVIDER_ASSETS.map((provider) => {
+
+      {/* Legend for the dots below. Every tile also names its family to screen
+          readers, so the mapping survives both greyscale and assistive tech. */}
+      <ul className="docs-provider-legend">
+        {WIRE_FAMILIES.map((family) => (
+          <li
+            key={family.id}
+            className="docs-provider-legend-item"
+            style={{ "--f-hue": family.hue } as CSSProperties}
+          >
+            <span className="docs-provider-legend-top">
+              <span className="docs-provider-dot" aria-hidden />
+              <span className="docs-provider-legend-label">{family.label}</span>
+              <span className="docs-provider-legend-count">
+                {PROVIDERS.filter((p) => p.family === family.id).length}
+              </span>
+            </span>
+            <span className="docs-provider-legend-note">{family.note}</span>
+          </li>
+        ))}
+      </ul>
+
+      <div
+        ref={gridRef}
+        className={`docs-provider-grid${revealed ? " is-revealed" : ""}`}
+        role="list"
+      >
+        {PROVIDERS.map((provider, i) => {
           const Logo = provider.icon;
           return (
             <div
-              key={provider.label}
-              className="docs-provider-item flex min-h-[76px] flex-col items-center justify-center gap-2 px-2 py-3"
+              key={provider.id}
+              role="listitem"
+              className="docs-provider-item"
+              style={
+                { "--f-hue": FAMILY_HUE[provider.family], "--f-i": i } as CSSProperties
+              }
+              onPointerMove={trackSpotlight}
             >
-              <div className="flex h-7 w-7 items-center justify-center">
+              <span className="docs-spotlight" aria-hidden />
+              <span className="docs-provider-logo">
                 {provider.src ? (
                   <img src={provider.src} alt="" className="h-full w-full object-contain" />
                 ) : Logo ? (
-                  <Logo className="h-5 w-5 text-[var(--admin-text-muted)]" />
+                  <Logo className="h-4 w-4" strokeWidth={1.75} aria-hidden />
                 ) : null}
-              </div>
-              <span className="max-w-full truncate text-[10px] font-medium text-[var(--admin-text-dim)]">
-                {provider.label}
+              </span>
+              <span className="docs-provider-name">{provider.label}</span>
+              <span className="docs-provider-id">
+                <span className="docs-provider-dot" aria-hidden />
+                <span className="docs-provider-id-text" style={{ fontFamily: MONO }}>
+                  {provider.id}
+                </span>
+                <span className="sr-only"> — {FAMILY_LABEL[provider.family]}</span>
               </span>
             </div>
           );
@@ -696,18 +796,19 @@ const FEATURE_MODULE_COUNT = new Set(
   FEATURES.map((f) => f.meta.replace(/^wiwi\//, "").split("/")[0]),
 ).size;
 
+// Pointer position is written straight onto the tile as two custom properties
+// — no React state, so a pointer-tracked spotlight never re-renders the grid.
+// Shared by the feature grid and the provider grid.
+function trackSpotlight(event: ReactPointerEvent<HTMLElement>) {
+  const el = event.currentTarget;
+  const rect = el.getBoundingClientRect();
+  el.style.setProperty("--mx", `${((event.clientX - rect.left) / rect.width) * 100}%`);
+  el.style.setProperty("--my", `${((event.clientY - rect.top) / rect.height) * 100}%`);
+}
+
 function FeatureGrid() {
   const gridRef = useRef<HTMLDivElement>(null);
   const revealed = useInViewOnce(gridRef);
-
-  // Pointer position is written straight onto the tile as two custom
-  // properties — no React state, so the spotlight never re-renders the grid.
-  const trackPointer = useCallback((event: ReactPointerEvent<HTMLElement>) => {
-    const el = event.currentTarget;
-    const rect = el.getBoundingClientRect();
-    el.style.setProperty("--mx", `${((event.clientX - rect.left) / rect.width) * 100}%`);
-    el.style.setProperty("--my", `${((event.clientY - rect.top) / rect.height) * 100}%`);
-  }, []);
 
   return (
     <div
@@ -723,9 +824,9 @@ function FeatureGrid() {
             role="listitem"
             className="docs-feature"
             style={{ "--f-hue": feature.hue, "--f-i": i } as CSSProperties}
-            onPointerMove={trackPointer}
+            onPointerMove={trackSpotlight}
           >
-            <span className="docs-feature-spot" aria-hidden />
+            <span className="docs-spotlight" aria-hidden />
             <div className="docs-feature-top">
               <span className="docs-feature-icon">
                 <Icon strokeWidth={1.75} aria-hidden />
