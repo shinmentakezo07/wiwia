@@ -4,9 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-**wiwi** is a self-hosted unified LLM gateway proxy (LiteLLM-shaped): three inbound API dialects — OpenAI Chat, OpenAI Responses (Codex CLI), Anthropic Messages — all route through one canonical internal representation (IR) to any of twelve outbound provider types; responses are always re-encoded in the caller's inbound dialect (e.g. Claude Code backed by GPT). Adds virtual keys, budgets, rate limits, key pools with smooth weighted round-robin, retries/cooldowns/fallbacks, a health healer, cost tracking, request logs, and an admin web UI.
+**wiwi** is a self-hosted unified LLM gateway proxy (LiteLLM-shaped): three inbound API dialects — OpenAI Chat, OpenAI Responses (Codex CLI), Anthropic Messages — plus the legacy OpenAI Completions shape and a browser-session twin of Chat, all route through one canonical internal representation (IR) to any of twelve outbound provider types; responses are always re-encoded in the caller's inbound dialect (e.g. Claude Code backed by GPT). Adds virtual keys, budgets, rate limits, key pools with smooth weighted round-robin, retries/cooldowns/fallbacks, a health healer, cost tracking, request logs, and an admin web UI.
 
-**Use the ambient `python3` (3.12) / `pytest` (9.1.1) / `ruff` (0.16.4) on PATH** — they have the project installed (`import wiwi` resolves to this checkout). There is **no usable `.venv`**: the directory does not exist in this checkout, and the docs that describe it as an empty uv-venv symlink are stale either way. Never invoke `.venv/bin/python`.
+**Scale, verified 2026-10-17** (re-measure rather than trust): 80 Python files under `wiwi/`, `__init__.py`s included; `wiwi/server/app.py` ~7.0k lines and `wiwi/core/gateway.py` ~2.6k; `wiwi/wire/` 4 codecs, `wiwi/providers/` 12 types across 25 files; 9 `/v1` routes and 57 `/admin` routes; 202 test files collecting ~3,388 tests; 62 components in `web/src/pages/`. Counts drift — the commands below are the source of truth.
+
+**Use the ambient `python3` (3.13.5 at time of writing — *not* 3.12, as older versions of this file claimed) / `pytest` (9.1.1) / `ruff` (0.17.1) on PATH** — they have the project installed (`import wiwi` resolves to this checkout). There is **no usable `.venv`**: the directory does not exist in this checkout, and the docs that describe it as an empty uv-venv symlink are stale either way. Never invoke `.venv/bin/python`.
 
 `AGENTS.md` is the OpenCode-facing guide and claims canonical status for OpenCode work; it is accurate and slightly more current than this file in places. Where the two disagree with the code, trust the code.
 
@@ -63,9 +65,9 @@ wire codec (inbound) ──decode──► IR ──adapter.encode_request──
 wire encoder (inbound) ◄──IRStreamDelta/IRResponse◄──adapter.decode─── provider
 ```
 
-Adding an inbound surface = one new module in `wiwi/wire/`; adding a provider = one new adapter in `wiwi/providers/` + a branch in `registry.get_adapter()` (or a documented entry in `_OPENAI_WIRE_TYPES`). Core code (`core/gateway.py`) never branches on dialect or provider name. Request flow end-to-end is best traced through `server/app.py:run_chat_like` (decode → auth → rate limit → journal replay check → router retries/fallbacks → gateway complete/stream) and back out through the wire encoders; `core/context.py:RequestContext` (~83 lines) is the single mutable holder threaded through all of it.
+Adding an inbound surface = one new module in `wiwi/wire/`; adding a provider = one new adapter in `wiwi/providers/` + a branch in `registry.get_adapter()` (or a documented entry in `_OPENAI_WIRE_TYPES`). Core code (`core/gateway.py`) never branches on dialect or provider name. Request flow end-to-end is best traced through `server/app.py:run_chat_like` (decode → auth → rate limit → journal replay check → router retries/fallbacks → gateway complete/stream) and back out through the wire encoders; `core/context.py:RequestContext` (121 lines) is the single mutable holder threaded through all of it.
 
-Inbound surfaces: `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages`, `POST /v1/messages/count_tokens`; plus `GET /v1/models`, `GET /public/models`, `GET /health`, a configurable Prometheus metrics path (`server/metrics.py`), `/admin/*` (master key), `/auth/*` (user sessions), `/cline/oauth/callback`.
+Inbound surfaces: `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages`, `POST /v1/messages/count_tokens`, the legacy `POST /v1/completions` (`wire/openai_completions.py`, `choices[].text` not a chat transcript), and `POST /v1/playground/completions` — the Chat pipeline gated by the `wiwi_session` cookie instead of a bearer key; plus `GET`/`DELETE /v1/responses/{response_id}` (wiwi-owned stored Responses state, `server/response_store.py` — ids are key-scoped, not capability tokens), `GET /v1/models`, `GET /public/models`, `GET /health`, a configurable Prometheus metrics path (`server/metrics.py`), `/admin/*` (master key), `/auth/*` (user sessions), `/cline/oauth/callback`.
 
 `PROVIDER_TYPES` (`wiwi/config.py`) is the outbound-type source of truth — twelve: `openai`, `anthropic`, `gemini`, `openai-compatible`, `openrouter`, `gmicloud`, `bai`, `nvidia-nim`, `cline`, `workbuddy`, `opencode`, `hermes`.
 
@@ -73,32 +75,32 @@ Inbound surfaces: `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/m
 
 | Path | Role |
 |---|---|
-| `wire/` | Inbound codecs: `openai_chat.py`, `openai_responses.py`, `anthropic_messages.py` — each owns `decode_request`, `encode_response`, a `StreamEncoder`, and `error_body` |
-| `providers/` | Outbound adapters: openai, anthropic, gemini, openrouter, nim, cline, bai, workbuddy, opencode (+ `cline_oauth.py`/`cline_auto_refresh.py`/`cline_version.py`, `workbuddy_auth.py`/`workbuddy_auto_refresh.py`, `opencode_version.py`, `nim_tool_schema.py`, `nim_native_tools.py`), plus `base.py` + `registry.py` |
-| `core/` | Engine: `gateway.py` (~1.8k lines), `context.py` (RequestContext), `recovery.py` (Backoff, CircuitBreaker, ProbeVerdict, HealthHealer) |
-| `ir/` | Internal representation (`types.py`, `builtin_tools.py`) |
-| `streaming/` | `IRStreamDelta` taxonomy (~140 lines, `deltas.py`) + `sse.py` / `coalesce.py` / `resume.py` / `tape_store.py` (durable journals) / `partial_json.py` / `loopdetect.py` / `validation.py` — the contract between adapters and encoders |
+| `wire/` | Inbound codecs: `openai_chat.py`, `openai_responses.py`, `anthropic_messages.py`, `openai_completions.py` (legacy `/v1/completions`) — each owns `decode_request`, `encode_response`, a `StreamEncoder`, and `error_body` |
+| `providers/` | Outbound adapters: `openai`, `anthropic`, `gemini`, `openrouter`, `nim`, `cline`, `bai`, `workbuddy`, `opencode`, `hermes` (+ `hermes_oauth.py`/`hermes_auto_refresh.py`, `cline_oauth.py`/`cline_auto_refresh.py`/`cline_version.py`, `workbuddy_auth.py`/`workbuddy_auto_refresh.py`/`workbuddy_version.py`, `opencode_version.py`, `nim_tool_schema.py`/`nim_native_tools.py`, `token_expiry.py`), plus `base.py` + `registry.py`. `openai-compatible` and `gmicloud` have no adapter file — both resolve to the `openai` adapter via `_OPENAI_WIRE_TYPES` |
+| `core/` | Engine: `gateway.py` (~2.6k lines), `context.py` (RequestContext, 121 lines), `recovery.py` (Backoff, CircuitBreaker, ProbeVerdict, HealthHealer), `telemetry.py` |
+| `ir/` | Internal representation (`types.py`, `builtin_tools.py`, `translation.py`) |
+| `streaming/` | `IRStreamDelta` taxonomy (151 lines, `deltas.py`) + `sse.py` / `coalesce.py` / `resume.py` / `tape_store.py` (durable journals) / `partial_json.py` / `loopdetect.py` / `validation.py` — the contract between adapters and encoders |
 | `router/` | Key pools, weighted round-robin, retries, cooldowns, fallbacks, probation |
 | `auth/` | Virtual keys, budgets, users (`keys.py`, `service.py`, `users.py`) |
 | `ratelimit/` | Sliding-window rpm/tpm (memory default + redis) |
 | `cache/` | Opt-in exact-match response cache (`CacheSettings`, off by default) |
 | `cost/` | Token/cost calculation (`pricing.py`) |
-| `logging_core/` | Three-stream logger: request (DB+SSE), proxy (stdout+SSE), audit (sync DB) |
-| `server/` | FastAPI app (`app.py`, ~4.5k lines), admin API, `stats.py` rollups, `metrics.py` (Prometheus), `config_store.py`, static SPA serving |
-| `web/` | Admin UI + public site (React 19 + TypeScript + Vite 6 + Tailwind 4), ~50 page components in `src/pages/` |
-| `tests/` | Pytest suite — 100+ files: thematic regressions plus numbered `test_fix_roundN.py` |
+| `logging_core/` | Three-stream logger: request (DB+SSE), proxy (stdout+SSE), audit (sync DB) — `events.py`, `subsystem.py`, `db_sink.py`, `hist.py`, `retention.py` |
+| `server/` | FastAPI app (`app.py`, ~7.0k lines), admin API, `stats.py` rollups, `metrics.py` (Prometheus), `config_store.py`, `response_store.py` (Responses-API state), `backup.py`, static SPA serving |
+| `web/` | Admin UI + public site (React 19 + TypeScript + Vite 6 + Tailwind 4), 62 page components in `src/pages/` |
+| `tests/` | Pytest suite — 202 files collecting ~3,388 tests: thematic regressions plus numbered `test_fix_roundN.py` |
 | `docs/` | Design specs (intentionally run ahead of implementation) + `docs/superpowers/{plans,specs}` |
 
 Two adapters carry provider-specific quirks that live in `providers/` (never in `core/`):
 
 - **NVIDIA NIM** (`nim_adapter.py` + `nim_tool_schema.py` + `nim_native_tools.py`) — NIM is vLLM-backed and rejects JSON Schema boolean subschemas (`"additionalProperties": true`) and parameters named `type`, which collide with the schema keyword inside vLLM's tool parser. `nim_tool_schema.py` strips the former and aliases the latter to `_nim_arg_<name>`, keeping a mapping so agent-facing names are restored on the way back.
-- **Cline** (`cline_adapter.py` + `cline_oauth.py` + `cline_auto_refresh.py`) and **WorkBuddy** (`workbuddy_adapter.py` + `workbuddy_auth.py` + `workbuddy_auto_refresh.py`) — OAuth-based; tokens refresh on demand, which is what makes their requests survive a 401.
+- **Cline** (`cline_adapter.py` + `cline_oauth.py` + `cline_auto_refresh.py`), **WorkBuddy** (`workbuddy_adapter.py` + `workbuddy_auth.py` + `workbuddy_auto_refresh.py`) and **Hermes / Nous Portal** (`hermes_adapter.py` + `hermes_oauth.py` + `hermes_auto_refresh.py`, device-code flow, multi-account rotation) — OAuth-based; tokens refresh on demand, which is what makes their requests survive a 401.
 
 `registry.get_adapter()` dispatches on provider type, and an import-time `assert` at the bottom of `registry.py` fails loudly if a type is added to `PROVIDER_TYPES` without a matching branch or `_OPENAI_WIRE_TYPES` entry — so adding a provider is safe-by-construction. Note the assert catches *missing* branches, not *misplaced* branching.
 
 **Adapter ownership matters.** Adapters accumulate per-stream decode state across awaits (open tool indices, name fragments, deferred tool opens, NIM aliases), so `fresh_adapter(type)` returns a *private* instance and is what the request hot path must use; `get_adapter(type)` returns a shared singleton that is `reset()` on every hand-out and is only safe for synchronous, non-await-held use. Using the shared one on the hot path lets a concurrent request wipe an in-flight stream's state.
 
-**`core/recovery.py`** holds the resilience primitives: `Backoff` (shared by the router's retry sleep — see the note at `router.py` about keeping the math in sync with `tests/test_recovery.py`), `CircuitBreaker` (shared by the Cline/WorkBuddy token refreshers), `ProbeVerdict`/`parse_retry_after` (shared upstream-error classification), and `HealthHealer` — a background sweeper that probes cooling/invalid keys and cooled deployments with a 1-token completion and restores them early into a *probation* state (reduced WRR weight until it graduates). The healer is **off by default** (`healer.enabled`) because probes spend real provider money — same opt-in ethos as the response cache. It is wired into the app lifespan in `server/app.py`.
+**`core/recovery.py`** holds the resilience primitives: `Backoff` (shared by the router's retry sleep — see the note at `router.py` about keeping the math in sync with `tests/test_recovery.py`), `CircuitBreaker` (shared by the Cline/WorkBuddy/Hermes token refreshers), `ProbeVerdict`/`parse_retry_after` (shared upstream-error classification), and `HealthHealer` — a background sweeper that probes cooling/invalid keys and cooled deployments with a 1-token completion and restores them early into a *probation* state (reduced WRR weight until it graduates). The healer is **off by default** (`healer.enabled`) because probes spend real provider money — same opt-in ethos as the response cache. It is wired into the app lifespan in `server/app.py`.
 
 ### Non-negotiable streaming contract
 
@@ -137,8 +139,8 @@ Error bodies are dialect-correct per surface (OpenAI `{"error":{…}}` vs Anthro
 - Upstream mocking with `respx`; **use the decorator form** (`@respx.mock`) — the context-manager form is broken in respx 0.23 + httpx 0.28.
 - Property-based round-trip tests use `hypothesis` (persistent cache in `.hypothesis/`) — the right tool for codec/adapter invariants.
 - Default master key for admin-auth'd tests: `sk-wiwi-master-test` via `Authorization: Bearer …`.
-- New bug fixes go into the next unused numbered regression file (`test_fix_roundN.py`) rather than topic files. Find the next number with `ls tests/test_fix_round*.py` — **never assume one** (rounds 2–43 exist; round 1 is missing; `test_bugfix_round5.py` is a legacy filename).
-- Run full pytest + ruff before claiming work done or committing — both green at commit time.
+- New bug fixes go into the next unused numbered regression file (`test_fix_roundN.py`) rather than topic files. Find the next number with `ls tests/test_fix_round*.py | sed 's/.*round//;s/\.py//' | sort -n | tail -3` — **never assume one, and never trust a plain `ls`**: it sorts lexicographically, so `round9.py` appears after `round156.py`. As of 2026-10-17 the highest is `round156`, so the next file is `round157`; 152 of these files exist, with gaps at 1 (never created), 5 (`test_bugfix_round5.py` is the legacy filename) and 102, 147.
+- Run full pytest + ruff before claiming work done or committing — both green at commit time. Measured baseline 2026-10-17: `3383 passed, 6 skipped, 7 warnings in 217.64s` (202 files, ~3,388 collected). Some of those warnings are `aiosqlite` worker threads outliving their event loop (`AUDIT.md` #475): harmless here, and do **not** try to silence them by escalating that warning class to an error — pytest charges the failure to an unrelated test.
 
 ## Conventions & guardrails
 
@@ -186,7 +188,7 @@ Every UI or UX change — in `web/` or in any admin-facing HTML/template surface
 
 ## Where to start reading
 
-`server/app.py` is ~4.5k lines and `core/gateway.py` ~1.8k — don't read either top to bottom. For a request's full path, start at `run_chat_like` in `server/app.py` (and `create_app`/`AppState` above it) and follow the pipeline it names; `RequestContext` (`core/context.py`, ~83 lines) is the single mutable object threaded through every stage, so reading its fields tells you what the pipeline carries. For streaming, read `streaming/deltas.py` (~140 lines, the whole contract) before any adapter. `docs/QUICKSTART.md`, `docs/API_REFERENCE.md`, `docs/CONFIG.md`, `docs/PROVIDERS.md`, and `docs/STREAMING.md` are the practical companion docs; `detailed.md` is a code-derived technical reference.
+`server/app.py` is ~7.0k lines and `core/gateway.py` ~2.6k — don't read either top to bottom. `app.py` is a single `create_app` closure holding every route plus `AppState`/`lifespan`; to navigate it, grep for the surface you care about (`@app.post("/v1`, `@app.get("/admin`, …) rather than scrolling. For a request's full path, start at `run_chat_like` in `server/app.py` (and `create_app`/`AppState` above it) and follow the pipeline it names; `RequestContext` (`core/context.py`, 121 lines) is the single mutable object threaded through every stage, so reading its fields tells you what the pipeline carries. For streaming, read `streaming/deltas.py` (151 lines, the whole contract) before any adapter. `docs/QUICKSTART.md`, `docs/API_REFERENCE.md`, `docs/CONFIG.md`, `docs/PROVIDERS.md`, and `docs/STREAMING.md` are the practical companion docs; `detailed.md` is a code-derived technical reference.
 
 ## Docs vs. code
 
@@ -194,7 +196,7 @@ Every UI or UX change — in `web/` or in any admin-facing HTML/template surface
 
 ## UPDATE.md — changelog for translation work
 
-`UPDATE.md` is the **binding changelog** for all OpenAI ↔ Anthropic cross-provider translation fixes, the OpenRouter adapter, and multi-turn conversation fixes. Any agent touching the translation layer — `wiwi/wire/{openai_chat,openai_responses,anthropic_messages}.py`, `wiwi/providers/{openai,anthropic,openrouter}_adapter.py`, or any code handling `reasoning_effort`/`reasoning` mapping, `tool_result` messages, `content: null`, `stream_options`, or upstream error extraction — **must read UPDATE.md first** and follow the invariants it records. It documents every fix with before/after code snippets, the files changed, and the tests that cover them. When extending one of those areas, check UPDATE.md for the existing fix before writing new code; when a new fix lands in one of those areas, add an entry to UPDATE.md so a later agent does not rediscover and re-fix the same thing.
+`UPDATE.md` is the **binding changelog** for all OpenAI ↔ Anthropic cross-provider translation fixes, the OpenRouter adapter, and multi-turn conversation fixes. Any agent touching the translation layer — `wiwi/wire/{openai_chat,openai_responses,anthropic_messages,openai_completions}.py`, `wiwi/providers/{openai,anthropic,openrouter}_adapter.py`, or any code handling `reasoning_effort`/`reasoning` mapping, `tool_result` messages, `content: null`, `stream_options`, or upstream error extraction — **must read UPDATE.md first** and follow the invariants it records. It documents every fix with before/after code snippets, the files changed, and the tests that cover them. When extending one of those areas, check UPDATE.md for the existing fix before writing new code; when a new fix lands in one of those areas, add an entry to UPDATE.md so a later agent does not rediscover and re-fix the same thing.
 
 ## AUDIT.md — known-bug register
 

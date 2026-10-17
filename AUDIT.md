@@ -8,6 +8,20 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ⚪ Open — aiosqlite workers outlive their event loop, and pytest blames an innocent test (2026-10-17)
+
+### 475. Undisposed test-side `aiosqlite` connections raise `RuntimeError: Event loop is closed` on a worker thread, mis-attributed to the *next* test
+
+**Severity:** ⚪ Low (test hygiene — the default gate stays green and nothing in production is affected, but the warning class cannot be escalated and its reported nodeid is not the culprit) · **Status: open**
+**Files:** the leaker is unnamed (see below); the production shutdown path is *not* it — `wiwi/server/app.py:1041` creates exactly one async engine, `:1085` hands the same object to `DBSink` (`wiwi/logging_core/db_sink.py:412` stores it as `self.engine`), and `:1252` disposes it, so the sole engine is disposed on shutdown.
+**Trigger:** any full `python3 -m pytest tests/ -q` run. Result on 2026-10-17: `3383 passed, 6 skipped, 7 warnings in 217.64s`. Several of those warnings are `PytestUnhandledThreadExceptionWarning: Exception in thread Thread-NNN (_connection_worker_thread)`, each a stack of `aiosqlite/core.py:75 future.get_loop().call_soon_threadsafe(...)` → `RuntimeError: Event loop is closed`; at least four distinct thread ids appear (`Thread-464`, `-466`, `-1188`, `-1189`). An `aiosqlite` connection that is never closed outlives the loop it was bound to, and its worker thread then tries to publish a result onto a loop that is already closed. (The run's other warnings are unrelated deprecations — Starlette's `httpx`-based `TestClient` at `tests/test_fix_round139.py:49`, and SQLAlchemy's `StaticPool`-from-`mode=memory` selection at `wiwi/server/app.py:1041` — so read the 7 as a mix, and count the thread exceptions by their `_connection_worker_thread` frames rather than by the total.)
+**Why the reported nodeid is useless:** `_pytest/threadexception.py:147` collects pending thread exceptions inside `pytest_runtest_call`, i.e. at the *start* of a test's call phase, so whatever thread died during the previous teardown is charged to the next test. Escalating with `-W error::pytest.PytestUnhandledThreadExceptionWarning` proves it: a stop-at-first run (`-x`) charged the very first occurrence to `tests/test_fix_round126.py::test_an_unknown_provider_type_is_rejected_by_the_registry` — a sync registry test that opens no database — while a full escalation run (`1 failed, 3381 passed, 6 skipped, 2 warnings, 1 error`) charged `tests/test_fix_round59.py::test_query_cache_keeps_live_entries` (FAILED) and `tests/test_fix_round126.py::test_forget_owner_drops_a_dropped_journals_intent` (ERROR), the latter a pure `JournalStore` test with no DB either. Three runs, three different nodeids, all innocent.
+**Consequence:** `-W error::pytest.PytestUnhandledThreadExceptionWarning` cannot be used as a strict gate or a warning-free baseline until this is fixed — it turns a green suite red at an unrelated test, which reads as a regression in whatever change happens to be in flight. Distinct from #463/#464, which are real failures (an hour-boundary bucket split and the realtime connection race).
+**Fix sketch:** name the leaker, then dispose it. Every `create_async_engine` in a test must be paired with `await engine.dispose()` (or the app must be driven through `LifespanManager` so `AppState.shutdown` runs) — pytest's own hint (`--tracemalloc`) or bisecting a file at a time with `-W error::…` will localise it. Keep a session-end assertion that no `aiosqlite` worker thread survives, so the class cannot come back silently.
+
+
+---
+
 ## ✅ Fixed — rounds 155/156: the TPS meter, and the tool-call churn behind it (2026-10-16)
 
 Found while auditing the generation-throughput meter. #474 is the metric bug

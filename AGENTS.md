@@ -1,8 +1,13 @@
 # Repository Guidelines
 
-Agent guide for **wiwi** — a self-hosted unified LLM gateway proxy (FastAPI, Python 3.12).
+Agent guide for **wiwi** — a self-hosted unified LLM gateway proxy (FastAPI; `requires-python
+>=3.11`, ambient interpreter is 3.13).
 Three inbound API dialects route through one canonical internal representation (IR) to twelve
-outbound provider types; responses are always re-encoded in the caller's inbound dialect.
+outbound provider types; responses are always re-encoded in the caller's inbound dialect. Two
+further inbound routes reuse that same pipeline rather than adding a fourth dialect: legacy
+`POST /v1/completions` (bare `prompt` in, `choices[].text` out) and
+`POST /v1/playground/completions` (the Chat pipeline admitted by the `wiwi_session` cookie
+instead of a bearer key).
 
 ## Project Overview
 
@@ -45,9 +50,16 @@ stage (carries `surface`, params, auth, and the chosen dialect encoder).
 ### Inbound surfaces
 
 `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages`,
-`POST /v1/messages/count_tokens`; `GET /v1/models`, `GET /public/models`, `GET /health`, a
-configurable Prometheus path (`server/metrics.py`), `/admin/*` (master key), `/auth/*` (user
-sessions), `/cline/oauth/callback`.
+`POST /v1/messages/count_tokens`, `POST /v1/completions` (legacy, `wire/openai_completions.py`),
+`POST /v1/playground/completions` (`wiwi_session` cookie);
+`GET`/`DELETE /v1/responses/{response_id}` (wiwi-owned stored Responses state,
+`server/response_store.py` — key-scoped, not a capability token); `GET /v1/models`,
+`GET /public/models`, `GET /health`, a configurable Prometheus path (`server/metrics.py`),
+`/admin/*` (master key), `/auth/*` (user sessions), `/cline/oauth/callback`.
+
+That is **9 routes under `/v1` and 57 under `/admin`** (count them with
+`grep -c '@app\.\(get\|post\|put\|delete\|patch\)("/admin' wiwi/server/app.py`), all defined in
+one `create_app` closure in `server/app.py`.
 
 ### Outbound provider types (12)
 
@@ -66,22 +78,22 @@ with no `Finish`. All delta variants are `@dataclass(frozen=True)`.
 
 | Path | Purpose |
 |---|---|
-| `wiwi/wire/` | Inbound codecs + encoders per dialect: `openai_chat.py`, `openai_responses.py`, `anthropic_messages.py` |
-| `wiwi/ir/` | Canonical IR: `types.py` (tagged parts, messages, tools, `GenParams`, `Usage`), `builtin_tools.py` |
-| `wiwi/providers/` | Outbound adapters (`<provider>_adapter.py`) + `base.py` (`ProviderAdapter` protocol, `WiwiError`), `registry.py` |
+| `wiwi/wire/` | Inbound codecs + encoders per dialect: `openai_chat.py`, `openai_responses.py`, `anthropic_messages.py`, `openai_completions.py` (legacy `/v1/completions`) |
+| `wiwi/ir/` | Canonical IR: `types.py` (tagged parts, messages, tools, `GenParams`, `Usage`), `builtin_tools.py`, `translation.py` (dialect↔IR translation helpers) |
+| `wiwi/providers/` | Outbound adapters (`<provider>_adapter.py`) + `base.py` (`ProviderAdapter` protocol, `WiwiError`), `registry.py`, `token_expiry.py`, and the OAuth support files `cline_oauth.py`, `cline_auto_refresh.py`, `cline_version.py`, `workbuddy_auth.py`, `workbuddy_auto_refresh.py`, `workbuddy_version.py`, `hermes_oauth.py`, `hermes_auto_refresh.py`, `opencode_version.py`, `nim_tool_schema.py`, `nim_native_tools.py`. `openai-compatible` and `gmicloud` have no adapter file — they resolve to the `openai` adapter via `_OPENAI_WIRE_TYPES` |
 | `wiwi/router/` | `router.py`: `ProviderKey`/`ProviderAccount`/`Deployment`/`Router`, smooth WRR, cooldowns, fallbacks |
-| `wiwi/core/` | `gateway.py` (execution engine, pricing, log events), `context.py` (`RequestContext`), `recovery.py` |
+| `wiwi/core/` | `gateway.py` (~2.6k lines; execution engine, pricing, log events), `context.py` (`RequestContext`), `recovery.py`, `telemetry.py` |
 | `wiwi/streaming/` | `deltas.py` (taxonomy), `sse.py`, `partial_json.py`, `validation.py`, `resume.py` (`StreamTape`), `tape_store.py` (`JournalStore`), `coalesce.py`, `loopdetect.py` |
 | `wiwi/auth/` | `service.py` (`AuthService`: virtual keys SHA-256 at rest, budgets), `users.py`, `keys.py` |
 | `wiwi/ratelimit/` | `memory.py`, `redis.py` |
 | `wiwi/cache/` | `build_response_cache()`, `keygen.py`, `response_cache.py`, `redis_cache.py`, `interface.py` |
 | `wiwi/cost/` | `pricing.py` |
-| `wiwi/logging_core/` | `db_sink.py`, `events.py`, `subsystem.py` (structlog workers) |
-| `wiwi/server/` | `app.py` (FastAPI app, `create_app`, `AppState`, `lifespan`), `config_store.py` (SQL DDL + admin persistence), `metrics.py`, `stats.py`, `static/` (built SPA) |
+| `wiwi/logging_core/` | `db_sink.py`, `events.py`, `subsystem.py` (structlog workers), `hist.py`, `retention.py` |
+| `wiwi/server/` | `app.py` (~7.0k lines: `create_app`, `AppState`, `lifespan`, every route), `config_store.py` (SQL DDL + admin persistence), `response_store.py` (Responses-API state), `backup.py`, `metrics.py`, `stats.py`, `static/` (built SPA) |
 | `wiwi/config.py` | Pydantic v2 config models + `load_config`; `PROVIDER_TYPES` is the single source of truth |
 | `wiwi/main.py` | CLI entrypoint (`wiwi.main:cli`) |
-| `web/` | Admin SPA + public site (React 19, TS strict, Vite 6, Tailwind 4) — builds to `wiwi/server/static/` |
-| `tests/` | pytest suite; bugfix regressions in `test_fix_roundN.py` |
+| `web/` | Admin SPA + public site (React 19, TS strict, Vite 6, Tailwind 4) — 62 components in `src/pages/`, builds to `wiwi/server/static/` |
+| `tests/` | pytest suite — 202 files collecting ~3,388 tests; bugfix regressions in `test_fix_roundN.py` |
 | `docs/` | Design specs (see **Important Files**) |
 
 ## Development Commands
@@ -150,10 +162,14 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
   env vars win.
 - `wiwi/config.py` — Pydantic config models; `load_config`, `load_config_from_string`;
   `os.environ/NAME` interpolation is resolved here.
-- `wiwi/server/app.py` — ~4.1k lines: `create_app(config)`, `create_app_from_config_path`
-  (uvicorn reload factory), `AppState`, `lifespan`, `run_chat_like`, and every route.
+- `wiwi/server/app.py` — ~7.0k lines in one `create_app` closure: `create_app(config)`,
+  `create_app_from_config_path` (uvicorn reload factory), `AppState`, `lifespan`, `run_chat_like`,
+  and all 9 `/v1` + 57 `/admin` routes. Navigate it by grepping for a route prefix, not by reading.
 - `wiwi/server/config_store.py` — SQL DDL + migrations for admin-managed providers, keys,
   deployments, prices, settings.
+- `wiwi/server/response_store.py` — persisted Responses-API state behind
+  `store` + `previous_response_id`; ids are key-scoped and expiry is enforced on read.
+- `wiwi/server/backup.py` — whole-gateway backup/restore behind `/admin/backup`.
 - `wiwi/ir/types.py`, `wiwi/core/gateway.py`, `wiwi/core/context.py`, `wiwi/router/router.py`,
   `wiwi/providers/registry.py`, `wiwi/providers/base.py`, `wiwi/streaming/deltas.py`,
   `wiwi/auth/service.py` — core seams.
@@ -173,9 +189,14 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
   `stream_options`, upstream error extraction). **Required reading before touching
   `wiwi/wire/` codecs or provider adapters**; add an entry when a fix lands there.
 - `docs/` — `QUICKSTART.md`, `CONFIG.md`, `API_REFERENCE.md`, `PROVIDERS.md`, `UPSTREAM_DIAGNOSIS.md`,
-  `OPENCODE.md`, `STREAMING.md`, `ARCHITECTURE.md`, `CORE.md`, `ADMIN.md`, `DEVELOPMENT.md`
-  (binding invariants §5, UI rule §7, bugfix workflow §8), `TECHSTACK.md`, `PLAN.md`, `MVP.md`,
-  `RESEARCH.md`; `docs/superpowers/{specs,plans}/` is a historical record.
+  `OPENCODE.md`, `STREAMING.md`, `STREAMING_PERFORMANCE_RECOVERY.md`, `ARCHITECTURE.md`, `CORE.md`,
+  `ADMIN.md`, `DEVELOPMENT.md`
+  (binding invariants §5, UI rule §7, bugfix workflow §8), `TECHSTACK.md`, `PLAN.md`, `MVP.md`;
+  `docs/superpowers/{specs,plans}/` is a historical record.
+- **Repo-root docs that are *not* under `docs/`** — `RESEARCH.md` (a `docs/RESEARCH.md` does not
+  exist), `detailed.md` (code-derived technical reference), `knowledge.md`, `AUDIT_REPORT.md`
+  (point-in-time deep audit), `REMINDERS.md` (manual follow-ups; its status claims go stale —
+  check `git status` rather than trusting them), `TERMS.md`.
 - `docs/UPSTREAM_DIAGNOSIS.md` — **binding when any provider returns a `4xx` you cannot explain.**
   An upstream refusal has three causes with different fixes (wrong credential / account not entitled /
   our request does not look like the vendor's client) and the error text picks between them *wrongly*:
@@ -195,7 +216,8 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
 
 ## Runtime/Tooling Preferences
 
-- **Use the ambient `python3` (3.12) / `python3 -m pytest` (9.1.1) / `ruff` (0.16.4)** — the
+- **Use the ambient `python3` (3.13.5 at time of writing — *not* 3.12) /
+  `python3 -m pytest` (9.1.1) / `ruff` (0.17.1)** — the
   project is installed on PATH and `import wiwi` resolves to this checkout. **There is no
   usable `.venv`**; never invoke `.venv/bin/python`.
 - `requires-python = ">=3.11"`; ruff `line-length = 100`, `target-version = "py311"`,
@@ -229,9 +251,10 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
 - **Property tests:** `hypothesis` (`test_property_roundtrip.py`) for IR/codec round-trips and
   stream-SSE legality invariants.
 - **Regression convention:** new bugfix regressions go in the next unused
-  `tests/test_fix_roundN.py`. Latest present: `test_fix_round52.py` → next is `round53`
-  (confirm with `ls tests/test_fix_round*.py`). Older rounds were collapsed thematically in
-  places (e.g. `test_bugfix_round5.py`), which explains numbering gaps.
+  `tests/test_fix_roundN.py`. Latest present: `test_fix_round156.py` → next is `round157`
+  (confirm numerically, never with a plain `ls` — it sorts lexicographically, so `round9.py`
+  looks newest). 152 such files exist; gaps at 1, 5 (`test_bugfix_round5.py` is the legacy
+  filename), 102 and 147.
 - **Subsystem map (rough):** `test_codecs.py` / `test_extra_body.py` — wire unit; `test_router.py`,
   `test_round_robin.py`, `test_fix_cycle_failover.py` — routing; `test_admin_api.py`,
   `test_config*.py`, `test_provider_admin.py`, `test_pricing_admin.py` — server/admin;
@@ -239,6 +262,9 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
   `test_recovery.py`, `test_cache_and_journal.py` — streaming/recovery; `test_<provider>_adapter.py`
   — per-adapter.
 - **Coverage expectation:** none configured; the bare gate is the full suite green. Don't trust a
-  pinned pass-count in docs/README badges — run the suite.
+  pinned pass-count in docs/README badges — run the suite. Measured baseline 2026-10-17:
+  `3383 passed, 6 skipped, 7 warnings in 217.64s` (~3,388 collected). Some warnings are `aiosqlite`
+  worker threads outliving their event loop (`AUDIT.md` #475) — harmless, but escalating that
+  warning class to an error charges the failure to an unrelated test, so don't.
 - **Verification gate before claiming done:** `python3 -m pytest tests/ -q && ruff check wiwi/ tests/`
   both green, plus a live-path smoke test (server or UI) for user-visible changes.
