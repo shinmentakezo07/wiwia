@@ -340,6 +340,14 @@ export function StatCard(props: {
   numeric?: number;
   /** Formatter for `numeric`; falls back to `value`. */
   format?: (n: number) => string;
+  /** Inline share bar under the sub row: 0..1 fraction, accent-colored. */
+  progress?: { value: number; color?: string };
+  /** Stacked multicolor mini-strip (token-kind share), rendered like
+   *  `progress` but segmented; each part is a `label: value` pair and the
+   *  widths are fractions of the total. */
+  strip?: { label: string; value: number; color: string }[];
+  /** Text shown right-aligned inside the progress/strip track row. */
+  progressRight?: string;
 }) {
   const accent = STAT_ACCENT[props.tone ?? "default"];
   const Icon = props.icon;
@@ -385,6 +393,36 @@ export function StatCard(props: {
               <p className="font-mono text-[11px] text-[var(--admin-text-dim)]">{props.sub}</p>
             )}
             {props.delta && <DeltaChip delta={props.delta} goodDir={props.deltaGoodDir ?? "down"} />}
+          </div>
+        )}
+        {(props.progress || props.strip) && (
+          <div className="mt-3">
+            {props.strip ? (
+              <div className="flex h-1.5 w-full overflow-hidden rounded-full bg-white/[0.04]">
+                {props.strip
+                  .filter((p) => p.value > 0)
+                  .map((p) => (
+                    <span
+                      key={p.label}
+                      className="h-full transition-[width] duration-500 ease-out"
+                      style={{ width: `${p.value * 100}%`, backgroundColor: p.color }}
+                      title={`${p.label}: ${Math.round(p.value * 100)}%`}
+                    />
+                  ))}
+              </div>
+            ) : (
+              <ProgressBar
+                value={props.progress!.value}
+                tone={props.progress!.color}
+              />
+            )}
+            {props.progressRight && (
+              <div className="mt-1 flex justify-end">
+                <span className="font-mono text-[10px] tabular-nums text-[var(--admin-text-dim)]">
+                  {props.progressRight}
+                </span>
+              </div>
+            )}
           </div>
         )}
       </div>

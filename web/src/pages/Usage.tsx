@@ -564,6 +564,14 @@ export function UsagePage() {
     sumIn(errPts, hourCut, Number.POSITIVE_INFINITY),
     sumIn(errPts, hourPrevStart, hourCut),
   );
+  const inDelta = deltaVsPrevHour(
+    sumIn(inPts, hourCut, Number.POSITIVE_INFINITY),
+    sumIn(inPts, hourPrevStart, hourCut),
+  );
+  const outDelta = deltaVsPrevHour(
+    sumIn(outPts, hourCut, Number.POSITIVE_INFINITY),
+    sumIn(outPts, hourPrevStart, hourCut),
+  );
 
   const hasTraffic = requests > 0;
   const cacheHitRate = hasTraffic ? cacheHits / requests : 0;
@@ -792,7 +800,8 @@ export function UsagePage() {
         />
       </div>
 
-      {/* Secondary stat row: token breakdown */}
+      {/* Secondary stat row: token breakdown, each tile showing its share of
+          the window's total tokens via an inline progress bar */}
       <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
         <StatCard
           icon={ArrowDownToLine}
@@ -801,7 +810,11 @@ export function UsagePage() {
           numeric={tokIn}
           format={fmtTokens}
           spark={hourlySeries(inPts, nowMs)}
+          delta={inDelta}
+          deltaGoodDir="up"
           waiting={!hasTraffic}
+          progress={{ value: totalTokens > 0 ? tokIn / totalTokens : 0, color: "bg-blue-400" }}
+          progressRight={totalTokens > 0 ? fmtPct(tokIn / totalTokens) : undefined}
         />
         <StatCard
           icon={Zap}
@@ -813,6 +826,8 @@ export function UsagePage() {
           sub={`${fmtInt(cacheHits)} hits`}
           spark={hourlySeries(cachedPts, nowMs)}
           waiting={!hasTraffic}
+          progress={{ value: totalTokens > 0 ? tokCached / totalTokens : 0, color: "bg-emerald-400" }}
+          progressRight={totalTokens > 0 ? fmtPct(tokCached / totalTokens) : undefined}
         />
         <StatCard
           icon={Brain}
@@ -822,6 +837,8 @@ export function UsagePage() {
           format={fmtTokens}
           spark={hourlySeries(reasonPts, nowMs)}
           waiting={!hasTraffic}
+          progress={{ value: totalTokens > 0 ? tokReasoning / totalTokens : 0, color: "bg-violet-400" }}
+          progressRight={totalTokens > 0 ? fmtPct(tokReasoning / totalTokens) : undefined}
         />
         <StatCard
           icon={ArrowUpFromLine}
@@ -830,7 +847,11 @@ export function UsagePage() {
           numeric={tokOut}
           format={fmtTokens}
           spark={hourlySeries(outPts, nowMs)}
+          delta={outDelta}
+          deltaGoodDir="up"
           waiting={!hasTraffic}
+          progress={{ value: totalTokens > 0 ? tokOut / totalTokens : 0, color: "bg-purple-400" }}
+          progressRight={totalTokens > 0 ? fmtPct(tokOut / totalTokens) : undefined}
         />
         <StatCard
           icon={Activity}
@@ -843,6 +864,7 @@ export function UsagePage() {
           spark={hourlySeries(errPts, nowMs)}
           delta={errDelta}
           waiting={!hasTraffic}
+          progress={{ value: errorRate }}
         />
         <StatCard
           icon={Gauge}
@@ -851,6 +873,12 @@ export function UsagePage() {
           numeric={totalTokens}
           format={fmtTokens}
           waiting={!hasTraffic}
+          strip={[
+            { label: "input", value: totalTokens > 0 ? tokIn / totalTokens : 0, color: PIE_COLORS[0] },
+            { label: "cached", value: totalTokens > 0 ? tokCached / totalTokens : 0, color: PIE_COLORS[1] },
+            { label: "reasoning", value: totalTokens > 0 ? tokReasoning / totalTokens : 0, color: PIE_COLORS[2] },
+            { label: "output", value: totalTokens > 0 ? tokOut / totalTokens : 0, color: PIE_COLORS[3] },
+          ]}
         />
       </div>
 
