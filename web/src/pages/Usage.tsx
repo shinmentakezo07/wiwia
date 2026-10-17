@@ -18,6 +18,7 @@ import {
   Server,
   Timer,
   X,
+  RefreshCw,
   Zap,
 } from "lucide-react";
 import {
@@ -587,6 +588,15 @@ export function UsagePage() {
     setFilterGroup(null);
   };
 
+  // Manual refresh alongside the 10–15s polls and the live SSE invalidation:
+  // refetches all three queries so the whole page (overview + TPS + logs)
+  // moves to fresh data at once.
+  const refreshAll = () => {
+    void overviewQuery.refetch();
+    void tpsQuery.refetch();
+    void logsQuery.refetch();
+  };
+
   const maxGroupReqs = Math.max(1, ...groupRows.map((r) => r.requests));
   const latColor = LATENCY_COLORS[latencyMetric];
   const hasLatency = latBuckets.some((b) => b.count > 0);
@@ -671,6 +681,20 @@ export function UsagePage() {
         right={
           <div className="flex items-center gap-2">
             <LiveBadge connected={connected} />
+            <Button
+              variant="ghost"
+              className="min-h-11 sm:min-h-0"
+              onClick={refreshAll}
+              aria-label="Refresh usage data"
+            >
+              <RefreshCw
+                size={14}
+                className={
+                  overviewQuery.isFetching || logsQuery.isFetching ? "animate-spin" : ""
+                }
+              />{" "}
+              Refresh
+            </Button>
             {filterGroup && (
               <span className="admin-badge admin-badge-violet">
                 {filterGroup.dim}: {filterGroup.name}
