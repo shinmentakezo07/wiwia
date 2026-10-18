@@ -52,6 +52,24 @@ const LEVEL_BAR: Record<Level, string> = {
 
 const EMPTY: ProxyLogEntry[] = [];
 
+/** Per-column classes, shared by each `<th>` and its `<td>`.
+ *
+ *  The message cell used to be capped at a flat 520px, which is a third wider
+ *  than a 375px viewport: the row overflowed its card and the message was cut
+ *  off at the edge with no scroll affordance. The cap now steps down with the
+ *  viewport, and the request id — a debugging aid that the expanded row also
+ *  shows — drops out below `sm`. */
+const COL = {
+  requestId: "hidden sm:table-cell",
+} as const;
+
+const HEAD = [
+  { label: "Time" },
+  { label: "Level" },
+  { label: "Message" },
+  { label: "Request ID", cls: COL.requestId },
+];
+
 /** Identity for a proxy row that survives the live tail's prepend.
  *
  * `ts` is a float `time.time()` (microsecond resolution) so distinct events
@@ -189,7 +207,12 @@ export function ProxyLogsPage() {
 
       {filtered.length > 0 && (
         <Card>
-          <LogsTable head={["Time", "Level", "Message", "Request ID"]} maxHeight={640}>
+          <LogsTable
+            className="admin-table-logs"
+            head={HEAD.map((h) => h.label)}
+            colClass={HEAD.map((h) => h.cls)}
+            maxHeight={640}
+          >
             {filtered.map((l, i) => {
               // Stable identity, NOT the array index. The live tail PREPENDS
               // (`[evt, ...old]`), which shifts every index by one, so an
@@ -249,7 +272,7 @@ function ProxyRow(props: {
         <LogTD>
           <Badge tone={LEVEL_TONE[l.level]}>{l.level}</Badge>
         </LogTD>
-        <LogTD className="max-w-[520px]">
+        <LogTD className="max-w-[180px] sm:max-w-[320px] lg:max-w-[520px]">
           <div className="flex items-start gap-1">
             {hasExtra && (
               <span
@@ -264,7 +287,7 @@ function ProxyRow(props: {
             </div>
           </div>
         </LogTD>
-        <LogTD>
+        <LogTD className={COL.requestId}>
           {l.request_id ? (
             <MonoCell className="text-[var(--admin-text-dim)]">{l.request_id}</MonoCell>
           ) : (
