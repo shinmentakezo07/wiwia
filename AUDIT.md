@@ -14050,7 +14050,12 @@ the detail drawer below "Error code". Regression: `tests/test_fix_round137.py`.
 
 ### 429. The console `Drawer` portals to `<body>`, escaping the `[data-admin]` CSS-var scope — its panel background resolves to nothing and renders fully transparent
 
-**Severity:** 🟠 Medium · **Status: open** (found while verifying #428)
+**Severity:** 🟠 Medium · **Status: fixed** — `overlayHost()` in
+`web/src/components/ui.tsx` now portals both `Dialog` and `Drawer` into
+`document.querySelector("[data-admin]")` (falling back to `document.body`).
+Verified in a live browser at 375px and 1440px: the drawer panel computes
+`rgb(14, 14, 14)` and the dialog `rgb(14, 14, 14)`, and neither layer
+interleaves with the page behind it any more.
 
 **Files:** `web/src/components/ui.tsx:777-794` (`Drawer`, the
 `createPortal(..., document.body)`), `web/src/styles.css:209-213` (the
@@ -14068,6 +14073,8 @@ both 1280px and 375px, on every drawer in the console.
 
 `Dialog` (`ui.tsx:681`) portals the same way but hardcodes `bg-black/70`, so
 its scrim happens to survive — only the `Drawer` panel depends on a token.
+Its panel does not: `bg-[var(--admin-surface-elevated)]` on the dialog panel
+was equally undefined, so it was fixed by the same change.
 
 **Fix:** either portal into the `[data-admin]` element instead of `document.body`
 (keeps one source of truth for the tokens), or hoist the token block to
@@ -14075,8 +14082,8 @@ its scrim happens to survive — only the `Drawer` panel depends on a token.
 `[data-admin]` scoping. The second is the smaller change but widens every
 token to the public marketing pages, so check for collisions first.
 
-Not fixed here: it is pre-existing, unrelated to #428, and this repo takes one
-logical change per commit.
+**Fixed** by taking the first option. The helper is shared by both overlays so
+there is one convention, not a second beside the existing one.
 
 ---
 
@@ -15662,3 +15669,56 @@ idempotency; `cache_hit` vs `response_cache_hit` separation; zero
 `dangerouslySetInnerHTML`; all 68 routes auth-guarded; exactly 2 live import-rule
 violations; config defaults all fail-closed; master-key-less startup fails
 closed.
+
+---
+
+## ✅ Fixed — log-table responsiveness at 375px, and the transparent overlays (2026-10-18)
+
+Found while doing the binding UI/UX verification for the request-logs
+redesign (`CLAUDE.md` "UI/UX Universal Compatibility Rule" §6: open the page
+in a 375px viewport *and* a desktop viewport before claiming done). Both
+findings below were reproduced with a headless Chromium harness driving the
+real console at 375×812, 768×1024 and 1440×900.
+
+### 466. The proxy-log message cell is capped at a flat 520px, so the table overflows its card at 375px and the message is clipped with no scroll affordance
+
+**Severity:** 🟡 Medium · **Status: fixed**
+
+**Files:** `web/src/pages/ProxyLogs.tsx:252` (the message `<td>`'s
+`max-w-[520px]`), `:192` (the `LogsTable` head, which listed four columns with
+no breakpoint classes)
+
+The request-log table was given per-column breakpoints so a phone shows four
+columns instead of fifteen, but `ProxyLogs.tsx` was left on the old fixed
+markup. A 520px cap is wider than a 375px viewport on its own, so the row
+overflowed the card: the message ran off the right edge, cut mid-word with no
+ellipsis and no indication that the region scrolled. Confirmed by screenshot
+and by measurement — `document.scrollWidth` stayed at 375 (the clipping is
+inside the `overflow-auto` wrapper), so a naive overflow check does not catch
+it.
+
+**Fix:** the cap now steps down with the viewport
+(`max-w-[180px] sm:max-w-[320px] lg:max-w-[520px]`), and the request-id column
+drops out below `sm` via the `colClass` prop `LogsTable` already supports —
+the expanded row already shows the id in full, so nothing is lost. The page
+also picks up `admin-table-logs`, the tighter-gutter class the request-log
+table uses.
+
+**Verified:** at 375px the message truncates inside the card with an ellipsis;
+at 1440px all four columns and the full message are unchanged.
+
+### #429 revisited — `Dialog` was affected too, not just `Drawer`
+
+**Severity:** 🟠 Medium · **Status: fixed** (see the #429 entry above)
+
+The #429 write-up said `Dialog` "happens to survive" because its scrim
+hardcodes `bg-black/70`. Its *panel* does not: the dialog panel carries the
+same `bg-[var(--admin-surface-elevated)]`, so the "New virtual key" dialog on
+`/console/keys` was equally transparent at every width. One `overlayHost()`
+helper now serves both overlays, so there is a single portal convention rather
+than a second one beside it.
+
+**Verified:** `getComputedStyle(backgroundColor)` on the drawer panel and the
+dialog panel both compute `rgb(14, 14, 14)`; Escape still closes the drawer
+(`document.querySelectorAll('[role="dialog"]').length === 0`); the dialog
+still paints above the page after the portal target changed.
