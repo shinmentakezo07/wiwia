@@ -8,6 +8,7 @@ import type {
   InputHTMLAttributes,
   KeyboardEvent as ReactKeyboardEvent,
   ReactNode,
+  Ref,
 } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -112,7 +113,10 @@ export function Button(
   return <button className={cls} {...rest} />;
 }
 
-export function Input(props: InputHTMLAttributes<HTMLInputElement>) {
+/** Text input. `ref` is accepted as a plain prop (React 19 semantics onward) so
+ *  callers that need to move focus into the field — a "/" shortcut, a clear
+ * button — do not have to reach for the DOM themselves. */
+export function Input(props: InputHTMLAttributes<HTMLInputElement> & { ref?: Ref<HTMLInputElement> }) {
   const { className = "", ...rest } = props;
   return <input className={`admin-input ${className}`} {...rest} />;
 }

@@ -1,11 +1,12 @@
 // Shared building blocks for the two log pages (request + proxy):
 // toolbar shell, custom table markup with per-row content-visibility,
-// and small cell/badge helpers. Kept free of page-specific logic.
+// small cell/badge helpers, and the loading skeleton.
+// Kept free of page-specific logic.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Search } from "lucide-react";
-import { Badge, Input, Toggle } from "@/components/ui";
+import { Search, X } from "lucide-react";
+import { Badge, Card, Input, Toggle } from "@/components/ui";
 import { fmtAgo, fmtDateTime } from "@/lib/format";
 
 // -- live clock hook ---------------------------------------------------------
@@ -22,72 +23,25 @@ export function useNow(interval = 15_000): number {
 
 // -- relative time cell -------------------------------------------------------
 
-/** Mono-typed time cell: shows "x ago" relative, with absolute ts on hover. */
+/** Mono-typed time cell: shows "x ago" relative, with absolute ts on hover.
+ *
+ *  Below `sm` the unit word is dropped ("11m" rather than "11m ago"): on a
+ *  phone every pixel of the status column has to hold the error code and the
+ *  model name, and "ago" is already stated by the column header and the
+ *  tooltip. */
 export function TimeAgo(props: { ts: number; nowMs: number; className?: string }) {
+  const [value, unit] = fmtAgo(props.ts, props.nowMs).split(" ");
   return (
     <td
       title={fmtDateTime(props.ts)}
       className={`font-mono text-[12px] text-[var(--admin-text-dim)] whitespace-nowrap ${props.className ?? ""}`}
     >
-      {fmtAgo(props.ts, props.nowMs)}
+      {value}
+      {unit && <span className="hidden sm:inline"> {unit}</span>}
     </td>
   );
 }
 
-// -- summary chips -----------------------------------------------------------
-
-/** Small inline summary chip for the area above a log table. */
-export function SummaryChip(props: {
-  label: string;
-  value: string;
-  tone?: "default" | "success" | "warning" | "danger";
-  icon?: ReactNode;
-}) {
-  const toneCls = {
-    default: "border-[var(--admin-border)] text-[var(--admin-text-muted)]",
-    success: "border-emerald-500/15 bg-emerald-500/[0.03] text-emerald-400",
-    warning: "border-amber-500/15 bg-amber-500/[0.03] text-amber-400",
-    danger: "border-red-500/15 bg-red-500/[0.03] text-red-400",
-  };
-  return (
-    <span
-      className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[12px] ${toneCls[props.tone ?? "default"]}`}
-    >
-      {props.icon && (
-        <span className="text-[var(--admin-text-dim)]" aria-hidden>
-          {props.icon}
-        </span>
-      )}
-      <span className="font-mono tabular-nums font-semibold">{props.value}</span>
-      <span className="text-[10px] font-medium uppercase tracking-wide text-[var(--admin-text-dim)]">
-        {props.label}
-      </span>
-    </span>
-  );
-}
-
-/** Thin horizontal distribution bar showing relative proportions (e.g. ok vs
- * errors). Renders nothing when the total is zero. */
-export function SummaryBar(props: {
-  segments: { value: number; tone: string; title?: string }[];
-}) {
-  const total = props.segments.reduce((s, seg) => s + seg.value, 0);
-  if (total <= 0) return null;
-  return (
-    <div className="flex h-1.5 w-full overflow-hidden rounded-full bg-white/[0.03]">
-      {props.segments.map((seg, i) =>
-        seg.value > 0 ? (
-          <div
-            key={i}
-            className={seg.tone}
-            style={{ width: `${(seg.value / total) * 100}%` }}
-            title={seg.title}
-          />
-        ) : null,
-      )}
-    </div>
-  );
-}
 // -- toolbar -----------------------------------------------------------------
 
 /** Flex-wrap container for the filter bar above a log table. */
@@ -95,24 +49,71 @@ export function LogsToolbar(props: { children: ReactNode }) {
   return <div className="mb-3 flex flex-wrap items-center gap-2">{props.children}</div>;
 }
 
+/** Filter box with a themed clear button and a "/" jump-to shortcut.
+ *
+ *  Both affordances exist because the box is the page's main navigation: "/"
+ *  is what a reader who lives in a terminal or a log viewer reaches for, and
+ *  clearing a filter you can no longer read (a long request id) should not
+ *  require selecting the text and deleting it. */
 export function SearchInput(props: {
   value: string;
   onChange: (v: string) => void;
   placeholder: string;
+  className?: string;
 }) {
+  const ref = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
+      const el = document.activeElement as HTMLElement | null;
+      const tag = el?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el?.isContentEditable) return;
+      e.preventDefault();
+      ref.current?.focus();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   return (
-    <div className="relative">
+    <div className={`relative ${props.className ?? ""}`}>
       <Search
         size={13}
         aria-hidden
         className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--admin-text-dim)]"
       />
       <Input
-        className="h-8 w-72 pl-8 text-[12px]"
+        ref={ref}
+        type="search"
+        className="h-8 pr-8 pl-8 text-[12px] pointer-coarse:h-11"
         value={props.value}
         onChange={(e) => props.onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape" && props.value) props.onChange("");
+        }}
         placeholder={props.placeholder}
       />
+      {props.value ? (
+        <button
+          type="button"
+          onClick={() => {
+            props.onChange("");
+            ref.current?.focus();
+          }}
+          aria-label="Clear filter"
+          className="absolute right-0.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.06] hover:text-[var(--admin-text)] focus-visible:bg-white/[0.06] focus-visible:text-[var(--admin-text)] focus-visible:outline-none pointer-coarse:h-10 pointer-coarse:w-10"
+        >
+          <X size={12} aria-hidden />
+        </button>
+      ) : (
+        <span
+          aria-hidden
+          className="admin-kbd pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 pointer-coarse:hidden"
+        >
+          /
+        </span>
+      )}
     </div>
   );
 }
@@ -148,9 +149,16 @@ export function LogsTable(props: {
   children: ReactNode;
   /** Optional max-height (px) enabling a sticky header inside a scrollable body. */
   maxHeight?: number;
+  /** Extra classes for the wrapper — `admin-table-logs` tightens the gutters on
+   *  narrow viewports. */
+  className?: string;
+  /** Per-column class applied to the matching `<th>`, so a caller can drop a
+   *  low-priority column below a breakpoint (`hidden lg:table-cell`) and hide
+   *  the matching `<td>` with the same class. */
+  colClass?: (string | undefined)[];
 }) {
   return (
-    <div className="admin-table">
+    <div className={`admin-table ${props.className ?? ""}`}>
       <div
         className="admin-scroll overflow-auto"
         style={props.maxHeight ? { maxHeight: `${props.maxHeight}px` } : undefined}
@@ -159,7 +167,9 @@ export function LogsTable(props: {
           <thead>
             <tr>
               {props.head.map((h, i) => (
-                <th key={i}>{h}</th>
+                <th key={i} className={props.colClass?.[i]}>
+                  {h}
+                </th>
               ))}
             </tr>
           </thead>
@@ -195,7 +205,9 @@ export function LogRow(props: {
           : undefined
       }
       tabIndex={props.onClick ? 0 : undefined}
-      className={`[content-visibility:auto] [contain-intrinsic-size:auto_37px] ${zebraCls}${
+      // `group` lets a row's trailing affordance appear on hover *and* on
+      // keyboard focus — the hover-only reveal was invisible to a tab user.
+      className={`group [content-visibility:auto] [contain-intrinsic-size:auto_37px] ${zebraCls}${
         props.onClick && !props.flat
           ? " cursor-pointer outline-none hover:bg-white/[0.04] focus-visible:bg-white/[0.04]"
           : ""
@@ -223,18 +235,40 @@ export function MonoCell(props: { children: ReactNode; className?: string }) {
 }
 
 /** Right-aligned tabular number content (wrap in a td with text-right). */
-export function NumCell(props: { children: ReactNode }) {
-  return <span className="font-mono tabular-nums">{props.children}</span>;
+export function NumCell(props: { children: ReactNode; className?: string }) {
+  return (
+    <span className={`font-mono tabular-nums ${props.className ?? ""}`}>{props.children}</span>
+  );
 }
 
-/** Green below 400, red otherwise; appends the error code on failures. */
+/** Status pill tinted by response class, with a dot of the same colour.
+ *
+ *  2xx green, 3xx blue, 4xx amber, 5xx red — a 4xx (our caller's request was
+ *  wrong) and a 5xx (the upstream failed) are different incidents, and the
+ *  previous all-red-over-400 pill hid that distinction in the one column a
+ *  reader scans first. */
 export function StatusBadge(props: { status: number; errorCode?: string }) {
-  const ok = props.status < 400;
+  const tone: "green" | "blue" | "amber" | "red" =
+    props.status >= 500
+      ? "red"
+      : props.status >= 400
+        ? "amber"
+        : props.status >= 300
+          ? "blue"
+          : "green";
   return (
-    <span className="inline-flex max-w-[220px] items-center gap-1.5" title={props.errorCode || undefined}>
-      <Badge tone={ok ? "green" : "red"}>{props.status}</Badge>
-      {!ok && props.errorCode && (
-        <span className="truncate font-mono text-[10px] tracking-wide text-[var(--admin-danger)] opacity-70">
+    <span
+      className="inline-flex max-w-[220px] items-center gap-1.5"
+      title={props.errorCode || undefined}
+    >
+      <Badge tone={tone}>
+        <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-current" />
+        {props.status}
+      </Badge>
+      {props.status >= 400 && props.errorCode && (
+        <span
+          className="max-w-[32px] truncate font-mono text-[10px] tracking-wide text-[var(--admin-text-dim)] sm:max-w-[180px]"
+        >
           {props.errorCode}
         </span>
       )}
@@ -251,5 +285,36 @@ export function LogsFooter(props: { shown: number; total: number }) {
         <span className="text-zinc-300">{props.total}</span> events
         <span className="mx-1.5 opacity-40">·</span> ring holds ~500
       </span>
+  );
+}
+
+// -- loading skeleton ----------------------------------------------------------
+
+/** Shimmer placeholder shaped like log rows.
+ *
+ *  The first paint is one fetch away. Six row-shaped placeholders say "loading"
+ *  where a single spinner centred in a 640px-tall empty region reads as
+ *  "nothing here" — and the row rhythm is the same one the table will have, so
+ *  the page does not jump when the data lands. */
+export function LogsSkeleton(props: { rows?: number; className?: string }) {
+  const rows = props.rows ?? 6;
+  // Deliberately uneven: identical bars read as a rendering artefact.
+  const widths = ["w-[38%]", "w-[61%]", "w-[45%]", "w-[54%]", "w-[32%]", "w-[49%]"];
+  return (
+    <Card className={`p-4 ${props.className ?? ""}`}>
+      <div className="space-y-3.5" aria-hidden>
+        {Array.from({ length: rows }, (_, i) => (
+          <div key={i} className="flex items-center gap-4">
+            <span className="admin-skeleton h-3 w-14 shrink-0" />
+            <span className="admin-skeleton h-3 w-24 shrink-0" />
+            <span className={`admin-skeleton h-3 ${widths[i % widths.length]}`} />
+            <span className="admin-skeleton ml-auto h-3 w-12 shrink-0" />
+          </div>
+        ))}
+      </div>
+      <p role="status" className="sr-only">
+        Loading logs…
+      </p>
+    </Card>
   );
 }

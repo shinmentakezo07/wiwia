@@ -349,6 +349,27 @@ body {
   background: var(--admin-surface);
 }
 
+/* Log tables (request + proxy logs). Their rows carry far more columns than a
+   phone can show, so the page hides the low-priority ones below a breakpoint
+   and the cells give their gutters back: 15 columns × 40px of default padding
+   was 600px of the row before any content. On touch screens the row is also
+   grown past the 44px tap-target floor — a log row is a button here. */
+.admin-table-logs th,
+.admin-table-logs td {
+  padding-inline: 14px;
+}
+@media (max-width: 640px) {
+  .admin-table-logs th,
+  .admin-table-logs td {
+    padding-inline: 10px;
+  }
+}
+@media (pointer: coarse) {
+  .admin-table-logs td {
+    padding-block: 16px;
+  }
+}
+
 /* Admin badge */
 .admin-badge {
   display: inline-flex;

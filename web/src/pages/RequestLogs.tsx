@@ -1,14 +1,18 @@
 // Request logs — ring-backed table with client-side filters, optional SSE live
-// tail, and a slide-in detail drawer with sectioned metadata + retry-chain.
+// tail, a window overview band, and a slide-in detail drawer with sectioned
+// metadata + retry chain.
 
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import {
+  Activity,
+  AlertTriangle,
   ArrowLeftRight,
   Brain,
-  Clock,
-  Copy,
   Check,
+  ChevronDown,
+  ChevronRight,
+  Copy,
   Cpu,
   DollarSign,
   Gauge,
@@ -19,16 +23,23 @@ import {
   Repeat,
   Server,
   Timer,
-  TrendingDown,
   Wrench,
-  Zap,
   X,
+  Zap,
 } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getRequestLogs } from "@/api/client";
 import { useAdminStream } from "@/api/stream";
 import type { Attempt, RequestLogEntry } from "@/api/types";
-import { fmtInt } from "@/lib/format";
+import {
+  LatencyRibbon,
+  StatusMix,
+  TokenRibbon,
+  VisualCard,
+  latencyProfile,
+  statusSlices,
+} from "@/components/console-visuals";
+import { fmtDateTime, fmtInt, fmtPct, fmtTokens, fmtUsd, mean, p95 } from "@/lib/format";
 import {
   Badge,
   Button,
@@ -37,14 +48,14 @@ import {
   EmptyState,
   ErrorText,
   PageHeader,
+  ProgressBar,
   Select,
-  Spinner,
 } from "@/components/ui";
-import { fmtDateTime, fmtTokens, fmtUsd } from "@/lib/format";
 import {
   LiveTail,
   LogRow,
   LogsFooter,
+  LogsSkeleton,
   LogsTable,
   LogsToolbar,
   LogTD,
@@ -52,8 +63,6 @@ import {
   NumCell,
   SearchInput,
   StatusBadge,
-  SummaryBar,
-  SummaryChip,
   TimeAgo,
   useNow,
 } from "./logs-shared";
@@ -101,7 +110,69 @@ function rangeLabel(range: RangeFilter): string {
 
 const CANONICAL_SURFACES = ["chat", "messages", "responses", "embeddings"];
 
+/** Token-mix palette — the same four colours the Usage / Analytics pages use
+ *  for input / cached / reasoning / output, so one strip reads the same
+ *  wherever it appears. */
+const TOKEN_COLORS = ["#3b82f6", "#199e70", "#a855f7", "#c98500"] as const;
+
 const EMPTY: RequestLogEntry[] = [];
+
+// ---------------------------------------------------------------------------
+// Column layout
+// ---------------------------------------------------------------------------
+
+/** Per-column classes, shared by the `<th>` and its `<td>`s.
+ *
+ *  A request row carries fifteen columns — token counts, TTFT, throughput,
+ *  cache state — which is roughly 1,600px wide. At a 375px viewport that is
+ *  a row the reader has to scroll sideways through to find the status code,
+ *  and on a 1,440px laptop the console's 300px sidebar leaves the table
+ *  narrower than the full set anyway. So each column declares the narrowest
+ *  viewport it still earns its width on, and everything below that is dropped
+ *  rather than hidden behind a scroll: a phone shows time, model, status and
+ *  latency, a laptop adds the routing and cost columns, and a wide desktop
+ *  gets the token detail. The drawer always has the full picture. */
+const COL = {
+  key: "hidden sm:table-cell",
+  provider: "hidden md:table-cell",
+  tokIn: "hidden lg:table-cell text-right",
+  tokCached: "hidden 2xl:table-cell text-right",
+  tokReasoning: "hidden 2xl:table-cell text-right",
+  tokOut: "hidden lg:table-cell text-right",
+  tps: "hidden 2xl:table-cell text-right",
+  ttft: "hidden md:table-cell text-right",
+  latency: "text-right",
+  cost: "hidden sm:table-cell text-right",
+  cache: "hidden xl:table-cell",
+  open: "hidden sm:table-cell",
+} as const;
+
+const HEAD: { label: string; cls?: string }[] = [
+  { label: "Time" },
+  { label: "Key", cls: COL.key },
+  { label: "Model" },
+  { label: "Provider / key", cls: COL.provider },
+  { label: "Status" },
+  { label: "Tok in", cls: COL.tokIn },
+  { label: "Tok cached", cls: COL.tokCached },
+  { label: "Tok reasoning", cls: COL.tokReasoning },
+  { label: "Tok out", cls: COL.tokOut },
+  { label: "Gen TPS", cls: COL.tps },
+  { label: "TTFT", cls: COL.ttft },
+  { label: "Latency", cls: COL.latency },
+  { label: "Cost", cls: COL.cost },
+  { label: "Cache", cls: COL.cache },
+  { label: "", cls: COL.open },
+];
+
+/** Left-edge accent that mirrors the status tone, so a failing request is
+ *  findable from the edge of the table without reading the badge. */
+function accentBar(l: RequestLogEntry): string {
+  if (l.status >= 500) return "border-l-red-500/60";
+  if (l.status >= 400) return "border-l-amber-500/60";
+  if (l.status < 300) return "border-l-emerald-500/45";
+  return "border-l-transparent";
+}
 
 function asRequestEntry(data: unknown): RequestLogEntry | null {
   if (typeof data !== "object" || data === null) return null;
@@ -142,6 +213,190 @@ function distinctOptions(
       ]
     : [...present].sort();
   return [{ value: "all", label: allLabel }, ...ordered.map((v) => ({ value: v, label: v }))];
+}
+
+// ---------------------------------------------------------------------------
+// Overview band
+// ---------------------------------------------------------------------------
+
+interface WindowStats {
+  total: number;
+  errors: number;
+  errorRate: number;
+  latencies: number[];
+  maxLatency: number;
+  avgLatency: number;
+  p95Latency: number;
+  avgTps: number;
+  streamed: number;
+  tokIn: number;
+  tokCached: number;
+  tokReasoning: number;
+  tokOut: number;
+  cost: number;
+  savings: number;
+  /** HTTP statuses in the window, for the response-class split. */
+  statuses: number[];
+}
+
+/** Six headline numbers for the filtered window, plus the response-class split.
+ *
+ *  A reader who opens this page is usually asking "is it healthy?" before
+ *  "show me the rows" — the band answers that without scrolling to the
+ *  dashboard, and it aggregates the same filtered set the table shows, so the
+ *  chips and the rows can never disagree. */
+function WindowOverview(props: {
+  stats: WindowStats;
+  range: RangeFilter;
+  insightsOpen: boolean;
+  onToggleInsights: () => void;
+}) {
+  const s = props.stats;
+  const errTone =
+    s.errorRate === 0 ? "var(--admin-success)" : s.errorRate < 0.05 ? "var(--admin-warning)" : "var(--admin-danger)";
+
+  const tiles: {
+    label: string;
+    value: string;
+    sub?: string;
+    icon: typeof Activity;
+    tone: string;
+  }[] = [
+    {
+      label: "requests",
+      value: fmtInt(s.total),
+      sub: `${fmtInt(s.streamed)} streaming`,
+      icon: Activity,
+      tone: "var(--admin-accent)",
+    },
+    {
+      label: "error rate",
+      value: fmtPct(s.errorRate),
+      sub: `${fmtInt(s.errors)} failed`,
+      icon: AlertTriangle,
+      tone: errTone,
+    },
+    {
+      label: "p95 latency",
+      value: s.p95Latency > 0 ? fmtLatency(s.p95Latency) : "—",
+      sub: `avg ${fmtLatency(s.avgLatency)}`,
+      icon: Timer,
+      tone: "var(--admin-accent-purple)",
+    },
+    {
+      label: "throughput",
+      value: s.avgTps > 0 ? s.avgTps.toFixed(1) : "—",
+      sub: "tok/s avg",
+      icon: Gauge,
+      tone: "var(--admin-accent-purple)",
+    },
+    {
+      label: "tokens",
+      value: fmtTokens(s.tokIn + s.tokOut),
+      sub: `${fmtTokens(s.tokIn)} in · ${fmtTokens(s.tokOut)} out`,
+      icon: Layers,
+      tone: "var(--admin-accent)",
+    },
+    {
+      label: "spend",
+      value: fmtUsd(s.cost),
+      sub: s.savings > 0 ? `saved ${fmtUsd(s.savings)}` : "no cache savings",
+      icon: DollarSign,
+      tone: "var(--admin-success)",
+    },
+  ];
+
+  return (
+    <Card className="mb-3">
+      {/* `gap-px` over a border-coloured plane draws the hairlines between the
+          cells, so the band reads as one instrument panel rather than six
+          floating cards. */}
+      <div className="grid gap-px bg-[var(--admin-border)] lg:grid-cols-[minmax(0,1fr)_248px]">
+        <div className="grid grid-cols-2 gap-px bg-[var(--admin-border)] sm:grid-cols-3 xl:grid-cols-6">
+          {tiles.map((t) => {
+            const Icon = t.icon;
+            return (
+              <div key={t.label} className="bg-[var(--admin-surface)] px-4 py-3">
+                <div className="flex items-center gap-1.5">
+                  <Icon size={12} style={{ color: t.tone }} aria-hidden />
+                  <span className="admin-label truncate">{t.label}</span>
+                </div>
+                <p className="admin-stat-value mt-1.5 text-[19px]">{t.value}</p>
+                <p className="mt-0.5 truncate font-mono text-[10px] text-[var(--admin-text-dim)]">
+                  {t.sub}
+                </p>
+              </div>
+            );
+          })}
+        </div>
+        <div className="bg-[var(--admin-surface)]">
+          <StatusMix slices={statusSlices(props.stats.statuses)} />
+        </div>
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--admin-border)] px-4 py-2">
+        <span className="font-mono text-[11px] text-[var(--admin-text-dim)]">
+          {rangeLabel(props.range)} · slowest{" "}
+          <span className="text-[var(--admin-text-muted)]">{fmtLatency(props.stats.maxLatency)}</span>
+        </span>
+        <button
+          type="button"
+          onClick={props.onToggleInsights}
+          aria-expanded={props.insightsOpen}
+          className="flex min-h-11 items-center gap-1.5 rounded-md px-2 text-[12px] text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)] focus-visible:bg-white/[0.04] focus-visible:text-[var(--admin-text)] focus-visible:outline-none"
+        >
+          Window analytics
+          <ChevronDown
+            size={13}
+            aria-hidden
+            className={`transition-transform ${props.insightsOpen ? "rotate-180" : ""}`}
+          />
+        </button>
+      </div>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Row cells
+// ---------------------------------------------------------------------------
+
+/** Latency with a share bar scaled to the slowest request in the window.
+ *
+ *  The number alone does not answer "is this slow?" — 800ms is unremarkable
+ *  next to a 1ms provider error and terrible on a 400ms gateway. The fill is
+ *  relative to the window's own maximum and anything past the window's p95 is
+ *  tinted amber, so the column scans as a shape first and numbers second. */
+function LatencyCell(props: { ms: number; p95: number; max: number }) {
+  const slow = props.p95 > 0 && props.ms > props.p95;
+  const frac = props.max > 0 ? Math.min(1, props.ms / props.max) : 0;
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <NumCell className={slow ? "text-amber-300" : undefined}>{fmtLatency(props.ms)}</NumCell>
+      <span className="block w-8 sm:w-12">
+        <ProgressBar
+          value={frac}
+          tone={slow ? "bg-amber-400/70" : "bg-blue-400/55"}
+        />
+      </span>
+    </div>  );
+}
+
+/** Cache column — the two cache flags are different systems and are labelled
+ *  as such (see the `cache_hit` / `response_cache_hit` note in the API types):
+ *  a green bar is the provider's prompt cache, a violet one is wiwi's own
+ *  exact-match response cache. */
+function CacheCell(props: { l: RequestLogEntry }) {
+  const l = props.l;
+  if (l.response_cache_hit) return <Badge tone="violet">response</Badge>;
+  if (l.cache_hit) {
+    const pct = l.tok_in > 0 ? Math.min(100, Math.round((l.tok_cached / l.tok_in) * 100)) : 0;
+    return (
+      <Badge tone="green" title={`${fmtTokens(l.tok_cached)} prompt tokens read from cache`}>
+        {pct > 0 ? `${pct}% cached` : "cached"}
+      </Badge>
+    );
+  }
+  return <span className="text-[var(--admin-text-dim)]">—</span>;
 }
 
 // ---------------------------------------------------------------------------
@@ -226,6 +481,7 @@ function InlineCopy(props: { text: string }) {
 
 function RetryChain(props: { attempts: Attempt[] }) {
   const steps = props.attempts;
+  const max = Math.max(1, ...steps.map((a) => a.latency_ms));
   return (
     <div className="px-3.5 py-3">
       {steps.length <= 1 ? (
@@ -252,6 +508,11 @@ function RetryChain(props: { attempts: Attempt[] }) {
                     {Math.round(a.latency_ms)}ms
                   </span>
                 </div>
+                {/* Each attempt's latency as a share of the slowest one, so a
+                    failover chain shows where the time actually went. */}
+                <span className="mt-1.5 block w-full max-w-[220px]">
+                  <ProgressBar value={a.latency_ms / max} tone={ok ? "bg-blue-400/50" : "bg-red-400/60"} />
+                </span>
               </li>
             );
           })}
@@ -390,11 +651,10 @@ function PromptResponseSection(props: { log: RequestLogEntry }) {
     return (
       <DetailSection title="Request & Response" icon={<ArrowLeftRight size={13} />}>
         <div className="py-4 text-center">
-          <p className="text-[12px] text-[var(--admin-text-dim)]">
-            Prompt logging is disabled.
-          </p>
-          <p className="mt-1 text-[11px] text-[var(--admin-text-dim)]">
-            Enable <code className="rounded bg-white/[0.04] px-1 py-0.5 font-mono text-[10px]">store_prompts_in_spend_logs</code> in wiwi.yaml to capture request/response content.
+          <p className="text-[12px] text-[var(--admin-text-muted)]">Prompt logging is off</p>
+          <p className="mt-1 text-[11px] leading-relaxed text-[var(--admin-text-dim)]">
+            Set <code className="rounded bg-white/[0.04] px-1 py-0.5 font-mono text-[10px]">store_prompts_in_spend_logs</code>{" "}
+            in wiwi.yaml to capture the request and response bodies.
           </p>
         </div>
       </DetailSection>
@@ -402,6 +662,8 @@ function PromptResponseSection(props: { log: RequestLogEntry }) {
   }
 
   const activeTab = tab === "request" && !hasRequest ? "response" : tab;
+  // The JSON view is what the copy button copies — keep them on one value.
+  const raw = activeTab === "request" ? log.request_body : log.response_body;
 
   return (
     <DetailSection
@@ -409,12 +671,15 @@ function PromptResponseSection(props: { log: RequestLogEntry }) {
       icon={<ArrowLeftRight size={13} />}
       right={
         <div className="flex items-center gap-1">
+          {mode === "json" && (
+            <InlineCopy text={JSON.stringify(raw, null, 2)} />
+          )}
           {hasRequest && hasResponse && (
             <div className="flex rounded-md border border-[var(--admin-border)] p-0.5">
               <button
                 type="button"
                 onClick={() => setTab("request")}
-                className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                className={`min-h-8 rounded px-2 text-[11px] font-medium transition-colors ${
                   activeTab === "request"
                     ? "bg-white/[0.06] text-[var(--admin-text)]"
                     : "text-[var(--admin-text-dim)] hover:text-[var(--admin-text-muted)]"
@@ -425,7 +690,7 @@ function PromptResponseSection(props: { log: RequestLogEntry }) {
               <button
                 type="button"
                 onClick={() => setTab("response")}
-                className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                className={`min-h-8 rounded px-2 text-[11px] font-medium transition-colors ${
                   activeTab === "response"
                     ? "bg-white/[0.06] text-[var(--admin-text)]"
                     : "text-[var(--admin-text-dim)] hover:text-[var(--admin-text-muted)]"
@@ -439,7 +704,7 @@ function PromptResponseSection(props: { log: RequestLogEntry }) {
             <button
               type="button"
               onClick={() => setMode("pretty")}
-              className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
+              className={`min-h-8 rounded px-2 text-[11px] font-medium transition-colors ${
                 mode === "pretty"
                   ? "bg-white/[0.06] text-[var(--admin-text)]"
                   : "text-[var(--admin-text-dim)] hover:text-[var(--admin-text-muted)]"
@@ -450,7 +715,7 @@ function PromptResponseSection(props: { log: RequestLogEntry }) {
             <button
               type="button"
               onClick={() => setMode("json")}
-              className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
+              className={`min-h-8 rounded px-2 text-[11px] font-medium transition-colors ${
                 mode === "json"
                   ? "bg-white/[0.06] text-[var(--admin-text)]"
                   : "text-[var(--admin-text-dim)] hover:text-[var(--admin-text-muted)]"
@@ -502,6 +767,7 @@ export function RequestLogsPage() {
   const [surface, setSurface] = useState("all");
   const [range, setRange] = useState<RangeFilter>(DEFAULT_RANGE);
   const [selected, setSelected] = useState<RequestLogEntry | null>(null);
+  const [insights, setInsights] = useState(false);
   const now = useNow(15_000);
 
   const query = useQuery({
@@ -595,16 +861,80 @@ export function RequestLogsPage() {
     [all],
   );
 
-  // Summary stats for the chips above the table (over the filtered set).
-  const summary = useMemo(() => {
+  // Aggregates for the overview band, over the same filtered set the table
+  // renders — so the band and the rows can never tell different stories.
+  const stats = useMemo<WindowStats>(() => {
     const total = filtered.length;
-    const errors = filtered.filter((l) => l.status >= 400).length;
-    const latencies = filtered.map((l) => l.latency_ms).filter((v) => v > 0);
-    const avgLatency = latencies.length
-      ? latencies.reduce((a, b) => a + b, 0) / latencies.length
-      : 0;
-    return { total, errors, avgLatency };
+    let errors = 0;
+    let streamed = 0;
+    let tokIn = 0;
+    let tokCached = 0;
+    let tokReasoning = 0;
+    let tokOut = 0;
+    let cost = 0;
+    let savings = 0;
+    let maxLatency = 0;
+    const latencies: number[] = [];
+    const tps: number[] = [];
+    for (const l of filtered) {
+      if (l.status >= 400) errors += 1;
+      if (l.was_stream) streamed += 1;
+      tokIn += l.tok_in;
+      tokCached += l.tok_cached;
+      tokReasoning += l.tok_reasoning;
+      tokOut += l.tok_out;
+      cost += l.cost;
+      savings += l.cache_savings;
+      if (l.latency_ms > 0) {
+        latencies.push(l.latency_ms);
+        if (l.latency_ms > maxLatency) maxLatency = l.latency_ms;
+      }
+      if (l.tps > 0) tps.push(l.tps);
+    }
+    return {
+      total,
+      errors,
+      errorRate: total > 0 ? errors / total : 0,
+      latencies,
+      maxLatency,
+      avgLatency: mean(latencies),
+      p95Latency: p95(latencies),
+      avgTps: mean(tps),
+      streamed,
+      tokIn,
+      tokCached,
+      tokReasoning,
+      tokOut,
+      cost,
+      savings,
+      statuses: filtered.map((l) => l.status),
+    };
   }, [filtered]);
+
+  const tokenParts = useMemo(
+    () => [
+      { label: "input", value: stats.tokIn, color: TOKEN_COLORS[0] },
+      { label: "cached", value: stats.tokCached, color: TOKEN_COLORS[1] },
+      { label: "reasoning", value: stats.tokReasoning, color: TOKEN_COLORS[2] },
+      { label: "output", value: stats.tokOut, color: TOKEN_COLORS[3] },
+    ],
+    [stats],
+  );
+
+  const filtersActive =
+    q.trim() !== "" ||
+    model !== "all" ||
+    providerSel !== "all" ||
+    status !== "all" ||
+    surface !== "all";
+
+  const resetFilters = () => {
+    setQ("");
+    setModel("all");
+    setProviderSel("all");
+    setStatus("all");
+    setSurface("all");
+  };
 
   return (
     <div>
@@ -619,13 +949,14 @@ export function RequestLogsPage() {
           value={q}
           onChange={setQ}
           placeholder="filter key / model / provider / request id…"
+          className="w-full sm:w-72"
         />
-        <Select value={model} onChange={setModel} options={modelOpts} className="h-8 w-[150px] text-[12px]" />
+        <Select value={model} onChange={setModel} options={modelOpts} className="h-8 w-[150px] text-[12px] pointer-coarse:h-11" />
         <Select
           value={providerSel}
           onChange={setProviderSel}
           options={providerOpts}
-          className="h-8 w-[160px] text-[12px]"
+          className="h-8 w-[160px] text-[12px] pointer-coarse:h-11"
         />
         <Select
           value={status}
@@ -636,110 +967,110 @@ export function RequestLogsPage() {
             { value: "4xx", label: "4xx" },
             { value: "5xx", label: "5xx" },
           ]}
-          className="h-8 w-[135px] text-[12px]"
+          className="h-8 w-[135px] text-[12px] pointer-coarse:h-11"
         />
         <Select
           value={surface}
           onChange={setSurface}
           options={surfaceOpts}
-          className="h-8 w-[145px] text-[12px]"
+          className="h-8 w-[145px] text-[12px] pointer-coarse:h-11"
         />
         <Select
           value={range}
           onChange={(v) => setRange(v as RangeFilter)}
           options={RANGE_OPTIONS}
-          className="h-8 w-[155px] text-[12px]"
+          className="h-8 w-[155px] text-[12px] pointer-coarse:h-11"
         />
+        {filtersActive && (
+          <Button
+            variant="ghost"
+            onClick={resetFilters}
+            className="h-8 px-2.5 text-[12px] pointer-coarse:h-11"
+            title="Clear the search box and every filter"
+          >
+            <X size={12} aria-hidden />
+            Reset
+          </Button>
+        )}
       </LogsToolbar>
 
-      {/* Summary chips + distribution bar */}
-      {filtered.length > 0 && (
-        <div className="mb-3 space-y-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <SummaryChip label="shown" value={String(summary.total)} />
-            <SummaryChip
-              label="errors"
-              value={String(summary.errors)}
-              tone={summary.errors > 0 ? "danger" : "default"}
-            />
-            <SummaryChip
-              label="avg latency"
-              value={fmtLatency(summary.avgLatency)}
-              icon={<TrendingDown size={12} />}
-            />
-          </div>
-          <SummaryBar
-            segments={[
-              {
-                value: summary.total - summary.errors,
-                tone: "bg-emerald-400/60",
-                title: `${summary.total - summary.errors} successful`,
-              },
-              {
-                value: summary.errors,
-                tone: "bg-red-400/70",
-                title: `${summary.errors} errors`,
-              },
-            ]}
-          />
+      {stats.total > 0 && (
+        <WindowOverview
+          stats={stats}
+          range={range}
+          insightsOpen={insights}
+          onToggleInsights={() => setInsights((v) => !v)}
+        />
+      )}
+
+      {insights && stats.total > 0 && (
+        <div className="mb-3 grid gap-3 lg:grid-cols-2">
+          <VisualCard
+            title="Latency distribution"
+            subtitle={`${fmtInt(stats.latencies.length)} timed requests in ${rangeLabel(range)}`}
+            icon={Timer}
+          >
+            <LatencyRibbon profile={latencyProfile(stats.latencies)} />
+          </VisualCard>
+          <VisualCard
+            title="Token mix"
+            subtitle="input · cached · reasoning · output"
+            icon={Layers}
+          >
+            <TokenRibbon parts={tokenParts} />
+          </VisualCard>
         </div>
       )}
 
-      {query.isLoading && (
-        <div className="py-12">
-          <Spinner />
-        </div>
-      )}
+      {query.isLoading && <LogsSkeleton rows={8} />}
       {query.error && <ErrorText>{query.error.message}</ErrorText>}
 
       {!query.isLoading && !query.error && filtered.length === 0 && (
         <Card>
-          <EmptyState>
-            <span className="mb-2 flex justify-center text-[var(--admin-text-dim)] opacity-50">
-              <Inbox size={20} aria-hidden />
-            </span>
-            {all.length === 0 ? (
-              "No requests logged yet."
-            ) : inRange === 0 ? (
-              <>
-                No requests in the {rangeLabel(range)}.
-                <div className="mt-3 flex flex-wrap justify-center gap-2">
-                  <Button
-                    variant="ghost"
-                    onClick={() => setRange("all")}
-                    className="min-h-[44px] px-3 text-[12px]"
-                  >
-                    Show all time
-                  </Button>
-                </div>
-              </>
-            ) : (
-              "No events match the current filters."
-            )}
-          </EmptyState>
+          {all.length === 0 ? (
+            <EmptyState icon={Inbox} title="No requests logged yet">
+              Requests sent through <code className="font-mono text-[12px]">/v1/chat/completions</code>,{" "}
+              <code className="font-mono text-[12px]">/v1/messages</code> or{" "}
+              <code className="font-mono text-[12px]">/v1/responses</code> appear here as they
+              complete.
+            </EmptyState>
+          ) : inRange === 0 ? (
+            <EmptyState
+              icon={Timer}
+              title={`Nothing in the ${rangeLabel(range)}`}
+              action={
+                <Button variant="ghost" onClick={() => setRange("all")}>
+                  Show all time
+                </Button>
+              }
+            >
+              The gateway still holds {fmtInt(all.length)} older events in its ring — the traffic
+              you are looking for may simply predate this window.
+            </EmptyState>
+          ) : (
+            <EmptyState
+              icon={Inbox}
+              title="No events match these filters"
+              action={
+                <Button variant="ghost" onClick={resetFilters}>
+                  Reset filters
+                </Button>
+              }
+            >
+              {fmtInt(inRange)} requests fall inside this window; the search box and the dropdowns
+              above are excluding all of them.
+            </EmptyState>
+          )}
         </Card>
       )}
 
       {filtered.length > 0 && (
         <Card>
           <LogsTable
+            className="admin-table-logs"
             maxHeight={640}
-            head={[
-              "Time",
-              "Key",
-              "Model",
-              "Provider / key",
-              "Status",
-              <span key="ti" className="block text-right">Tok in</span>,
-              <span key="tc" className="block text-right">Tok cached</span>,
-              <span key="tr" className="block text-right">Tok reasoning</span>,
-              <span key="to" className="block text-right">Tok out</span>,
-              <span key="tps" className="block text-right">Gen TPS (streaming)</span>,
-              <span key="ttft" className="block text-right">TTFT</span>,
-              <span key="lat" className="block text-right">Latency</span>,
-              <span key="cost" className="block text-right">Cost</span>,
-              "Cache",
-            ]}
+            head={HEAD.map((h) => h.label)}
+            colClass={HEAD.map((h) => h.cls)}
           >
             {visibleRows.map((l, i) => (
               <LogRow
@@ -748,45 +1079,56 @@ export function RequestLogsPage() {
                 ariaLabel={`request ${l.request_id}`}
                 onClick={() => setSelected(l)}
               >
-                <TimeAgo ts={l.ts} nowMs={now} />
-                <LogTD className="font-medium">{l.key_alias || "—"}</LogTD>
-                <LogTD>{l.model_group || "—"}</LogTD>
-                <LogTD className="text-[var(--admin-text-muted)]">
-                  {l.provider} / {l.provider_key_label}
+                <TimeAgo
+                  ts={l.ts}
+                  nowMs={now}
+                  className={`border-l-2 pl-2 ${accentBar(l)}`}
+                />
+                <LogTD className={`${COL.key} font-medium`} title={l.key_alias}>
+                  {l.key_alias || "—"}
+                </LogTD>
+                <LogTD className="max-w-[92px] truncate sm:max-w-[220px]" title={l.model_group}>
+                  {l.model_group || "—"}
+                </LogTD>
+                <LogTD
+                  className={`${COL.provider} text-[var(--admin-text-muted)]`}
+                  title={`${l.provider} / ${l.provider_key_label}`}
+                >
+                  {l.provider || "—"} / {l.provider_key_label || "—"}
                 </LogTD>
                 <LogTD>
                   <StatusBadge status={l.status} errorCode={l.error_code} />
                 </LogTD>
-                <LogTD className="text-right">
-                  <NumCell>{fmtTokens(l.tok_in)}</NumCell>
+                <LogTD className={COL.tokIn}>
+                  <NumCell className={dimZero(l.tok_in)}>{fmtTokens(l.tok_in)}</NumCell>
                 </LogTD>
-                <LogTD className="text-right">
-                  <NumCell>{fmtTokens(l.tok_cached)}</NumCell>
+                <LogTD className={COL.tokCached}>
+                  <NumCell className={dimZero(l.tok_cached)}>{fmtTokens(l.tok_cached)}</NumCell>
                 </LogTD>
-                <LogTD className="text-right">
-                  <NumCell>{fmtTokens(l.tok_reasoning)}</NumCell>
+                <LogTD className={COL.tokReasoning}>
+                  <NumCell className={dimZero(l.tok_reasoning)}>{fmtTokens(l.tok_reasoning)}</NumCell>
                 </LogTD>
-                <LogTD className="text-right">
-                  <NumCell>{fmtTokens(l.tok_out)}</NumCell>
+                <LogTD className={COL.tokOut}>
+                  <NumCell className={dimZero(l.tok_out)}>{fmtTokens(l.tok_out)}</NumCell>
                 </LogTD>
-                <LogTD className="text-right">
+                <LogTD className={COL.tps}>
                   {l.tps > 0 ? (
                     <NumCell>{l.tps.toFixed(1)}</NumCell>
                   ) : (
                     <span className="font-mono text-[var(--admin-text-dim)]">—</span>
                   )}
                 </LogTD>
-                <LogTD className="text-right">
+                <LogTD className={COL.ttft}>
                   {l.ttft_ms > 0 ? (
                     <NumCell>{fmtLatency(l.ttft_ms)}</NumCell>
                   ) : (
                     <span className="font-mono text-[var(--admin-text-dim)]">—</span>
                   )}
                 </LogTD>
-                <LogTD className="text-right">
-                  <NumCell>{fmtLatency(l.latency_ms)}</NumCell>
+                <LogTD className={COL.latency}>
+                  <LatencyCell ms={l.latency_ms} p95={stats.p95Latency} max={stats.maxLatency} />
                 </LogTD>
-                <LogTD className="text-right">
+                <LogTD className={COL.cost}>
                   <span
                     className={`font-mono tabular-nums ${
                       l.cost > 0 ? "" : "text-[var(--admin-text-dim)]"
@@ -795,7 +1137,16 @@ export function RequestLogsPage() {
                     {fmtUsd(l.cost)}
                   </span>
                 </LogTD>
-                <LogTD>{l.cache_hit && <Badge tone="green">cached</Badge>}</LogTD>
+                <LogTD className={COL.cache}>
+                  <CacheCell l={l} />
+                </LogTD>
+                <LogTD className={COL.open}>
+                  <ChevronRight
+                    size={14}
+                    aria-hidden
+                    className="ml-auto text-[var(--admin-text-dim)] opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 pointer-coarse:opacity-60"
+                  />
+                </LogTD>
               </LogRow>
             ))}
           </LogsTable>
@@ -812,7 +1163,7 @@ export function RequestLogsPage() {
             <button
               type="button"
               onClick={() => setVisible((v) => v + ROWS_PER_PAGE)}
-              className="min-h-11 rounded-md border border-[var(--admin-border)] px-4 text-[12px] font-medium hover:bg-white/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+              className="min-h-11 rounded-md border border-[var(--admin-border)] px-4 text-[12px] font-medium transition-colors hover:bg-white/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
             >
               Show {fmtInt(Math.min(ROWS_PER_PAGE, filtered.length - visibleRows.length))} more
             </button>
@@ -830,6 +1181,13 @@ export function RequestLogsPage() {
   );
 }
 
+/** Zero token counts are real data, but in a wall of numbers they are the
+ *  loudest thing on the row. Dimming them keeps the eye on the values that
+ *  differ. */
+function dimZero(n: number): string | undefined {
+  return n === 0 ? "text-[var(--admin-text-dim)]" : undefined;
+}
+
 // ---------------------------------------------------------------------------
 // LogDetail — the full content of the slide-in drawer
 // ---------------------------------------------------------------------------
@@ -837,29 +1195,37 @@ export function RequestLogsPage() {
 function LogDetail(props: { log: RequestLogEntry; onClose: () => void }) {
   const { log: l } = props;
   const ok = l.status < 400;
+  // Time to first token plus everything after it is the generation phase — the
+  // split is what tells a reader whether a slow request stalled before the
+  // model started talking or streamed too slowly.
+  const genMs = Math.max(0, l.latency_ms - l.ttft_ms);
+  const totalTokens = l.tok_in + l.tok_out;
 
   return (
     <>
       {/* Drawer header */}
       <header className="flex items-start justify-between gap-3 border-b border-white/[0.06] px-5 py-4">
         <div className="min-w-0">
-          <div className="mb-1.5 flex items-center gap-2">
+          <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
             <StatusBadge status={l.status} errorCode={l.error_code} />
+            {l.surface && <Badge tone="gray">{l.surface}</Badge>}
             {l.was_stream && <Badge tone="blue">stream</Badge>}
-            {l.cache_hit && <Badge tone="green">cached</Badge>}
+            {l.response_cache_hit && <Badge tone="violet">response cache</Badge>}
+            {l.cache_hit && <Badge tone="green">prompt cache</Badge>}
           </div>
           <h3 className="truncate text-[16px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
             {l.model_group || "—"}
           </h3>
-          <p className="mt-0.5 font-mono text-[11px] text-[var(--admin-text-dim)]">
-            {fmtDateTime(l.ts)}
+          <p className="mt-0.5 truncate font-mono text-[11px] text-[var(--admin-text-dim)]">
+            {fmtDateTime(l.ts)} · {l.key_alias || "no key"} · {l.provider || "—"} /{" "}
+            {l.provider_key_label || "—"}
           </p>
         </div>
         <button
           type="button"
           aria-label="Close"
           onClick={props.onClose}
-          className="shrink-0 rounded-lg p-2 text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)]"
+          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)]"
         >
           <X size={16} />
         </button>
@@ -879,7 +1245,7 @@ function LogDetail(props: { log: RequestLogEntry; onClose: () => void }) {
 
         {/* Performance metrics */}
         <DetailSection title="Performance" icon={<Gauge size={13} />}>
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
             <MetricPill
               icon={<Zap size={13} />}
               label="TTFT"
@@ -888,7 +1254,13 @@ function LogDetail(props: { log: RequestLogEntry; onClose: () => void }) {
             />
             <MetricPill
               icon={<Timer size={13} />}
-              label="Latency"
+              label="Generation"
+              value={fmtLatency(genMs)}
+              dim={l.ttft_ms === 0}
+            />
+            <MetricPill
+              icon={<Gauge size={13} />}
+              label="Total"
               value={fmtLatency(l.latency_ms)}
             />
             <MetricPill
@@ -898,23 +1270,51 @@ function LogDetail(props: { log: RequestLogEntry; onClose: () => void }) {
               dim={l.tps === 0}
             />
           </div>
+          {!l.was_stream && (
+            <p className="mt-2 text-[11px] leading-relaxed text-[var(--admin-text-dim)]">
+              Non-streaming response — there is no first-token boundary, so the whole duration sits
+              in generation time.
+            </p>
+          )}
         </DetailSection>
 
         {/* Token usage */}
         <DetailSection title="Token usage" icon={<Layers size={13} />}>
-          <div className="grid grid-cols-4 gap-2">
-            <MetricPill icon={<Layers size={13} />} label="Input" value={fmtTokens(l.tok_in)} />
-            <MetricPill icon={<Clock size={13} />} label="Cached" value={fmtTokens(l.tok_cached)} dim={l.tok_cached === 0} />
-            <MetricPill icon={<Cpu size={13} />} label="Reasoning" value={fmtTokens(l.tok_reasoning)} dim={l.tok_reasoning === 0} />
-            <MetricPill icon={<Layers size={13} />} label="Output" value={fmtTokens(l.tok_out)} />
-          </div>
+          <TokenRibbon
+            parts={[
+              { label: "input", value: l.tok_in, color: TOKEN_COLORS[0] },
+              { label: "cached", value: l.tok_cached, color: TOKEN_COLORS[1] },
+              { label: "reasoning", value: l.tok_reasoning, color: TOKEN_COLORS[2] },
+              { label: "output", value: l.tok_out, color: TOKEN_COLORS[3] },
+            ]}
+          />
+          {l.usage_estimated && (
+            <p className="px-4 pb-3 text-[11px] text-[var(--admin-text-dim)]">
+              Token counts are estimated — the provider did not report usage for this response.
+            </p>
+          )}
         </DetailSection>
 
         {/* Cost */}
         <DetailSection title="Cost" icon={<DollarSign size={13} />}>
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-3 gap-2">
             <MetricPill icon={<DollarSign size={13} />} label="Request cost" value={fmtUsd(l.cost)} dim={l.cost === 0} />
-            <MetricPill icon={<DollarSign size={13} />} label="Cache savings" value={fmtUsd(l.cache_savings)} dim={l.cache_savings === 0} />
+            <MetricPill
+              icon={<DollarSign size={13} />}
+              label="Cache savings"
+              value={fmtUsd(l.cache_savings)}
+              dim={l.cache_savings === 0}
+            />
+            <MetricPill
+              icon={<Layers size={13} />}
+              label="Per 1M tokens"
+              value={
+                totalTokens > 0 && l.cost > 0
+                  ? `$${((l.cost / totalTokens) * 1_000_000).toFixed(2)}`
+                  : "—"
+              }
+              dim={totalTokens === 0 || l.cost === 0}
+            />
           </div>
         </DetailSection>
 
@@ -925,7 +1325,7 @@ function LogDetail(props: { log: RequestLogEntry; onClose: () => void }) {
         <DetailSection title="Request details" icon={<Server size={13} />}>
           <DetailRow label="Virtual key">{l.key_alias || "—"}</DetailRow>
           <DetailRow label="Provider">
-            {l.provider} / {l.provider_key_label}
+            {l.provider || "—"} / {l.provider_key_label || "—"}
           </DetailRow>
           <DetailRow label="Surface">
             {l.surface}
@@ -948,6 +1348,11 @@ function LogDetail(props: { log: RequestLogEntry; onClose: () => void }) {
                   <InlineCopy text={l.error_message} />
                 </span>
               </span>
+            </DetailRow>
+          )}
+          {l.translation_warnings?.length > 0 && (
+            <DetailRow label="Translation">
+              <span className="text-amber-300">{l.translation_warnings.join(" · ")}</span>
             </DetailRow>
           )}
         </DetailSection>
