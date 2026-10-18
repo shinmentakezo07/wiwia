@@ -635,6 +635,20 @@ export function SortHeader<K extends string>(props: {
 
 // -- dialog ---------------------------------------------------------------------
 
+/** Where overlays (dialog, drawer) are portalled to.
+ *
+ *  Not `document.body`: the admin design tokens (`--admin-surface-elevated`,
+ *  `--admin-text`, `--admin-border`, …) are declared on the `[data-admin]`
+ *  wrapper so the public marketing pages never inherit them. A portal into
+ *  `body` sits *outside* that wrapper, so every `var(--admin-*)` inside an
+ *  overlay resolved to nothing — the drawer panel came out with no background
+ *  at all and the log table behind it showed straight through it. Portalling
+ *  into the admin root keeps the tokens in scope while still escaping the
+ *  page's own `overflow`/`transform` containers. */
+function overlayHost(): Element {
+  return document.querySelector("[data-admin]") ?? document.body;
+}
+
 export function Dialog(props: {
   open: boolean;
   title: ReactNode;
@@ -795,7 +809,7 @@ export function Dialog(props: {
         )}
       </div>
     </div>,
-    document.body,
+    overlayHost(),
   );
 }
 
@@ -837,7 +851,7 @@ export function Drawer(props: {
         {props.children}
       </div>
     </div>,
-    document.body,
+    overlayHost(),
   );
 }
 
