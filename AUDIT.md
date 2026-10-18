@@ -8,6 +8,68 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — rounds 157: an upstream 529 reached the caller as an opaque `api_error` (2026-10-18)
+
+Found while auditing the Anthropic Messages surface for missing logic. The
+streaming encoder had this right all along, which is what made the
+pre-first-byte path the anomalous one.
+
+### 476. A 529 overload was classified as `502 api_connection_error`, then rendered as `api_error` — so Claude Code had nothing to back off from
+
+**Severity:** 🟠 High (a saturated upstream is presented to the client as an
+opaque failure it will not intelligently retry; every Anthropic overload
+degrades to "something is broken") · **Status: fixed** — round 157
+(`tests/test_fix_round157.py`)
+**Files:** `wiwi/providers/base.py` (`_classify_provider_status`), `wiwi/wire/anthropic_messages.py` (`error_body`)
+
+Two defects stacked to produce one symptom.
+
+`_classify_provider_status` folded 529 into the same arm as 500/502/503 and
+returned `WiwiError(502, "api_connection_error", …)`. 529 is Anthropic's own
+overload signal, not a generic 5xx, and the rewrite destroyed **both** the
+status and the vendor's own type. The vendor type did survive on
+`err.upstream_type`, but nothing on the error path reads it — grepping showed
+it appears only in log lines (`gateway.py:175`, `router.py:1598`,
+`recovery.py:556`), never in a response body.
+
+`error_body` then accepted a `status` argument and never read it, deciding the
+whole rendering from a static `etype` table. So even once the classifier
+stopped collapsing 529, the encoder had no route to `overloaded_error` for any
+`etype` it had not already enumerated.
+
+Measured end-to-end through the ASGI app before the fix:
+
+```
+UPSTREAM 529 overloaded_error  -> HTTP 502 type=api_error
+UPSTREAM 429 rate_limit_error  -> HTTP 429 type=rate_limit_error
+```
+
+The 429 arm worked because `error_from_provider_status` passes 429 through
+untouched — which is exactly why the defect survived: only the status the
+classifier happened to preserve was renderable.
+
+**Consequence:** Claude Code branches on `error.type == "overloaded_error"` to
+back off against a saturated upstream. Flattened to `api_error`, a transient
+overload is indistinguishable from a broken deployment, so the client fails
+fast instead of retrying into a recovered upstream. `billing_error`,
+`invalid_tool_use` and `request_too_large` were flattened the same way.
+
+**Fix:** 529 gets its own arm returning `WiwiError(529, "overloaded_error", …)`,
+still `retryable=True` — 529 was already in `RETRYABLE_STATUS`, so
+`status_for_key_pool` and the deployment-cooldown paths keep behaving exactly
+as they did when it arrived rewritten as 502. `error_body` gained a
+`_ANTHROPIC_TYPE_BY_STATUS` fallback consulted only when the etype table has no
+entry, with the etype table deliberately taking precedence: it carries wiwi's
+own vocabulary (`budget_exceeded` arrives as a 402 and must stay
+`permission_error`), which has no one-status-one-answer mapping. The vendor
+types Claude Code switches on are now in the table rather than flattened.
+
+**Not verified against the live API:** that the current Anthropic upstream
+actually rejects these strings. The asymmetry is internal and provable without
+it — `_stream_error_type` classified the identical failures correctly all along,
+so the two surfaces simply disagreed.
+
+
 ## ⚪ Open — aiosqlite workers outlive their event loop, and pytest blames an innocent test (2026-10-17)
 
 ### 475. Undisposed test-side `aiosqlite` connections raise `RuntimeError: Event loop is closed` on a worker thread, mis-attributed to the *next* test

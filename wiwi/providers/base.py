@@ -296,7 +296,22 @@ def _classify_provider_status(status: int, body_text: str, provider: str) -> Wiw
         return WiwiError(429, "rate_limit_error", f"{provider} rate limited: {msg}", retryable=True)
     if status == 504:
         return WiwiError(504, "timeout", f"{provider} timed out: {msg}", retryable=True)
-    if status == 408 or status in (500, 502, 503, 529):
+    # 529 is Anthropic's own overload signal (several OpenAI-compatible vendors
+    # reuse it), NOT a generic 5xx. It used to share an arm with 500/502/503
+    # and came back as WiwiError(502, "api_connection_error"), which destroyed
+    # BOTH the status and the vendor's own type — so an overloaded upstream
+    # reached the client as an opaque api_error and Claude Code had nothing to
+    # back off from. The vendor type did survive on ``upstream_type``, but
+    # nothing on the error path reads it (only the log lines do).
+    #
+    # Stays retryable: an overload is a "fail over to the next key/deployment"
+    # signal, exactly as it was when it arrived rewritten as a 502, and 529 is
+    # already in RETRYABLE_STATUS so ``status_for_key_pool`` keeps reporting it
+    # and deployment cooldowns keep firing (AUDIT #476).
+    if status == 529:
+        return WiwiError(529, "overloaded_error",
+                         f"{provider} overloaded ({status}): {msg}", retryable=True)
+    if status == 408 or status in (500, 502, 503):
         return WiwiError(502, "api_connection_error",
                          f"{provider} error {status}: {msg}", retryable=True)
     if status == 400 and ("context" in msg.lower() or "maximum" in msg.lower()

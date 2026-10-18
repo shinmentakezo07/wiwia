@@ -1237,8 +1237,44 @@ def _stream_error_type(d: dl.StreamError) -> str:
     return "api_error"
 
 
+# Fallback when the etype is one the table above has never seen. Anthropic's
+# own vocabulary is recoverable from the status alone, which is what lets a
+# vendor type wiwi has not enumerated still render as something the client can
+# act on. 529 is Anthropic's overload signal and must NOT collapse into
+# api_error: Claude Code branches on it to back off (AUDIT #476).
+_ANTHROPIC_TYPE_BY_STATUS: dict[int, str] = {
+    400: "invalid_request_error",
+    401: "authentication_error",
+    403: "permission_error",
+    404: "not_found_error",
+    413: "request_too_large",
+    429: "rate_limit_error",
+    529: "overloaded_error",
+}
+
+
 def error_body(status: int, etype: str, message: str,
                request_id: str = "") -> dict[str, Any]:
+    """Anthropic-shaped error body.
+
+    ``status`` used to be accepted and never read, so the whole rendering
+    decision hung off a static ``etype`` table. That is what made an upstream
+    529 unreportable: even once the classifier stopped collapsing it, the
+    encoder had no way to reach ``overloaded_error`` for an ``etype`` it did
+    not already know (AUDIT #476).
+
+    Precedence is deliberate: an etype the table recognises WINS over the
+    status, because the table carries wiwi's own vocabulary (``timeout``,
+    ``budget_exceeded``, ``context_window_exceeded``, …) which has no
+    one-status-one-answer mapping — a ``budget_exceeded`` arrives as a 402 and
+    must stay ``permission_error``. The status arm is the fallback for
+    everything else, so a vendor type we have never seen still renders as the
+    most specific thing the status can tell us rather than a flat ``api_error``.
+
+    This mirrors ``_stream_error_type`` above, which classified the same
+    failures correctly on the streaming path — the two surfaces must not
+    disagree about what went wrong.
+    """
     amap = {"authentication_error": "authentication_error",
             "permission_error": "permission_error",
             "rate_limit_error": "rate_limit_error",
@@ -1246,13 +1282,25 @@ def error_body(status: int, etype: str, message: str,
             "not_found_error": "not_found_error",
             "api_error": "api_error",
             "service_unavailable": "overloaded_error",
+            "overloaded_error": "overloaded_error",
+            # Anthropic's own vocabulary, all of which Claude Code switches on.
+            # These used to arrive only on ``upstream_type``; flattening them to
+            # api_error stripped the only signal the client had to act on.
+            "billing_error": "billing_error",
+            "invalid_tool_use": "invalid_tool_use",
+            "request_too_large": "request_too_large",
+            "timeout_error": "timeout_error",
+            "api_connection_error": "api_error",
             "timeout": "api_error",
             "budget_exceeded": "permission_error",
             "context_window_exceeded": "invalid_request_error",
             "content_policy_violation": "invalid_request_error"}
+    mapped = amap.get(etype)
+    if mapped is None:
+        mapped = _ANTHROPIC_TYPE_BY_STATUS.get(status, "api_error")
     body: dict[str, Any] = {
         "type": "error",
-        "error": {"type": amap.get(etype, "api_error"), "message": message}}
+        "error": {"type": mapped, "message": message}}
     # The real API always echoes the request id in an error body, and Claude
     # Code surfaces it in bug reports; without it a user-reported failure could
     # not be tied to a wiwi request-log row (AUDIT #156).
