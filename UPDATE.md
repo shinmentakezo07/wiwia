@@ -10,6 +10,187 @@ Each entry below records the before→after state, the exact files and lines cha
 
 ---
 
+## Round 158 — Inbound-surface divergences on the translation path (2026-10-18)
+
+Found while auditing each inbound surface, and each path of a surface, against
+its siblings. The unifying shape: two surfaces (or two paths of one surface)
+disagreeing about the same event, so the caller's dialect decided what they were
+told. Entries 477–484 in `AUDIT.md`; regression coverage in
+`tests/test_fix_round158.py`.
+
+### 158.1 A content-filtered turn must announce `response.incomplete` on the Responses wire
+
+**Files**: `wiwi/wire/openai_responses.py` (`ResponsesStreamEncoder._completed`, `_INCOMPLETE_REASONS`), `AUDIT.md` #477.
+
+**Symptom**: an OpenAI upstream reporting `finish_reason: "content_filter"` was
+re-encoded on the Responses surface as `response.completed` wrapping a payload
+with `"status": "incomplete"` + `incomplete_details` — one event, two
+contradictory statements.
+
+**Before**:
+
+```python
+incomplete = self._stop == "length"
+```
+
+**After**: the event type consults the same table `_response_obj` keys the
+payload's `status` off:
+
+```python
+incomplete = self._stop in _INCOMPLETE_REASONS
+```
+
+**Invariant**: the event type and the payload's `status` are the same fact and
+must never disagree for any stop the table knows. A stop the table has never
+seen still completes (unchanged behaviour). `length` was already right, which is
+why the gap survived.
+
+### 158.2 A mid-stream failure keeps its classification on every dialect
+
+**Files**: `wiwi/streaming/deltas.py` (`stream_error_type`), `wiwi/wire/openai_chat.py`, `wiwi/wire/openai_completions.py`, `wiwi/wire/openai_responses.py`, `wiwi/wire/anthropic_messages.py` (`_stream_error_type`, `_ANTHROPIC_STREAM_TYPES`), `AUDIT.md` #478, #484.
+
+**Symptom**: a mid-stream 429/529/timeout reached an OpenAI client as an opaque
+`api_error` — while the identical failure reached Claude Code classified, since
+the Anthropic encoder had done this since round 1.
+
+**Before** (both OpenAI-shaped stream encoders, and the Responses `response.failed`
+payload):
+
+```python
+err = {"error": {"message": d.message, "type": "api_error"}}
+```
+
+**After**: one classifier beside the delta it interprets, in the vocabulary
+`providers/base.error_from_provider_status` already puts on `WiwiError.etype`:
+
+```python
+def stream_error_type(d: StreamError) -> str:
+    if d.etype:                      return d.etype
+    if d.status == 529:              return "overloaded_error"
+    if d.status == 429:              return "rate_limit_error"
+    if d.status == 504 or d.kind == "timeout": return "timeout"
+    if d.status in (408, 500, 502, 503):       return "api_connection_error"
+    return "api_error"
+```
+
+**Invariants**:
+
+- The vendor's own `etype` wins over the status — it is the most precise signal.
+- Each dialect spells the result its own way: Anthropic maps `timeout` →
+  `timeout_error` (`_ANTHROPIC_STREAM_TYPES`), the OpenAI surfaces pass it
+  straight into `error.type`/`error.code`, matching what their **sync**
+  `error_body` does with the same etype. Streaming and non-streaming paths of one
+  dialect must classify identically.
+- The sync Anthropic etype table maps wiwi's `timeout` → `timeout_error` (it used
+  to map it to `api_error`), and `_ANTHROPIC_TYPE_BY_STATUS` has a 504 arm for a
+  504 whose etype the table has never seen (#484).
+
+### 158.3 A server-tool `id` and its result must be one identity
+
+**Files**: `wiwi/wire/anthropic_messages.py` (`decode_request`'s `server_tool_use`/`mcp_tool_use` arm, the `ServerToolResultDelta` fallback arm), `AUDIT.md` #479.
+
+**Symptom**: two halves of one contract. Decode forwarded a non-`str` id (JSON
+`null`, a number, a list) into `ToolUsePart.id`, so replay re-emitted `"None"` on
+a `*_tool_result` pair naming nothing. And the single-call fallback shipped the
+result with the upstream's unrecognized id while the call shipped its real one —
+two ids for one pair, the unpaired-on-replay shape the buffering exists to
+prevent.
+
+**Before / After**:
+
+```python
+id=b.get("id", "")                       # defaults only a MISSING key
+id=raw_id if isinstance(raw_id, str) else ""   # guard like ``name``
+```
+
+```python
+content_block = d.block
+if content_block.get("tool_use_id") != call["id"]:
+    content_block = {**content_block, "tool_use_id": call["id"]}
+```
+
+**Invariants**:
+
+- The client-dispatched `tool_use` arm already refuses a missing/non-string id
+  with `DialectError` (AUDIT #368). The server-tool arm cannot raise the same way
+  — normalize instead, matching the pre-existing `""` fallback for a missing id.
+- An `mcp_tool_use` must go back as `mcp_tool_use` (not `server_tool_use`), or
+  the paired `mcp_tool_result` is rejected on replay. The guard must not disturb
+  `block_type` or `builtin`.
+- A result block and the call it is paired with carry ONE id.
+
+### 158.4 The stored copy of a streamed hosted search carries the real query
+
+**Files**: `wiwi/server/app.py` (`_streamed_response_payload`), `wiwi/wire/openai_responses.py` (`_builtin_query`, `_close_tool`), `AUDIT.md` #480.
+
+**Symptom**: the live SSE frame carried the real query (extracted by `_close_tool`
+via `_builtin_query`), while the stored turn — read back by
+`previous_response_id` — claimed an empty query, because the accumulator writes
+only raw fragments (`_args`) and never a parsed `query` key.
+
+**Before / After**:
+
+```python
+orp._builtin_call_item(tc["id"], tc.get("query", ""), tc["builtin"])
+orp._builtin_call_item(tc["id"],
+                       orp._builtin_query("".join(tc.get("_args") or [])),
+                       tc["builtin"])
+```
+
+**Invariant**: the stored turn and the streamed turn are the same turn; a hosted
+call's query is always extracted from the accumulated raw argument string with
+`_builtin_query`, never read from a parsed key the accumulator does not write.
+
+### 158.5 Repaired tool arguments must not invent a value the model never wrote
+
+**Files**: `wiwi/streaming/partial_json.py` (`_scan_json`, `_trim_incomplete_value`, `_DANGLING_NUMBER`, `_PARTIAL_LITERALS`, `_repair_truncated_json`), `AUDIT.md` #482.
+
+**Symptom**: the repair appended closers to a half-written token, producing
+`{"a": 1,}` / `{"b": }` / `{"a": tru}` / `{"n": 1.}` — none of which is JSON — so
+`json.loads` raised in every consumer (`core/gateway.py:_apply_event`,
+`wire/openai_chat.py`, `wire/openai_responses.py`) and the **entire** argument
+object was lost, which round 96.1 then propagated as an empty IR `args`.
+
+**After**: the tail is trimmed to the last complete element before the closers
+are appended. A half-written literal is completed (`tru` → `true`, unambiguous
+prefix); a trailing comma, a lone sign, a dangling colon, a dangling key and a
+number tail that cannot terminate (`.`, `e`, `e+`) are dropped.
+
+**Invariants**:
+
+- The number trimmer matches the **whole token** (`[0-9][0-9.eE+-]*[.eE+-]$`),
+  never just the offending `.e+`. Dropping only the punctuation would repair
+  `{"n": 1.` to `{"n": 1}` — asserting a number the model never wrote, and this
+  repaired text is what the tool call is executed with.
+- A number whose digits are complete (`{"n": 1.5`, `{"limit": 5`) is untouched.
+- The number tail is tested BEFORE the literal branch: an exponent's `e` is a
+  letter, so `{"n": 1e` would otherwise look like a half-written literal.
+- Every other key in the object survives the cut — pinned by a property test over
+  every prefix of a real payload.
+- Interaction with `wiwi/streaming/validation.py`: a repairable (truncated)
+  payload is not an argument violation; only genuinely unrepairable input is.
+  `tests/test_fix_round20.py::test_stream_pump_validates_tool_args_on_close` was
+  retargeted to `{"broken": }` for exactly this reason (see `AUDIT.md` #482).
+
+### 158.6 A tape that lost an entry must still prove the gap
+
+**Files**: `wiwi/streaming/resume.py` (`StreamTape._evict`), `AUDIT.md` #483.
+
+**Symptom**: a delta larger than the tape's whole budget was evicted by its own
+append, leaving the tape empty — `bytes == 0` and `head_evicted` answering False
+for the vacuous empty case, so the continuation guard could not tell "nothing was
+ever emitted" from "everything was dropped" and rebuilt the assistant prefix from
+an empty tape.
+
+**After**: `while self._bytes > self._max_bytes and len(self._entries) > 1` — the
+newest entry is never evicted.
+
+**Invariant**: a tape that dropped anything answers `head_evicted(pos) is True`
+for a position before the retained head, at any size; `replay` from a complete
+position is never silently partial.
+
+---
+
 ## Round 156 — An echoed tool-call `id` reopened the call on every arguments chunk (2026-10-16)
 
 ### 156.1 A repeated `id` on an open index is a continuation, not a second call

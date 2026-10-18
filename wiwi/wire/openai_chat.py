@@ -499,8 +499,16 @@ class ChatStreamEncoder:
             return None  # [DONE] is emitted by the caller after final_frame()
         if isinstance(d, dl.StreamError):
             # error frame only: connection close terminates the stream, same
-            # as the anthropic/responses encoders — [DONE] would imply success
-            err = {"error": {"message": d.message, "type": "api_error"}}
+            # as the anthropic/responses encoders — [DONE] would imply success.
+            # The type is NOT a constant: StreamError carries the vendor's own
+            # type / the status the gateway observed / the failure kind so a
+            # mid-stream frame keeps the classification the caller retries on,
+            # and the sync ``error_body`` on this surface renders the same
+            # etype verbatim. Hardcoding ``api_error`` here told an OpenAI
+            # client nothing about a 429/529/timeout that Claude Code was
+            # being told about for the identical failure (AUDIT #478).
+            etype = dl.stream_error_type(d)
+            err = {"error": {"message": d.message, "type": etype, "code": etype}}
             return sse_frame("", orjson.dumps(err).decode())
         return None
 

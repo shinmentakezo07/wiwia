@@ -160,6 +160,8 @@ import type {
   WorkBuddyAuthFile,
   WorkBuddyExportResponse,
   WorkBuddyImportResponse,
+  WorkBuddyLoginPollResponse,
+  WorkBuddyLoginStartResponse,
   WorkBuddyRefreshResponse,
   ProviderBackup,
   ProviderExportResponse,
@@ -613,6 +615,20 @@ export const workbuddyRefresh = (provider: string, label: string) =>
   api<WorkBuddyRefreshResponse>("/admin/workbuddy/refresh", {
     method: "POST",
     body: JSON.stringify({ provider, label }),
+  });
+
+/** Open a browser-login session. Returns the upstream login URL to hand the user. */
+export const workbuddyLoginStart = (provider: string, realm: "cn" | "global") =>
+  api<WorkBuddyLoginStartResponse>("/admin/workbuddy/login/start", {
+    method: "POST",
+    body: JSON.stringify({ provider, realm }),
+  });
+
+/** Poll an open login session; ``{pending:true}`` until the user approves. */
+export const workbuddyLoginPoll = (state: string) =>
+  api<WorkBuddyLoginPollResponse>("/admin/workbuddy/login/poll", {
+    method: "POST",
+    body: JSON.stringify({ state }),
   });
 
 // -- Provider backup (full export/import with secrets + deployments) -----------

@@ -30,6 +30,7 @@ import {
   Server,
   ShieldCheck,
   Terminal,
+  UserCheck,
   Users,
   X,
 } from "lucide-react";
@@ -109,6 +110,7 @@ const ADMIN_ONLY_SECTIONS: NavSection[] = [
     items: [
       { to: "/console/providers", label: "Providers", icon: Server },
       { to: "/console/oauth", label: "Accounts", icon: Link2 },
+      { to: "/console/login", label: "Account login", icon: UserCheck },
       { to: "/console/workbuddy", label: "WorkBuddy", icon: Briefcase },
       { to: "/console/hermes", label: "Hermes", icon: Hexagon },
       { to: "/console/hermes-oauth", label: "Hermes OAuth", icon: LogIn },
@@ -134,6 +136,7 @@ const PAGE_META: Record<string, { title: string; section: string }> = {
   "/console/analytics": { title: "Analytics", section: "Traffic" },
   "/console/providers": { title: "Providers", section: "Configuration" },
   "/console/oauth": { title: "Connected accounts", section: "Configuration" },
+  "/console/login": { title: "Account login", section: "Configuration" },
   "/console/workbuddy": { title: "WorkBuddy", section: "Configuration" },
   "/console/hermes": { title: "Hermes", section: "Configuration" },
   "/console/hermes-oauth": { title: "Hermes OAuth", section: "Configuration" },

@@ -22,9 +22,12 @@ ported from workbuddy2api's ``internal/upstream``:
    StreamError so the gateway can fail the stream.
 
 Requests are additionally sanitized against the upstream content-moderation
-fingerprint blocklist (ported from sanitize.go): known template sentences
-triggering verbatim-match moderation get a one-word rewrite, and
-``x-anthropic-billing-header`` / ``cc_*`` key-value segments are stripped.
+fingerprint blocklist (ported from sanitize.go): template sentences that
+trigger verbatim-match moderation get a minimal rewrite, and
+``x-anthropic-billing-header`` / ``cc_*`` key-value segments are stripped. The
+upstream refuses Claude Code and Codex outright on the strength of their
+system prompt, so the identity rewrites are matched on the identity *clause*
+rather than one frozen sentence — see :data:`_IDENTITY_REWRITES` and AUDIT #487.
 """
 
 from __future__ import annotations
@@ -50,14 +53,48 @@ log = structlog.get_logger("wiwi.workbuddy_adapter")
 _SANITIZE_FEATURES = (
     "x-anthropic-billing-header",  # header key-name segment
     "cc_entrypoint=",               # trailing bare kv (prefix match)
-    "You are Claude Code",          # identity sentence
+    # Identity clauses. Every entry here must also be a key of
+    # _IDENTITY_REWRITES: a marker with no matching rewrite (or a rewrite with
+    # no matching marker) passes the text through untouched, which is the
+    # defect this pair of tables is supposed to prevent. The two Claude Code
+    # personality prompts ("Proactive"/"Concise"/"Explanatory") name the
+    # product nowhere, so they are matched on their own clause.
+    "Claude Code",
+    "You are an interactive CLI tool",
+    "is an agentic coding CLI",
+    "OpenAI's command-line coding agent",
     "Main branch (",                # injected-instruction sentence
 )
 _HDR_RE = re.compile(r"(?i)x-anthropic-billing-header:[^;\n]*;?\s*")
 _KV_RE = re.compile(r"(?i)\bcc_[a-z0-9_]+=[^;\n]*;?\s*")
+
+# Identity rewrites match the *identity clause*, not one frozen sentence. The
+# upstream gate is a verbatim template match on the system prompt, so the
+# shipped table previously listed exactly one sentence ("You are Claude Code,
+# Anthropic's official CLI for Claude.") while the clients emit at least six
+# others — the Agent SDK opener, the subagent and specialist openers, the
+# personality-prompt openers — every one of which reached the upstream
+# byte-identical and was refused (AUDIT #487). Matching the clause covers the
+# whole family, so a wording drift in a client release no longer re-opens the
+# hole.
+#
+# Each replacement alters the smallest span that makes the text differ: the
+# upstream needs it changed, not replaced, and the model still needs its own
+# instructions intact.
+_IDENTITY_REWRITES = (
+    # Shared by every Claude Code identity sentence — CLI, Agent SDK, subagent,
+    # file-search and web-reading specialists.
+    ("Anthropic's official CLI for Claude",
+     "Anthropic's official CLI tool for Claude"),
+    # The personality prompts ("Proactive"/"Concise"/"Explanatory") and the
+    # agentic-CLI self-description carry no other marker at all.
+    ("You are an interactive CLI tool", "You are an interactive CLI utility"),
+    ("is an agentic coding CLI", "is an agentic coding utility"),
+    # Codex. Its only stable self-description is the login-screen blurb.
+    ("OpenAI's command-line coding agent",
+     "OpenAI's command-line coding utility"),
+)
 _REWRITES = (
-    ("You are Claude Code, Anthropic's official CLI for Claude.",
-     "You are Claude Code, Anthropic's official CLI tool for Claude."),
     ("Main branch (you will usually use this for PRs)",
      "Default branch (you will usually use this for PRs)"),
 )
@@ -75,6 +112,8 @@ def _sanitize_text(text: str) -> str:
     if not _has_fingerprint(text):
         return text
     for old, new in _REWRITES:
+        text = text.replace(old, new)
+    for old, new in _IDENTITY_REWRITES:
         text = text.replace(old, new)
     text = _HDR_RE.sub("", text)
     if "cc_" in text:

@@ -201,7 +201,18 @@ class StreamTape:
         return out
 
     def _evict(self) -> None:
-        while self._bytes > self._max_bytes and self._entries:
+        # Never evict the last entry. A single delta larger than the whole
+        # budget used to be popped immediately after being appended, leaving
+        # the tape EMPTY: ``bytes == 0`` and ``head_evicted`` returning False
+        # for the vacuous empty case even though the client had already
+        # received that content. The gateway's AUDIT #68 continuation guard
+        # reads exactly that predicate, so a one-delta oversized stream turned
+        # a refused resume into a silently partial one — the fallback rebuilt
+        # the assistant prefix from an empty tape and replayed nothing, while
+        # the client already had the content. Keeping the oversized newest
+        # entry costs nothing (it is in memory regardless) and keeps the tape's
+        # answer to "did anything get dropped?" honest (AUDIT #483).
+        while self._bytes > self._max_bytes and len(self._entries) > 1:
             evicted = self._entries.popleft()
             self._bytes -= _delta_size(evicted.delta)
 

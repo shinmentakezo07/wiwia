@@ -41,6 +41,17 @@ from collections import deque
 #: still far below the per-chunk JSON/SSE work it guards.
 MAX_LOOP_PERIOD = 32
 
+#: Fewest repeats at any period that count as evidence of a loop. A single
+#: confirming repetition is a coincidence, not a runaway decode: two chunks that
+#: happen to match 30 apart are ordinary prose, and aborting the stream there
+#: truncates a healthy answer. Three means the periodic pattern has been
+#: traversed four times, which is the shape a real loop shows. Only ever binds
+#: for periods within a couple of ``stream_loop_limit`` of it (at the shipped
+#: limit of 100 the arithmetic floor is 68), so the documented semantics — the
+#: limit decides how many repeats are required — hold where they matter
+#: (AUDIT #481).
+MIN_LOOP_REPEATS = 3
+
 
 class LoopDetector:
     """Detect ``limit`` consecutive repetitions of a short-period pattern.
@@ -80,10 +91,19 @@ class LoopDetector:
         ``limit - period`` is the repeat count that makes a window of ``limit``
         chunks exactly periodic — the condition the original full-window scan
         raised on. For a period at or above the limit that arithmetic goes to
-        zero or negative, which would fire on a single repeat; floor it at 1 so
-        such a period still requires at least one confirming repetition.
+        zero or negative, which would fire on a single repeat; floor it at
+        :data:`MIN_LOOP_REPEATS` instead.
+
+        The floor is the difference between "this lag repeated" and "this lag
+        repeated enough to be a loop". At 1, a configuration like
+        ``stream_loop_limit: 33`` fired on TWO chunks that merely happened to
+        coincide 32 apart — ordinary prose reusing a sentence does that, and the
+        healthy stream was aborted mid-answer. Dormant at the shipped limit of
+        100 (every period ≤ 32 needs 68+ repeats there), but the knob is
+        documented as deciding *how many repeats* are required, and a smaller
+        one silently converted it into "a coincidence is enough" (AUDIT #481).
         """
-        return max(1, self._limit - period)
+        return max(MIN_LOOP_REPEATS, self._limit - period)
 
     def feed(self, text: str) -> bool:
         """Record one generated chunk; return True when a loop is detected.

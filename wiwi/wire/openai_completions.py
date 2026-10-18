@@ -183,8 +183,12 @@ class CompletionStreamEncoder:
             return None  # emitted by final_frame()
         if isinstance(d, dl.StreamError):
             # Error frame only: connection close terminates the stream, same as
-            # the chat/anthropic/responses encoders.
-            err = {"error": {"message": d.message, "type": "api_error"}}
+            # the chat/anthropic/responses encoders. The classification is
+            # shared with those surfaces rather than flattened to ``api_error``
+            # — the sync ``error_body`` beside this encoder emits the same
+            # etype verbatim (AUDIT #478).
+            etype = dl.stream_error_type(d)
+            err = {"error": {"message": d.message, "type": etype, "code": etype}}
             return sse_frame("", orjson.dumps(err).decode())
         return None  # ThinkingDelta, ServerToolResultDelta, StreamEnd: nothing to send
 

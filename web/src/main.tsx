@@ -58,6 +58,7 @@ import { ProviderDetailPage } from "@/pages/ProviderDetail";
 import { BuiltinProvidersPage } from "@/pages/BuiltinProviders";
 import { OAuthProvidersPage } from "@/pages/OAuthProviders";
 import { WorkBuddyAccountsPage } from "@/pages/WorkBuddyAccounts";
+import { AccountLoginPage } from "@/pages/AccountLogin";
 import { HermesPage } from "@/pages/Hermes";
 import { HermesOAuthPage } from "@/pages/HermesOAuth";
 import { VirtualKeysPage } from "@/pages/VirtualKeys";
@@ -233,6 +234,14 @@ function AppRoutes() {
           element={
             <RequireAdmin>
               <OAuthProvidersPage />
+            </RequireAdmin>
+          }
+        />
+        <Route
+          path="/console/login"
+          element={
+            <RequireAdmin>
+              <AccountLoginPage />
             </RequireAdmin>
           }
         />

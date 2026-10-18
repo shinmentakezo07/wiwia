@@ -34,18 +34,27 @@ MAX_BUFFER_BYTES = 1024 * 1024
 MAX_REPAIR_DEPTH = 4096
 
 
-def _repair_truncated_json(text: str) -> str:
-    """Append missing closing characters for truncated JSON.
+def _scan_json(text: str) -> tuple[list[str], bool, int, bool]:
+    """Track JSON nesting and string state in one pass.
 
-    Tracks nesting depth and string state, then appends whatever closers
-    are needed to produce valid JSON.  The container stack is bounded by
-    :data:`MAX_REPAIR_DEPTH` so deeply-nested pathological input does not
-    blow memory or spend unbounded time producing an arbitrarily long suffix.
+    Returns ``(stack, in_string, open_idx, open_is_key)``: the closers still
+    owed (innermost last), whether the text ends inside a string, the index of
+    that string's opening quote (``-1`` when the text ends outside a string),
+    and whether that string sits where an object *key* belongs — a string at the
+    head of an object or right after a comma inside one, with no ``:`` yet.
+
+    Key detection needs the last significant character seen *outside* strings
+    (``prev_sig``), which is why it is tracked here rather than recovered later:
+    the difference between ``{"a":`` (a dangling key) and ``{"a": "b`` (a value
+    string worth closing) is exactly that character.
     """
     stack: list[str] = []
     in_string = False
     escaped = False
-    for ch in text:
+    prev_sig = ""
+    open_idx = -1
+    open_is_key = False
+    for idx, ch in enumerate(text):
         if in_string:
             if escaped:
                 escaped = False
@@ -53,16 +62,139 @@ def _repair_truncated_json(text: str) -> str:
                 escaped = True
             elif ch == _QUOTE:
                 in_string = False
+                prev_sig = ch
             continue
         if ch == _QUOTE:
             in_string = True
+            open_idx = idx
+            open_is_key = (prev_sig in ("{", ",") and bool(stack)
+                           and stack[-1] == "}")
         elif ch in _OPEN_CLOSE:
             if len(stack) < MAX_REPAIR_DEPTH:
                 stack.append(_OPEN_CLOSE[ch])
             # else: drop the opener on the floor; the repair will close
             # what we have but not balloon the suffix.
+            prev_sig = ch
         elif ch in _CLOSE_CHARS and stack and stack[-1] == ch:
             stack.pop()
+            prev_sig = ch
+        elif not ch.isspace():
+            prev_sig = ch
+    return stack, in_string, open_idx, open_is_key
+
+
+# JSON's only bare literals. A truncated one is unambiguous — no other literal
+# starts with ``t``/``f``/``n`` — so a half-written ``tru`` can be *completed*
+# instead of dropped, keeping the value the model was in the middle of writing.
+_PARTIAL_LITERALS = {"t": "true", "tr": "true", "tru": "true",
+                     "f": "false", "fa": "false", "fal": "false",
+                     "fals": "false", "n": "null", "nu": "null", "nul": "null"}
+
+# A number token that cannot terminate: a trailing '.', a bare exponent, or an
+# exponent whose sign arrived without its digits. The WHOLE token matches, not
+# just the offending '.e+', because the digits seen so far are a prefix of the
+# number the model was writing — ``12.`` is on its way to ``12.5``, so keeping
+# ``12`` would assert a value that was never written. Strings are excluded by
+# construction — the trimmer only ever runs on text that ends outside one.
+_DANGLING_NUMBER = re.compile(r"[0-9][0-9.eE+-]*[.eE+-]$")
+
+# The final string token of a text that ends with a closing quote. ``\\.``
+# keeps an escaped quote inside the token, so ``"a\"`` does not match (it is an
+# unterminated string, and the in-string path owns it).
+_TRAILING_STRING = re.compile(r'"(?:[^"\\]|\\.)*"$')
+
+
+def _trim_incomplete_value(text: str, stack: list[str]) -> str:
+    """Cut a truncated JSON text back to its last complete element.
+
+    Appending closers is enough when the cut lands *between* tokens, which is
+    not where a real token stream cuts: mid-separator (``{"a": 1,``), mid-key
+    (``{"b":``), mid-literal (``{"a": tru``) and mid-number (``{"n": 1.``) are
+    the common cases. Closing those produced ``{"a": 1,}`` / ``{"b": }`` /
+    ``{"a": tru}`` / ``{"n": 1.}`` — none of which is JSON, so every consumer of
+    a repaired tool call fell back to ``{}`` and lost EVERY argument in the
+    object at exactly the boundaries that occur most in practice, while
+    streamed partial views (``parse_partial``) showed the values fine
+    (AUDIT #482).
+
+    A half-written literal is *completed* — its prefix is unambiguous and the
+    value is real. A trailing comma, a lone sign, a dangling colon, a dangling
+    key, and a number tail that cannot terminate are *dropped*: there is no
+    value to invent, and the digits seen for ``1.`` are a prefix of a number
+    that had not finished arriving — this repaired text is what the call is
+    executed with, so keeping them would run a tool on a value the model never
+    wrote. ``stack`` is the nesting from the full text and stays valid, because
+    every cut here removes a token, never a bracket.
+    """
+    while True:
+        text = text.rstrip()
+        if not text:
+            return text
+        # A trailing separator carries no value of its own.
+        if text[-1] in ",:":
+            text = text[:-1]
+            continue
+        # A lone sign can only be a number that never started.
+        if text[-1] in "+-":
+            text = text[:-1]
+            continue
+        # A number tail that cannot terminate must be tested BEFORE the literal
+        # branch: an exponent's ``e`` is a letter, so a text ending ``1e`` would
+        # otherwise look like a half-written literal and be returned as-is.
+        #
+        # The whole token goes, not just the offending '.e+': the digits are a
+        # prefix of a number that had not finished arriving, and this repaired
+        # text is what the call is executed with — ``core/gateway.py``'s
+        # ``_apply_event`` parses it and assigns ``tc.args``, as do the
+        # decode-side repairs in ``wire/openai_chat.py``. Keeping the prefix
+        # would run a tool on a value the model never wrote; dropping the token
+        # lets the passes above drop the key that owned it, which is the honest
+        # answer.
+        m = _DANGLING_NUMBER.search(text)
+        if m is not None:
+            text = text[:m.start()]
+            continue
+        m = re.search(r"[A-Za-z]+$", text)
+        if m is not None:
+            completion = _PARTIAL_LITERALS.get(m.group(0))
+            if completion is None:
+                return text          # true/false/null are already complete
+            return text[:m.start()] + completion
+        if text.endswith(_QUOTE):
+            m = _TRAILING_STRING.search(text)
+            if m is not None:
+                before = text[:m.start()].rstrip()
+                # A complete string with nothing after it and no colon in front
+                # is a KEY whose value never arrived. Only inside an object: the
+                # same string inside an array is a finished value.
+                if (before and before[-1] in "{," and stack
+                        and stack[-1] == "}"):
+                    text = before
+                    continue
+            return text
+        return text
+
+
+def _repair_truncated_json(text: str) -> str:
+    """Append missing closing characters for truncated JSON.
+
+    Tracks nesting depth and string state, then appends whatever closers
+    are needed to produce valid JSON.  The container stack is bounded by
+    :data:`MAX_REPAIR_DEPTH` so deeply-nested pathological input does not
+    blow memory or spend unbounded time producing an arbitrarily long suffix.
+
+    Closers alone are only sufficient when the cut landed between tokens, so
+    the tail is also trimmed of a half-written token first (AUDIT #482), and a
+    cut inside a *key* drops the pair rather than closing a key that can never
+    be given a value.
+    """
+    stack, in_string, open_idx, open_is_key = _scan_json(text)
+    # A stream cut mid-key (``{"qu``) has no value to keep: closing the key's
+    # quote yields ``{"qu"}``, which is not JSON either, so drop the pair and
+    # re-scan. Each pass strictly shortens the text, so this terminates.
+    while in_string and open_is_key:
+        text = text[:open_idx].rstrip()
+        stack, in_string, open_idx, open_is_key = _scan_json(text)
     suffix = ""
     if in_string:
         # Unterminated string. Count the trailing backslash run: an ODD run
@@ -124,6 +256,8 @@ def _repair_truncated_json(text: str) -> str:
                         and 0xD800 <= int(prev.group(2), 16) <= 0xDBFF):
                     text = text[:m.start()] + keep
         suffix += _QUOTE
+    else:
+        text = _trim_incomplete_value(text, stack)
     # Close open containers in reverse order.
     suffix += "".join(reversed(stack))
     return text + suffix

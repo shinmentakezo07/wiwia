@@ -1,6 +1,8 @@
 // WorkBuddy — manage WorkBuddy/CodeBuddy accounts (one per pool key).
 //
 // This page lists every WorkBuddy pool key across all workbuddy providers:
+//   • Log in — browser login against the CN or global WorkBuddy API. The
+//     login URL is handed back by the upstream, never pinned here.
 //   • Import — bulk-import account auth JSONs in the workbuddy2api auths/
 //     file shape (nested {auth, account} objects). Each account becomes a
 //     pool key; the provider is created on first import.
@@ -8,21 +10,24 @@
 //     the same auths/ shape, for backup or re-import elsewhere.
 //   • Refresh — rotate one account's access token on demand.
 //   • Live expiry state — needs_refresh badge fed by the backend sweeper.
+//
+// The login machine and the account table live in ./workbuddy-shared so the
+// always-visible Account login page (/console/login) drives the same flow
+// instead of growing a second copy of it. This page keeps its modal wrapper —
+// the flow itself is the shared part.
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Download, RefreshCw, Upload } from "lucide-react";
-import {
-  getProviders,
-  workbuddyAccounts,
-  workbuddyExport,
-  workbuddyImport,
-  workbuddyRefresh,
-} from "../api/client";
-import type { WorkBuddyAccount, WorkBuddyAuthFile } from "../api/types";
+import { Download, LogIn, Upload } from "lucide-react";
+import { getProviders, workbuddyAccounts, workbuddyExport, workbuddyImport } from "../api/client";
+import type { WorkBuddyAuthFile, WorkBuddyLoginConnected } from "../api/types";
 import { datedFilename, downloadJson } from "@/api/backup";
 import {
-  Badge,
+  WorkBuddyAccountsTable,
+  WorkBuddyLoginForm,
+  useWorkBuddyLogin,
+} from "@/pages/workbuddy-shared";
+import {
   Button,
   Card,
   CardHeader,
@@ -33,22 +38,7 @@ import {
   Input,
   PageHeader,
   Spinner,
-  Table,
-  TD,
 } from "../components/ui";
-
-function _fmtExpiry(expiresAt: number | null | undefined): string {
-  if (!expiresAt) return "unknown";
-  const days = (expiresAt * 1000 - Date.now()) / 86_400_000;
-  const rel =
-    days >= 1 ? `${Math.floor(days)}d` : `${Math.max(0, Math.floor(days * 24))}h`;
-  return `${new Date(expiresAt * 1000).toLocaleDateString()} (${rel})`;
-}
-
-function _regionBadge(region: WorkBuddyAccount["region"]) {
-  if (region === "global") return <Badge tone="violet">global</Badge>;
-  return <Badge tone="blue">cn</Badge>;
-}
 
 // -- import dialog --------------------------------------------------------------
 // Accepts a JSON array of auth objects (a concatenated auths/ dump) or a
@@ -176,75 +166,37 @@ function ImportAccountsDialog(props: {
   );
 }
 
-// -- accounts table --------------------------------------------------------------
+// -- login dialog ---------------------------------------------------------------
+// WorkBuddy credentials are not static API keys: they are OAuth pairs whose
+// refresh grant rotates, and a revoked account can only be revived by logging
+// in again. Before this dialog the only way in was to log in somewhere else
+// (the CodeBuddy plugin) and import the resulting auths/ JSON by hand — so a
+// revoke left the operator with nothing to do inside wiwi.
+//
+// The flow itself (start → open the upstream-returned URL → poll → the account
+// is saved with every detail) is `useWorkBuddyLogin` in ./workbuddy-shared,
+// which the Account login page also drives. Only the modal chrome is here.
 
-function AccountsTable(props: {
-  accounts: WorkBuddyAccount[];
-  onError: (m: string) => void;
+function LoginDialog(props: {
+  open: boolean;
+  onClose: () => void;
+  onConnected: (provider: string, label: string) => void;
 }) {
-  const qc = useQueryClient();
-  const [refreshing, setRefreshing] = useState<string | null>(null);
-
-  const refresh = useMutation({
-    mutationFn: (a: WorkBuddyAccount) => workbuddyRefresh(a.provider, a.label),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["workbuddy-accounts"] });
-      void qc.invalidateQueries({ queryKey: ["providers"] });
-    },
-    onError: (e) => props.onError(e.message),
+  const state = useWorkBuddyLogin({
+    onConnected: (d: WorkBuddyLoginConnected) => props.onConnected(d.provider, d.key_label),
   });
+  const reset = state.reset;
 
-  const refreshOne = (a: WorkBuddyAccount) => {
-    setRefreshing(`${a.provider}/${a.label}`);
-    refresh.mutate(a, {
-      onSettled: () => setRefreshing(null),
-    });
-  };
+  // A reopened dialog must start from a blank form, not the previous session's
+  // waiting state — the session it was polling is gone the moment it closes.
+  useEffect(() => {
+    if (!props.open) reset();
+  }, [props.open, reset]);
 
   return (
-    <Table head={["Account", "Provider", "Region", "Token", "Expires", "Status", ""]}>
-      {props.accounts.map((a) => (
-        <tr key={`${a.provider}/${a.label}`}>
-          <TD>
-            <div className="font-medium">{a.nickname || a.label}</div>
-            <div className="text-[11px] text-[var(--admin-text-muted)]">
-              {a.uid || "—"} · {a.label}
-            </div>
-          </TD>
-          <TD>{a.provider}</TD>
-          <TD>{_regionBadge(a.region)}</TD>
-          <TD>
-            <code className="text-[11px] text-[var(--admin-text-muted)]">
-              {a.access_token_masked ?? "—"}
-            </code>
-          </TD>
-          <TD>{_fmtExpiry(a.expires_at)}</TD>
-          <TD>
-            {!a.valid_auth ? (
-              <Badge tone="red">invalid auth</Badge>
-            ) : a.needs_refresh ? (
-              <Badge tone="amber">needs refresh</Badge>
-            ) : (
-              <Badge tone="green">valid</Badge>
-            )}
-            {a.enabled === false && <Badge tone="gray">disabled</Badge>}
-          </TD>
-          <TD>
-            <Button
-              variant="ghost"
-              disabled={!a.has_refresh_token || refreshing !== null}
-              onClick={() => refreshOne(a)}
-            >
-              <RefreshCw
-                size={13}
-                className={refreshing === `${a.provider}/${a.label}` ? "animate-spin" : ""}
-              />
-              Refresh
-            </Button>
-          </TD>
-        </tr>
-      ))}
-    </Table>
+    <Dialog open={props.open} title="Log in to WorkBuddy" onClose={props.onClose}>
+      <WorkBuddyLoginForm state={state} onDismiss={props.onClose} />
+    </Dialog>
   );
 }
 
@@ -252,6 +204,7 @@ function AccountsTable(props: {
 
 export function WorkBuddyAccountsPage() {
   const [importOpen, setImportOpen] = useState(false);
+  const [loginOpen, setLoginOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -288,12 +241,24 @@ export function WorkBuddyAccountsPage() {
         title="WorkBuddy"
         subtitle="WorkBuddy / CodeBuddy accounts — one pool key per account"
         right={
-          <div className="flex gap-2">
-            <Button variant="outline" onClick={() => setImportOpen(true)}>
+          <div className="flex flex-wrap gap-2">
+            {/* Every control in this row meets the 44 px touch target: the
+                shared `.admin-btn` padding lands at 36 px, so call sites raise
+                it — the same `min-h-11` pattern `.admin-number-stepper` uses in
+                styles.css. */}
+            <Button className="min-h-11" onClick={() => setLoginOpen(true)}>
+              <LogIn size={14} /> Log in
+            </Button>
+            <Button
+              variant="outline"
+              className="min-h-11"
+              onClick={() => setImportOpen(true)}
+            >
               <Upload size={14} /> Import accounts
             </Button>
             <Button
               variant="ghost"
+              className="min-h-11"
               disabled={doExport.isPending || accounts.length === 0}
               onClick={() => doExport.mutate()}
             >
@@ -358,16 +323,25 @@ export function WorkBuddyAccountsPage() {
                 <Spinner />
               ) : accounts.length === 0 ? (
                 <EmptyState>
-                  No WorkBuddy accounts yet. Import auth JSONs from the CodeBuddy
-                  plugin (auths/ directory) to get started.
+                  No WorkBuddy accounts yet. Log in with a WorkBuddy /
+                  CodeBuddy account, or import auth JSONs from the plugin
+                  (auths/ directory) to get started.
                 </EmptyState>
               ) : (
-                <AccountsTable accounts={accounts} onError={setError} />
+                <WorkBuddyAccountsTable accounts={accounts} onError={setError} />
               )}
             </div>
           </Card>
         </>
       )}
+
+      <LoginDialog
+        open={loginOpen}
+        onClose={() => setLoginOpen(false)}
+        onConnected={(provider, label) =>
+          setNotice(`Logged in to ${provider} as ${label}.`)
+        }
+      />
 
       <ImportAccountsDialog
         open={importOpen}

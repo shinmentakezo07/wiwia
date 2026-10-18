@@ -225,6 +225,25 @@ _POLICY_MESSAGE_MARKERS = (
     "model is not supported",
 )
 
+# Phrase fallbacks for upstreams that refuse on the *shape* of the request
+# rather than on the account — the caller is a client the vendor does not
+# serve from that channel. Sent as a 400, so it never reaches the 401/403
+# entitlement branch above, yet it behaves exactly like one: it is a property
+# of this deployment, not of the key, and another deployment in the same model
+# group can serve the very same request.
+#
+# WorkBuddy refuses Claude Code and Codex this way, naming the system prompt
+# as the reason and telling the operator to "add another provider to this
+# group" — advice wiwi could not act on, because a bare 400 classified as a
+# non-retryable invalid_request_error is re-raised by the router *before* it
+# drains its fallback queue. Keyed on the vendor's wording rather than on the
+# provider name, so a second vendor refusing on channel is covered too
+# (AUDIT #487).
+_CHANNEL_REFUSAL_MARKERS = (
+    "unapproved channel",
+    "illegal api invocation",
+)
+
 
 def _entitlement_kind(body_text: str, msg: str) -> str | None:
     """Classify a 401/403 as an account-level refusal, else ``None``.
@@ -317,6 +336,17 @@ def _classify_provider_status(status: int, body_text: str, provider: str) -> Wiw
     if status == 400 and ("context" in msg.lower() or "maximum" in msg.lower()
                           or "too long" in msg.lower()):
         return WiwiError(400, "context_window_exceeded", msg)
+    if status == 400 and any(m in msg.lower() for m in _CHANNEL_REFUSAL_MARKERS):
+        # A channel refusal is not a malformed request: the same body sails
+        # through on a different deployment. Marked permission_error (not
+        # authentication_error) so status_for_key_pool leaves the key alone —
+        # nothing is wrong with the credential — and retryable so the router
+        # drains its fallback queue instead of raising at the client. The
+        # vendor's own wording is preserved verbatim because it is the only
+        # evidence of what was actually objected to (AUDIT #487).
+        return WiwiError(400, "permission_error",
+                         f"{provider} refused this client/channel: {msg}",
+                         retryable=True)
     if status == 400:
         return WiwiError(400, "invalid_request_error", f"{provider}: {msg}")
     return WiwiError(502, "api_error", f"{provider} error {status}: {msg}", retryable=status >= 500)

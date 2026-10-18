@@ -996,7 +996,12 @@ class ResponsesStreamEncoder:
                 closing += b"".join(self._close_tool(idx))
             return closing + self._evt("response.failed", {
                 "response": {"id": f"resp_{self.req_id}", "status": "failed",
-                             "error": {"code": "api_error", "message": d.message}}})
+                             # Same classification as the sync path's
+                             # ``error_body``, not a hardcoded ``api_error``:
+                             # a mid-stream 429/529/timeout says what it is
+                             # (AUDIT #478).
+                             "error": {"code": dl.stream_error_type(d),
+                                       "message": d.message}}})
         return None
 
     def _completed(self) -> bytes:
@@ -1021,7 +1026,15 @@ class ResponsesStreamEncoder:
         # deliberately rather than shipping a check that changes nothing.
         # Truncation is a DISTINCT terminal event (response.incomplete) with
         # status "incomplete" + incomplete_details — not a completed response.
-        incomplete = self._stop == "length"
+        # The test must be the SAME table _response_obj keys the payload's
+        # ``status`` off: ``length`` is not the only incomplete stop, and
+        # keying the event type on it alone emitted ``response.completed``
+        # wrapping a payload that said ``"status": "incomplete"`` for a
+        # content-filtered turn. A client switching on the event type (the
+        # OpenAI SDK, Codex CLI) saw a clean completion and never learned the
+        # filter had cut the answer, while the non-streaming encoder — which
+        # consults the table — reported it correctly (AUDIT #477).
+        incomplete = self._stop in _INCOMPLETE_REASONS
         etype = "response.incomplete" if incomplete else "response.completed"
         resp = _response_obj(self.model, self.req_id, self._stop, self._output,
                              _usage_obj(u.prompt, u.output, u.cached, u.reasoning))

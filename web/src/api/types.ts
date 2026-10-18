@@ -437,6 +437,33 @@ export interface WorkBuddyRefreshResponse {
   refreshed: boolean;
 }
 
+export interface WorkBuddyLoginStartResponse {
+  /** wiwi-side session token to poll with; the upstream ``state`` stays server-side. */
+  state: string;
+  provider: string;
+  realm: "cn" | "global";
+  /** The login URL, as handed back by the upstream (host-allowlisted before it gets here). */
+  auth_url: string;
+}
+
+/** The login session is still waiting on the user to approve in their browser. */
+export interface WorkBuddyLoginPending {
+  pending: true;
+}
+
+export interface WorkBuddyLoginConnected {
+  provider: string;
+  connected: true;
+  key_label: string;
+  uid: string;
+  nickname: string;
+  region: "cn" | "global";
+  access_token_masked: string;
+  expires_at?: number | null;
+}
+
+export type WorkBuddyLoginPollResponse = WorkBuddyLoginPending | WorkBuddyLoginConnected;
+
 // -- Provider backup (export/import) -------------------------------------------
 
 export interface ProviderBackupKey {

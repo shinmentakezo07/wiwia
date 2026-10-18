@@ -182,8 +182,17 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                     # Anthropic rejects the history (AUDIT #156).
                     raw_name = b.get("name")
                     name = raw_name if isinstance(raw_name, str) else ""
+                    # ``b.get("id", "")`` defaults only a MISSING key: an
+                    # explicit JSON null came back as ``None`` (and any
+                    # non-string passed through untouched), so the IR carried an
+                    # id that is not a str and replay re-emitted it as the
+                    # literal ``"None"`` on a ``*_tool_result`` pair that names
+                    # nothing — a 400 blamed on a field the caller never wrote
+                    # and could not see. Guard it like ``name`` one line up
+                    # (AUDIT #479).
+                    raw_id = b.get("id")
                     parts.append(ir.ToolUsePart(
-                        id=b.get("id", ""), name=name,
+                        id=raw_id if isinstance(raw_id, str) else "", name=name,
                         # Same object guard as the client-dispatched arm above.
                         args=b.get("input") if isinstance(b.get("input"), dict) else {},
                         builtin=name or "server_tool",
@@ -1118,9 +1127,20 @@ class AnthropicStreamEncoder:
             # result block below would reuse its index and leave it unstopped.
             out.extend(self._drain_deferred())
             if not skipped_result:
+                # The single-call fallback above exists so a result naming an id
+                # the adapter never saw is still emitted *with* its call, rather
+                # than alone and unpaired. Shipping the two with DIFFERENT ids
+                # defeated that: the pair was internally inconsistent — the
+                # call's id on one block, the unrecognized id on its result —
+                # which is the unpaired-on-replay shape the buffering exists to
+                # prevent. Rewrite the result's id to the call it is actually
+                # paired with (AUDIT #479).
+                block = d.block
+                if block.get("tool_use_id") != call["id"]:
+                    block = {**block, "tool_use_id": call["id"]}
                 out.append(self._evt("content_block_start", {
                     "type": "content_block_start", "index": self._block_idx,
-                    "content_block": d.block}))
+                    "content_block": block}))
                 out.append(self._evt("content_block_stop",
                                      {"type": "content_block_stop",
                                       "index": self._block_idx}))
@@ -1223,18 +1243,18 @@ def _stream_error_type(d: dl.StreamError) -> str:
     an opaque error the client would not back off from, even though the IR
     carried the real classification in ``StreamError.kind``/``etype``
     (AUDIT #156).
+
+    The classification itself now lives in one place for every dialect
+    (``streaming.deltas.stream_error_type``); only the spelling differs here,
+    because Anthropic names a timeout ``timeout_error`` where wiwi's own
+    vocabulary calls it ``timeout`` (AUDIT #478).
     """
-    # The upstream named its own type (Anthropic error frames carry one):
-    # that is the most precise signal and passes through verbatim.
-    if d.etype:
-        return d.etype
-    if d.status == 529:
-        return "overloaded_error"
-    if d.status == 429:
-        return "rate_limit_error"
-    if d.kind == "timeout":
-        return "timeout_error"
-    return "api_error"
+    etype = dl.stream_error_type(d)
+    return _ANTHROPIC_STREAM_TYPES.get(etype, etype)
+
+
+# wiwi's vocabulary -> Anthropic's, for the names the two spell differently.
+_ANTHROPIC_STREAM_TYPES: dict[str, str] = {"timeout": "timeout_error"}
 
 
 # Fallback when the etype is one the table above has never seen. Anthropic's
@@ -1249,6 +1269,13 @@ _ANTHROPIC_TYPE_BY_STATUS: dict[int, str] = {
     404: "not_found_error",
     413: "request_too_large",
     429: "rate_limit_error",
+    # A timeout with no etype of its own — or one this table has never seen —
+    # must still reach Claude Code as ``timeout_error``. The status is the only
+    # signal left, and ``api_error`` is not a failure the client retries any
+    # differently from a broken deployment. The streaming twin already reads
+    # 504 as a timeout (``streaming.deltas.stream_error_type``); the status arm
+    # below must agree (AUDIT #484).
+    504: "timeout_error",
     529: "overloaded_error",
 }
 
@@ -1291,7 +1318,15 @@ def error_body(status: int, etype: str, message: str,
             "request_too_large": "request_too_large",
             "timeout_error": "timeout_error",
             "api_connection_error": "api_error",
-            "timeout": "api_error",
+            # wiwi's own vocabulary spells a timeout ``timeout``
+            # (``providers/base.py`` returns ``WiwiError(504, "timeout", …)``);
+            # Anthropic spells the same failure ``timeout_error``. Mapping the
+            # two apart made the pre-first-byte path render the identical
+            # failure as an opaque ``api_error`` while the streaming path
+            # rendered ``timeout_error`` — the mirror of the 529 defect above,
+            # one line down the same table, where the streaming twin was again
+            # the one that had it right (AUDIT #484).
+            "timeout": "timeout_error",
             "budget_exceeded": "permission_error",
             "context_window_exceeded": "invalid_request_error",
             "content_policy_violation": "invalid_request_error"}

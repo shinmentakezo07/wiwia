@@ -837,13 +837,22 @@ def _tool_stream_body(name: str, raw_args: str) -> bytes:
 async def test_stream_pump_validates_tool_args_on_close():
     """Malformed tool args (broken JSON) must be caught at ToolCallClose by the
     previously-dead ``validate_tool_args`` — logged and flagged in request
-    metadata, never stream-failing (the validator's documented contract)."""
-    body = _tool_stream_body("t", '{"broken":')
+    metadata, never stream-failing (the validator's documented contract).
+
+    The input is an object the MODEL wrote with a key and no value, both of
+    which arrived — not a stream cut mid-token. That distinction is the point:
+    the validator repairs a truncated payload before judging it
+    (``wiwi/streaming/validation.py``), and since AUDIT #482 repair *can* fix a
+    dangling key (``{"broken":`` is now the honest ``{}``), a cut payload is
+    deliberately not a violation. Genuinely unrepairable args still are, which
+    is what this test pins.
+    """
+    body = _tool_stream_body("t", '{"broken": }')
     gw = Gateway(Router(_gw_config()), CostEngine())
     try:
         respx.post("https://round20.example/v1/chat/completions").mock(
             return_value=httpx.Response(200, content=body))
-        ctx = _tool_schema_req({"type": "object", "properties": {}}, '{"broken":')
+        ctx = _tool_schema_req({"type": "object", "properties": {}}, '{"broken": }')
         out = []
         async for d in gw.stream(ctx):
             out.append(d)

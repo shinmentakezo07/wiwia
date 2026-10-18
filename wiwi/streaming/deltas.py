@@ -144,6 +144,39 @@ class StreamError:
     etype: str | None = None
 
 
+def stream_error_type(d: StreamError) -> str:
+    """wiwi's classification of a mid-stream failure, for any dialect to render.
+
+    A mid-stream ``error`` frame carries no HTTP status, so the classification
+    a client retries on has to be recovered from the delta itself: the vendor's
+    own type when the upstream named one (``etype``), else the status the
+    gateway observed, else the failure kind. The vocabulary is the one
+    ``providers/base.error_from_provider_status`` puts on ``WiwiError.etype``,
+    so a streamed failure and a non-streamed one are classified the same way.
+
+    This lives beside the delta it interprets because every dialect encoder
+    needs it and each spells the result differently: the OpenAI surfaces pass
+    it straight into ``error.type``/``error.code`` — exactly what their sync
+    ``error_body`` does with the same etype — while the Anthropic encoder maps
+    ``timeout`` onto its own ``timeout_error``. Before this helper existed the
+    two OpenAI-shaped codecs hardcoded ``api_error`` for every mid-stream
+    failure, so a 429/529/timeout reached an OpenAI client unclassified while
+    the identical failure reached Claude Code correctly classified, depending
+    only on which surface the caller used (AUDIT #478).
+    """
+    if d.etype:
+        return d.etype
+    if d.status == 529:
+        return "overloaded_error"
+    if d.status == 429:
+        return "rate_limit_error"
+    if d.status == 504 or d.kind == "timeout":
+        return "timeout"
+    if d.status in (408, 500, 502, 503):
+        return "api_connection_error"
+    return "api_error"
+
+
 IRStreamDelta = (
     StreamStart | TextDelta | ThinkingDelta | ToolCallOpen | ToolCallArgsDelta
     | ToolCallClose | ServerToolResultDelta | UsageFinal | Finish | StreamEnd

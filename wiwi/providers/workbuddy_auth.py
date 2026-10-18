@@ -23,6 +23,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 import orjson
@@ -48,6 +49,33 @@ REFRESH_LEAD_S = 5 * 60
 
 _GLOBAL_SUFFIX = ".workbuddy.ai"
 _TIMEOUT_S = 30.0
+
+# -- browser login -----------------------------------------------------------
+#
+# A WorkBuddy credential is an OAuth pair, not a static API key, so the only way
+# to mint one is the CLI's own login flow. Unlike Cline and Hermes there is no
+# separate auth host: all three legs live on the *API* host (``chat_base()``).
+#
+#   1. POST {base}/v2/plugin/auth/state?platform=CLI -> data.state + data.authUrl
+#   2. the operator opens authUrl in a browser and approves the CLI
+#   3. GET  {base}/v2/plugin/auth/token?state=<state> -> tokens once approved
+#      (HTTP 200 ``{"code": 11217}`` while still pending)
+#   4. GET  {base}/v2/plugin/login/account?state=<state> + Bearer -> identity
+LOGIN_STATE_PATH = "/v2/plugin/auth/state"
+LOGIN_TOKEN_PATH = "/v2/plugin/auth/token"
+LOGIN_ACCOUNT_PATH = "/v2/plugin/login/account"
+LOGIN_PLATFORM = "CLI"
+# Pending-login lifetime. The upstream's own state is short-lived, and the
+# operator may abandon the browser tab, so the session store expires too.
+LOGIN_TTL_S = 600.0
+
+# The authUrl is *returned by the upstream* and then handed to a browser, so it
+# is host-allowlisted on the way out: a misrouted or hostile response must not
+# turn the admin console into an open redirector. The login page lives on the
+# API hosts themselves (copilot.tencent.com / workbuddy.ai) — codebuddy.cn is
+# the CN web Origin and serves the same page, so it is accepted too.
+_ACCEPTED_AUTH_HOSTS = frozenset({"tencent.com", "codebuddy.cn", "workbuddy.ai"})
+_ACCEPTED_AUTH_SUFFIXES = (".tencent.com", ".codebuddy.cn", ".workbuddy.ai")
 
 
 class WorkBuddyAuthError(Exception):
@@ -330,3 +358,209 @@ async def refresh_token(auth: WorkBuddyAuth,
     rotated.expires_at = int(compute_expires_at(
         data.get("expiresIn"), lead_s=REFRESH_LEAD_S))
     return RefreshOutcome(ok=True, auth=rotated)
+
+
+# -- browser login -----------------------------------------------------------
+
+
+def _auth_host_allowed(host: str) -> bool:
+    """True for the WorkBuddy login hosts (exact host or a subdomain of one)."""
+    host = host.lower()
+    return host in _ACCEPTED_AUTH_HOSTS or host.endswith(_ACCEPTED_AUTH_SUFFIXES)
+
+
+def accepted_auth_url(url: str) -> str:
+    """Return *url* unchanged when it is a safe WorkBuddy login URL.
+
+    The URL comes *from the upstream response* and is then handed to the
+    operator's browser, so it is validated before it leaves wiwi — a misrouted
+    or hostile response must not turn the admin console into an open
+    redirector. Requires https and a host on the allowlist; a ``userinfo@``
+    URL or a look-alike suffix resolves to its *real* hostname via
+    :func:`urllib.parse.urlparse`, so both are rejected.
+    """
+    raw = str(url or "").strip()
+    parsed = urlparse(raw)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise WorkBuddyAuthError(f"login URL is not an https URL: {raw!r}")
+    if not _auth_host_allowed(parsed.hostname):
+        raise WorkBuddyAuthError(
+            f"login URL host is not a WorkBuddy host: {parsed.hostname}")
+    return raw
+
+
+@dataclass(frozen=True)
+class LoginStart:
+    """A pending browser login: the upstream's ``state``, the URL the operator
+    must open, and the realm that minted it."""
+
+    state: str
+    auth_url: str
+    realm: str
+
+
+def normalize_realm(realm: str) -> str:
+    """'cn' (the default) or 'global'; anything else is a caller error."""
+    r = (realm or "").strip().lower()
+    if r in ("", "cn"):
+        return "cn"
+    if r == "global":
+        return "global"
+    raise WorkBuddyAuthError(f"unknown realm: {realm!r}")
+
+
+def _base_for_realm(realm: str) -> str:
+    return CHAT_BASE_GLOBAL if realm == "global" else CHAT_BASE_CN
+
+
+def _origin_for_realm(realm: str) -> str:
+    return ORIGIN_GLOBAL if realm == "global" else ORIGIN_CN
+
+
+def _str_field(d: dict[str, Any], k: str) -> str:
+    v = d.get(k)
+    return v if isinstance(v, str) else ""
+
+
+async def start_login(realm: str = "cn",
+                      client: httpx.AsyncClient | None = None) -> LoginStart:
+    """Open a browser login: POST {base}/v2/plugin/auth/state?platform=CLI.
+
+    Returns the upstream's ``state`` (the polling handle) and its ``authUrl``
+    — the page the operator opens. The URL is host-allowlisted by
+    :func:`accepted_auth_url` before it is returned, and the state is *not*
+    persisted here: the caller owns the pending-session lifetime.
+
+    Raises :class:`WorkBuddyAuthError` on a transport failure, an HTTP error,
+    an unparseable body, or a non-zero business envelope.
+    """
+    realm = normalize_realm(realm)
+    base = _base_for_realm(realm)
+    origin = _origin_for_realm(realm)
+    owns_client = client is None
+    if owns_client:
+        client = httpx.AsyncClient(timeout=_TIMEOUT_S)
+    try:
+        resp = await client.post(base + LOGIN_STATE_PATH,
+                                 params={"platform": LOGIN_PLATFORM},
+                                 headers=_common_headers(origin))
+    except httpx.HTTPError as e:
+        raise WorkBuddyAuthError(
+            f"login start transport error: {type(e).__name__}") from e
+    finally:
+        if owns_client:
+            await client.aclose()
+    body = resp.text
+    if resp.status_code >= 400:
+        raise WorkBuddyAuthError(
+            f"login start http {resp.status_code}: {body[:200]}")
+    try:
+        env = orjson.loads(body)
+    except (orjson.JSONDecodeError, ValueError) as e:
+        raise WorkBuddyAuthError(f"login start parse failed: {body[:120]}") from e
+    if not isinstance(env, dict):
+        raise WorkBuddyAuthError(f"login start unexpected shape: {body[:120]}")
+    data = env.get("data")
+    if env.get("code") != 0 or not isinstance(data, dict):
+        raise WorkBuddyAuthError(
+            f"login start code={env.get('code')} "
+            f"msg={str(env.get('msg', ''))[:160]}")
+    state = _str_field(data, "state")
+    if not state.strip():
+        raise WorkBuddyAuthError("login start: response carried no state")
+    return LoginStart(state=state,
+                      auth_url=accepted_auth_url(_str_field(data, "authUrl")),
+                      realm=realm)
+
+
+async def _fill_login_account(client: httpx.AsyncClient, base: str, origin: str,
+                              state: str, auth: WorkBuddyAuth) -> None:
+    """Fill uid / enterprise_id / nickname from the account leg, in place.
+
+    Best-effort by design: the identity headers are cosmetic, so a failure here
+    (transport error, HTTP error, unparseable body, non-zero envelope) leaves
+    the credential exactly as the token leg produced it rather than discarding
+    a login that already yielded usable tokens.
+    """
+    headers = _common_headers(origin)
+    headers["Authorization"] = f"Bearer {auth.access_token}"
+    try:
+        resp = await client.get(base + LOGIN_ACCOUNT_PATH,
+                                params={"state": state}, headers=headers)
+    except httpx.HTTPError:
+        return
+    if resp.status_code >= 400:
+        return
+    try:
+        env = orjson.loads(resp.text)
+    except (orjson.JSONDecodeError, ValueError):
+        return
+    if not isinstance(env, dict) or env.get("code") != 0:
+        return
+    data = env.get("data")
+    if not isinstance(data, dict):
+        return
+    auth.uid = _str_field(data, "uid")
+    auth.enterprise_id = _str_field(data, "enterpriseId")
+    auth.nickname = _str_field(data, "nickname")
+
+
+async def poll_login(state: str, realm: str = "cn",
+                     client: httpx.AsyncClient | None = None
+                     ) -> WorkBuddyAuth | None:
+    """Poll a pending browser login; ``None`` while the user has not approved.
+
+    GET {base}/v2/plugin/auth/token?state=<state> answers ``{"code": 11217}``
+    (HTTP 200) until the operator approves in the browser, which is reported as
+    ``None`` so the caller simply polls again. A transport failure is also
+    ``None`` — it is transient and the caller's own deadline governs how long
+    to keep asking. An HTTP error status, by contrast, is raised: that is the
+    server refusing, not the user hesitating.
+
+    On approval the token leg yields the credential and the account leg fills
+    in the identity (see :func:`_fill_login_account`). A realm of ``global``
+    whose response omits ``domain`` is pinned to the global host: an empty
+    domain reads as CN (:meth:`WorkBuddyAuth.region`) and the global token
+    would then 401 against the CN host.
+    """
+    realm = normalize_realm(realm)
+    base = _base_for_realm(realm)
+    origin = _origin_for_realm(realm)
+    owns_client = client is None
+    if owns_client:
+        client = httpx.AsyncClient(timeout=_TIMEOUT_S)
+    try:
+        try:
+            resp = await client.get(base + LOGIN_TOKEN_PATH,
+                                    params={"state": state},
+                                    headers=_common_headers(origin))
+        except httpx.HTTPError:
+            return None
+        if resp.status_code >= 400:
+            raise WorkBuddyAuthError(
+                f"login poll http {resp.status_code}: {resp.text[:200]}")
+        try:
+            env = orjson.loads(resp.text)
+        except (orjson.JSONDecodeError, ValueError):
+            return None
+        if not isinstance(env, dict) or env.get("code") != 0:
+            return None
+        data = env.get("data")
+        if not isinstance(data, dict):
+            return None
+        access = _str_field(data, "accessToken")
+        if not access:
+            return None
+        domain = _str_field(data, "domain")
+        if not domain and realm == "global":
+            domain = CHAT_BASE_GLOBAL
+        auth = WorkBuddyAuth(access_token=access,
+                             refresh_token=_str_field(data, "refreshToken"),
+                             domain=domain)
+        auth.expires_at = int(compute_expires_at(
+            data.get("expiresIn"), lead_s=REFRESH_LEAD_S))
+        await _fill_login_account(client, base, origin, state, auth)
+        return auth
+    finally:
+        if owns_client:
+            await client.aclose()

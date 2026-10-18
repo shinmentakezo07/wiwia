@@ -2011,8 +2011,16 @@ def create_app(config: WiwiConfig) -> FastAPI:
             out_id += 1
         for _, tc in sorted(tools.items()):
             if tc.get("builtin") is not None:
-                out.append(orp._builtin_call_item(tc["id"], tc.get("query", ""),
-                                                  tc["builtin"]))
+                # The accumulator records only the raw argument fragments
+                # (``_args``) and never a parsed query, so ``tc.get("query", "")``
+                # always stored "" — the stored item claimed a hosted search ran
+                # with an empty query. The live SSE frame for the same turn (the
+                # Responses encoder's ``_close_tool``) extracts the real query
+                # from those fragments, so the two copies of one turn disagreed:
+                # a client continuing from ``previous_response_id`` read back a
+                # different turn than the one it saw streamed (AUDIT #480).
+                query = orp._builtin_query("".join(tc.get("_args") or []))
+                out.append(orp._builtin_call_item(tc["id"], query, tc["builtin"]))
             else:
                 out.append(orp._function_call_item(
                     f"fc_{req_id}_{out_id}", tc["id"], tc["name"],
@@ -6672,6 +6680,14 @@ def create_app(config: WiwiConfig) -> FastAPI:
     # the auth JSONs produced by the upstream plugin / CPA panel (the
     # workbuddy2api ``auths/`` format), and export them back out in the same
     # shape for backup or re-import elsewhere.
+    #
+    # On top of that sits the login flow (/login/start + /login/poll). A
+    # WorkBuddy credential is an OAuth pair, not a static key, so without it
+    # the only way to obtain one was to have logged in somewhere else first —
+    # and a revoked account had nothing inside wiwi that could revive it. The
+    # upstream three-leg flow (state -> browser approval -> token + account)
+    # lives in wiwi.providers.workbuddy_auth; these handlers own only the
+    # pending session that ties a browser tab to a provider.
 
     def _workbuddy_accounts() -> list[dict[str, Any]]:
         accounts: list[dict[str, Any]] = []
@@ -6901,6 +6917,192 @@ def create_app(config: WiwiConfig) -> FastAPI:
             target=f"{provider}/{label}", diff={})
         return ORJSONResponse({"provider": provider, "label": label,
                                "refreshed": True})
+
+    @app.post("/admin/workbuddy/login/start")
+    async def workbuddy_login_start(request: Request):
+        """Begin a WorkBuddy browser login; hand the operator the URL to open.
+
+        Nothing is written to the provider here. A login the operator never
+        approves has to leave no trace, and the credential does not exist
+        until the upstream mints it — so the account is created by
+        ``/login/poll``.
+
+        The URL comes back *from the upstream* rather than being composed
+        here: it carries the upstream's own ``state``, and pinning it would
+        break the moment Tencent moves the login page. ``start_login``
+        host-allowlists it before it reaches this response, so a hostile or
+        misrouted answer cannot turn the admin console into an open
+        redirector (the SPA opens this URL for the operator).
+        """
+        resp = await require_admin_dep(request)
+        if resp:
+            return resp
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        provider = str(body.get("provider") or "workbuddy-main").strip()
+        raw_realm = str(body.get("realm") or "cn").strip()
+        try:
+            realm = workbuddy_auth.normalize_realm(raw_realm)
+        except workbuddy_auth.WorkBuddyAuthError:
+            return _err(400, "invalid_request_error",
+                        f"unknown realm '{raw_realm}' "
+                        f"(expected 'cn' or 'global')", request)
+        try:
+            started = await workbuddy_auth.start_login(realm)
+        except workbuddy_auth.WorkBuddyAuthError as e:
+            return _err(502, "upstream_error",
+                        f"WorkBuddy login start failed: {e}", request)
+        # The SPA polls with a wiwi-side token, not the upstream ``state``:
+        # the upstream identifier is what the token leg authenticates with,
+        # so it stays server-side. Same store (and shape) as the Cline and
+        # Hermes flows — the three are told apart by ``kind``.
+        token = secrets.token_urlsafe(24)
+        state.cline_pending[token] = {
+            "kind": "workbuddy_login",
+            "provider": provider,
+            "realm": realm,
+            "state": started.state,
+            "created_at": time.time(),
+        }
+        return ORJSONResponse({
+            "state": token,
+            "provider": provider,
+            "realm": realm,
+            "auth_url": started.auth_url,
+        })
+
+    @app.post("/admin/workbuddy/login/poll")
+    async def workbuddy_login_poll(request: Request):
+        """Poll a pending WorkBuddy login once.
+
+        ``{"pending": true}`` while the operator has not approved in the
+        browser — the session is deliberately NOT consumed, because the SPA
+        polls this repeatedly and the first poll almost always lands before
+        the human has finished typing a password. Success (and any terminal
+        error) consumes the session, so a login cannot be replayed.
+
+        On approval the credential is written the same way ``/import``
+        writes one: persist first, mutate routing only once the write has
+        landed.
+        """
+        resp = await require_admin_dep(request)
+        if resp:
+            return resp
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        token = str(body.get("state") or "").strip()
+        sess = state.cline_pending.get(token)
+        if not sess or sess.get("kind") != "workbuddy_login":
+            return _err(404, "not_found_error",
+                        "unknown or already-completed login session", request)
+        provider = sess["provider"]
+        if time.time() - sess["created_at"] > workbuddy_auth.LOGIN_TTL_S:
+            state.cline_pending.pop(token, None)
+            return _err(410, "invalid_request_error",
+                        "login session expired; start a new one", request)
+        # Type-check BEFORE spending the login: the token leg is single-use,
+        # so polling into a provider that can never accept the key would burn
+        # a real login for nothing.
+        acct = state.router.providers.get(provider)
+        if acct is not None and acct.provider_type != "workbuddy":
+            state.cline_pending.pop(token, None)
+            return _err(409, "invalid_request_error",
+                        f"provider '{provider}' exists with type "
+                        f"'{acct.provider_type}'", request)
+        try:
+            auth = await workbuddy_auth.poll_login(sess["state"], sess["realm"])
+        except workbuddy_auth.WorkBuddyAuthError as e:
+            return _err(502, "upstream_error",
+                        f"WorkBuddy login poll failed: {e}", request)
+        if auth is None:
+            return ORJSONResponse({"pending": True})
+        state.cline_pending.pop(token, None)
+
+        secret = auth.to_secret()
+        # Label the key by the ACCOUNT, never the credential blob: pool-key
+        # labels are not masked and are echoed by /accounts, /export,
+        # /admin/providers and every request log row (see
+        # _unique_hermes_key_label — generic despite the name). This matches
+        # /import, which also labels by nickname.
+        account_label = (auth.nickname or auth.uid or "workbuddy").strip()[:64] \
+            or "workbuddy"
+        # Re-login of an account already in the pool rotates the SAME key in
+        # place. Appending instead would leave a second key holding a refresh
+        # grant this login already superseded — and the stale row would keep
+        # being handed traffic while rotating a token the upstream has
+        # already invalidated. Matched by uid (a nickname is user-editable);
+        # only a credential carrying no uid at all falls back to the
+        # nickname.
+        existing_key = None
+        if acct is not None:
+            for k in acct.keys:
+                try:
+                    prev = workbuddy_auth.parse_auth(k.secret)
+                except workbuddy_auth.WorkBuddyAuthError:
+                    continue
+                if auth.uid:
+                    same = prev.uid == auth.uid
+                else:
+                    same = bool(auth.nickname) and prev.nickname == auth.nickname
+                if same:
+                    existing_key = k
+                    break
+        created_provider = acct is None
+        base_url = _default_base_url("workbuddy")
+        label = (existing_key.label if existing_key is not None
+                 else _unique_hermes_key_label(state, provider, account_label))
+        try:
+            if state.config_store:
+                if created_provider:
+                    await state.config_store.add_provider(provider, "workbuddy",
+                                                          base_url)
+                if existing_key is not None:
+                    await state.config_store.update_key_secret(provider, label,
+                                                               secret)
+                else:
+                    await state.config_store.add_key(provider, label, secret)
+        except Exception as e:  # noqa: BLE001 — DB/constraint/driver varies
+            # Roll the provider back when this login created it, so a failed
+            # key write cannot leave an empty WorkBuddy provider behind.
+            if created_provider and state.config_store:
+                with contextlib.suppress(Exception):
+                    await state.config_store.delete_provider(provider)
+            structlog.get_logger("wiwi.workbuddy").error(
+                "workbuddy_login_persist_failed", provider=provider,
+                label=label, error=type(e).__name__)
+            with contextlib.suppress(Exception):
+                await state.logs.log_audit(
+                    actor="master", action="workbuddy.login.failed",
+                    target=provider, diff={"label": label})
+            return _err(500, "api_error",
+                        f"failed to store the WorkBuddy credential for "
+                        f"provider '{provider}' — the login was NOT saved; "
+                        f"start a new one", request)
+        if created_provider:
+            state.router.providers[provider] = ProviderAccount(
+                name=provider, provider_type="workbuddy", base_url=base_url,
+                keys=[ProviderKey(label=label, secret=secret)])
+        elif existing_key is not None:
+            existing_key.secret = secret
+            existing_key.status = "active"
+            existing_key.cooldown_until = 0.0
+        else:
+            acct.keys.append(ProviderKey(label=label, secret=secret))
+        await state.logs.log_audit(
+            actor="master", action="workbuddy.login", target=provider,
+            diff={"label": label, "realm": sess["realm"]})
+        return ORJSONResponse({
+            "provider": provider,
+            "connected": True,
+            "key_label": label,
+            "uid": auth.uid,
+            "nickname": auth.nickname,
+            "region": auth.region(),
+            "access_token_masked": mask_key(auth.access_token),
+            "expires_at": auth.expires_at or None,
+        })
 
     @app.get("/public/models")
     async def public_models() -> ORJSONResponse:
