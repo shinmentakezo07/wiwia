@@ -8,6 +8,160 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — round 161: the /console/settings Import merge (2026-10-19)
+
+Found by *driving* the merge against a live gateway and then reading the
+database back — export from one instance, merge into another, then read the
+target's tables. Not by reading the code. The pattern is identical in all
+five: the merge answers `200` with a per-section count, the console renders
+"merged N …", and the value is either gone on the next restart or never
+worked in the first place.
+
+Covered by `tests/test_fix_round161.py` (9 tests; all 9 failed before the
+fix, each for its own reason).
+
+### 488. An imported model alias was applied in memory and never written to the database
+
+**Severity:** 🟠 High (an alias the operator merged is gone on the next restart, and the console reported the merge as successful) · **Status: fixed** — round 161 (`tests/test_fix_round161.py`)
+**Files:** `wiwi/server/backup.py` (`_apply_aliases` — pre-fix it merged the overlay into `router.settings.model_group_alias` and returned), compared against `wiwi/server/app.py:5110-5127` (`admin_update_aliases`, which persists the same overlay)
+
+`_apply_aliases` applied the imported overlay to the live router and stopped
+there. Nothing called `config_store.set_setting("model_group_alias", …)`, so
+the alias lived exactly as long as the process: the next startup re-read the
+`settings` table, found no overlay row, and the alias was gone.
+
+`POST /admin/aliases` persists the overlay, so the two writers of one
+feature disagreed about whether an alias survives a restart — and the import
+path was the one that did not.
+
+**Probe** (executed — real export → merge → new `AppState` over the same DB):
+
+```
+merge: 200 {'aliases': 1, …}
+settings rows: []                     ← the overlay was never written
+after restart: {}                     ← the alias is gone
+```
+
+**Fix:** `_apply_aliases` now persists the overlay. The persisted value is
+the **overlay**, not the merged map — the merged map also contains the
+YAML-defined aliases, and writing those would pin aliases the operator never
+created. The overlay is recomputed as `diff(live vs YAML base)` by the new
+`_alias_overlay` helper, mirroring the admin route: a YAML alias the import
+removed is a `None` tombstone, a YAML alias it restored is its value.
+
+### 489. An imported virtual key's `owner_id` pointed at the source's user id, orphaning the key
+
+**Severity:** 🔴 Critical (a key that authenticates on the source is **dead** on the target, while the merge reports it as applied) · **Status: fixed** — round 161 (`tests/test_fix_round161.py`)
+**Files:** `wiwi/server/backup.py` (`_apply_users` — it preserves the target's id for an existing username; `_apply_vkeys` — pre-fix it wrote the document's `owner_id` verbatim), `wiwi/auth/service.py:386-397` (`_lookup_db`'s `EXISTS` subquery, which fails CLOSED on a dangling owner)
+
+Users are keyed by `username`, and the document carries the **source's** user
+ids. The target may already have that username under a different id.
+`_apply_users` handles this correctly — an existing username keeps the
+target's id — but `_apply_vkeys` wrote the source's `owner_id` unchanged, so
+the key referenced a `users` row that does not exist here.
+
+The auth check fails closed on that: `EXISTS (SELECT 1 FROM users u WHERE
+u.id = v.owner_id AND …)` is false for a missing owner, so the key is
+rejected. A tenant's key that worked on the source gateway was dead on the
+target — and `vkeys: 1` in the response said it had been restored.
+
+**Probe** (executed — source and target both have `alice`, different ids):
+
+```
+source: user=u21b88a807cc0b500  key authenticates=True
+target: user=u230d0ff3f4dced12
+target vkeys: [('playground', 'u230d0ff3f4dced12'), ('playground', 'u21b88a807cc0b500')]
+ORPHANED keys: [('playground', 'u21b88a807cc0b500')]
+target: source key authenticates = False
+```
+
+**Fix:** `_apply_users` now returns the source→target id mapping, and
+`_apply_vkeys` re-points `owner_id` through it. An owner the mapping does
+not cover and that does not exist on the target is dropped rather than left
+dangling — an un-owned key still authenticates (`auth/service.py` exempts
+`owner_id IS NULL`), while a dangling one does not.
+
+### 490. A secret-less backup overwrote a live `cline_oauth:*` record with the redacted placeholder
+
+**Severity:** 🟠 High (restoring a backup without secrets disconnected the target's working Cline accounts) · **Status: fixed** — round 161 (`tests/test_fix_round161.py`)
+**Files:** `wiwi/server/backup.py` (`_apply_settings` — pre-fix it wrote every setting verbatim; `_redact_oauth`, whose docstring already promised the correct behaviour)
+
+The export redacts credential-bearing settings and marks the result
+`{"redacted": True}` (plus a `connected` flag). `_redact_oauth`'s own
+docstring says import "skips a redacted record rather than writing the
+placeholder over a live token" — but nothing skipped it. `_apply_settings`
+wrote the redacted record verbatim, so the target's working refresh token
+was replaced by a record carrying no token at all.
+
+**Probe** (executed — target holds `LIVE-TOKEN`, the file carries the
+redacted placeholder):
+
+```
+exported: {'connected': True, 'expires_at': 1.0, 'redacted': True}
+target after merge: {'connected': True, 'expires_at': 1.0, 'redacted': True}
+```
+
+**Fix:** `_apply_settings` skips a record marked `redacted` (new
+`_is_redacted_setting` helper) and logs `backup_setting_redacted_skipped`. A
+redacted record also carries no information worth storing — every field but
+the marker was stripped — so writing it would replace a real record with an
+empty shell even where the target had none.
+
+### 491. A provider key imported from a secret-less backup was never persisted
+
+**Severity:** 🟠 High (the provider silently loses a member of its key pool on the next restart, and the operator's weight edit goes with it) · **Status: fixed** — round 161 (`tests/test_fix_round161.py`)
+**Files:** `wiwi/server/backup.py` (`_apply_keys` — pre-fix it wrote the DB row only `if k["secret"]`), `wiwi/server/config_store.py` (the new `upsert_key_routing`)
+
+The DB row was written only when the document carried a secret. The
+rationale was sound — a backup exported without secrets must not blank a
+working credential — but it also meant a key the target did **not** have was
+never created: it existed in memory with an empty secret and was gone on the
+next restart, and its `weight`/`enabled` edits were lost with it. The
+console reported the key as merged.
+
+**Probe** (executed — source exports without secrets, target merges):
+
+```
+merge: 200 {'providers': 1, 'keys': 1, …}
+provider_keys rows: []
+in-memory keys of pX: [('k1', '')]
+-- restart --
+pX keys after restart: []
+```
+
+**Fix:** the distinction that matters is *does the target already have this
+key*, not *does the document carry a secret*. A key the target lacks is now
+created (with the empty secret the document implies); an existing key keeps
+its credential and only its routing fields move. The latter needed a new
+`ConfigStore.upsert_key_routing` — `add_key` takes the secret as a value
+and overwrites it, and `update_key` raises `ConfigStoreNotFound` when the
+row is missing, which is the normal case for a YAML-defined provider (the
+AUDIT #319 trap).
+
+### 492. A virtual key whose id collided with a live row was dropped but counted as applied
+
+**Severity:** 🟡 Medium (the console reports a virtual key that is not in the database) · **Status: fixed** — round 161 (`tests/test_fix_round161.py`)
+**Files:** `wiwi/server/backup.py` (`_apply_vkeys` — pre-fix the insert was `INSERT OR IGNORE` / `ON CONFLICT (id) DO NOTHING` and the counter incremented regardless)
+
+`vkeys.id` is the primary key, so a document whose key id collides with a
+live row made the insert a no-op rather than an error — and the counter
+said "applied" anyway. The colliding row is a *different* key, so it must
+not be clobbered either, but the imported key was simply not restored.
+
+**Probe** (executed — the target holds a different key under the same id):
+
+```
+merge result: {…, 'vkeys': 1}
+target vkeys: [('kc729c5487712ae41', 'target-key-collision')]
+```
+
+**Fix:** the collision is detected before the insert and the import is
+**re-keyed** under a fresh id (`bk<hash prefix>`), so the key is restored,
+the pre-existing row is untouched, and the applied count matches what is
+on disk. Logged as `backup_vkey_id_collision_rekeyed`.
+
+---
+
 ## ✅ Fixed — round 160: WorkBuddy refused every Codex / Claude Code request (2026-10-18)
 
 Reported verbatim from a Claude Code session routed at a `workbuddy`

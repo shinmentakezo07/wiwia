@@ -136,6 +136,7 @@ function SectionPicker(props: {
 function ImportSummary(props: { result: BackupImportResult; onDismiss: () => void }) {
   const failures = describeFailures(props.result);
   const skipped = props.result.audit_skipped;
+  const redacted = props.result.settings_skipped ?? 0;
   return (
     <Alert
       tone={failures.length ? "warning" : "success"}
@@ -162,6 +163,14 @@ function ImportSummary(props: { result: BackupImportResult; onDismiss: () => voi
             ))}
           </ul>
         </>
+      )}
+      {redacted > 0 && (
+        <p className="mt-1">
+          {plural(redacted, "setting")} in the file{" "}
+          {redacted === 1 ? "carried a redacted placeholder and was" : "carried redacted placeholders and were"}{" "}
+          left alone, so this gateway kept its own live records — export with
+          plaintext secrets to move them.
+        </p>
       )}
       {skipped > 0 && (
         <p className="mt-1">

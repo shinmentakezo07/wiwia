@@ -386,6 +386,41 @@ class ConfigStore:
                 raise ConfigStoreNotFound(
                     f"no persisted key {provider_name!r}/{label!r}")
 
+    async def upsert_key_routing(self, provider_name: str, label: str, *,
+                                  weight: int, enabled: bool) -> None:
+        """Set a key's routing fields, creating the row when it has none.
+
+        The secret is **preserved**: an existing row keeps its credential and
+        only ``weight``/``enabled`` move, while a row that does not exist is
+        created with an empty secret. That is the shape the backup import
+        needs — a document that carries no secret must not blank a working
+        credential, but it must still record the key's routing fields.
+
+        ``add_key`` cannot do this: it takes the secret as a value and
+        overwrites it. ``update_key`` cannot either: it raises
+        ``ConfigStoreNotFound`` when the row is missing, which is the normal
+        case for a YAML-defined provider (it has no DB row at all) — the
+        AUDIT #319 trap.
+        """
+        if self._is_pg:
+            sql = ("INSERT INTO provider_keys"
+                   " (provider_name, label, secret, weight, enabled)"
+                   " VALUES (:p,:l,'',:w,:e)"
+                   " ON CONFLICT (provider_name, label) DO UPDATE SET"
+                   " weight=EXCLUDED.weight, enabled=EXCLUDED.enabled")
+        else:
+            # SQLite's INSERT OR REPLACE would reset the secret, so the
+            # conflict arm updates the routing fields only.
+            sql = ("INSERT INTO provider_keys"
+                   " (provider_name, label, secret, weight, enabled)"
+                   " VALUES (:p,:l,'',:w,:e)"
+                   " ON CONFLICT (provider_name, label) DO UPDATE SET"
+                   " weight=excluded.weight, enabled=excluded.enabled")
+        async with self.engine.begin() as conn:
+            await conn.execute(sa.text(sql),
+                               {"p": provider_name, "l": label,
+                                "w": weight, "e": int(enabled)})
+
     async def update_key(self, provider_name: str, label: str, *,
                          weight: int | None = None,
                          enabled: bool | None = None) -> None:

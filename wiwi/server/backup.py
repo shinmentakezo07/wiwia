@@ -1428,11 +1428,17 @@ async def apply_backup(state, plan: dict) -> dict:
     result["providers"] = await _apply_providers(state, plan["providers"])
     result["keys"] = await _apply_keys(state, plan["keys"])
     result["deployments"] = await _apply_deployments(state, plan["deployments"])
-    result["aliases"] = _apply_aliases(state, plan["aliases"])
-    result["settings"] = await _apply_settings(state, plan["settings"])
+    result["aliases"] = await _apply_aliases(state, plan["aliases"])
+    result["settings"], result["settings_skipped"] = await _apply_settings(
+        state, plan["settings"])
     result["prices"] = await _apply_prices(state, plan["prices"])
-    result["users"] = await _apply_users(state, plan["users"])
-    result["vkeys"] = await _apply_vkeys(state, plan["vkeys"])
+    # ``_apply_users`` returns the source→target user-id mapping, not a
+    # count: the vkeys section needs it to re-point ``owner_id`` at the rows
+    # that exist here. The response still reports a plain count.
+    user_id_map = await _apply_users(state, plan["users"])
+    result["users"] = len(plan["users"])
+    result["vkeys"] = await _apply_vkeys(state, plan["vkeys"],
+                                         user_id_map=user_id_map)
     result["audit_skipped"] = len(plan["audit"]["audit_logs"])
     if plan.get("cline_default_models") is not None:
         # Reconciling the Cline default models touches the router in a way that
@@ -1531,6 +1537,28 @@ async def _apply_providers(state, entries: list[dict]) -> int:
 
 
 async def _apply_keys(state, entries: list[dict]) -> int:
+    """Merge provider key-pool entries, persisting each one.
+
+    The DB row is written in two cases, and both are needed:
+
+    * **The document carries a secret** — the full upsert, secret included.
+    * **The document does not** — the row is created with an *empty* secret
+      when the target does not have that key yet, and left alone when it
+      does.
+
+    The second case used to write nothing at all. The rationale for
+    skipping it was sound — a backup exported without secrets must not
+    blank a working credential — but it also meant a key the target did
+    *not* have was never created: it lived in memory with an empty secret
+    and was gone on the next restart, so the provider silently lost a
+    member of its key pool and the operator's ``weight``/``enabled`` edit
+    went with it. The console reported the key as merged.
+
+    The distinction that matters is *does the target already have this
+    key*, not *does the document carry a secret*. An existing row keeps its
+    secret; a new row is created with the empty secret the document
+    implies, and the operator can fill it in afterwards.
+    """
     from wiwi.router.router import ProviderKey
 
     store = state.config_store
@@ -1545,6 +1573,10 @@ async def _apply_keys(state, entries: list[dict]) -> int:
             acct.keys.append(ProviderKey(
                 label=k["label"], secret=k["secret"] or "",
                 weight=k["weight"], enabled=k["enabled"]))
+            # A new key: persist it, secret or not, or it is lost on restart.
+            if store is not None:
+                await store.add_key(k["provider_name"], k["label"],
+                                    k["secret"] or "", k["weight"], k["enabled"])
         else:
             # weight/enabled are always written; the secret only when the
             # document carries one. A backup exported without secrets must not
@@ -1553,9 +1585,17 @@ async def _apply_keys(state, entries: list[dict]) -> int:
             live.enabled = k["enabled"]
             if k["secret"]:
                 live.secret = k["secret"]
-        if store is not None and k["secret"]:
-            await store.add_key(k["provider_name"], k["label"],
-                                k["secret"], k["weight"], k["enabled"])
+            if store is not None:
+                if k["secret"]:
+                    await store.add_key(k["provider_name"], k["label"],
+                                        k["secret"], k["weight"], k["enabled"])
+                else:
+                    # Secret-less document, existing key: update the routing
+                    # fields only, so the stored credential is preserved.
+                    await store.upsert_key_routing(k["provider_name"],
+                                                   k["label"],
+                                                   weight=k["weight"],
+                                                   enabled=k["enabled"])
         applied += 1
     return applied
 
@@ -1619,13 +1659,29 @@ async def _apply_deployments(state, entries: list[dict]) -> int:
     return applied
 
 
-def _apply_aliases(state, entries: dict) -> int:
+async def _apply_aliases(state, entries: dict) -> int:
     """Merge the ``model_group_alias`` overlay into the live map.
 
     Same semantics as the startup merge in ``_load_db_config``: a ``None``
     value removes a YAML-defined alias, anything else is coerced through
     ``ModelAliasEntry`` so a malformed entry is dropped rather than poisoning
     the map.
+
+    The merged overlay is also **persisted**. It used to be applied to
+    ``router.settings.model_group_alias`` and returned, so the alias lived
+    exactly as long as the process: the next restart re-read the settings
+    table, found no ``model_group_alias`` row, and the alias was gone — with
+    the console reporting the merge as successful. ``POST /admin/aliases``
+    persists the same overlay (``app.py``), so the two writers of one feature
+    disagreed about whether an alias survives a restart.
+
+    The persisted value is the **overlay**, not the merged map: the merged
+    map contains the YAML-defined aliases too, and writing those would pin
+    aliases the operator never created (the same reasoning as
+    :func:`_export_aliases`). The overlay is recomputed as
+    ``diff(live vs YAML base)`` — a YAML alias the import removed appears as
+    a ``None`` tombstone, and a YAML alias the import restored appears as its
+    value.
     """
     merged = dict(state.router.settings.model_group_alias)
     for name, value in entries.items():
@@ -1638,17 +1694,71 @@ def _apply_aliases(state, entries: dict) -> int:
             continue
         merged[name] = coerced
     state.router.settings.model_group_alias = merged
+    store = state.config_store
+    if store is not None:
+        overlay = _alias_overlay(state, merged)
+        await store.set_setting("model_group_alias", overlay)
     return len(entries)
 
 
-async def _apply_settings(state, entries: dict) -> int:
+def _alias_overlay(state, live: dict) -> dict[str, Any]:
+    """The admin-owned alias overlay for *live*, as diff against the YAML base.
+
+    Mirrors the computation the admin alias route performs
+    (``app.py``'s ``admin_update_aliases``): an alias the YAML defines and
+    the live map no longer has is a ``None`` tombstone, an alias whose value
+    differs from the YAML one is that value, and an alias the YAML does not
+    define is admin-owned. Storing this — rather than the merged map — is
+    what keeps a YAML-defined alias from being pinned as though an admin had
+    created it.
+    """
+    base = getattr(state, "alias_yaml_base", {}) or {}
+    overlay: dict[str, Any] = {}
+    for k, v in base.items():
+        if k not in live:
+            overlay[k] = None
+        elif not alias_value_eq(live[k], v):
+            overlay[k] = alias_value_to_json(live[k])
+    for k, v in live.items():
+        if k not in base:
+            overlay[k] = alias_value_to_json(v)
+    return overlay
+
+
+async def _apply_settings(state, entries: dict) -> tuple[int, int]:
+    """Merge the ``settings`` key/value table.
+
+    A **redacted** record is skipped rather than written. The export
+    redacts credential-bearing settings (``cline_oauth:*``) and marks the
+    result ``{"redacted": True}``; ``_redact_oauth``'s docstring says
+    import "skips a redacted record rather than writing the placeholder
+    over a live token", but nothing skipped it — so restoring a secret-less
+    backup replaced the target's working Cline refresh token with a record
+    carrying no token at all, disconnecting the account.
+
+    A redacted record also carries no information worth storing: every
+    field but the marker was stripped, so writing it would replace a real
+    record with an empty shell even where the target had none.
+
+    Returns ``(applied, skipped)``. The skipped count matters to the
+    operator: a file whose every settings row is redacted reports zero
+    settings applied, and without the count that reads as "nothing was in
+    the file" rather than "the file carried records this gateway declined
+    to write over its live ones".
+    """
     store = state.config_store
     applied = 0
+    skipped = 0
     for key, value in entries.items():
         if key == "model_group_alias":
             # Handled by _apply_aliases from the dedicated section: writing the
             # merged map here would persist YAML-defined aliases as though an
             # admin had created them.
+            continue
+        if _is_redacted_setting(value):
+            # Nothing to restore and something live to protect.
+            log.info("backup_setting_redacted_skipped", key=key)
+            skipped += 1
             continue
         if store is not None:
             await store.set_setting(key, value)
@@ -1657,7 +1767,18 @@ async def _apply_settings(state, entries: dict) -> int:
         elif key == "routing_strategy" and isinstance(value, str):
             state.router.settings.routing_strategy = value
         applied += 1
-    return applied
+    return applied, skipped
+
+
+def _is_redacted_setting(value: Any) -> bool:
+    """True when *value* is a redacted export placeholder rather than data.
+
+    The export marks a redacted record with ``redacted: True`` and strips
+    its credential fields, so the marker is what distinguishes "the source
+    had a secret we chose not to export" from "the source stored this
+    literal value".
+    """
+    return isinstance(value, dict) and value.get("redacted") is True
 
 
 async def _apply_prices(state, entries: list[dict]) -> int:
@@ -1686,19 +1807,25 @@ async def _apply_prices(state, entries: list[dict]) -> int:
     return applied
 
 
-async def _apply_users(state, entries: list[dict]) -> int:
+async def _apply_users(state, entries: list[dict]) -> dict[str, str]:
     """Upsert console accounts on ``username``, preserving the target's ``id``.
 
     The id is what ``vkeys.owner_id`` points at, and authentication checks it
     with an ``EXISTS`` subquery — an orphaned owner silently kills every key
     that user holds. So a user that already exists keeps its id and only its
     mutable fields are refreshed.
+
+    Returns the mapping from **source** user id to **target** user id, so
+    :func:`_apply_vkeys` can re-point the keys that referenced the source
+    ids at the rows that actually exist here. A source id that resolves to
+    no user on the target is not in the mapping, and the key that
+    referenced it is left unowned rather than pointing at nothing.
     """
     if state.users is None:
-        return 0
+        return {}
     engine = state.users.engine
     now = time.time()
-    applied = 0
+    id_map: dict[str, str] = {}
     for u in entries:
         async with engine.begin() as conn:
             existing = (await conn.execute(sa.text(
@@ -1715,34 +1842,71 @@ async def _apply_users(state, entries: list[dict]) -> int:
                 await conn.execute(sa.text(
                     f"UPDATE users SET {', '.join(sets)}"
                     " WHERE username = :u"), params)
+                id_map[u["id"]] = existing[0]
             else:
                 # A new account keeps the source id so any vkeys.owner_id in
                 # the same document resolves to a row that exists.
+                uid = u["id"] or f"bk{u['username']}"
                 await conn.execute(sa.text(
                     "INSERT INTO users (id, username, password_hash, role,"
                     " disabled, created_at, updated_at)"
                     " VALUES (:i,:u,:h,:r,:d,:c,:t)"),
-                    {"i": u["id"] or f"bk{u['username']}", "u": u["username"],
+                    {"i": uid, "u": u["username"],
                      "h": u["password_hash"] or "", "r": u["role"],
                      "d": int(u["disabled"]), "c": now, "t": now})
-        applied += 1
-    return applied
+                id_map[u["id"]] = uid
+    return id_map
 
 
-async def _apply_vkeys(state, entries: list[dict]) -> int:
+async def _apply_vkeys(state, entries: list[dict], *,
+                       user_id_map: dict[str, str] | None = None) -> int:
     """Upsert virtual keys on ``key_hash``, preserving the target's ``id``.
 
     ``AuthService`` has no by-hash insert — ``create_key`` takes a plaintext
     and mints a fresh id — so this writes the row directly. The id is
     preserved on conflict so ``owner_id`` references and any local state keyed
     on it stay valid.
+
+    **``owner_id`` is re-pointed at the target's user ids.** The document
+    carries the *source's* user ids, and those rows do not exist here: a
+    username is the natural key, and the target may already have that
+    username under a different id. Writing the source id verbatim left the
+    key referencing a user that is not there, and the auth check — which
+    fails CLOSED on a dangling owner — rejected it. So a key that
+    authenticated on the source was dead on the target while the merge
+    reported it as applied. *user_id_map* carries the source→target
+    mapping built by :func:`_apply_users`; an owner the map does not cover
+    is left unowned rather than pointing at a row that does not exist.
+
+    A key whose **id** collides with a live row is stored under a **fresh
+    id** rather than dropped. The insert is ``INSERT OR IGNORE`` /
+    ``ON CONFLICT (id) DO NOTHING``, so the colliding row would vanish
+    without an error — and the counter used to say "applied" anyway, so the
+    console reported a virtual key that was not in the database. The
+    colliding row on the target is a *different* key, so it must not be
+    clobbered either: the import is re-keyed and the key is restored.
     """
     if state.auth is None:
         return 0
     engine = state.auth.engine
     is_pg = engine.dialect.name == "postgresql"
+    id_map = user_id_map or {}
     applied = 0
     for k in entries:
+        owner_id = k["owner_id"]
+        if owner_id is not None:
+            if owner_id in id_map:
+                # The source's id for this username → the target's id.
+                owner_id = id_map[owner_id]
+            elif not await _user_exists(state, owner_id):
+                # The owner did not come from this document's user section (or
+                # the map does not cover it) and the id does not exist here.
+                # Leaving it would orphan the key; dropping the owner keeps
+                # the key usable and matches the "un-owned keys still
+                # authenticate" rule in auth/service.py.
+                log.warning("backup_vkey_owner_missing", owner_id=owner_id,
+                            key_alias=k["key_alias"])
+                owner_id = None
         async with engine.begin() as conn:
             existing = (await conn.execute(sa.text(
                 "SELECT id FROM vkeys WHERE key_hash = :h"),
@@ -1759,10 +1923,35 @@ async def _apply_vkeys(state, entries: list[dict]) -> int:
                      "b": k["max_budget"], "s": k["spend_to_date"],
                      "r": k["budget_reserved"], "rpm": k["rpm"],
                      "tpm": k["tpm"], "e": k["expires_at"],
-                     "d": int(k["disabled"]), "o": k["owner_id"],
+                     "d": int(k["disabled"]), "o": owner_id,
                      "p": k["priority"]})
             else:
                 uid = k["id"] or f"bk{k['key_hash'][:16]}"
+                # The id is the primary key, so a collision with a live row
+                # makes the insert a no-op rather than an error — and a
+                # no-op that the counter used to report as "applied". Re-key
+                # the import instead of dropping it: a merge that reports a
+                # key as restored must actually have stored it, and the
+                # colliding row on the target is a *different* key that must
+                # not be clobbered.
+                clash = (await conn.execute(sa.text(
+                    "SELECT id FROM vkeys WHERE id = :i"), {"i": uid})).first()
+                if clash is not None:
+                    # The fallback id could itself be taken, so keep adding a
+                    # counter until it is free — the point is to store the
+                    # key, and a second collision must not reintroduce the
+                    # silent drop this branch exists to prevent.
+                    base = f"bk{k['key_hash'][:16]}"
+                    uid = base
+                    n = 0
+                    while (await conn.execute(sa.text(
+                            "SELECT id FROM vkeys WHERE id = :i"),
+                            {"i": uid})).first() is not None:
+                        n += 1
+                        uid = f"{base}-{n}"
+                    log.warning("backup_vkey_id_collision_rekeyed",
+                                source_id=k["id"], new_id=uid,
+                                key_alias=k["key_alias"])
                 if is_pg:
                     sql = ("INSERT INTO vkeys (id, key_hash, key_alias,"
                            " models, max_budget, spend_to_date,"
@@ -1783,7 +1972,7 @@ async def _apply_vkeys(state, entries: list[dict]) -> int:
                     "m": models, "b": k["max_budget"],
                     "s": k["spend_to_date"], "r": k["budget_reserved"],
                     "rpm": k["rpm"], "tpm": k["tpm"], "e": k["expires_at"],
-                    "d": int(k["disabled"]), "o": k["owner_id"],
+                    "d": int(k["disabled"]), "o": owner_id,
                     "p": k["priority"], "c": time.time(), "t": time.time()})
         applied += 1
     if applied:
@@ -1791,6 +1980,16 @@ async def _apply_vkeys(state, entries: list[dict]) -> int:
         # cached negative entry for up to the 60s auth TTL.
         state.auth.invalidate_cache()
     return applied
+
+
+async def _user_exists(state, user_id: str) -> bool:
+    """Whether a ``users`` row with this id exists on this gateway."""
+    if state.users is None:
+        return False
+    async with state.users.engine.connect() as conn:
+        row = (await conn.execute(sa.text(
+            "SELECT 1 FROM users WHERE id = :i"), {"i": user_id})).first()
+    return row is not None
 
 
 #: Columns re-encoded as JSON on the way back in. They are TEXT in the schema

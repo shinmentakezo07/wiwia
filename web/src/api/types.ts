@@ -668,5 +668,9 @@ export interface BackupImportResult {
   rollups: BackupSectionResult;
   /** Audit rows the file carried that were deliberately NOT replayed. */
   audit_skipped: number;
+  /** Settings rows the file carried as redacted placeholders — a
+   *  secret-less export strips their credentials and marks them, so they
+   *  are skipped rather than written over the target's live records. */
+  settings_skipped: number;
   responses: BackupSectionResult;
 }
