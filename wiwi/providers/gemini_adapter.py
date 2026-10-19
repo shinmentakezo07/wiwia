@@ -390,6 +390,26 @@ class GeminiAdapter:
         if (not block_reason and isinstance(cands, list) and cands
                 and not isinstance(cands[0], dict)):
             return []
+        # A candidate whose ``content`` is a truthy NON-dict is a corrupt
+        # frame. The gate below reads it as ``(cand.get("content") or {}).get
+        # ("parts")``, whose ``or {}`` default fires only on a FALSY value, so
+        # a number/string/array reached ``.get("parts")`` and raised
+        # AttributeError straight out of the decoder — which the pump turns
+        # into a StreamError, cooling a healthy deployment for a frame
+        # carrying no semantics (AUDIT #386). The sync twin already reads the
+        # field through ``as_dict`` (``gemini_adapter.py:308``).
+        #
+        # Such a frame is dropped WHOLE rather than terminating the stream:
+        # the usage-without-finishReason arm below (AUDIT #76) requires a
+        # parts-less content as evidence of a clean completion, and a corrupt
+        # content is not that evidence. Dropping it lets the next, intact
+        # frame carry the turn (the same disposition as the non-dict
+        # candidate above).
+        if (not block_reason and isinstance(cands, list) and cands
+                and isinstance(cands[0], dict)):
+            _content = cands[0].get("content")
+            if _content and not isinstance(_content, dict):
+                return []
         out: list[dl.IRStreamDelta] = []
         if not self._started:
             out.append(dl.StreamStart(model=""))
@@ -467,7 +487,7 @@ class GeminiAdapter:
                     finish if isinstance(finish, str) else "", "stop")))
             out.append(dl.StreamEnd())
             self._saw_tail = True
-        elif u and not self._saw_tail and not (cand.get("content") or {}).get("parts"):
+        elif u and not self._saw_tail and not as_dict(cand.get("content")).get("parts"):
             # Usage without finishReason: emitted on some SAFETY-truncated and
             # mid-stream-cut responses. Treat it as a clean completion — the
             # pump otherwise reports `upstream stream ended without completion`

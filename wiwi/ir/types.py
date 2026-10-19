@@ -115,6 +115,16 @@ class ThinkingPart:
     # an empty-text thinking part and drop it harmlessly.
     block_type: str = "thinking"
     data: str | None = None
+    # OpenAI Responses ``reasoning.encrypted_content``: the opaque blob the
+    # Responses API hands back and demands back on the next turn.
+    #
+    # Codex sends ``include: ["reasoning.encrypted_content"]`` on EVERY
+    # request and must replay every output item verbatim, blob included.
+    # Without a carrier here the blob was dropped at decode and the next
+    # turn's history was rejected with "'encrypted_content' is required" —
+    # so reasoning-model multi-turn through /v1/responses broke on turn 2
+    # (AUDIT #355). The field is Responses-shaped; other dialects ignore it.
+    encrypted_content: str | None = None
 
 
 # Reserved multimodal kinds (field names stable now, translation later).

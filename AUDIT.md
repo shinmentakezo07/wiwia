@@ -8,6 +8,57 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — round 162: the delta / chunk flow (2026-10-19)
+
+A sweep of the streaming delta path — the wire encoders
+(`wiwi/wire/openai_chat.py`, `openai_responses.py`, `anthropic_messages.py`,
+`openai_completions.py`), the pump (`wiwi/core/gateway.py`), the coalescer
+(`wiwi/streaming/coalesce.py`) and the streaming adapters — against the
+contract in `wiwi/streaming/deltas.py`.
+
+**Method.** Adversarial delta sequences fed through every encoder and every
+adapter decoder; end-to-end replays through `create_app` with a `respx`-mocked
+upstream for the findings that need the *client-visible* behaviour rather than
+an adapter-level guess. Thirteen defects were found and fixed, with 30
+regressions in `tests/test_fix_round162.py`.
+
+**Fixed in round 162:**
+
+| # | Severity | Summary |
+|---|---|---|
+| 350 | 🔴 Critical | `previous_response_id` dropped the entire user-side history — three chained `/v1/responses` turns reached the model as `assistant:A2 \| user:Q3`, with Q1 and Q2 gone. The store recorded both halves; only the output was read |
+| 382 | 🔴 Critical | `router_settings` resilience knobs accepted negative values — `num_retries: -1` made `range(num_retries + 1)` empty, so every request was a 503. Now negative is rejected; **zero is not** (it is a legitimate "try once") |
+| 420 | 🟠 High | `[DONE]` on an `anthropic`-typed upstream was dropped, so a relay that normalises to OpenAI shape produced a mid-stream `error` frame AND failed a healthy deployment. The decoder now has the terminator arm its OpenAI-wire siblings had |
+| 347 | 🟠 High | The 402 budget refusal leaked the rate-limit slot it had reserved — in the GLOBAL scope, so three refusals from a capped key locked an unrelated uncapped key out with a 429 |
+| 348 | 🟠 High | The lifespan teardown was twelve unguarded `await X.stop()` calls: the first to raise skipped every later one and the engine disposal, so `shutdown_event` was never set and seven workers were orphaned |
+| 353 | 🟠 High | `audit_logs` was written on every admin mutation and never pruned — no age prune, no cap, no rollup. Now swept alongside `request_logs` |
+| 354 | 🟠 High | The retention sweep had no cross-process lock, so two gateway processes swept the same table and double-counted the rollup. Now takes a database-level lock |
+| 355 | 🟠 High | A Responses `reasoning` item replayed with no `encrypted_content` — the field did not exist anywhere in the tree, so Codex's turn-2 history was rejected. Now carried end to end through the IR and the delta |
+| 349 | 🟡 Medium | `/metrics` returned the SPA's `index.html` (HTTP 200) when Prometheus was disabled — the default. The route is now always registered and answers a truthful 404 when the exporter is off |
+| 356 | 🟡 Medium | A tool item's `item_id` used the IR stream index, so the streamed and sync ids disagreed for the same turn. Now keyed on the output index, like the sync path |
+| 357 | 🟡 Medium | `ToolCallClose` out of open order misordered `response.completed.output` — the contract permits batch closes in any order, so close order cannot be display order |
+| 358 | 🟡 Medium | `stop_reason: context_window_exceeded` reported `status: "completed"`, removing the client's only auto-compact signal. Now `incomplete`, like `length` and `content_filter` |
+| 386 | 🟡 Medium | Gemini's `(cand.get("content") or {}).get("parts")` gate raised `AttributeError` on a truthy non-dict `content` — the `or {}` default fires only on a falsy value |
+
+**Also re-verified fixed** (the status marker was stale): **#419** — a float
+`content_block_delta.index` is normalized to its integer block rather than
+coerced to `0`, so the args fragment reaches the right tool call.
+
+**Also checked and found already handled** (no new entry needed — the code is
+correct, and any report claiming otherwise would be a false positive): the
+interleaved text/thinking buffer in all three streaming encoders (text
+arriving while a tool call is open is deferred, never dropped, and flushed
+only once the *last* sibling tool closes); parallel tool-call index routing in
+the Anthropic and Responses encoders; the coalescer's `max_ms` deadline
+(`flush_due` is polled against the wall clock, not against upstream traffic);
+the loop detector's period/repeat arithmetic; the `_saw_tail` exactly-once
+guard in the Gemini adapter; the Anthropic decoder's `null` `partial_json`
+coercion; the NIM adapter's args-before-id synthesize branch (#143) and its
+reused-index close (#196); the OpenAI adapter's in-band error frame (#212);
+the Anthropic encoder's deferred-buffer cap (#219).
+
+---
+
 ## ✅ Fixed — round 161: the /console/settings Import merge (2026-10-19)
 
 Found by *driving* the merge against a live gateway and then reading the
@@ -1708,7 +1759,13 @@ held up under chunk-splitting, CRLF, multi-line `data:`, non-dict JSON and
 
 ### 419. A float `content_block_delta.index` is coerced to `0`, silently dropping or misrouting a tool-call args fragment
 
-**Severity:** 🟠 high · **Status: open**
+**Severity:** 🟠 high · **Status: fixed** — 2026-10-19 (re-verified; the fix predates this sweep)
+
+The float case is normalized, not coerced: `_block_index` returns `int(idx)`
+for a numerically whole float, so `1.0` reaches the SAME block as `1` instead
+of being rewritten to `0` (a different tool call's index). A typed-wrong
+value (list/dict/str/bool/non-integral float) still falls back to `0`, and
+the frame is kept rather than dropped.
 **Files:** `wiwi/providers/anthropic_adapter.py:706-709` (`_block_index` coercion),
 `:812-822` (`input_json_delta` arm — no membership test), landing in
 `wiwi/wire/anthropic_messages.py:1042-1049` (`_tool_blocks.get(d.index)`)
@@ -1773,7 +1830,13 @@ one provider tool call into two blocks.
 
 ### 420. `[DONE]` on an `anthropic`-typed upstream is dropped, producing a mid-stream `error` frame and cooling a healthy deployment
 
-**Severity:** 🟠 high · **Status: open**
+**Severity:** 🟠 high · **Status: fixed** — round 162 (`tests/test_fix_round162.py`)
+
+The Anthropic decoder now has the terminator arm its OpenAI-wire siblings
+already had: on `data == "[DONE]"` it flushes the still-open tool calls
+(`ToolCallClose` per index), emits `Finish("tool_call")` when a call was
+delivered, and terminates with `StreamEnd`. The body now ends cleanly instead
+of being mistaken for a truncation.
 **Files:** `wiwi/providers/anthropic_adapter.py:711-715` (`orjson.JSONDecodeError ->
 return []` swallows the sentinel), consumed by `wiwi/core/gateway.py:2083-2093`
 (`if finish is None and not saw_terminal:` → `_fail_stream(..., price=False)`) and
@@ -1831,7 +1894,16 @@ alone. Findings #382-#386.
 
 ### 382. `router_settings` retry/failover knobs have no positivity validator; `num_retries: -1` makes every request a 503
 
-**Severity:** 🔴 critical (single-typo total outage) · **Status: open**
+**Severity:** 🔴 critical (single-typo total outage) · **Status: fixed** — round 162 (`tests/test_fix_round162.py`)
+
+The validator now rejects a NEGATIVE value for all five knobs. **Zero is not
+rejected**, and that distinction is load-bearing: these knobs are COUNTS of
+attempts and failures, not LIMITS. `num_retries: 0` means "try once, never
+retry" (the loop's `range(0 + 1)` is exactly one attempt) and is the common
+test configuration; `stream_loop_limit: 0` disables loop detection by the
+detector's own documented contract. The sibling validators on
+`DeploymentParams`/`KeyDef` reject zero because those knobs are LIMITS, where
+zero silently means "no cap" (AUDIT #101) — the opposite rule.
 **Files:** `wiwi/config.py:236-243` (`RouterSettings`, no `field_validator`), consumed at
 `wiwi/router/router.py:1384` (`for attempt in range(router.settings.num_retries + 1)`)
 **Fix:** a `_positive`-style validator on `num_retries`, `allowed_fails`,
@@ -2000,7 +2072,12 @@ is now direct: OpenRouter guards, its two siblings do not.
 
 ### 386. `gemini_adapter.py:470` re-implements the dict gate as `(cand.get("content") or {}).get("parts")`, which a truthy non-dict turns into an `AttributeError`
 
-**Severity:** 🟡 Medium · **Status: open**
+**Severity:** 🟡 Medium · **Status: fixed** — round 162 (`tests/test_fix_round162.py`)
+
+The gate now reads the field through `as_dict` (the same helper the sync twin
+and the sibling `usageMetadata` arm already use), so a truthy non-dict yields
+`{}` instead of raising. A corrupt frame is additionally dropped WHOLE, so it
+cannot terminate the stream on the usage-without-finishReason arm.
 **Files:** `wiwi/providers/gemini_adapter.py:470`
 **Fix:** `not as_dict(cand.get("content")).get("parts")` — the sync twin at `:302`
 already uses `as_dict(cand.get("content"))`, and `:419` uses `if not isinstance(u, dict):
@@ -14159,7 +14236,12 @@ process lifetime, which is precisely the case that works.
 
 ### 347. The 402 budget refusal leaks the rate-limit slot it already reserved, and the leak is global
 
-**Severity:** 🟠 High · **Status: open**
+**Severity:** 🟠 High · **Status: fixed** — round 162 (`tests/test_fix_round162.py`)
+
+The 402 path now refunds the reservation it took:
+`await state.limiter.release(info.key_id, request_id)` before returning. The
+release is identity-matched and removes the event from BOTH the key's and the
+global window, so the cross-tenant leak is closed.
 
 **Files:** `wiwi/server/app.py:1909` (`enforce_rate_limit`), `:1937-1949`
 (the 402 return), `:1951-1956` (`ctx` construction, *after* the return)
@@ -14210,7 +14292,12 @@ on the 402 path exactly as `:2069` does.
 
 ### 348. `lifespan` teardown is unguarded: one failing `stop()` skips every later one, including engine disposal
 
-**Severity:** 🟠 High · **Status: open**
+**Severity:** 🟠 High · **Status: fixed** — round 162 (`tests/test_fix_round162.py`)
+
+Each worker's `stop()` now runs through a local `_stop(name, stop)` helper that
+absorbs and logs a failure, and `state.shutdown()` (the engine disposal) runs
+in its own guarded block. The order is unchanged — the DB-touching workers
+still stop before the engine is disposed.
 
 **Files:** `wiwi/server/app.py:1248-1266` (the whole teardown half),
 `:1144-1152` (`AppState.shutdown` — `shutdown_event`, log pumps, engine dispose)
@@ -14299,7 +14386,13 @@ setting is off, rather than not registering it at all.
 
 ### 350. `previous_response_id` drops the entire user-side conversation history
 
-**Severity:** 🔴 Critical · **Status: open** — re-tested 2026-10-13 (sweep).
+**Severity:** 🔴 Critical · **Status: fixed** — round 162 (`tests/test_fix_round162.py`) — re-tested 2026-10-13 (sweep).
+
+The fix reads BOTH halves of the stored turn: `with_history` now takes the
+previous turn's `input_items` as well as its `output`, and the input half is
+prepended FIRST (the conversation order is user-then-assistant). The store
+already recorded both halves — `StoredResponse.input_items` was written by two
+call sites and read by none.
 Code read of the live path: `_chat_like` loads the stored transcript before the
 codec and 404s on a store miss (`wiwi/server/app.py:1959-1976`), and
 `with_history` prepends the items / wraps a string input as a user message
@@ -14430,7 +14523,13 @@ mirroring both siblings.
 
 ### 353. `audit_logs` has no retention, no cap and no rollup
 
-**Severity:** 🟠 High · **Status: open**
+**Severity:** 🟠 High · **Status: fixed** — round 162 (`tests/test_fix_round162.py`)
+
+`db_sink` gained `prune_old_audit(retention_days)`,
+`enforce_audit_cap(max_rows)` and `audit_log_count()`; the retention sweep now
+runs both prunes against `audit_logs`. The cap drops the OLDEST rows, keeping
+the newest, with the same `(ts DESC, id DESC)` boundary shape as the request
+log's cap.
 
 **Files:** `wiwi/logging_core/db_sink.py:1198-1206` (`write_audit`, INSERT
 only), `:774` (`idx_audit_logs_ts`), vs `wiwi/logging_core/retention.py:96-97`
@@ -14459,7 +14558,13 @@ cap) and add `CREATE INDEX ... ON audit_logs(ts, id)`.
 
 ### 354. `rollup_and_prune` has no cross-process lock — concurrent sweeps double-count the table
 
-**Severity:** 🟠 High · **Status: open**
+**Severity:** 🟠 High · **Status: fixed** — round 162 (`tests/test_fix_round162.py`)
+
+The sweep now runs under a DATABASE-level lock — a row in a new `sweep_locks`
+table, taken with a conditional insert so exactly one process wins. A row is
+used rather than a Postgres advisory lock because the gateway also runs on
+SQLite (no advisory lock) and because a row can carry an age: a process that
+died holding the lock leaves a stale row, reclaimed by its TTL.
 
 **Files:** `wiwi/logging_core/db_sink.py:567-687` (the whole transaction),
 `:660-663` (`if not groups: return 0` inside it),
@@ -14492,7 +14597,14 @@ row lock on a singleton row at the top of the transaction.
 
 ### 355. A Responses `reasoning` item replays with no `encrypted_content`
 
-**Severity:** 🟠 High · **Status: open**
+**Severity:** 🟠 High · **Status: fixed** — round 162 (`tests/test_fix_round162.py`)
+
+The blob now has a carrier end to end: `ir.ThinkingPart.encrypted_content` and
+`dl.ThinkingDelta.encrypted_content` (Codex streams its turns, so the
+streaming path needs it too). The Responses decoder reads it, `_reasoning_item`
+re-emits it, and the Responses-shaped outbound adapter both decodes and
+re-encodes it. The field is omitted when absent, so an item with no blob does
+not grow a fake one.
 
 **Files:** `wiwi/wire/openai_responses.py:377-387` (the `reasoning` decode
 arm), `:459-462` (`_reasoning_item`), `wiwi/ir/types.py:115` (`ThinkingPart`
@@ -14526,7 +14638,11 @@ decode it, re-emit it from `_reasoning_item`, and have `anthropic_adapter` skip
 
 ### 356. A tool item's `item_id` uses the IR stream index, so streamed and sync ids disagree
 
-**Severity:** 🟡 Medium · **Status: open**
+**Severity:** 🟡 Medium · **Status: fixed** — round 162 (`tests/test_fix_round162.py`)
+
+The tool item id now keys on the OUTPUT INDEX in all three places that mint
+it (`ToolCallOpen`, the args-delta frame, and `_close_tool`), matching the
+non-streaming `encode_response`, which already used the shared item counter.
 
 **Files:** `wiwi/wire/openai_responses.py:761` (`ToolCallOpen` mints
 `fc_{req_id}_{n}` from `d.index`), `:625` (`_close_tool` likewise), `:551-556`
@@ -14557,7 +14673,12 @@ counter) and reuse it from `encode_response`.
 
 ### 357. `ToolCallClose` in an order other than open order misorders `response.completed.output`
 
-**Severity:** 🟡 Medium · **Status: open**
+**Severity:** 🟡 Medium · **Status: fixed** — round 162 (`tests/test_fix_round162.py`)
+
+`_item_done` now inserts the item at its `output_index` instead of appending
+it, so the terminal `output[]` array is in the same order as the per-item
+events. The contract permits batch closes in ANY order, so the close order
+cannot be the display order.
 
 **Files:** `wiwi/wire/openai_responses.py:604-609` (`_item_done` appends in
 **close** order), `:829-832` (`_completed` sorts `sorted(self._tools)`)
@@ -14586,7 +14707,12 @@ tool calls in the wrong sequence relative to the text they bracket.
 
 ### 358. `stop_reason: context_window_exceeded` reports `status: "completed"`
 
-**Severity:** 🟡 Medium · **Status: open (re-opens #272)**
+**Severity:** 🟡 Medium · **Status: fixed** — round 162 (`tests/test_fix_round162.py`)
+
+`_INCOMPLETE_REASONS` now also covers `context_window_exceeded` (mapped to the
+spec's `max_output_tokens`, the closest existing value for a turn that did not
+finish) and `pause_turn`. Both are stop reasons the IR carries precisely so
+the client can react; reporting `status: "completed"` removed that signal.
 
 **Files:** `wiwi/wire/openai_responses.py:428` (`_INCOMPLETE_REASONS`),
 `:445-450` (`_response_obj`), `:823-825` (the `incomplete` test)

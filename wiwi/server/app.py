@@ -1390,27 +1390,67 @@ async def lifespan(app: FastAPI):
                 "cline_default_apply_failed_at_startup", err=str(e),
             )
     yield
+    # Teardown: EVERY stop runs, even if an earlier one raised.
+    #
+    # The teardown was twelve bare sequential ``await X.stop()`` calls with
+    # no try/finally, no suppress and no aggregation. The first to raise
+    # aborted every later one AND ``state.shutdown()`` — so the DB engine
+    # was never disposed, ``shutdown_event`` was never set (the
+    # ``/admin/stream`` SSE keepalive loop's only break condition is that
+    # event, so it never returned), and the tracer's OTLP exporter was left
+    # unflushed. Seven orphaned workers kept polling providers and holding
+    # sockets and DB connections.
+    #
+    # Starlette's ``Router.lifespan`` re-raises anything raised while
+    # serving, so an exception in the request path skipped this half
+    # entirely — the same defect, reached by a different route (AUDIT #348).
+    #
+    # Each stop is now independent: a failure is logged and the rest still
+    # run. The order is preserved — the DB-touching workers stop BEFORE
+    # ``state.shutdown()`` disposes the engine.
+    async def _stop(name: str, stop: Any) -> None:
+        """Run one worker's stop, absorbing and logging its failure."""
+        try:
+            await stop()
+        except Exception as e:  # noqa: BLE001 — teardown must not raise
+            import structlog as _sl
+            _sl.get_logger("wiwi.shutdown").warning(
+                "worker_stop_failed", worker=name, error=str(e)[:200])
+
     if state.journals is not None:
-        await state.journals.stop()
+        await _stop("journals", state.journals.stop)
     if state.healer is not None:
-        await state.healer.stop()
+        await _stop("healer", state.healer.stop)
     if state.response_store is not None:
-        await state.response_store.stop()
-    tracer.shutdown()
+        await _stop("response_store", state.response_store.stop)
+    try:
+        tracer.shutdown()
+    except Exception as e:  # noqa: BLE001 — teardown must not raise
+        import structlog as _sl
+        _sl.get_logger("wiwi.shutdown").warning(
+            "tracer_shutdown_failed", error=str(e)[:200])
     if state.opencode_refresh is not None:
-        await state.opencode_refresh.stop()
+        await _stop("opencode_refresh", state.opencode_refresh.stop)
     if state.cline_version_refresh is not None:
-        await state.cline_version_refresh.stop()
+        await _stop("cline_version_refresh", state.cline_version_refresh.stop)
     if state.workbuddy_version_refresh is not None:
-        await state.workbuddy_version_refresh.stop()
+        await _stop("workbuddy_version_refresh",
+                    state.workbuddy_version_refresh.stop)
     if state.workbuddy_refresh is not None:
-        await state.workbuddy_refresh.stop()
+        await _stop("workbuddy_refresh", state.workbuddy_refresh.stop)
     if state.hermes_refresh is not None:
-        await state.hermes_refresh.stop()
+        await _stop("hermes_refresh", state.hermes_refresh.stop)
     if state.log_retention is not None:
-        await state.log_retention.stop()
-    await state.cline_refresh.stop()
-    await state.shutdown()
+        await _stop("log_retention", state.log_retention.stop)
+    if state.cline_refresh is not None:
+        await _stop("cline_refresh", state.cline_refresh.stop)
+    # The engine disposal is last: the workers above still touch the DB.
+    try:
+        await state.shutdown()
+    except Exception as e:  # noqa: BLE001 — teardown must not raise
+        import structlog as _sl
+        _sl.get_logger("wiwi.shutdown").warning(
+            "state_shutdown_failed", error=str(e)[:200])
 
 
 def _inject_id(chunk: bytes, first_id: int) -> tuple[bytes, int]:
@@ -2110,7 +2150,15 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 return _err(404, "not_found_error",
                             f"response '{body['previous_response_id']}' not found",
                             request, surface, span=req_span)
-            body = codec_history(body, prev.output.get("output", []))
+            # BOTH halves of the stored turn are replayed: the previous
+            # turn's OUTPUT (the assistant's answer) and its INPUT (the
+            # user's message). The store recorded both, but only the output
+            # was read — so the user's original question never reached the
+            # upstream, and every stateful multi-turn session silently lost
+            # its context (AUDIT #350). The input half goes FIRST: the
+            # conversation order is user-then-assistant.
+            body = codec_history(body, prev.output.get("output", []),
+                                 prev.input_items)
         try:
             ir_req = codec_decode(body)
         except (oc.DialectError, ValueError) as e:
@@ -2183,6 +2231,20 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 if not ok:
                     # Refused at the cap: same contract as the pre-flight
                     # branch in authenticate() — 402, never 429.
+                    #
+                    # The rate-limit slot reserved a few lines above must be
+                    # REFUNDED before returning. The request never reached
+                    # an upstream, so the reservation is pure phantom — and
+                    # it sits in the GLOBAL scope as well as the key's, so
+                    # leaving it in place throttles unrelated traffic (and
+                    # unrelated TENANTS: three refusals from a budget-capped
+                    # key locked an uncapped key out with a 429, AUDIT #347).
+                    # Every sibling early return between the reserve and
+                    # the settle funnels through ``_release_tpm_reservation``;
+                    # this one predated that convention and was not
+                    # converted.
+                    with contextlib.suppress(Exception):
+                        await state.limiter.release(info.key_id, request_id)
                     refused = RequestContext(
                         surface=surface, ir_req=ir_req, auth=info, group=group,
                         request_id=request_id, status=402)
@@ -3229,33 +3291,51 @@ def create_app(config: WiwiConfig) -> FastAPI:
         }
 
     # -- metrics ---------------------------------------------------------------
-    if config.router_settings.prometheus_enabled:
-        from wiwi.server.metrics import render_metrics
-        metrics_path = config.router_settings.prometheus_path
+    # The route is ALWAYS registered, even when Prometheus is disabled.
+    #
+    # It used to be registered only inside ``if prometheus_enabled:``, so
+    # with Prometheus off — the DEFAULT — the path had no handler at all
+    # and the SPA catch-all answered it with ``index.html`` and a 200. A
+    # scraper then recorded the SPA's HTML as a successful scrape, and the
+    # operator's "is Prometheus up?" check read green (AUDIT #349).
+    #
+    # Now the path answers 404 with a plain-text explanation when the
+    # exporter is off — a truthful signal — and the metrics body when it is
+    # on.
+    from wiwi.server.metrics import render_metrics
+    metrics_path = config.router_settings.prometheus_path
 
-        @app.get(metrics_path)
-        async def prometheus_metrics(request: Request):
-            if not is_admin(request):
-                return _err(401, "authentication_error", "master key required",
-                            request, "chat")
-            events = [e for _, e in await state.logs.sse.replay("request", 0)]
-            # The loss counters and the process-lifetime totals cannot be
-            # derived from the ring: a dropped event is absent from it by
-            # definition, and a ring-derived total decreases on every eviction
-            # (AUDIT #180), which makes PromQL read each eviction as a process
-            # restart. Both are passed in from the subsystem that owns them.
-            # ``_RT_COUNTERS`` is the same object /health reads, so the two
-            # operator surfaces cannot disagree (AUDIT #347).
-            text = render_metrics(
-                events,
-                state.logs.dropped_request_logs,
-                state.logs.totals,
-                state.logs.failed_request_log_writes,
-                state.logs.dropped_proxy_logs,
-                state.logs.failed_audit_log_writes,
-                state.spend_charge_failures,
-                _RT_COUNTERS["usage_missing"])
-            return PlainTextResponse(text, media_type="text/plain; version=0.0.4")
+    @app.get(metrics_path)
+    async def prometheus_metrics(request: Request):
+        if not config.router_settings.prometheus_enabled:
+            return PlainTextResponse(
+                "Prometheus metrics are disabled. Set "
+                "router_settings.prometheus_enabled: true to enable this "
+                "endpoint.\n",
+                media_type="text/plain; charset=utf-8",
+                status_code=404,
+            )
+        if not is_admin(request):
+            return _err(401, "authentication_error", "master key required",
+                        request, "chat")
+        events = [e for _, e in await state.logs.sse.replay("request", 0)]
+        # The loss counters and the process-lifetime totals cannot be
+        # derived from the ring: a dropped event is absent from it by
+        # definition, and a ring-derived total decreases on every eviction
+        # (AUDIT #180), which makes PromQL read every eviction as a process
+        # restart. Both are passed in from the subsystem that owns them.
+        # ``_RT_COUNTERS`` is the same object /health reads, so the two
+        # operator surfaces cannot disagree (AUDIT #347).
+        text = render_metrics(
+            events,
+            state.logs.dropped_request_logs,
+            state.logs.totals,
+            state.logs.failed_request_log_writes,
+            state.logs.dropped_proxy_logs,
+            state.logs.failed_audit_log_writes,
+            state.spend_charge_failures,
+            _RT_COUNTERS["usage_missing"])
+        return PlainTextResponse(text, media_type="text/plain; version=0.0.4")
 
     # -- admin -------------------------------------------------------------------
     @app.post("/admin/keys/generate")

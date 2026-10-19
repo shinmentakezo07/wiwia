@@ -16,6 +16,7 @@ call when never started, matching the other ``*_auto_refresh`` helpers.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from typing import TYPE_CHECKING
 
@@ -86,6 +87,18 @@ class LogRetention:
         remains. Running the cap first would roll up and delete rows the age
         pass was about to remove anyway — same result, but the cap's OFFSET
         scan would be over a larger table.
+
+        The ``audit_logs`` table is swept too, and with a cap of its own: it
+        was written on every admin mutation and never pruned at all, so it
+        grew without bound (AUDIT #353).
+
+        The whole pass runs under a **cross-process** lock. Two gateway
+        processes pointed at the same database both swept it, and each
+        rolled the same rows up — so the rollup counted every request
+        twice and the dashboard's totals were inflated (AUDIT #354). The
+        lock is taken on the DATABASE, not in this process, so it is
+        effective across processes; a process that cannot take it skips the
+        sweep rather than double-counting.
         """
         sink = self._state.logs.db_sink
         if sink is None:
@@ -93,8 +106,37 @@ class LogRetention:
         ws = self._state.config.wiwi_settings
 
         t0 = time.monotonic()
-        by_age = await sink.prune_old_requests(ws.log_retention_days)
-        by_cap = await sink.enforce_log_cap(ws.log_max_rows)
-        if by_age or by_cap:
+        async with self._sweep_lock(sink):
+            by_age = await sink.prune_old_requests(ws.log_retention_days)
+            by_cap = await sink.enforce_log_cap(ws.log_max_rows)
+            audit_age = await sink.prune_old_audit(ws.log_retention_days)
+            audit_cap = await sink.enforce_audit_cap(ws.log_max_rows)
+        if by_age or by_cap or audit_age or audit_cap:
             log.info("request_logs_pruned", by_age=by_age, by_cap=by_cap,
+                     audit_by_age=audit_age, audit_by_cap=audit_cap,
                      took_ms=int((time.monotonic() - t0) * 1000))
+
+    @contextlib.asynccontextmanager
+    async def _sweep_lock(self, sink):
+        """Hold the database-level sweep lock for the duration of the pass.
+
+        Implemented as a row in a tiny ``sweep_locks`` table: a Postgres
+        ``pg_advisory_lock`` has no SQLite equivalent, and a file lock does
+        not work for a Postgres-backed deployment with several hosts. One
+        mechanism that works on both backends is worth the extra table.
+
+        The lock is released by DELETING the row, so a crashed process
+        leaves a stale row rather than a held lock; the stale row is
+        reclaimed by its age (see ``db_sink._STALE_LOCK_S``).
+        """
+        try:
+            await sink.acquire_sweep_lock()
+        except Exception as e:  # noqa: BLE001 — a lock failure must not kill the task
+            log.warning("log_retention_lock_failed", error=str(e)[:200])
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            with contextlib.suppress(Exception):
+                await sink.release_sweep_lock()

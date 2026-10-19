@@ -731,7 +731,53 @@ class AnthropicAdapter:
             return 0
         return idx
 
+    def _flush_open_tools(self) -> list[dl.IRStreamDelta]:
+        """Close every still-open tool call.
+
+        Used by the ``[DONE]`` arm: a stream that ends on the sentinel
+        instead of a ``message_stop`` would otherwise leave its tool calls
+        open, so the client received a ``tool_use`` block that never
+        stopped — a shape Anthropic rejects when the history is replayed
+        (the same defect the OpenAI-wire decoders fixed under AUDIT #133).
+        Returns ``[]`` when nothing is open, so the plain-text ``[DONE]``
+        path stays byte-identical to the native-terminator path.
+        """
+        out: list[dl.IRStreamDelta] = []
+        for open_idx in sorted(self._tool_indices):
+            out.append(dl.ToolCallClose(index=open_idx))
+        self._tool_indices.clear()
+        return out
+
     def decode_stream_event(self, event: str, data: str) -> list[dl.IRStreamDelta]:
+        if data == "[DONE]":
+            # The OpenAI terminator, on an Anthropic-typed upstream.
+            #
+            # A provider entry typed ``anthropic`` whose upstream actually
+            # speaks OpenAI shape is the common self-hosted-relay case
+            # (newapi/one-api/LiteLLM-style proxies normalise every upstream
+            # to OpenAI and append ``[DONE]`` universally). The decoder had
+            # no terminator arm, so the sentinel fell through
+            # ``orjson.JSONDecodeError -> return []``: the body ended with no
+            # ``Finish`` and no ``StreamEnd``, the pump read that as a
+            # truncation and queued
+            # ``StreamError("upstream stream ended without completion")``
+            # AFTER the content was already delivered — and recorded a fail
+            # against a perfectly healthy deployment, so past
+            # ``allowed_fails`` a misconfigured relay retired a working
+            # credential (AUDIT #420).
+            #
+            # Every OpenAI-wire sibling already had this arm
+            # (``openai_adapter.py:537``, ``nim_adapter.py:303``,
+            # ``openrouter_adapter.py``, ``opencode_adapter.py``); the
+            # Anthropic one was the only decoder without it.
+            out = self._flush_open_tools()
+            if out:
+                # Tool calls were delivered, so the stop reason is
+                # content-derived, not "stop" — the same reasoning the
+                # OpenAI-wire arms use.
+                out.append(dl.Finish("tool_call"))
+            out.append(dl.StreamEnd())
+            return out
         try:
             payload = orjson.loads(data)
         except json.JSONDecodeError:

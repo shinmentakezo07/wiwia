@@ -379,6 +379,60 @@ class RouterSettings(BaseModel):
     prometheus_enabled: bool = False
     prometheus_path: str = "/metrics"
 
+    @field_validator(
+        "num_retries", "allowed_fails", "key_max_consecutive_fails",
+        "stream_resume_max_retries", "stream_loop_limit",
+    )
+    @classmethod
+    def _resilience_knobs_must_not_be_negative(cls, v: int, info) -> int:
+        """Reject a NEGATIVE resilience knob instead of silently degrading.
+
+        These feed the same retry/cooldown control loop, and a negative value
+        has no sensible meaning at all — each one names a count of attempts
+        or failures.
+
+        * ``num_retries: -1`` makes ``range(num_retries + 1)`` EMPTY
+          (``router.py``), so the retry loop never runs and every request
+          falls through to "no healthy deployment" — a 503 on every call
+          from a single typo in the YAML.
+        * ``allowed_fails: -1`` cools a deployment on its first failure
+          (``if len(recent) >= allowed_fails`` is true immediately).
+        * ``key_max_consecutive_fails: -1`` retires a key on its first
+          error (``err_count >= key_max_consecutive_fails``).
+        * ``stream_loop_limit: -1`` fires the loop detector on the first
+          chunk.
+        * ``stream_resume_max_retries: -2`` makes the mid-stream resume
+          loop's range empty, so resume never runs.
+
+        **Zero is NOT rejected**, because zero is a legitimate setting for
+        every one of them and is used as such:
+
+        * ``num_retries: 0`` means "try once, never retry" — the retry
+          loop's ``range(0 + 1)`` is exactly one attempt. This is the
+          common test configuration and a sane production choice.
+        * ``allowed_fails: 0`` / ``key_max_consecutive_fails: 0`` retire on
+          the first failure, which is a coherent (if strict) policy.
+        * ``stream_loop_limit: 0`` DISABLES loop detection — the
+          ``LoopDetector`` documents ``limit <= 0`` as "detection off", and
+          ``stream_loop_detection: false`` is the same switch.
+        * ``stream_resume_max_retries: 0`` disables the mid-stream resume
+          path, which is what ``stream_resume: off`` means.
+
+        The sibling validators on ``DeploymentParams``
+        (``_limits_must_be_positive``) and ``KeyDef``
+        (``_weight_positive``) reject zero as well — but those knobs are
+        LIMITS, where zero means "no requests allowed" and the code
+        treats a falsy limit as "no cap", so zero there is a silent no-op
+        (AUDIT #101). These knobs are COUNTS of attempts, where zero is
+        meaningful, so the rule is "not negative" rather than "positive"
+        (AUDIT #382).
+        """
+        if v < 0:
+            raise ValueError(
+                f"{info.field_name} must not be negative (got {v}); "
+                "0 is a valid value for this knob")
+        return v
+
     @field_validator("prometheus_path")
     @classmethod
     def _prometheus_path_is_literal(cls, v: str) -> str:

@@ -116,6 +116,25 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 """
 
+_SWEEP_LOCK_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS sweep_locks (
+  name TEXT PRIMARY KEY,
+  ts REAL NOT NULL
+);
+"""
+
+_SWEEP_LOCK_DDL_PG = """
+CREATE TABLE IF NOT EXISTS sweep_locks (
+  name TEXT PRIMARY KEY,
+  ts DOUBLE PRECISION NOT NULL
+);
+"""
+
+#: A lock row older than this is treated as abandoned — its holder died
+#: without releasing it — and is reclaimed. A sweep is short, so a live
+#: holder never has a row this old.
+_STALE_LOCK_S = 300.0
+
 _ROLLUP_DDL_SQLITE = """
 CREATE TABLE IF NOT EXISTS request_rollups (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -470,7 +489,49 @@ class DBSink:
             await conn.execute(sa.text(request_ddl))
             await conn.execute(sa.text(audit_ddl))
             await conn.execute(sa.text(rollup_ddl))
+            await conn.execute(sa.text(
+                _SWEEP_LOCK_DDL_PG if self._is_pg else _SWEEP_LOCK_DDL_SQLITE))
             await self._migrate(conn)
+
+    async def acquire_sweep_lock(self, name: str = "log_retention",
+                                 ttl_s: float = _STALE_LOCK_S) -> bool:
+        """Take the cross-process retention lock. True when it was taken.
+
+        Two gateway processes pointed at the same database both ran the
+        retention sweep, and each rolled the same rows up — so the rollup
+        counted every request twice and the dashboard's totals were
+        inflated (AUDIT #354). An in-process ``asyncio.Lock`` cannot help:
+        the two sweeps are in different processes.
+
+        The lock is a ROW, not a Postgres advisory lock, because the
+        gateway also runs on SQLite (where there is no advisory lock) and
+        because a row can carry an age — a process that died holding the
+        lock leaves a stale row, which the TTL below reclaims.
+
+        The insert is conditional, so exactly one process wins: the row is
+        only inserted when no live row exists for *name*.
+        """
+        now = time.time()
+        async with self.engine.begin() as conn:
+            # Reclaim a stale lock first: the holder died without releasing.
+            await conn.execute(
+                sa.text("DELETE FROM sweep_locks WHERE name = :n AND ts < :cutoff"),
+                {"n": name, "cutoff": now - ttl_s})
+            if self._is_pg:
+                res = await conn.execute(sa.text(
+                    "INSERT INTO sweep_locks (name, ts) VALUES (:n, :ts)"
+                    " ON CONFLICT (name) DO NOTHING"), {"n": name, "ts": now})
+            else:
+                res = await conn.execute(sa.text(
+                    "INSERT INTO sweep_locks (name, ts) VALUES (:n, :ts)"
+                    " ON CONFLICT (name) DO NOTHING"), {"n": name, "ts": now})
+            return (res.rowcount or 0) > 0
+
+    async def release_sweep_lock(self, name: str = "log_retention") -> None:
+        """Release the retention lock (delete the row)."""
+        async with self.engine.begin() as conn:
+            await conn.execute(
+                sa.text("DELETE FROM sweep_locks WHERE name = :n"), {"n": name})
 
     async def prune_old_requests(self, retention_days: int) -> int:
         """Roll old rows into ``request_rollups``, then delete them.
@@ -1211,6 +1272,77 @@ class DBSink:
         if not (isinstance(dep, str) and dep.endswith(f"/{match_tail}")):
             return None
         return serving
+
+    async def prune_old_audit(self, retention_days: int) -> int:
+        """Delete ``audit_logs`` rows older than *retention_days*.
+
+        The audit trail was written on every admin mutation and NEVER
+        pruned: ``grep "DELETE" db_sink.py`` returned exactly one statement,
+        against ``request_logs``. The table therefore grew without bound on
+        a busy console, and the sweeper that bounds ``request_logs`` never
+        touched it (AUDIT #353).
+
+        Unlike the request log there is nothing to roll up — an audit row
+        is a point event with no aggregate to preserve — so the rows are
+        simply deleted. The trail's value is in the recent window; an
+        unbounded table is a disk leak, not a longer audit.
+
+        ``retention_days <= 0`` means "keep everything" and is a no-op.
+        """
+        if retention_days <= 0:
+            return 0
+        cutoff = time.time() - retention_days * 86400
+        async with self.engine.begin() as conn:
+            res = await conn.execute(
+                sa.text("DELETE FROM audit_logs WHERE ts < :cutoff"),
+                {"cutoff": cutoff})
+            deleted = res.rowcount or 0
+        self.invalidate_cache()
+        return int(deleted)
+
+    async def enforce_audit_cap(self, max_rows: int) -> int:
+        """Keep at most *max_rows* audit rows, dropping the oldest.
+
+        The count-based counterpart of :meth:`prune_old_audit`: a busy
+        console writes audit rows far faster than a day passes, so the age
+        prune alone would not bound the table (AUDIT #353).
+
+        ``max_rows <= 0`` means "no cap" and is a no-op.
+        """
+        if max_rows <= 0:
+            return 0
+        async with self.engine.begin() as conn:
+            total = (await conn.execute(
+                sa.text("SELECT COUNT(*) FROM audit_logs"))).scalar() or 0
+            if total <= max_rows:
+                return 0
+            # The boundary is the oldest row we intend to KEEP — index
+            # max_rows-1 in (ts DESC, id DESC) order, with the id
+            # tiebreak so a group of rows sharing a timestamp is trimmed
+            # exactly (the same shape as enforce_log_cap).
+            row = (await conn.execute(sa.text(
+                "SELECT ts, id FROM audit_logs ORDER BY ts DESC, id DESC "
+                "LIMIT 1 OFFSET :off"), {"off": max_rows - 1})).first()
+            if row is None:
+                return 0
+            cutoff_ts, cutoff_id = row[0], row[1]
+            res = await conn.execute(
+                sa.text("DELETE FROM audit_logs WHERE ts < :ts"
+                        " OR (ts = :ts AND id <= :id)"),
+                {"ts": cutoff_ts, "id": cutoff_id})
+            deleted = res.rowcount or 0
+        self.invalidate_cache()
+        return int(deleted)
+
+    async def audit_log_count(self) -> int:
+        """The number of rows in ``audit_logs``.
+
+        The sweep's own bookkeeping, and the assertion the retention test
+        reads.
+        """
+        async with self.engine.connect() as conn:
+            return int((await conn.execute(
+                sa.text("SELECT COUNT(*) FROM audit_logs"))).scalar() or 0)
 
     async def write_audit(self, evt: LogEvent) -> None:
         async with self.engine.begin() as conn:

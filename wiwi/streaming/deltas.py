@@ -60,6 +60,11 @@ class ThinkingDelta:
     # re-emit a redacted_thinking block instead of dropping it (AUDIT #103).
     block_type: str | None = None
     data: str | None = None
+    # OpenAI Responses ``reasoning.encrypted_content``: the opaque blob the
+    # Responses API hands back and demands back on the next turn. Codex
+    # streams its turns, so the streaming path needs the same carrier the IR
+    # has for the non-streaming one (AUDIT #355).
+    encrypted_content: str | None = None
 
 
 @dataclass(frozen=True)

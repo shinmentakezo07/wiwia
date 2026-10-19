@@ -1053,9 +1053,17 @@ def _encode_responses_request(req: ir.Request, model_id: str,
                 input_items.append({"type": "function_call_output",
                                     "call_id": p.tool_use_id,
                                     "output": p.content or ""})
-            elif isinstance(p, ir.ThinkingPart) and p.text:
-                input_items.append({"type": "reasoning", "summary": [
-                    {"type": "summary_text", "text": p.text}]})
+            elif isinstance(p, ir.ThinkingPart) and (p.text or p.encrypted_content):
+                # The blob must be sent back verbatim: the Responses API
+                # rejects a reasoning item whose ``encrypted_content`` is
+                # missing, which is what broke turn 2 of every reasoning
+                # session (AUDIT #355).
+                item: dict[str, Any] = {"type": "reasoning"}
+                if p.text:
+                    item["summary"] = [{"type": "summary_text", "text": p.text}]
+                if p.encrypted_content:
+                    item["encrypted_content"] = p.encrypted_content
+                input_items.append(item)
             elif isinstance(p, (ir.AudioPart, ir.DocumentPart)):
                 log.warning("dropping_unsupported_part_for_responses",
                             part=type(p).__name__, provider="opencode")
@@ -1164,9 +1172,17 @@ def _decode_responses_response(body: bytes) -> ir.AssistantTurn:
                         "output_text", "text", "refusal"):
                     turn.text += c.get("text") or c.get("refusal") or ""
         elif itype == "reasoning":
+            # The opaque ``encrypted_content`` blob rides on the part: the
+            # Responses API demands it back on the next turn, and dropping it
+            # here broke reasoning-model multi-turn on turn 2 (AUDIT #355).
+            blob = item.get("encrypted_content")
+            blob = blob if isinstance(blob, str) and blob else None
             for s in as_list(item.get("summary")):
                 if isinstance(s, dict) and s.get("text"):
-                    turn.thinking.append(ir.ThinkingPart(s["text"]))
+                    turn.thinking.append(ir.ThinkingPart(
+                        s["text"], encrypted_content=blob))
+            if blob and not turn.thinking:
+                turn.thinking.append(ir.ThinkingPart("", encrypted_content=blob))
         elif itype == "function_call":
             raw_args = item.get("arguments") or "{}"
             try:

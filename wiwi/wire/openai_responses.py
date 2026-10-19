@@ -248,15 +248,32 @@ def _decode_response_format(text_field: Any) -> ir.ResponseFormat | None:
 
 
 def with_history(body: dict[str, Any],
-                 previous: list[dict[str, Any]]) -> dict[str, Any]:
-    """Prepend a stored response's output items to this request's ``input``.
+                 previous: list[dict[str, Any]],
+                 previous_input: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Prepend a stored response's items to this request's ``input``.
 
     ``previous_response_id`` is dropped: the caller's next hop must carry the
     literal history, because the upstream never saw our id.
+
+    ``previous_input`` is the stored turn's **input** half — the user's
+    message and any tool results that went with it. It is prepended BEFORE
+    the previous turn's output, because that is the order the conversation
+    actually happened in: the user asked, the model answered, the user asked
+    again.
+
+    Without it the replay carried only the assistant's half, so the model's
+    next turn began with an assistant message and no user turn to answer.
+    The user never learned that the model was being asked to continue, and
+    the model never learned what it was continuing FROM — it answered
+    "the same thing again", or refused, or asked for clarification, with no
+    error anywhere to explain it (AUDIT #350).
     """
     merged = dict(body)
     merged.pop("previous_response_id", None)
-    items = list(previous)
+    items: list[dict[str, Any]] = []
+    if previous_input:
+        items.extend(previous_input)
+    items.extend(previous)
     existing = body.get("input")
     if isinstance(existing, str):
         items.append({"type": "message", "role": "user", "content": existing})
@@ -395,9 +412,20 @@ def decode_request(body: dict[str, Any],
                 summary = []  # non-list summary: nothing to flatten, skip it
             text = " ".join(s["text"] for s in summary
                             if isinstance(s, dict) and isinstance(s.get("text"), str))
-            if text:
-                messages.append(ir.Message(role="assistant",
-                                           parts=[ir.ThinkingPart(text)]))
+            # The opaque blob the Responses API demands back on the next
+            # turn. Codex sends ``include: ["reasoning.encrypted_content"]``
+            # on EVERY request and must replay every output item verbatim,
+            # blob included — without it the next turn is rejected with
+            # "'encrypted_content' is required" and reasoning-model
+            # multi-turn breaks on turn 2 (AUDIT #355). The IR carries it
+            # in ``ThinkingPart.encrypted_content``; the item is emitted
+            # even when the summary is empty, because the blob alone is
+            # what the API requires back.
+            blob = item.get("encrypted_content")
+            blob = blob if isinstance(blob, str) and blob else None
+            if text or blob:
+                messages.append(ir.Message(role="assistant", parts=[
+                    ir.ThinkingPart(text=text, encrypted_content=blob)]))
         else:
             # Unsupported item (computer_call, mcp_call, item_reference, ...).
             # Warn rather than reject: a client that currently gets partial
@@ -466,7 +494,25 @@ def _usage_obj(prompt: int, output: int, cached: int, reasoning: int) -> dict[st
 
 # stop_reason -> Responses incomplete_details.reason. A safety block is NOT a
 # successful completion; reporting "completed" would hide it from the client.
-_INCOMPLETE_REASONS = {"length": "max_output_tokens", "content_filter": "content_filter"}
+#
+# ``context_window_exceeded`` and ``pause_turn`` are here for the same
+# reason: both mean the turn did NOT complete, and both are stop reasons the
+# IR carries precisely so the client can react (``ir/types.py`` lists them
+# among the values "stop" cannot express). Reporting "completed" for a
+# context overflow removed the client's only signal to trigger auto-compact
+# — the exact failure the IR field exists to prevent, and the exact symptom
+# AUDIT #272 recorded and closed as "non-actionable" (AUDIT #358).
+_INCOMPLETE_REASONS = {
+    "length": "max_output_tokens",
+    "content_filter": "content_filter",
+    # A context overflow is a truncation by another name. The spec's own
+    # vocabulary for "the turn did not finish" is the reason string, and
+    # ``max_output_tokens`` is the closest existing value.
+    "context_window_exceeded": "max_output_tokens",
+    # A paused turn (the provider yielded control back) is likewise not a
+    # completion; the client must be able to tell it apart from one.
+    "pause_turn": "pause_turn",
+}
 
 # Cap on content buffered while a tool item is open (AUDIT #367). Matches the
 # Anthropic encoder's MAX_DEFERRED_CHARS: a model that narrates around a tool
@@ -499,10 +545,21 @@ def _response_obj(model: str, req_id: str, stop: str, output: list[dict[str, Any
 
 # --- output item builders (shared by encode_response and the stream encoder) --
 
-def _reasoning_item(text: str, req_id: str, n: int) -> dict[str, Any]:
-    """A reasoning output item; ``n`` disambiguates multiple thinking blocks."""
-    return {"type": "reasoning", "id": f"rs_{req_id}_{n}",
-            "summary": [{"type": "summary_text", "text": text}]}
+def _reasoning_item(text: str, req_id: str, n: int,
+                    encrypted_content: str | None = None) -> dict[str, Any]:
+    """A reasoning output item; ``n`` disambiguates multiple thinking blocks.
+
+    ``encrypted_content`` is the opaque blob the Responses API hands back and
+    demands back on the next turn. It is emitted only when present: a
+    reasoning item with no blob must not grow a fake one, and the field is
+    not part of the item's shape for providers that never send it
+    (AUDIT #355).
+    """
+    item: dict[str, Any] = {"type": "reasoning", "id": f"rs_{req_id}_{n}",
+                             "summary": [{"type": "summary_text", "text": text}]}
+    if encrypted_content:
+        item["encrypted_content"] = encrypted_content
+    return item
 
 
 def _message_item_id(req_id: str, n: int) -> str:
@@ -602,7 +659,10 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
     # separately would renumber ids and break multi-turn replay.
     out_id = 0
     for t in turn.thinking:
-        output.append(_reasoning_item(t.text, req_id, out_id))
+        # The blob rides on the item so the next turn can replay it
+        # verbatim (AUDIT #355).
+        output.append(_reasoning_item(t.text, req_id, out_id,
+                                       encrypted_content=t.encrypted_content))
         out_id += 1
     if turn.text or not turn.tool_calls:
         output.append(_message_item(turn.text, req_id))
@@ -643,6 +703,10 @@ class ResponsesStreamEncoder:
         # O(n) total instead of O(n^2) copying for a long stream.
         self._text_buf: list[str] = []
         self._think_buf: list[str] = []
+        # The opaque ``encrypted_content`` blob of the open reasoning item,
+        # if the delta carried one. Codex demands it back on the next turn,
+        # so it must ride on the emitted item (AUDIT #355).
+        self._think_blob: str | None = None
         # Per-tool-call state keyed by the IR stream's tool index, so
         # interleaved parallel tool calls (Open(0) Open(1) Args(0) ...) don't
         # corrupt each other's item ids / argument buffers.
@@ -675,8 +739,26 @@ class ResponsesStreamEncoder:
         return sse_frame("", orjson.dumps(payload).decode())
 
     def _item_done(self, idx: int, item: dict[str, Any]) -> bytes:
-        """output_item.done — the one event every closed item has in common."""
-        self._output.append(item)
+        """output_item.done — the one event every closed item has in common.
+
+        The item is inserted at its ``output_index``, not appended: the
+        delta contract explicitly permits batch closes in ANY order
+        ("Adapters may hold several indices open at once and close them in a
+        batch"), so the CLOSE order is not the display order. Appending put
+        the terminal ``response.completed.output`` array in close order
+        while the per-item ``output_item.added``/``done`` events were in
+        output_index order, so a client rebuilding the turn from the
+        terminal payload got the tool calls in the wrong sequence relative
+        to the text they bracket (AUDIT #357).
+        """
+        # Keep the array dense and ordered: insert at the index, shifting
+        # later entries right, and drop anything already parked there.
+        while len(self._output) < idx:
+            self._output.append({})
+        if idx < len(self._output):
+            self._output[idx] = item
+        else:
+            self._output.append(item)
         return self._evt("response.output_item.done",
                          {"output_index": idx, "item": item})
 
@@ -697,7 +779,18 @@ class ResponsesStreamEncoder:
                                       t.get("builtin"))
             out = [self._item_done(idx, item)]
         else:
-            item_id = f"fc_{self.req_id}_{n}"
+            # The item id keys on the OUTPUT INDEX, not the IR tool index.
+            #
+            # ``encode_response`` (the non-streaming twin of this encoder)
+            # mints ``fc_{req_id}_{out_id}`` from a counter over every output
+            # item — thinking, message and tool alike. The stream used the IR
+            # tool index instead, so the same turn carried TWO different ids
+            # for the same call: with one message before the tool, the stream
+            # said ``fc_r1_0`` and the sync path said ``fc_r1_1``. A client
+            # that stored the streamed id and later referenced it against a
+            # sync-shaped payload pointed at a different item, and the gap
+            # grew with every preceding item (AUDIT #356).
+            item_id = f"fc_{self.req_id}_{idx}"
             item = _function_call_item(item_id, t["call_id"], t["name"], t["args"])
             out = [self._evt("response.function_call_arguments.done", {
                         "item_id": item_id, "output_index": idx,
@@ -841,11 +934,18 @@ class ResponsesStreamEncoder:
                     self._item_done(idx, _message_item(text, self.req_id, idx))]
         if kind == "thinking":
             think = "".join(self._think_buf)
-            item = _reasoning_item(think, self.req_id, idx)
-            return [self._evt("response.reasoning_summary_text.done", {
-                        "item_id": item["id"], "output_index": idx,
-                        "text": think}),
-                    self._item_done(idx, item)]
+            # The blob rides on the emitted item: Codex must replay it on
+            # the next turn (AUDIT #355).
+            item = _reasoning_item(think, self.req_id, idx,
+                                   encrypted_content=self._think_blob)
+            self._think_blob = None
+            out = []
+            if think:
+                out.append(self._evt("response.reasoning_summary_text.done", {
+                            "item_id": item["id"], "output_index": idx,
+                            "text": think}))
+            out.append(self._item_done(idx, item))
+            return out
         # kind == "tool". Delegate to _close_tool, which POPS the entry from
         # self._tools: reading it in place would leave the tool recorded as
         # open, so the tool's own ToolCallClose later re-emits a second
@@ -893,7 +993,11 @@ class ResponsesStreamEncoder:
                 "content_index": 0, "delta": d.text}))
             return b"".join(out)
         if isinstance(d, dl.ThinkingDelta):
-            if not d.text:
+            # A blob-only delta carries no summary text but DOES carry the
+            # opaque ``encrypted_content`` the next turn must replay, so it
+            # must not be dropped (AUDIT #355). The text is optional; the
+            # blob alone is enough to open a reasoning item.
+            if not d.text and not d.encrypted_content:
                 return None  # signature-only delta: no Responses representation
             # Same interleave policy as TextDelta: never close an open tool
             # item from a thinking delta (round-25 proved this class of bug
@@ -901,6 +1005,8 @@ class ResponsesStreamEncoder:
             # rather than drop, for the same reason (AUDIT #367).
             if self._item_open == "tool":
                 self._defer("thinking", d.text)
+                if d.encrypted_content:
+                    self._think_blob = d.encrypted_content
                 return None
             out = []
             if self._item_open != "thinking":
@@ -912,7 +1018,13 @@ class ResponsesStreamEncoder:
                     "item": {"type": "reasoning", "id": item_id, "summary": []}}))
                 self._item_open = "thinking"
                 self._think_buf = []
+                self._think_blob = None
             self._think_buf.append(d.text)
+            if d.encrypted_content:
+                self._think_blob = d.encrypted_content
+            if not d.text:
+                # Blob-only: the item is opened, nothing to stream yet.
+                return b"".join(out)
             out.append(self._evt("response.reasoning_summary_text.delta", {
                 "item_id": f"rs_{self.req_id}_{self._open_out}",
                 "output_index": self._open_out, "delta": d.text}))
@@ -946,7 +1058,9 @@ class ResponsesStreamEncoder:
                             "status": "in_progress",
                             "action": {"type": "search", "query": ""}}
             else:
-                item = _function_call_item(f"fc_{self.req_id}_{n}", d.id, d.name, "")
+                # Keyed on the OUTPUT INDEX so the streamed id matches the
+                # non-streaming twin's (see _close_tool, AUDIT #356).
+                item = _function_call_item(f"fc_{self.req_id}_{oi}", d.id, d.name, "")
             out.append(self._evt("response.output_item.added", {
                 "output_index": oi, "item": item}))
             self._item_open = "tool"
@@ -970,7 +1084,7 @@ class ResponsesStreamEncoder:
                 return None
             self._open_tool = d.index
             return self._evt("response.function_call_arguments.delta", {
-                "item_id": f"fc_{self.req_id}_{d.index}",
+                "item_id": f"fc_{self.req_id}_{t['output_index']}",
                 "output_index": t["output_index"],
                 "delta": d.args_fragment})
         if isinstance(d, dl.ToolCallClose):
