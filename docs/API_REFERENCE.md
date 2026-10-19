@@ -191,6 +191,13 @@ full validation and returns the per-section plan **without writing** — the
 console's Import panel shows that before enabling its Merge button. Any
 validation error rejects the whole document with nothing applied.
 
+Validation is not atomicity. The three bulk sections (`logs`, `rollups`,
+`responses`) are applied first in one transaction, so a malformed row rolls
+that whole pass back. The configuration sections then apply in order, each
+persisting in its own transaction — so a failure partway leaves the earlier
+config sections committed. The per-section counts in the response are the
+report of what actually landed.
+
 Merge keys, one per section: providers `name` · keys `(provider_name, label)` ·
 deployments `(group_name, provider_name, model_id)` · aliases the alias name ·
 settings the setting key · prices `model_id` (+ `(model_id, scope)` per scoped

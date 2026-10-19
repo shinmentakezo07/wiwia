@@ -8,6 +8,133 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — round 163: the replay cursor's unit (2026-10-19)
+
+A sweep of the SSE **replay** path — the journal (`wiwi/streaming/tape_store.py`),
+the writer (`wiwi/server/app.py:_stream_response` / `_emit`), the wire format
+(`wiwi/streaming/sse.py`) and the reconnect documentation — against the contract
+in `docs/API_REFERENCE.md` §"Streaming headers & reconnect".
+
+**Method.** The real journal and the real app (`create_app` + a `respx`-mocked
+upstream) driven through a reconnect: the first stream captured frame by frame,
+then a second request with `x-wiwi-stream-id` + `Last-Event-ID` compared
+against what the client had already received. Seven regressions in
+`tests/test_fix_round163.py`; all seven fail against the pre-fix tree.
+
+### 493. The replay cursor counted frames while the journal counted chunks, so a reconnect re-delivered the frames before the cursor
+
+**Severity:** 🟠 High · **Status: fixed** — round 163 (`tests/test_fix_round163.py`)
+
+**Where:** `wiwi/server/app.py:2781-2806` (`_emit`), `wiwi/streaming/tape_store.py`
+(`_encode_record`, `append`, `read_after`, `JournalTail.read_next`).
+
+**Trigger:** any reconnect whose cursor lands *inside* a chunk that carries
+several SSE frames — which the encoders produce routinely: chat's
+`final_frame()` is the finish chunk **plus** the usage chunk (with
+`stream_options.include_usage`), Anthropic's is `content_block_stop` **plus**
+`message_delta`, Responses' `_completed()` is several frames.
+
+**Cause.** #283 gave every sub-frame its own SSE `id:`, so the client's
+`Last-Event-ID` names a single **frame**. But the journal wrote **one record
+per chunk**, keyed by the chunk's *last* frame id, and `read_after` filtered
+`seq > cursor` — a **chunk** comparison. A cursor landing mid-chunk therefore
+re-delivered the chunk from its first frame: the client received a frame it
+had already applied.
+
+#283's fix note asserted the two sides agreed — "the journal records the same
+numbering, so `Last-Event-ID` means one thing to both sides" (entry #283
+below). That claim was never checked, and it is false: the wire numbers
+frames, the journal numbers chunks. #283's own trigger — "the client's
+connection dropping between sub-frames" — was fixed on the wire side only, and
+the same scenario now *duplicates* frames instead of losing them.
+
+**Probe** (executed, real app, chat + `include_usage`, `stream_event_ids: true`):
+
+```
+ORIGINAL STREAM            RECONNECT with Last-Event-ID: 4
+  frame0 ['id: 1']           frame0 ['id: 4']   <- the client already had this
+  frame1 ['id: 2']           frame1 ['id: 5']
+  frame2 ['id: 3']           frame2 ['id: 6']
+  frame3 ['id: 4']  <- cursor
+  frame4 ['id: 5']
+  frame5 ['id: 6']
+```
+
+**Fix:** the sequence counter now counts **frames**, the journal record gains
+the chunk's first-frame number (`"fs"`), and both readers slice a chunk at
+frame granularity against the cursor (`_frames_after` in `tape_store.py`).
+A record written before the field existed reads `fs = seq` (a single frame).
+
+**Regression:** `tests/test_fix_round163.py` —
+`test_journal_replay_slices_a_multi_frame_chunk`,
+`test_journal_replay_keeps_a_whole_chunk_when_the_cursor_is_below_it`,
+`test_reconnect_does_not_re_deliver_a_frame_the_client_already_had`.
+
+### 494. `stream_event_ids` defaulted off while the journal defaulted on, so the client could not express a cursor at all
+
+**Severity:** 🟠 High · **Status: fixed** — round 163 (`tests/test_fix_round163.py`)
+
+**Where:** `wiwi/config.py:332-339` (`RouterSettings.stream_event_ids`),
+`wiwi/server/app.py:2500` (the consumer), `wiwi/server/app.py:2291-2297`
+(the replay gate).
+
+**Trigger:** every reconnect in the shipped configuration.
+
+**Cause.** `stream_journal_enabled` defaults to `true` and
+`stream_event_ids` defaulted to `false`. With no `id:` line on the wire the
+client cannot name the frame it stopped at, so `replay_after` stayed `0` and
+`read_after(replay_id, 0)` re-served the **whole** response — the client
+applied the content it already had a second time. The documentation promised
+the opposite: "a client reconnecting with `x-wiwi-stream-id` +
+`Last-Event-ID` replays missed frames" (`docs/API_REFERENCE.md`,
+`docs/STREAMING.md`).
+
+**Probe** (executed, real app, default config):
+
+```
+=== ORIGINAL STREAM (default config) ===   role / "Hello" / " world" / finish / [DONE]
+-> any 'id:' line?  False
+
+=== RECONNECT with x-wiwi-stream-id, NO Last-Event-ID ===
+    role / "Hello" / " world" / finish / [DONE]   <- the whole stream again
+-> upstream calls: 1                              <- no double billing, full duplication
+```
+
+**Fix:** `stream_event_ids` now defaults to `true` (~8 bytes a frame). The
+journal was always on; this makes its cursor reachable. `docs/CONFIG.md`,
+`README.md` and the pinned default in `tests/test_streaming_improvements.py`
+were updated with it.
+
+**Regression:** `tests/test_fix_round163.py` —
+`test_event_ids_are_on_by_default`,
+`test_default_config_emits_a_cursor_on_every_frame`,
+`test_reconnect_with_a_cursor_replays_only_the_missed_frames`.
+
+### 495. The API reference called the request id a field on every SSE frame
+
+**Severity:** ⚪ Low (documentation) · **Status: fixed** — round 163
+
+**Where:** `docs/API_REFERENCE.md` §"Streaming headers & reconnect".
+
+**Cause.** The row read "`x-wiwi-request-id` | Request ID, echoed on every SSE
+frame's `id:` field". It is a **response header** (`wiwi/server/app.py:2269`);
+the frame `id:` field carries a monotonic per-frame sequence number, and only
+when `stream_event_ids` is on. The row now says what the header is, and the
+`Last-Event-ID` row says what the cursor is.
+
+**Regression:** `tests/test_fix_round163.py` —
+`test_api_reference_does_not_call_the_request_id_a_frame_id`.
+
+### Also noted, not fixed (no defect, but dead weight)
+
+`wiwi/streaming/sse.py`: `sse_frame`'s `event_id` parameter is never passed by
+any caller — the `id:` line is injected by `_inject_id` in `server/app.py`
+instead, so two conventions exist for one thing; and `iter_sse_events` has no
+caller at all (not even a test). `StreamTape.replay` has no production caller
+either, which `docs/STREAMING.md` already states honestly.
+
+---
+
 ## ✅ Fixed — round 162: the delta / chunk flow (2026-10-19)
 
 A sweep of the streaming delta path — the wire encoders
@@ -927,7 +1054,8 @@ mistake a red gate for their own regression.
 
 ### 463. `test_repeated_sweeps_merge_instead_of_overwrite` splits its bucket when the two sweeps straddle an hour boundary
 
-**Severity:** 🟡 Medium (hourly gate flake) · **Status: open**
+**Severity:** 🟡 Medium (hourly gate flake) · **Status: fixed** — the test now
+anchors its timestamps inside one hour bucket (re-verified 2026-10-19)
 **File:** `tests/test_hist_percentiles.py` (`test_repeated_sweeps_merge_instead_of_overwrite`)
 **Trigger:** full-suite run that happens to cross an hour boundary between the
 two `rollup_and_prune` calls. Both sweeps write `now - i` for `i in range(50)`,
@@ -937,6 +1065,18 @@ roughly once per hour (~1.4% of runs). Reproduced once on 2026-10-14; passes
 **Fix:** derive the timestamps from a frozen `now` captured before the first
 write (or subtract a fixed span instead of a per-index second), so the two
 sweeps are always in the same bucket regardless of when the test runs.
+
+**Fix applied (2026-10-19).** The timestamps are now anchored 1800 seconds
+into the current hour, so the whole 50-event run (1800 down to 1750) lands in
+one bucket whatever the wall clock says:
+
+```python
+now = (int(time.time() // 3600) * 3600) + 1800
+```
+
+Verified against the boundary case the old scheme failed on — with `now` 20
+seconds past an hour edge, the old timestamps produced **two** buckets and the
+anchored ones produce exactly **one**.
 
 ### 464. `test_realtime` opens two relay connections under full-suite ordering — see #414
 
@@ -13776,7 +13916,11 @@ wrong call.
 
 ### 332. Over-budget true-up swallows its exception with no counter
 
-**Severity:** 🟡 Medium · **Status: open**
+**Severity:** 🟡 Medium · **Status: fixed** — the counter and the log are
+both present (re-verified 2026-10-19; the regression is
+`tests/test_fix_round140.py::test_over_cap_trueup_failure_is_counted_and_logged`,
+which passes)
+
 **Files:** `wiwi/server/app.py:1240-1265`
 
 The true-up path wraps its call in `contextlib.suppress(...)` with no metric and
@@ -13785,7 +13929,13 @@ observable. This is the `ecc:silent-failure-hunter` class.
 
 **Fix sketch:** increment a counter and log at warning when the true-up fails.
 
-**Test:** `tests/test_fix_round111.py::test_over_budget_trueup_failure_is_observable`
+**Re-verification (2026-10-19).** Both halves are now in place on the
+over-cap path (`app.py:1767-1776`): the failure increments
+`state.spend_charge_failures` and logs `spend_charge_unrecorded` naming the key
+and the cost. The realtime true-up (`app.py:614-621`) has the same shape. The
+test named in the original entry (`test_fix_round111.py`) does not exist — the
+regression was written in round 140, which is where the coverage actually
+lives.
 
 ### 334. Non-string `signature` on an inbound thinking block reaches the IR unguarded
 
@@ -13902,7 +14052,9 @@ conflates a failed fetch with a missing provider, reporting a transient blip as
 
 ### 340. AUDIT.md status markers are unreliable in both directions
 
-**Severity:** 🟡 Medium · **Status: open**
+**Severity:** 🟡 Medium · **Status: open** — **re-confirmed 2026-10-19; the drift
+is systematic, not random** (two more drifted markers found by the round-162
+delta/chunk sweep, one in each direction)
 **File:** `AUDIT.md`
 
 Verified this sweep: entries marked fixed that are not (#229, #317 partial,
@@ -13915,8 +14067,33 @@ number **283** is used twice (`AUDIT.md:1086` and `:9136`). The
 `.claude/rules/wiwi-bugfix-workflow.md:18` claims the 2026-08-25 list is
 "fully fixed … do not re-fix", which #324 above contradicts.
 
+**Re-confirmed 2026-10-19 (round 162).** The round-162 delta/chunk sweep
+produced two more drifted markers, one in EACH direction — which is the
+clearest evidence yet that the drift is systematic rather than random:
+
+* **Fixed but still marked open** — #349. The route is now registered
+  unconditionally and answers a truthful 404 when Prometheus is off, with a
+  passing regression, but the entry still read `Status: open`. The
+  round-162 update pass simply missed it.
+* **Marked open but genuinely fixed** — #332. The over-budget true-up
+  increments `spend_charge_failures` and logs `spend_charge_unrecorded` on
+  both the request and the realtime path, and
+  `tests/test_fix_round140.py::test_over_cap_trueup_failure_is_counted_and_logged`
+  passes. The entry still read `Status: open`, and it also pointed at a
+  regression in `test_fix_round111.py` that **does not exist** — the
+  coverage was written in round 140.
+
+**A second, subtler failure mode, found in the same round:** entries are
+matched by NUMBER, and several numbers are used TWICE in this file (#420 is
+both a WorkBuddy export entry and the `[DONE]` entry; #356 and #357 are each
+used twice). A number-based update pass therefore rewrites the WRONG entry's
+status — which is how #420's WorkBuddy marker was briefly overwritten with
+the round-162 marker. Any bulk status update must match on the entry's
+**exact heading text**, not its number.
+
 **Fix sketch:** re-verify every marker against source in one pass and correct
-them in place; the drift is systematic, not random.
+them in place; the drift is systematic, not random. Bulk updates must key on
+the heading text, never on the number.
 
 ---
 
@@ -14355,15 +14532,35 @@ exception-during-serve case.
 
 ### 349. `/metrics` returns the SPA's `index.html` (HTTP 200) when Prometheus is disabled
 
-**Severity:** 🟡 Medium · **Status: open**
+**Severity:** 🟡 Medium · **Status: fixed** — round 162 (`tests/test_fix_round162.py`)
 
 **Files:** `wiwi/server/app.py:2905` (route registered only inside
 `if config.router_settings.prometheus_enabled:`), `:5844-5853`
 (`SPAStaticFiles.get_response`), `:5860` (the catch-all mount)
 
-With `prometheus_enabled: false` — **the default** — the metrics route is never
-registered, so the SPA mount is the only handler left for that path. It answers
-with `index.html` and a 200, including for paths that 404 internally.
+**Fix (round 162).** The metrics route is now registered
+**unconditionally**, and answers a truthful 404 with a plain-text
+explanation when the exporter is off:
+
+```python
+@app.get(metrics_path)
+async def prometheus_metrics(request: Request):
+    if not config.router_settings.prometheus_enabled:
+        return PlainTextResponse(
+            "Prometheus metrics are disabled. Set "
+            "router_settings.prometheus_enabled: true to enable this "
+            "endpoint.\n",
+            media_type="text/plain; charset=utf-8",
+            status_code=404,
+        )
+```
+
+The route used to be registered only inside
+`if config.router_settings.prometheus_enabled:`, so with Prometheus off —
+the DEFAULT — the path had no handler at all and the SPA catch-all
+answered it with `index.html` and a 200. A scraper then recorded the
+SPA's HTML as a successful scrape, and the operator's "is Prometheus up?"
+check read green.
 
 **Probe** (default config):
 
@@ -14371,6 +14568,15 @@ with `index.html` and a 200, including for paths that 404 internally.
 GET /metrics   -> 200 text/html; charset=utf-8
 GET /metrics/  -> 200 text/html; charset=utf-8
 ```
+
+**Probe** (after the fix, default config):
+
+```
+GET /metrics   -> 404 text/plain; charset=utf-8   ("Prometheus metrics are disabled...")
+```
+
+**Tests:** `test_metrics_path_is_not_the_spa_when_prometheus_is_disabled`,
+`test_metrics_path_still_serves_metrics_when_enabled`.
 
 **Consequence:** a scrape expecting `text/plain` gets 200 HTML. Prometheus's
 `up` stays **1** while every metric is unparseable — a silent monitoring black
@@ -16047,17 +16253,28 @@ recorded here so they are not mistaken for fixed work.
 
 ### 460. The backup-import route docstring still over-promises for the config sections — "nothing applied" is only true of the bulk pass
 
-**Severity:** 🟠 High · **Status: open**
-
+**Severity:** 🟠 High · **Status: fixed** — both docstrings now state the split
+explicitly (2026-10-19)
 **Files:** `wiwi/server/app.py:4586-4596` (`admin_import_backup`'s docstring),
 `wiwi/server/backup.py:1390-1417` (`apply_backup`'s docstring, which is
 accurate), `wiwi/server/backup.py` (`_apply_deployments` and the other
-`ConfigStore`-backed section appliers)
+`ConfigStore`-backed section appliers), `docs/API_REFERENCE.md` (the same
+over-promise, in the public API reference)
 
 `admin_import_backup` still reads:
 
 > The whole document is validated before anything is written; any error
 > rejects it with nothing applied.
+
+**Fix applied (2026-10-19).** Both places that carried the over-promise now
+state the split explicitly — the route's docstring in
+`wiwi/server/app.py` and the public API reference in
+`docs/API_REFERENCE.md`. Both now say that VALIDATION rejects the document
+whole, while the BULK sections apply in one transaction and the CONFIG
+sections each persist in their own, so a failure partway leaves the earlier
+config sections committed. The per-section counts in the response are the
+report of what landed. `apply_backup`'s own docstring already described this
+accurately, so the three now agree.
 
 Round 142 made that **true** for the bulk sections: `logs`/`rollups`/`responses`
 are applied first, in one transaction, so a malformed row rolls the whole bulk

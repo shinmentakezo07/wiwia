@@ -164,7 +164,17 @@ async def test_repeated_sweeps_merge_instead_of_overwrite(tmp_path):
     """Two sweeps into the same hour must accumulate, not replace."""
     sink, eng = await _sink(tmp_path, "merge.db")
     try:
-        now = time.time()
+        # Anchor the timestamps INSIDE one hour bucket, away from either
+        # boundary. The rollup bucket is derived from each row's own ``ts``
+        # (``int(ts // 3600) * 3600``), so a run of 50 events spanning 50
+        # seconds STRADDLES two buckets whenever the wall clock is within
+        # 50 seconds of an hour boundary — about 1.4% of runs. The sweep
+        # then wrote two rollup rows and ``assert len(rows) == 1`` failed
+        # (AUDIT #463).
+        #
+        # Anchoring at 1800s into the current hour puts the whole run
+        # (1800 down to 1750) inside one bucket, whatever the clock says.
+        now = (int(time.time() // 3600) * 3600) + 1800
         first = [_evt(now - i, f"a{i}", latency_ms=10.0) for i in range(50)]
         second = [_evt(now - i, f"b{i}", latency_ms=5000.0) for i in range(50)]
         await sink.write_requests(first)

@@ -4676,10 +4676,23 @@ def create_app(config: WiwiConfig) -> FastAPI:
         """Merge a backup document. MERGE ONLY — upsert by natural key, never
         deletes.
 
-        The whole document is validated before anything is written; any error
-        rejects it with nothing applied. ``?dry_run=1`` runs that validation
-        and returns the per-section plan without writing — which is what the
-        console's Import panel shows before the Merge button enables.
+        The whole document is VALIDATED before anything is written, so a
+        malformed document is rejected with nothing applied. ``?dry_run=1``
+        runs that validation and returns the per-section plan without
+        writing — which is what the console's Import panel shows before the
+        Merge button enables.
+
+        Validation is not the same as atomicity, and the difference matters
+        if a merge fails partway. The three bulk sections (``logs``,
+        ``rollups``, ``responses``) are applied first, in ONE transaction, so
+        a malformed row rolls the whole bulk pass back with nothing else
+        touched. The configuration sections then run in order, and each
+        persists through ``ConfigStore`` in its OWN transaction — so a
+        failure in, say, ``prices`` leaves every earlier config section
+        (providers, keys, deployments, aliases, settings) durably committed.
+        Nothing rolls them back. A per-record failure inside a config
+        section is logged and counted rather than raised, so the response's
+        per-section counts are the report of what actually landed.
 
         The audit section is validated, counted, and reported but never
         replayed: replaying another instance's mutation trail would forge this
