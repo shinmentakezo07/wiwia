@@ -40,6 +40,7 @@ def _role_parts_to_content(
     messages: list[ir.Message],
     *,
     emit_per_message_reasoning: bool = True,
+    warn: Any = None,
 ) -> list[dict[str, Any]]:
     """Encode IR messages as a list of OpenAI Chat wire messages.
 
@@ -49,6 +50,12 @@ def _role_parts_to_content(
     (Palantir Foundry, etc.) reject with ``400 unrecognizedProperty`` when
     history carries them. The OpenAI adapter enables this for the OpenAI
     provider type and disables it for openai-compatible / openrouter / gmicloud.
+
+    ``warn`` is the caller-visible warning sink (an adapter's ``warn``
+    method). It is optional so the function stays callable on its own, but
+    the OpenAI adapter always passes one: a dropped document title is
+    information the caller needs, and the operator log alone does not reach
+    them (AUDIT #499).
     """
     out: list[dict[str, Any]] = []
     for m in messages:
@@ -125,6 +132,15 @@ def _role_parts_to_content(
                 elif p.b64:
                     content.append({"type": "file",
                                     "file": {"file_data": f"data:{p.mime};base64,{p.b64}"}})
+                # The document's title and context have no Chat Completions
+                # field. The DOCUMENT is forwarded, but its name and the
+                # caller's description of it are not — so two differently
+                # named attachments become indistinguishable to the model.
+                # Reported to the caller (AUDIT #499).
+                if (p.name or p.context) and callable(warn):
+                    warn(
+                        "a document's title/context was dropped: the Chat "
+                        "Completions wire has no field for it")
             elif isinstance(p, ir.ToolUsePart):
                 if p.builtin is not None:
                     # Provider-hosted call (web_search, tool_search, ...). No
@@ -260,6 +276,7 @@ class OpenAIAdapter(WarningMixin):
             "messages": _role_parts_to_content(
                 req.messages,
                 emit_per_message_reasoning=emit_per_message_reasoning,
+                warn=self.warn,
             ),
             "stream": req.stream,
         }

@@ -148,9 +148,12 @@ attachments became indistinguishable to the model.
 **Fix:** explicit branches. Anthropic and Gemini now report the dropped
 audio part (the drop itself is unavoidable — the Messages API has no audio
 content block, and Gemini's `inline_data` audio shape differs from the
-inbound dialects'). Gemini reports the dropped document title/context.
+inbound dialects'). Gemini and the OpenAI-wire family (OpenAI, OpenRouter,
+NIM, BAI, Cline, WorkBuddy, Hermes) report the dropped document
+title/context. Anthropic is exempt from the latter: it has native `title`
+and `context` fields, and a test pins that.
 
-**Test:** `tests/test_fix_round164.py::test_anthropic_adapter_does_not_silently_drop_an_audio_part` (+ 2 siblings)
+**Test:** `tests/test_fix_round164.py::test_anthropic_adapter_does_not_silently_drop_an_audio_part` (+ 4 siblings, one pinning the Anthropic document-title case)
 
 ### 500. An unsigned thinking block was sent to Anthropic, which rejects it on replay
 
@@ -186,8 +189,8 @@ signed material, and it still replays verbatim.
 
 ### 501. Twelve OpenAI-2026 platform params are honoured and billed by the upstream but invisible to the caller
 
-**Severity:** 🟡 Medium · **Status: open**
-**Files:** `wiwi/wire/openai_chat.py` (`_STANDARD`), `wiwi/providers/openai_adapter.py` (`_STANDARD`)
+**Severity:** 🟡 Medium · **Status: fixed — round 164 (`tests/test_fix_round164.py`)**
+**Files:** `wiwi/providers/base.py` (new `OPENAI_PLATFORM_PARAMS`, `unhonoured_platform_params`), `wiwi/providers/anthropic_adapter.py`, `wiwi/providers/gemini_adapter.py`, `wiwi/providers/nim_adapter.py`, `wiwi/providers/opencode_adapter.py`
 
 `user`, `frequency_penalty`, `presence_penalty`, `logit_bias`,
 `service_tier`, `store`, `prediction`, `modalities`, `verbosity`,
@@ -205,14 +208,38 @@ to warn about.
 Also unrepresentable in the IR: assistant **audio output** and
 `image_url.detail`.
 
-**Fix sketch:** when the target provider cannot honour a forwarded
-standard param, report it — either by not forwarding it and warning, or by
-forwarding it and warning that the provider has no equivalent. The
-decision needs a product call: forwarding-and-warning keeps a strict
-OpenAI-compatible gateway's behaviour, while not-forwarding-and-warning is
-honest about what the backend did.
+**Fixed in round 164 — by warning, not by suppressing.**
 
-**Test:** (not yet written — the fix shape is not decided)
+The decision the original fix sketch left open — "forwarding-and-warning
+keeps a strict OpenAI-compatible gateway's behaviour, while
+not-forwarding-and-warning is honest about what the backend did" — was
+resolved in favour of **warning**: the parameter is still forwarded (so a
+deployment that talks to an OpenAI-shaped backend behind a non-OpenAI-typed
+provider entry keeps working), and the caller is told it did not apply to
+this backend. Suppressing it would have been a silent behaviour change for
+any deployment whose *typed* provider understates what it actually talks to
+— and the provider type is configuration, not a fact about the endpoint.
+
+- `providers/base.py` gains `OPENAI_PLATFORM_PARAMS` and
+  `unhonoured_platform_params(extras)`. The table lives in `base.py` rather
+  than in one adapter because BOTH layers need it: the OpenAI-shaped
+  adapters forward these (they CAN honour them) and the Anthropic/Gemini
+  adapters must report that they cannot. A single table keeps the two
+  sides from drifting — a param added to the forward list without a row
+  here would be silently dropped on every non-OpenAI backend, which is the
+  exact defect this table exists to prevent.
+- The Anthropic and Gemini adapters report each such param by name.
+- The OpenAI-shaped adapters do **not**: they honour the params, so a
+  warning there would be a false alarm on every ordinary request that sets
+  `logprobs` or `service_tier`. A test pins that.
+- Two providers strip these for a *different* reason and were silent on it
+  too: **NIM** strict-validates its body ("Unsupported parameter(s):
+  `prompt_cache_key`") and 400s, so the strip is mandatory — and **the
+  OpenCode Responses route** never forwards extras at all. Both now report
+  what they removed. NIM's strip predates this finding and was correct in
+  what it did; what it lacked was the report.
+
+**Test:** `tests/test_fix_round164.py::test_anthropic_adapter_reports_the_platform_params_it_cannot_honour` (+ 4 siblings, one pinning that the OpenAI adapter stays silent, one for NIM's mandatory strip, one for the OpenCode Responses route)
 
 ---
 
@@ -14070,8 +14097,11 @@ plus assistant **audio output** and `image_url.detail`. These are
 has a response-side value, so there is nothing to carry back — but a caller
 that set `logit_bias` against a non-OpenAI backend learns nothing. Round
 164 closed the same silence for the knobs that DO have a response-side
-value (#497) and for every drop the gateway can see (#498); these twelve
-remain a *provider-capability* gap and are tracked as #501.
+value (#497) and for every drop the gateway can see (#498); the twelve
+request-side ones are closed in **#501** — the parameter is still
+forwarded, and the caller is told it did not apply to this backend.
+Assistant **audio output** and `image_url.detail` remain unrepresentable
+in the IR.
 
 **Test:** `tests/test_fix_round164.py::test_logprobs_decodes_from_an_openai_response_into_the_ir` (+ 4 siblings), `tests/test_fix_round111.py::test_logprobs_round_trips_through_ir`
 

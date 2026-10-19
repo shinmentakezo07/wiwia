@@ -499,3 +499,43 @@ class WarningMixin:
         if not isinstance(message, str) or not message:
             return
         self.translation_warnings.append(message)
+
+
+# The OpenAI-2026 platform params that ride ``Request.extras`` (the IR does
+# not model them) and that an OpenAI-shaped upstream honours and bills for.
+#
+# The gap they closed (AUDIT #501): a caller that set ``logit_bias`` against
+# an Anthropic or Gemini deployment got a request the backend silently
+# ignored, with nothing anywhere saying so. These are *request-side* knobs —
+# unlike ``logprobs`` (#326) they have no response-side value, so there is
+# nothing to carry back; the only honest signal is to say the parameter did
+# not apply.
+#
+# Kept here rather than in one adapter because BOTH layers need it: the
+# OpenAI-shaped adapters forward them (they CAN honour them), and the
+# Anthropic/Gemini adapters must report that they cannot. A single table
+# keeps the two sides from drifting — a param added to the forward list
+# without a row here would be silently dropped on every non-OpenAI backend,
+# which is the exact defect this table exists to prevent.
+OPENAI_PLATFORM_PARAMS: frozenset[str] = frozenset({
+    "user", "frequency_penalty", "presence_penalty", "logit_bias",
+    "service_tier", "store", "prediction", "modalities", "verbosity",
+    "safety_identifier", "prompt_cache_key", "web_search_options",
+    "logprobs", "top_logprobs",
+})
+
+
+def unhonoured_platform_params(extras: Any) -> list[str]:
+    """The OpenAI-2026 platform params in *extras* that a non-OpenAI backend drops.
+
+    *extras* is the IR's ``Request.extras`` — the request-body keys the
+    inbound codec did not model. A param in this set is one an
+    OpenAI-shaped upstream honours and bills for; on a provider with no
+    such field the value is simply lost.
+
+    Returns the sorted names, so a caller-facing message is deterministic.
+    Total: a non-mapping *extras* yields ``[]``.
+    """
+    if not isinstance(extras, dict):
+        return []
+    return sorted(k for k in extras if k in OPENAI_PLATFORM_PARAMS)

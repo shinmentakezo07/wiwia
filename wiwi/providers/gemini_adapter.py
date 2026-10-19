@@ -17,6 +17,7 @@ from wiwi.providers.base import (
     as_dict,
     as_list,
     as_str,
+    unhonoured_platform_params,
 )
 from wiwi.streaming import deltas as dl
 
@@ -238,6 +239,13 @@ class GeminiAdapter(WarningMixin):
             # Gemini's generationConfig has no seed field. Reported to the
             # caller, who set it (AUDIT #498).
             self.warn("seed has no Gemini equivalent and was dropped")
+        # OpenAI-2026 platform params the caller set (logit_bias,
+        # frequency_penalty, service_tier, …). Gemini has no such fields in
+        # generationConfig, so the request went out with them ignored. The
+        # caller is told which ones did not apply (AUDIT #501).
+        for name in unhonoured_platform_params(req.extras):
+            self.warn(
+                f"'{name}' has no Gemini equivalent and was dropped")
         if g.response_format and g.response_format.type in ("json_object",
                                                             "json_schema"):
             gen["responseMimeType"] = "application/json"

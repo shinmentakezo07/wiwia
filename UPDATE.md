@@ -154,6 +154,39 @@ rather than forwarded as a malformed `responseSchema`.
 (`output_config.format`) and was never affected — check the sibling adapter
 before assuming a gap.
 
+### 164.6 The OpenAI-2026 platform params a non-OpenAI backend cannot honour are now reported
+
+**Files**: `wiwi/providers/base.py` (new `OPENAI_PLATFORM_PARAMS`,
+`unhonoured_platform_params`), `wiwi/providers/anthropic_adapter.py`,
+`wiwi/providers/gemini_adapter.py`, `AUDIT.md` #501.
+
+**Symptom**: `logit_bias`, `frequency_penalty`, `service_tier` and nine
+siblings are honoured and billed by an OpenAI-shaped upstream and simply
+absent on the Messages API and in Gemini's `generationConfig`. A caller
+that set one of them against a non-OpenAI deployment got a request the
+backend ignored, with nothing anywhere saying so.
+
+**After**: the Anthropic and Gemini adapters report each such param by
+name. The parameter is still **forwarded** — suppressing it would be a
+silent behaviour change for any deployment whose *typed* provider
+understates what it actually talks to, and the provider type is
+configuration, not a fact about the endpoint. The OpenAI-shaped adapters
+stay silent, because they honour the params: a warning there would be a
+false alarm on every ordinary request that sets `logprobs` or
+`service_tier`.
+
+**Invariant**: the param table lives in `providers/base.py`, not in one
+adapter, because BOTH layers need it — the OpenAI-shaped adapters forward
+these (they CAN honour them) and the Anthropic/Gemini adapters must report
+that they cannot. A single table keeps the two sides from drifting: a param
+added to the forward list without a row here would be silently dropped on
+every non-OpenAI backend, which is the exact defect the table prevents.
+
+**Two more strippers, found while closing this**: NIM strict-validates its
+body and 400s on these ("Unsupported parameter(s): `prompt_cache_key`"), so
+its strip is mandatory — and the OpenCode Responses route never forwards
+extras at all. Both were silent about what they removed; both now report it.
+
 ---
 
 ## Round 158 — Inbound-surface divergences on the translation path (2026-10-18)

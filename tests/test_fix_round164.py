@@ -464,6 +464,152 @@ def test_gemini_adapter_warns_when_it_drops_a_document_title():
     assert any("title" in w.lower() or "context" in w.lower() for w in warnings)
 
 
+def test_openai_adapter_warns_when_it_drops_a_document_title():
+    """The same gap on the Chat Completions wire, which forwards the document
+    but not its name or context."""
+    adapter = OpenAIAdapter()
+    req = ir.Request(
+        model="m",
+        messages=[ir.Message(role="user", parts=[
+            ir.DocumentPart(b64="DOCB64", mime="application/pdf",
+                            name="report.pdf", context="Q3 revenue"),
+        ])],
+    )
+    adapter.encode_request(req, "m", {
+        "provider_type": "openai", "drop_params": True, "extra_body": {},
+    })
+    warnings = take_adapter_warnings(adapter)
+    assert any("title" in w.lower() or "context" in w.lower() for w in warnings), (
+        "a dropped document title must reach the caller")
+
+
+def test_anthropic_adapter_keeps_the_document_title():
+    """Anthropic has a native spelling — the guard must not fire there."""
+    adapter = AnthropicAdapter()
+    req = ir.Request(
+        model="m",
+        messages=[ir.Message(role="user", parts=[
+            ir.DocumentPart(b64="DOCB64", mime="application/pdf",
+                            name="report.pdf", context="Q3 revenue"),
+        ])],
+    )
+    body = adapter.encode_request(req, "claude-sonnet-4-5", {
+        "provider_type": "anthropic", "drop_params": True, "extra_body": {},
+    })
+    doc = body["messages"][0]["content"][0]
+    assert doc["title"] == "report.pdf"
+    assert doc["context"] == "Q3 revenue"
+    assert not take_adapter_warnings(adapter)
+
+
+# ---------------------------------------------------------------------------
+# #501 — the OpenAI-2026 platform params a non-OpenAI backend cannot honour
+# ---------------------------------------------------------------------------
+
+
+def test_anthropic_adapter_reports_the_platform_params_it_cannot_honour():
+    """``logit_bias`` and friends are honoured and billed by OpenAI only.
+
+    On the Messages API they are simply absent, so the caller set a
+    constraint the backend never applied — and had no way to know.
+    """
+    adapter = AnthropicAdapter()
+    req = ir.Request(
+        model="m",
+        messages=[ir.Message(role="user", parts=[ir.TextPart("x")])],
+        extras={"logit_bias": {"123": -100}, "service_tier": "flex",
+                "unmodelled_param": 1},
+    )
+    adapter.encode_request(req, "claude-sonnet-4-5", {
+        "provider_type": "anthropic", "drop_params": True, "extra_body": {},
+    })
+    warnings = take_adapter_warnings(adapter)
+    assert any("logit_bias" in w for w in warnings), warnings
+    assert any("service_tier" in w for w in warnings), warnings
+    # A param that is NOT an OpenAI platform one is not this channel's
+    # business — it is an unmodelled extra, handled by the drop_params policy.
+    assert not any("unmodelled_param" in w for w in warnings), warnings
+
+
+def test_gemini_adapter_reports_the_platform_params_it_cannot_honour():
+    adapter = GeminiAdapter()
+    req = ir.Request(
+        model="m",
+        messages=[ir.Message(role="user", parts=[ir.TextPart("x")])],
+        extras={"frequency_penalty": 0.5, "verbosity": "low"},
+    )
+    adapter.encode_request(req, "m", {
+        "provider_type": "gemini", "drop_params": True, "extra_body": {},
+    })
+    warnings = take_adapter_warnings(adapter)
+    assert any("frequency_penalty" in w for w in warnings), warnings
+    assert any("verbosity" in w for w in warnings), warnings
+
+
+def test_the_openai_adapter_does_not_report_params_it_can_honour():
+    """The OpenAI-shaped upstream DOES honour these — no warning.
+
+    A warning here would be a false alarm on every ordinary OpenAI request
+    that sets ``logprobs`` or ``service_tier``.
+    """
+    adapter = OpenAIAdapter()
+    req = ir.Request(
+        model="m",
+        messages=[ir.Message(role="user", parts=[ir.TextPart("x")])],
+        extras={"logit_bias": {"123": -100}, "service_tier": "flex"},
+    )
+    body = adapter.encode_request(req, "m", {
+        "provider_type": "openai", "drop_params": True, "extra_body": {},
+    })
+    assert body["logit_bias"] == {"123": -100}
+    assert body["service_tier"] == "flex"
+    assert not take_adapter_warnings(adapter)
+
+
+def test_nim_adapter_reports_the_platform_params_it_strips():
+    """NIM 400s on these, so they MUST go — but the caller must be told.
+
+    NIM strict-validates its request body ("Unsupported parameter(s):
+    `prompt_cache_key`"), so the strip is mandatory. It was also silent:
+    the caller set ``logit_bias`` and the request looked honoured.
+    """
+    from wiwi.providers.nim_adapter import NimAdapter
+
+    adapter = NimAdapter()
+    req = ir.Request(
+        model="m",
+        messages=[ir.Message(role="user", parts=[ir.TextPart("x")])],
+        extras={"logit_bias": {"123": -100}, "prompt_cache_key": "k"},
+    )
+    body = adapter.encode_request(req, "m", {
+        "provider_type": "nvidia-nim", "drop_params": True, "extra_body": {},
+    })
+    assert "logit_bias" not in body, "NIM 400s on this — it must be stripped"
+    assert "prompt_cache_key" not in body
+    warnings = take_adapter_warnings(adapter)
+    assert any("logit_bias" in w for w in warnings), warnings
+    assert any("prompt_cache_key" in w for w in warnings), warnings
+
+
+def test_the_opencode_responses_route_reports_the_platform_params():
+    """The OpenCode Responses route never forwards extras — so it drops
+    every platform param, and says so."""
+    from wiwi.providers.opencode_adapter import OpencodeAdapter
+
+    adapter = OpencodeAdapter()
+    req = ir.Request(
+        model="m",
+        messages=[ir.Message(role="user", parts=[ir.TextPart("x")])],
+        extras={"logit_bias": {"123": -100}},
+    )
+    # A gpt-* model routes to the Responses wire.
+    adapter.encode_request(req, "gpt-4o", {
+        "provider_type": "opencode", "drop_params": True, "extra_body": {},
+    })
+    warnings = take_adapter_warnings(adapter)
+    assert any("logit_bias" in w for w in warnings), warnings
+
+
 # ---------------------------------------------------------------------------
 # #496 — the other OpenAI-2026 platform params
 # ---------------------------------------------------------------------------

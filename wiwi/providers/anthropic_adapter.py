@@ -16,6 +16,7 @@ from wiwi.providers.base import (
     as_dict,
     as_list,
     as_str,
+    unhonoured_platform_params,
 )
 from wiwi.streaming import deltas as dl
 
@@ -597,6 +598,13 @@ class AnthropicAdapter(WarningMixin):
         # off than one that was told the knob was dropped.
         if g.seed is not None:
             self.warn("seed has no Messages API equivalent and was dropped")
+        # OpenAI-2026 platform params the caller set (logit_bias,
+        # frequency_penalty, service_tier, …). The Messages API has no such
+        # fields, so the upstream honoured and billed for nothing. The
+        # caller is told which ones did not apply (AUDIT #501).
+        for name in unhonoured_platform_params(req.extras):
+            self.warn(
+                f"'{name}' has no Messages API equivalent and was dropped")
 
         if req.tools:
             rendered: list[dict[str, Any]] = []

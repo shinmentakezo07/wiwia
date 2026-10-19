@@ -128,6 +128,7 @@ from wiwi.providers.base import (
     as_dict,
     as_list,
     take_adapter_warnings,
+    unhonoured_platform_params,
 )
 from wiwi.providers.gemini_adapter import GeminiAdapter
 from wiwi.providers.openai_adapter import OpenAIAdapter
@@ -1040,6 +1041,12 @@ def _encode_responses_request(req: ir.Request, model_id: str,
     them (AUDIT #498).
     """
     g = req.gen_params
+    # The OpenAI-2026 platform params the caller set. This route does not
+    # forward extras at all, so every one of them is dropped here — and the
+    # caller is told which ones (AUDIT #501).
+    if callable(warn):
+        for name in unhonoured_platform_params(req.extras):
+            warn(f"'{name}' is not supported on this route and was dropped")
     instructions_parts: list[str] = []
     input_items: list[dict[str, Any]] = []
     for m in req.messages:

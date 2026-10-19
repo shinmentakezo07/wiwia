@@ -139,6 +139,14 @@ class NimAdapter(OpenAIAdapter):
         for key in ("prompt_cache_key", "safety_identifier", "store",
                     "verbosity", "web_search_options", "prediction",
                     "modalities", "audio", "logit_bias", "service_tier"):
+            if key in body:
+                # The caller set this and it did not apply. NIM would 400 on
+                # it, so it has to go — but the caller must be told it went,
+                # or a request that set ``logit_bias`` looks honoured when
+                # the backend never saw it (AUDIT #501).
+                self.warn(
+                    f"'{key}' is not supported by this provider and was "
+                    f"dropped")
             body.pop(key, None)
 
         # If the client or deployment supplied chat_template_kwargs, strip
