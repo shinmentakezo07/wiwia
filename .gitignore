@@ -78,3 +78,6 @@ wiwi3/bin/
 # as key.md / code.md: a plaintext credential with no naming convention
 # this file already covers, so `git add -A` would otherwise commit it.
 kye
+
+# Superdesign scratch (generated component HTML) — never commit
+.superdesign/tmp/
