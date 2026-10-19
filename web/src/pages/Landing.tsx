@@ -523,6 +523,74 @@ function CheckIcon({ yes }: { yes: boolean }) {
   );
 }
 
+// Three real invocations from docs/QUICKSTART.md — the "30 seconds" claim is
+// the step count, so every line here must actually work when pasted. Kept
+// short enough to fit the card at 375px without clipping or mid-token breaks.
+const SETUP_STEPS: { title: string; command: string }[] = [
+  { title: "Start the gateway", command: "wiwi --config wiwi.yaml" },
+  { title: "Mint a virtual key", command: "POST /admin/keys/generate" },
+  { title: "Send any dialect", command: "POST /v1/messages" },
+];
+
+function SetupCard() {
+  const [copied, setCopied] = useState<number | null>(null);
+  return (
+    <div className="relative min-w-0">
+      <div className="hero-grid pointer-events-none absolute -inset-16 opacity-60" aria-hidden />
+      <div
+        className="pointer-events-none absolute left-1/2 top-1/2 h-[300px] w-[420px] -translate-x-1/2 -translate-y-1/2 rounded-full blur-3xl"
+        style={{ background: "radial-gradient(circle, rgba(124,58,237,0.10) 0%, transparent 70%)" }}
+        aria-hidden
+      />
+      <div className="relative overflow-hidden rounded-[var(--admin-radius)] border border-[var(--admin-border)] bg-[var(--admin-surface)]">
+        <div className="relative flex h-12 items-center border-b border-[var(--admin-border)] px-5">
+          <div className="flex items-center gap-1.5" aria-hidden>
+            <span className="size-1.5 rounded-full bg-white/[0.14]" />
+            <span className="size-1.5 rounded-full bg-white/[0.10]" />
+            <span className="size-1.5 rounded-full bg-white/[0.08]" />
+          </div>
+          <span className="admin-label absolute left-1/2 -translate-x-1/2 font-mono">30 seconds</span>
+        </div>
+        {SETUP_STEPS.map((step, i) => (
+          <div
+            key={step.title}
+            className={`px-5 py-5 ${i < SETUP_STEPS.length - 1 ? "border-b border-[var(--admin-border)]" : ""}`}
+          >
+            <div className="flex items-baseline gap-3">
+              <span className="font-mono text-[10px] font-semibold tracking-[0.14em] text-[var(--admin-text-dim)]">
+                {String(i + 1).padStart(2, "0")}
+              </span>
+              <h3 className="text-[13px] font-medium text-[var(--admin-text)]">{step.title}</h3>
+            </div>
+            <div className="mt-3 flex min-h-11 items-center gap-2 rounded-lg bg-white/[0.02] pl-3">
+              <code className="min-w-0 flex-1 overflow-x-auto py-2 pr-1 font-mono text-[12px] whitespace-nowrap text-[var(--admin-text-muted)]">
+                {step.command}
+              </code>
+              <button
+                type="button"
+                aria-label={`Copy ${step.title.toLowerCase()}`}
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(step.command);
+                    setCopied(i);
+                    setTimeout(() => setCopied(null), 1500);
+                  } catch {
+                    // Clipboard can be denied in an insecure context; leave the
+                    // command selectable rather than claiming a copy happened.
+                  }
+                }}
+                className="inline-flex size-11 shrink-0 items-center justify-center rounded-[8px] text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)] focus-visible:ring-2 focus-visible:ring-[var(--admin-accent)]/60 focus-visible:outline-none"
+              >
+                {copied === i ? <Check size={14} /> : <Copy size={14} />}
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ── page ───────────────────────────────────────────────────────────────────
 
 export function LandingPage() {
@@ -1012,25 +1080,37 @@ export function LandingPage() {
       {/* ══ final CTA ══ */}
       <section className="relative overflow-hidden py-32 md:py-40">
         <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[var(--admin-border)] to-transparent" />
-        <div className="absolute left-1/2 top-1/2 h-[400px] w-[600px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-blue-500/[0.06] blur-3xl" aria-hidden />
-        <div className="relative mx-auto max-w-3xl text-center">
-          <h2 className="text-4xl font-bold tracking-tight text-[var(--admin-text)] md:text-5xl lg:text-6xl">
-            Start routing requests
-            <br />in 30 seconds
-          </h2>
-          <p className="mx-auto mt-6 max-w-xl text-lg text-[var(--admin-text-muted)]">
-            Join thousands of developers processing 100B+ tokens through WIWI Gateway.
-            Free tier included, no credit card required.
-          </p>
-          <div className="mt-10 flex flex-col items-center justify-center gap-4 sm:flex-row">
-            <Link to="/signup" className="wiwi-shimmer group inline-flex h-12 items-center justify-center gap-2 rounded-[10px] bg-gradient-to-b from-brand-500 to-brand-700 px-8 text-base font-medium text-white shadow-lg shadow-brand-600/20 transition-[filter] duration-150 hover:brightness-110">
-              Create Free Account
-              <ArrowRight size={18} className="transition-transform duration-150 group-hover:translate-x-0.5" />
-            </Link>
-            <a href="https://github.com/shinmentakezo07/wiwia" target="_blank" rel="noopener noreferrer" className="inline-flex h-12 items-center justify-center gap-2 rounded-[10px] border border-[var(--admin-border)] bg-transparent px-8 text-base font-medium text-[var(--admin-text)] transition-colors hover:bg-white/[0.04]">
-              Self-host WIWI Gateway
-            </a>
+        <div className="relative mx-auto grid max-w-6xl items-center gap-14 px-6 lg:grid-cols-2 lg:gap-20">
+          <div className="min-w-0">
+            <span className="admin-label block">Get started</span>
+            <h2 className="mt-5 text-4xl font-bold leading-[1.06] tracking-tight text-[var(--admin-text)] md:text-5xl lg:text-[54px]">
+              Start routing requests
+              <br />
+              <span className="text-brand-400">in 30 seconds</span>
+            </h2>
+            <p className="mt-6 max-w-xl text-base leading-relaxed text-[var(--admin-text-muted)]">
+              Join thousands of developers processing 100B+ tokens through WIWI Gateway.
+              Free tier included, no credit card required.
+            </p>
+            <div className="mt-10 flex flex-col gap-3 sm:flex-row">
+              <Link
+                to="/signup"
+                className="wiwi-shimmer group inline-flex h-12 w-full items-center justify-center gap-2 rounded-[10px] bg-gradient-to-b from-brand-500 to-brand-700 px-6 text-base font-medium text-white shadow-lg shadow-brand-600/20 transition-[filter] duration-150 hover:brightness-110 focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--admin-bg)] focus-visible:outline-none sm:w-auto"
+              >
+                Create Free Account
+                <ArrowRight size={18} className="transition-transform duration-150 group-hover:translate-x-0.5" />
+              </Link>
+              <a
+                href="https://github.com/shinmentakezo07/wiwia"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-[10px] border border-[var(--admin-border)] bg-transparent px-6 text-base font-medium text-[var(--admin-text)] transition-colors hover:bg-white/[0.04] focus-visible:ring-2 focus-visible:ring-[var(--admin-accent)]/60 focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--admin-bg)] focus-visible:outline-none sm:w-auto"
+              >
+                Self-host WIWI Gateway
+              </a>
+            </div>
           </div>
+          <SetupCard />
         </div>
       </section>
     </div>
