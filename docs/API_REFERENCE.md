@@ -79,11 +79,13 @@ OpenAI-style model list of the model groups visible to the authenticated key.
 
 | Header | Meaning |
 |---|---|
-| `x-wiwi-request-id` | Request ID, echoed on every SSE frame's `id:` field |
+| `x-wiwi-request-id` | Request ID, echoed as a response header on every reply |
 | `x-wiwi-trace-id` | Trace ID (32 hex), only when `telemetry.enabled`. Pair it with the collector to pull the exact trace; see `docs/CONFIG.md` § `telemetry` |
 | `x-wiwi-stream-id` | Stream journal ID — pass back on reconnect to replay |
 | `x-wiwi-session-id` | Client session identity, used only when `router_settings.session_affinity` is on: pins the session to the deployment that served it so upstream prompt caches stay warm. A pin is dropped the moment that deployment is unhealthy or above this request's lane ceiling. Also accepted as a `session_id` query parameter for clients that cannot set headers; truncated to 128 chars. |
-| `Last-Event-ID` | SSE standard header; reconnect replays missed frames |
+| `Last-Event-ID` | SSE standard header; reconnect replays missed frames. The value is the `id:` field of the last frame the client received — a monotonic per-frame sequence number, not the request id |
+
+Every SSE frame carries an `id:` line holding a monotonic per-frame sequence number (`stream_event_ids`, on by default). That is the value a reconnecting client sends back as `Last-Event-ID`.
 
 Stream journals are ON by default (`.wiwi/journals/`, 600 s TTL, 1 MiB cap): a client reconnecting with `x-wiwi-stream-id` + `Last-Event-ID` replays missed frames even after a wiwi restart. Mid-stream provider death resumes from the tape on a fallback deployment (continuation messages are synthesized from partial output).
 

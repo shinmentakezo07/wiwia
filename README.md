@@ -476,7 +476,7 @@ router_settings:
   stream_loop_detection: true
   stream_coalesce: false               # merge TextDeltas under backpressure
   stream_resume: off                   # off | content_only | enabled
-  stream_event_ids: false              # monotonic SSE ids for Last-Event-ID
+  stream_event_ids: true               # monotonic SSE ids for Last-Event-ID
   # -- metrics --
   prometheus_enabled: false
   prometheus_path: /metrics

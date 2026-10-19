@@ -183,6 +183,7 @@ from wiwi.providers.registry import fresh_adapter, get_adapter
 from wiwi.providers.workbuddy_auto_refresh import refresh_key_now
 from wiwi.ratelimit.memory import RateLimiter
 from wiwi.server import backup
+from wiwi.streaming.sse import split_frames
 
 
 class _SerializedAsyncEngine:
@@ -2657,7 +2658,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
         from wiwi.streaming import deltas as dl
         encoder, style = encoder_pair
         errored = False
+        # The client's ``Last-Event-ID`` names a single FRAME, so the sequence
+        # counter counts frames; the chunk counter is separate and is what the
+        # ``wiwi.chunks`` attribute reports (AUDIT #493).
         _seq = 0
+        _chunks = 0
         # Capture is needed by the spend log and by the Responses store (spec B);
         # with neither asking for it the accumulators stay empty and no per-token
         # string work happens.
@@ -2772,27 +2777,38 @@ def create_app(config: WiwiConfig) -> FastAPI:
                                       "wiwi.cost": ctx.cost or None,
                                       "wiwi.streamed": True,
                                       "wiwi.errored": errored,
-                                      "wiwi.chunks": _seq,
+                                      "wiwi.chunks": _chunks,
                                       "wiwi.ttft_ms": (
                                           int((ctx.first_token_at - ctx.started) * 1000)
                                           if ctx.first_token_at else None)})
 
         try:
             async def _emit(chunk: bytes) -> None:
-                nonlocal _seq
+                nonlocal _seq, _chunks
+                frames = split_frames(chunk)
+                if not frames:
+                    return
+                _chunks += 1
+                # The sequence counter counts FRAMES, not chunks: the client's
+                # ``Last-Event-ID`` names a single frame, and the journal
+                # slices a chunk at frame granularity against that cursor
+                # (AUDIT #493). A chunk carries several frames (the encoders'
+                # terminal frames do), so the chunk's frame range is
+                # ``first_seq .. _seq`` and both ends go to the journal.
+                first_seq = _seq + 1
                 if event_ids:
                     # Each sub-frame takes the next id so a reconnect cursor
                     # lands on a single frame rather than a whole chunk
-                    # (AUDIT #283). The journal records the same numbering, so
-                    # Last-Event-ID means one thing to both sides.
-                    tagged, last_id = _inject_id(chunk, _seq + 1)
+                    # (AUDIT #283). The journal records the same numbering,
+                    # so Last-Event-ID means one thing to both sides.
+                    tagged, last_id = _inject_id(chunk, first_seq)
                     _seq = last_id
                 else:
-                    _seq += 1
+                    _seq += len(frames)
                     tagged = chunk
                 if journal is not None:
                     with contextlib.suppress(Exception):
-                        await journal.append(_seq, tagged)
+                        await journal.append(_seq, tagged, first_seq=first_seq)
                 yield tagged
             if first is not None:
                 if isinstance(first, dl.StreamError):

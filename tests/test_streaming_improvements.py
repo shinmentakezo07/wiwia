@@ -455,7 +455,10 @@ class TestConfigSettings:
     def test_stream_event_ids_default(self):
         from wiwi.config import RouterSettings
         rs = RouterSettings()
-        assert rs.stream_event_ids is False
+        # ON by default: the stream journal is on by default too, and a
+        # reconnecting client can only name the frame it stopped at if the
+        # frames carry an id (AUDIT #494).
+        assert rs.stream_event_ids is True
 
     def test_grace_drain_default(self):
         from wiwi.config import RouterSettings

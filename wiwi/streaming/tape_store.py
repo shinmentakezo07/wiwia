@@ -13,9 +13,16 @@ per-key scoping below would be defeatable by a crafted id (AUDIT #191).
 
 Line schema (one JSON object per line):
     {"seq": <int>, "ts": <unix seconds>, "data": "<base64 SSE chunk>",
-     "done": <bool>}
-``seq`` is the monotonic chunk counter shared with SSE id injection; the
-``done`` line is written once with ``data: ""`` when the original stream
+     "done": <bool>, "fs": <int>}
+``seq`` is the sequence number of the LAST frame in the chunk; ``fs`` is the
+number of its FIRST frame. A chunk may carry several SSE frames (chat's
+``final_frame()`` is the finish chunk plus the usage chunk), and the client
+names a single FRAME in its ``Last-Event-ID`` — so the two are reconciled by
+slicing the chunk at frame granularity against the cursor (see
+``_frames_after``). ``fs`` is absent on records written before that field
+existed, where it defaults to ``seq`` (a single-frame chunk).
+
+The ``done`` line is written once with ``data: ""`` when the original stream
 terminates. Journals expire after ``stream_journal_ttl_s`` and are swept at
 startup and on a periodic background timer (see the lifespan sweep loop in
 ``server/app.py``); ``release()`` does not sweep.
@@ -42,6 +49,8 @@ from pathlib import Path
 import orjson
 import structlog
 
+from wiwi.streaming.sse import split_frames
+
 # Request ids the journal directory may name directly. ``RequestContext``
 # generates ``uuid4().hex[:16]``; a client-supplied ``x-wiwi-stream-id`` is
 # adopted verbatim when a reconnect misses the replay gate (AUDIT #117), so
@@ -63,6 +72,29 @@ except OSError:  # pragma: no cover - platform-dependent
     _DIR_FSYNC = False
 
 log = structlog.get_logger("wiwi.journals")
+
+
+def _frames_after(chunk: bytes, first_seq: int,
+                  cursor: int) -> list[tuple[int, bytes]]:
+    """The frames of *chunk* whose sequence number is greater than *cursor*.
+
+    A journal record holds one CHUNK, and a chunk may carry several SSE
+    frames: the encoders' terminal frames do (chat's ``final_frame()`` is the
+    finish chunk plus the usage chunk, Anthropic's is ``content_block_stop``
+    plus ``message_delta``). The frames inside a chunk are numbered
+    consecutively from *first_seq*, so a cursor that lands INSIDE the chunk
+    must skip the frames the client already has — otherwise the replay hands
+    back frames the client has already applied (AUDIT #493).
+
+    The frames are returned with their blank-line terminator, so a replay can
+    write them straight to the client.
+    """
+    out: list[tuple[int, bytes]] = []
+    for i, frame in enumerate(split_frames(chunk)):
+        seq = first_seq + i
+        if seq > cursor:
+            out.append((seq, frame + b"\n\n"))
+    return out
 
 
 class JournalTail:
@@ -104,8 +136,13 @@ class JournalTail:
     def read_next(self) -> list[tuple[int, bytes, bool]]:
         """Consume complete lines appended since the last call.
 
-        Returns ``(seq, chunk, done)`` triples in order. Ownership records
+        Returns ``(seq, frame, done)`` triples in order. Ownership records
         (``seq == 0``, no payload) are skipped, matching ``read_after``.
+
+        A record holds a CHUNK that may carry several frames; like
+        ``read_after`` the tail slices it at frame granularity, so a cursor
+        that lands inside a chunk does not re-deliver the frames before it
+        (AUDIT #493).
         """
         try:
             with open(self._path, "rb") as fh:
@@ -145,8 +182,20 @@ class JournalTail:
             # caller's fixed ``last_seq`` rather than an advancing cursor.
             if not done and seq <= self._last_seq:
                 continue
+            chunk = base64.b64decode(rec.get("data", ""))
+            if done:
+                self._last_seq = max(self._last_seq, seq)
+                out.append((seq, chunk, True))
+                continue
+            first = rec.get("fs")
+            if not isinstance(first, int):
+                first = seq
+            frames = _frames_after(chunk, first, self._last_seq)
+            if not frames:
+                continue
             self._last_seq = max(self._last_seq, seq)
-            out.append((seq, base64.b64decode(rec.get("data", "")), done))
+            for fseq, frame in frames:
+                out.append((fseq, frame, False))
         return out
 
 
@@ -207,20 +256,35 @@ class StreamJournal:
         return self._last_seq
 
     @staticmethod
-    def _encode_record(seq: int, chunk: bytes, done: bool) -> bytes:
+    def _encode_record(seq: int, chunk: bytes, done: bool,
+                       first_seq: int | None = None) -> bytes:
         return orjson.dumps({
             "seq": seq,
             "ts": time.time(),
             "data": base64.b64encode(chunk).decode("ascii"),
             "done": done,
+            # The chunk's FIRST frame. A chunk can hold several frames, and
+            # the client names a single frame in its ``Last-Event-ID``, so the
+            # reader needs both ends of the range to slice at frame
+            # granularity. Absent on records written before the field
+            # existed, where it defaults to ``seq`` (a single-frame chunk).
+            "fs": seq if first_seq is None else first_seq,
         }) + b"\n"
 
     def _open_sync(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         return open(self.path, "ab")
 
-    async def append(self, seq: int, chunk: bytes, done: bool = False) -> None:
-        record = self._encode_record(seq, chunk, done)
+    async def append(self, seq: int, chunk: bytes, done: bool = False,
+                     first_seq: int | None = None) -> None:
+        """Append one chunk to the journal.
+
+        *seq* is the sequence number of the chunk's LAST frame and
+        *first_seq* that of its FIRST frame; the two differ when the chunk
+        carries several SSE frames (the encoders' terminal frames do). A
+        reader that must answer "the frames after this cursor" needs both.
+        """
+        record = self._encode_record(seq, chunk, done, first_seq)
 
         def _write(fh, path) -> None:
             # Per-journal byte cap: once exceeded, stop appending for the rest
@@ -409,7 +473,8 @@ class JournalStore:
         (or one written by a version predating this map) and genuinely
         reports None, preserving the documented restart-replay compat.
         """
-        for seq, _chunk, _done, owner in self._read_records(request_id, -1):
+        for seq, _chunk, _done, _first, owner in self._read_records(
+                request_id, -1):
             if seq == 0 and owner is not None:
                 return owner
         intent = self._owner_intent.get(request_id)
@@ -455,7 +520,13 @@ class JournalStore:
         self._durable_intent.discard(request_id)
 
     def read_after(self, request_id: str, last_seq: int) -> list[tuple[int, bytes]]:
-        """Read data records with seq > last_seq, in order.
+        """Read the client-visible FRAMES with seq > last_seq, in order.
+
+        The cursor the client sends (``Last-Event-ID``) names a single FRAME,
+        but a journal record holds a whole CHUNK that may carry several
+        frames — so the answer is sliced at frame granularity: a chunk
+        straddling the cursor contributes only the frames the client has not
+        seen (AUDIT #493).
 
         Done-marker and ownership records are internal (empty payload, not
         client-visible SSE) and are excluded — use :meth:`is_complete` for
@@ -463,17 +534,19 @@ class JournalStore:
         appends: partial trailing lines are ignored.
         """
         out: list[tuple[int, bytes]] = []
-        for seq, chunk, done, _owner in self._read_records(request_id, last_seq):
+        for seq, chunk, done, first_seq, _owner in self._read_records(
+                request_id, last_seq):
             if not done:
-                out.append((seq, chunk))
+                out.extend(_frames_after(chunk, first_seq, last_seq))
         return out
 
-    def _read_records(self, request_id: str,
-                      last_seq: int) -> list[tuple[int, bytes, bool, str | None]]:
+    def _read_records(
+        self, request_id: str, last_seq: int
+    ) -> list[tuple[int, bytes, bool, int, str | None]]:
         path = self.path_for(request_id)
         if not path.exists():
             return []
-        out: list[tuple[int, bytes, bool, str | None]] = []
+        out: list[tuple[int, bytes, bool, int, str | None]] = []
         try:
             raw = path.read_bytes()
         except OSError:
@@ -489,9 +562,14 @@ class JournalStore:
             if not isinstance(seq, int) or seq <= last_seq:
                 continue
             owner = rec.get("owner")
+            first = rec.get("fs")
+            if not isinstance(first, int):
+                # A record written before the field existed: a single frame.
+                first = seq
             out.append((seq,
                         base64.b64decode(rec.get("data", "")),
                         bool(rec.get("done", False)),
+                        first,
                         owner if isinstance(owner, str) else None))
         return out
 
@@ -514,7 +592,7 @@ class JournalStore:
 
     def is_complete(self, request_id: str) -> bool:
         """True when the journal carries the original stream's done record."""
-        return any(done for _, _, done, _owner
+        return any(done for _, _, done, _first, _owner
                    in self._read_records(request_id, 0))
 
     def is_expired(self, request_id: str, now: float | None = None) -> bool:

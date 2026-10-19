@@ -330,7 +330,13 @@ class RouterSettings(BaseModel):
     stream_resume: Literal["off", "content_only", "enabled"] = "off"
     stream_resume_max_retries: int = 1  # how many mid-stream resume attempts
     # SSE Last-Event-ID: assign monotonic event ids for client-side resumption.
-    stream_event_ids: bool = False
+    #
+    # ON by default: the stream journal is on by default too, and a journal
+    # whose cursor the client cannot express is useless — with no ``id:`` line
+    # on the wire a reconnecting client cannot name the frame it stopped at,
+    # so the whole response is replayed and the client applies content it
+    # already has a second time (AUDIT #494). The ids cost ~8 bytes a frame.
+    stream_event_ids: bool = True
     # Client-gone grace drain: on disconnect, keep pumping upstream for
     # accurate billing. 0 = cancel immediately (current behavior).
     stream_grace_drain_s: float = 0.0

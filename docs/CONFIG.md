@@ -150,7 +150,7 @@ Streaming resilience and journal knobs live here too — see the tables below.
 | `stream_coalesce_max_ms` | `50.0` | Time ceiling per coalesced flush. |
 | `stream_resume` | `"off"` | `off`, `content_only`, or `enabled`. Mid-stream failover retries on a fallback deployment with partial output prepended. |
 | `stream_resume_max_retries` | `1` | Mid-stream resume attempts. |
-| `stream_event_ids` | `false` | Assign monotonic SSE event ids for `Last-Event-ID` resumption. |
+| `stream_event_ids` | `true` | Assign monotonic SSE event ids for `Last-Event-ID` resumption. On by default: the stream journal is on by default too, and a reconnecting client can only name the frame it stopped at if the frames carry an id. |
 | `stream_grace_drain_s` | `0.0` | On client disconnect, keep pumping upstream for accurate billing. `0` cancels immediately. |
 
 ### Load shedding, priority lanes and session affinity

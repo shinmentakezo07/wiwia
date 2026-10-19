@@ -70,6 +70,23 @@ class LineSSEParser:
         return None
 
 
+def split_frames(chunk: bytes) -> list[bytes]:
+    """Split one chunk of SSE bytes into its individual frames.
+
+    A chunk may carry several frames joined by blank-line boundaries — the
+    encoders emit them that way (chat's ``final_frame()`` is the finish chunk
+    plus the usage chunk, Anthropic's is ``content_block_stop`` plus
+    ``message_delta``). The frames are returned in order WITHOUT the blank-line
+    terminator; empty segments (a leading or trailing separator) are dropped.
+
+    The blank-line boundary is the only delimiter the SSE wire format has, and
+    wiwi writes single-line ``data:`` payloads (JSON has no raw newlines), so
+    a split on it is exact for the frames this codebase produces — the same
+    assumption ``_inject_id`` already makes.
+    """
+    return [f for f in chunk.split(b"\n\n") if f]
+
+
 def _sse_sanitize(value: str) -> str:
     """Strip CR/LF so a caller-controlled value cannot inject extra SSE lines
     (or a full forged frame) into the output stream."""
