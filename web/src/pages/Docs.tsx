@@ -1,13 +1,19 @@
-// Docs — public API documentation for the gateway. A reference-manual layout:
-// a numbered left rail that tracks the reader, hairline-separated sections
-// (no floating cards), tabbed code examples with copy buttons, and an endpoint
-// reference list. Matches the dark design system shared with the admin console.
+// Docs — public API documentation for the gateway.
+//
+// A reference manual with an editorial spine: the masthead states the
+// product's core idea (many dialects → one canonical IR → many providers) as
+// a live animated diagram, then the body is a two-column reference — a sticky
+// glass rail that tracks the reader, hairline-separated sections (no floating
+// cards), tabbed code samples with copy buttons, and a searchable endpoint
+// reference. Matches the dark design system shared with the admin console.
 
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
+  type ComponentType,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
@@ -31,6 +37,7 @@ import {
   Network,
   RefreshCw,
   ScrollText,
+  Search,
   Settings2,
   Shield,
   Terminal,
@@ -38,6 +45,14 @@ import {
   Zap,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import {
+  AnthropicIcon,
+  AnimatedBeam,
+  GeminiIcon,
+  OpenAIIcon,
+  OpenRouterIcon,
+} from "@/components/AnimatedBeam";
+import { HERO_BEAMS_COMPACT, HeroBeamBackdrop } from "@/components/HeroBeamBackdrop";
 import { highlight, langFromLabel, LANG_DOT, MONO, type Lang } from "@/lib/code-highlight";
 
 // ── scroll-spy ─────────────────────────────────────────────────────────────
@@ -54,6 +69,9 @@ const SECTIONS: Section[] = [
   { id: "config", label: "Configuration", icon: Settings2 },
   { id: "features", label: "Features", icon: Layers },
 ];
+
+// Hoisted so the scroll-spy effect does not re-observe on every render.
+const SECTION_IDS = SECTIONS.map((s) => s.id);
 
 function useScrollSpy(ids: string[]) {
   const [active, setActive] = useState(ids[0] ?? "");
@@ -168,7 +186,7 @@ function CopyBtn(props: { text: string }) {
         setCopied(true);
         timer.current = setTimeout(() => setCopied(false), 1500);
       }}
-      className="inline-flex h-11 min-w-[72px] shrink-0 items-center justify-center gap-1.5 rounded-md border border-white/[0.06] bg-white/[0.03] px-2.5 text-[10px] font-medium text-[var(--admin-text-dim)] transition-colors hover:border-white/[0.14] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+      className="docs-copybtn"
       aria-label="Copy code"
     >
       {copied ? <Check size={11} /> : <Copy size={11} />}
@@ -190,7 +208,7 @@ function PathCopyBtn(props: { text: string }) {
         setCopied(true);
         timer.current = setTimeout(() => setCopied(false), 1500);
       }}
-      className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-white/[0.06] bg-white/[0.02] text-[var(--admin-text-dim)] transition-colors hover:border-white/[0.14] hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+      className="docs-pathcopy"
       aria-label={`Copy ${props.text}`}
     >
       {copied ? <Check size={11} /> : <Copy size={11} />}
@@ -213,7 +231,7 @@ function CodeBlock(props: { code: string; label?: string; lang?: Lang }) {
   const showGutter = lines.length > 1;
   return (
     <div className="docs-codeblock group">
-      <div className="flex items-center justify-between gap-3 border-b border-[var(--admin-border)] bg-white/[0.015] px-3 py-1.5">
+      <div className="docs-codehead">
         <span className="flex min-w-0 items-center gap-2">
           <span
             className={`h-1.5 w-1.5 shrink-0 rounded-full ${LANG_DOT[lang]}`}
@@ -235,8 +253,7 @@ function CodeBlock(props: { code: string; label?: string; lang?: Lang }) {
           tabIndex={0}
           role="group"
           aria-label={props.label ? `${props.label} code example` : "Code example"}
-          className="overflow-x-auto px-3.5 py-3 text-[12px] leading-relaxed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
-          style={{ fontFamily: MONO }}
+          className="docs-pre"
         >
           <code className="text-[var(--admin-text-muted)]">{highlight(props.code, lang)}</code>
         </pre>
@@ -252,18 +269,15 @@ function TabbedCode(props: { tabs: { label: string; code: string }[] }) {
   const tab = props.tabs[idx];
   return (
     <div className="space-y-2.5">
-      <div className="flex flex-wrap items-center gap-1">
+      <div className="docs-tabs" role="tablist" aria-label="Code language">
         {props.tabs.map((t, i) => (
           <button
             key={t.label}
             type="button"
+            role="tab"
+            aria-selected={i === idx}
             onClick={() => setIdx(i)}
-            aria-pressed={i === idx}
-            className={`inline-flex min-h-11 items-center gap-1.5 rounded-md px-3 text-[11px] font-medium transition-colors sm:min-h-0 sm:py-1.5 ${
-              i === idx
-                ? "bg-blue-500/[0.12] text-blue-200 ring-1 ring-blue-400/20"
-                : "text-[var(--admin-text-muted)] hover:bg-white/[0.03] hover:text-[var(--admin-text)]"
-            } focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50`}
+            className={`docs-tab ${i === idx ? "is-active" : ""}`}
           >
             <span
               className={`h-1.5 w-1.5 rounded-full transition-opacity ${LANG_DOT[langFromLabel(t.label)]} ${
@@ -317,17 +331,14 @@ function EndpointRow(props: {
         {clients && (
           <div className="docs-endpoint-clients flex flex-wrap items-center gap-1.5">
             {clients.map((c) => (
-              <span
-                key={c}
-                className="rounded-full border border-white/[0.06] bg-white/[0.02] px-2 py-0.5 text-[9.5px] font-medium tracking-wide text-[var(--admin-text-dim)] transition-colors group-hover/endpoint:border-white/[0.1] group-hover/endpoint:text-[var(--admin-text-muted)]"
-              >
+              <span key={c} className="docs-client-chip">
                 {c}
               </span>
             ))}
           </div>
         )}
       </div>
-      <p className="mt-2 max-w-[74ch] text-[12px] leading-relaxed text-[var(--admin-text-muted)]">
+      <p className="mt-2 max-w-[74ch] text-[12.5px] leading-relaxed text-[var(--admin-text-muted)]">
         {desc}
       </p>
       {auth && (
@@ -650,6 +661,160 @@ function Pipeline() {
   );
 }
 
+// ── how it works: the live translation diagram ────────────────────────────
+
+const HERO_DIALECTS = [
+  { chip: "chat/completions", tone: "text-blue-300" },
+  { chip: "responses", tone: "text-cyan-300" },
+  { chip: "messages", tone: "text-fuchsia-300" },
+];
+
+const HERO_PROVIDERS = [
+  { label: "OpenAI", src: "/logos/openai.png" },
+  { label: "Anthropic", src: "/logos/anthropic.png" },
+  { label: "Gemini", src: "/logos/gemini.png" },
+  { label: "OpenRouter", src: "/logos/openrouter.png" },
+];
+
+// The provider pills under the masthead, in the landing page's style: a
+// rounded chip carrying the brand mark and the name.
+const HERO_PROVIDER_PILLS: {
+  label: string;
+  src?: string;
+  Icon?: ComponentType<{ className?: string }>;
+}[] = [
+  { label: "OpenAI", Icon: OpenAIIcon },
+  { label: "Anthropic", Icon: AnthropicIcon },
+  { label: "Gemini", Icon: GeminiIcon },
+  { label: "OpenRouter", Icon: OpenRouterIcon },
+  { label: "NVIDIA NIM", src: "/logos/nvidia-nim.png" },
+  { label: "OpenCode", src: "/logos/opencode.svg" },
+];
+
+// The live diagram: three inbound dialects, the wiwi IR hub, four upstream
+// providers, and a beam travelling along every edge. It is the product's
+// central claim drawn as a picture — and, like the landing page's own graph
+// section, it stands free on the page rather than sitting inside a card.
+function TranslationCore() {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const d0 = useRef<HTMLDivElement>(null);
+  const d1 = useRef<HTMLDivElement>(null);
+  const d2 = useRef<HTMLDivElement>(null);
+  const hub = useRef<HTMLDivElement>(null);
+  const p0 = useRef<HTMLDivElement>(null);
+  const p1 = useRef<HTMLDivElement>(null);
+  const p2 = useRef<HTMLDivElement>(null);
+  const p3 = useRef<HTMLDivElement>(null);
+
+  const dialectRefs = [d0, d1, d2];
+  const providerRefs = [p0, p1, p2, p3];
+  const providerHues = [
+    ["#3b82f6", "#8b5cf6"],
+    ["#f59e0b", "#ef4444"],
+    ["#22c55e", "#3b82f6"],
+    ["#06b6d4", "#8b5cf6"],
+  ];
+
+  return (
+    <div className="docs-core">
+      {/* A vertical flow — dialects in, hub in the middle, providers out. The
+          panel is a narrow column, so top-to-bottom is the only arrangement
+          that gives every node room and still reads as one diagram. */}
+      {/* A vertical flow — dialects in, hub in the middle, providers out. The
+          panel is a narrow column, so top-to-bottom is the only arrangement
+          that gives every node room and still reads as one diagram. */}
+      <div className="docs-core-body" ref={containerRef}>
+        {/* Inbound dialects */}
+        <div className="docs-core-row docs-core-row-in">
+          {HERO_DIALECTS.map((d, i) => (
+            <div key={d.chip} ref={dialectRefs[i]} className="docs-core-dialect">
+              <span className={`docs-core-dialect-text ${d.tone}`} style={{ fontFamily: MONO }}>
+                {d.chip}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        {/* The hub */}
+        <div className="docs-core-hub-wrap">
+          <div ref={hub} className="docs-core-hub">
+            <span className="docs-core-hub-ring" aria-hidden />
+            <img src="/wiwi-logo.png" alt="" className="docs-core-hub-logo" />
+          </div>
+          <span className="docs-core-hub-label">wiwi IR</span>
+        </div>
+
+        {/* Upstream providers */}
+        <div className="docs-core-row docs-core-row-out">
+          {HERO_PROVIDERS.map((p, i) => (
+            <div
+              key={p.label}
+              ref={providerRefs[i]}
+              className="docs-core-provider"
+              title={p.label}
+            >
+              <img src={p.src} alt={p.label} className="h-full w-full object-contain" />
+            </div>
+          ))}
+        </div>
+
+        {/* Beams — inbound to hub, hub to outbound. A negative curvature puts
+            the control point below the start, so each beam leaves its node
+            travelling down the panel instead of cutting sideways through
+            the row it starts in. */}
+        {dialectRefs.map((ref, i) => (
+          <AnimatedBeam
+            key={`in-${i}`}
+            containerRef={containerRef}
+            fromRef={ref}
+            toRef={hub}
+            curvature={-30}
+            pathWidth={2}
+            pathOpacity={0.3}
+            gradientStart="#60a5fa"
+            gradientStop="#a78bfa"
+            duration={3.2}
+            delay={i * 0.35}
+          />
+        ))}
+        {providerRefs.map((ref, i) => {
+          const [g0, g1] = providerHues[i] ?? ["#8b5cf6", "#ec4899"];
+          return (
+            <AnimatedBeam
+              key={`out-${i}`}
+              containerRef={containerRef}
+              fromRef={hub}
+              toRef={ref}
+              curvature={-26}
+              pathWidth={2}
+              pathOpacity={0.3}
+              gradientStart={g0}
+              gradientStop={g1}
+              duration={3.6}
+              delay={0.6 + i * 0.45}
+            />
+          );
+        })}
+      </div>
+
+      <div className="docs-core-foot">
+        <span className="docs-core-foot-item">
+          <span className="docs-core-foot-dot" style={{ background: "#60a5fa" }} aria-hidden />
+          decode
+        </span>
+        <span className="docs-core-foot-item">
+          <span className="docs-core-foot-dot" style={{ background: "#a78bfa" }} aria-hidden />
+          canonical IR
+        </span>
+        <span className="docs-core-foot-item">
+          <span className="docs-core-foot-dot" style={{ background: "#34d399" }} aria-hidden />
+          re-encode
+        </span>
+      </div>
+    </div>
+  );
+}
+
 // ── section heading ─────────────────────────────────────────────────────────
 
 // Quiet "jump to the next section" control, rendered under the heading. A
@@ -681,12 +846,16 @@ function SectionHeading(props: {
 }) {
   return (
     <div className="docs-heading group mb-5">
-      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-        <p className="admin-label mb-2">Section {String(props.index).padStart(2, "0")}</p>
-        {props.aside && <div className="mb-2">{props.aside}</div>}
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+        <span className="docs-eyebrow">
+          <span className="docs-eyebrow-num">{String(props.index).padStart(2, "0")}</span>
+          <span className="docs-eyebrow-rule" aria-hidden />
+          <span>Section</span>
+        </span>
+        {props.aside && <div>{props.aside}</div>}
       </div>
-      <h2 className="flex items-center gap-2 text-[20px] font-semibold tracking-[-0.015em] text-[var(--admin-text)]">
-        {props.title}
+      <h2 className="docs-h2">
+        <span className="docs-h2-text">{props.title}</span>
         <a
           href={`#${props.id}`}
           aria-label={`Link to ${props.title}`}
@@ -705,9 +874,7 @@ function SectionHeading(props: {
           <Hash size={14} />
         </a>
       </h2>
-      {props.subtitle && (
-        <p className="mt-1 text-[12.5px] text-[var(--admin-text-dim)]">{props.subtitle}</p>
-      )}
+      {props.subtitle && <p className="docs-subtitle">{props.subtitle}</p>}
     </div>
   );
 }
@@ -718,19 +885,22 @@ function SectionHeading(props: {
 // left spine, spotlight, index) through CSS custom properties, so the grid
 // reads as one spectrum instead of six unrelated colors. `meta` is the module
 // that owns the capability — the tile doubles as a map of the codebase.
+// `span` breaks the grid into a bento rhythm instead of a uniform matrix.
 const FEATURES: {
   icon: LucideIcon;
   title: string;
   body: string;
   meta: string;
   hue: number;
+  span?: 2;
 }[] = [
   {
     icon: Layers,
     hue: 213,
     title: "Three inbound dialects",
-    body: "OpenAI Chat, OpenAI Responses (Codex CLI), and Anthropic Messages all decode into the same canonical IR.",
+    body: "OpenAI Chat, OpenAI Responses (Codex CLI), and Anthropic Messages all decode into the same canonical IR — so a Claude Code session can be backed by GPT, and vice versa.",
     meta: "wiwi/wire/",
+    span: 2,
   },
   {
     icon: KeyRound,
@@ -771,8 +941,9 @@ const FEATURES: {
     icon: HeartPulse,
     hue: 27,
     title: "Health healing",
-    body: "Keys that start failing cool off, get probed, and come back on their own — no operator paging.",
+    body: "Keys that start failing cool off, get probed with a one-token completion, and come back on their own — no operator paging, no wasted spend.",
     meta: "wiwi/core/recovery.py",
+    span: 2,
   },
   {
     icon: Database,
@@ -823,6 +994,7 @@ function FeatureGrid() {
             key={feature.title}
             role="listitem"
             className="docs-feature"
+            data-span={feature.span ?? 1}
             style={{ "--f-hue": feature.hue, "--f-i": i } as CSSProperties}
             onPointerMove={trackSpotlight}
           >
@@ -846,13 +1018,72 @@ function FeatureGrid() {
   );
 }
 
+// ── endpoint filter ────────────────────────────────────────────────────────
+
+// A live filter over the endpoint reference. Four endpoints is small, but the
+// control earns its place by making the reference scannable — and it is the
+// one piece of real interactivity on the page.
+function EndpointFilter(props: {
+  value: string;
+  onChange: (v: string) => void;
+  count: number;
+  total: number;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+      e.preventDefault();
+      inputRef.current?.focus();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  return (
+    <div className="docs-filter">
+      <span className="docs-filter-icon" aria-hidden>
+        <Search size={13} />
+      </span>
+      <input
+        ref={inputRef}
+        type="search"
+        value={props.value}
+        onChange={(e) => props.onChange(e.currentTarget.value)}
+        placeholder="Filter endpoints…"
+        aria-label="Filter endpoints"
+        className="docs-filter-input"
+      />
+      <kbd className="docs-filter-kbd" aria-hidden>
+        /
+      </kbd>
+      <span className="docs-filter-count" aria-live="polite">
+        {props.count === props.total
+          ? `${props.total} routes`
+          : `${props.count} of ${props.total}`}
+      </span>
+    </div>
+  );
+}
+
 // ── page ────────────────────────────────────────────────────────────────────
 
 export function DocsPage() {
-  const ids = SECTIONS.map((s) => s.id);
-  const active = useScrollSpy(ids);
+  const active = useScrollSpy(SECTION_IDS);
   const progress = useScrollProgress();
   const handleClick = useCallback((id: string) => { scrollToId(id); }, []);
+  const [query, setQuery] = useState("");
+
+  const visibleEndpoints = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return ENDPOINTS;
+    return ENDPOINTS.filter((ep) =>
+      [ep.path, ep.desc, ...(ep.clients ?? [])].join(" ").toLowerCase().includes(q),
+    );
+  }, [query]);
 
   // Deep links (/docs#streaming) land on their section once it exists.
   useEffect(() => {
@@ -875,63 +1106,124 @@ export function DocsPage() {
       </div>
       <BackToTop />
 
-      {/* Masthead */}
-      <header className="docs-hero mb-10">
-        <div className="docs-hero-glow" aria-hidden />
-        <div className="mb-3 flex flex-wrap items-center gap-2">
-          <span className="admin-badge admin-badge-blue inline-flex items-center gap-1.5">
-            <BookOpen size={11} /> Documentation
-          </span>
-          <span className="admin-badge admin-badge-gray inline-flex items-center gap-1.5">
-            v0.1.0
-          </span>
-        </div>
-        <h1 className="max-w-3xl text-3xl font-semibold tracking-[-0.025em] text-[var(--admin-text)] sm:text-4xl">
-          Point any client at <span className="text-blue-300">wiwi</span>
-        </h1>
-        <p className="mt-3 max-w-2xl text-[15px] leading-relaxed text-[var(--admin-text-muted)]">
-          wiwi is a single endpoint that speaks every inbound dialect and routes to every
-          outbound provider. Bring your own client — OpenAI SDK, Anthropic SDK, Codex CLI,
-          Claude Code, or plain <code style={{ fontFamily: MONO }}>curl</code> — retarget it
-          at the gateway, and authenticate with a virtual key.
-        </p>
-        <div className="docs-hero-actions mt-5 flex flex-wrap items-center gap-2">
-          <button
-            onClick={() => handleClick("quickstart")}
-            className="inline-flex h-11 items-center gap-2 rounded-[10px] bg-gradient-to-b from-brand-500 to-brand-700 px-5 text-[13px] font-medium text-white shadow-lg shadow-brand-600/20 transition-[filter] duration-150 hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
-          >
-            <Terminal size={14} /> Quickstart
-            <ArrowRight size={13} />
-          </button>
-          <button
-            onClick={() => handleClick("endpoints")}
-            className="inline-flex h-11 items-center gap-2 rounded-[10px] border border-white/[0.08] bg-white/[0.02] px-5 text-[13px] font-medium text-[var(--admin-text)] transition-colors hover:border-white/[0.14] hover:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
-          >
-            <Network size={14} /> API reference
-          </button>
-        </div>
+      {/* Masthead — the site's own hero language, applied to a docs page: a
+          full-bleed band standing on the page background, the same animated
+          beam backdrop the landing page uses, centred type, and the same
+          CTA treatment. No card, no border — the point of a hero is that it
+          is the page, not a box on the page. */}
+      <header className="docs-masthead full-bleed">
+        <HeroBeamBackdrop beams={HERO_BEAMS_COMPACT} className="opacity-60" />
+        <div className="hero-grid pointer-events-none absolute inset-0 opacity-60" aria-hidden />
 
-        <div className="docs-hero-meta mt-8">
-          <div className="min-w-0">
-            <p className="admin-label">Base URL</p>
-            <code
-              className="mt-1 block truncate text-[13px] text-[var(--admin-text)]"
-              style={{ fontFamily: MONO }}
-            >
-              http://localhost:4000
-            </code>
-          </div>
-          <div>
-            <p className="admin-label">Facts</p>
-            <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-[var(--admin-text-muted)]">
-              <span>3 inbound dialects</span>
-              <span>12 provider types</span>
-              <span>1 canonical IR</span>
-              <span>SSE streaming</span>
+        <div className="relative mx-auto max-w-4xl px-6 py-20 text-center sm:py-24">
+          <div className="animate-hero-enter">
+            <div className="mb-6 flex flex-wrap items-center justify-center gap-2">
+              <span className="admin-badge admin-badge-blue inline-flex items-center gap-1.5">
+                <BookOpen size={11} /> Documentation
+              </span>
+              <span className="admin-badge admin-badge-gray inline-flex items-center gap-1.5">
+                v0.1.0
+              </span>
+              <span className="docs-chip-live">
+                <span className="docs-chip-live-dot" aria-hidden />
+                9 routes live
+              </span>
+            </div>
+
+            <h1 className="docs-display">
+              Point any client at
+              <br />
+              <span className="hero-gradient-text">wiwi</span>
+            </h1>
+
+            <p className="docs-lead">
+              One endpoint that speaks every inbound dialect and routes to every outbound
+              provider. Bring your own client — OpenAI SDK, Anthropic SDK, Codex CLI, Claude Code,
+              or plain <code style={{ fontFamily: MONO }}>curl</code> — retarget it at the
+              gateway, and authenticate with a virtual key.
+            </p>
+
+            <div className="docs-hero-actions mt-9 flex flex-wrap items-center justify-center gap-3">
+              <div className="relative">
+                <div className="hero-cta-ring" aria-hidden />
+                <button
+                  onClick={() => handleClick("quickstart")}
+                  className="wiwi-shimmer group inline-flex h-11 items-center justify-center gap-2 rounded-full bg-gradient-to-b from-brand-400 to-brand-700 px-7 text-sm font-medium text-white shadow-lg shadow-brand-600/25 transition-[transform,filter] duration-150 hover:brightness-110 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/70"
+                >
+                  Quickstart
+                  <ArrowRight
+                    size={15}
+                    className="transition-transform duration-150 group-hover:translate-x-0.5"
+                  />
+                </button>
+              </div>
+              <button
+                onClick={() => handleClick("endpoints")}
+                className="inline-flex h-11 items-center justify-center gap-2 rounded-[10px] border border-white/[0.08] bg-white/[0.02] px-5 text-sm font-medium text-[var(--admin-text)] transition-colors hover:border-white/[0.14] hover:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--admin-accent)]/60"
+              >
+                <Network size={15} /> API reference
+              </button>
+              <button
+                onClick={() => handleClick("overview")}
+                className="inline-flex h-11 items-center justify-center gap-2 rounded-[10px] px-5 text-sm font-medium text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.02] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--admin-accent)]/60"
+              >
+                <BookOpen size={15} /> How it works
+              </button>
+            </div>
+
+            {/* The facts, in the landing page's trust-indicator idiom. */}
+            <div className="mt-6 flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-[13px] text-[var(--admin-text-muted)]">
+              {[
+                "3 inbound dialects",
+                "12 provider types",
+                "1 canonical IR",
+                "9 /v1 routes",
+              ].map((fact) => (
+                <span key={fact} className="flex items-center gap-1.5">
+                  <Check size={14} className="text-emerald-400" /> {fact}
+                </span>
+              ))}
+            </div>
+
+            {/* Provider badges, in the landing page's idiom. */}
+            <div className="mt-8 flex flex-wrap items-center justify-center gap-2.5">
+              {HERO_PROVIDER_PILLS.map((p) => (
+                <div
+                  key={p.label}
+                  className="flex items-center gap-2 rounded-full border border-white/[0.06] bg-white/[0.02] px-3.5 py-1.5 transition-colors hover:border-white/[0.12] hover:bg-white/[0.04]"
+                >
+                  {p.Icon ? (
+                    <p.Icon className="h-4 w-4" />
+                  ) : (
+                    <img src={p.src} alt="" className="h-4 w-4 object-contain" />
+                  )}
+                  <span className="text-[13px] font-medium text-[var(--admin-text)]">
+                    {p.label}
+                  </span>
+                </div>
+              ))}
             </div>
           </div>
         </div>
       </header>
+
+      {/* How it works — the hub-and-spoke diagram, free-standing on the page
+          the way the landing page renders the same idea. */}
+      <section className="docs-graph" aria-labelledby="docs-graph-title">
+        <div className="docs-graph-inner">
+          <p className="admin-label">How it works</p>
+          <h2 id="docs-graph-title" className="docs-graph-title">
+            One request in. <span className="text-brand-400">Any model out.</span>
+          </h2>
+          <p className="docs-graph-sub">
+            Every inbound dialect decodes into the same canonical IR. The router picks a
+            provider and a key from the pool, the adapter encodes the IR into that
+            provider&apos;s native format, and the reply comes back re-encoded in the dialect
+            you asked in.
+          </p>
+          <TranslationCore />
+        </div>
+      </section>
 
       {/* Mobile jump control */}
       <div className="docs-mobile-jump mb-6 lg:hidden">
@@ -972,37 +1264,45 @@ export function DocsPage() {
                 <span className="opacity-50"> / {String(SECTIONS.length).padStart(2, "0")}</span>
               </span>
             </div>
-            {SECTIONS.map((s, i) => {
-              const Icon = s.icon;
-              const isActive = active === s.id;
-              // Completed = everything the reader has already passed, so a
-              // partially-read document still reads as progress.
-              const isDone = i + 1 < activeIndex;
-              return (
-                <button
-                  key={s.id}
-                  type="button"
-                  onClick={() => handleClick(s.id)}
-                  aria-current={isActive ? "true" : undefined}
-                  className={`docs-nav-item flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left text-[12px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/40 ${
-                    isActive
-                      ? "is-active"
-                      : isDone
-                        ? "text-[var(--admin-text-muted)] hover:text-[var(--admin-text)]"
-                        : "text-[var(--admin-text-dim)] hover:text-[var(--admin-text)]"
-                  }`}
-                >
-                  <span
-                    className={`docs-nav-num font-mono text-[10px] tabular-nums ${isDone ? "is-done" : "opacity-50"}`}
-                    aria-hidden
+            <div className="docs-rail">
+              <span className="docs-rail-line" aria-hidden />
+              <span
+                className="docs-rail-line-fill"
+                style={{ height: `${(progress * 100).toFixed(2)}%` }}
+                aria-hidden
+              />
+              {SECTIONS.map((s, i) => {
+                const Icon = s.icon;
+                const isActive = active === s.id;
+                // Completed = everything the reader has already passed, so a
+                // partially-read document still reads as progress.
+                const isDone = i + 1 < activeIndex;
+                return (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => handleClick(s.id)}
+                    aria-current={isActive ? "true" : undefined}
+                    className={`docs-nav-item flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left text-[12px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/40 ${
+                      isActive
+                        ? "is-active"
+                        : isDone
+                          ? "text-[var(--admin-text-muted)] hover:text-[var(--admin-text)]"
+                          : "text-[var(--admin-text-dim)] hover:text-[var(--admin-text)]"
+                    }`}
                   >
-                    {isDone ? <Check size={10} strokeWidth={2.5} /> : String(i + 1).padStart(2, "0")}
-                  </span>
-                  <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden />
-                  <span className="flex-1">{s.label}</span>
-                </button>
-              );
-            })}
+                    <span
+                      className={`docs-nav-num font-mono text-[10px] tabular-nums ${isDone ? "is-done" : "opacity-50"}`}
+                      aria-hidden
+                    >
+                      {isDone ? <Check size={10} strokeWidth={2.5} /> : String(i + 1).padStart(2, "0")}
+                    </span>
+                    <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                    <span className="flex-1">{s.label}</span>
+                  </button>
+                );
+              })}
+            </div>
             {/* Rail footer: a quiet progress meter. The filled width mirrors
                 the reading-progress hairline at the top of the viewport, so
                 the rail always states how much of the document remains. */}
@@ -1049,7 +1349,7 @@ export function DocsPage() {
               subtitle="How the gateway translates and routes requests"
             />
             <SectionNext nextId="quickstart" nextLabel="Quickstart" onGo={handleClick} />
-            <p className="text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
+            <p className="docs-prose">
               Every request follows the same hub-and-spoke path: the wire codec for the inbound
               dialect decodes the request into a canonical internal representation (IR), the router
               selects a provider and key from the pool, and the adapter encodes the IR into the
@@ -1057,7 +1357,7 @@ export function DocsPage() {
               decodes the provider response into IR deltas, and the wire encoder re-encodes them in
               the caller&apos;s original dialect.
             </p>
-            <div className="mt-5 rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] p-4">
+            <div className="docs-panel mt-5">
               <p className="admin-label mb-3">Translation path</p>
               <Pipeline />
             </div>
@@ -1072,7 +1372,7 @@ export function DocsPage() {
               subtitle="Running locally in under a minute"
             />
             <SectionNext nextId="authentication" nextLabel="Authentication" onGo={handleClick} />
-            <p className="text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
+            <p className="docs-prose">
               Assuming wiwi is running on{" "}
               <code style={{ fontFamily: MONO }}>http://localhost:4000</code>, every path below
               is relative to <code style={{ fontFamily: MONO }}>/v1</code>. The Authorization
@@ -1106,23 +1406,23 @@ curl http://localhost:4000/v1/chat/completions \\
               subtitle="Virtual keys — never provider keys"
             />
             <SectionNext nextId="endpoints" nextLabel="Endpoints" onGo={handleClick} />
-            <p className="text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
+            <p className="docs-prose">
               Callers authenticate with a virtual key — never a provider key. Virtual keys are
               SHA-256-hashed at rest with constant-time comparison; per-key budgets, rate limits,
               and model allowlists are enforced before a request ever leaves the gateway.
             </p>
             <div className="mt-5 flex flex-wrap gap-2">
-              <span className="inline-flex min-h-11 items-center rounded-full border border-white/[0.07] bg-white/[0.02] px-3 text-[12px] text-[var(--admin-text-muted)]">
+              <span className="docs-keychip">
                 <code style={{ fontFamily: MONO }}>Authorization: Bearer sk-wiwi-…</code>
               </span>
-              <span className="inline-flex min-h-11 items-center rounded-full border border-white/[0.07] bg-white/[0.02] px-3 text-[12px] text-[var(--admin-text-muted)]">
+              <span className="docs-keychip">
                 <code style={{ fontFamily: MONO }}>x-api-key: sk-wiwi-…</code>
               </span>
-              <span className="inline-flex min-h-11 items-center rounded-full border border-white/[0.07] bg-white/[0.02] px-3 text-[12px] text-[var(--admin-text-dim)]">
+              <span className="docs-keychip docs-keychip-plain">
                 OpenAI · Responses · Anthropic
               </span>
             </div>
-            <div className="mt-5 grid grid-cols-1 gap-px overflow-hidden rounded-xl border border-[var(--admin-border)] bg-[var(--admin-border)] sm:grid-cols-3">
+            <div className="docs-triad mt-5">
               {[
                 {
                   icon: Shield,
@@ -1145,7 +1445,7 @@ curl http://localhost:4000/v1/chat/completions \\
               ].map((item) => {
                 const Icon = item.icon;
                 return (
-                  <div key={item.title} className="bg-[var(--admin-surface)] p-4">
+                  <div key={item.title} className="docs-triad-cell">
                     <div className="flex items-center gap-2">
                       <Icon className={`h-3.5 w-3.5 shrink-0 ${item.tone}`} aria-hidden />
                       <h3 className="text-[13px] font-semibold text-[var(--admin-text)]">
@@ -1169,13 +1469,21 @@ curl http://localhost:4000/v1/chat/completions \\
               subtitle="The three inbound surfaces plus model listing"
             />
             <SectionNext nextId="cross-provider" nextLabel="Cross-provider" onGo={handleClick} />
-            <p className="text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
+            <p className="docs-prose">
               Each surface maps onto the same canonical IR. Responses are re-encoded in the
               caller&apos;s dialect on the way back out — so a Claude Code session (Anthropic
               Messages) can be backed by GPT, and vice versa.
             </p>
-            <div className="mt-4 divide-y divide-[var(--admin-border)]">
-              {ENDPOINTS.map((ep) => (
+            <div className="mt-4">
+              <EndpointFilter
+                value={query}
+                onChange={setQuery}
+                count={visibleEndpoints.length}
+                total={ENDPOINTS.length}
+              />
+            </div>
+            <div className="mt-2 divide-y divide-[var(--admin-border)]">
+              {visibleEndpoints.map((ep) => (
                 <EndpointRow
                   key={ep.path}
                   method={ep.method}
@@ -1186,6 +1494,11 @@ curl http://localhost:4000/v1/chat/completions \\
                   example={ep.example}
                 />
               ))}
+              {visibleEndpoints.length === 0 && (
+                <p className="docs-empty py-6 text-center text-[13px] text-[var(--admin-text-muted)]">
+                  No endpoint matches “{query}”.
+                </p>
+              )}
             </div>
           </section>
 
@@ -1197,7 +1510,7 @@ curl http://localhost:4000/v1/chat/completions \\
               subtitle="Decouple the caller's dialect from the upstream provider"
             />
             <SectionNext nextId="streaming" nextLabel="Streaming" onGo={handleClick} />
-            <p className="text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
+            <p className="docs-prose">
               Because every direction goes dialect → IR → provider, the caller&apos;s dialect is
               decoupled from the upstream provider. Clients request a{" "}
               <code style={{ fontFamily: MONO }}>model_name</code>; wiwi routes to the
@@ -1235,7 +1548,7 @@ router_settings:
               subtitle="Server-sent events across all three dialects"
             />
             <SectionNext nextId="config" nextLabel="Configuration" onGo={handleClick} />
-            <p className="text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
+            <p className="docs-prose">
               Streaming is supported across all three surfaces. Set{" "}
               <code style={{ fontFamily: MONO }}>&quot;stream&quot;: true</code> in the request
               body. The gateway decodes the provider&apos;s stream into{" "}
@@ -1257,15 +1570,17 @@ router_settings:
   }'`}
               />
             </div>
-            <p className="mt-3 text-[12px] leading-relaxed text-[var(--admin-text-dim)]">
-              The streaming contract guarantees: exactly one{" "}
-              <code style={{ fontFamily: MONO }}>StreamStart</code>, then{" "}
-              <code style={{ fontFamily: MONO }}>ToolCallOpen → ArgsDelta* → Close</code> per
-              index, then <code style={{ fontFamily: MONO }}>UsageFinal</code>, then{" "}
-              <code style={{ fontFamily: MONO }}>Finish</code>, then{" "}
-              <code style={{ fontFamily: MONO }}>StreamEnd</code> or{" "}
-              <code style={{ fontFamily: MONO }}>StreamError</code>.
-            </p>
+            <div className="docs-callout mt-4">
+              <p className="docs-callout-label">The streaming contract</p>
+              <p className="docs-callout-body">
+                Exactly one <code style={{ fontFamily: MONO }}>StreamStart</code>, then{" "}
+                <code style={{ fontFamily: MONO }}>ToolCallOpen → ArgsDelta* → Close</code> per
+                index, then <code style={{ fontFamily: MONO }}>UsageFinal</code>, then{" "}
+                <code style={{ fontFamily: MONO }}>Finish</code>, then{" "}
+                <code style={{ fontFamily: MONO }}>StreamEnd</code> or{" "}
+                <code style={{ fontFamily: MONO }}>StreamError</code>.
+              </p>
+            </div>
           </section>
 
           <section id="config" className="docs-section scroll-mt-20">
@@ -1276,7 +1591,7 @@ router_settings:
               subtitle="A single wiwi.yaml — LiteLLM-shaped"
             />
             <SectionNext nextId="features" nextLabel="Features" onGo={handleClick} />
-            <p className="text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
+            <p className="docs-prose">
               The entire gateway is configured through one YAML file. Providers hold named
               accounts with pools of keyed entries;{" "}
               <code style={{ fontFamily: MONO }}>model_list</code> maps client-requested names
@@ -1340,26 +1655,33 @@ router_settings:
             <FeatureGrid />
           </section>
 
-          {/* CTA */}
-          <div className="docs-cta mt-12 p-8 text-center">
-            <h2 className="text-xl font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
-              Ready to try it?
+          {/* CTA — borderless, like the landing page's closing section. */}
+          <div className="docs-cta mt-16">
+            <h2 className="docs-cta-title">
+              Start routing requests
+              <br />
+              <span className="text-brand-400">in 30 seconds</span>
             </h2>
-            <p className="mx-auto mt-2 max-w-md text-[14px] text-[var(--admin-text-muted)]">
-              Spin up a gateway in a minute, or jump straight into the playground.
+            <p className="docs-cta-body">
+              Point an OpenAI, Anthropic, or Codex client at the gateway, mint a virtual key, and
+              make the first call — or jump straight into the playground.
             </p>
-            <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
+            <div className="docs-cta-actions">
               <Link
                 to="/playground"
-                className="inline-flex h-11 items-center gap-2 rounded-[10px] bg-gradient-to-b from-brand-500 to-brand-700 px-5 text-[13px] font-medium text-white shadow-lg shadow-brand-600/20 transition-[filter] duration-150 hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+                className="wiwi-shimmer group inline-flex h-12 items-center justify-center gap-2 rounded-[10px] bg-gradient-to-b from-brand-500 to-brand-700 px-6 text-base font-medium text-white shadow-lg shadow-brand-600/20 transition-[filter] duration-150 hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/70"
               >
-                <Terminal size={14} /> Open playground
+                Open playground
+                <ArrowRight
+                  size={16}
+                  className="transition-transform duration-150 group-hover:translate-x-0.5"
+                />
               </Link>
               <Link
                 to="/signup"
-                className="inline-flex h-11 items-center gap-2 rounded-[10px] border border-white/[0.08] bg-white/[0.02] px-5 text-[13px] font-medium text-[var(--admin-text)] transition-colors hover:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+                className="inline-flex h-12 items-center justify-center gap-2 rounded-[10px] border border-[var(--admin-border)] bg-transparent px-6 text-base font-medium text-[var(--admin-text)] transition-colors hover:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--admin-accent)]/60"
               >
-                Create an account <ArrowRight size={13} />
+                Create an account
               </Link>
             </div>
           </div>

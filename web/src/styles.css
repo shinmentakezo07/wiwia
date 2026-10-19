@@ -1104,10 +1104,13 @@ select.admin-input option {
 }
 }
 
-/* -- docs page: reference-manual layout (redesigned) ------------------------
-   Two-column document: hairline-separated sections instead of floating cards,
-   a numbered section rail, and a quieter masthead. All tokens come from the
-   shared admin design system (--admin-*). */
+/* -- docs page: reference manual in the site's hero language ---------------
+   A public documentation page, not a console screen. The masthead is a
+   full-bleed band on the page background — the same beam backdrop, gradient
+   headline and CTA treatment the landing page uses — and the body is a
+   reference manual: a sticky rail that tracks the reader, hairline-separated
+   sections, tabbed code samples, and a searchable endpoint list. All tokens
+   come from the shared admin design system (--admin-*). */
 
 .docs-grid {
   display: grid;
@@ -1128,7 +1131,283 @@ select.admin-input option {
   font-family: inherit;
 }
 
-/* Left rail: a hairline spine with numbered entries, not a floating panel. */
+/* ── masthead ────────────────────────────────────────────────────────────
+   Full-bleed and borderless, standing on the page background rather than
+   floating in a card. The ambient effects are the site's own: the animated
+   beam backdrop and the panning grid from the landing hero. */
+
+.docs-masthead {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  background: var(--admin-bg);
+}
+
+/* Display heading — the accent word carries the site's animated gradient,
+   the rest is solid white, and the two never orphan each other. */
+.docs-display {
+  font-size: clamp(2.25rem, 6.5vw, 4.25rem);
+  font-weight: 600;
+  line-height: 1.02;
+  letter-spacing: -0.032em;
+  color: var(--admin-text);
+  text-wrap: balance;
+}
+
+.docs-lead {
+  max-width: 44rem;
+  margin: 1.25rem auto 0;
+  font-size: 15px;
+  line-height: 1.75;
+  color: var(--admin-text-muted);
+  /* Keeps the last line from collapsing to a single orphan word. */
+  text-wrap: pretty;
+}
+@media (min-width: 640px) {
+  .docs-lead {
+    font-size: 16px;
+  }
+}
+
+/* ── how it works ───────────────────────────────────────────────────────
+   The hub-and-spoke diagram, free-standing on the page — the landing page
+   renders the same idea the same way, as a section rather than a card. */
+
+.docs-graph {
+  position: relative;
+  overflow: hidden;
+  padding: clamp(2.5rem, 6vw, 4.5rem) 0;
+}
+.docs-graph-inner {
+  position: relative;
+  z-index: 1;
+  margin: 0 auto;
+  max-width: 56rem;
+  padding: 0 1.5rem;
+  text-align: center;
+}
+.docs-graph-title {
+  margin-top: 0.75rem;
+  font-size: clamp(1.6rem, 3.4vw, 2.4rem);
+  font-weight: 700;
+  line-height: 1.08;
+  letter-spacing: -0.03em;
+  color: var(--admin-text);
+  text-wrap: balance;
+}
+.docs-graph-sub {
+  max-width: 58ch;
+  margin: 0.9rem auto 0;
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--admin-text-muted);
+}
+
+/* The shared blue badge is tuned for the console, where it sits on a lighter
+   surface. On the near-black hero its 80%-alpha blue falls under 4.5:1 at
+   10px, so the docs hero lifts it to the 300-weight step. */
+.docs-masthead .admin-badge-blue {
+  color: #93c5fd;
+  background: rgba(59, 130, 246, 0.1);
+  border-color: rgba(59, 130, 246, 0.22);
+}
+
+/* "Live" chip — a soft status pill that says the gateway is running. */
+.docs-chip-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid rgba(52, 211, 153, 0.22);
+  border-radius: 999px;
+  background: rgba(52, 211, 153, 0.08);
+  padding: 3px 10px;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: #6ee7b7;
+}
+.docs-chip-live-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: #34d399;
+  box-shadow: 0 0 8px rgba(52, 211, 153, 0.9);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .docs-chip-live-dot {
+    animation: docs-blink 2.6s ease-in-out infinite;
+  }
+}
+@keyframes docs-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+/* ── live translation diagram ───────────────────────────────────────────
+   The how-it-works visual: three inbound dialects, the wiwi IR hub, four
+   upstream providers, and a beam travelling along every edge. It stands free
+   on the page — no card, no border — the way the landing page renders its
+   own graph section. The hub sits above the beam layer, and every node is
+   positioned so the beams connect real elements. */
+
+.docs-core {
+  position: relative;
+  margin-top: clamp(2rem, 4vw, 3rem);
+}
+
+.docs-core-body {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto auto auto;
+  justify-items: center;
+  align-items: center;
+  gap: 30px;
+  min-height: 300px;
+  padding: 26px 18px 28px;
+}
+
+.docs-core-row {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  max-width: 100%;
+}
+.docs-core-row-out {
+  gap: 10px;
+}
+
+.docs-core-dialect {
+  position: relative;
+  z-index: 2;
+  max-width: 100%;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 9px;
+  background: rgba(10, 10, 10, 0.9);
+  padding: 6px 10px;
+  font-size: 10.5px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.docs-core-dialect-text {
+  letter-spacing: 0.01em;
+}
+
+.docs-core-provider {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 11px;
+  background: rgba(10, 10, 10, 0.9);
+  padding: 8px;
+  transition: transform 0.25s ease, border-color 0.25s ease, background-color 0.25s ease;
+}
+.docs-core-provider:hover {
+  transform: translateY(-1px) scale(1.04);
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.docs-core-hub-wrap {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+.docs-core-hub {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 62px;
+  height: 62px;
+  border: 1px solid rgba(167, 139, 250, 0.32);
+  border-radius: 9999px;
+  background: radial-gradient(circle at 50% 30%, rgba(167, 139, 250, 0.16), rgba(10, 10, 10, 0.9));
+  box-shadow:
+    0 0 40px -10px rgba(139, 92, 246, 0.65),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+.docs-core-hub-logo {
+  width: 32px;
+  height: 32px;
+  border-radius: 9999px;
+  object-fit: cover;
+}
+.docs-core-hub-ring {
+  position: absolute;
+  inset: -7px;
+  border: 1px solid rgba(167, 139, 250, 0.22);
+  border-radius: 9999px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .docs-core-hub-ring {
+    animation: docs-hub-pulse 3.4s ease-in-out infinite;
+  }
+}
+@keyframes docs-hub-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  50% {
+    transform: scale(1.13);
+    opacity: 0.12;
+  }
+}
+.docs-core-hub-label {
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 999px;
+  background: rgba(10, 10, 10, 0.85);
+  padding: 2px 9px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--admin-text-muted);
+}
+
+.docs-core-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 6px 20px;
+  margin-top: 1.75rem;
+}
+.docs-core-foot-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--admin-text-muted);
+}
+.docs-core-foot-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+}
+
+/* ── left rail ──────────────────────────────────────────────────────────
+   A hairline spine with a progress fill, so the reader's position in the
+   document is always visible without reading a number. */
+
 .docs-sidebar {
   position: sticky;
   top: 96px;
@@ -1136,7 +1415,6 @@ select.admin-input option {
   max-height: calc(100vh - 116px);
   overflow-y: auto;
   padding-left: 16px;
-  border-left: 1px solid var(--admin-border);
 }
 @media (max-width: 1023px) {
   .docs-grid {
@@ -1147,28 +1425,46 @@ select.admin-input option {
   }
 }
 
+.docs-rail {
+  position: relative;
+  padding-left: 12px;
+}
+.docs-rail-line {
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 0;
+  width: 1px;
+  background: var(--admin-border);
+}
+.docs-rail-line-fill {
+  position: absolute;
+  top: 8px;
+  left: 0;
+  width: 1px;
+  border-radius: 1px;
+  background: linear-gradient(180deg, #60a5fa, #a78bfa);
+  box-shadow: 0 0 10px rgba(96, 165, 250, 0.5);
+  transition: height 0.15s linear;
+}
+
 /* Sections are separated by hairlines, not cards. */
 .docs-section {
   position: relative;
   scroll-margin-top: 96px;
-  padding-top: clamp(1.75rem, 4vw, 2.75rem);
-  border-top: 1px solid var(--admin-border);
+  padding-top: clamp(2rem, 4.5vw, 3rem);
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
 }
 .docs-section:first-child {
   padding-top: 0;
   border-top: 0;
 }
 
-/* Comfortable reading measure for section body prose. */
-.docs-section > p {
-  max-width: 74ch;
-}
-
 /* Section navigation */
 .docs-nav-item {
   position: relative;
   min-height: 36px;
-  transition: color 0.2s ease;
+  transition: color 0.2s ease, background-color 0.2s ease;
 }
 .docs-nav-item:hover,
 .docs-nav-item:focus-visible {
@@ -1181,15 +1477,18 @@ select.admin-input option {
 .docs-nav-item.is-active {
   color: #bfdbfe;
 }
+/* The active marker sits on the rail spine itself, so "you are here" and
+   "how far in you are" are the same line. */
 .docs-nav-item.is-active::before {
   content: "";
   position: absolute;
-  left: -16px;
-  top: 22%;
-  bottom: 22%;
+  left: -12px;
+  top: 20%;
+  bottom: 20%;
   width: 2px;
   border-radius: 2px;
   background: linear-gradient(180deg, #60a5fa, #a78bfa);
+  box-shadow: 0 0 12px rgba(96, 165, 250, 0.55);
 }
 
 /* Completed-section marker: a tick replaces the number, tinted like the
@@ -1225,42 +1524,69 @@ select.admin-input option {
   transition: transform 0.12s linear;
 }
 
-/* Masthead */
-.docs-hero {
-  position: relative;
-  isolation: isolate;
-  overflow: hidden;
-  border: 1px solid var(--admin-border);
-  border-radius: 20px;
-  background: var(--admin-surface);
-  padding: clamp(2rem, 5vw, 3.5rem);
+/* ── section headings ───────────────────────────────────────────────────
+   A numbered eyebrow, then the title in gradient ink. The rule under the
+   eyebrow is the same accent as the rail spine, tying the two together. */
+
+.docs-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--admin-text-dim);
 }
-.docs-hero::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  background-image:
-    linear-gradient(rgba(255, 255, 255, 0.028) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.028) 1px, transparent 1px);
-  background-size: 26px 26px;
-  -webkit-mask-image: radial-gradient(ellipse 76% 100% at 22% 0%, black 0%, transparent 72%);
-  mask-image: radial-gradient(ellipse 76% 100% at 22% 0%, black 0%, transparent 72%);
-  pointer-events: none;
+.docs-eyebrow-num {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: #a78bfa;
 }
-.docs-hero-glow {
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  background: radial-gradient(ellipse 560px 220px at 14% -6%, rgba(59, 130, 246, 0.10), transparent 62%);
-  pointer-events: none;
+.docs-eyebrow-rule {
+  width: 28px;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(167, 139, 250, 0.75), rgba(167, 139, 250, 0));
 }
-.docs-hero-meta {
+
+.docs-h2 {
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem 2rem;
-  border-top: 1px solid var(--admin-border);
-  padding-top: 1.25rem;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.7rem;
+  font-size: clamp(1.3rem, 2.4vw, 1.6rem);
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.022em;
+}
+.docs-h2-text {
+  background: linear-gradient(180deg, #ffffff 20%, #cbd5e1 120%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.docs-subtitle {
+  margin-top: 0.35rem;
+  font-size: 13px;
+  color: var(--admin-text-dim);
+}
+
+/* Body prose: a comfortable 72ch measure and an open leading. */
+.docs-prose {
+  max-width: 72ch;
+  font-size: 14.5px;
+  line-height: 1.78;
+  color: var(--admin-text-muted);
+}
+
+/* A hairline panel for the inline pipeline strip. */
+.docs-panel {
+  border: 1px solid var(--admin-border);
+  border-radius: 14px;
+  background: var(--admin-surface);
+  padding: 15px 16px;
 }
 
 /* Inline pipeline: dialect -> IR -> provider, as mono chips. */
@@ -1287,7 +1613,128 @@ select.admin-input option {
   font-size: 11px;
 }
 
-/* Code blocks: flat, with a left accent spine. */
+/* ── callouts ───────────────────────────────────────────────────────────
+   A left rule in the section accent with a wash fading to the right. */
+
+.docs-callout {
+  border-left: 2px solid rgba(139, 92, 246, 0.65);
+  border-radius: 0 12px 12px 0;
+  background: linear-gradient(90deg, rgba(139, 92, 246, 0.1), rgba(139, 92, 246, 0) 72%);
+  padding: 13px 16px;
+}
+.docs-callout-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #c4b5fd;
+}
+.docs-callout-body {
+  margin-top: 6px;
+  max-width: 72ch;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--admin-text-muted);
+}
+
+/* ── auth chips + triad ───────────────────────────────────────────────── */
+
+.docs-keychip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.02);
+  padding: 0 0.9rem;
+  font-size: 12px;
+  color: var(--admin-text-muted);
+}
+.docs-keychip-plain {
+  color: var(--admin-text-dim);
+}
+
+.docs-triad {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--admin-border);
+  border-radius: 14px;
+  background: var(--admin-border);
+}
+@media (min-width: 640px) {
+  .docs-triad {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+.docs-triad-cell {
+  min-width: 0;
+  background: var(--admin-surface);
+  padding: 15px 16px;
+}
+
+/* ── endpoint filter ──────────────────────────────────────────────────── */
+
+.docs-filter {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  border: 1px solid var(--admin-border);
+  border-radius: 12px;
+  background: var(--admin-surface);
+  padding: 0 12px;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+.docs-filter:focus-within {
+  border-color: rgba(96, 165, 250, 0.45);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+.docs-filter-icon {
+  display: flex;
+  color: var(--admin-text-dim);
+}
+.docs-filter-input {
+  min-width: 0;
+  flex: 1 1 auto;
+  border: 0;
+  background: transparent;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--admin-text);
+  outline: none;
+}
+.docs-filter-input::placeholder {
+  color: var(--admin-text-dim);
+}
+.docs-filter-input::-webkit-search-cancel-button {
+  filter: invert(0.6);
+}
+.docs-filter-kbd {
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 1px 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  color: var(--admin-text-dim);
+}
+.docs-filter-count {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--admin-text-muted);
+}
+
+.docs-empty {
+  color: var(--admin-text-muted);
+}
+
+/* ── code blocks ────────────────────────────────────────────────────────
+   Flat, with a left accent spine and a lit header rule. */
+
 .docs-codeblock {
   min-width: 0;
   max-width: 100%;
@@ -1301,6 +1748,39 @@ select.admin-input option {
 .docs-codeblock:hover {
   border-color: rgba(96, 165, 250, 0.26);
   box-shadow: inset 3px 0 0 rgba(96, 165, 250, 0.32);
+}
+.docs-codehead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--admin-border);
+  background: rgba(255, 255, 255, 0.015);
+  padding: 4px 10px 4px 12px;
+}
+.docs-copybtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 72px;
+  min-height: 30px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 0 9px;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--admin-text-dim);
+  transition: color 0.16s ease, border-color 0.16s ease, background-color 0.16s ease;
+}
+.docs-copybtn:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+  color: var(--admin-text);
+}
+.docs-copybtn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.45);
 }
 .docs-codeblock pre {
   max-width: 100%;
@@ -1326,23 +1806,85 @@ select.admin-input option {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   line-height: 1.625;
-  color: rgba(255, 255, 255, 0.18);
-  font-variant-numeric: tabular-nums;
+  user-select: none;
   text-align: right;
   /* Line numbers are real content, not decoration — 0.18 alpha failed the 4.5:1
      contrast floor on the #08090b block background. */
   color: rgba(255, 255, 255, 0.42);
-  user-select: none;
 }
 .docs-codebody > pre {
   flex: 1 1 auto;
   min-width: 0;
 }
+.docs-pre {
+  overflow-x: auto;
+  padding: 12px 14px;
+  font-size: 12px;
+  line-height: 1.625;
+  scrollbar-width: thin;
+}
+.docs-pre:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px rgba(96, 165, 250, 0.45);
+}
 
-/* Provider ecosystem: hairline-separated tiles (gap-px over a border fill),
-   each carrying the hue of the wire family it belongs to. The legend above the
-   grid states the same mapping in words, so the hue is decoration and the dot
-   is never the only way to read a tile. */
+/* ── code tabs ────────────────────────────────────────────────────────── */
+
+.docs-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.docs-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  border-radius: 8px;
+  padding: 0 10px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--admin-text-dim);
+  transition: color 0.16s ease, background-color 0.16s ease, box-shadow 0.16s ease;
+}
+.docs-tab:hover {
+  color: var(--admin-text);
+  background: rgba(255, 255, 255, 0.03);
+}
+.docs-tab.is-active {
+  color: #bfdbfe;
+  background: rgba(96, 165, 250, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(96, 165, 250, 0.22);
+}
+.docs-tab:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.45);
+}
+
+/* Touch devices get a 44px target on every control. */
+@media (hover: none) {
+  .docs-copybtn,
+  .docs-tab,
+  .docs-pathcopy {
+    min-height: 44px;
+  }
+}
+
+/* Reduced motion: the beams are SMIL animations, which CSS cannot pause, so
+   the travelling gradient stroke is hidden and only the static connecting
+   path remains. The diagram still reads; it just stops moving. */
+@media (prefers-reduced-motion: reduce) {
+  .docs-core svg path:nth-of-type(2) {
+    display: none;
+  }
+}
+
+/* ── provider ecosystem ─────────────────────────────────────────────────
+   Hairline-separated tiles (gap-px over a border fill), each carrying the hue
+   of the wire family it belongs to. The legend above the grid states the same
+   mapping in words, so the hue is decoration and the dot is never the only
+   way to read a tile. */
 .docs-provider-head {
   display: flex;
   flex-wrap: wrap;
@@ -1380,8 +1922,8 @@ select.admin-input option {
 }
 .docs-provider-legend-item {
   min-width: 0;
-  padding: 10px 12px 11px;
   background: var(--admin-surface);
+  padding: 10px 12px 11px;
 }
 .docs-provider-legend-top {
   display: flex;
@@ -1398,10 +1940,10 @@ select.admin-input option {
    with the dots in the grid below. */
 .docs-provider-legend-count {
   margin-left: auto;
-  padding: 1px 7px;
   border: 1px solid hsl(var(--f-hue) 80% 62% / 0.24);
   border-radius: 999px;
   background: hsl(var(--f-hue) 80% 62% / 0.1);
+  padding: 1px 7px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 9.5px;
   font-variant-numeric: tabular-nums;
@@ -1446,9 +1988,9 @@ select.admin-input option {
   justify-content: center;
   gap: 7px;
   min-width: 0;
-  min-height: 96px;
-  padding: 14px 10px 12px;
+  min-height: 104px;
   background: var(--admin-surface);
+  padding: 16px 10px 13px;
   transition: background-color 0.25s ease;
 }
 .docs-provider-item:hover {
@@ -1460,11 +2002,10 @@ select.admin-input option {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 38px;
-  height: 38px;
-  padding: 8px;
+  width: 40px;
+  height: 40px;
   border: 1px solid var(--admin-border);
-  border-radius: 11px;
+  border-radius: 12px;
   background: rgba(255, 255, 255, 0.022);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
   transition:
@@ -1520,11 +2061,13 @@ select.admin-input option {
    Hairline tiles over one spectrum: each tile receives --f-hue and derives its
    icon chip, left spine, index, and pointer-tracked spotlight from it. The
    base state already carries a low-opacity tint, so the tiles read the same on
-   touch devices where there is no hover to intensify them. */
+   touch devices where there is no hover to intensify them. Tiles marked
+   span="2" break the matrix into a bento rhythm. */
 
 .docs-feature-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
+  grid-auto-flow: dense;
   gap: 1px;
   overflow: hidden;
   border: 1px solid var(--admin-border);
@@ -1549,9 +2092,17 @@ select.admin-input option {
   position: relative;
   isolation: isolate;
   min-width: 0;
-  padding: 16px 16px 15px;
   background: var(--admin-surface);
+  padding: 17px 17px 16px;
   transition: background-color 0.25s ease;
+}
+.docs-feature[data-span="2"] {
+  grid-column: span 2;
+}
+@media (max-width: 639px) {
+  .docs-feature[data-span="2"] {
+    grid-column: span 1;
+  }
 }
 /* Pointer-tracked spotlight, shared by the feature and provider tiles.
    Negative z-index keeps it above the tile's own background (painted first
@@ -1601,10 +2152,10 @@ select.admin-input option {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
+  width: 32px;
+  height: 32px;
   border: 1px solid var(--f-line);
-  border-radius: 9px;
+  border-radius: 10px;
   background: var(--f-soft);
   color: var(--f-ink);
   box-shadow: inset 0 1px 0 hsl(var(--f-hue) 90% 82% / 0.07);
@@ -1641,10 +2192,10 @@ select.admin-input option {
 }
 
 .docs-feature-title {
-  margin-top: 11px;
-  font-size: 13px;
+  margin-top: 12px;
+  font-size: 13.5px;
   font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.012em;
   color: var(--admin-text);
   transition: color 0.25s ease;
 }
@@ -1654,7 +2205,7 @@ select.admin-input option {
 .docs-feature-body {
   margin-top: 5px;
   font-size: 12px;
-  line-height: 1.6;
+  line-height: 1.65;
   color: var(--admin-text-muted);
 }
 
@@ -1815,6 +2366,42 @@ select.admin-input option {
 .docs-method-badge {
   box-shadow: 0 0 16px -7px currentColor;
 }
+.docs-client-chip {
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.02);
+  padding: 2px 8px;
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--admin-text-dim);
+  transition: color 0.2s ease, border-color 0.2s ease;
+}
+.group\/endpoint:hover .docs-client-chip {
+  border-color: rgba(255, 255, 255, 0.1);
+  color: var(--admin-text-muted);
+}
+.docs-pathcopy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--admin-text-dim);
+  transition: color 0.16s ease, border-color 0.16s ease, background-color 0.16s ease;
+}
+.docs-pathcopy:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+  color: #93c5fd;
+}
+.docs-pathcopy:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.45);
+}
 @media (min-width: 640px) {
   /* Client chips sit at the end of the row instead of drifting to the far
      right edge of a wide content column. */
@@ -1870,7 +2457,7 @@ select.admin-input option {
 
 /* Selection themed to the docs world */
 .docs-content ::selection,
-.docs-hero ::selection {
+.docs-masthead ::selection {
   background: rgba(96, 165, 250, 0.28);
   color: #fff;
 }
@@ -1914,28 +2501,63 @@ select.admin-input option {
 /* Hero action buttons stretch to the full measure on phones */
 @media (max-width: 479px) {
   .docs-hero-actions > a,
-  .docs-hero-actions > button {
+  .docs-hero-actions > button,
+  .docs-hero-actions > div {
     flex: 1 1 auto;
     justify-content: center;
   }
 }
 
-/* CTA: a flat closing panel with a single lit top edge. */
+/* CTA: a borderless closing section, like the landing page's. */
 .docs-cta {
   position: relative;
   isolation: isolate;
   overflow: hidden;
-  border: 1px solid var(--admin-border);
-  border-radius: 20px;
-  background: var(--admin-surface);
+  padding-top: clamp(2rem, 4vw, 3rem);
+  text-align: center;
 }
 .docs-cta::before {
   content: "";
   position: absolute;
-  inset: 0 0 auto;
+  top: 0;
+  right: 0;
+  left: 0;
   height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(167, 139, 250, 0.45), transparent);
-  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--admin-border) 20%,
+    var(--admin-border) 80%,
+    transparent
+  );
+}
+.docs-cta-title {
+  font-size: clamp(1.6rem, 3.4vw, 2.4rem);
+  font-weight: 700;
+  line-height: 1.08;
+  letter-spacing: -0.03em;
+  color: var(--admin-text);
+  text-wrap: balance;
+}
+.docs-cta-body {
+  max-width: 44ch;
+  margin: 1rem auto 0;
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--admin-text-muted);
+}
+.docs-cta-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 2rem;
+}
+@media (max-width: 479px) {
+  .docs-cta-actions > a {
+    width: 100%;
+  }
 }
 
 /* ─── Login page: split-panel beam console ───────────────────────────────── */
