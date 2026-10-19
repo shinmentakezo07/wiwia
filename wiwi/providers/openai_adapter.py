@@ -12,6 +12,7 @@ from wiwi.ir import translation as tr
 from wiwi.ir import types as ir
 from wiwi.providers.base import (
     ProviderKeyRef,
+    WarningMixin,
     as_dict,
     as_list,
     as_str,
@@ -211,7 +212,7 @@ def _role_parts_to_content(
     return out
 
 
-class OpenAIAdapter:
+class OpenAIAdapter(WarningMixin):
     provider_type = "openai"
     force_stream = False  # set True on adapters whose upstream is streaming-only
 
@@ -352,6 +353,14 @@ class OpenAIAdapter:
         for k, v in req.extras.items():
             if k in _STANDARD or not deployment_params.get("drop_params", True):
                 body.setdefault(k, v)
+        # Sampling params the Chat Completions wire has no field for. They are
+        # real constraints the caller set, so the drop is reported to the
+        # CALLER too (AUDIT #498) — the operator log alone left an agent that
+        # asked for a deterministic-ish decode with no idea its ``top_k`` was
+        # silently discarded.
+        if g.top_k is not None:
+            self.warn(
+                "top_k has no Chat Completions equivalent and was dropped")
         return body
 
     def _encode_tools(self, req: ir.Request) -> list[dict[str, Any]] | None:
@@ -371,6 +380,14 @@ class OpenAIAdapter:
             if t.builtin is not None:
                 log.warning("dropping_unhostable_builtin_tool",
                             builtin=t.builtin, provider=self.provider_type)
+                # The CALLER needs to know too: a provider-hosted tool the
+                # caller asked for is now gone, and its result will never
+                # arrive. The operator log alone left the caller believing a
+                # search tool was running (AUDIT #498).
+                self.warn(
+                    f"provider-hosted tool '{t.name}' "
+                    f"({t.builtin}) is not supported by this provider and "
+                    f"was dropped")
                 continue
             fn: dict[str, Any] = {"name": t.name, "description": t.description,
                                   "parameters": t.parameters_json_schema}
@@ -460,9 +477,25 @@ class OpenAIAdapter:
             cached_tokens=_token_count(details_p.get("cached_tokens")),
             reasoning_tokens=_token_count(details_c.get("reasoning_tokens")),
         )
+        # Per-token logprobs (AUDIT #326). The client asked for them
+        # (``logprobs``/``top_logprobs`` in the request), the upstream
+        # computed and billed them, and until now no adapter decoded
+        # ``choices[0].logprobs`` — so the caller paid for a feature it
+        # never received, with nothing in the response to show for it.
+        #
+        # Carried as the provider's own dict (see ``AssistantTurn.logprobs``).
+        # A dict test rather than a truthiness test: an explicit JSON
+        # ``null`` means "no logprobs", and so does a missing key — but an
+        # upstream that returns ``{}`` (no content, e.g. a refusal) DID
+        # answer the question, and the encoder should say so rather than
+        # stay silent.
+        raw_logprobs = choice.get("logprobs")
+        if isinstance(raw_logprobs, dict):
+            turn.logprobs = raw_logprobs
         return turn
 
     def __init__(self) -> None:
+        self._init_warnings()
         self._open_tool_indices: set[int] = set()
         self._tool_names: dict[int, str] = {}  # accumulated name fragments per index
         # Deferred ToolCallOpen per index: some OpenAI-compatible providers
@@ -509,6 +542,7 @@ class OpenAIAdapter:
         self._pending_opens.clear()
         self._synthesized_opens.clear()
         self._open_tool_ids.clear()
+        self._reset_warnings()
 
     def _flush_open_tools(self) -> list[dl.IRStreamDelta]:
         """Close every still-open tool call, flushing deferred Opens first.
@@ -614,6 +648,14 @@ class OpenAIAdapter:
         # (AUDIT #154).
         if isinstance(delta.get("content"), str) and delta["content"]:
             out.append(dl.TextDelta(delta["content"]))
+        # Per-token logprobs ride the CHOICE, not the delta: OpenAI puts
+        # ``logprobs`` alongside ``delta`` inside ``choices[0]`` (AUDIT
+        # #326). Emitted as its own delta so the encoder can attach it to
+        # the frame carrying the matching token — a logprob that arrives
+        # after its token is useless to the caller.
+        raw_logprobs = c.get("logprobs")
+        if isinstance(raw_logprobs, dict) and raw_logprobs:
+            out.append(dl.LogprobsDelta(logprobs=raw_logprobs))
         if isinstance(delta.get("reasoning_content"), str) and delta["reasoning_content"]:
             out.append(dl.ThinkingDelta(delta["reasoning_content"]))
         elif isinstance(delta.get("reasoning"), str) and delta["reasoning"]:

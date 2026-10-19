@@ -122,7 +122,13 @@ import structlog
 
 from wiwi.ir import types as ir
 from wiwi.providers.anthropic_adapter import AnthropicAdapter
-from wiwi.providers.base import ProviderKeyRef, as_dict, as_list
+from wiwi.providers.base import (
+    ProviderKeyRef,
+    WarningMixin,
+    as_dict,
+    as_list,
+    take_adapter_warnings,
+)
 from wiwi.providers.gemini_adapter import GeminiAdapter
 from wiwi.providers.openai_adapter import OpenAIAdapter
 from wiwi.providers.opencode_version import build_user_agent
@@ -491,7 +497,7 @@ def _base(base_url: str) -> str:
     return (base_url or OPENCODE_ZEN_BASE).rstrip("/") or OPENCODE_ZEN_BASE
 
 
-class OpencodeAdapter:
+class OpencodeAdapter(WarningMixin):
     """Multi-protocol Zen adapter with live opencode User-Agent headers."""
 
     provider_type = "opencode"
@@ -504,6 +510,7 @@ class OpencodeAdapter:
     force_stream = True
 
     def __init__(self) -> None:
+        self._init_warnings()
         self._chat = OpenAIAdapter()
         self._msg = AnthropicAdapter()
         self._gem = GeminiAdapter()
@@ -540,6 +547,23 @@ class OpencodeAdapter:
         self._decoy_names = frozenset()
         self._decoy_indices.clear()
         self._kept_real_call = False
+        self._reset_warnings()
+
+    def _collect_sub_warnings(self) -> None:
+        """Move the route adapter's caller-visible warnings up to this adapter.
+
+        OpenCode routes a request to one of three wire shapes, each encoded
+        by its own adapter (OpenAI chat, Anthropic messages, Gemini). Those
+        adapters raise the caller-visible translation warnings (a dropped
+        builtin tool, an unsupported ``strict``, a dropped ``top_k``) into
+        their OWN lists — but the gateway drains exactly one list, this
+        adapter's. Without this forwarding every warning raised on a
+        sub-route was collected and thrown away, so the caller learned
+        nothing on those routes (AUDIT #498).
+        """
+        for sub in (self._chat, self._msg, self._gem):
+            for msg in take_adapter_warnings(sub):
+                self.warn(msg)
 
     # -- auth / URL ------------------------------------------------------
     def headers(self, key: ProviderKeyRef) -> dict[str, str]:
@@ -666,13 +690,22 @@ class OpencodeAdapter:
             # ?alt=sse` — see build_url, which the pump already calls with
             # stream=True), not from a body field; a `stream` key here is an
             # unknown field the endpoint rejects.
-            return self._gem.encode_request(req, model_id, dict(deployment_params))
+            body = self._gem.encode_request(req, model_id, dict(deployment_params))
+            # The sub-adapter's caller-visible warnings belong to THIS
+            # adapter as far as the gateway is concerned — it drains one
+            # list, this adapter's. Forward them (AUDIT #498); otherwise
+            # OpenCode's Gemini route would swallow every warning its
+            # sub-adapters raised.
+            self._collect_sub_warnings()
+            return body
         elif route == "responses":
-            body = _encode_responses_request(req, model_id, deployment_params)
+            body = _encode_responses_request(req, model_id, deployment_params,
+                                             warn=self.warn)
         else:
             params = dict(deployment_params)
             params["provider_type"] = "openai"
             body = self._chat.encode_request(req, model_id, params)
+        self._collect_sub_warnings()
         # Zen refuses the caller's client-metadata block on every route that can
         # carry one (see _drop_client_metadata). The Gemini route returns above
         # and the Responses encoder never forwards extras, so neither can.
@@ -996,8 +1029,16 @@ def _envelope_stream_error(data: str) -> dl.StreamError | None:
 
 
 def _encode_responses_request(req: ir.Request, model_id: str,
-                              deployment_params: dict[str, Any]) -> dict[str, Any]:
-    """Render IR as an OpenAI Responses API request body for Zen."""
+                              deployment_params: dict[str, Any],
+                              warn: Any = None) -> dict[str, Any]:
+    """Render IR as an OpenAI Responses API request body for Zen.
+
+    ``warn`` is the caller-visible warning sink (an adapter's ``warn``
+    method). It is optional so the function stays callable on its own, but
+    the OpenCode adapter always passes one: a dropped attachment is
+    information the caller needs, and the operator log alone does not reach
+    them (AUDIT #498).
+    """
     g = req.gen_params
     instructions_parts: list[str] = []
     input_items: list[dict[str, Any]] = []
@@ -1067,6 +1108,14 @@ def _encode_responses_request(req: ir.Request, model_id: str,
             elif isinstance(p, (ir.AudioPart, ir.DocumentPart)):
                 log.warning("dropping_unsupported_part_for_responses",
                             part=type(p).__name__, provider="opencode")
+                # The CALLER is told too (AUDIT #498) — the log line is the
+                # operator's view, and the caller who attached the file had
+                # no way to learn it never reached the model.
+                if callable(warn):
+                    warn(
+                        f"a {type(p).__name__.replace('Part', '').lower()} "
+                        f"attachment was dropped: this route does not "
+                        f"accept it")
         if text_buf or image_parts:
             content: list[dict[str, Any]] = []
             for t in text_buf:

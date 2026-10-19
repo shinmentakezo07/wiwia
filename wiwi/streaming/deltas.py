@@ -116,6 +116,25 @@ class ServerToolResultDelta:
 
 
 @dataclass(frozen=True)
+class LogprobsDelta:
+    """Per-token log probabilities for the content just emitted.
+
+    The streaming half of the AUDIT #326 carrier. The sync path holds
+    logprobs on ``AssistantTurn.logprobs``; the streaming path needs its own
+    delta because a token's logprobs arrive with that token, not at the end
+    of the turn.
+
+    ``logprobs`` is the provider's own ``choices[0].logprobs`` dict
+    (``{"content": [{"token", "logprob", "bytes", "top_logprobs"}], ...}``) —
+    the OpenAI wire shape, carried verbatim for the same reason the IR field
+    is: a second dialect would have to translate it before a caller could
+    read it, so there is nothing to gain by modelling it twice.
+    """
+
+    logprobs: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
 class UsageFinal:
     prompt: int = 0
     cached: int = 0
@@ -184,6 +203,6 @@ def stream_error_type(d: StreamError) -> str:
 
 IRStreamDelta = (
     StreamStart | TextDelta | ThinkingDelta | ToolCallOpen | ToolCallArgsDelta
-    | ToolCallClose | ServerToolResultDelta | UsageFinal | Finish | StreamEnd
-    | StreamError
+    | ToolCallClose | ServerToolResultDelta | LogprobsDelta | UsageFinal
+    | Finish | StreamEnd | StreamError
 )

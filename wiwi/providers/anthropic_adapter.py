@@ -10,7 +10,13 @@ import structlog
 
 from wiwi.ir import builtin_tools as bt
 from wiwi.ir import types as ir
-from wiwi.providers.base import ProviderKeyRef, as_dict, as_list, as_str
+from wiwi.providers.base import (
+    ProviderKeyRef,
+    WarningMixin,
+    as_dict,
+    as_list,
+    as_str,
+)
 from wiwi.streaming import deltas as dl
 
 log = structlog.get_logger("wiwi.anthropic_adapter")
@@ -194,10 +200,11 @@ def _count_breakpoints(req: ir.Request) -> int:
     return n
 
 
-class AnthropicAdapter:
+class AnthropicAdapter(WarningMixin):
     provider_type = "anthropic"
 
     def __init__(self) -> None:
+        self._init_warnings()
         self._tool_indices: set[int] = set()
         # tool_use id -> tool name, so a server tool's RESULT block (which
         # carries only ``tool_use_id``) can be tagged with the canonical
@@ -216,6 +223,7 @@ class AnthropicAdapter:
         self._pending_prompt = 0
         self._pending_cached = 0
         self._pending_cache_creation = 0
+        self._reset_warnings()
 
     def headers(self, key: ProviderKeyRef) -> dict[str, str]:
         return {"x-api-key": key.secret, "anthropic-version": "2023-06-01"}
@@ -361,6 +369,18 @@ class AnthropicAdapter:
                     if p.cache_control:
                         doc["cache_control"] = p.cache_control
                     blocks.append(doc)
+                elif isinstance(p, ir.AudioPart):
+                    # The Messages API has no audio content block. Before
+                    # this branch the part fell straight through the loop
+                    # with no arm at all — not even a log line — so an
+                    # audio attachment vanished with no trace of it
+                    # anywhere (AUDIT #499). The drop is unavoidable on
+                    # this provider; the SILENCE was not.
+                    log.warning("dropping_unsupported_audio_part",
+                                provider=self.provider_type, mime=p.mime)
+                    self.warn(
+                        "an audio attachment was dropped: the Messages API "
+                        "has no audio content block")
                 elif isinstance(p, ir.ToolUsePart):
                     # Replay the block type the client actually sent. A
                     # provider-hosted call (server_tool_use) or an MCP call
@@ -414,9 +434,39 @@ class AnthropicAdapter:
                         # it breaks tool-use continuity.
                         blocks.append({"type": "redacted_thinking", "data": p.data})
                         continue
+                    if not p.signature:
+                        # An UNSIGNED thinking block is rejected by Anthropic
+                        # on replay — ``RESEARCH.md:67``: "Anthropic signatures
+                        # MUST round-trip unmodified or 400". The upstream
+                        # error names nothing the caller sent, so the request
+                        # fails on the vendor's terms with no diagnosable
+                        # cause.
+                        #
+                        # Reachable in two ways: a Responses
+                        # ``reasoning.encrypted_content`` blob (which no
+                        # Anthropic-shaped source signs) replayed here, and an
+                        # OpenAI-shaped client's ``reasoning_content`` echoed
+                        # back as history. ``AUDIT.md`` #355's fix sketch
+                        # asked for exactly this guard ("skip (or refuse) a
+                        # ThinkingPart with no signature rather than send it
+                        # unsigned"); only the ``encrypted_content`` half
+                        # landed (AUDIT #500).
+                        #
+                        # The block is dropped, not sent: an unsigned replay
+                        # is a guaranteed 400, and a dropped thinking block is
+                        # a history the API still accepts (the model just
+                        # loses the visible reasoning it had produced). The
+                        # caller is told, so the loss is not silent.
+                        log.warning("dropping_unsigned_thinking_block",
+                                    provider=self.provider_type,
+                                    text_len=len(p.text))
+                        self.warn(
+                            "an unsigned thinking block was dropped: this "
+                            "provider requires a signed thinking block on "
+                            "replay, and the source did not carry one")
+                        continue
                     tb: dict[str, Any] = {"type": "thinking", "thinking": p.text}
-                    if p.signature:
-                        tb["signature"] = p.signature
+                    tb["signature"] = p.signature
                     blocks.append(tb)
             if m.role == "assistant":
                 role = "assistant"
@@ -539,6 +589,14 @@ class AnthropicAdapter:
         for k, v in req.extras.items():
             if k in _ANTHROPIC_STANDARD or not deployment_params.get("drop_params", True):
                 body.setdefault(k, v)
+
+        # Sampling params the Messages API has no field for. Reported to the
+        # caller, who set the constraint (AUDIT #498) — a ``seed`` is often
+        # set precisely to make a run reproducible, and a caller that
+        # believes it is reproducing a run that is not reproducible is worse
+        # off than one that was told the knob was dropped.
+        if g.seed is not None:
+            self.warn("seed has no Messages API equivalent and was dropped")
 
         if req.tools:
             rendered: list[dict[str, Any]] = []

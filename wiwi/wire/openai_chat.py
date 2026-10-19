@@ -381,10 +381,25 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
     # A1 downgrade guard: tool_calls finish with every call suppressed is wrong.
     if fr == "tool_calls" and not tool_calls:
         fr = "stop"
+    choice: dict[str, Any] = {"index": 0, "message": message, "finish_reason": fr}
+    # Per-token logprobs (AUDIT #326). The upstream computed and billed them
+    # because the client asked; until now no encoder emitted them, so the
+    # caller paid for a feature it never received. Emitted only when the
+    # upstream actually returned them, so a response never grows a phantom
+    # field.
+    if turn.logprobs is not None:
+        choice["logprobs"] = turn.logprobs
+    # The matched stop sequence (AUDIT #497). OpenAI's ``finish_reason``
+    # vocabulary has no "stop_sequence" value, so the information used to
+    # stop at the IR boundary: the caller learned that the turn stopped but
+    # never WHICH caller-supplied sequence fired. It rides on the choice
+    # next to the finish_reason that describes it.
+    if turn.stop_sequence:
+        choice["stop_sequence"] = turn.stop_sequence
     return {
         "id": f"chatcmpl-{req_id}", "object": "chat.completion",
         "created": int(time.time()), "model": model,
-        "choices": [{"index": 0, "message": message, "finish_reason": fr}],
+        "choices": [choice],
         "usage": usage,
     }
 
@@ -428,11 +443,28 @@ class ChatStreamEncoder:
         self._choice["delta"] = delta
         self._choice["finish_reason"] = finish
         self._chunk.pop("usage", None)
+        # The choice dict is reused across frames, so a logprobs key set by
+        # the LogprobsDelta arm would ride along on every later frame —
+        # telling the caller the same logprobs apply to a different token.
+        # Each logprobs frame carries its own, so the key is per-frame.
+        self._choice.pop("logprobs", None)
         return sse_frame("", orjson.dumps(self._chunk).decode())
 
     def feed(self, d: dl.IRStreamDelta) -> bytes | None:
         if isinstance(d, dl.StreamStart):
             return self._shell({"role": "assistant", "content": ""})
+        if isinstance(d, dl.LogprobsDelta):
+            # Per-token logprobs ride the CHOICE, not the delta — that is
+            # where OpenAI puts them, and where a caller reads them
+            # (AUDIT #326). The delta carries an empty ``delta`` object so
+            # the frame stays a well-formed chunk.
+            if not d.logprobs:
+                return None
+            self._choice["delta"] = {}
+            self._choice["finish_reason"] = None
+            self._choice["logprobs"] = d.logprobs
+            self._chunk.pop("usage", None)
+            return sse_frame("", orjson.dumps(self._chunk).decode())
         if isinstance(d, dl.TextDelta):
             return self._shell({"content": d.text})
         if isinstance(d, dl.ThinkingDelta):

@@ -761,6 +761,48 @@ def _alias_first_hop(entry_map: dict, name: str) -> str | ModelAliasEntry | None
     return entry_map.get(name)
 
 
+# Bound on the caller-visible translation-warning header. A request can drop
+# several things (a builtin tool, a sampling param, an attachment), and each
+# message is a sentence; the header must stay small enough that the HTTP
+# response headers remain legal. The full list is always in the request log
+# (``LogEvent.translation_warnings``), so truncation loses nothing that is
+# not recoverable.
+_MAX_WARNING_HEADER = 900
+
+
+def _with_warnings(headers: dict[str, str], ctx: RequestContext) -> dict[str, str]:
+    """Add the caller-visible translation warnings to a response's headers.
+
+    The ``translation_warnings`` channel was built for exactly this: a
+    construct the caller asked for that the provider could not honour
+    (a hosted tool the backend cannot run, a ``strict`` mode it cannot
+    enforce, a sampling param it has no field for). Until now the warnings
+    went to the *operator* — the proxy log and the request log — and the
+    CALLER, who set the constraint and pays for the request, learned
+    nothing (AUDIT #498).
+
+    The header is the only way to tell the caller, because the response
+    body is dialect-owned: an OpenAI-shaped body cannot carry an
+    Anthropic-shaped note without breaking the client's schema
+    expectations. A header is additive and every HTTP client surfaces it.
+
+    Absent when there are no warnings, so a clean request's response is
+    byte-identical to what it was before.
+    """
+    warnings = ctx.metadata.get("translation_warnings")
+    if not isinstance(warnings, list) or not warnings:
+        return headers
+    msgs = [w for w in warnings if isinstance(w, str) and w]
+    if not msgs:
+        return headers
+    value = "; ".join(msgs)
+    if len(value) > _MAX_WARNING_HEADER:
+        value = value[:_MAX_WARNING_HEADER - 1] + "…"
+    out = dict(headers)
+    out["x-wiwi-translation-warnings"] = value
+    return out
+
+
 def _validate_alias_batch(current: dict, set_map: object, unset: object,
                           groups: dict, provider_aliases: dict[str, str]
                           ) -> tuple[dict | None, str | None]:
@@ -2518,6 +2560,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
                              # long turn. /admin/stream already set this; the
                              # inference surfaces did not (AUDIT #156).
                              "x-accel-buffering": "no",
+                             # The caller-visible translation warnings. The
+                             # first delta was pulled above, so the pump has
+                             # already encoded the request and the warnings
+                             # are known by the time the headers are built
+                             # (AUDIT #498).
+                             **_with_warnings({}, ctx),
                              **success_headers})
             turn = await gateway.complete(ctx)
             ctx.status = 200
@@ -2572,7 +2620,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
             state_.logs.log_request(build_log_event(ctx))
             tracer.close(ctx.span, **{"wiwi.status": ctx.status,
                                       "wiwi.cost": ctx.cost or None})
-            return ORJSONResponse(payload, headers=success_headers)
+            return ORJSONResponse(payload, headers=_with_warnings(success_headers,
+                                                                  ctx))
         except Exception as e:  # noqa: BLE001
             if isinstance(e, WiwiError):
                 ctx.status = e.status

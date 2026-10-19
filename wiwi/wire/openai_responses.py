@@ -681,11 +681,24 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
                                               json.dumps(t.args)))
         out_id += 1
     u = turn.usage
-    return _response_obj(
+    resp = _response_obj(
         model, req_id, turn.stop_reason, output,
         _usage_obj(u.prompt_tokens, u.completion_tokens, u.cached_tokens,
                    u.reasoning_tokens),
         created_at=int(time.time()))
+    # The matched stop sequence (AUDIT #497). The Responses surface has no
+    # ``stop_sequence`` field of its own, but the information was on the IR
+    # and the caller had no way to learn it: a turn that stopped on a
+    # caller-supplied sequence was indistinguishable from one that stopped
+    # on its own.
+    if turn.stop_sequence:
+        resp["stop_sequence"] = turn.stop_sequence
+    # Per-token logprobs (AUDIT #326). The Responses API has no logprobs
+    # field, but the caller asked for them and the upstream billed for them;
+    # dropping them here meant paying for a feature the caller never saw.
+    if turn.logprobs is not None:
+        resp["logprobs"] = turn.logprobs
+    return resp
 
 
 class ResponsesStreamEncoder:

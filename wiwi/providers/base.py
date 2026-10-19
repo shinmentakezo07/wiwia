@@ -448,3 +448,54 @@ def take_adapter_warnings(adapter: Any) -> list[str]:
     drained = [w for w in warnings if isinstance(w, str)]
     warnings.clear()
     return drained
+
+
+class WarningMixin:
+    """Mixin giving an adapter the caller-visible translation-warning channel.
+
+    The mechanism itself (``translation_warnings`` → ``take_adapter_warnings``
+    → ``ctx.metadata`` → the spend log) is described in
+    :func:`take_adapter_warnings`. It used to be used by exactly ONE adapter
+    out of ten (Gemini, for ``strict`` and ``disable_parallel_tool_use``),
+    while every other drop — the OpenAI adapter's builtin-tool drop, its
+    ``top_k`` drop, the Anthropic and Gemini audio drops — was visible only
+    to the *operator* in the log. The caller, who set the constraint and
+    pays for the request, learned nothing (AUDIT #498).
+
+    The mixin provides the attribute, its reset, and one ``warn`` method so
+    every adapter phrases its warnings the same way and the channel is reset
+    with the rest of the per-request state. Adapters that do not inherit it
+    are unaffected: ``take_adapter_warnings`` is total, and the attribute
+    lookup is a ``getattr`` with a type check.
+
+    Inheritance note: this is a *generic* contract with no provider-specific
+    logic, so it lives in ``providers/base.py`` alongside the other generic
+    contracts rather than in a provider module — the layering rule lets
+    ``core/`` import ``providers.base`` but no concrete adapter.
+    """
+
+    translation_warnings: list[str]
+
+    def _init_warnings(self) -> None:
+        """Start the warning list. Call from the adapter's ``__init__``."""
+        self.translation_warnings = []
+
+    def _reset_warnings(self) -> None:
+        """Empty the warning list. Call from the adapter's ``reset``.
+
+        A previous request's warning must never ride along on the next one:
+        the shared singleton is handed out reset, and a stale warning would
+        be attributed to a request that never hit the condition.
+        """
+        self.translation_warnings = []
+
+    def warn(self, message: str) -> None:
+        """Record one caller-visible translation warning.
+
+        Appends to the list the gateway drains into
+        ``ctx.metadata["translation_warnings"]``. The adapter's own
+        ``log.warning`` remains the operator's view; this is the CALLER's.
+        """
+        if not isinstance(message, str) or not message:
+            return
+        self.translation_warnings.append(message)

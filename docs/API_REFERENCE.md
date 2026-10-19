@@ -82,6 +82,7 @@ OpenAI-style model list of the model groups visible to the authenticated key.
 | `x-wiwi-request-id` | Request ID, echoed as a response header on every reply |
 | `x-wiwi-trace-id` | Trace ID (32 hex), only when `telemetry.enabled`. Pair it with the collector to pull the exact trace; see `docs/CONFIG.md` § `telemetry` |
 | `x-wiwi-stream-id` | Stream journal ID — pass back on reconnect to replay |
+| `x-wiwi-translation-warnings` | Present **only** when the request asked for something the chosen provider could not honour — a provider-hosted tool the backend cannot run, a sampling parameter it has no field for, a dropped attachment, an unsigned thinking block. The messages are `;`-separated. The same list is always in the request log (`translation_warnings`). Absent when nothing was dropped. |
 | `x-wiwi-session-id` | Client session identity, used only when `router_settings.session_affinity` is on: pins the session to the deployment that served it so upstream prompt caches stay warm. A pin is dropped the moment that deployment is unhealthy or above this request's lane ceiling. Also accepted as a `session_id` query parameter for clients that cannot set headers; truncated to 128 chars. |
 | `Last-Event-ID` | SSE standard header; reconnect replays missed frames. The value is the `id:` field of the last frame the client received — a monotonic per-frame sequence number, not the request id |
 

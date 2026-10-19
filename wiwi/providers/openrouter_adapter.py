@@ -99,6 +99,12 @@ class OpenRouterAdapter(OpenAIAdapter):
             wt = bt.wire_type_for("openrouter", t.builtin) if t.builtin else None
             if t.builtin is not None and wt is None:
                 # Unhostable builtin (e.g. code_execution): drop, don't mangle.
+                # The CALLER is told too (AUDIT #498) — a hosted tool that
+                # silently vanishes leaves the caller waiting for a result
+                # that will never come.
+                self.warn(
+                    f"provider-hosted tool '{t.name}' ({t.builtin}) is not "
+                    f"supported by OpenRouter and was dropped")
                 continue
             if t.builtin is not None:
                 cfg = t.builtin_config or {}
@@ -215,6 +221,12 @@ class OpenRouterAdapter(OpenAIAdapter):
         if body.get("stream") and not req.stream_options_include_usage:
             body.pop("stream_options", None)
 
+        # ``top_k`` has no OpenRouter (or Chat Completions) field, and the
+        # OpenAI base does not emit it. Report the drop to the caller, who
+        # set the constraint (AUDIT #498).
+        if req.gen_params.top_k is not None:
+            self.warn(
+                "top_k has no OpenRouter equivalent and was dropped")
         return body
 
     # -- decode: extract reasoning_details and mid-stream errors -----------------

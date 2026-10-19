@@ -8,6 +8,214 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — round 164: the translation layer's loss points (2026-10-19)
+
+A sweep of the **decode → IR → re-encode** path — every inbound codec
+(`wiwi/wire/`), every outbound adapter (`wiwi/providers/`), the IR itself
+(`wiwi/ir/`) and the delta taxonomy (`wiwi/streaming/deltas.py`) — for
+information that is lost on the way through, and for losses the caller
+cannot see.
+
+**Method.** One maximally-rich IR request (every part type, every tool
+flag, every generation parameter) encoded into every adapter, and one rich
+`AssistantTurn` encoded into every inbound dialect; each feature's survival
+probed with a sentinel value rather than a substring, so a probe could not
+report a false positive. The matrix is reproduced in the test module's
+docstring.
+
+**Result.** The IR is not the problem — it models the intersection of the
+dialects correctly, and the lossless paths (Anthropic→Anthropic, OpenAI→
+OpenAI) are lossless. The loss was in three places: a *carrier* gap (the IR
+had no field for something), a *silence* gap (the carrier existed but the
+caller was not told), and a *billed-but-unreturned* gap (the upstream charged
+for a feature the client never received).
+
+### 496. `json_schema` was dropped entirely on the Gemini adapter
+
+**Severity:** 🟠 High · **Status: fixed** — round 164 (`tests/test_fix_round164.py`)
+**Files:** `wiwi/providers/gemini_adapter.py` (`encode_request`, `generationConfig`)
+
+The adapter handled only `response_format.type == "json_object"`, which
+Gemini spells `responseMimeType: "application/json"`. A caller asking for
+`json_schema` — the constrained-output form, with an actual schema — got
+**nothing**: no `responseMimeType`, no schema, no error. The model answered
+in prose, the caller had no way to know its constraint was ignored, and the
+request looked successful.
+
+Gemini has a native spelling for this: `responseSchema` in
+`generationConfig`. It was simply never emitted.
+
+**Fix:** `json_schema` now emits both `responseMimeType: "application/json"`
+and `responseSchema` (with the schema's `name` as `title` when present).
+A schema that is not a JSON object is dropped with a caller-visible warning
+rather than forwarded as a malformed `responseSchema`.
+
+**Test:** `tests/test_fix_round164.py::test_response_format_reaches_a_gemini_upstream`
+
+### 497. `stop_sequence` was populated on the IR and read by no OpenAI-shaped encoder
+
+**Severity:** 🟡 Medium · **Status: fixed** — round 164 (`tests/test_fix_round164.py`)
+**Files:** `wiwi/ir/types.py` (`AssistantTurn.stop_sequence`), `wiwi/providers/anthropic_adapter.py` (populates it), `wiwi/wire/openai_chat.py`, `wiwi/wire/openai_responses.py`
+
+`AssistantTurn.stop_sequence` exists precisely to carry "which caller-supplied
+stop sequence fired" — a distinction `StopReason` gained the `stop_sequence`
+member for. The Anthropic adapter populates it (`anthropic_adapter.py:676`).
+No OpenAI-shaped encoder ever read it: OpenAI's `finish_reason` vocabulary
+has no `stop_sequence` value, so the information was dropped at the encoder.
+
+The caller of an OpenAI-shaped surface learned that the turn stopped but
+never *why*, and the caller of a Responses surface learned the same.
+
+**Fix:** `openai_chat.encode_response` emits `choice["stop_sequence"]` and
+`openai_responses.encode_response` emits `response["stop_sequence"]`, both
+only when the value is present. The Anthropic encoder already carried it.
+
+**Test:** `tests/test_fix_round164.py::test_stop_sequence_reaches_an_openai_chat_caller` (+ 2 siblings)
+
+### 498. The caller-visible translation-warning channel was wired into one adapter out of ten
+
+**Severity:** 🟠 High · **Status: fixed** — round 164 (`tests/test_fix_round164.py`)
+**Files:** `wiwi/providers/base.py` (new `WarningMixin`), `wiwi/providers/{openai,openrouter,anthropic,gemini,opencode}_adapter.py`, `wiwi/server/app.py` (`_with_warnings`)
+
+`providers/base.py` documents the mechanism it owns:
+
+> Adapters that want to surface such warnings set `self.translation_warnings`
+> to a list during `encode_request`; the gateway drains it into
+> `ctx.metadata["translation_warnings"]` via this helper.
+
+and explains why it exists: "an agent that serializes tool calls for
+correctness (file edits, shell state) would never learn it is getting
+concurrency it forbade."
+
+**Only the Gemini adapter used it** (for `strict` and
+`disable_parallel_tool_use`). Every other drop was visible only to the
+*operator* in the proxy log. The mechanism drained into `ctx.metadata` and
+from there into the spend log — so even the one adapter that used it never
+told the *caller*; the caller had no channel at all.
+
+Confirmed silent drops (all reachable from a normal client request):
+
+| Drop | Adapters |
+|---|---|
+| provider-hosted builtin tool | OpenAI, OpenRouter, Gemini, NIM, OpenCode |
+| `top_k` | OpenAI, OpenRouter, NIM |
+| `seed` | Anthropic, Gemini |
+| `strict` (already warned) | Gemini |
+| `disable_parallel_tool_use` (already warned) | Gemini |
+| audio attachment | Anthropic, Gemini, OpenCode |
+| document title/context | Gemini |
+
+**Fix, in three parts:**
+
+1. **`providers/base.py` gains `WarningMixin`** — the attribute, its reset,
+   and one `warn()` method, so every adapter phrases its warnings the same
+   way and no adapter hand-rolls the list. It lives in `base.py` because it
+   is a generic contract with no provider-specific logic, which is the only
+   part of `providers/` the layering rule lets `core/` import.
+2. **Every adapter now warns** on the drop it performs, and the OpenCode
+   adapter forwards its three sub-adapters' warnings up to itself (they
+   would otherwise be collected and thrown away, so the caller learned
+   nothing on those routes).
+3. **`server/app.py` gains `_with_warnings`**, which puts the messages in an
+   `x-wiwi-translation-warnings` response header. A header is the only
+   channel available: the response body is dialect-owned, and an
+   OpenAI-shaped body cannot carry an Anthropic-shaped note without
+   breaking the client's schema expectations. The header is absent when
+   there are no warnings, so a clean request's response is unchanged. The
+   full list always remains in the request log.
+
+**Test:** `tests/test_fix_round164.py` — 8 warning tests plus two end-to-end
+ones (`test_the_caller_learns_that_a_builtin_tool_was_dropped`,
+`test_a_caller_defined_function_tool_is_not_reported_as_dropped`, which
+pins the flag-not-name rule that AUDIT #156 established).
+
+### 499. Two part types fell through the adapter loops with no branch and no warning
+
+**Severity:** 🟠 High · **Status: fixed** — round 164 (`tests/test_fix_round164.py`)
+**Files:** `wiwi/providers/anthropic_adapter.py`, `wiwi/providers/gemini_adapter.py`, `wiwi/providers/opencode_adapter.py`
+
+`AudioPart` had **no branch at all** on the Anthropic and Gemini adapters:
+the part simply vanished from the `for p in m.parts` loop — not even a log
+line. A caller that attached audio got no indication that the model would
+never hear it. (The OpenCode adapter logged, but only for the operator.)
+
+`DocumentPart.name` and `DocumentPart.context` — a PDF's title and the
+caller's description of it — were dropped on every non-Anthropic adapter
+with no report. A caller attaching `report.pdf` with the context `"Q3
+revenue"` got a document with neither, and two differently-named
+attachments became indistinguishable to the model.
+
+**Fix:** explicit branches. Anthropic and Gemini now report the dropped
+audio part (the drop itself is unavoidable — the Messages API has no audio
+content block, and Gemini's `inline_data` audio shape differs from the
+inbound dialects'). Gemini reports the dropped document title/context.
+
+**Test:** `tests/test_fix_round164.py::test_anthropic_adapter_does_not_silently_drop_an_audio_part` (+ 2 siblings)
+
+### 500. An unsigned thinking block was sent to Anthropic, which rejects it on replay
+
+**Severity:** 🟠 High · **Status: fixed** — round 164 (`tests/test_fix_round164.py`)
+**Files:** `wiwi/providers/anthropic_adapter.py` (`encode_request`, `ThinkingPart` branch)
+
+`RESEARCH.md:67`: "Anthropic signatures MUST round-trip unmodified or 400."
+
+The adapter sent `{"type": "thinking", "thinking": ...}` with **no
+`signature`** whenever the source had none — so the block was rejected by
+the upstream on replay, naming nothing the caller sent.
+
+Two reachable paths:
+
+- A Responses `reasoning.encrypted_content` blob (which no Anthropic-shaped
+  source signs) replayed to an Anthropic upstream. AUDIT #355 added the
+  `encrypted_content` carrier; its fix sketch also said "have
+  `anthropic_adapter` skip (or refuse) a `ThinkingPart` with no signature
+  rather than send it unsigned" — **only the `encrypted_content` half of
+  that landed.**
+- An OpenAI-shaped client's `reasoning_content` echoed back as history: the
+  Chat codec lifts it into a `ThinkingPart` (`openai_chat.py`, the
+  `reasoning_content` arm), and the OpenAI dialect has no notion of a
+  signature to sign it with.
+
+**Fix:** the block is dropped rather than sent, and the caller is warned. A
+dropped thinking block is a history the API still accepts — the model just
+loses the visible reasoning it produced. An unsigned replay is a
+guaranteed 400. The `redacted_thinking` blob is unaffected: it IS the
+signed material, and it still replays verbatim.
+
+**Test:** `tests/test_fix_round164.py::test_anthropic_upstream_never_receives_an_unsigned_thinking_block` (+ 2 siblings, one pinning the signed case and one pinning the redacted blob)
+
+### 501. Twelve OpenAI-2026 platform params are honoured and billed by the upstream but invisible to the caller
+
+**Severity:** 🟡 Medium · **Status: open**
+**Files:** `wiwi/wire/openai_chat.py` (`_STANDARD`), `wiwi/providers/openai_adapter.py` (`_STANDARD`)
+
+`user`, `frequency_penalty`, `presence_penalty`, `logit_bias`,
+`service_tier`, `store`, `prediction`, `modalities`, `verbosity`,
+`safety_identifier`, `prompt_cache_key`, `web_search_options` are forwarded
+verbatim to an OpenAI-shaped upstream and dropped by every other provider.
+They are *request-side* knobs: unlike `logprobs` (#326) they have no
+response-side value, so there is nothing to carry back.
+
+The upstream honours and bills for them, so the request is not wasted — but
+a caller that set `logit_bias` against an Anthropic or Gemini deployment
+learns nothing about it. #498 closed the silence for the drops the gateway
+*can* see; these are forwarded rather than dropped, so no drop is visible
+to warn about.
+
+Also unrepresentable in the IR: assistant **audio output** and
+`image_url.detail`.
+
+**Fix sketch:** when the target provider cannot honour a forwarded
+standard param, report it — either by not forwarding it and warning, or by
+forwarding it and warning that the provider has no equivalent. The
+decision needs a product call: forwarding-and-warning keeps a strict
+OpenAI-compatible gateway's behaviour, while not-forwarding-and-warning is
+honest about what the backend did.
+
+**Test:** (not yet written — the fix shape is not decided)
+
+---
+
 ## ✅ Fixed — round 163: the replay cursor's unit (2026-10-19)
 
 A sweep of the SSE **replay** path — the journal (`wiwi/streaming/tape_store.py`),
@@ -13828,16 +14036,44 @@ inputs, which is a product call, not a cleanup. Left as-is deliberately.
 
 ### 326. `logprobs` is a full-stack IR gap — billed for, silently never returned
 
-**Severity:** 🟠 High · **Status: open**
-**Files:** `wiwi/ir/types.py` (no `AssistantTurn.logprobs`), `wiwi/providers/openai_adapter.py:375-390`, `wiwi/wire/openai_chat.py` (`encode_response`)
+**Severity:** 🟠 High · **Status: fixed — round 164 (`tests/test_fix_round164.py`)**
+**Files:** `wiwi/ir/types.py` (`AssistantTurn.logprobs`), `wiwi/streaming/deltas.py` (`LogprobsDelta`), `wiwi/providers/openai_adapter.py` (decode), `wiwi/wire/openai_chat.py` (encode), `wiwi/wire/openai_responses.py` (encode)
 
 A client sends `{"logprobs": true, "top_logprobs": 5}`. The value rides `Request.extras` untyped, is forwarded upstream, and the tokens are **billed as output** — but no adapter decodes `choices[0].logprobs`, no `AssistantTurn` field holds it, and no encoder emits it. The client silently receives no logprobs. `AssistantTurn` fields are `text, thinking, tool_calls, stop_reason, stop_sequence, usage, raw, server_blocks`.
 
-The same gap applies to 12 OpenAI-2026 platform params (`user`, `frequency_penalty`, `presence_penalty`, `logit_bias`, `service_tier`, `store`, `prediction`, `modalities`, `verbosity`, `safety_identifier`, `prompt_cache_key`, `web_search_options`): correct against an OpenAI upstream, silently dropped for Anthropic/Gemini/OpenRouter. Also unrepresentable: assistant **audio output** and `image_url.detail`.
+**Fixed in round 164.** The carrier now exists end to end:
 
-**Fix sketch:** add `AssistantTurn.logprobs` plus a `LogprobsDelta`, decode `choices[0].logprobs`, emit `choice.logprobs` in `encode_response`.
+- `ir.AssistantTurn.logprobs: dict | None` holds the provider's own
+  `choices[0].logprobs` dict. `None` means "the upstream returned no
+  logprobs" — distinct from an empty dict, which means "the upstream
+  answered and had no content to score".
+- `streaming/deltas.py:LogprobsDelta` is the streaming half: a token's
+  logprobs arrive with that token, so they cannot wait for the turn's end.
+- `openai_adapter.decode_response` reads `choices[0].logprobs`;
+  `decode_stream_event` reads the per-chunk `choices[0].logprobs`.
+- `openai_chat.encode_response` emits `choice["logprobs"]`;
+  `openai_responses.encode_response` emits `response["logprobs"]`;
+  `ChatStreamEncoder.feed` emits the per-frame `choices[0]["logprobs"]`.
 
-**Test:** `tests/test_fix_round111.py::test_logprobs_round_trips_through_ir`
+Both keys are omitted when the upstream returned nothing, so a response
+never grows a phantom field. The `ChatStreamEncoder` choice dict is reused
+across frames, so `_shell` pops the `logprobs` key — otherwise one token's
+logprobs would ride along on every later frame and claim to describe a
+different token.
+
+**Still open (same class, different fields):** the 12 OpenAI-2026 platform
+params this entry listed (`user`, `frequency_penalty`, `presence_penalty`,
+`logit_bias`, `service_tier`, `store`, `prediction`, `modalities`,
+`verbosity`, `safety_identifier`, `prompt_cache_key`, `web_search_options`),
+plus assistant **audio output** and `image_url.detail`. These are
+*request-side* knobs that the upstream honours and bills for; none of them
+has a response-side value, so there is nothing to carry back — but a caller
+that set `logit_bias` against a non-OpenAI backend learns nothing. Round
+164 closed the same silence for the knobs that DO have a response-side
+value (#497) and for every drop the gateway can see (#498); these twelve
+remain a *provider-capability* gap and are tracked as #501.
+
+**Test:** `tests/test_fix_round164.py::test_logprobs_decodes_from_an_openai_response_into_the_ir` (+ 4 siblings), `tests/test_fix_round111.py::test_logprobs_round_trips_through_ir`
 
 ### 327. Unhashable upstream `stop_reason` raises an unhandled `TypeError`
 

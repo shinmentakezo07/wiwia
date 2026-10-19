@@ -11,7 +11,13 @@ import structlog
 
 from wiwi.ir import builtin_tools as bt
 from wiwi.ir import types as ir
-from wiwi.providers.base import ProviderKeyRef, as_dict, as_list, as_str
+from wiwi.providers.base import (
+    ProviderKeyRef,
+    WarningMixin,
+    as_dict,
+    as_list,
+    as_str,
+)
 from wiwi.streaming import deltas as dl
 
 log = structlog.get_logger("wiwi.gemini_adapter")
@@ -72,10 +78,11 @@ _FINISH_MAP: dict[str, ir.StopReason] = {
 }
 
 
-class GeminiAdapter:
+class GeminiAdapter(WarningMixin):
     provider_type = "gemini"
 
     def __init__(self) -> None:
+        self._init_warnings()
         self._started = False
         self._saw_function_call = False
         self._tool_seq = 0
@@ -86,7 +93,7 @@ class GeminiAdapter:
         # gateway into ctx.metadata (see base.take_adapter_warnings). Reset
         # with the rest of the per-request state so a previous request's
         # warning never rides along on the next one.
-        self.translation_warnings: list[str] = []
+        self._reset_warnings()
 
     def reset(self) -> None:
         """Drop per-stream state so the adapter can serve another stream."""
@@ -94,7 +101,7 @@ class GeminiAdapter:
         self._saw_function_call = False
         self._tool_seq = 0
         self._saw_tail = False
-        self.translation_warnings = []
+        self._reset_warnings()
 
     def headers(self, key: ProviderKeyRef) -> dict[str, str]:
         return {}  # key goes in querystring
@@ -157,6 +164,29 @@ class GeminiAdapter:
                         parts.append({"inline_data": {"mime_type": p.mime, "data": p.b64}})
                     elif p.url:
                         parts.append({"file_data": {"file_uri": p.url}})
+                    # The document's title and context have no Gemini
+                    # spelling. They are real information the caller
+                    # supplied — a PDF named "report.pdf" with the context
+                    # "Q3 revenue" — and dropping them silently made two
+                    # different attachments indistinguishable to the model
+                    # (AUDIT #499). The drop is reported to the caller.
+                    if p.name or p.context:
+                        self.warn(
+                            "a document's title/context was dropped: Gemini "
+                            "has no field for it")
+                elif isinstance(p, ir.AudioPart):
+                    # Gemini's ``inline_data`` carries audio bytes, so an
+                    # audio part COULD ride it. But the inbound dialects'
+                    # audio shapes differ (OpenAI's ``input_audio`` is a
+                    # separate content type, and Gemini's inline audio has
+                    # its own limits), so the part is dropped rather than
+                    # guessed at — and, unlike before this branch, the
+                    # caller is told (AUDIT #499).
+                    log.warning("dropping_unsupported_audio_part",
+                                provider=self.provider_type, mime=p.mime)
+                    self.warn(
+                        "an audio attachment was dropped: this provider does "
+                        "not accept the inbound audio shape")
                 elif isinstance(p, ir.ToolUsePart):
                     if p.builtin is not None:
                         # Provider-hosted call (web_search, tool_search, ...).
@@ -204,8 +234,37 @@ class GeminiAdapter:
             gen["topK"] = g.top_k
         if g.stop:
             gen["stopSequences"] = g.stop
-        if g.response_format and g.response_format.type == "json_object":
+        if g.seed is not None:
+            # Gemini's generationConfig has no seed field. Reported to the
+            # caller, who set it (AUDIT #498).
+            self.warn("seed has no Gemini equivalent and was dropped")
+        if g.response_format and g.response_format.type in ("json_object",
+                                                            "json_schema"):
             gen["responseMimeType"] = "application/json"
+        if g.response_format and g.response_format.type == "json_schema":
+            # ``json_schema`` has a native Gemini spelling: ``responseSchema``
+            # in ``generationConfig``. Until now only ``json_object`` was
+            # handled, so a caller asking for a schema-constrained object
+            # got prose back — the constraint was dropped with no error
+            # anywhere, and the caller had no way to tell (AUDIT #496).
+            #
+            # Gemini's schema dialect is OpenAPI-ish rather than JSON-Schema,
+            # but the common subset (type/properties/required/items/enum)
+            # is shared, and a schema Gemini cannot express is a 400 there
+            # rather than a silent downgrade — which is the honest failure:
+            # the caller learns the schema was not honoured.
+            schema = g.response_format.json_schema
+            if isinstance(schema, dict) and schema:
+                gen["responseSchema"] = schema
+            elif schema is not None:
+                self.warn(
+                    "the response schema was dropped: it is not a JSON object "
+                    "and Gemini has no equivalent")
+            if g.response_format.name:
+                gen["responseSchema"] = {
+                    "title": g.response_format.name,
+                    **(schema if isinstance(schema, dict) else {}),
+                }
         # Map reasoning effort to Gemini's thinkingConfig (reasoning token budget)
         thinking_budget = g.effective_thinking_budget()
         if thinking_budget is not None:
@@ -232,7 +291,7 @@ class GeminiAdapter:
             # disable_parallel_tool_use warning below).
             if any(t.strict for t in req.tools if t.builtin is None):
                 log.warning("unsupported_tool_strict", provider="gemini")
-                self.translation_warnings.append(
+                self.warn(
                     "tool 'strict' mode has no Gemini equivalent; "
                     "arguments are unconstrained")
             entries: list[dict[str, Any]] = []
@@ -245,6 +304,12 @@ class GeminiAdapter:
                 if wt is None:
                     log.warning("dropping_unhostable_builtin_tool",
                                 builtin=t.builtin, provider="gemini")
+                    # The CALLER is told too (AUDIT #498): a hosted tool the
+                    # caller asked for is gone, and its result will never
+                    # arrive.
+                    self.warn(
+                        f"provider-hosted tool '{t.name}' ({t.builtin}) is not "
+                        f"supported by Gemini and was dropped")
                     continue
                 entries.append({wt: {}})
             if entries:
@@ -268,7 +333,7 @@ class GeminiAdapter:
             if req.gen_params.disable_parallel_tool_use:
                 log.warning("unsupported_disable_parallel_tool_use",
                             provider="gemini")
-                self.translation_warnings.append(
+                self.warn(
                     "disable_parallel_tool_use has no Gemini equivalent; "
                     "parallel tool calls cannot be suppressed")
         return body

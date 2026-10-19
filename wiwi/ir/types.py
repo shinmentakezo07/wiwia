@@ -432,3 +432,20 @@ class AssistantTurn:
     # ``tool_reference`` entries tool search discovered, and an unpaired
     # ``server_tool_use`` is rejected by the API on the next turn.
     server_blocks: list[dict[str, Any]] = field(default_factory=list)
+    # Per-token log probabilities, in the OpenAI ``choices[0].logprobs`` shape
+    # (``{"content": [{"token", "logprob", "bytes", "top_logprobs"}], ...}``).
+    #
+    # The carrier for AUDIT #326. The client sends ``{"logprobs": true,
+    # "top_logprobs": 5}``; the request rides ``Request.extras`` untyped, is
+    # forwarded upstream, and the tokens are BILLED as output — but no
+    # adapter decoded ``choices[0].logprobs``, no IR field held it, and no
+    # encoder emitted it, so the client silently received no logprobs for
+    # money it had already paid.
+    #
+    # Kept as the provider's own dict rather than a modelled dataclass
+    # because the shape IS the OpenAI wire shape, and a second dialect would
+    # have to be translated into it before the caller could read it anyway.
+    # ``None`` means "the upstream returned no logprobs", which is
+    # different from "an empty list" — the encoders emit the key only when
+    # this is not None, so a response never grows a phantom field.
+    logprobs: dict[str, Any] | None = None
