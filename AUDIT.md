@@ -8,6 +8,86 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — round 166: the README's copy-paste config did not load (2026-10-20)
+
+A sweep of the **README's own YAML** — every ```yaml block in `README.md`,
+extracted and fed to wiwi's own loader (`wiwi.config.load_config`) — for
+blocks a reader copying them verbatim could not actually use. The README is
+the project's front page and its Quickstart tells the reader to
+`cp wiwi.yaml.example wiwi.yaml` and edit; the annotated config block is
+presented as *the* reference to copy. It has to load.
+
+**Method.** Every ```yaml block in `README.md` was extracted and passed
+through `load_config` with the provider-key environment variables set. A
+block that names a provider account, or a `router_settings` key, that the
+schema or the validator rejects is a copy-paste failure.
+
+**Result.** Two of the five blocks failed. Both are fixed below; all five
+now load.
+
+### 505. The annotated config's `stream_resume: off` is YAML's boolean, and the schema rejects it
+
+**Severity:** 🟠 High · **Status: fixed** — round 166
+**Files:** `README.md` (the annotated `wiwi.yaml` block), `wiwi/config.py:330`
+(`RouterSettings.stream_resume`)
+
+**Trigger:** copy the README's annotated config into `wiwi.yaml` and start
+the gateway.
+
+**Cause.** `stream_resume` is typed
+`Literal["off", "content_only", "enabled"]` (`wiwi/config.py:330`). YAML 1.1
+parses a bare `off` as the **boolean** `False`, not the string `"off"` — so
+the README's `stream_resume: off` reached the validator as `False` and was
+rejected outright:
+
+```
+ConfigError: invalid config at 'router_settings.stream_resume':
+Input should be 'off', 'content_only' or 'enabled'
+```
+
+The gateway refuses to start on that line. The same trap applies to `no`
+and `yes`. `docs/CONFIG.md:151` already documented the value correctly,
+as the quoted string `"off"`.
+
+**Fix:** quote the value in the README — `stream_resume: "off"` — and say
+why in the comment, since a reader "simplifying" the quotes re-breaks it.
+
+**Regression:** the five README YAML blocks are now validated against
+`load_config` as part of this round's verification (see below).
+
+### 506. The annotated config referenced a provider account it never defined
+
+**Severity:** 🟠 High · **Status: fixed** — round 166
+**Files:** `README.md` (the annotated `wiwi.yaml` block's `model_list`)
+
+**Trigger:** copy the README's annotated config into `wiwi.yaml` and start
+the gateway.
+
+**Cause.** The block's `model_list` routed `claude-sonnet` at the provider
+account `anthropic-main`, but the block's `providers:` list defined only
+`openai-main` and `local-ollama`. wiwi's validator requires every
+`wiwi_params.provider` to resolve to a `providers:` entry, so the config
+was rejected:
+
+```
+ConfigError: invalid config at '<root>': Value error,
+model 'claude-sonnet' references unknown provider 'anthropic-main'
+```
+
+This is the single most-copied block in the file — it is the config the
+Quickstart points at — and it could not start a gateway.
+
+**Fix:** add the missing `anthropic-main` account to the block's
+`providers:` list, so the block is self-contained and loadable on its own.
+
+**Regression:** all five of the README's YAML blocks now load through
+`wiwi.config.load_config`. The new "Recipes" section was written against
+the same bar: each of its four recipes is a standalone fragment that loads
+on its own (the fourth needed its two provider accounts added for the
+same reason as #506).
+
+---
+
 ## ✅ Fixed — round 164: the translation layer's loss points (2026-10-19)
 
 A sweep of the **decode → IR → re-encode** path — every inbound codec

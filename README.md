@@ -52,6 +52,7 @@
 
 **Run it**
 - [⚡ Quickstart](#-quickstart) — install, mint a key, connect a client
+- [🧑‍🍳 Recipes](#-recipes) — four copy-paste setups
 - [📡 What ships](#-what-ships) — inbound surfaces and outbound providers
 - [⚙️ Configuration](#-configuration) — the annotated `wiwi.yaml`
 - [🔌 API surface](#-api-surface) — every route group
@@ -233,6 +234,116 @@ curl http://localhost:4000/v1/messages \
 
 ---
 
+## 🧑‍🍳 Recipes
+
+Four setups that cover most installs. Each is a `wiwi.yaml` fragment plus the client
+line that goes with it — drop the fragment into the config you already have.
+
+### ① Claude Code → GPT
+
+Claude Code speaks Anthropic Messages; point it at wiwi and let the IR carry the request to OpenAI.
+
+```yaml
+providers:
+  - name: openai-main
+    provider: openai
+    keys:
+      - {label: main, key: os.environ/OPENAI_API_KEY}
+
+model_list:
+  - model_name: gpt-4o
+    wiwi_params: {provider: openai-main, model: gpt-4o}
+```
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:4000
+export ANTHROPIC_AUTH_TOKEN=$WIWI_VIRTUAL_KEY
+claude
+```
+
+The client keeps sending `content` blocks and gets `content` blocks back — only the model
+behind the group changed.
+
+### ② Codex CLI → Claude
+
+The mirror image: the Responses dialect in, Anthropic out.
+
+```yaml
+providers:
+  - name: anthropic-main
+    provider: anthropic
+    keys:
+      - {label: main, key: os.environ/ANTHROPIC_API_KEY}
+
+model_list:
+  - model_name: claude-sonnet-4-20250514
+    wiwi_params: {provider: anthropic-main, model: claude-sonnet-4-20250514}
+```
+
+```bash
+export OPENAI_BASE_URL=http://localhost:4000/v1
+codex --model claude-sonnet-4-20250514
+```
+
+### ③ Local models — Ollama, vLLM, LM Studio
+
+Anything that speaks the OpenAI Chat shape goes through `openai-compatible`.
+
+```yaml
+providers:
+  - name: local-ollama
+    provider: openai-compatible
+    base_url: http://localhost:11434/v1
+    keys: [{label: local, key: "ollama"}]   # local servers ignore it, but it must not be empty
+
+model_list:
+  - model_name: llama3.1
+    wiwi_params: {provider: local-ollama, model: llama3.1}
+```
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer $WIWI_VIRTUAL_KEY" -H "content-type: application/json" \
+  -d '{"model":"llama3.1","messages":[{"role":"user","content":"hi"}]}'
+```
+
+A key that resolves to `""` drops its provider at startup — which is why the literal
+`"ollama"` sits there instead of an env var.
+
+### ④ One model group, several upstreams
+
+Repeat a `model_name` to add a deployment to the group. Weights decide the split.
+
+```yaml
+providers:
+  - name: openai-main
+    provider: openai
+    keys: [{label: main, key: os.environ/OPENAI_API_KEY}]
+  - name: anthropic-main
+    provider: anthropic
+    keys: [{label: main, key: os.environ/ANTHROPIC_API_KEY}]
+
+model_list:
+  - model_name: fast
+    wiwi_params: {provider: openai-main, model: gpt-4o-mini, weight: 2}
+  - model_name: fast
+    wiwi_params: {provider: anthropic-main, model: claude-sonnet-4-20250514, weight: 1}
+  - model_name: smart
+    wiwi_params: {provider: anthropic-main, model: claude-sonnet-4-20250514}
+
+router_settings:
+  fallbacks:
+    fast: ["smart"]              # the group is exhausted → escalate
+  context_window_fallbacks:
+    fast: ["smart"]              # the prompt overflowed the model → escalate
+```
+
+`fast` now serves 2:1 from OpenAI to Anthropic. If every deployment in `fast` fails, the
+router escalates to `smart` instead of dropping the request; a context-overflow error takes
+the second table, which is scoped to that one cause.
+
+---
+
 ## 🎛️ The control plane
 
 <table>
@@ -283,6 +394,19 @@ Four things wiwi does that a config-file gateway doesn't.
   rather than inheriting a URL that would 404 mid-session.
 
 ### 🛟 Routing & self-healing
+
+<div align="center">
+
+<table>
+  <tr>
+    <td>
+      <img alt="The router's decision path: resolve the group, pick a deployment and a key by weighted round-robin, call the upstream — then either serve the reply or cool the key down, count the failure, try the next key, the next deployment, and finally the fallbacks chain" src="docs/assets/wiwi-routing.svg" width="100%">
+      <br/><sub>What actually happens when a key fails — the ladder from one failure to a served reply or an error.</sub>
+    </td>
+  </tr>
+</table>
+
+</div>
 
 - Key pools with **smooth weighted round-robin** (per-key `weight`, `enabled`).
 - Cooldowns on failure, `allowed_fails` threshold, configurable `cooldown_time`.
@@ -345,10 +469,11 @@ mutable object threaded through every stage, so reading its fields tells you wha
 
 | | Endpoint | Dialect | Works with |
 |---|---|---|---|
-| <img src="docs/assets/inbound/openai-chat.svg" width="26" height="26" alt="OpenAI"> | `/v1/chat/completions` | 🟢 **OpenAI Chat** | openai SDK, LangChain, curl |
-| <img src="docs/assets/inbound/openai-responses.svg" width="26" height="26" alt="Responses"> | `/v1/responses` | 🟣 **OpenAI Responses** | Codex CLI (`base_url` → wiwi) |
-| <img src="docs/assets/inbound/anthropic-messages.svg" width="26" height="26" alt="Anthropic"> | `/v1/messages` | 🟠 **Anthropic Messages** | Claude Code (`ANTHROPIC_BASE_URL` → wiwi), anthropic SDK |
-| <img src="docs/assets/inbound/anthropic-messages.svg" width="26" height="26" alt="count"> | `/v1/messages/count_tokens` | 🟠 Anthropic | token counting, no inference |
+| <img src="web/public/logos/inbound/openai-chat.svg" width="26" height="26" alt="OpenAI"> | `/v1/chat/completions` | 🟢 **OpenAI Chat** | openai SDK, LangChain, curl |
+| <img src="web/public/logos/inbound/openai-responses.svg" width="26" height="26" alt="Responses"> | `/v1/responses` | 🟣 **OpenAI Responses** | Codex CLI (`base_url` → wiwi) |
+| <img src="web/public/logos/inbound/anthropic-messages.svg" width="26" height="26" alt="Anthropic"> | `/v1/messages` | 🟠 **Anthropic Messages** | Claude Code (`ANTHROPIC_BASE_URL` → wiwi), anthropic SDK |
+| <img src="web/public/logos/inbound/anthropic-messages.svg" width="26" height="26" alt="count"> | `/v1/messages/count_tokens` | 🟠 Anthropic | token counting, no inference |
+| <img src="web/public/logos/inbound/openai-completions.svg" width="26" height="26" alt="Legacy completions"> | `/v1/completions` | ⚪ **OpenAI Completions** *(legacy)* | the pre-chat shape — `choices[].text`, not a chat transcript |
 | 🔌 | `WS /v1/realtime` | realtime | bidirectional audio/text, relayed upstream |
 | 🧾 | `GET/DELETE /v1/responses/{id}` | 🟣 Responses | retrieve or drop a stored response |
 | 📋 | `GET /v1/models` · `GET /public/models` | model list | all |
@@ -363,18 +488,18 @@ Any inbound dialect works with any outbound provider — the IR handles translat
 <table>
   <tr>
     <td></td>
-    <td align="center"><img src="docs/assets/providers/openai.svg" width="16" alt="OpenAI"></td>
-    <td align="center"><img src="docs/assets/providers/anthropic.svg" width="16" alt="Anthropic"></td>
-    <td align="center"><img src="docs/assets/providers/gemini.svg" width="16" alt="Gemini"></td>
-    <td align="center"><img src="docs/assets/providers/openrouter.svg" width="16" alt="OpenRouter"></td>
-    <td align="center"><img src="docs/assets/providers/nvidia-nim.svg" width="16" alt="NVIDIA NIM"></td>
-    <td align="center"><img src="docs/assets/providers/cline.svg" width="16" alt="Cline"></td>
-    <td align="center"><img src="docs/assets/providers/workbuddy.svg" width="16" alt="WorkBuddy"></td>
-    <td align="center"><img src="docs/assets/providers/gmicloud.svg" width="16" alt="GMI Cloud"></td>
-    <td align="center"><img src="docs/assets/providers/bai.svg" width="16" alt="B.AI"></td>
-    <td align="center"><img src="docs/assets/providers/opencode.svg" width="16" alt="OpenCode Zen"></td>
-    <td align="center"><img src="docs/assets/providers/hermes.svg" width="16" alt="Hermes"></td>
-    <td align="center"><img src="docs/assets/providers/openai-compatible.svg" width="16" alt="OpenAI-compatible"></td>
+    <td align="center"><img src="web/public/logos/openai.svg" width="16" alt="OpenAI"></td>
+    <td align="center"><img src="web/public/logos/anthropic.svg" width="16" alt="Anthropic"></td>
+    <td align="center"><img src="web/public/logos/gemini.svg" width="16" alt="Gemini"></td>
+    <td align="center"><img src="web/public/logos/openrouter.svg" width="16" alt="OpenRouter"></td>
+    <td align="center"><img src="web/public/logos/nvidia-nim.svg" width="16" alt="NVIDIA NIM"></td>
+    <td align="center"><img src="web/public/logos/cline.svg" width="16" alt="Cline"></td>
+    <td align="center"><img src="web/public/logos/workbuddy.svg" width="16" alt="WorkBuddy"></td>
+    <td align="center"><img src="web/public/logos/gmicloud.svg" width="16" alt="GMI Cloud"></td>
+    <td align="center"><img src="web/public/logos/bai.svg" width="16" alt="B.AI"></td>
+    <td align="center"><img src="web/public/logos/opencode.svg" width="16" alt="OpenCode Zen"></td>
+    <td align="center"><img src="web/public/logos/hermes.svg" width="16" alt="Hermes"></td>
+    <td align="center"><img src="web/public/logos/openai-compatible.svg" width="16" alt="OpenAI-compatible"></td>
   </tr>
   <tr>
     <td align="right"><b>🟢 Chat</b></td>
@@ -398,6 +523,11 @@ Any inbound dialect works with any outbound provider — the IR handles translat
 
 <sub>Columns read left to right in <code>PROVIDER_TYPES</code> order, plus <code>openai-compatible</code> last
 because it is the escape hatch — it works with anything behind a URL.</sub>
+
+> 🧬 The matrix is the **3 modern dialects**. `wiwi/wire/` actually holds a **fourth codec** —
+> `openai_completions.py`, the pre-chat `POST /v1/completions` shape. It is a real, supported inbound
+> surface, but it is not a *dialect* in the matrix sense: its body is a prompt plus a `choices[].text`
+> completion, not a chat transcript, so it translates rather than round-trips.
 
 ### Outbound providers
 
@@ -451,6 +581,10 @@ providers:              # named provider accounts, each with a pool of keyed ent
     base_url: http://localhost:11434/v1
     keys: [{label: local, key: "ollama"}]
 
+  - name: anthropic-main
+    provider: anthropic
+    keys: [{label: main, key: os.environ/ANTHROPIC_API_KEY}]
+
 model_list:             # model_name clients request → provider account + native model id
   - model_name: gpt-4o
     wiwi_params: {provider: openai-main, model: gpt-4o, weight: 2}
@@ -475,7 +609,7 @@ router_settings:
                                       # reasoning model may think this long)
   stream_loop_detection: true
   stream_coalesce: false               # merge TextDeltas under backpressure
-  stream_resume: off                   # off | content_only | enabled
+  stream_resume: "off"                 # off | content_only | enabled  (quote it — bare `off` is YAML's false)
   stream_event_ids: true               # monotonic SSE ids for Last-Event-ID
   # -- metrics --
   prometheus_enabled: false
@@ -557,11 +691,11 @@ wiwi_settings:
 </div>
 
 ```
-wiwi/                      36.4k lines of Python across 80 modules
+wiwi/                      38.7k lines of Python across 80 modules
 ├── main.py                CLI entrypoint (wiwi --config …)
 ├── config.py              YAML → pydantic; env interpolation; PROVIDER_TYPES
 ├── ir/                    Canonical IR: types.py (tagged parts, messages, tools, params) + builtin_tools.py
-├── wire/                  Inbound codecs: openai_chat · openai_responses · anthropic_messages
+├── wire/                  Inbound codecs: openai_chat · openai_responses · anthropic_messages · openai_completions (legacy)
 ├── providers/             Outbound adapters + base.py protocol + registry.py
 ├── core/                  gateway.py (execution engine) · context.py (RequestContext) · recovery.py
 ├── streaming/             deltas · coalesce · loopdetect · resume · partial_json · validation · tape_store
@@ -577,7 +711,7 @@ wiwi/                      36.4k lines of Python across 80 modules
     <td align="center"><b>36.4k</b><br/><sub>lines of Python</sub></td>
     <td align="center"><b>36.8k</b><br/><sub>lines of TS/TSX</sub></td>
     <td align="center"><b>72</b><br/><sub>SPA routes</sub></td>
-    <td align="center"><b>3356</b><br/><sub>tests, all green</sub></td>
+    <td align="center"><b>3569</b><br/><sub>tests, all green</sub></td>
     <td align="center"><b>0</b><br/><sub>ruff findings</sub></td>
   </tr>
 </table>
@@ -608,7 +742,7 @@ All `/admin/*` requires the master key (`Authorization: Bearer …`) or an admin
 
 | Route | Purpose |
 |---|---|
-| **Proxy** | `POST /v1/chat/completions` · `/v1/responses` · `/v1/messages` · `/v1/messages/count_tokens` · `WS /v1/realtime` · `GET/DELETE /v1/responses/{id}` · `GET /v1/models` · `GET /health` · `GET /metrics` · `GET /public/models` |
+| **Proxy** | `POST /v1/chat/completions` · `/v1/completions` (legacy) · `/v1/responses` · `/v1/messages` · `/v1/messages/count_tokens` · `WS /v1/realtime` · `GET/DELETE /v1/responses/{id}` · `GET /v1/models` · `GET /health` · `GET /metrics` · `GET /public/models` |
 | **Playground** | `POST /v1/playground/completions` · `POST /auth/playground-key` |
 | **Virtual keys** | `POST /admin/keys/generate` · `GET /admin/keys` · `PATCH/DELETE /admin/keys/{id}` · `POST /admin/keys/{id}/disable` |
 | **Providers** | `GET /admin/provider-catalog` · `GET /admin/providers` · `POST/PATCH/DELETE /admin/providers/{name}` · key-pool CRUD under `…/keys/{label}` · `GET …/secret` (audit-logged) |
@@ -625,8 +759,8 @@ All `/admin/*` requires the master key (`Authorization: Bearer …`) or an admin
 ## 🧪 Development
 
 ```bash
-python3 -m pytest tests/ -q                                 # 3356 collected
-python3 -m pytest tests/test_fix_round154.py -q            # latest regression file
+python3 -m pytest tests/ -q                                 # 3569 collected
+python3 -m pytest tests/test_fix_round164.py -q            # latest regression file
 python3 -m pytest tests/test_router.py -k cooldown -q      # by name
 
 ruff check wiwi/ tests/                                     # line-length 100, target py311
@@ -640,7 +774,7 @@ The suite mixes **unit tests** (`respx` HTTP mocks), **ASGI end-to-end** runs th
 write bare `async def test_…`, no decorator. There is no `conftest.py`; each file builds its own config factory
 and ASGI client.
 
-Bugfix regressions land in the next thematic `test_fix_roundN.py` — **round 154 is current**. Gaps in the numbering
+Bugfix regressions land in the next thematic `test_fix_roundN.py` — **round 164 is current**. Gaps in the numbering
 are real; find the next unused N with `ls tests/test_fix_round*.py`, never assume one.
 
 > The counts in this README are checked in periodically. Re-derive them with
