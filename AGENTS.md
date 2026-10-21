@@ -57,7 +57,7 @@ stage (carries `surface`, params, auth, and the chosen dialect encoder).
 `GET /public/models`, `GET /health`, a configurable Prometheus path (`server/metrics.py`),
 `/admin/*` (master key), `/auth/*` (user sessions), `/cline/oauth/callback`.
 
-That is **9 routes under `/v1` and 57 under `/admin`** (count them with
+That is **9 routes under `/v1` and 59 under `/admin`** (count them with
 `grep -c '@app\.\(get\|post\|put\|delete\|patch\)("/admin' wiwi/server/app.py`), all defined in
 one `create_app` closure in `server/app.py`.
 
@@ -164,7 +164,7 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
   `os.environ/NAME` interpolation is resolved here.
 - `wiwi/server/app.py` — ~7.3k lines in one `create_app` closure: `create_app(config)`,
   `create_app_from_config_path` (uvicorn reload factory), `AppState`, `lifespan`, `run_chat_like`,
-  and all 10 `/v1` + 59 `/admin` routes. Navigate it by grepping for a route prefix, not by reading.
+  and all 9 `/v1` + 59 `/admin` routes. Navigate it by grepping for a route prefix, not by reading.
 - `wiwi/server/config_store.py` — SQL DDL + migrations for admin-managed providers, keys,
   deployments, prices, settings.
 - `wiwi/server/response_store.py` — persisted Responses-API state behind
