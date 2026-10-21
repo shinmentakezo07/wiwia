@@ -114,10 +114,11 @@ cd "$WORK/space"
 
 # HF rejects a push containing binaries that are not in LFS/xet ("Your push was
 # rejected because it contains binary files ... use xet to store binary files").
-# The tracked tree carries the UI's PNG logos, so they must go through LFS. The
-# Space's own .gitattributes covers model weights (*.bin, *.safetensors, ...) but
-# not *.png, hence the explicit track. git-lfs uploads the objects to HF's LFS
-# endpoint during push, authenticating through the same helper.
+# The tracked tree still carries PNGs (the Open Graph card, the LFS-tracked
+# console screenshots), so they must go through LFS. The Space's own
+# .gitattributes covers model weights (*.bin, *.safetensors, ...) but not *.png,
+# hence the explicit track. git-lfs uploads the objects to HF's LFS endpoint
+# during push, authenticating through the same helper.
 git lfs install --local >/dev/null
 git lfs track "*.png" >/dev/null
 

@@ -1996,31 +1996,23 @@ select.admin-input option {
 .docs-provider-item:hover {
   background: hsl(var(--f-hue) 22% 8%);
 }
-/* The logo keeps its own brand colours; the chip around it is what carries the
-   family tint, so twelve brands do not fight twelve washes. */
+/* The mark is a self-contained badge tile (web/public/logos/) that brings its
+   own rounded corners, background and brand colours. The slot therefore adds
+   no frame of its own — a border here would read as a chip inside a chip. The
+   family tint survives as the hover glow instead. */
 .docs-provider-logo {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 40px;
   height: 40px;
-  border: 1px solid var(--admin-border);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.022);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
   transition:
     transform 0.25s ease,
-    border-color 0.25s ease,
-    background-color 0.25s ease,
-    box-shadow 0.25s ease;
+    filter 0.25s ease;
 }
 .docs-provider-item:hover .docs-provider-logo {
   transform: translateY(-1px);
-  border-color: hsl(var(--f-hue) 85% 70% / 0.45);
-  background: hsl(var(--f-hue) 80% 62% / 0.15);
-  box-shadow:
-    0 0 22px -7px hsl(var(--f-hue) 85% 62% / 0.6),
-    inset 0 1px 0 hsl(var(--f-hue) 90% 85% / 0.12);
+  filter: drop-shadow(0 0 10px hsl(var(--f-hue) 85% 70% / 0.55));
 }
 .docs-provider-name {
   max-width: 100%;

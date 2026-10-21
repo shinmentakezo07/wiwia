@@ -8,21 +8,14 @@ import {
   AlertTriangle,
   ArrowDownToLine,
   ArrowUpFromLine,
-  Boxes,
-  Briefcase,
-  Cpu,
-  Cloud,
   DollarSign,
   Download,
-  Globe,
   Layers,
-  Link2,
   Pencil,
   Plus,
   RefreshCw,
   Search,
   Server,
-  Sparkles,
   Trash2,
   Upload,
   X,
@@ -59,19 +52,23 @@ const STATUS_TONE: Record<PoolKey["status"], "green" | "amber" | "red" | "gray">
   disabled: "gray",
 };
 
-const PROVIDER_ICON: Record<string, LucideIcon> = {
-  openai: Sparkles,
-  anthropic: Boxes,
-  gemini: Zap,
-  openrouter: Globe,
-  "nvidia-nim": Cpu,
-  "openai-compatible": Server,
-  gmicloud: Cloud,
-  bai: Globe,
-  workbuddy: Briefcase,
-  cline: Link2,
-  opencode: Layers,
-  hermes: Sparkles,
+// The canonical provider badges from `web/public/logos/` — the same tiles the
+// README and the built-in providers catalog embed. One entry per type in
+// `wiwi/config.py:PROVIDER_TYPES`; anything unknown falls back to a generic
+// server glyph.
+const PROVIDER_BADGE: Record<string, string> = {
+  openai: "/logos/openai.svg",
+  anthropic: "/logos/anthropic.svg",
+  gemini: "/logos/gemini.svg",
+  openrouter: "/logos/openrouter.svg",
+  "nvidia-nim": "/logos/nvidia-nim.svg",
+  "openai-compatible": "/logos/openai-compatible.svg",
+  gmicloud: "/logos/gmicloud.svg",
+  bai: "/logos/bai.svg",
+  workbuddy: "/logos/workbuddy.svg",
+  cline: "/logos/cline.svg",
+  opencode: "/logos/opencode.svg",
+  hermes: "/logos/hermes.svg",
 };
 
 const PROVIDER_TYPE_OPTIONS = [
@@ -89,8 +86,8 @@ const PROVIDER_TYPE_OPTIONS = [
   { value: "openai-compatible", label: "OpenAI-compatible URL" },
 ];
 
-function providerIcon(type: string): LucideIcon {
-  return PROVIDER_ICON[type] ?? Server;
+function providerBadge(type: string): string | null {
+  return PROVIDER_BADGE[type] ?? null;
 }
 
 /** Lowercased haystack for the account search box: name, provider type, base
@@ -198,16 +195,24 @@ function ProviderCard(props: {
   const activeKeys = props.p.keys.filter((k) => k.enabled && k.status === "active").length;
   const errorRate = s && s.requests > 0 ? s.errors / s.requests : 0;
   const cacheRate = s && s.tokIn > 0 ? s.tokCached / s.tokIn : 0;
-  const Icon = providerIcon(props.p.provider_type);
+  const badge = providerBadge(props.p.provider_type);
 
   return (
     <Card>
       {/* header */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--admin-border)] px-4 py-3">
         <div className="flex items-center gap-2.5">
-          <div className="flex h-7 w-7 items-center justify-center rounded-lg border border-[var(--admin-border)] bg-white/[0.02]">
-            <Icon size={14} className="text-[var(--admin-text-muted)]" />
-          </div>
+          {badge ? (
+            <img
+              src={badge}
+              alt=""
+              className="h-7 w-7 shrink-0 rounded-lg object-contain"
+            />
+          ) : (
+            <div className="flex h-7 w-7 items-center justify-center rounded-lg border border-[var(--admin-border)] bg-white/[0.02]">
+              <Server size={14} className="text-[var(--admin-text-muted)]" />
+            </div>
+          )}
           <h3 className="text-[14px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
             {props.p.name}
           </h3>

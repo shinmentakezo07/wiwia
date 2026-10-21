@@ -19,16 +19,21 @@ import {
   Spinner,
 } from "@/components/ui";
 
+// The canonical provider badges from `web/public/logos/` — the same tiles the
+// README and the docs page embed. One entry per type in
+// `wiwi/config.py:PROVIDER_TYPES`; anything missing falls back to a generic
+// server glyph.
 const PROVIDER_LOGO: Record<string, string> = {
-  openai: "/logos/openai.png",
-  anthropic: "/logos/anthropic.png",
-  gemini: "/logos/gemini.png",
-  openrouter: "/logos/openrouter.png",
-  "openai-compatible": "/logos/openai-compatible.png",
-  gmicloud: "/logos/gmicloud.png",
-  bai: "/logos/bai.png",
+  openai: "/logos/openai.svg",
+  anthropic: "/logos/anthropic.svg",
+  gemini: "/logos/gemini.svg",
+  openrouter: "/logos/openrouter.svg",
+  "openai-compatible": "/logos/openai-compatible.svg",
+  gmicloud: "/logos/gmicloud.svg",
+  bai: "/logos/bai.svg",
+  cline: "/logos/cline.svg",
   workbuddy: "/logos/workbuddy.svg",
-  "nvidia-nim": "/logos/nvidia-nim.png",
+  "nvidia-nim": "/logos/nvidia-nim.svg",
   opencode: "/logos/opencode.svg",
   hermes: "/logos/hermes.svg",
 };
@@ -51,13 +56,17 @@ function ProviderCatalogCard(props: {
     <Card className="flex flex-col">
       {/* header */}
       <div className="flex items-start gap-3 border-b border-[var(--admin-border)] px-5 py-4">
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[var(--admin-border)] bg-white/[0.02]">
-          {logo ? (
-            <img src={logo} alt={props.p.label} className="h-5 w-5 object-contain" />
-          ) : (
+        {logo ? (
+          <img
+            src={logo}
+            alt={props.p.label}
+            className="h-9 w-9 shrink-0 rounded-[10px] object-contain"
+          />
+        ) : (
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[var(--admin-border)] bg-white/[0.02]">
             <Server size={16} className="text-[var(--admin-text-muted)]" />
-          )}
-        </div>
+          </div>
+        )}
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <h3 className="text-[14px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">

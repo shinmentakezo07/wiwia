@@ -12,7 +12,7 @@ pinned: false
 
 This Space runs the [wiwi](https://github.com/shinmentakezo07/wiwia) gateway —
 a self-hosted unified LLM proxy. Three inbound dialects (OpenAI Chat, OpenAI
-Responses, Anthropic Messages) route through one canonical IR to eleven
+Responses, Anthropic Messages) route through one canonical IR to twelve
 outbound provider types, and every response is re-encoded in the caller's
 inbound dialect.
 
@@ -22,13 +22,13 @@ Do not edit this Space by hand. It is a deploy target, built from the repo:
 
 ```bash
 # from a checkout of the wiwi repo
-./deploy/hf_space.sh              # rsync the repo tree here and push
+./deploy/hf_space.sh              # export the committed tree here and push
 ```
 
-The script reads `HF_TOKEN` from the repo's gitignored `.env`, copies the
-source tree into a scratch clone of this Space, and pushes a single
-`Deploy wiwi <sha>` commit. It never force-pushes and never touches the
-gateway's own git history.
+The script reads `HF_TOKEN` from the repo's gitignored `.env`, exports the
+committed tree (`git archive HEAD`) into a scratch clone of this Space, and
+pushes a single `Deploy wiwi <sha>` commit. It never force-pushes and never
+touches the gateway's own git history.
 
 ## Configuration
 

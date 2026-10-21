@@ -1,0 +1,126 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="540" viewBox="0 0 1280 540" role="img" aria-label="The router's decision path: a request resolves to a model group, picks a deployment and a key by weighted round-robin, calls the upstream, and either serves the reply in the caller's dialect or cools the key down, counts the failure, tries the next key, then the next deployment, then walks the fallbacks chain before giving up with an error in the caller's dialect">
+  <defs>
+    <linearGradient id="rt" gradientUnits="userSpaceOnUse" x1="43" y1="0" x2="1237" y2="0"><stop offset="0" stop-color="#6366f1"/><stop offset=".5" stop-color="#8b5cf6"/><stop offset="1" stop-color="#d946ef"/></linearGradient>
+    <radialGradient id="rga" cx="14%" cy="18%" r="58%"><stop offset="0" stop-color="#6366f1" stop-opacity=".22"/><stop offset="1" stop-color="#6366f1" stop-opacity="0"/></radialGradient>
+    <radialGradient id="rgb" cx="88%" cy="84%" r="56%"><stop offset="0" stop-color="#a855f7" stop-opacity=".18"/><stop offset="1" stop-color="#a855f7" stop-opacity="0"/></radialGradient>
+    <pattern id="rtgrid" width="64" height="64" patternUnits="userSpaceOnUse"><path d="M64 0H0v64" fill="none" stroke="#ffffff" stroke-opacity=".035"/></pattern>
+    <marker id="rtarw" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#8b5cf6"/>
+    </marker>
+    <marker id="rtarw2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#a78bfa"/>
+    </marker>
+    <style>
+      .flow { fill: none; stroke: #c4b5fd; stroke-width: 2; stroke-linecap: round; stroke-dasharray: 7 13; animation: rtflow .8s linear infinite; }
+      @keyframes rtflow { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -20; } }
+      .ret { fill: none; stroke: #f87171; stroke-width: 1.8; stroke-linecap: round; stroke-dasharray: 6 8; animation: rtflow .8s linear infinite; }
+      .heal { fill: none; stroke: #a78bfa; stroke-width: 1.6; stroke-dasharray: 3 7; opacity: .75; }
+      @media (prefers-reduced-motion: reduce) { .flow, .ret, .heal { animation: none; } }
+    </style>
+  </defs>
+
+  <rect width="1280" height="540" fill="#07070c"/>
+  <rect width="1280" height="540" fill="url(#rga)"/>
+  <rect width="1280" height="540" fill="url(#rgb)"/>
+  <rect width="1280" height="540" fill="url(#rtgrid)"/>
+
+  <text x="43" y="42" font-family="Inter,Arial,sans-serif" font-size="19" font-weight="800" fill="#f4f4f6">What happens when a key fails</text>
+  <text x="43" y="64" font-family="Inter,Arial,sans-serif" font-size="12.5" fill="#8b93a5">The router&#8217;s decision path — from a model group to a served reply, or to an error in the caller&#8217;s own dialect.</text>
+
+  <!-- row 1 — the request path -->
+  <g>
+    <rect x="43" y="96" width="214" height="80" rx="12" fill="#101018" stroke="#ffffff" stroke-opacity=".10"/>
+    <text x="59" y="117" font-family="ui-monospace,Menlo,monospace" font-size="9.5" fill="#6b7280">01</text>
+    <text x="59" y="137" font-family="Inter,Arial,sans-serif" font-size="13.5" font-weight="700" fill="#e5e7eb">Resolve the group</text>
+    <text x="59" y="156" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#8b93a5">model_name → deployments</text>
+
+    <rect x="287" y="96" width="214" height="80" rx="12" fill="#101018" stroke="#ffffff" stroke-opacity=".10"/>
+    <text x="303" y="117" font-family="ui-monospace,Menlo,monospace" font-size="9.5" fill="#6b7280">02</text>
+    <text x="303" y="137" font-family="Inter,Arial,sans-serif" font-size="13.5" font-weight="700" fill="#e5e7eb">Pick a deployment</text>
+    <text x="303" y="156" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#8b93a5">weighted round-robin</text>
+
+    <rect x="531" y="96" width="214" height="80" rx="12" fill="#101018" stroke="#ffffff" stroke-opacity=".10"/>
+    <text x="547" y="117" font-family="ui-monospace,Menlo,monospace" font-size="9.5" fill="#6b7280">03</text>
+    <text x="547" y="137" font-family="Inter,Arial,sans-serif" font-size="13.5" font-weight="700" fill="#e5e7eb">Pick a key</text>
+    <text x="547" y="156" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#8b93a5">pool · weight · enabled</text>
+
+    <rect x="775" y="96" width="214" height="80" rx="12" fill="#151527" stroke="#6366f1" stroke-opacity=".45"/>
+    <text x="791" y="117" font-family="ui-monospace,Menlo,monospace" font-size="9.5" fill="#818cf8">04</text>
+    <text x="791" y="137" font-family="Inter,Arial,sans-serif" font-size="13.5" font-weight="700" fill="#c7d2fe">Call the upstream</text>
+    <text x="791" y="156" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#a5b4fc">the adapter encodes it</text>
+
+    <rect x="1019" y="96" width="214" height="80" rx="12" fill="#0d1a14" stroke="#22c55e" stroke-opacity=".40"/>
+    <text x="1035" y="117" font-family="ui-monospace,Menlo,monospace" font-size="9.5" fill="#4ade80">05</text>
+    <text x="1035" y="137" font-family="Inter,Arial,sans-serif" font-size="13.5" font-weight="700" fill="#86efac">Serve it</text>
+    <text x="1035" y="156" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#6ee7b7">200 → the caller&#8217;s dialect</text>
+  </g>
+
+  <g stroke="url(#rt)" stroke-width="1.8" marker-end="url(#rtarw)" fill="none">
+    <line x1="261" y1="136" x2="281" y2="136"/>
+    <line x1="505" y1="136" x2="525" y2="136"/>
+    <line x1="749" y1="136" x2="769" y2="136"/>
+  </g>
+  <g stroke="#22c55e" stroke-width="1.8" marker-end="url(#rtarw2)" fill="none" stroke-opacity=".85">
+    <line x1="993" y1="136" x2="1013" y2="136"/>
+  </g>
+
+  <!-- the failure return, from 04 down and back to the start of row 2 -->
+  <path class="ret" d="M 882 176 L 882 222 L 150 222 L 150 262" fill="none" marker-end="url(#rtarw)"/>
+  <text x="516" y="214" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="11" fill="#fca5a5">non-200 · timeout · 429</text>
+
+  <!-- row 2 — the failure ladder -->
+  <g>
+    <rect x="43" y="268" width="214" height="80" rx="12" fill="#101018" stroke="#ffffff" stroke-opacity=".10"/>
+    <text x="59" y="289" font-family="ui-monospace,Menlo,monospace" font-size="9.5" fill="#6b7280">06</text>
+    <text x="59" y="309" font-family="Inter,Arial,sans-serif" font-size="13.5" font-weight="700" fill="#e5e7eb">Cool the key down</text>
+    <text x="59" y="328" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#8b93a5">cooldown_time seconds</text>
+
+    <rect x="287" y="268" width="214" height="80" rx="12" fill="#101018" stroke="#ffffff" stroke-opacity=".10"/>
+    <text x="303" y="289" font-family="ui-monospace,Menlo,monospace" font-size="9.5" fill="#6b7280">07</text>
+    <text x="303" y="309" font-family="Inter,Arial,sans-serif" font-size="13.5" font-weight="700" fill="#e5e7eb">Count the failure</text>
+    <text x="303" y="328" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#8b93a5">allowed_fails · 401/403 ×2</text>
+
+    <rect x="531" y="268" width="214" height="80" rx="12" fill="#101018" stroke="#ffffff" stroke-opacity=".10"/>
+    <text x="547" y="289" font-family="ui-monospace,Menlo,monospace" font-size="9.5" fill="#6b7280">08</text>
+    <text x="547" y="309" font-family="Inter,Arial,sans-serif" font-size="13.5" font-weight="700" fill="#e5e7eb">Try the next key</text>
+    <text x="547" y="328" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#8b93a5">or retire it for good</text>
+
+    <rect x="775" y="268" width="214" height="80" rx="12" fill="#101018" stroke="#ffffff" stroke-opacity=".10"/>
+    <text x="791" y="289" font-family="ui-monospace,Menlo,monospace" font-size="9.5" fill="#6b7280">09</text>
+    <text x="791" y="309" font-family="Inter,Arial,sans-serif" font-size="13.5" font-weight="700" fill="#e5e7eb">Next deployment</text>
+    <text x="791" y="328" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#8b93a5">the group&#8217;s other routes</text>
+
+    <rect x="1019" y="268" width="214" height="80" rx="12" fill="#151527" stroke="#6366f1" stroke-opacity=".45"/>
+    <text x="1035" y="289" font-family="ui-monospace,Menlo,monospace" font-size="9.5" fill="#818cf8">10</text>
+    <text x="1035" y="309" font-family="Inter,Arial,sans-serif" font-size="13.5" font-weight="700" fill="#c7d2fe">Walk the fallbacks</text>
+    <text x="1035" y="327" font-family="Inter,Arial,sans-serif" font-size="10" fill="#a5b4fc">fallbacks:</text>
+    <text x="1035" y="340" font-family="Inter,Arial,sans-serif" font-size="10" fill="#a5b4fc">context_window_fallbacks:</text>
+  </g>
+
+  <g stroke="url(#rt)" stroke-width="1.8" marker-end="url(#rtarw)" fill="none">
+    <line x1="261" y1="308" x2="281" y2="308"/>
+    <line x1="505" y1="308" x2="525" y2="308"/>
+    <line x1="749" y1="308" x2="769" y2="308"/>
+    <line x1="993" y1="308" x2="1013" y2="308"/>
+  </g>
+
+  <!-- terminal: exhausted -->
+  <path d="M 1126 348 L 1126 386" fill="none" stroke="url(#rt)" stroke-width="1.8" marker-end="url(#rtarw2)"/>
+  <rect x="1019" y="392" width="214" height="80" rx="12" fill="#18121a" stroke="#f87171" stroke-opacity=".30"/>
+  <text x="1035" y="413" font-family="ui-monospace,Menlo,monospace" font-size="9.5" fill="#f87171">exhausted</text>
+  <text x="1035" y="433" font-family="Inter,Arial,sans-serif" font-size="13.5" font-weight="700" fill="#fecaca">Give up</text>
+  <text x="1035" y="452" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#fca5a5">an error, in the caller&#8217;s dialect</text>
+
+  <!-- the healer branch, off by default -->
+  <path class="heal" d="M 150 348 L 150 386" fill="none" marker-end="url(#rtarw2)"/>
+  <rect x="43" y="392" width="560" height="80" rx="12" fill="#101018" stroke="#a78bfa" stroke-opacity=".30" stroke-dasharray="5 5"/>
+  <text x="59" y="413" font-family="ui-monospace,Menlo,monospace" font-size="9.5" fill="#a78bfa">optional · off by default</text>
+  <text x="59" y="433" font-family="Inter,Arial,sans-serif" font-size="13.5" font-weight="700" fill="#ddd6fe">The HealthHealer probes a cooled key</text>
+  <text x="59" y="452" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#8b93a5">a 1-token request restores it into a reduced-weight probation state — it spends real money</text>
+
+  <!-- the loop-back note -->
+  <text x="790" y="424" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="11.5" fill="#a78bfa">08 and 09 loop back — next key, then next deployment —</text>
+  <text x="790" y="442" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="11.5" fill="#a78bfa">until the group is empty, and only then does 10 run.</text>
+
+  <text x="640" y="512" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="11.5" fill="#8b93a5">Every reply carries x-wiwi-request-id and x-wiwi-latency-ms · errors keep the caller&#8217;s dialect too</text>
+</svg>

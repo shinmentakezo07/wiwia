@@ -13,7 +13,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type ComponentType,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
@@ -45,13 +44,7 @@ import {
   Zap,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import {
-  AnthropicIcon,
-  AnimatedBeam,
-  GeminiIcon,
-  OpenAIIcon,
-  OpenRouterIcon,
-} from "@/components/AnimatedBeam";
+import { AnimatedBeam } from "@/components/AnimatedBeam";
 import { HERO_BEAMS_COMPACT, HeroBeamBackdrop } from "@/components/HeroBeamBackdrop";
 import { highlight, langFromLabel, LANG_DOT, MONO, type Lang } from "@/lib/code-highlight";
 
@@ -519,28 +512,30 @@ const FAMILY_LABEL = Object.fromEntries(
 
 // `id` is the value a reader puts in `provider:` in wiwi.yaml — it is the
 // provider type from `wiwi/config.py:PROVIDER_TYPES`, listed in the same order.
+// `src` points at the canonical provider badge in `web/public/logos/` — the
+// same 120×120 tiles the README embeds, so the docs and the repo front page
+// show the same marks.
 const PROVIDERS: {
   label: string;
   id: string;
-  src?: string;
-  icon?: LucideIcon;
+  src: string;
   family: WireFamily;
 }[] = [
-  { label: "OpenAI", id: "openai", src: "/logos/openai.png", family: "chat" },
+  { label: "OpenAI", id: "openai", src: "/logos/openai.svg", family: "chat" },
   {
     label: "OpenAI-compatible",
     id: "openai-compatible",
-    src: "/logos/openai-compatible.png",
+    src: "/logos/openai-compatible.svg",
     family: "chat",
   },
-  { label: "GMI Cloud", id: "gmicloud", src: "/logos/gmicloud.png", family: "chat" },
-  { label: "B.AI", id: "bai", src: "/logos/bai.png", family: "chat" },
-  { label: "OpenRouter", id: "openrouter", src: "/logos/openrouter.png", family: "chat" },
-  { label: "NVIDIA NIM", id: "nvidia-nim", src: "/logos/nvidia-nim.png", family: "chat" },
+  { label: "GMI Cloud", id: "gmicloud", src: "/logos/gmicloud.svg", family: "chat" },
+  { label: "B.AI", id: "bai", src: "/logos/bai.svg", family: "chat" },
+  { label: "OpenRouter", id: "openrouter", src: "/logos/openrouter.svg", family: "chat" },
+  { label: "NVIDIA NIM", id: "nvidia-nim", src: "/logos/nvidia-nim.svg", family: "chat" },
   { label: "Hermes", id: "hermes", src: "/logos/hermes.svg", family: "chat" },
-  { label: "Anthropic", id: "anthropic", src: "/logos/anthropic.png", family: "native" },
-  { label: "Gemini", id: "gemini", src: "/logos/gemini.png", family: "native" },
-  { label: "Cline", id: "cline", icon: Boxes, family: "sse" },
+  { label: "Anthropic", id: "anthropic", src: "/logos/anthropic.svg", family: "native" },
+  { label: "Gemini", id: "gemini", src: "/logos/gemini.svg", family: "native" },
+  { label: "Cline", id: "cline", src: "/logos/cline.svg", family: "sse" },
   { label: "WorkBuddy", id: "workbuddy", src: "/logos/workbuddy.svg", family: "sse" },
   { label: "OpenCode Zen", id: "opencode", src: "/logos/opencode.svg", family: "sse" },
 ];
@@ -592,7 +587,6 @@ function ProviderGrid() {
         role="list"
       >
         {PROVIDERS.map((provider, i) => {
-          const Logo = provider.icon;
           return (
             <div
               key={provider.id}
@@ -605,11 +599,7 @@ function ProviderGrid() {
             >
               <span className="docs-spotlight" aria-hidden />
               <span className="docs-provider-logo">
-                {provider.src ? (
-                  <img src={provider.src} alt="" className="h-full w-full object-contain" />
-                ) : Logo ? (
-                  <Logo className="h-4 w-4" strokeWidth={1.75} aria-hidden />
-                ) : null}
+                <img src={provider.src} alt="" className="h-full w-full object-contain" />
               </span>
               <span className="docs-provider-name">{provider.label}</span>
               <span className="docs-provider-id">
@@ -670,24 +660,21 @@ const HERO_DIALECTS = [
 ];
 
 const HERO_PROVIDERS = [
-  { label: "OpenAI", src: "/logos/openai.png" },
-  { label: "Anthropic", src: "/logos/anthropic.png" },
-  { label: "Gemini", src: "/logos/gemini.png" },
-  { label: "OpenRouter", src: "/logos/openrouter.png" },
+  { label: "OpenAI", src: "/logos/openai.svg" },
+  { label: "Anthropic", src: "/logos/anthropic.svg" },
+  { label: "Gemini", src: "/logos/gemini.svg" },
+  { label: "OpenRouter", src: "/logos/openrouter.svg" },
 ];
 
 // The provider pills under the masthead, in the landing page's style: a
-// rounded chip carrying the brand mark and the name.
-const HERO_PROVIDER_PILLS: {
-  label: string;
-  src?: string;
-  Icon?: ComponentType<{ className?: string }>;
-}[] = [
-  { label: "OpenAI", Icon: OpenAIIcon },
-  { label: "Anthropic", Icon: AnthropicIcon },
-  { label: "Gemini", Icon: GeminiIcon },
-  { label: "OpenRouter", Icon: OpenRouterIcon },
-  { label: "NVIDIA NIM", src: "/logos/nvidia-nim.png" },
+// rounded chip carrying the brand mark and the name. The marks are the same
+// canonical badges the provider grid uses.
+const HERO_PROVIDER_PILLS: { label: string; src: string }[] = [
+  { label: "OpenAI", src: "/logos/openai.svg" },
+  { label: "Anthropic", src: "/logos/anthropic.svg" },
+  { label: "Gemini", src: "/logos/gemini.svg" },
+  { label: "OpenRouter", src: "/logos/openrouter.svg" },
+  { label: "NVIDIA NIM", src: "/logos/nvidia-nim.svg" },
   { label: "OpenCode", src: "/logos/opencode.svg" },
 ];
 
@@ -1192,11 +1179,7 @@ export function DocsPage() {
                   key={p.label}
                   className="flex items-center gap-2 rounded-full border border-white/[0.06] bg-white/[0.02] px-3.5 py-1.5 transition-colors hover:border-white/[0.12] hover:bg-white/[0.04]"
                 >
-                  {p.Icon ? (
-                    <p.Icon className="h-4 w-4" />
-                  ) : (
-                    <img src={p.src} alt="" className="h-4 w-4 object-contain" />
-                  )}
+                  <img src={p.src} alt="" className="h-5 w-5 object-contain" />
                   <span className="text-[13px] font-medium text-[var(--admin-text)]">
                     {p.label}
                   </span>
