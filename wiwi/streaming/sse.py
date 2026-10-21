@@ -12,6 +12,19 @@ class SSEEvent:
     data: str   # joined data payload
 
 
+def _looks_like_payload(line: str) -> bool:
+    """True when a line is a self-contained payload rather than an SSE field.
+
+    The unframed mode exists for the envelope providers (Cline, WorkBuddy),
+    which answer with one whole JSON object per line. Recognising the shape
+    is what keeps that mode from also claiming the SSE *field* lines
+    (``id:``, ``retry:``) — a line that starts with a letter is a field, and
+    a field is not a payload (AUDIT #502).
+    """
+    stripped = line.lstrip()
+    return stripped.startswith(("{", "["))
+
+
 class LineSSEParser:
     """Feed lines from `aiter_lines()`; yields SSEEvent at blank-line boundaries.
 
@@ -45,10 +58,28 @@ class LineSSEParser:
             self._event = line[6:].removeprefix(" ")
         elif line.startswith("data:"):
             self._data.append(line[5:].removeprefix(" "))
-        elif self._allow_unframed:
+        elif line.startswith(("id:", "retry:")):
+            # A FIELD of the frame, not a payload (AUDIT #502). The unframed
+            # catch-all below used to claim these lines, so the parser
+            # emitted an EXTRA event per field line whose payload was the
+            # literal text "id: 42" — a payload no adapter can parse, so it
+            # was decoded and discarded. The frame's own payload was never
+            # affected.
+            #
+            # The id is the UPSTREAM's own frame cursor, not wiwi's: wiwi
+            # re-numbers every frame it emits (see ``_inject_id``), so the
+            # upstream's id is not the client's ``Last-Event-ID`` and is
+            # dropped. ``retry:`` is a reconnection hint the gateway does not
+            # act on.
+            return None
+        elif self._allow_unframed and _looks_like_payload(line):
             # One self-contained JSON object on its own line; it terminates
             # itself, so emit immediately rather than buffering for a blank line
             # that an envelope body never sends.
+            #
+            # The shape test is what keeps this from swallowing an unknown
+            # SSE FIELD line: only a line that actually looks like a payload
+            # qualifies (AUDIT #502).
             return SSEEvent("", line)
         return None
 

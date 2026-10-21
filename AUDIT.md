@@ -323,6 +323,189 @@ any deployment whose *typed* provider understates what it actually talks to
 
 ---
 
+## ✅ Fixed — round 165: the SSE layer's ingest and replay (2026-10-20)
+
+A sweep of the **SSE** layer — the upstream ingest parser
+(`wiwi/streaming/sse.py`), the gateway pump (`wiwi/core/gateway.py`), the
+journal (`wiwi/streaming/tape_store.py`), the client-facing writer
+(`wiwi/server/app.py`) and the four wire encoders (`wiwi/wire/`) — against
+the streaming contract in `docs/STREAMING.md` and the reconnect contract in
+`docs/API_REFERENCE.md`.
+
+**Method.** Probes against the real app (`create_app` + a `respx`-mocked
+upstream) and against the real parser, driven both through `httpx` and
+directly at the ASGI app so that *when* a frame was sent could be observed
+rather than inferred. Each finding below was reproduced against the current
+tree before being written down.
+
+> **A note on the method, recorded because it cost the sweep a wrong
+> finding.** #502 was first written as a 🔴 "the client loses the frame's
+> content" defect on the strength of an end-to-end probe that showed the
+> content missing. The probe's fixture was invalid: it put **two** JSON
+> documents in **one** frame, which the SSE spec joins into a single
+> multi-line `data` payload, and two concatenated JSON documents are not
+> valid JSON — so the frame was *correctly* dropped. The decisive control
+> (the same frame with the `id:` line removed) loses the content
+> identically, exonerating the `id:` line. #502 below is the **corrected**
+> entry, with the correction and the control recorded in place. The lesson
+> is the one the register already teaches elsewhere: a probe that shows a
+> symptom must also show a **control** where the suspected cause is
+> absent, or the finding is a guess.
+
+### 502. An SSE field line (`id:`, `retry:`) on the upstream stream is read as a data payload
+
+**Severity:** 🟡 Medium · **Status: fixed** — round 165 (`tests/test_fix_round165.py`)
+
+**Where:** `wiwi/streaming/sse.py:36-49` (`LineSSEParser.feed_line`),
+`wiwi/core/gateway.py:838` and `:1955` (both pumps build the parser with
+`allow_unframed=True`).
+
+**Trigger:** any upstream that emits an `id:` or `retry:` field line.
+This is legal SSE — those are *fields* of the frame, not payloads.
+
+**Cause.** `allow_unframed` exists so the envelope providers (Cline,
+WorkBuddy), which answer with one whole JSON object per line, are not
+silently discarded. Its implementation, however, was a catch-all: **any**
+line that is not a comment, not `event:` and not `data:` was emitted as an
+immediate data event — including `id:`, `retry:` and any other legal SSE
+field. The parser therefore handed the adapters a second, spurious event
+whose payload was the literal text `id: 42`.
+
+**Consequence.** Every adapter opens `decode_stream_event` with
+`orjson.loads(data)` and returns `[]` on a decode error, so the spurious
+event is dropped — the frame's *own* payload is untouched. The observable
+defect is therefore **a wasted event, not lost content**: the pump decodes
+one extra frame per field line, and the healer's probe classifier
+(`core/recovery.py`) scans one extra payload per field line. The
+`id:`-line-carrying frame itself is decoded normally.
+
+> **Correction.** This entry was first written as a 🔴 "the frame's real
+> content is lost" finding, on the strength of an end-to-end probe that
+> showed the content missing. That probe was **invalid**: its fixture put
+> *two* JSON documents in one frame, which the SSE spec joins into one
+> `data` payload — and two concatenated JSON documents are not valid JSON,
+> so the frame was correctly dropped. The decisive control (the same frame
+> with the `id:` line REMOVED) loses the content identically, exonerating
+> the `id:` line. The corrected probe, one JSON document per frame:
+>
+> ```
+> id: 1 / data: {"c":"Hello"}   ->  PRE: ['id: 1', '{"c":"Hello"}']
+>                                   POST: ['{"c":"Hello"}']
+> data: {"c":"Hello"} (no id)   ->  PRE: ['{"c":"Hello"}']
+>                                   POST: ['{"c":"Hello"}']
+> ```
+>
+> The `id:` line's only real effect was the extra junk event, which the
+> pre-fix and post-fix parsers both emitted. The fix is still right — the
+> field line should never have been read as a payload — but the severity is
+> 🟡, not 🔴, and no content was ever lost.
+
+**Fix:** `LineSSEParser.feed_line` now recognises `id:` and `retry:`
+explicitly and treats them as fields (ignored — wiwi re-numbers every
+frame it emits, so the upstream's id is not the client's `Last-Event-ID`).
+The unframed branch additionally requires the line to *look* like a
+payload (it starts with `{` or `[`), so no unknown field line can be
+mistaken for one. The envelope providers' shape is unchanged.
+
+**Regression:** `tests/test_fix_round165.py` —
+`test_parser_does_not_emit_an_id_line_as_its_own_data_event`,
+`test_parser_still_accepts_a_bare_json_object_per_line`, and
+`test_an_upstream_id_line_does_not_cost_the_client_its_answer` (the
+end-to-end case, with the fixture corrected to one JSON document per
+frame).
+
+### 503. The reconnect-replay response omits `x-accel-buffering: no`, so a proxy buffers the replayed stream into one burst
+
+**Severity:** 🟠 High · **Status: fixed** — round 165 (`tests/test_fix_round165.py`)
+
+**Where:** `wiwi/server/app.py:2422-2428` (the replay `StreamingResponse`),
+versus `wiwi/server/app.py:2557-2563` (the live inference response) and
+`wiwi/server/app.py:3683` (the admin stream).
+
+**Trigger:** any client that reconnects with `x-wiwi-stream-id` behind a
+buffering reverse proxy (nginx, ALB, Cloudflare).
+
+**Cause.** The live path sets `x-accel-buffering: no` — with the comment
+"nginx and friends buffer an SSE body unless told not to, which turns a
+stream into one burst at the end and can trip a proxy write timeout on a
+long turn" — and the admin stream sets it too. The **replay** path builds
+its `StreamingResponse` with a separate header dict that does not include
+it. The header is the only signal the proxy has: `Cache-Control: no-cache`
+does not disable proxy buffering.
+
+**Why it matters more on replay than on a live stream.** A live stream
+emits frames as they are produced, so a buffering proxy still forwards
+everything promptly *if the turn is short*; the burst appears at the end.
+A replay is a different shape: for an in-flight stream the replay **tails**
+the journal, and the tail loop yields frames as they are appended — possibly
+one frame every few seconds for the life of the original turn. A buffering
+proxy holds all of it until the response closes, which is exactly the
+"reconnect appears hung, then dumps everything at once" symptom the live
+path's header was added to prevent. The client asked to resume and gets
+silence followed by a burst, or a proxy write timeout.
+
+**Probe** (executed, real app, reconnect with `x-wiwi-stream-id`):
+
+```
+LIVE   x-accel-buffering = no
+REPLAY headers:
+    cache-control = no-cache
+    x-wiwi-request-id = 2a367662d0eb4b7a
+    x-wiwi-stream-replay = d7a0a6f290a04f9a
+    content-type = text/event-stream; charset=utf-8
+    x-wiwi-latency-ms = 0.8
+                                      <- no x-accel-buffering
+```
+
+**Fix:** add `"x-accel-buffering": "no"` to the replay response's
+headers. The three SSE responses should carry the same set — the header is
+about the transport, not about the route.
+
+**Regression:** `tests/test_fix_round165.py` —
+`test_the_replay_response_carries_the_anti_buffering_header` (the live and
+replay responses carry the same anti-buffering header).
+
+### 504. The replay tail loop sends no keep-alive, so a reconnecting client sits in silence for the whole journal TTL
+
+**Severity:** 🟡 Medium · **Status: fixed** — round 165 (`tests/test_fix_round165.py`)
+
+**Where:** `wiwi/server/app.py:2386-2402` (`_replay_iter`'s tail loop).
+
+**Trigger:** a reconnect to a stream that is still running in this process,
+on a turn whose upstream is slow.
+
+**Cause.** The tail loop polls the journal every 50 ms and yields the
+frames it finds. When the original turn is between chunks — the long
+thinking phase, a slow tool call — there is nothing to yield, so the replay
+connection emits **nothing at all**: no frame, no comment, no ping. The loop
+runs until the journal's done record lands or the TTL expires
+(`stream_journal_ttl_s`, default 600 s).
+
+**Why it matters.** The live path has a keep-alive for exactly this
+situation: the gateway emits an SSE keep-alive frame when the upstream goes
+quiet for `stream_ping_interval_s` (default 15 s), so an idle proxy/ALB
+does not reap the connection mid-turn. The replay path has no equivalent,
+so the reconnecting client — which is *by definition* waiting on someone
+else's turn — is the one connection with no protection. An idle proxy
+reaps it, the client reconnects, and the cycle repeats.
+
+**Probe** (executed, real app, an active journal with no done record):
+the replay delivered its two buffered frames within 0.03 s and then emitted
+**nothing** for the rest of the observation window, while the tail loop was
+still open.
+
+**Fix:** emit an SSE comment (`: keep-alive\n\n`) from the tail loop
+on the same cadence as the live path's ping. A comment is ignored by every
+conforming SSE parser, so it is safe on any dialect — unlike the live
+path's ``ping``, which is Anthropic's *named* event and does not exist on
+the other three surfaces.
+
+**Regression:** `tests/test_fix_round165.py` —
+`test_a_tailing_replay_emits_a_keepalive` (a tailing replay emits a
+keep-alive within the ping interval of going idle).
+
+---
+
 ## ✅ Fixed — round 163: the replay cursor's unit (2026-10-19)
 
 A sweep of the SSE **replay** path — the journal (`wiwi/streaming/tape_store.py`),

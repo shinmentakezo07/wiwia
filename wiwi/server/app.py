@@ -2386,6 +2386,21 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     # tail burned O(journal size) of event-loop time per tick.
                     tail = state_.journals.tail_reader(replay_id, last)
                     deadline = time.time() + config.router_settings.stream_journal_ttl_s
+                    # Keep-alive while the tail waits (AUDIT #504). The live
+                    # path has one for exactly this window — the upstream
+                    # going quiet for ``stream_ping_interval_s`` — and a
+                    # reconnect is BY DEFINITION waiting on someone else's
+                    # turn, so without one this is the single connection with
+                    # no protection against an idle proxy reaping it (and the
+                    # client reconnecting into the same silence).
+                    #
+                    # An SSE COMMENT, not an event: comments are ignored by
+                    # every conforming parser, so this is safe on all four
+                    # dialects (the live path's ``ping`` event is Anthropic's
+                    # named event and does not exist elsewhere).
+                    keepalive_s = config.router_settings.stream_ping_interval_s
+                    next_keepalive = (time.time() + keepalive_s
+                                      if keepalive_s > 0 else None)
                     while time.time() < deadline:
                         await asyncio.sleep(0.05)
                         for seq, chunk, done in tail.read_next():
@@ -2393,6 +2408,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
                             if done:
                                 return
                             yield chunk
+                        if next_keepalive is not None and time.time() >= next_keepalive:
+                            yield b": keep-alive\n\n"
+                            next_keepalive = time.time() + keepalive_s
                         if tail.truncated() or state_.journals.is_expired(replay_id):
                             return
 
@@ -2424,6 +2442,14 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     _replay_iter(),
                     media_type="text/event-stream",
                     headers={"Cache-Control": "no-cache",
+                             # Same anti-buffering header the live inference
+                             # path and the admin stream set (AUDIT #503).
+                             # A replay is not a short burst: it TAILS a
+                             # still-running turn, so a buffering proxy would
+                             # hold every frame until the response closes —
+                             # the client asked to resume and gets silence
+                             # followed by a dump, or a proxy write timeout.
+                             "x-accel-buffering": "no",
                              "x-wiwi-request-id": ctx.request_id,
                              "x-wiwi-stream-replay": replay_id})
             if owner_ok:
