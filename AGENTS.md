@@ -89,11 +89,11 @@ with no `Finish`. All delta variants are `@dataclass(frozen=True)`.
 | `wiwi/cache/` | `build_response_cache()`, `keygen.py`, `response_cache.py`, `redis_cache.py`, `interface.py` |
 | `wiwi/cost/` | `pricing.py` |
 | `wiwi/logging_core/` | `db_sink.py`, `events.py`, `subsystem.py` (structlog workers), `hist.py`, `retention.py` |
-| `wiwi/server/` | `app.py` (~7.0k lines: `create_app`, `AppState`, `lifespan`, every route), `config_store.py` (SQL DDL + admin persistence), `response_store.py` (Responses-API state), `backup.py`, `metrics.py`, `stats.py`, `static/` (built SPA) |
+| `wiwi/server/` | `app.py` (~7.3k lines: `create_app`, `AppState`, `lifespan`, every route), `config_store.py` (SQL DDL + admin persistence), `response_store.py` (Responses-API state), `backup.py`, `metrics.py`, `stats.py`, `static/` (built SPA) |
 | `wiwi/config.py` | Pydantic v2 config models + `load_config`; `PROVIDER_TYPES` is the single source of truth |
 | `wiwi/main.py` | CLI entrypoint (`wiwi.main:cli`) |
-| `web/` | Admin SPA + public site (React 19, TS strict, Vite 6, Tailwind 4) — 62 components in `src/pages/`, builds to `wiwi/server/static/` |
-| `tests/` | pytest suite — 202 files collecting ~3,388 tests; bugfix regressions in `test_fix_roundN.py` |
+| `web/` | Admin SPA + public site (React 19, TS strict, Vite 6, Tailwind 4) — 64 components in `src/pages/`, builds to `wiwi/server/static/` |
+| `tests/` | pytest suite — 211 files collecting ~3,589 tests; bugfix regressions in `test_fix_roundN.py` |
 | `docs/` | Design specs (see **Important Files**) |
 
 ## Development Commands
@@ -162,9 +162,9 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
   env vars win.
 - `wiwi/config.py` — Pydantic config models; `load_config`, `load_config_from_string`;
   `os.environ/NAME` interpolation is resolved here.
-- `wiwi/server/app.py` — ~7.0k lines in one `create_app` closure: `create_app(config)`,
+- `wiwi/server/app.py` — ~7.3k lines in one `create_app` closure: `create_app(config)`,
   `create_app_from_config_path` (uvicorn reload factory), `AppState`, `lifespan`, `run_chat_like`,
-  and all 9 `/v1` + 57 `/admin` routes. Navigate it by grepping for a route prefix, not by reading.
+  and all 10 `/v1` + 59 `/admin` routes. Navigate it by grepping for a route prefix, not by reading.
 - `wiwi/server/config_store.py` — SQL DDL + migrations for admin-managed providers, keys,
   deployments, prices, settings.
 - `wiwi/server/response_store.py` — persisted Responses-API state behind
@@ -251,9 +251,9 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
 - **Property tests:** `hypothesis` (`test_property_roundtrip.py`) for IR/codec round-trips and
   stream-SSE legality invariants.
 - **Regression convention:** new bugfix regressions go in the next unused
-  `tests/test_fix_roundN.py`. Latest present: `test_fix_round156.py` → next is `round157`
+  `tests/test_fix_roundN.py`. Latest present: `test_fix_round166.py` → next is `round167`
   (confirm numerically, never with a plain `ls` — it sorts lexicographically, so `round9.py`
-  looks newest). 152 such files exist; gaps at 1, 5 (`test_bugfix_round5.py` is the legacy
+  looks newest). 163 such files exist; gaps at 1, 5 (`test_bugfix_round5.py` is the legacy
   filename), 102 and 147.
 - **Subsystem map (rough):** `test_codecs.py` / `test_extra_body.py` — wire unit; `test_router.py`,
   `test_round_robin.py`, `test_fix_cycle_failover.py` — routing; `test_admin_api.py`,
@@ -262,8 +262,8 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
   `test_recovery.py`, `test_cache_and_journal.py` — streaming/recovery; `test_<provider>_adapter.py`
   — per-adapter.
 - **Coverage expectation:** none configured; the bare gate is the full suite green. Don't trust a
-  pinned pass-count in docs/README badges — run the suite. Measured baseline 2026-10-17:
-  `3383 passed, 6 skipped, 7 warnings in 217.64s` (~3,388 collected). Some warnings are `aiosqlite`
+  pinned pass-count in docs/README badges — run the suite. Measured baseline 2026-10-21:
+  `3579 passed, 11 skipped, 4 warnings in 237.80s` (3,589 collected). Some warnings are `aiosqlite`
   worker threads outliving their event loop (`AUDIT.md` #475) — harmless, but escalating that
   warning class to an error charges the failure to an unrelated test, so don't.
 - **Verification gate before claiming done:** `python3 -m pytest tests/ -q && ruff check wiwi/ tests/`

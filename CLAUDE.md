@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **wiwi** is a self-hosted unified LLM gateway proxy (LiteLLM-shaped): three inbound API dialects — OpenAI Chat, OpenAI Responses (Codex CLI), Anthropic Messages — plus the legacy OpenAI Completions shape and a browser-session twin of Chat, all route through one canonical internal representation (IR) to any of twelve outbound provider types; responses are always re-encoded in the caller's inbound dialect (e.g. Claude Code backed by GPT). Adds virtual keys, budgets, rate limits, key pools with smooth weighted round-robin, retries/cooldowns/fallbacks, a health healer, cost tracking, request logs, and an admin web UI.
 
-**Scale, verified 2026-10-17** (re-measure rather than trust): 80 Python files under `wiwi/`, `__init__.py`s included; `wiwi/server/app.py` ~7.0k lines and `wiwi/core/gateway.py` ~2.6k; `wiwi/wire/` 4 codecs, `wiwi/providers/` 12 types across 25 files; 9 `/v1` routes and 57 `/admin` routes; 202 test files collecting ~3,388 tests; 62 components in `web/src/pages/`. Counts drift — the commands below are the source of truth.
+**Scale, verified 2026-10-21** (re-measure rather than trust): 80 Python files under `wiwi/`, `__init__.py`s included; `wiwi/server/app.py` ~7.3k lines and `wiwi/core/gateway.py` ~2.6k; `wiwi/wire/` 4 codecs, `wiwi/providers/` 12 types across 25 files; 10 `/v1` routes and 59 `/admin` routes; 211 test files collecting ~3,589 tests; 64 components in `web/src/pages/`. Counts drift — the commands below are the source of truth.
 
 **Use the ambient `python3` (3.13.5 at time of writing — *not* 3.12, as older versions of this file claimed) / `pytest` (9.1.1) / `ruff` (0.17.1) on PATH** — they have the project installed (`import wiwi` resolves to this checkout). There is **no usable `.venv`**: the directory does not exist in this checkout, and the docs that describe it as an empty uv-venv symlink are stale either way. Never invoke `.venv/bin/python`.
 
@@ -86,9 +86,9 @@ Inbound surfaces: `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/m
 | `cache/` | Opt-in exact-match response cache (`CacheSettings`, off by default) |
 | `cost/` | Token/cost calculation (`pricing.py`) |
 | `logging_core/` | Three-stream logger: request (DB+SSE), proxy (stdout+SSE), audit (sync DB) — `events.py`, `subsystem.py`, `db_sink.py`, `hist.py`, `retention.py` |
-| `server/` | FastAPI app (`app.py`, ~7.0k lines), admin API, `stats.py` rollups, `metrics.py` (Prometheus), `config_store.py`, `response_store.py` (Responses-API state), `backup.py`, static SPA serving |
-| `web/` | Admin UI + public site (React 19 + TypeScript + Vite 6 + Tailwind 4), 62 page components in `src/pages/` |
-| `tests/` | Pytest suite — 202 files collecting ~3,388 tests: thematic regressions plus numbered `test_fix_roundN.py` |
+| `server/` | FastAPI app (`app.py`, ~7.3k lines), admin API, `stats.py` rollups, `metrics.py` (Prometheus), `config_store.py`, `response_store.py` (Responses-API state), `backup.py`, static SPA serving |
+| `web/` | Admin UI + public site (React 19 + TypeScript + Vite 6 + Tailwind 4), 64 page components in `src/pages/` |
+| `tests/` | Pytest suite — 211 files collecting ~3,589 tests: thematic regressions plus numbered `test_fix_roundN.py` |
 | `docs/` | Design specs (intentionally run ahead of implementation) + `docs/superpowers/{plans,specs}` |
 
 Two adapters carry provider-specific quirks that live in `providers/` (never in `core/`):
@@ -139,8 +139,8 @@ Error bodies are dialect-correct per surface (OpenAI `{"error":{…}}` vs Anthro
 - Upstream mocking with `respx`; **use the decorator form** (`@respx.mock`) — the context-manager form is broken in respx 0.23 + httpx 0.28.
 - Property-based round-trip tests use `hypothesis` (persistent cache in `.hypothesis/`) — the right tool for codec/adapter invariants.
 - Default master key for admin-auth'd tests: `sk-wiwi-master-test` via `Authorization: Bearer …`.
-- New bug fixes go into the next unused numbered regression file (`test_fix_roundN.py`) rather than topic files. Find the next number with `ls tests/test_fix_round*.py | sed 's/.*round//;s/\.py//' | sort -n | tail -3` — **never assume one, and never trust a plain `ls`**: it sorts lexicographically, so `round9.py` appears after `round156.py`. As of 2026-10-17 the highest is `round156`, so the next file is `round157`; 152 of these files exist, with gaps at 1 (never created), 5 (`test_bugfix_round5.py` is the legacy filename) and 102, 147.
-- Run full pytest + ruff before claiming work done or committing — both green at commit time. Measured baseline 2026-10-17: `3383 passed, 6 skipped, 7 warnings in 217.64s` (202 files, ~3,388 collected). Some of those warnings are `aiosqlite` worker threads outliving their event loop (`AUDIT.md` #475): harmless here, and do **not** try to silence them by escalating that warning class to an error — pytest charges the failure to an unrelated test.
+- New bug fixes go into the next unused numbered regression file (`test_fix_roundN.py`) rather than topic files. Find the next number with `ls tests/test_fix_round*.py | sed 's/.*round//;s/\.py//' | sort -n | tail -3` — **never assume one, and never trust a plain `ls`**: it sorts lexicographically, so `round9.py` appears after `round164.py`. As of 2026-10-21 the highest is `round166`, so the next file is `round167`; 163 of these files exist, with gaps at 1 (never created), 5 (`test_bugfix_round5.py` is the legacy filename) and 102, 147.
+- Run full pytest + ruff before claiming work done or committing — both green at commit time. Measured baseline 2026-10-21: `3579 passed, 11 skipped, 4 warnings in 237.80s` (211 files, 3,589 collected). Some of those warnings are `aiosqlite` worker threads outliving their event loop (`AUDIT.md` #475): harmless here, and do **not** try to silence them by escalating that warning class to an error — pytest charges the failure to an unrelated test.
 
 ## Conventions & guardrails
 
@@ -188,7 +188,7 @@ Every UI or UX change — in `web/` or in any admin-facing HTML/template surface
 
 ## Where to start reading
 
-`server/app.py` is ~7.0k lines and `core/gateway.py` ~2.6k — don't read either top to bottom. `app.py` is a single `create_app` closure holding every route plus `AppState`/`lifespan`; to navigate it, grep for the surface you care about (`@app.post("/v1`, `@app.get("/admin`, …) rather than scrolling. For a request's full path, start at `run_chat_like` in `server/app.py` (and `create_app`/`AppState` above it) and follow the pipeline it names; `RequestContext` (`core/context.py`, 121 lines) is the single mutable object threaded through every stage, so reading its fields tells you what the pipeline carries. For streaming, read `streaming/deltas.py` (151 lines, the whole contract) before any adapter. `docs/QUICKSTART.md`, `docs/API_REFERENCE.md`, `docs/CONFIG.md`, `docs/PROVIDERS.md`, and `docs/STREAMING.md` are the practical companion docs; `detailed.md` is a code-derived technical reference.
+`server/app.py` is ~7.3k lines and `core/gateway.py` ~2.6k — don't read either top to bottom. `app.py` is a single `create_app` closure holding every route plus `AppState`/`lifespan`; to navigate it, grep for the surface you care about (`@app.post("/v1`, `@app.get("/admin`, …) rather than scrolling. For a request's full path, start at `run_chat_like` in `server/app.py` (and `create_app`/`AppState` above it) and follow the pipeline it names; `RequestContext` (`core/context.py`, 121 lines) is the single mutable object threaded through every stage, so reading its fields tells you what the pipeline carries. For streaming, read `streaming/deltas.py` (151 lines, the whole contract) before any adapter. `docs/QUICKSTART.md`, `docs/API_REFERENCE.md`, `docs/CONFIG.md`, `docs/PROVIDERS.md`, and `docs/STREAMING.md` are the practical companion docs; `detailed.md` is a code-derived technical reference.
 
 ## Docs vs. code
 
