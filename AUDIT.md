@@ -8,6 +8,93 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — round 167: DeepSeek's thinking-mode round-trip was missing on the OpenCode route (2026-10-21)
+
+### 507. A DeepSeek model on the OpenCode adapter was rejected with `The reasoning_content in the thinking mode must be passed back to the API`
+
+**Severity:** 🟠 High · **Status: fixed** — round 167
+**Files:** `wiwi/providers/opencode_adapter.py` (`encode_request`, the chat
+route), `wiwi/providers/deepseek.py` (NEW — the shared rule),
+`wiwi/providers/bai_adapter.py` (the same rule, now shared rather than copied)
+
+**Trigger:** route any `deepseek-*` model through the **OpenCode** provider
+(Zen) with a request that carries tools, and replay a history in which any
+assistant turn has no `reasoning_content` — the ordinary shape of a transcript
+a router rebuilt from the client's own messages. The upstream answers:
+
+```
+400 invalid_request_error: The reasoning_content in the thinking mode must be
+passed back to the API.
+```
+
+Through Zen the client sees the Console wrapper
+(`io: Upstream request failed: [invalid_request_error] …`), which reads like a
+gateway fault rather than a request-shape one.
+
+**Cause.** DeepSeek's thinking mode documents one hard rule
+(api-docs.deepseek.com/guides/thinking_mode): when a request carries
+`tools`, the `reasoning_content` of **all** previous assistant turns must be
+passed back — *even for turns where the model made no tool call*. What the
+API validates is the field's **presence** on every history assistant message.
+
+The OpenCode adapter's chat route delegates to the OpenAI adapter with
+`provider_type="openai"`, and that adapter writes `reasoning_content` only on
+the history turns that *have* thinking
+(`wiwi/providers/openai_adapter.py`, `_role_parts_to_content`). A turn whose
+reasoning the client did not echo therefore arrived with the field missing —
+precisely the turn DeepSeek rejects. The B.A.I adapter had already solved this
+for its own route (`wiwi/providers/bai_adapter.py`), but the OpenCode route
+never received the rule: the two adapters were two copies of a provider fact
+that only one of them had.
+
+**Fix.** The rule moved into one module, `wiwi/providers/deepseek.py`, and
+both adapters apply it:
+
+- `is_deepseek_model()` — the model-id test (substring, so
+  `deepseek-ai/DeepSeek-V3.2` and `DeepSeek-R1` are matched too).
+- `deepseek_thinking_enabled()` — DeepSeek thinks **by default**, so only an
+  explicit disable (`reasoning_effort="none"`, which is what the Anthropic
+  codec's `thinking.type="disabled"` normalises to) turns the rule off.
+- `deepseek_roundtrip_required()` — model + tools + thinking on.
+- `apply_deepseek_reasoning_roundtrip()` — pads every history assistant
+  message that lacks the field with `""`, and returns whether it changed the
+  body.
+
+Two details the fix had to get right, both of which a naive port of the B.A.I
+copy would have missed:
+
+1. **"Does the upstream see tools?" is the caller's to answer.** The rule keys
+   on the tools the *upstream* will see, and the two adapters answer that
+   differently — correctly so. B.A.I adds no tools of its own, so the
+   *declared* tools are the tools on the wire, which is what its route has
+   always keyed on. The OpenCode adapter's free-tier cloak injects
+   `read`/`shell` into the body, so there the *wire* is the answer — a
+   caller that declared no tools still requests tool-carrying upstream. The
+   shared helper takes the answer as an argument (`has_tools`) rather than
+   deciding it, so neither adapter is forced into the other's reading and
+   the B.A.I route stays byte-for-byte unchanged.
+2. **The padding is additive.** A turn that *has* real reasoning keeps it; the
+   helper only adds the field to the turns that lack it, so the reasoning
+   text a client sent is never overwritten with an empty string.
+
+**Blast radius (measured, not asserted).** The pre-fix and post-fix adapters
+were loaded side by side — the real `HEAD` versions out of git, not a
+reconstruction — and their encoded bodies compared byte for byte over 960
+OpenCode and 180 B.A.I request bodies (16 models x 2 inbound dialects x tools
+x history shape x effort). Result: **35 OpenCode differences, every one of
+them a DeepSeek model in the `history=bare` shape — the bug's own shape —
+and 0 non-DeepSeek differences; 0 B.A.I differences at all.** The eight other
+adapters do not import the module, so their behaviour cannot change.
+
+**Regression:** `tests/test_fix_round167.py` (23 tests) — the empty-string
+pad, the reasoning text surviving, the rule not firing without tools / with
+thinking disabled / on a non-DeepSeek model, the cloak ordering, the
+`has_tools` split between the two adapters, the Anthropic-dialect (Claude
+Code) and OpenAI-dialect callers, and the messages route staying untouched.
+
+
+---
+
 ## ✅ Fixed — round 166: the README's copy-paste config did not load (2026-10-20)
 
 A sweep of the **README's own YAML** — every ```yaml block in `README.md`,

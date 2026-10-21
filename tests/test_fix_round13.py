@@ -21,7 +21,12 @@ from __future__ import annotations
 import json
 
 from wiwi.ir import types as ir
-from wiwi.providers.bai_adapter import BAIAdapter, _is_deepseek
+from wiwi.providers.bai_adapter import BAIAdapter
+
+# ``is_deepseek_model`` moved to ``wiwi/providers/deepseek.py`` — the module
+# that owns the DeepSeek rule for every adapter that fronts DeepSeek, so the
+# OpenCode adapter and this one cannot drift apart on it.
+from wiwi.providers.deepseek import is_deepseek_model as _is_deepseek
 
 # -- model-id detection ---------------------------------------------------------
 

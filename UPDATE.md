@@ -4333,3 +4333,92 @@ model — confirming the table needs a funded account.
 
 **Tests:** `tests/test_fix_round149.py` (15), `tests/test_fix_round148.py` (58),
 with rounds 88/89 corrected in place.
+
+---
+
+## Round 167 — DeepSeek's thinking-mode round-trip on the OpenCode route (2026-10-21)
+
+### 167.1 The rule DeepSeek documents, and the one place it now lives
+
+DeepSeek's thinking mode (api-docs.deepseek.com/guides/thinking_mode) puts one
+hard rule on the *request* side:
+
+> For requests carrying the `tools` parameter, the `reasoning_content` must be
+> fully passed back to the API in all subsequent requests — **even for turns
+> where the model did not perform a tool call**. If your code does not
+> correctly pass back `reasoning_content`, the API will return a 400 error.
+
+The 400 is
+`invalid_request_error: The reasoning_content in the thinking mode must be
+passed back to the API`.
+
+Two of the rule's edges are easy to get wrong, and both are now encoded once
+in `wiwi/providers/deepseek.py` rather than per adapter:
+
+- **Thinking is ON by default.** DeepSeek's thinking mode is enabled by
+  default with effort `high`, so a request that says nothing about reasoning
+  is a *thinking* request. Only an explicit disable turns the rule off —
+  `reasoning_effort="none"` (which is what the Anthropic codec's
+  `thinking.type="disabled"` normalises to).
+- **Without `tools`, history `reasoning_content` is ignored** (and older
+  R1-era deployments 400'd on it), so it is stripped rather than forwarded.
+
+### 167.2 Why the OpenCode route broke and the B.A.I route did not
+
+The B.A.I adapter had the rule; the OpenCode adapter did not. The OpenCode
+chat route delegates to the OpenAI adapter with `provider_type="openai"`, and
+that adapter writes `reasoning_content` on history assistant turns **only when
+they have thinking** (`_role_parts_to_content`). A router rebuilds history
+from the client's own transcript, so every turn whose reasoning the client
+did not echo arrives with the field missing — and that is exactly the turn
+DeepSeek rejects.
+
+The failure is invisible until it is not: turn 1 of a tool-using session is
+fine, and the 400 appears on the turn that replays the history.
+
+### 167.3 The detail the naive port would have missed
+
+DeepSeek's rule keys on the tools the **upstream will see**, and the two
+adapters answer that question differently — correctly so:
+
+- **B.A.I** adds no tools of its own, so the *declared* tools are the tools
+  on the wire. That is what its route has always keyed on, and it stays
+  byte-for-byte identical.
+- **OpenCode** injects `read`/`shell` decoys via its free-tier cloak, so
+  there the *wire* is the answer: a caller that declared no tools still
+  requests tool-carrying upstream, and still owes the round-trip.
+
+The shared helper therefore takes the answer as an argument (`has_tools`)
+instead of deciding it — a second convention beside the first is prohibited,
+and neither adapter is forced into the other's reading. The OpenCode call
+site sits **after** the cloak, for the same reason.
+
+The padding is also *additive*: a turn that carries real reasoning keeps it,
+and only the turns that lack the field get the `""` — so a client's reasoning
+text is never overwritten with an empty string.
+
+### 167.4 One rule, two adapters
+
+`wiwi/providers/deepseek.py` is the single owner of the DeepSeek request-side
+quirks:
+
+| helper | what it decides |
+|---|---|
+| `is_deepseek_model(model_id)` | substring match, so `deepseek-ai/DeepSeek-V3.2` and `DeepSeek-R1` match too |
+| `deepseek_thinking_enabled(req)` | thinking is on unless explicitly disabled |
+| `deepseek_roundtrip_required(req, model_id)` | model + tools + thinking on |
+| `apply_deepseek_reasoning_roundtrip(body, req, model_id, has_tools=…)` | pads the history assistant turns that lack the field |
+
+The B.A.I adapter's private `_is_deepseek` became `is_deepseek_model` in that
+module, so the two routes cannot drift apart on a provider fact that used to
+live in only one of them.
+
+**Blast radius, measured.** The pre-fix and post-fix adapters were loaded
+side by side — the real `HEAD` versions out of git — and their encoded bodies
+compared byte for byte over 960 OpenCode and 180 B.A.I request bodies (16
+models x 2 inbound dialects x tools x history shape x effort): **35 OpenCode
+differences, all of them DeepSeek models in the failing shape; 0 non-DeepSeek
+differences; 0 B.A.I differences.**
+
+**Tests:** `tests/test_fix_round167.py` (23).
+

@@ -102,6 +102,21 @@ serves only paid models. Free quota is accounted per session (the client reuses
 one long-lived session per identity), so ``x-opencode-session`` is reused per
 credential rather than re-minted per request.
 
+**DeepSeek models on the chat route carry DeepSeek's thinking-mode rule.**
+Zen's catalogue includes the ``deepseek-*`` models, and the provider *behind*
+Zen is DeepSeek, whose thinking mode rejects a request whose history assistant
+turns do not all carry ``reasoning_content`` once the request carries tools:
+
+    400 invalid_request_error: The reasoning_content in the thinking mode
+    must be passed back to the API.
+
+The chat route delegates to the OpenAI adapter, which emits
+``reasoning_content`` only on the history turns that *have* thinking — so the
+turns whose reasoning the client stripped were the ones that failed. The
+round-trip is applied here through
+:func:`wiwi.providers.deepseek.apply_deepseek_reasoning_roundtrip`, the same
+helper the B.A.I adapter uses (AUDIT #507).
+
 ``anthropic-version`` rides the messages route only; ``X-Title`` is referral
 attribution and, unlike the ``HTTP-Referer`` that used to sit beside it, does not
 trip the gate.
@@ -130,6 +145,7 @@ from wiwi.providers.base import (
     take_adapter_warnings,
     unhonoured_platform_params,
 )
+from wiwi.providers.deepseek import apply_deepseek_reasoning_roundtrip
 from wiwi.providers.gemini_adapter import GeminiAdapter
 from wiwi.providers.openai_adapter import OpenAIAdapter
 from wiwi.providers.opencode_version import build_user_agent
@@ -746,6 +762,29 @@ class OpencodeAdapter(WarningMixin):
             # lesser evil there. Allowlisted per model (see
             # _FORCE_AUTO_TOOL_CHOICE), so it cannot touch other traffic.
             _force_auto_tool_choice(body, model_id)
+        if route == "chat" and apply_deepseek_reasoning_roundtrip(
+                body, req, model_id, has_tools=bool(body.get("tools"))):
+            # DeepSeek's thinking mode demands that EVERY history assistant
+            # turn carry `reasoning_content` once the request carries tools —
+            # including turns whose reasoning the client (or an earlier hop)
+            # stripped, which is exactly the transcript shape a router
+            # rebuilds. Without it DeepSeek answers
+            # `400 invalid_request_error: The reasoning_content in the
+            # thinking mode must be passed back to the API` (AUDIT #507).
+            #
+            # The OpenAI sub-adapter is told `provider_type="openai"`, so it
+            # emits `reasoning_content` on the history turns that HAVE
+            # thinking; the turns without it are the ones that need the
+            # empty-string pad. The shared helper owns the rule — see
+            # `wiwi/providers/deepseek.py` and the B.A.I adapter, which
+            # applies the same rule for the same reason.
+            #
+            # `has_tools` is the tools ON THE WIRE, not the ones the caller
+            # declared: the free-tier cloak injects `read`/`shell` into the
+            # body, which makes even a tool-less call tool-carrying upstream.
+            # Placed AFTER the cloak on purpose, for that reason.
+            log.debug("opencode_deepseek_reasoning_roundtrip",
+                      model=model_id, messages=len(body.get("messages") or []))
         return body
 
     # -- response decoding ---------------------------------------------------

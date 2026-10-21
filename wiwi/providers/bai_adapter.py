@@ -47,13 +47,12 @@ from __future__ import annotations
 from typing import Any
 
 from wiwi.ir import types as ir
+from wiwi.providers.deepseek import (
+    apply_deepseek_reasoning_roundtrip,
+    deepseek_roundtrip_required,
+    is_deepseek_model,
+)
 from wiwi.providers.openai_adapter import OpenAIAdapter
-
-
-def _is_deepseek(model_id: str) -> bool:
-    """True for DeepSeek models (deepseek-reasoner, deepseek-v3.x/v4, R1 ids,
-    optionally vendor-prefixed like ``deepseek/deepseek-v4``)."""
-    return "deepseek" in model_id.lower()
 
 
 class BAIAdapter(OpenAIAdapter):
@@ -63,13 +62,13 @@ class BAIAdapter(OpenAIAdapter):
 
     def encode_request(self, req: ir.Request, model_id: str,
                        deployment_params: dict[str, Any]) -> dict[str, Any]:
-        deepseek = _is_deepseek(model_id)
+        deepseek = is_deepseek_model(model_id)
         effort = req.gen_params.effective_reasoning_effort()
         # Per-message history reasoning is wanted exactly when DeepSeek's
         # thinking-mode round-trip rule requires it: DeepSeek model + tools
         # + thinking not explicitly disabled. Everything else takes the
         # strict compatible-gateway path (history reasoning stripped).
-        deepseek_roundtrip = deepseek and bool(req.tools) and effort != "none"
+        deepseek_roundtrip = deepseek_roundtrip_required(req, model_id)
         params = dict(deployment_params)
         params["provider_type"] = "openai" if deepseek_roundtrip else "openai-compatible"
         body = super().encode_request(req, model_id, params)
@@ -91,13 +90,18 @@ class BAIAdapter(OpenAIAdapter):
         # DeepSeek: normalize the reasoning controls.
         if effort:
             body["reasoning_effort"] = effort
-        if deepseek_roundtrip:
-            # The thinking-mode tool round-trip: EVERY history assistant
-            # message must carry reasoning_content once tools are present,
-            # even turns without thinking. Clients that stripped the field
-            # (the widespread 400) get an empty string — presence of the
-            # field is what the API validates; content is best-effort.
-            for m in body["messages"]:
-                if m.get("role") == "assistant" and "reasoning_content" not in m:
-                    m["reasoning_content"] = ""
+        # The thinking-mode tool round-trip: EVERY history assistant
+        # message must carry reasoning_content once tools are present,
+        # even turns without thinking. Clients that stripped the field
+        # (the widespread 400) get an empty string — presence of the
+        # field is what the API validates; content is best-effort.
+        #
+        # `has_tools` is the tools the CALLER declared, which is what this
+        # route has always keyed on: B.A.I adds no tools of its own, so the
+        # declared tools are the tools on the wire. (The OpenCode adapter
+        # answers the same question differently — its free-tier cloak injects
+        # tools of its own — which is why the helper takes the answer as an
+        # argument rather than deciding it.)
+        apply_deepseek_reasoning_roundtrip(
+            body, req, model_id, has_tools=bool(req.tools))
         return body
