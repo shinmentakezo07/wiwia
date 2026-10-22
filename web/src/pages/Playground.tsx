@@ -19,6 +19,8 @@ import {
   ChevronDown,
   CircleDot,
   Clock,
+  Code,
+  Compass,
   Copy,
   Eraser,
   Gauge,
@@ -37,6 +39,7 @@ import {
   Terminal,
   Trash2,
   User,
+  WandSparkles,
   X,
 } from "lucide-react";
 import { ApiError, getModels, getPlaygroundMetrics } from "@/api/client";
@@ -243,6 +246,35 @@ function toChatMsgs(msgs: Msg[]): ChatMsg[] {
   }));
 }
 
+/**
+ * Per-group visual identity for the hero launcher. Each category gets its own
+ * icon and accent hue so the empty state reads as a deliberate editorial grid
+ * rather than a uniform run of identical cards — the accent is reused for the
+ * tab, the card icon and the hover glow of that group's suggestions. The
+ * accent classes are literal Tailwind utility strings so they tree-shake
+ * correctly under strict TS.
+ */
+const GROUP_META: Record<
+  HeroSuggestionGroup,
+  { icon: typeof Sparkles; acc: string; accSoft: string }
+> = {
+  Create: {
+    icon: WandSparkles,
+    acc: "text-violet-300",
+    accSoft: "bg-violet-400/10 text-violet-300",
+  },
+  Explore: {
+    icon: Compass,
+    acc: "text-sky-300",
+    accSoft: "bg-sky-400/10 text-sky-300",
+  },
+  Code: {
+    icon: Code,
+    acc: "text-emerald-300",
+    accSoft: "bg-emerald-400/10 text-emerald-300",
+  },
+};
+
 /** Stored conversation → live message state. The inverse of `toChatMsgs`; a
  *  single mapping keeps every load path (mount, chat switch, delete) from
  *  dropping fields the others keep. */
@@ -381,10 +413,10 @@ function ModelSelector(props: {
         aria-expanded={open}
         aria-controls="pg-model-listbox"
         aria-label={`Choose model${selected ? `, currently ${selected.name}` : ""}`}
-        className="pg-model-trigger group flex min-h-11 max-w-full items-center gap-2 rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] px-3 py-2 text-[13px] transition-[border-color,background-color,box-shadow] duration-200 hover:border-[var(--admin-border-hover)] hover:bg-white/[0.035] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50 disabled:opacity-50"
+        className="pg-model-trigger group flex min-h-11 max-w-full items-center gap-2 rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] px-3 py-2 text-[13px] transition-[border-color,background-color,box-shadow] duration-200 hover:border-[var(--admin-border-hover)] hover:bg-white/[0.035] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50 disabled:opacity-50"
       >
-        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-blue-500/10">
-          <Terminal className="h-3.5 w-3.5 text-blue-400" />
+        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-brand-500/10">
+          <Terminal className="h-3.5 w-3.5 text-brand-300" />
         </div>
         <div className="min-w-0 text-left">
           <div className="truncate text-[13px] font-medium text-[var(--admin-text)]">
@@ -469,21 +501,21 @@ function ModelSelector(props: {
                     className={`group/item flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors ${
                       idx === active
                         ? isSelected
-                          ? "bg-blue-500/15"
+                          ? "bg-brand-500/15"
                           : "bg-white/[0.06]"
                         : isSelected
-                          ? "bg-blue-500/10"
+                          ? "bg-brand-500/10"
                           : "hover:bg-white/[0.03]"
                     }`}
                   >
                     {/* Selection check */}
                     <div className="mt-0.5 w-4 shrink-0">
-                      {isSelected && <Check className="h-4 w-4 text-blue-400" />}
+                      {isSelected && <Check className="h-4 w-4 text-brand-300" />}
                     </div>
                     <div className="min-w-0 flex-1">
                       {/* Model name + availability dot */}
                       <div className="flex items-center gap-2">
-                        <span className={`truncate text-[13px] font-medium ${isSelected ? "text-blue-300" : "text-[var(--admin-text)]"}`}>
+                        <span className={`truncate text-[13px] font-medium ${isSelected ? "text-brand-300" : "text-[var(--admin-text)]"}`}>
                           {g.name}
                         </span>
                         <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${available ? "bg-emerald-400" : "bg-amber-400"}`} />
@@ -580,7 +612,7 @@ function ChatSidebar(props: {
         <button
           type="button"
           onClick={onToggle}
-          className="pg-icon-button flex h-11 w-11 items-center justify-center rounded-lg text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.05] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+          className="pg-icon-button flex h-11 w-11 items-center justify-center rounded-lg text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.05] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50"
           aria-label="Expand sidebar"
           title="Expand sidebar"
         >
@@ -590,7 +622,7 @@ function ChatSidebar(props: {
         <button
           type="button"
           onClick={onNew}
-          className="pg-icon-button flex h-11 w-11 items-center justify-center rounded-lg text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.05] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+          className="pg-icon-button flex h-11 w-11 items-center justify-center rounded-lg text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.05] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50"
           aria-label="New chat"
           title="New chat"
         >
@@ -640,7 +672,7 @@ function ChatSidebar(props: {
           <button
             type="button"
             onClick={onToggle}
-            className="pg-icon-button flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.05] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+            className="pg-icon-button flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.05] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50"
             aria-label="Collapse sidebar"
             title="Collapse sidebar"
           >
@@ -653,7 +685,7 @@ function ChatSidebar(props: {
           <button
             type="button"
             onClick={onNew}
-            className="pg-new-chat flex min-h-11 w-full items-center gap-2 rounded-lg border border-[var(--admin-border)] bg-white/[0.025] px-3 py-2 text-[13px] font-medium text-[var(--admin-text)] transition-colors hover:border-brand-400/30 hover:bg-brand-500/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+            className="pg-new-chat flex min-h-11 w-full items-center gap-2 rounded-lg border border-[var(--admin-border)] bg-white/[0.025] px-3 py-2 text-[13px] font-medium text-[var(--admin-text)] transition-colors hover:border-brand-400/30 hover:bg-brand-500/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50"
           >
             <span className="flex h-7 w-7 items-center justify-center rounded-md bg-brand-500/10 text-brand-300">
               <MessageSquarePlus size={15} />
@@ -664,7 +696,7 @@ function ChatSidebar(props: {
 
         {/* Search */}
         <div className="px-3 pb-2">
-          <div className="flex items-center gap-2 rounded-lg border border-[var(--admin-border)] bg-white/[0.02] px-2.5 py-1.5 transition-colors focus-within:border-[var(--admin-border-hover)] focus-within:ring-2 focus-within:ring-blue-400/20">
+          <div className="flex items-center gap-2 rounded-lg border border-[var(--admin-border)] bg-white/[0.02] px-2.5 py-1.5 transition-colors focus-within:border-[var(--admin-border-hover)] focus-within:ring-2 focus-within:ring-brand-400/20">
             <Search className="h-3.5 w-3.5 shrink-0 text-[var(--admin-text-dim)]" />
             <input
               type="search"
@@ -736,14 +768,14 @@ function ChatSidebar(props: {
                             pickChat(c.id);
                           }
                         }}
-                        className="pg-chat-item group flex cursor-pointer items-start gap-2.5 rounded-lg border border-transparent px-2.5 py-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+                        className="pg-chat-item group flex cursor-pointer items-start gap-2.5 rounded-lg border border-transparent px-2.5 py-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50"
                       >
                         <span className="pg-chat-item-icon mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--admin-text-dim)]" aria-hidden>
                           <MessageSquare size={12} />
                         </span>
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-1.5">
-                            <span className={`truncate text-[13px] ${c.id === activeId ? "text-blue-300 font-medium" : "text-[var(--admin-text-muted)]"}`}>
+                            <span className={`truncate text-[13px] ${c.id === activeId ? "text-brand-300 font-medium" : "text-[var(--admin-text-muted)]"}`}>
                               {c.title || "New chat"}
                             </span>
                           </div>
@@ -765,7 +797,7 @@ function ChatSidebar(props: {
                               setRenamingId(c.id);
                               setRenameDraft(c.title || "");
                             }}
-                            className="flex h-11 w-11 items-center justify-center rounded text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+                            className="flex h-11 w-11 items-center justify-center rounded text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50"
                             aria-label="Rename chat"
                             title="Rename chat"
                           >
@@ -1373,7 +1405,7 @@ export function PlaygroundPage() {
       {/* ══ Top bar ══ */}
       <header className="admin-topbar pg-topbar relative z-30 shrink-0">
         <div className="flex min-h-[60px] flex-wrap items-center gap-x-4 gap-y-2 px-3 py-2 sm:px-5">
-          <Link to="/" className="pg-brand flex min-w-0 items-center gap-2.5 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50">
+          <Link to="/" className="pg-brand flex min-w-0 items-center gap-2.5 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50">
             <span className="pg-brand-mark flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px]">
               <img src="/wiwi-logo.png" alt="wiwi" className="h-7 w-7 rounded-[8px] object-cover ring-1 ring-white/[0.08] ring-inset" />
             </span>
@@ -1509,7 +1541,7 @@ export function PlaygroundPage() {
             <button
               type="button"
               onClick={scrollToBottom}
-              className="pg-scroll-btn absolute bottom-24 left-1/2 z-10 flex h-11 w-11 -translate-x-1/2 items-center justify-center rounded-full border border-[var(--admin-border)] bg-[var(--admin-surface-elevated)] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+              className="pg-scroll-btn absolute bottom-24 left-1/2 z-10 flex h-11 w-11 -translate-x-1/2 items-center justify-center rounded-full border border-[var(--admin-border)] bg-[var(--admin-surface-elevated)] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50"
               aria-label="Scroll to bottom"
             >
               <ArrowDown size={16} />
@@ -1601,7 +1633,7 @@ export function PlaygroundPage() {
                     <button
                       type="submit"
                       disabled={busy || !draft.trim()}
-                      className="pg-send-button flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-white transition-[filter,transform] duration-150 hover:brightness-110 active:scale-95 disabled:opacity-40 disabled:grayscale focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300/60"
+                      className="pg-send-button flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-white transition-[filter,transform] duration-150 hover:brightness-110 active:scale-95 disabled:opacity-40 disabled:grayscale focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300/60"
                       aria-label="Send"
                     >
                       {busy ? <Spinner className="h-4 w-4" /> : <Send size={16} />}
@@ -1649,6 +1681,7 @@ function HeroEmptyState(props: {
   const { activeGroup, onGroupChange, suggestions, onPick, model } = props;
   const visible = heroSuggestionGroupNames;
   const current = suggestions?.[activeGroup] ?? [];
+  const meta = GROUP_META[activeGroup];
 
   return (
     <div className="pg-hero-shell relative flex min-h-full items-center justify-center overflow-hidden px-4 py-6 sm:px-6 sm:py-10">
@@ -1656,6 +1689,9 @@ function HeroEmptyState(props: {
         <div className="mb-3 flex justify-center sm:mb-5">
           <div className="pg-hero-badge relative flex h-12 w-12 items-center justify-center rounded-2xl border border-white/[0.08] shadow-xl shadow-brand-900/30 sm:h-14 sm:w-14">
             <Sparkles className="relative h-5 w-5 text-white sm:h-6 sm:w-6" />
+            <span className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full border border-white/10 bg-brand-500 shadow-sm">
+              <CircleDot size={9} className="text-white" />
+            </span>
           </div>
         </div>
 
@@ -1667,60 +1703,68 @@ function HeroEmptyState(props: {
         </p>
 
         {model && (
-          <div className="pg-model-card mx-auto mt-4 max-w-[440px] rounded-2xl px-4 py-3 sm:mt-6">
-            <div className="flex items-center gap-3">
-              <div className="pg-model-card-icon flex h-9 w-9 shrink-0 items-center justify-center rounded-xl">
-                <Terminal size={17} />
-              </div>
-              <div className="min-w-0 flex-1 text-left">
-                <div className="truncate text-[13px] font-medium text-[var(--admin-text)]">{model}</div>
-                <div className="mt-0.5 text-[11px] text-[var(--admin-text-dim)]">Streaming · local session</div>
-              </div>
+          <div className="pg-model-card mx-auto mt-4 flex max-w-[440px] items-center gap-3 rounded-2xl px-4 py-3 text-left sm:mt-6">
+            <div className="pg-model-card-icon flex h-9 w-9 shrink-0 items-center justify-center rounded-xl">
+              <Terminal size={17} />
             </div>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[13px] font-medium text-[var(--admin-text)]">{model}</div>
+              <div className="mt-0.5 text-[11px] text-[var(--admin-text-dim)]">Streaming · local session</div>
+            </div>
+            <span className="pg-ready-pill hidden shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-medium sm:inline-flex">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+              Ready
+            </span>
           </div>
         )}
 
         {model && (
           <>
             <div className="pg-hero-tabs pg-hero-tabs-scroll mt-5 inline-flex max-w-full items-center gap-1 overflow-x-auto rounded-xl p-1 sm:mt-7" role="tablist" aria-label="Prompt categories">
-              {visible.map((g) => (
-                <button
-                  key={g}
-                  type="button"
-                  role="tab"
-                  aria-selected={activeGroup === g}
-                  onClick={() => onGroupChange(g)}
-                  className={`min-h-11 shrink-0 rounded-lg px-3.5 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50 ${
-                    activeGroup === g
-                      ? "bg-white/[0.09] text-[var(--admin-text)] shadow-sm"
-                      : "text-[var(--admin-text-muted)] hover:text-[var(--admin-text)]"
-                  }`}
-                >
-                  {g}
-                </button>
-              ))}
+              {visible.map((g) => {
+                const gmeta = GROUP_META[g];
+                const Icon = gmeta.icon;
+                const active = g === activeGroup;
+                return (
+                  <button
+                    key={g}
+                    type="button"
+                    role="tab"
+                    aria-selected={active}
+                    onClick={() => onGroupChange(g)}
+                    className={`group/tab flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg px-3.5 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50 ${
+                      active
+                        ? "bg-white/[0.09] text-[var(--admin-text)] shadow-sm"
+                        : "text-[var(--admin-text-muted)] hover:text-[var(--admin-text)]"
+                    }`}
+                  >
+                    <Icon size={13} className={active ? gmeta.acc : "text-[var(--admin-text-dim)]"} />
+                    {g}
+                  </button>
+                );
+              })}
             </div>
 
             <div className="pg-suggestion-grid mt-3 grid gap-2 text-left sm:grid-cols-2" role="tabpanel" aria-label={`${activeGroup} prompt suggestions`}>
-              {current.map((s, i) => (
-                <button
-                  key={s}
-                  type="button"
-                  onClick={() => onPick(s)}
-                  className="pg-sugg-enter pg-suggestion-card group flex min-h-[58px] items-start gap-3 rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] px-3.5 py-2.5 text-left text-[13px] leading-snug text-[var(--admin-text-muted)] transition-[border-color,background-color,color,transform,box-shadow] duration-200 hover:-translate-y-0.5 hover:border-brand-400/30 hover:bg-brand-500/[0.06] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
-                  style={{ animationDelay: `${i * 0.04}s` }}
-                >
-                  <span className="pg-suggestion-icon flex h-8 w-8 shrink-0 items-center justify-center rounded-lg">
-                    <Sparkles className="h-4 w-4" />
-                  </span>
-                  <span className="min-w-0 flex-1">{s}</span>
-                  <ArrowUpRight className="h-4 w-4 shrink-0 text-[var(--admin-text-dim)] opacity-0 transition-opacity group-hover:opacity-100" aria-hidden />
-                </button>
-              ))}
+              {current.map((s, i) => {
+                const Icon = meta.icon;
+                return (
+                  <button
+                    key={s}
+                    type="button"
+                    onClick={() => onPick(s)}
+                    className="pg-sugg-enter pg-suggestion-card group flex min-h-[58px] items-start gap-3 rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] px-3.5 py-2.5 text-left text-[13px] leading-snug text-[var(--admin-text-muted)] transition-[border-color,background-color,color,transform,box-shadow] duration-200 hover:-translate-y-0.5 hover:border-[var(--admin-border-hover)] hover:bg-white/[0.03] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50"
+                    style={{ animationDelay: `${i * 0.04}s` }}
+                  >
+                    <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors ${meta.accSoft} group-hover:bg-white/[0.07]`}>
+                      <Icon className="h-4 w-4" />
+                    </span>
+                    <span className="min-w-0 flex-1">{s}</span>
+                    <ArrowUpRight className="h-4 w-4 shrink-0 text-[var(--admin-text-dim)] opacity-0 transition-opacity group-hover:opacity-100" aria-hidden />
+                  </button>
+                );
+              })}
             </div>
-            {/* Keyboard hints live on the composer, directly beside the keys
-                they describe; repeating them here put two identical rows on
-                screen at once. */}
           </>
         )}
       </div>
@@ -1781,6 +1825,7 @@ function MessageBubble(props: {
       <div className="min-w-0 flex-1">
         <div className="pg-message-heading mb-1.5 flex items-center gap-2">
           <span className="pg-message-role text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--admin-text-muted)]">Assistant</span>
+          {isStreamingThis && <span className="pg-live-dot" aria-hidden />}
           <span className="h-3 w-px bg-[var(--admin-border)]" aria-hidden />
           <span className="truncate font-mono text-[10px] text-[var(--admin-text-dim)]">
             {model}
@@ -1838,7 +1883,7 @@ function ActionButton(props: { onClick: () => void; label: string; disabled?: bo
       type="button"
       onClick={props.onClick}
       disabled={props.disabled}
-      className="flex min-h-11 items-center gap-1 rounded-md px-2 text-[11px] text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50 disabled:opacity-40"
+      className="flex min-h-11 items-center gap-1 rounded-md px-2 text-[11px] text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50 disabled:opacity-40"
     >
       {props.children}
       {props.label}

@@ -3270,6 +3270,25 @@ select.admin-input option {
 .pg-hero-badge {
   background: linear-gradient(135deg, var(--color-brand-500), var(--color-brand-700));
 }
+/* A slow, quiet halo behind the hero badge — reinforces the brand pool
+   without competing with the prompt grid. Fully disabled under reduced
+   motion. */
+.pg-hero-badge::before {
+  content: "";
+  position: absolute;
+  inset: -14px;
+  border-radius: 28px;
+  background: radial-gradient(55% 55% at 50% 50%, rgba(124, 58, 237, 0.28), transparent 72%);
+  z-index: -1;
+  animation: pg-halo 3.6s ease-in-out infinite;
+}
+@keyframes pg-halo {
+  0%, 100% { opacity: 0.55; transform: scale(0.96); }
+  50% { opacity: 1; transform: scale(1.05); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pg-hero-badge::before { animation: none; opacity: 0.7; }
+}
 
 /* Response stats enter */
 @keyframes pg-stats-in {
@@ -3881,6 +3900,22 @@ select.admin-input option {
   min-height: 18px;
 }
 
+/* A tiny live marker beside the Assistant label on the turn that is still
+   streaming — signals "this turn is still writing" without adding a second
+   copy of the top bar's status pill. Reuses the app's pulse keyframes and
+   goes static under reduced motion. */
+.pg-live-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 9999px;
+  background: var(--color-brand-400);
+  box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.12);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .pg-live-dot { animation: pg-status-pulse 1.6s ease-in-out infinite; }
+}
+
 .pg-hero-shell {
   isolation: isolate;
 }
@@ -3915,18 +3950,6 @@ select.admin-input option {
 .pg-hero-tabs-scroll > * { scroll-snap-align: center; }
 .pg-suggestion-card {
   min-height: 58px;
-}
-.pg-suggestion-icon {
-  color: var(--admin-text-dim);
-  background: rgba(255, 255, 255, 0.045);
-  transition: color 0.2s ease, background-color 0.2s ease;
-}
-.pg-suggestion-card:hover .pg-suggestion-icon {
-  color: #c4b5fd;
-  background: rgba(124, 58, 237, 0.16);
-}
-.pg-hero-hints {
-  min-height: 18px;
 }
 
 @media (max-width: 767px) {
