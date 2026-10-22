@@ -4422,3 +4422,65 @@ differences; 0 B.A.I differences.**
 
 **Tests:** `tests/test_fix_round167.py` (23).
 
+
+## Round 170 — four IR carriers: the usage convention, tool_use breakpoints, Chat `top_k`, typed block spans (2026-10-22)
+
+Found by reading `wiwi/ir/types.py` against its consumers rather than by a
+failing request. Each item is the same shape: a value that exists on one side
+of a translation and had no carrier in the IR, so it was either inferred from
+the deployment's provider type or dropped without a signal.
+
+### 170.1 `Usage` did not state whether `prompt_tokens` includes cache reads
+
+`wiwi/core/gateway.py` derived it from the wire: `prompt_includes_cached(dep)`
+→ `not _speaks_messages(dep)`. That inference has already produced two billing
+defects (AUDIT #9, #227 — the second when an `opencode` deployment serving
+`claude-*` speaks the Messages wire, so a provider-type test took the OpenAI
+branch and billed fresh input at $0). It is a property of the *usage object*,
+not of the provider, so `ir.Usage.cached_in_prompt: bool | None` now records
+it where the body is decoded, and `dl.UsageFinal` carries it on the streaming
+path (which is how Claude Code, Codex and the playground are all served). Both
+pricing entry points prefer the recorded value and fall back to the wire-shape
+inference only when it is `None`; resume merges and the streaming fallback
+inherit it instead of recomputing. The Anthropic decoder records `False`, the
+OpenAI decoder `True`.
+
+### 170.2 `ToolUsePart` had no `cache_control`
+
+`TextPart`, `ImagePart`, `DocumentPart`, `ToolResultPart` and `Tool` all carry
+a breakpoint. Anthropic accepts one on a `tool_use` block, so the marker was
+dropped on decode and every token before that block was re-read at 1x on the
+next turn — the defect the `ImagePart.cache_control` comment documents, on the
+block an agent emits most. Field added, decoded on both the client-dispatched
+and `server_tool_use`/`mcp_tool_use` arms, and re-emitted by the Anthropic
+encoder next to `input`. Providers with no equivalent block ignore it.
+
+### 170.3 The Chat codec did not decode `top_k`
+
+`GenParams.top_k` exists and the Anthropic and Responses codecs populate it, so
+a non-OpenAI backend emits a caller-visible "top_k was dropped" warning. On the
+Chat surface the parameter fell into `Request.extras`, where the OpenAI
+adapter's `_STANDARD` set does not list it — `drop_params` discarded it with no
+warning at all, because the adapter's warning only fires when the value reached
+`GenParams.top_k`. Now decoded with `ir.coerce_int` (so `true`/`"5"`/`[5]` are
+rejected rather than forwarded) and removed from the extras denylist's blind
+spot by listing it as a known key.
+
+### 170.4 `block_type` was an untyped `str`
+
+The spelling is a replay requirement — an `mcp_tool_use` paired with an
+`mcp_tool_result` must go back under the same name or Anthropic rejects the
+history — but a typo or a junk upstream value propagated verbatim to the wire.
+`ToolUseBlockType` (`tool_use` | `server_tool_use` | `mcp_tool_use`) and
+`ThinkingBlockType` (`thinking` | `redacted_thinking`) are now `Literal`s,
+normalized in `__post_init__` to the always-legal default. `ToolResultPart`
+deliberately stays `str`: the decoder accepts any `*_tool_result` spelling so a
+new server-tool version replays without an IR change, and a `Literal` there
+would reject next year's tool.
+
+**Blast radius.** Additive fields with `None` defaults, so an adapter that has
+not learned to record the usage convention prices exactly as before. Two
+existing tests compared `UsageFinal`/`Usage` by exact dataclass equality and
+now name the new field explicitly (`test_fix_round12.py`, `test_fix_round61.py`).
+
+**Tests:** `tests/test_fix_round170.py` (14).

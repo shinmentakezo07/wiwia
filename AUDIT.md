@@ -7897,6 +7897,8 @@ The non-streaming path parses `Retry-After` at line 95-97 and sets `err.retry_af
 
 **Status: fixed** — re-verified 2026-10-11 (round 127 sweep). `wiwi/cost/pricing.py` now takes `prompt_includes_cached`, and `wiwi/core/gateway.py` derives it from the WIRE shape via `prompt_includes_cached(dep)` → `not _speaks_messages(dep)` rather than keying on `provider_type`. That is the documented #227 generalization. Body preserved unchanged.
 
+**Superseded in part (round 170, #513):** the wire-shape derivation is now only the FALLBACK. `ir.Usage.cached_in_prompt` / `dl.UsageFinal.cached_in_prompt` let the decoding adapter record the convention, and `_price`/`_price_stream` prefer it over the inference — so a deployment whose wire shape and usage convention disagree no longer depends on `_speaks_messages`.
+
 **File:** `wiwi/cost/pricing.py:49` + `wiwi/providers/anthropic_adapter.py:213`
 **Trigger:** any Anthropic response using prompt caching.
 
@@ -13038,6 +13040,8 @@ second provider that speaks Messages.
 
 **Status: fixed** — round 90 (2026-09-19); `tests/test_fix_round90.py`. Reproduced against the live tree before the fix and pinned after it.
 
+**Superseded in part (round 170, #513):** deriving the flag from the wire shape was still an inference, and it lives in the gateway rather than where the usage object is decoded. `ir.Usage.cached_in_prompt` (and `dl.UsageFinal.cached_in_prompt`) now record the convention in the adapter, and both pricing paths prefer it; the wire-shape derivation remains only for decoders that record nothing.
+
 ### 228. Quadratic string accumulation in `_complete_via_stream` stalls the event loop
 
 **Severity:** 🟠 High (super-linear loop stall; affects every concurrent request)
@@ -17635,3 +17639,82 @@ than a second one beside it.
 dialog panel both compute `rgb(14, 14, 14)`; Escape still closes the drawer
 (`document.querySelectorAll('[role="dialog"]').length === 0`); the dialog
 still paints above the page after the portal target changed.
+
+---
+
+## ✅ Fixed — round 170: four IR carriers the translation was inferring or dropping (2026-10-22)
+
+Found by reading `wiwi/ir/types.py` against its consumers. None of these was
+found by a failing request, which is why they survived: each one produces a
+plausible-looking result rather than an error.
+
+### 513. `Usage` did not say whether `prompt_tokens` includes cache reads, so pricing inferred it from the provider
+
+**Severity:** 🔴 High (money — a wrong answer bills *and* reports a plausible cost) · **Status: fixed** — round 170 (`tests/test_fix_round170.py`)
+
+**Files:** `wiwi/ir/types.py` (`Usage`), `wiwi/streaming/deltas.py` (`UsageFinal`), `wiwi/core/gateway.py` (`_price`, `_price_stream`, `merge_resume_context`, `accumulated_stream_usage`, `usage_fallback`)
+
+**Trigger.** Any adapter whose usage convention disagrees with the deployment's
+wire shape. OpenAI totals the prompt (`cached` is a subset); Anthropic's
+`input_tokens` excludes cache reads. `prompt_includes_cached(dep)` decided
+which by wire, and an `opencode` deployment serving `claude-*` speaks Messages
+while an OpenAI-wire test classified it — fresh input was billed at $0 for a
+whole Claude Code session (#227; #9 was the same defect one provider narrower).
+
+**The fix.** `Usage.cached_in_prompt: bool | None` records the convention where
+the body is decoded; `UsageFinal` carries it for the streaming path. Both
+pricing entry points prefer it and fall back to the wire-shape inference only
+when it is `None`. Resume merges and the streaming fallback inherit the value
+instead of recomputing it. Anthropic records `False`, OpenAI `True`.
+
+### 514. `ToolUsePart` had no `cache_control`, so a breakpoint on a tool call was dropped on replay
+
+**Severity:** 🟠 Medium (cost — a stable prefix re-read at 1x every turn) · **Status: fixed** — round 170 (`tests/test_fix_round170.py`)
+
+**Files:** `wiwi/ir/types.py` (`ToolUsePart`), `wiwi/wire/anthropic_messages.py:162,200`, `wiwi/providers/anthropic_adapter.py`
+
+**Trigger.** A Claude Code turn whose prompt-cache breakpoint sits on a
+`tool_use` block (per Anthropic's tool-use caching docs, a marker on any member
+of a batch action is accepted). `TextPart`, `ImagePart`, `DocumentPart`,
+`ToolResultPart` and `Tool` all carried the field; `ToolUsePart` did not, so the
+marker vanished on decode and the replayed history had no breakpoint there.
+
+**The fix.** Field added and decoded on both arms (client-dispatched `tool_use`
+and the provider-hosted `server_tool_use`/`mcp_tool_use`), re-emitted by the
+Anthropic encoder beside `input`.
+
+### 515. The Chat codec did not decode `top_k`, so `drop_params` discarded it with no signal to the caller
+
+**Severity:** 🟡 Medium (a caller-set constraint silently ignored) · **Status: fixed** — round 170 (`tests/test_fix_round170.py`)
+
+**Files:** `wiwi/wire/openai_chat.py` (`decode_request`, `_KNOWN_KEYS`)
+
+**Trigger.** `POST /v1/chat/completions` with `top_k`. The Anthropic and
+Responses codecs put it in `GenParams.top_k`, which makes a non-OpenAI backend
+emit the caller-visible "top_k has no Chat Completions equivalent and was
+dropped" warning. The Chat codec left it in `Request.extras`, and the OpenAI
+adapter's `_STANDARD` set does not list `top_k` — so `drop_params` removed it
+before the warning branch, which keys on `g.top_k is not None`, could fire.
+Same parameter: warned on two surfaces, silent on the third.
+
+**The fix.** Decode with `ir.coerce_int` (a non-numeric value is rejected, not
+forwarded) and add `top_k` to the codec's known keys so it is modelled rather
+than passed as an opaque extra.
+
+### 516. `block_type` was an untyped `str` for a value whose exact spelling is a replay requirement
+
+**Severity:** ⚪ Low (latent — no reproduced failure; needs a typo or a junk upstream value) · **Status: fixed** — round 170 (`tests/test_fix_round170.py`)
+
+**Files:** `wiwi/ir/types.py` (`ToolUsePart`, `ThinkingPart`), `wiwi/streaming/deltas.py` (`ToolCallOpen`)
+
+**Trigger.** Any value outside the documented vocabulary. An `mcp_tool_use`
+whose paired result is replayed under a different spelling is an unpaired block
+and Anthropic rejects the history; `ThinkingPart.block_type` gates the
+`redacted_thinking` replay branch the same way. Both were `str` while `Role` and
+`StopReason` next to them were `Literal`s.
+
+**The fix.** `ToolUseBlockType` and `ThinkingBlockType` are `Literal`s, and
+`__post_init__` normalizes an unknown value to the always-legal default instead
+of forwarding it. `ToolResultPart.block_type` stays `str` on purpose: the
+decoder accepts any `*_tool_result` spelling so a new server-tool version
+replays without an IR change.

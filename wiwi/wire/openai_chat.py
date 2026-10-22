@@ -317,6 +317,14 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         disable_parallel_tool_use=(True if body.get("parallel_tool_calls") is False else None),
         reasoning_effort=(body.get("reasoning_effort")
                           if isinstance(body.get("reasoning_effort"), str) else None),
+        # Chat Completions has no ``top_k``, but the IR models it and the other
+        # three codecs decode it. Leaving it out here sent the parameter into
+        # ``Request.extras`` instead, where the OpenAI adapter's ``_STANDARD``
+        # set does not include it — so it was dropped with no warning at all
+        # (the adapter's warning fires only when the value reached
+        # ``GenParams.top_k``). Same client parameter, silent on this surface
+        # and caller-visible on the Anthropic and Responses ones.
+        top_k=ir.coerce_int(body.get("top_k")),
     )
     rf = body.get("response_format")
     if isinstance(rf, dict) and rf.get("type") in ("json_object", "json_schema"):
@@ -341,8 +349,8 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
 
 
 _KNOWN_KEYS = {"model", "messages", "tools", "tool_choice", "temperature", "top_p",
-               "max_tokens", "max_completion_tokens", "stop", "seed", "n", "stream",
-               "stream_options", "response_format", "parallel_tool_calls",
+               "top_k", "max_tokens", "max_completion_tokens", "stop", "seed", "n",
+               "stream", "stream_options", "response_format", "parallel_tool_calls",
                "reasoning_effort"}
 
 

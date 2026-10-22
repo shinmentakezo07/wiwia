@@ -171,7 +171,13 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                         # ("raw string", [1, 2], 5) was forwarded verbatim and
                         # rejected upstream far from its origin. Guard like the
                         # sibling read in openai_chat.py.
-                        args=b.get("input") if isinstance(b.get("input"), dict) else {}))
+                        args=b.get("input") if isinstance(b.get("input"), dict) else {},
+                        # Anthropic accepts a cache breakpoint on a
+                        # ``tool_use`` block. Dropping it here lost the marker
+                        # on replay, so the stable prefix before it was
+                        # re-billed at 1x — the defect the ImagePart field
+                        # documents, on the block agents emit most.
+                        cache_control=b.get("cache_control")))
                 elif btype == "server_tool_use" or btype == "mcp_tool_use":
                     # Server-side tools (web_search, code_execution, mcp, ...):
                     # the PROVIDER executes these, so tag them builtin — the
@@ -196,7 +202,8 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                         # Same object guard as the client-dispatched arm above.
                         args=b.get("input") if isinstance(b.get("input"), dict) else {},
                         builtin=name or "server_tool",
-                        block_type=btype))
+                        block_type=btype,
+                        cache_control=b.get("cache_control")))
                 elif btype in ("search_result", "container_upload",
                                "tool_reference"):
                     # Blocks the IR has no first-class part for. They carry

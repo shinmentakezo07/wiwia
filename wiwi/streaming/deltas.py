@@ -27,7 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from wiwi.ir.types import StopReason
+from wiwi.ir.types import StopReason, ToolUseBlockType
 
 
 @dataclass(frozen=True)
@@ -79,7 +79,7 @@ class ToolCallOpen:
     # Original wire block type (``tool_use`` | ``server_tool_use`` |
     # ``mcp_tool_use``). Replay must re-emit the same spelling or the paired
     # result block is unpaired and the API rejects the history.
-    block_type: str = "tool_use"
+    block_type: ToolUseBlockType = "tool_use"
 
 
 @dataclass(frozen=True)
@@ -143,6 +143,13 @@ class UsageFinal:
     cache_creation: int = 0
     estimated: bool = False
     cost: float = 0.0
+    # Streaming half of ``ir.Usage.cached_in_prompt``: True when ``prompt``
+    # already contains ``cached``. ``None`` means this adapter did not record
+    # the convention, and pricing falls back to the deployment's wire shape.
+    # Without it, the streaming path — which is how Claude Code, Codex and the
+    # playground are all served — could not express the fact the sync path now
+    # carries, so the fix would have been inert for every real client.
+    cached_in_prompt: bool | None = None
 
 
 @dataclass(frozen=True)

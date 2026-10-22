@@ -26,6 +26,20 @@ StopReason = Literal[
 
 CacheControl = dict[str, Any] | None  # e.g. {"type": "ephemeral"} (Anthropic passthrough, G8)
 
+# Closed vocabularies for the block types whose exact spelling is a REPLAY
+# requirement. Anthropic rejects a history whose result block does not match
+# the spelling of the call it answers, so these were documented sets carried in
+# a bare ``str``: a typo or a junk upstream value propagated verbatim to the
+# wire and produced a 400 naming no field the caller wrote. Typed as ``Literal``
+# so a wrong value is caught statically, and normalized in ``__post_init__`` so
+# one that slips in at runtime (the decoders read upstream strings) cannot
+# reach an encoder.
+ToolUseBlockType = Literal["tool_use", "server_tool_use", "mcp_tool_use"]
+ThinkingBlockType = Literal["thinking", "redacted_thinking"]
+
+_TOOL_USE_BLOCK_TYPES = frozenset({"tool_use", "server_tool_use", "mcp_tool_use"})
+_THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
+
 
 @dataclass
 class TextPart:
@@ -67,7 +81,15 @@ class ToolUsePart:
     # ``mcp_tool_result`` whose paired call was rewritten to a plain
     # ``tool_use`` is an unpaired result block and Anthropic rejects the
     # history. Mirrors ToolResultPart.block_type.
-    block_type: str = "tool_use"
+    block_type: ToolUseBlockType = "tool_use"
+    # Prompt-cache breakpoint on the CALL block. Anthropic accepts a
+    # ``cache_control`` marker on a ``tool_use`` block exactly as it does on
+    # text, image and document blocks, and (per the tool-use caching docs) on
+    # any member of a batch action. Without this field the marker was dropped
+    # on decode and the replayed prefix lost its breakpoint — the same defect
+    # ``ImagePart.cache_control`` documents, where losing the marker re-billed
+    # a long stable prefix at 1x on every turn.
+    cache_control: CacheControl = None
 
     def __post_init__(self) -> None:
         # Providers/decoders can hand us a non-string id (OpenAI-compatible
@@ -75,6 +97,12 @@ class ToolUsePart:
         # must emit a string id, so coerce once at the IR boundary.
         if not isinstance(self.id, str):
             self.id = str(self.id)
+        # An unknown block type has no legal wire spelling: the only consumer
+        # (the Anthropic encoder) would emit it verbatim and the API would
+        # reject the history. Degrade to the client-dispatched default, which
+        # is always a legal spelling, instead of forwarding junk.
+        if not isinstance(self.block_type, str) or self.block_type not in _TOOL_USE_BLOCK_TYPES:
+            self.block_type = "tool_use"
 
 
 @dataclass
@@ -86,6 +114,11 @@ class ToolResultPart:
     # Original result-block type when the inbound dialect distinguishes them
     # (Anthropic's server-tool family: web_search_tool_result, ...). Replay
     # must re-emit the same block type or Anthropic rejects the history.
+    #
+    # Deliberately ``str`` rather than a ``Literal``: the family is OPEN — the
+    # decoder accepts any ``*_tool_result`` spelling so a new server tool
+    # version replays without an IR change — so there is no closed set to
+    # enumerate, and a Literal here would silently reject the next one.
     block_type: str = "tool_result"
     # Multimodal tool results (e.g. screenshots from computer-use tools).
     # Adapters with native image support re-emit them as block-form content;
@@ -113,7 +146,7 @@ class ThinkingPart:
     # ``data``; replay must re-emit the same block type or Anthropic rejects
     # the history (mirror of ToolResultPart.block_type). Other adapters see
     # an empty-text thinking part and drop it harmlessly.
-    block_type: str = "thinking"
+    block_type: ThinkingBlockType = "thinking"
     data: str | None = None
     # OpenAI Responses ``reasoning.encrypted_content``: the opaque blob the
     # Responses API hands back and demands back on the next turn.
@@ -125,6 +158,12 @@ class ThinkingPart:
     # so reasoning-model multi-turn through /v1/responses broke on turn 2
     # (AUDIT #355). The field is Responses-shaped; other dialects ignore it.
     encrypted_content: str | None = None
+
+    def __post_init__(self) -> None:
+        # Same rule as ToolUsePart: an unknown spelling cannot be replayed, so
+        # normalize to the always-legal default rather than emit it upstream.
+        if not isinstance(self.block_type, str) or self.block_type not in _THINKING_BLOCK_TYPES:
+            self.block_type = "thinking"
 
 
 # Reserved multimodal kinds (field names stable now, translation later).
@@ -412,6 +451,19 @@ class Usage:
     estimated: bool = False
     # Anthropic cache bookkeeping (G8-adjacent accounting)
     cache_creation_tokens: int = 0
+    # Whether ``prompt_tokens`` ALREADY CONTAINS ``cached_tokens``. Recorded by
+    # the adapter that decoded the counts, because it is a property of the
+    # wire's usage object, not of the provider: OpenAI totals the prompt
+    # (cached is a subset), Anthropic's ``input_tokens`` excludes cache reads.
+    #
+    # ``None`` means "the decoder did not say" and the gateway falls back to
+    # ``prompt_includes_cached(dep)``, which infers the convention from the
+    # deployment's wire shape. That inference has already caused two billing
+    # defects (AUDIT #9 and #227 — the second because an opencode deployment
+    # serving claude-* speaks the Messages wire, so a provider-type test picked
+    # the wrong branch and billed fresh input at $0). A decoder that knows the
+    # answer must record it rather than let the guess run.
+    cached_in_prompt: bool | None = None
 
 
 @dataclass

@@ -72,7 +72,7 @@ def test_anthropic_non_dict_usage_reads():
         "message_delta",
         '{"type":"message_delta","delta":null,"usage":"x"}')
     assert out == [dl.UsageFinal(prompt=0, cached=0, cache_creation=0,
-                                 reasoning=0, output=0),
+                                 reasoning=0, output=0, cached_in_prompt=False),
                    dl.Finish("stop", stop_sequence=None)]
 
 
@@ -130,7 +130,7 @@ def test_anthropic_happy_path_unharmed():
         dl.StreamStart(model="claude", prompt=3, cached=1, cache_creation=0),
         dl.TextDelta("hi"),
         dl.UsageFinal(prompt=3, cached=1, cache_creation=0, reasoning=5,
-                      output=2),
+                      output=2, cached_in_prompt=False),
         dl.Finish("stop", stop_sequence=None),
     ]
 

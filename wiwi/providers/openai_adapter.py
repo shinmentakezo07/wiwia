@@ -493,6 +493,11 @@ class OpenAIAdapter(WarningMixin):
             completion_tokens=_token_count(u.get("completion_tokens")),
             cached_tokens=_token_count(details_p.get("cached_tokens")),
             reasoning_tokens=_token_count(details_c.get("reasoning_tokens")),
+            # Chat Completions' ``prompt_tokens`` is the TOTAL prompt, with
+            # ``prompt_tokens_details.cached_tokens`` a subset of it. Recorded
+            # so pricing does not have to infer the convention from the
+            # provider type (AUDIT #9/#227).
+            cached_in_prompt=True,
         )
         # Per-token logprobs (AUDIT #326). The client asked for them
         # (``logprobs``/``top_logprobs`` in the request), the upstream
@@ -644,7 +649,9 @@ class OpenAIAdapter(WarningMixin):
                 prompt=_token_count(u.get("prompt_tokens")),
                 cached=_token_count(dp.get("cached_tokens")),
                 reasoning=_token_count(dc.get("reasoning_tokens")),
-                output=_token_count(u.get("completion_tokens"))))
+                output=_token_count(u.get("completion_tokens")),
+                # Streaming half of the same convention (see decode_response).
+                cached_in_prompt=True))
         if not choices:
             return out
         c = choices[0]

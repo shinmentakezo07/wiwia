@@ -393,8 +393,14 @@ class AnthropicAdapter(WarningMixin):
                     utype = p.block_type or ("server_tool_use"
                                              if bt.is_builtin_name(p.name)
                                              else "tool_use")
-                    blocks.append({"type": utype, "id": p.id, "name": p.name,
-                                   "input": p.args})
+                    ub: dict[str, Any] = {"type": utype, "id": p.id,
+                                          "name": p.name, "input": p.args}
+                    # Re-emit the block's cache breakpoint. It is a position
+                    # marker on the PREFIX: dropping it on replay makes every
+                    # token before this block a fresh read on the next turn.
+                    if p.cache_control:
+                        ub["cache_control"] = p.cache_control
+                    blocks.append(ub)
                 elif isinstance(p, ir.ToolResultPart):
                     # block_type preserves the inbound result-block type
                     # (web_search_tool_result, ...) so replayed server-tool
@@ -750,6 +756,11 @@ class AnthropicAdapter(WarningMixin):
             cached_tokens=_token_count(u.get("cache_read_input_tokens")),
             cache_creation_tokens=_token_count(u.get("cache_creation_input_tokens")),
             reasoning_tokens=_token_count(out_details.get("thinking_tokens")),
+            # Messages usage reports ``input_tokens`` EXCLUDING cache reads —
+            # the fact pricing has to subtract (or not) cached tokens. Record
+            # it here, where the body is visible, instead of leaving the
+            # gateway to infer it from the deployment's wire shape.
+            cached_in_prompt=False,
         )
         return turn
 
@@ -975,7 +986,9 @@ class AnthropicAdapter(WarningMixin):
                 cached=getattr(self, "_pending_cached", 0),
                 cache_creation=getattr(self, "_pending_cache_creation", 0),
                 reasoning=_token_count(out_details.get("thinking_tokens")),
-                output=_token_count(u.get("output_tokens"))))
+                output=_token_count(u.get("output_tokens")),
+                # Streaming half of the same convention (see decode_response).
+                cached_in_prompt=False))
             out.append(dl.Finish(_STOP_REASON_IN.get(
                 sr if isinstance(sr, str) else "", "stop"),
                                  stop_sequence=d.get("stop_sequence")))

@@ -385,6 +385,14 @@ def merge_resume_context(origin: RequestContext,
                 # estimated tokens is itself an estimate (AUDIT #131).
                 estimated=ou_su.estimated or su.estimated,
                 cost=ou_su.cost + su.cost,
+                # Same convention rides the merged total: the originating
+                # attempt's record wins, falling back to the resumed one when
+                # only it spoke. Both normally come from the same deployment
+                # wire, so a disagreement is already a bug worth keeping
+                # visible rather than averaging.
+                cached_in_prompt=(ou_su.cached_in_prompt
+                                  if ou_su.cached_in_prompt is not None
+                                  else su.cached_in_prompt),
             )
 
 
@@ -414,7 +422,8 @@ def accumulated_stream_usage(ctx: RequestContext) -> dl.UsageFinal | None:
             total = dl.UsageFinal(
                 prompt=u.prompt_tokens, cached=u.cached_tokens,
                 reasoning=u.reasoning_tokens, output=u.completion_tokens,
-                cache_creation=u.cache_creation_tokens, estimated=u.estimated)
+                cache_creation=u.cache_creation_tokens, estimated=u.estimated,
+                cached_in_prompt=u.cached_in_prompt)
         else:
             total = dl.UsageFinal(
                 prompt=total.prompt + u.prompt_tokens,
@@ -424,7 +433,12 @@ def accumulated_stream_usage(ctx: RequestContext) -> dl.UsageFinal | None:
                 cache_creation=total.cache_creation + u.cache_creation_tokens,
                 # Same rule as `merge_resume_context`: a total containing any
                 # estimated tokens is itself an estimate (AUDIT #131).
-                estimated=total.estimated or u.estimated)
+                estimated=total.estimated or u.estimated,
+                # And the usage convention is inherited, not recomputed — the
+                # summed tokens all came from the same deployment wire.
+                cached_in_prompt=(total.cached_in_prompt
+                                  if total.cached_in_prompt is not None
+                                  else u.cached_in_prompt))
     return total
 
 
@@ -472,7 +486,11 @@ async def usage_fallback(ctx: RequestContext, dep: Deployment,
         # means the provider sent no usable usage, so the frame is reported as
         # an estimate even when the prompt count came from the attempt's own
         # opening frame (the output count is still synthesized).
-        estimated=True)
+        estimated=True,
+        # The convention is the provider's, not the estimate's: carry what the
+        # real usage object recorded so a locally estimated prompt count is
+        # still interpreted against the right wire.
+        cached_in_prompt=real.cached_in_prompt)
 
 
 class Gateway:
@@ -881,6 +899,7 @@ class Gateway:
                             cached_tokens=d.cached,
                             reasoning_tokens=d.reasoning,
                             cache_creation_tokens=d.cache_creation,
+                            cached_in_prompt=d.cached_in_prompt,
                         )
                     elif isinstance(d, dl.Finish):
                         stop_reason = d.stop_reason
@@ -1019,7 +1038,8 @@ class Gateway:
             turn.usage = ir.Usage(
                 prompt_tokens=u.prompt, completion_tokens=u.output,
                 cached_tokens=u.cached, reasoning_tokens=u.reasoning,
-                cache_creation_tokens=u.cache_creation, estimated=u.estimated)
+                cache_creation_tokens=u.cache_creation, estimated=u.estimated,
+                cached_in_prompt=u.cached_in_prompt)
         self._price(ctx, dep, turn.usage)
         return turn
 
@@ -2433,7 +2453,12 @@ class Gateway:
         # provider-reported usage, so one request is charged once against the
         # cap, not estimate + actual (AUDIT #101).
         dep.settle_tokens(ctx.request_id, u.prompt_tokens + u.completion_tokens)
-        includes_cached = prompt_includes_cached(dep)
+        # The adapter's own statement about its usage object wins over the
+        # wire-shape inference. ``None`` keeps the historical behaviour, so a
+        # decoder that has not learned to record the convention prices exactly
+        # as it did before (`prompt_includes_cached`).
+        includes_cached = (u.cached_in_prompt if u.cached_in_prompt is not None
+                           else prompt_includes_cached(dep))
         state = self.cost.cost_with_status(
             model_key, u.prompt_tokens, u.completion_tokens, u.cached_tokens,
             u.cache_creation_tokens, includes_cached,
@@ -2468,11 +2493,15 @@ class Gateway:
         ctx.usage = ir.Usage(prompt_tokens=u.prompt, completion_tokens=u.output,
                              cached_tokens=u.cached, reasoning_tokens=u.reasoning,
                              estimated=u.estimated,
-                             cache_creation_tokens=u.cache_creation)
+                             cache_creation_tokens=u.cache_creation,
+                             cached_in_prompt=u.cached_in_prompt)
         # Settle the deployment's admission-time estimate against actual usage
         # (AUDIT #101) — see `_price`.
         dep.settle_tokens(ctx.request_id, u.prompt + u.output)
-        includes_cached = prompt_includes_cached(dep)
+        # Same precedence as `_price`: the adapter's recorded convention beats
+        # the deployment's wire-shape heuristic.
+        includes_cached = (u.cached_in_prompt if u.cached_in_prompt is not None
+                           else prompt_includes_cached(dep))
         state = self.cost.cost_with_status(
             model_key, u.prompt, u.output, u.cached, u.cache_creation,
             includes_cached,

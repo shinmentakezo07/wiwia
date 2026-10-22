@@ -260,7 +260,8 @@ def test_stream_usage_final_and_done():
         "usage": {"prompt_tokens": 7, "completion_tokens": 3,
                   "prompt_tokens_details": {"cached_tokens": 2}},
     }))
-    assert out == [dl.UsageFinal(prompt=7, cached=2, reasoning=0, output=3)]
+    assert out == [dl.UsageFinal(prompt=7, cached=2, reasoning=0, output=3,
+                                 cached_in_prompt=True)]
     assert a.decode_stream_event("", "[DONE]") == [dl.StreamEnd()]
 
 
