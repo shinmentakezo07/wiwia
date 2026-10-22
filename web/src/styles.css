@@ -4066,3 +4066,262 @@ select.admin-input option {
   margin-left: calc(50% - 50vw);
   margin-right: calc(50% - 50vw);
 }
+
+/* ─── Models: the routing ledger ───────────────────────────────────────────
+   The Models page is a switchboard, not a gallery. A model group is a signal
+   source; its deployments are where that signal is split. So the page is one
+   continuous ruled table — group header rows, indented deployment rows
+   beneath — rather than a stack of identical rounded cards. Rules carry the
+   hierarchy (a rule means "a new group starts here"), and the only rounded
+   thing on the page is the one control that needs it.
+
+   Naming: `wl-` = wiwi ledger. */
+
+.wl-shell {
+  border: 1px solid var(--admin-border);
+  border-radius: var(--admin-radius);
+  background: var(--admin-surface);
+  overflow: hidden;
+}
+
+/* Column header. Uppercase micro-labels are the house chrome, but they
+   belong to the columns here — not scattered above every value the way the
+   card version put them. Metric columns opt out: "P95" shouted is a typo
+   wearing a hat, not a label. */
+.wl-head th {
+  padding: 10px 16px;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--admin-text-dim);
+  text-align: left;
+  white-space: nowrap;
+  background: rgba(255, 255, 255, 0.012);
+  border-bottom: 1px solid var(--admin-border);
+}
+.wl-head th.wl-plain {
+  text-transform: none;
+  letter-spacing: 0.02em;
+  font-size: 10.5px;
+}
+/* The header rule sets `text-align: left` on every column, and a class
+   selector like `.text-right` cannot out-specify it — so a right-aligned
+   header has to be re-asserted here, or the label drifts away from the
+   numbers it names. */
+.wl-head th.wl-right {
+  text-align: right;
+}
+
+/* A group header: the source of the signal. Set apart by weight and by the
+   rule above it, not by a card, a shadow, or a gradient. */
+.wl-group {
+  border-top: 1px solid var(--admin-border);
+}
+.wl-group:first-child {
+  border-top: 0;
+}
+.wl-group td {
+  padding: 13px 16px;
+  vertical-align: middle;
+  background: rgba(255, 255, 255, 0.022);
+}
+
+/* The group's name is the subject of the page: the one place a large,
+   confident face is set in the sans, everything else recedes. */
+.wl-group-name {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  color: var(--admin-text);
+  line-height: 1.2;
+}
+
+/* A deployment row: an indented child of the group above it. */
+.wl-dep td {
+  padding: 9px 16px;
+  vertical-align: middle;
+  border-top: 1px solid rgba(255, 255, 255, 0.035);
+}
+.wl-dep:hover td {
+  background: rgba(255, 255, 255, 0.016);
+}
+
+/* Indentation replaces a nested card: the tree structure is drawn by
+   position and a hairline, not by another box. */
+.wl-indent {
+  border-left: 1px solid var(--admin-border);
+  margin-left: 3px;
+  padding-left: 14px;
+}
+
+/* The split bar: where this group's traffic actually goes. This is the
+   subject of the page, so it is drawn as a real bar with a measured scale
+   rather than as a decorative strip. */
+.wl-split {
+  position: relative;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.055);
+  overflow: hidden;
+}
+.wl-split > span {
+  display: block;
+  height: 100%;
+  transition: width 500ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Provider identity: the one place colour is spent, and it is spent only
+   here. A provider keeps its hue everywhere it appears. */
+.wl-hue {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex: none;
+}
+
+/* Weight editor: the only rounded control on the page, because it is the
+   only one you touch. */
+.wl-weight {
+  width: 4.5rem;
+}
+
+/* Status text, not a status pill. A pill per row is a wall of chips; a word
+   in the state colour reads faster and costs no chrome. */
+.wl-state {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Meta under a group name: aliases and counts, in the sans at low
+   contrast. Never a middot-joined string of unrelated facts. */
+.wl-meta {
+  font-size: 11.5px;
+  color: var(--admin-text-dim);
+  line-height: 1.5;
+}
+
+/* Numeric columns share one right edge. */
+.wl-num {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* Filter rail: a row of quiet text choices, not a segmented control with
+   filled pills. The active one is marked by an underline, which is a
+   typographic decision, not a chip. The 44px min-height keeps the targets
+   tappable — the underline is the active marker, not the hit area. */
+.wl-filter {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 7px 2px 9px;
+  color: var(--admin-text-dim);
+  font-size: 12.5px;
+  transition: color 0.15s ease;
+}
+.wl-filter:hover {
+  color: var(--admin-text-muted);
+}
+.wl-filter::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: transparent;
+  transition: background 0.15s ease;
+}
+.wl-filter[aria-pressed="true"] {
+  color: var(--admin-text);
+}
+.wl-filter[aria-pressed="true"]::after {
+  background: var(--admin-accent);
+}
+
+/* The page's one moment of motion: the split bars settle when the routing
+   changes. Reduced motion turns the transition off, so the bar still lands
+   on the right width — it just arrives without sliding. */
+@media (prefers-reduced-motion: reduce) {
+  .wl-split > span {
+    transition: none;
+  }
+}
+
+/* The inline metric copy, used only below md where the table's own p95 /
+   in-flight columns are dropped. */
+.wl-m-inline {
+  display: none;
+}
+
+/* Below md the ledger stops being a table. Five columns cannot fit a
+   phone, and a table that scrolls sideways hides the data the operator
+   came for. So below md the p95 / in-flight columns are dropped and
+   their values ride inline with the route, and the weight editor moves
+   to the end of the route line.
+
+   The weight editor is the ONE editor in the page, not a second copy
+   rendered for the narrow layout: two editors for one value meant two
+   independent debounce timers, and the server refetch (every 10s) fed
+   each of them a different server value, so the two fought and the
+   weight flip-flopped between what was typed and what was stored. */
+@media (max-width: 767px) {
+  .wl-table thead {
+    display: none;
+  }
+  .wl-table,
+  .wl-table tbody {
+    display: block;
+    width: 100%;
+  }
+  .wl-table tr {
+    display: block;
+  }
+  .wl-table td {
+    display: block;
+    min-width: 0;
+  }
+  /* The p95 / in-flight cells are replaced by the inline copy in the
+     route cell, so the table's own cells are not rendered. */
+  .wl-dep td.wl-metric {
+    display: none;
+  }
+  .wl-m-inline {
+    display: inline-flex;
+    gap: 12px;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    color: var(--admin-text-dim);
+  }
+  /* The route and the weight editor share line one. The editor is
+     positioned against the ROW (not the route cell): the route cell is
+     `display:block` and its own box would be only as tall as its text, so
+     anchoring to it put the editor at the top of the whole table. */
+  .wl-dep {
+    position: relative;
+  }
+  .wl-dep td.wl-ident {
+    padding-right: 7rem;
+  }
+  .wl-dep td.wl-weight {
+    position: absolute;
+    right: 16px;
+    top: 9px;
+    width: auto;
+    padding-left: 0;
+    text-align: right;
+  }
+  /* The group band is a block too, so its split bar gets the full width. */
+  .wl-group td {
+    display: block;
+  }
+}
