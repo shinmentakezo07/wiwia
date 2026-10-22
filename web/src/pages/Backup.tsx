@@ -422,7 +422,9 @@ export function BackupTab() {
           <Alert tone="info" title="Merge only">
             Records are matched by name and updated; anything the file does not
             mention is left alone. Nothing is ever deleted, so this is safe to
-            run twice.
+            run twice. Only the sections you have selected above are merged —
+            a section you did not select is not written, even when the file
+            carries it.
           </Alert>
 
           <div className="flex flex-wrap gap-2">
@@ -542,10 +544,13 @@ export function BackupTab() {
           <p className="flex gap-2">
             <ShieldAlert size={14} className="mt-0.5 shrink-0 text-amber-400/70" aria-hidden />
             <span>
-              <strong className="text-[var(--admin-text)]">OAuth accounts ride in the keys
-              section.</strong>{" "}
-              Connected Cline, WorkBuddy, and OpenCode accounts are stored as provider keys, so
-              they only appear when plaintext secrets are included.
+              <strong className="text-[var(--admin-text)]">OAuth accounts need the secrets
+              toggle.</strong>{" "}
+              A connected Cline, WorkBuddy, or Hermes account keeps its access token on a
+              provider key, and its refresh token in a gateway setting. Both are withheld
+              unless plaintext secrets are included: without the toggle the file records that
+              the account exists, but not the tokens — so a restore keeps your live accounts
+              connected instead of overwriting them with empty records.
             </span>
           </p>
           <p className="flex gap-2">

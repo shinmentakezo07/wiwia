@@ -4718,8 +4718,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return jerr
         dry_run = backup.truthy(request.query_params.get("dry_run"))
         try:
-            sections = backup.parse_sections(
-                request.query_params.get("sections"))
+            # The selection: the caller's ``?sections=`` when it sent one,
+            # otherwise the sections the document itself carries. See
+            # ``backup.parse_import_sections`` (AUDIT #510).
+            sections = backup.parse_import_sections(
+                request.query_params.get("sections"), body)
             plan = await backup.validate_backup(state, body, sections=sections)
             if dry_run:
                 return ORJSONResponse({"dry_run": True, **backup.summarize(plan)})

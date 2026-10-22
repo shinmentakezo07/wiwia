@@ -123,11 +123,38 @@ _PAGE = 2000
 #: pulling provider credentials can never also drag user content.
 BODY_COLUMNS = ("request_body", "response_body")
 
-#: Settings keys whose value is credential-bearing. ``cline_oauth:*`` records
-#: carry a refresh token; they are gated exactly like provider key secrets.
+#: Settings keys whose value is credential-bearing. These records carry a
+#: refresh token; they are gated exactly like provider key secrets.
+#:
 #: A prefix rule rather than an enumeration, so a new OAuth provider is covered
-#: the day it is added instead of the day someone remembers.
-_SECRET_SETTING_PREFIX = "cline_oauth:"
+#: the day it is added instead of the day someone remembers — BUT the rule has
+#: to name EVERY provider, and it did not (AUDIT #509). It listed only
+#: ``cline_oauth:``, so the Hermes record — stored under
+#: ``hermes_oauth:<provider>`` (``wiwi/server/app.py``'s
+#: ``_hermes_oauth_setting_key``) — was written into a no-secrets export with
+#: its refresh token and access token in clear text, while the console told
+#: the operator the file "carry[s] no secrets".
+#:
+#: The tuple is the defence, and a tuple has to be extended by hand. The
+#: structural fix is to mark a record secret at *write* time and redact on
+#: that mark; until every writer does that, this tuple must list every
+#: credential-bearing prefix — and the test in
+#: ``tests/test_fix_round169.py`` fails if a new one appears unlisted.
+_SECRET_SETTING_PREFIXES: tuple[str, ...] = (
+    "cline_oauth:",
+    "hermes_oauth:",
+)
+
+
+def _is_secret_setting_key(key: str) -> bool:
+    """True when *key* names a settings row whose value is a credential.
+
+    The rule is a prefix match against :data:`_SECRET_SETTING_PREFIXES`.
+    It is deliberately prefix-based (not an enumeration of full keys) so a
+    per-account row — ``cline_oauth:<name>``, ``hermes_oauth:<name>`` — is
+    covered without naming the account.
+    """
+    return key.startswith(_SECRET_SETTING_PREFIXES)
 
 log = structlog.get_logger("wiwi.backup")
 
@@ -163,6 +190,39 @@ def parse_sections(raw: str | None, *, default: tuple[str, ...]
     # Preserve SECTIONS order regardless of query order, so a restore always
     # applies parents before children.
     return tuple(s for s in SECTIONS if s in set(wanted))
+
+
+def parse_import_sections(raw: str | None, doc: Any) -> tuple[str, ...]:
+    """Resolve the section selection for an IMPORT.
+
+    Two cases:
+
+    * The caller named sections (``?sections=a,b``) — that is the selection,
+      and the console always sends one (it is the section picker's state).
+    * The caller named none — the selection is **the sections the document
+      actually carries**. "Merge this file" means "merge what is in it".
+
+    The document's own ``sections`` list is a *claim* about what it holds,
+      and it is not always truthful: a file exported with
+      ``?sections=logs`` and then hand-edited (or merged from a file that
+      carried more) can carry a section it does not list. Trusting the
+      claim dropped real content — a document whose ``rollups`` section was
+      present but unlisted was imported with the rollups silently skipped
+      (AUDIT #510). The CONTENT is the truth; the declared list is only a
+      hint.
+
+    A document that carries no recognised section at all (a hand-written
+    file, or one from a build that predates the field) falls back to
+    :data:`DEFAULT_SECTIONS`.
+    """
+    if raw is not None and raw.strip():
+        return parse_sections(raw)
+    if isinstance(doc, dict):
+        carried = [s for s in SECTIONS if doc.get(s) not in (None, {}, [])]
+        if carried:
+            # SECTIONS order, so parents still land before children.
+            return tuple(carried)
+    return DEFAULT_SECTIONS
 
 
 # ---------------------------------------------------------------------------
@@ -469,24 +529,50 @@ async def _export_settings(state, include_secrets: bool) -> dict[str, Any]:
             # the row — see _export_aliases. It has its own section.
             continue
         value = _decode(raw, None)
-        if key.startswith(_SECRET_SETTING_PREFIX) and not include_secrets:
+        if _is_secret_setting_key(key) and not include_secrets:
             out[key] = _redact_oauth(value)
         else:
             out[key] = value
     return out
 
 
+#: Field names inside an OAuth settings record that carry a credential.
+#: Matched as substrings, not equality, so a variant spelling
+#: (``refreshToken``, ``refresh_token_value``…) is covered too.
+_SECRET_RECORD_FIELDS: tuple[str, ...] = (
+    "refresh_token",
+    "accesstoken",
+    "access_token",
+    "token",
+    "secret",
+    "password",
+    "credential",
+)
+
+
 def _redact_oauth(value: Any) -> dict:
-    """Strip the refresh token from a ``cline_oauth:*`` record.
+    """Strip the credentials from an OAuth settings record.
 
     Import skips a redacted record rather than writing the placeholder over a
     live token, so an operator restoring a secret-less backup does not
-    disconnect their own Cline accounts.
+    disconnect their own accounts (Cline, Hermes, …).
+
+    The field list is a substring match, not an equality test. The previous
+    version compared against exactly ``("refresh_token", "access_token",
+    "token")``, so a record that spelled the field differently — or carried
+    one under a name the list did not mention — kept it. Since the whole
+    point of this function is to guarantee that a *no-secrets* file contains
+    no secret, the safe direction is to strip anything that looks like a
+    credential, and keep only the fields the console actually displays.
     """
     if not isinstance(value, dict):
         return {"connected": bool(value)}
-    redacted = {k: v for k, v in value.items()
-                if k not in ("refresh_token", "access_token", "token")}
+    redacted: dict[str, Any] = {}
+    for k, v in value.items():
+        lowered = str(k).lower()
+        if any(field in lowered for field in _SECRET_RECORD_FIELDS):
+            continue
+        redacted[k] = v
     redacted["connected"] = True
     redacted["redacted"] = True
     return redacted
@@ -1384,8 +1470,17 @@ def _validate_responses(doc: dict, plan: dict) -> None:
 
 
 def summarize(plan: dict) -> dict:
-    """Per-section row counts for the console's pre-import preview."""
-    return {"sections": list(plan["sections"]), "counts": plan["counts"]}
+    """Per-section row counts for the console's pre-import preview.
+
+    The counts describe the **selected** sections, not the whole document.
+    The preview is what the console shows before it enables the Merge
+    button, and what the operator approves on that strength — so a preview
+    that counted a section the merge would not touch (or would touch and the
+    preview hid) misrepresents the merge in both directions (AUDIT #510).
+    """
+    selected = frozenset(plan.get("sections") or SECTIONS)
+    counts = {k: v for k, v in plan["counts"].items() if k in selected}
+    return {"sections": list(plan["sections"]), "counts": counts}
 
 
 # ---------------------------------------------------------------------------
@@ -1420,26 +1515,61 @@ async def apply_backup(state, plan: dict) -> dict:
     import look broken when it worked. Those sections persist through
     ``ConfigStore``, which owns its own transactions, so a failure in one of
     them does not roll back the ones before it.
+
+    **Only the selected sections are applied.** The console's section picker
+    is the only scope control the operator has on the import side, and it
+    sends the selection as ``?sections=``. ``validate_backup`` stored that
+    selection in ``plan["sections"]`` and ``summarize()`` reported it — but
+    no apply function ever read it, so every section in the document was
+    merged regardless. Unchecking "Request log" merged the request log
+    anyway (AUDIT #510). Each section is now gated on its membership, and a
+    section that was not selected is *absent* from the result rather than
+    reported as a zero — the console renders these counts as prose, so a
+    deselected section must not appear in it at all.
     """
     if plan.get("_validated") is not True:
         raise BackupError("plan was not validated; call validate_backup first")
+    selected = frozenset(plan.get("sections") or SECTIONS)
     result: dict[str, Any] = {}
-    result.update(await _apply_bulk(state, plan))
-    result["providers"] = await _apply_providers(state, plan["providers"])
-    result["keys"] = await _apply_keys(state, plan["keys"])
-    result["deployments"] = await _apply_deployments(state, plan["deployments"])
-    result["aliases"] = await _apply_aliases(state, plan["aliases"])
-    result["settings"], result["settings_skipped"] = await _apply_settings(
-        state, plan["settings"])
-    result["prices"] = await _apply_prices(state, plan["prices"])
+    if selected & {"logs", "rollups", "responses"}:
+        bulk = await _apply_bulk(state, plan, selected)
+        result.update(bulk)
+    if "providers" in selected:
+        result["providers"] = await _apply_providers(state, plan["providers"])
+    if "keys" in selected:
+        result["keys"] = await _apply_keys(state, plan["keys"])
+    if "deployments" in selected:
+        result["deployments"] = await _apply_deployments(
+            state, plan["deployments"])
+    if "aliases" in selected:
+        result["aliases"] = await _apply_aliases(state, plan["aliases"])
+    if "settings" in selected:
+        result["settings"], result["settings_skipped"] = await _apply_settings(
+            state, plan["settings"])
+    if "prices" in selected:
+        result["prices"] = await _apply_prices(state, plan["prices"])
     # ``_apply_users`` returns the source→target user-id mapping, not a
     # count: the vkeys section needs it to re-point ``owner_id`` at the rows
     # that exist here. The response still reports a plain count.
-    user_id_map = await _apply_users(state, plan["users"])
-    result["users"] = len(plan["users"])
-    result["vkeys"] = await _apply_vkeys(state, plan["vkeys"],
-                                         user_id_map=user_id_map)
-    result["audit_skipped"] = len(plan["audit"]["audit_logs"])
+    #
+    # The users section is applied when it was selected, and also when only
+    # ``vkeys`` was: a vkey's ``owner_id`` references a user, and a key whose
+    # owner does not exist is rejected by the auth check, which fails CLOSED.
+    # Creating the referenced user is therefore part of restoring the key,
+    # not a separate scope the operator has to know about. It is *not*
+    # applied for an unrelated selection — merging a providers-only backup
+    # must not create accounts.
+    if "users" in selected or "vkeys" in selected:
+        user_id_map = await _apply_users(state, plan["users"])
+    else:
+        user_id_map = {}
+    if "users" in selected:
+        result["users"] = len(plan["users"])
+    if "vkeys" in selected:
+        result["vkeys"] = await _apply_vkeys(state, plan["vkeys"],
+                                             user_id_map=user_id_map)
+    if "audit" in selected:
+        result["audit_skipped"] = len(plan["audit"]["audit_logs"])
     if plan.get("cline_default_models") is not None:
         # Reconciling the Cline default models touches the router in a way that
         # belongs to app.py's helper, not here — the route calls it.
@@ -1447,12 +1577,19 @@ async def apply_backup(state, plan: dict) -> dict:
     return result
 
 
-async def _apply_bulk(state, plan: dict) -> dict[str, Any]:
+async def _apply_bulk(state, plan: dict,
+                      selected: frozenset[str] | None = None) -> dict[str, Any]:
     """The bulk sections, in one transaction, as ``{section: {written, failed}}``.
 
     A failure anywhere in the pass raises :class:`BackupError` with a 500, so
     the route renders it and the operator learns the import was rolled back
     rather than receiving a bare stack trace out of a half-written gateway.
+
+    *selected* gates each bulk section individually: the console's picker
+    can select "Request log" without "Usage rollups", and the two are
+    written in the same transaction — so a deselected one must be skipped,
+    not written (AUDIT #510). A section that was not selected is absent
+    from the result rather than reported as a zero.
     """
     engine = _engine(state)
     store = state.response_store
@@ -1461,16 +1598,19 @@ async def _apply_bulk(state, plan: dict) -> dict[str, Any]:
     # silently pretending it did would be exactly the class of bug this
     # function exists to remove.
     shared = store is None or store.engine is engine
+    want = frozenset(SECTIONS) if selected is None else selected
     out: dict[str, Any] = {}
     try:
         async with engine.begin() as conn:
-            out["logs"] = await _apply_logs(state, plan["logs"], conn=conn)
-            out["rollups"] = await _apply_rollups(state, plan["rollups"],
-                                                   conn=conn)
-            if shared and store is not None:
+            if "logs" in want:
+                out["logs"] = await _apply_logs(state, plan["logs"], conn=conn)
+            if "rollups" in want:
+                out["rollups"] = await _apply_rollups(state, plan["rollups"],
+                                                       conn=conn)
+            if "responses" in want and shared and store is not None:
                 out["responses"] = await _apply_responses(
                     state, plan["responses"], conn=conn)
-        if store is not None and not shared:
+        if "responses" in want and store is not None and not shared:
             log.warning("backup_responses_separate_engine")
             out["responses"] = await _apply_responses(state, plan["responses"])
     except BackupError:

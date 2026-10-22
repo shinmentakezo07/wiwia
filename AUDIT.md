@@ -8,6 +8,250 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — round 169: the /console/settings Import panel (2026-10-22)
+
+Found by reading `web/src/pages/Backup.tsx`, `web/src/pages/Settings.tsx` and
+`wiwi/server/backup.py`, then verifying each claim against a live gateway
+(in-memory SQLite, `create_app` + `httpx.ASGITransport`). Every finding below
+was reproduced, not inferred. Regression tests:
+`tests/test_fix_round169.py` (12 tests).
+
+### 509. A no-secrets export still writes Hermes OAuth refresh tokens in clear text
+
+**Severity:** 🔴 Critical (a credential the operator explicitly opted out of
+lands in a downloaded file) · **Status: fixed** — round 169
+(`tests/test_fix_round169.py`)
+
+**Files:** `wiwi/server/backup.py:131` (`_SECRET_SETTING_PREFIXES` — was
+`_SECRET_SETTING_PREFIX`), `wiwi/server/backup.py:452` (`_export_settings`),
+`wiwi/server/backup.py:479` (`_redact_oauth`),
+`wiwi/server/app.py:6314` (`_hermes_oauth_setting_key`)
+
+**Trigger.** `GET /admin/backup` **without** `include_secrets=1`. The export
+sweeps the whole `settings` table and redacts any key starting with
+`_SECRET_SETTING_PREFIX`, which is the single string `"cline_oauth:"`. The
+Hermes OAuth record is stored under a *different* prefix,
+`"hermes_oauth:<provider>"` (`wiwi/server/app.py:6314`), so it never matches
+the rule and is written verbatim — refresh token and all.
+
+Reproduced against a live gateway with a synthetic Hermes record:
+
+```
+include_secrets flag in doc: False
+cline_oauth:mycline   -> {'connected': True, 'email': 'a@b.c', 'redacted': True}
+hermes_oauth:myhermes -> {'connected': True, 'email': 'a@b.c',
+                          'refresh_token': 'REFRESH-SECRET-abc123',
+                          'access_token': 'ACCESS-SECRET-def456'}
+```
+
+**Why it matters.** The console's own wording for the toggle is
+*"Off. The file will list key labels and their weights but carry no secrets."*
+— and the "What a backup carries" card says *"OAuth accounts ride in the keys
+section… they only appear when plaintext secrets are included."* Both claims
+are false for Hermes: the record never rides in the keys section at all, and
+its secret rides in the **settings** section regardless of the toggle.
+
+**Fix sketch.** Replace the single-prefix rule with a set of credential-bearing
+prefixes (`cline_oauth:`, `hermes_oauth:`, and any future provider added
+alongside them) — or, better, mark a record secret at *write* time (a
+`secret: True` flag on the record) and redact on that flag, so a new OAuth
+provider is covered the day it is added rather than the day someone
+remembers to extend the tuple. Note the Hermes record is currently written by
+no live code path (`_hermes_oauth_setting_key` has exactly two references,
+both in `app.py`, and neither writes the row — the Hermes credential is
+actually stored on the *pool key* as a `hermes:` blob, `wiwi/server/app.py:6524`),
+so the leak is reachable only via a row left behind by an older build or
+written out of band. It is still a live leak of a live secret, and the
+defence must not depend on the writer staying absent.
+
+**The fix.** Two layers, because the prefix tuple alone would leave the same
+hole open for the *next* provider:
+
+1. `_SECRET_SETTING_PREFIX` became `_SECRET_SETTING_PREFIXES`, a tuple
+   naming every credential-bearing prefix (`cline_oauth:`, `hermes_oauth:`),
+   matched through a new `_is_secret_setting_key` helper.
+2. `_redact_oauth` now strips by **substring** match against
+   `_SECRET_RECORD_FIELDS` rather than by equality against three exact
+   names. The old equality list was a second enumeration of the same
+   fragility: a record that spelled the field differently (`refreshToken`,
+   `token_value`) kept it. The safe direction for a function whose whole
+   job is to guarantee that a *no-secrets* file contains no secret is to
+   strip anything that looks like a credential and keep only the fields the
+   console displays.
+
+The `include_secrets=1` path is unchanged — a credential backup still
+carries the refresh token, so the fix does not silently break it
+(`test_secrets_export_still_carries_the_hermes_refresh_token`).
+
+**Not done, deliberately.** The structural fix — marking a record secret at
+*write* time — is not implemented, because it would change the write shape
+of every OAuth provider's record and the tuple is the smaller, safer
+change. The tuple's maintenance burden is now carried by a test: the
+whole-document sweep in
+`test_no_secrets_export_leaks_no_secret_anywhere_in_the_document` fails if
+a new secret-bearing key appears in the settings table unlisted.
+
+### 510. The import's `?sections=` filter is ignored — every section is merged
+
+**Severity:** 🟠 High (the operator's explicit scope choice is silently
+discarded) · **Status: fixed** — round 169
+(`tests/test_fix_round169.py`)
+
+**Files:** `wiwi/server/backup.py:795` (`validate_backup`),
+`wiwi/server/backup.py:820` (the plan's `"sections"` key),
+`wiwi/server/backup.py:1396` (`apply_backup`),
+`wiwi/server/backup.py` (`parse_import_sections` — NEW),
+`wiwi/server/backup.py` (`summarize`),
+`wiwi/server/app.py:4686` (`admin_import_backup`),
+`web/src/pages/Backup.tsx:262` (`previewBackup` / `importBackup`)
+
+**Trigger.** Tick "Request log" in the export, then **untick it** before
+merging — the console sends `POST /admin/backup/import?sections=providers,keys,aliases`
+with a document that still carries the `logs` section. The server validates
+every section and applies every section regardless of the filter.
+
+`validate_backup` stores the requested sections in `plan["sections"]` and
+`summarize()` reports them, but **no `_apply_*` function consults
+`plan["sections"]`**. `apply_backup` calls all of them unconditionally.
+
+Reproduced against a live gateway — the operator asked to merge three
+sections, and the request log was merged anyway:
+
+```
+file sections: ['providers', 'keys', 'aliases', 'logs']
+file log rows: 1
+import status: 200
+logs result: 1
+TARGET request_logs ROWS: 1
+```
+
+**Why it matters.** The section filter is the console's *only* scope control
+on the import side, and the "Merge only" card tells the operator *"anything the
+file does not mention is left alone"* — implying that what the file *does*
+mention, and what they selected, is what lands. The dry-run preview is worse
+than useless here: it reports the counts of the *document*, not of the
+*selection*, so the operator sees a preview they believe matches the merge and
+it does not.
+
+**Fix sketch.** Gate each section's apply on membership in `plan["sections"]`
+— the plan already carries the tuple. The bulk sections need the same gate
+(`_apply_bulk` currently writes all three). The dry-run summary should
+report the *selected* sections' counts, so the preview and the merge agree.
+
+**The fix.** Four parts:
+
+1. **`apply_backup` gates every section** on `plan["sections"]`. A section
+   that was not selected is *absent* from the result rather than reported as
+   a zero — the console renders these counts as prose ("merged 3 providers,
+   1 alias…"), so a deselected section must not appear in it at all.
+2. **`_apply_bulk` gates each bulk section individually** (`logs`,
+   `rollups`, `responses`), since the picker can select one without the
+   others and they share one transaction.
+3. **`summarize` reports the selection**, so the dry-run preview counts what
+   the merge will do rather than what the document contains.
+4. **`parse_import_sections` (NEW)** resolves the selection when the caller
+   sent no `?sections=`: it is the sections the document **actually
+   carries**, not the ones it declares.
+
+Point 4 is the one that needed a second pass. The first implementation used
+the document's declared `sections` list, and that broke
+`tests/test_fix_round142.py::test_a_failed_rollup_row_is_counted_and_the_rest_survives`
+— that test hand-builds a document carrying a `rollups` section that its
+declared list does not mention, and the rollup was silently skipped. A
+document's `sections` field is a *claim*, not a fact: a file exported with
+`?sections=logs` and then hand-edited, or merged from a file that carried
+more, can hold a section it does not list. The content is the truth. The
+declared list is only a hint, and a hint must not decide what gets written.
+
+One deliberate exception: the `users` section is applied when `vkeys` was
+selected, even if `users` was not. A vkey's `owner_id` references a user,
+and a key whose owner does not exist is rejected by the auth check, which
+fails CLOSED — so creating the referenced user is part of restoring the key,
+not a separate scope the operator has to know about. It is *not* applied
+for an unrelated selection: merging a providers-only backup must not create
+accounts.
+
+### 511. The About tab states facts the code contradicts
+
+**Severity:** 🟡 Medium (operator-facing documentation is wrong) ·
+**Status: fixed** — round 169
+(`tests/test_fix_round169.py`)
+
+**Files:** `web/src/pages/Settings.tsx:381` (`AboutTab`),
+`web/src/pages/Settings.tsx:389` (the "Data retention" card),
+`web/src/pages/Settings.tsx:437` (the "Models" info tile),
+`wiwi/logging_core/subsystem.py:51` (the ring size),
+`wiwi/server/app.py:1143` (the DB sink)
+
+**Trigger.** Open Settings → About. Three claims are false:
+
+1. *"Request and proxy log rings hold ~500 events in memory. / Stats windows
+   are computed from that ring. / **DB persistence lands post-MVP.**"* — the DB
+   sink is not post-MVP. `AppState.init_db` creates a `DBSink` unconditionally
+   (`wiwi/server/app.py:1143`), and `/admin/stats/overview` reads from it
+   whenever it exists (`wiwi/server/app.py:5280-5285`), precisely so that
+   *"usage stats silently reset on every redeploy"* stops happening. The 500
+   event ring is a fallback path, not the storage.
+2. *"Inbound surfaces: OpenAI Chat / OpenAI Responses / Anthropic Messages"*
+   — the legacy `POST /v1/completions` surface and the cookie-gated
+   `POST /v1/playground/completions` are absent, as is the OpenAI Completions
+   *dialect* the repository ships a codec for.
+3. The "Models" info tile links to `/models`, which is the **public catalog**
+   page (`web/src/main.tsx:127` → `ModelsCatalogPage`). The admin page that
+   configures deployments is `/console/models` (`web/src/main.tsx:195` →
+   `ModelsPage`). The tile is titled "Models" and describes it as
+   *"configure deployments"*, so it sends the operator to the wrong page.
+
+**Fix sketch.** Rewrite the retention card against the real storage model
+(DB sink primary, 500-event ring as fallback), list all five inbound
+surfaces, and point the tile at `/console/models`.
+
+**The fix.** The retention card now names the two real knobs and their
+defaults — `log_retention_days` (30) and `log_max_rows` (10 000, from
+`wiwi/config.py`) — states that pruned rows are rolled into hourly usage
+rollups first so totals survive the delete, and describes the ~500-event
+ring as the fallback for when the database sink is unavailable. The
+inbound-surface list gained "OpenAI Completions" and "Playground". The
+Models tile now points at `/console/models`.
+
+**A responsive defect found while verifying the fix.** The two new badges
+made a pre-existing mobile problem visible: `.admin-badge` had no
+`white-space` rule, so on a 375px viewport the flex item broke a label
+*mid-word* — "OPENAI RESPONSE / S". The fix is `white-space: nowrap` on
+`.admin-badge` (`web/src/styles.css`), so each badge stays whole and the
+container wraps *between* badges instead.
+
+The first attempt also added `max-width: 100%` + `overflow: hidden` +
+`text-overflow: ellipsis`, and that was wrong: a badge inside a narrow
+table cell is *wider* than its cell, and clipping it hid the label
+entirely ("openai-compatible" became "openai-compatibl…"). Those three
+properties were removed — overflowing the cell is the lesser evil, the
+text stays readable, and the table scrolls. Verified by driving eight
+console pages at 375px and 1440px and measuring every `.admin-badge` for
+a two-line box or a clipped label: none.
+
+### 512. The General tab's "Last checked" ignores the 24-hour clock preference
+
+**Severity:** ⚪ Low · **Status: fixed** — round 169
+(`tests/test_fix_round169.py`)
+
+**Files:** `web/src/pages/Settings.tsx:133`
+
+**Trigger.** Settings → Appearance → turn **off** "24-hour clock", then look
+at Settings → General. The "Last checked" row is hardcoded
+`toLocaleTimeString("en-US", { hour12: false })` — always 24-hour, whatever
+the preference says. The topbar clock honours the pref
+(`web/src/components/Layout.tsx:162`), so the console shows two different
+formats for the same clock.
+
+**Fix sketch.** Read `prefs.clock24h` (the `useClientPrefs` hook is already
+imported in this file) and pass `hour12: !prefs.clock24h`.
+
+**The fix.** `GeneralTab` now reads `useClientPrefs()` and passes
+`hour12: !prefs.clock24h`, matching the topbar.
+
+---
+
 ## ✅ Fixed — round 168: the /admin/keys routes move to a router + service + schemas (2026-10-21)
 
 ### 508. A per-app FastAPI dependency was silently demoted to a body field

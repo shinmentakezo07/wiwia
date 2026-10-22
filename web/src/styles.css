@@ -382,7 +382,20 @@ body {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   line-height: 1.6;
+  /* Never break a label mid-word. The uppercase + letter-spacing makes
+     "OpenAI Responses" wider than a narrow phone column, and without this
+     the flex item wrapped as "OPENAI RESPONSE / S" — a broken word, not a
+     broken layout. `white-space: nowrap` keeps each badge whole; the
+     container wraps BETWEEN badges instead, which is what a reader expects.
+
+     No `overflow: hidden` / `max-width` here on purpose: a badge inside a
+     narrow table cell is *wider* than its cell, and clipping it hid the
+     label entirely ("openai-compatible" became "openai-compatibl…").
+     Overflowing the cell is the lesser evil — the text stays readable —
+     and the table itself scrolls. */
+  white-space: nowrap;
 }
+
 .admin-badge-green {
   color: #34d399;
   background: rgba(52, 211, 153, 0.08);

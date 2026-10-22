@@ -72,6 +72,11 @@ function GeneralTab() {
   const [health, setHealth] = useState<HealthResp | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // The "Last checked" row shows a clock, so it follows the same
+  // 24-hour/12-hour preference as the topbar. It used to hardcode
+  // ``hour12: false``, which left the console showing two different clock
+  // formats at once (AUDIT #512).
+  const { prefs } = useClientPrefs();
 
   const fetchHealth = async () => {
     setLoading(true);
@@ -130,7 +135,9 @@ function GeneralTab() {
               <dd className="font-mono tabular-nums">{health?.groups ?? 0}</dd>
               <dt>Last checked</dt>
               <dd className="font-mono text-[12px] text-[var(--admin-text-muted)]">
-                {new Date().toLocaleTimeString("en-US", { hour12: false })}
+                {new Date().toLocaleTimeString("en-US", {
+                  hour12: !prefs.clock24h,
+                })}
               </dd>
             </dl>
           )}
@@ -406,6 +413,8 @@ function AboutTab() {
               <Badge tone="blue">OpenAI Chat</Badge>
               <Badge tone="blue">OpenAI Responses</Badge>
               <Badge tone="blue">Anthropic Messages</Badge>
+              <Badge tone="blue">OpenAI Completions</Badge>
+              <Badge tone="blue">Playground</Badge>
             </dd>
             <dt>Translation</dt>
             <dd className="text-[var(--admin-text-muted)]">dialect → IR → provider</dd>
@@ -418,9 +427,25 @@ function AboutTab() {
       <Card>
         <CardHeader title="Data retention" subtitle="how long request and proxy data lives" />
         <div className="space-y-1.5 px-5 py-4 text-[13px] text-[var(--admin-text-muted)]">
-          <p>Request and proxy log rings hold ~500 events in memory.</p>
-          <p>Stats windows are computed from that ring.</p>
-          <p>DB persistence lands post-MVP.</p>
+          {/* These numbers are the gateway's DEFAULTS, not a description of a
+              future plan: the DB sink is created unconditionally and is the
+              primary store. The old copy said "DB persistence lands
+              post-MVP" and listed the 500-event in-memory ring as *the*
+              storage, which is the fallback path, not the truth (AUDIT #511). */}
+          <p>
+            Request logs persist in the database, pruned after{" "}
+            <span className="font-mono">log_retention_days</span> (30 by
+            default) and capped at <span className="font-mono">log_max_rows</span>{" "}
+            (10 000 by default).
+          </p>
+          <p>
+            Pruned rows are rolled into hourly usage rollups first, so
+            totals, token counts, cost and percentiles survive the delete.
+          </p>
+          <p>
+            A ~500-event in-memory ring backs the live request and proxy log
+            views; it is a fallback for when the database sink is unavailable.
+          </p>
         </div>
       </Card>
 
@@ -428,7 +453,12 @@ function AboutTab() {
         <CardHeader title="Resources" subtitle="reference material" />
         <div className="px-5 py-4">
           <div className="grid gap-3 sm:grid-cols-3">
-            <InfoTile icon={Database} title="Models" desc="configure deployments" to="/models" />
+            <InfoTile
+              icon={Database}
+              title="Models"
+              desc="configure deployments"
+              to="/console/models"
+            />
             <InfoTile icon={Boxes} title="Providers" desc="outbound accounts" to="/console/providers" />
             <InfoTile icon={KeyRound} title="Virtual keys" desc="client keys" to="/console/keys" />
           </div>
