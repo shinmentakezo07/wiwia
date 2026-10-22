@@ -67,7 +67,12 @@ The design mirrors LiteLLM's mental model (config-driven `model_list`, model gro
 
 | Layer | Location | What it does |
 |---|---|---|
-| HTTP app | `wiwi/server/app.py` | FastAPI factory, pure-ASGI middleware chain (request id, body-size guard, latency headers), all routes, lifespan, SPA mount |
+| HTTP app | `wiwi/server/app.py` | FastAPI factory, pure-ASGI middleware chain (request id, body-size guard, latency headers), lifespan, SPA mount, and the routes that are still inline closures |
+| HTTP errors | `wiwi/server/errors.py` | `APIError` (status + error type + dialect) and the per-dialect renderer; the app's exception handlers turn a raised `APIError` into the caller's dialect body (OpenAI `{"error":{…}}` / Anthropic `{"type":"error",…}`) |
+| HTTP deps | `wiwi/server/dependencies.py` | The auth guards as importable FastAPI dependencies (`require_user`, `require_admin`); they read the app state via `request.app.state.wiwi` and raise `APIError` rather than returning a response |
+| HTTP routers | `wiwi/server/routers/` | One module per admin surface; a router owns the HTTP shape (path, method, request/response models) and delegates the rules to `wiwi/server/services/` |
+| HTTP schemas | `wiwi/server/schemas/` | Pydantic v2 request/response models per surface. A validation failure is rendered as **400** (not FastAPI's 422) in the caller's dialect, by the `RequestValidationError` handler in `server/app.py` |
+| Services | `wiwi/server/services/` | The business rules behind the routes (authorization, invariants), raising `APIError`; no FastAPI imports, so the rules are testable without an HTTP client |
 | Wire codecs | `wiwi/wire/{openai_chat,openai_responses,anthropic_messages}.py` | `decode_request`, `encode_response`, `StreamEncoder`, `error_body` per dialect |
 | IR | `wiwi/ir/types.py`, `ir/builtin_tools.py` | `Part` union (`TextPart`, `ImagePart`, `ToolUsePart`, `ToolResultPart`, `ThinkingPart`, `AudioPart`, `DocumentPart`), `Message`, `Tool`, `ToolChoice*`, `ResponseFormat`, `GenParams`, `Request`, `Usage`, `AssistantTurn`, `Response`; hosted-tool registry |
 | Router | `wiwi/router/router.py` | Groups/deployments/keys, WRR picking, alias chains, `execute_with_retries`, health scoring (EWMA latency + success rate), adaptive cooldowns |

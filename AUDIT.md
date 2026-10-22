@@ -8,6 +8,114 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — round 168: the /admin/keys routes move to a router + service + schemas (2026-10-21)
+
+### 508. A per-app FastAPI dependency was silently demoted to a body field
+
+**Severity:** 🟠 High · **Status: fixed** — round 168
+**Files:** `wiwi/server/routers/admin_keys.py` (the router),
+`wiwi/server/dependencies.py` (the guard), `wiwi/server/app.py` (the mount),
+`wiwi/server/schemas/admin_keys.py` (the request models),
+`wiwi/server/services/key_admin.py` (the rules),
+`wiwi/server/errors.py` (NEW — `APIError` + the dialect-correct renderer)
+
+**Trigger.** The five `/admin/keys` routes moved out of `create_app`'s closure
+into a router module. The first cut of that move passed the auth guard as a
+**per-app closure**:
+
+```python
+app.include_router(admin_keys_router.make_router(
+    KeyAdminService(state, config.router_settings.priority_lanes),
+    make_require_user_dependency(state)),          # ← closure, not a name
+)
+```
+
+with the handler annotated `actor: Annotated[UserInfo, Depends(require_user)]`.
+
+**Cause.** `from __future__ import annotations` makes every annotation a
+*string*, and FastAPI evaluates those strings against the **module globals** of
+the file that declares the handler — not the enclosing function's locals. The
+closure-local `require_user` was therefore invisible to the resolver, so the
+`Depends` marker was never seen and `actor` was treated as an ordinary
+**body field**. Every request to the five routes failed:
+
+```
+400 invalid_request_error: actor: Field required
+```
+
+The failure is silent in the sense that matters: the app boots, the routes
+are registered, the paths answer, and the error is a 400 that looks like a
+client mistake. Nothing says "your dependency did not resolve". A guard that
+never runs is worse than no guard — the routes looked protected and were not.
+
+**The fix.** The guard is module-level and reads the app state the standard
+FastAPI way:
+
+```python
+async def require_user(request: Request) -> UserInfo:
+    actor = await resolve_current_user(request, app_state(request))
+    if actor is None:
+        raise APIError(401, "authentication_error", "authentication required")
+    return actor
+```
+
+The `CurrentUser` / `AdminUser` aliases live in `wiwi/server/dependencies.py`
+next to the function they name, so the annotation resolves against the module
+that defines it.
+
+**Two further corrections the move forced, both now pinned by
+`tests/test_fix_round168.py`:**
+
+* **422 → 400.** FastAPI's default request-validation handler answers *422*
+  with `{"detail": [...]}`. wiwi's contract is **400** with a dialect-shaped
+  body (`docs/API_REFERENCE.md`), and 422 was a status the gateway had never
+  returned. A `RequestValidationError` handler was installed in
+  `server/app.py` to re-render validation failures as a 400 in the caller's
+  dialect.
+* **`TypeError` → `ValueError` in the Pydantic validators.** Pydantic v2
+  converts only `ValueError`/`AssertionError` into a validation error; a
+  `TypeError` raised in a `field_validator` escapes the validator and
+  surfaces as an unhandled **500**. The validators raise `ValueError`
+  (with `# noqa: TRY004`, the same reasoning as
+  `wiwi/auth/service.py`).
+
+**Three fidelity defects the review caught and the move introduced** (all
+fixed, all pinned by `tests/test_fix_round168.py`):
+
+* **The error message changed.** Pydantic reports a validator's `ValueError`
+  as `"Value error, 'models' must be a list of strings"`, and the field name
+  in front of it. The old handler returned exactly
+  `"'models' must be a list of strings"`. A client matching on the message
+  would have broken, and the existing tests only checked a substring, so
+  nothing caught it. `validation_message()` in `wiwi/server/errors.py` now
+  strips the prefix and uses a custom validator's message verbatim; Pydantic's
+  *built-in* errors still get the field name, because those are terse
+  ("Input should be a valid string") and the field is what makes them
+  actionable.
+* **The response model ADDED a field.** `list_keys_for_owner` omits
+  `owner_id` (the WHERE clause already fixed it) while `list_keys` includes
+  it. The typed response model would have added `"owner_id": null` to the
+  owner-scoped listing — a shape the old handler never produced. The two
+  routes that return key dicts are mounted with
+  `response_model_exclude_unset=True`, so an absent field stays absent.
+* **The `priority` coercion moved.** The old `_key_priority` helper turned
+  `""` and `"   "` into `None` and trimmed the rest. The schema's validator
+  reproduces that exactly, so a blank lane still means "no lane".
+
+**Regression coverage.** `tests/test_fix_round168.py` (30 tests) pins the
+route table, the response shapes, the 400-not-422 rule, the verbatim error
+messages, the `owner_id` presence/absence split, the authorization rules
+(401 / 403 "not your key" / 403 "may only be set by an admin"), the audit
+trail, and `test_actor_is_a_dependency_not_a_body_field` — the defect
+above, so a future "make it per-app again" change cannot land silently.
+
+**Also fixed in the same move:** the guard's resolution logic was duplicated
+between `server/app.py`'s closures and the new module (two copies of the
+master-bearer → session-cookie → anonymous chain). There is now one
+definition, in `wiwi/server/dependencies.py`, and `app.py`'s closures
+delegate to it.
+
+
 ## ✅ Fixed — round 167: DeepSeek's thinking-mode round-trip was missing on the OpenCode route (2026-10-21)
 
 ### 507. A DeepSeek model on the OpenCode adapter was rejected with `The reasoning_content in the thinking mode must be passed back to the API`

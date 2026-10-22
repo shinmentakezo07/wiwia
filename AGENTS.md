@@ -57,9 +57,27 @@ stage (carries `surface`, params, auth, and the chosen dialect encoder).
 `GET /public/models`, `GET /health`, a configurable Prometheus path (`server/metrics.py`),
 `/admin/*` (master key), `/auth/*` (user sessions), `/cline/oauth/callback`.
 
-That is **9 routes under `/v1` and 59 under `/admin`** (count them with
-`grep -c '@app\.\(get\|post\|put\|delete\|patch\)("/admin' wiwi/server/app.py`), all defined in
-one `create_app` closure in `server/app.py`.
+That is **9 routes under `/v1` and 59 under `/admin`**. Most are defined in
+the `create_app` closure in `server/app.py`; the `/admin/keys` ones live in
+`wiwi/server/routers/admin_keys.py` and are mounted with `include_router`, so
+a grep over `app.py` alone under-counts them. Count them with:
+
+```bash
+python3 -c "
+import wiwi.server.app as m
+from wiwi.config import *
+app = m.create_app(WiwiConfig(general_settings=GeneralSettings(master_key='sk-x')))
+routes=set()
+def walk(rs):
+    for r in rs:
+        p=getattr(r,'path',None); meth=getattr(r,'methods',None)
+        if p and meth: routes.add((tuple(sorted(meth)), p))
+        o=getattr(r,'original_router',None)
+        if o is not None: walk(o.routes)
+walk(app.routes)
+print('v1', len([r for r in routes if r[1].startswith('/v1')]),
+      'admin', len([r for r in routes if r[1].startswith('/admin')]))"
+```
 
 ### Outbound provider types (12)
 
@@ -89,11 +107,16 @@ with no `Finish`. All delta variants are `@dataclass(frozen=True)`.
 | `wiwi/cache/` | `build_response_cache()`, `keygen.py`, `response_cache.py`, `redis_cache.py`, `interface.py` |
 | `wiwi/cost/` | `pricing.py` |
 | `wiwi/logging_core/` | `db_sink.py`, `events.py`, `subsystem.py` (structlog workers), `hist.py`, `retention.py` |
-| `wiwi/server/` | `app.py` (~7.3k lines: `create_app`, `AppState`, `lifespan`, every route), `config_store.py` (SQL DDL + admin persistence), `response_store.py` (Responses-API state), `backup.py`, `metrics.py`, `stats.py`, `static/` (built SPA) |
+| `wiwi/server/` | `app.py` (~7.2k lines: `create_app`, `AppState`, `lifespan`, the error handlers, and the routes that are still inline closures), `config_store.py` (SQL DDL + admin persistence), `response_store.py` (Responses-API state), `backup.py`, `metrics.py`, `stats.py`, `static/` (built SPA) |
+| `wiwi/server/routers/` | HTTP routers, one module per admin surface. A router owns the HTTP shape (path, method, request/response models) and delegates the rules to `wiwi/server/services/`. Built per app in `create_app` (the service is per-app); the auth guard is a module-level dependency |
+| `wiwi/server/schemas/` | Pydantic v2 request/response models per surface. `extra="ignore"`, and a validator raises `ValueError` (a `TypeError` escapes as a 500) |
+| `wiwi/server/services/` | The business rules behind the routes (authorization, invariants), raising `APIError`. No FastAPI imports, so the rules are testable without an HTTP client |
+| `wiwi/server/dependencies.py` | The auth guards as importable FastAPI dependencies (`require_user`, `require_admin`), reading the app state via `request.app.state.wiwi`. They must stay module-level: a per-app closure is invisible to FastAPI's annotation resolver, which silently demotes the parameter to a body field |
+| `wiwi/server/errors.py` | `APIError` (status + error type + dialect) and the per-dialect renderer. The app's exception handlers turn a raised `APIError` into the caller's dialect body, and a request-validation failure into a **400** (not FastAPI's 422) |
 | `wiwi/config.py` | Pydantic v2 config models + `load_config`; `PROVIDER_TYPES` is the single source of truth |
 | `wiwi/main.py` | CLI entrypoint (`wiwi.main:cli`) |
 | `web/` | Admin SPA + public site (React 19, TS strict, Vite 6, Tailwind 4) — 64 components in `src/pages/`, builds to `wiwi/server/static/` |
-| `tests/` | pytest suite — 211 files collecting ~3,589 tests; bugfix regressions in `test_fix_roundN.py` |
+| `tests/` | pytest suite — 213 files collecting ~3,642 tests; bugfix regressions in `test_fix_roundN.py` |
 | `docs/` | Design specs (see **Important Files**) |
 
 ## Development Commands
@@ -162,9 +185,10 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
   env vars win.
 - `wiwi/config.py` — Pydantic config models; `load_config`, `load_config_from_string`;
   `os.environ/NAME` interpolation is resolved here.
-- `wiwi/server/app.py` — ~7.3k lines in one `create_app` closure: `create_app(config)`,
+- `wiwi/server/app.py` — ~7.2k lines in one `create_app` closure: `create_app(config)`,
   `create_app_from_config_path` (uvicorn reload factory), `AppState`, `lifespan`, `run_chat_like`,
-  and all 9 `/v1` + 59 `/admin` routes. Navigate it by grepping for a route prefix, not by reading.
+  the error handlers, and most of the routes (the `/admin/keys` ones live in
+  `wiwi/server/routers/admin_keys.py`). Navigate it by grepping for a route prefix, not by reading.
 - `wiwi/server/config_store.py` — SQL DDL + migrations for admin-managed providers, keys,
   deployments, prices, settings.
 - `wiwi/server/response_store.py` — persisted Responses-API state behind
@@ -251,9 +275,9 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
 - **Property tests:** `hypothesis` (`test_property_roundtrip.py`) for IR/codec round-trips and
   stream-SSE legality invariants.
 - **Regression convention:** new bugfix regressions go in the next unused
-  `tests/test_fix_roundN.py`. Latest present: `test_fix_round166.py` → next is `round167`
+  `tests/test_fix_roundN.py`. Latest present: `test_fix_round168.py` → next is `round169`
   (confirm numerically, never with a plain `ls` — it sorts lexicographically, so `round9.py`
-  looks newest). 163 such files exist; gaps at 1, 5 (`test_bugfix_round5.py` is the legacy
+  looks newest). 165 such files exist; gaps at 1, 5 (`test_bugfix_round5.py` is the legacy
   filename), 102 and 147.
 - **Subsystem map (rough):** `test_codecs.py` / `test_extra_body.py` — wire unit; `test_router.py`,
   `test_round_robin.py`, `test_fix_cycle_failover.py` — routing; `test_admin_api.py`,
@@ -262,8 +286,8 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
   `test_recovery.py`, `test_cache_and_journal.py` — streaming/recovery; `test_<provider>_adapter.py`
   — per-adapter.
 - **Coverage expectation:** none configured; the bare gate is the full suite green. Don't trust a
-  pinned pass-count in docs/README badges — run the suite. Measured baseline 2026-10-21:
-  `3579 passed, 11 skipped, 4 warnings in 237.80s` (3,589 collected). Some warnings are `aiosqlite`
+  pinned pass-count in docs/README badges — run the suite. Measured baseline 2026-10-22:
+  `3632 passed, 11 skipped, 5 warnings in 254.29s` (3,642 collected). Some warnings are `aiosqlite`
   worker threads outliving their event loop (`AUDIT.md` #475) — harmless, but escalating that
   warning class to an error charges the failure to an unrelated test, so don't.
 - **Verification gate before claiming done:** `python3 -m pytest tests/ -q && ruff check wiwi/ tests/`

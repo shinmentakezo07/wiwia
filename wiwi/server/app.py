@@ -19,6 +19,7 @@ import orjson
 import structlog
 import websockets
 from fastapi import FastAPI, Request, WebSocket
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
@@ -149,7 +150,7 @@ class RequestIdMiddleware:
 
 from wiwi.auth.keys import mask_key
 from wiwi.auth.service import AuthService
-from wiwi.auth.users import SESSION_TTL, UserInfo, UserService, sign_session, verify_session
+from wiwi.auth.users import SESSION_TTL, UserInfo, UserService, sign_session
 from wiwi.cache import build_response_cache
 from wiwi.cache.interface import CacheBackend, CacheEntry
 from wiwi.cache.keygen import is_cacheable_request, response_cache_key
@@ -183,6 +184,18 @@ from wiwi.providers.registry import fresh_adapter, get_adapter
 from wiwi.providers.workbuddy_auto_refresh import refresh_key_now
 from wiwi.ratelimit.memory import RateLimiter
 from wiwi.server import backup
+from wiwi.server.dependencies import (
+    SYNTHETIC_MASTER_ID,
+    bearer_token,
+    key_owner_id,
+    master_actor,
+    resolve_current_user,
+)
+from wiwi.server.errors import APIError
+from wiwi.server.errors import render as render_error
+from wiwi.server.errors import validation_message as _validation_message
+from wiwi.server.routers import admin_keys as admin_keys_router
+from wiwi.server.services.key_admin import KeyAdminService
 from wiwi.streaming.sse import split_frames
 
 
@@ -268,7 +281,11 @@ _MAX_PLAYGROUND_KEYS_PER_USER = 5
 # The synthetic master actor (``current_user`` mints it for a master bearer or
 # a master session cookie). Real user ids are "u" + 16 hex, so this value can
 # only ever name the synthetic actor, never a row in ``users``.
-_SYNTHETIC_MASTER_ID = "master"
+#
+# The definition lives in ``wiwi/server/dependencies.py`` so the routers can
+# share it; it is re-exported here because several call sites (and tests)
+# import it from ``wiwi.server.app``.
+_SYNTHETIC_MASTER_ID = SYNTHETIC_MASTER_ID
 
 # The wrapper holds a plaintext key per owner, so the map needs a ceiling. It
 # is deliberately far below the number of accounts a deployment can hold: an
@@ -321,8 +338,7 @@ def _master_actor() -> UserInfo:
     One definition so the session mint in ``/auth/login``, the master-bearer
     branch of ``current_user``, and their uid check cannot drift apart.
     """
-    return UserInfo(id=_SYNTHETIC_MASTER_ID, username=_SYNTHETIC_MASTER_ID,
-                    role="admin")
+    return master_actor()
 
 
 def _key_owner_id(actor: UserInfo) -> str | None:
@@ -340,7 +356,7 @@ def _key_owner_id(actor: UserInfo) -> str | None:
     separation: every master-key holder is the same operator behind the same
     secret.
     """
-    return None if actor.id == _SYNTHETIC_MASTER_ID else actor.id
+    return key_owner_id(actor)
 
 
 def _client_ip(request: Request, trusted_proxies: list[str] | None = None) -> str:
@@ -1545,11 +1561,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     # -- helpers ---------------------------------------------------------------
     def bearer(request: Request) -> str:
-        authz = request.headers.get("authorization", "")
-        if authz.lower().startswith("bearer "):
-            return authz[7:].strip()
-        xkey = request.headers.get("x-api-key")  # Claude Code on /v1/messages
-        return xkey.strip() if xkey else ""
+        # The credential extraction lives in ``wiwi/server/dependencies.py``
+        # so the routers read the same header the inline routes do.
+        return bearer_token(request)
 
     # Headers an Anthropic client sets to negotiate capabilities that its
     # BODY then depends on. Anthropic's Messages format is header-coupled:
@@ -1587,20 +1601,6 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return None
         raw = raw.strip()
         return raw[:128] or None
-
-    def _key_priority(raw: object) -> str | None:
-        """Coerce an admin-supplied lane name.
-
-        ``None`` means "no lane declared" and lands on ``default_lane``. A
-        non-string is refused rather than stringified: ``priority: 3`` would
-        otherwise become a lane named "3" that matches nothing.
-        """
-        if raw is None:
-            return None
-        if not isinstance(raw, str):
-            raise TypeError("'priority' must be a string")
-        name = raw.strip()
-        return name or None
 
     def is_admin(request: Request) -> bool:
         mk = config.general_settings.master_key
@@ -2030,6 +2030,36 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if surface == "responses":
             return orp.error_body
         return oc.error_body
+
+    # -- error rendering ------------------------------------------------------
+
+    # A raised APIError is rendered here, in the caller's dialect. The inline
+    # `_err` calls below return the same bodies; the raise path exists so a
+    # service or a dependency can report a failure without threading a
+    # response object back to the caller (see wiwi/server/errors.py).
+    @app.exception_handler(APIError)
+    async def _api_error_handler(request: Request, exc: APIError):
+        rid = getattr(request.state, "request_id", "")
+        body = render_error(exc, rid)
+        return ORJSONResponse(body, status_code=exc.status_code,
+                              headers={"x-wiwi-request-id": rid})
+
+    # FastAPI's default validation-error handler answers 422 with
+    # ``{"detail": [...]}``. wiwi's contract is 400 with a dialect-shaped
+    # body (docs/API_REFERENCE.md), and 422 is a status wiwi has never
+    # returned — a request-model validation failure must not become the only
+    # 422 in the gateway's history. Re-render it as a 400 in the same shape
+    # the inline `_err` calls produce.
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error_handler(request: Request,
+                                        exc: RequestValidationError):
+        rid = getattr(request.state, "request_id", "")
+        surface = _surface_for_path(request.url.path)
+        message = _validation_message(exc)
+        body = render_error(APIError(400, "invalid_request_error", message,
+                                     surface), rid)
+        return ORJSONResponse(body, status_code=400,
+                              headers={"x-wiwi-request-id": rid})
 
     def _err(status: int, etype: str, message: str,
              request: Request, surface: str = "chat",
@@ -3429,103 +3459,14 @@ def create_app(config: WiwiConfig) -> FastAPI:
         return PlainTextResponse(text, media_type="text/plain; version=0.0.4")
 
     # -- admin -------------------------------------------------------------------
-    @app.post("/admin/keys/generate")
-    async def admin_generate_key(request: Request):
-        actor = await current_user(request)
-        if actor is None:
-            return _err(401, "authentication_error", "authentication required", request)
-        body, jerr = await json_body(request)
-        if jerr:
-            return jerr
-        models = body.get("models")
-        if models is not None and (not isinstance(models, list)
-                                   or not all(isinstance(m, str) for m in models)):
-            return _err(400, "invalid_request_error",
-                        "'models' must be a list of strings", request)
-        # Owner-scope real admins too (the synthetic master stays un-owned):
-        # an un-owned admin key is exempt from ``max_keys_per_user`` and shares
-        # one owner id with every other admin, which is the round-105 defect on
-        # the Playground path (round 107).
-        owner_id = _key_owner_id(actor)
-        # A key must not be able to sit in a lane the operator never configured:
-        # an unknown name would silently fall back to ``default_lane`` at
-        # admission, so what the caller asked for would be quietly ignored.
-        # Reject it here, where the caller can see the 400 and fix it.
-        try:
-            priority = _key_priority(body.get("priority"))
-        except TypeError as e:
-            return _err(400, "invalid_request_error", str(e), request)
-        lanes = config.router_settings.priority_lanes
-        if priority is not None and priority not in lanes:
-            return _err(400, "invalid_request_error",
-                        f"unknown priority lane {priority!r}; configured"
-                        f" lanes: {sorted(lanes) or 'none'}", request)
-        try:
-            plaintext, kid = await state.auth.create_key(
-                alias=str(body.get("name") or body.get("alias") or ""),
-                models=body.get("models"), max_budget=body.get("max_budget"),
-                rpm=body.get("rpm"), tpm=body.get("tpm"),
-                ttl_seconds=body.get("ttl_seconds"),
-                custom_key=body.get("custom_key"), owner_id=owner_id,
-                priority=priority)
-        except ValueError as e:
-            return _err(400, "invalid_request_error", str(e), request)
-        await state.logs.log_audit(
-            actor=actor.username, action="key.generate", target=kid,
-            diff={"source": "custom"} if body.get("custom_key") else None)
-        return ORJSONResponse({"key": plaintext, "id": kid,
-                             "note": "store this key now; it is not shown again"})
-
-    @app.get("/admin/keys")
-    async def admin_list_keys(request: Request):
-        actor = await current_user(request)
-        if actor is None:
-            return _err(401, "authentication_error", "authentication required", request)
-        if actor.role == "admin":
-            keys = await state.auth.list_keys()
-        else:
-            keys = await state.auth.list_keys_for_owner(actor.id)
-        return ORJSONResponse({"keys": keys})
-
-    @app.delete("/admin/keys/{key_id}")
-    async def admin_delete_key(key_id: str, request: Request):
-        actor = await current_user(request)
-        if actor is None:
-            return _err(401, "authentication_error", "authentication required", request)
-        if actor.role != "admin":
-            owner = await state.auth.key_owner(key_id)
-            if owner != actor.id:
-                return _err(403, "permission_error", "not your key", request)
-        ok = await state.auth.delete_key(key_id)
-        await state.logs.log_audit(actor=actor.username, action="key.delete",
-                                   target=key_id)
-        return ORJSONResponse({"deleted": ok})
-
-    @app.post("/admin/keys/{key_id}/disable")
-    async def admin_disable_key(key_id: str, request: Request):
-        actor = await current_user(request)
-        if actor is None:
-            return _err(401, "authentication_error", "authentication required", request)
-        if actor.role != "admin":
-            owner = await state.auth.key_owner(key_id)
-            if owner != actor.id:
-                return _err(403, "permission_error", "not your key", request)
-        body, jerr = await json_body(request)
-        if jerr:
-            return jerr
-        # Require a real bool, same as the sibling provider-key route
-        # (AUDIT #82): bool("false") is True, so a caller asking to *enable*
-        # a key silently revoked it instead.
-        disabled = body.get("disabled", True)
-        if not isinstance(disabled, bool):
-            return _err(400, "invalid_request_error",
-                        "disabled must be a boolean", request)
-        if not await state.auth.set_disabled(key_id, disabled):
-            return _err(404, "not_found_error", f"unknown key '{key_id}'", request)
-        await state.logs.log_audit(actor=actor.username,
-                                   action="key.disable" if disabled else "key.enable",
-                                   target=key_id)
-        return ORJSONResponse({"key_id": key_id, "disabled": disabled})
+    # -- admin: virtual keys ---------------------------------------------------
+    # The five /admin/keys routes live in ``wiwi/server/routers/admin_keys.py``
+    # (a router module + a service + Pydantic request models). They are
+    # mounted here because the service and the auth guard are per-app objects.
+    app.include_router(
+        admin_keys_router.make_router(
+            KeyAdminService(state, config.router_settings.priority_lanes)),
+    )
 
     @app.get("/admin/logs/requests")
     async def admin_request_logs(request: Request, limit: int = 10000,
@@ -3717,36 +3658,16 @@ def create_app(config: WiwiConfig) -> FastAPI:
     # bearer-only guard to drift away from it.
 
     # -- session / user resolution ----------------------------------------------
+    # The resolution rules live in ``wiwi/server/dependencies.py`` so the
+    # routers (which are separate modules and cannot see this closure) share
+    # one definition with the inline routes. These three remain as thin
+    # wrappers because ~70 call sites below use them, and the "return a
+    # response or None" shape is what those call sites are written against.
     async def current_user(request: Request) -> UserInfo | None:
         """Resolve the caller from a signed session cookie OR a bearer master
         key (back-compat). Returns ``None`` when anonymous or when the session
         user has been disabled/deleted."""
-        # master key via bearer → synthetic admin (back-compat for /auth/me)
-        mk = config.general_settings.master_key
-        tok = bearer(request)
-        if mk and tok and hmac.compare_digest(tok.encode(), mk.encode()):
-            return _master_actor()
-        # signed session cookie
-        cookie = request.cookies.get("wiwi_session")
-        if not cookie:
-            return None
-        parsed = verify_session(state.users._secret, cookie)  # type: ignore[union-attr]
-        if parsed is None:
-            return None
-        uid, _role, _exp = parsed
-        if uid == _SYNTHETIC_MASTER_ID:
-            # Only honour a synthetic master session when a master key is
-            # actually configured. Otherwise any cookie signed with whatever
-            # secret happened to be in use would mint an admin with no DB row.
-            if not config.general_settings.master_key:
-                return None
-            return _master_actor()
-        if state.users is None:
-            return None
-        info = await state.users.get(uid)
-        if info is None or info.disabled:
-            return None
-        return info
+        return await resolve_current_user(request, state)
 
     async def require_user_dep(request: Request) -> ORJSONResponse | None:
         """401 when the caller is not an authenticated user (nor master)."""
@@ -5319,47 +5240,6 @@ def create_app(config: WiwiConfig) -> FastAPI:
                                "unset": list(unset)})
 
     # -- admin: virtual keys PATCH -----------------------------------------------
-    @app.patch("/admin/keys/{key_id}")
-    async def admin_patch_key(key_id: str, request: Request):
-        actor = await current_user(request)
-        if actor is None:
-            return _err(401, "authentication_error", "authentication required", request)
-        # A non-admin may only touch a key they own, and only the owner-facing
-        # fields on it. Ownership alone was the whole check, so a tenant could
-        # PATCH the budget/RPM/TPM/model-allowlist caps an operator had placed
-        # on their own key straight back off (AUDIT #220) — total defeat of the
-        # controls rounds 52/57/59/116/163/198/202 added. The allowlist is
-        # enforced again inside ``update_key`` so no future call site can
-        # reintroduce the gap.
-        allow: tuple[str, ...] | None = None
-        if actor.role != "admin":
-            owner = await state.auth.key_owner(key_id)
-            if owner != actor.id:
-                return _err(403, "permission_error", "not your key", request)
-            allow = state.auth.OWNER_FACING_FIELDS
-        body, jerr = await json_body(request)
-        if jerr:
-            return jerr
-        fields = {k: body[k] for k in state.auth.UPDATABLE_FIELDS  # type: ignore[union-attr]
-                  if k in body}
-        if allow is not None:
-            refused = [k for k in fields if k not in allow]
-            if refused:
-                return _err(403, "permission_error",
-                            f"field '{refused[0]}' may only be set by an admin",
-                            request)
-        try:
-            updated = await state.auth.update_key(key_id, fields, allow)  # type: ignore[union-attr]
-        except ValueError as e:
-            # Malformed limit/model values used to escape as an uncaught
-            # ValueError/TypeError (HTTP 500); report them as a client error.
-            return _err(400, "invalid_request_error", str(e), request)
-        if updated is None:
-            return _err(404, "not_found_error", f"unknown key '{key_id}'", request)
-        await state.logs.log_audit(actor=actor.username, action="key.update",
-                                   target=key_id, diff=fields)
-        return ORJSONResponse({"key": updated})
-
     # -- admin: logs & stats -------------------------------------------------------
     @app.get("/admin/logs/proxy")
     async def admin_proxy_logs(request: Request):
