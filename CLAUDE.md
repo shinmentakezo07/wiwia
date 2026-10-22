@@ -232,6 +232,8 @@ When an agent discovers a bug, error, or suspicious behavior in this codebase:
 
 `git archive HEAD` exports the committed tree into a scratch clone of the Space, `deploy/hf-space/README.md` is written over the Space's `README.md` (the Space manifest — `sdk: docker`, `app_port: 4000`), and a single `Deploy wiwi <sha>` commit is pushed. Nothing is force-pushed and the gateway's own git history is untouched.
 
+**`git-lfs` is a hard prerequisite of the deploy.** The tracked tree carries PNGs, HF rejects a push containing binaries that are not in LFS/xet, and the Space's own `.gitattributes` covers only model weights — so the script tracks `*.png` and pushes those objects through LFS. Without git-lfs the failure lands *after* the clone and the commit, so the Space is left untouched and the error reads as a bare `git: 'lfs' is not a git command`. The script now preflights it and prints install instructions (including the no-root path: drop the official binary in `~/.local/bin`, which is already on the default PATH on this box).
+
 Three things to know before touching the deploy path:
 
 - **The Space is public, so the export must stay secret-free.** `git archive` exports *tracked* files only — that is exactly why the script uses it instead of `hf upload`, which walks the working tree and would ship `.env`, `wiwi.yaml` and `wiwi.db` whenever they sit in the checkout. Do not "simplify" it back to a working-tree copy.

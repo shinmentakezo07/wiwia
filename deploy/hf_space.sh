@@ -29,6 +29,29 @@ case "${1:-}" in
   *) echo "usage: $0 [--dry-run]" >&2; exit 2 ;;
 esac
 
+# --- preflight --------------------------------------------------------------
+# git-lfs is REQUIRED: the Space's own .gitattributes covers model weights
+# (*.bin, *.safetensors, ...) but not *.png, and the tracked tree carries
+# PNGs (the Open Graph card, the LFS-tracked console screenshots). HF
+# rejects a push containing binaries that are not in LFS/xet, so the deploy
+# tracks *.png and pushes those objects through LFS.
+#
+# Without git-lfs the failure lands *after* the clone and the commit, so the
+# error is a bare "git: 'lfs' is not a git command" and the Space is left
+# untouched — a wasted cycle, and easy to misread as a deploy that half
+# worked. Check up front, and say how to install it.
+if ! git lfs version >/dev/null 2>&1; then
+  echo "error: git-lfs is required to deploy (the tracked tree has PNGs and HF" >&2
+  echo "       rejects non-LFS binaries) but 'git lfs' is not available." >&2
+  echo "       install it:  apt-get install git-lfs   (needs root)" >&2
+  echo "       or, without root, drop the official binary on PATH:" >&2
+  echo "         mkdir -p ~/.local/bin && cd ~/.local/bin" >&2
+  echo "         curl -fsSLO https://github.com/git-lfs/git-lfs/releases/latest/download/git-lfs-linux-\$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" >&2
+  echo "         tar -xzf git-lfs-linux-*.tar.gz --strip-components=1 'git-lfs-*/git-lfs' && chmod +x git-lfs" >&2
+  echo "       ~/.local/bin is already on the default PATH on this box." >&2
+  exit 1
+fi
+
 # --- token -------------------------------------------------------------------
 if [[ -z "${HF_TOKEN:-}" && -f "$ROOT/.env" ]]; then
   # Last assignment wins, matching dotenv semantics; comments are skipped.

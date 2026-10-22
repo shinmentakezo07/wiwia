@@ -260,6 +260,12 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
   `deploy/hf_space.sh` — the gateway itself never reads it. The Space is **public**, so a
   token or key pasted into any tracked file is world-readable: never put a live value in
   `.env.example` (see `AUDIT.md` #154).
+- **`git-lfs` is a hard prerequisite of `deploy/hf_space.sh`.** The tracked tree carries
+  PNGs and HF rejects a push containing binaries that are not in LFS/xet, so the script
+  tracks `*.png` and pushes those objects through LFS. Without git-lfs the failure lands
+  *after* the clone and the commit — the Space is left untouched and the error is a bare
+  `git: 'lfs' is not a git command`. The script now preflights it and prints install
+  instructions (no-root path: the official binary in `~/.local/bin`, already on PATH here).
 
 ## Testing & QA
 
