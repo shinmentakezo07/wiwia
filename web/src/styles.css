@@ -3243,8 +3243,8 @@ select.admin-input option {
   background: rgba(255, 255, 255, 0.025);
 }
 .pg-chat-item[data-active="true"] {
-  background: rgba(59, 130, 246, 0.08);
-  border-color: rgba(59, 130, 246, 0.15);
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.08);
 }
 
 @keyframes pg-sidebar-enter {
@@ -3609,16 +3609,16 @@ select.admin-input option {
   background: rgba(255, 255, 255, 0.035);
 }
 .pg-chat-item[data-active="true"] {
-  background: rgba(99, 102, 241, 0.11);
-  border-color: rgba(129, 140, 248, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.1);
 }
 .pg-chat-item[data-active="true"] .pg-chat-item-icon {
-  color: #c4b5fd;
-  background: rgba(124, 58, 237, 0.14);
+  color: var(--admin-text-muted);
+  background: rgba(255, 255, 255, 0.06);
 }
 .pg-chat-item[data-active="true"]::before {
   width: 1px;
-  background: #a78bfa;
+  background: rgba(255, 255, 255, 0.28);
 }
 
 .pg-body {

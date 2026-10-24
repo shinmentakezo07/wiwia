@@ -15,12 +15,15 @@ import {
   CreditCard,
   GitBranch,
   Infinity as InfinityIcon,
+  Info,
   KeyRound,
   Minus,
+  Route,
   Server,
   ShieldCheck,
   Sparkles,
   Wallet,
+  Zap,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { HERO_BEAMS_COMPACT, HeroBeamBackdrop } from "@/components/HeroBeamBackdrop";
@@ -300,15 +303,19 @@ export function PricingPage() {
       </section>
 
       {/* ════════ tiers ════════ */}
-      <section className="scroll-reveal">
-        <div className="mb-10 text-center">
+      <section className="scroll-reveal relative overflow-hidden">
+        <div className="relative mb-10 text-center">
           <span className="admin-label">Plans</span>
           <h2 className="mt-2 text-2xl font-semibold tracking-[-0.01em] text-[var(--admin-text)] sm:text-3xl">
             Pick where it runs, not what you pay
           </h2>
+          <p className="mx-auto mt-3 max-w-xl text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
+            The same gateway in every plan — the only difference is whose
+            infrastructure it runs on.
+          </p>
         </div>
 
-        <div className="mx-auto grid max-w-6xl grid-cols-1 gap-5 md:grid-cols-3 md:py-6">
+        <div className="relative mx-auto grid max-w-6xl grid-cols-1 gap-5 md:grid-cols-3 md:py-6">
           {TIERS.map((tier, idx) => (
             <div
               key={tier.name}
@@ -339,13 +346,30 @@ export function PricingPage() {
           </p>
         </div>
 
-        <div className="relative grid grid-cols-1 gap-4 md:grid-cols-[1fr_auto_1fr] md:items-center">
+        <div className="relative grid grid-cols-1 gap-4 md:grid-cols-[1fr_auto_1fr] md:items-stretch md:gap-6">
+          {/* dashed line connecting the two receipts through the equals badge —
+              hidden below md because the cards stack with the badge between */}
+          <span
+            className="pointer-events-none absolute left-1/2 top-1/2 hidden h-px w-[calc(100%-11rem)] -translate-x-1/2 -translate-y-1/2 md:block"
+            style={{
+              backgroundImage:
+                "linear-gradient(90deg, transparent 0%, rgba(59,130,246,0.35) 20%, rgba(59,130,246,0.35) 80%, transparent 100%)",
+            }}
+            aria-hidden
+          />
           <Receipt title="Straight to your provider" subtitle="No gateway in the path" />
-          <div className="flex items-center justify-center md:py-8">
+          <div className="relative flex items-center justify-center md:py-8">
+            {/* halo behind the badge */}
             <span
-              className="flex h-11 w-11 items-center justify-center rounded-full border border-[var(--admin-border)] bg-[var(--admin-surface-elevated)] text-[15px] font-semibold text-[var(--admin-text-muted)]"
-              style={{ fontFamily: MONO }}
+              className="pointer-events-none absolute inset-0 m-auto h-16 w-16 rounded-full"
+              style={{ background: "radial-gradient(circle, rgba(59,130,246,0.18) 0%, transparent 70%)" }}
               aria-hidden
+            />
+            <span
+              className="wiwi-aurora relative flex h-12 w-12 items-center justify-center rounded-full border border-blue-400/30 bg-[var(--admin-surface-elevated)] text-[16px] font-semibold text-blue-300 shadow-lg shadow-blue-500/[0.12]"
+              style={{ fontFamily: MONO }}
+              aria-label="equals"
+              role="img"
             >
               =
             </span>
@@ -357,7 +381,8 @@ export function PricingPage() {
           />
         </div>
 
-        <p className="mt-4 text-center text-[12px] text-[var(--admin-text-dim)]">
+        <p className="mt-5 flex items-center justify-center gap-1.5 text-center text-[12px] text-[var(--admin-text-dim)]">
+          <Info size={12} aria-hidden />
           Illustrative month at $1,000 of provider usage.
         </p>
 
@@ -366,15 +391,25 @@ export function PricingPage() {
           {ZERO_FACTS.map(({ label, value }) => (
             <div
               key={label}
-              className="flex items-center justify-between gap-3 rounded-[12px] border border-[var(--admin-border)] bg-[var(--admin-surface)] px-5 py-4"
+              className="group relative overflow-hidden rounded-[12px] border border-[var(--admin-border)] bg-[var(--admin-surface)] px-5 py-4 transition-colors duration-150 hover:border-emerald-400/25"
             >
-              <span className="flex items-center gap-2 text-[13px] text-[var(--admin-text-muted)]">
-                <InfinityIcon size={14} className="text-emerald-400/80" aria-hidden />
-                {label}
-              </span>
-              <span className="text-[17px] font-semibold text-emerald-400" style={{ fontFamily: MONO }}>
-                {value}
-              </span>
+              {/* emerald wash that lifts on hover/focus-within — subtle, same
+                  accent the value already carries */}
+              <span
+                className="pointer-events-none absolute inset-0 bg-gradient-to-br from-emerald-400/[0.06] to-transparent opacity-60 transition-opacity duration-150 group-hover:opacity-100"
+                aria-hidden
+              />
+              <div className="relative flex items-center justify-between gap-3">
+                <span className="flex items-center gap-2 text-[13px] text-[var(--admin-text-muted)]">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-400/10">
+                    <InfinityIcon size={13} className="text-emerald-400/90" aria-hidden />
+                  </span>
+                  {label}
+                </span>
+                <span className="text-[17px] font-semibold text-emerald-400" style={{ fontFamily: MONO }}>
+                  {value}
+                </span>
+              </div>
             </div>
           ))}
         </div>
@@ -518,27 +553,19 @@ function TierCard({ tier }: { tier: Tier }) {
     <div
       className={`group relative flex h-full flex-col rounded-[var(--admin-radius-lg)] p-7 transition-all duration-300 hover:-translate-y-1 ${
         featured
-          ? "border border-blue-500/25 bg-[var(--admin-surface-elevated)] shadow-2xl shadow-blue-500/[0.08] md:scale-[1.03] md:hover:scale-[1.04]"
-          : "border border-[var(--admin-border)] bg-[var(--admin-surface)] hover:border-[var(--admin-border-hover)] hover:shadow-xl hover:shadow-black/30"
+          ? "border border-blue-500/25 bg-[var(--admin-surface-elevated)] md:scale-[1.03]"
+          : "border border-[var(--admin-border)] bg-[var(--admin-surface)] hover:border-[var(--admin-border-hover)]"
       }`}
     >
-      {/* accent wash, keyed to the tier's own colour */}
-      <span
-        className="pointer-events-none absolute inset-0 opacity-70 transition-opacity duration-300 group-hover:opacity-100"
-        style={{
-          background: `radial-gradient(110% 70% at 50% 0%, ${withAlpha(tier.accent, featured ? 0.12 : 0.07)} 0%, transparent 60%)`,
-        }}
-        aria-hidden
-      />
       {/* top specular edge */}
       <span
         className="pointer-events-none absolute inset-x-6 top-0 h-px"
-        style={{ background: `linear-gradient(90deg, transparent, ${withAlpha(tier.accent, 0.55)}, transparent)` }}
+        style={{ background: `linear-gradient(90deg, transparent, ${withAlpha(tier.accent, 0.35)}, transparent)` }}
         aria-hidden
       />
 
       {featured && (
-        <span className="absolute -top-3 right-6 inline-flex items-center gap-1.5 rounded-full border border-blue-500/30 bg-blue-500/15 px-3 py-1 text-[11px] font-medium text-blue-300">
+        <span className="absolute -top-3.5 left-1/2 inline-flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-blue-500/30 bg-[var(--admin-surface-elevated)] px-3.5 py-1.5 text-[11px] font-semibold text-blue-300">
           <Sparkles size={11} aria-hidden />
           Most popular
         </span>
@@ -547,7 +574,7 @@ function TierCard({ tier }: { tier: Tier }) {
       <div className="relative z-10 flex h-full flex-col">
         <div className="mb-6 flex items-center gap-3">
           <span
-            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[12px] border transition-transform duration-300 group-hover:scale-105"
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[12px] border transition-transform duration-300 group-hover:scale-110"
             style={{
               background: withAlpha(tier.accent, 0.1),
               borderColor: withAlpha(tier.accent, 0.22),
@@ -567,9 +594,12 @@ function TierCard({ tier }: { tier: Tier }) {
         </div>
 
         {/* price block */}
-        <div className="rounded-[12px] border border-white/[0.05] bg-white/[0.02] px-4 py-4">
+        <div
+          className="relative rounded-[12px] border px-4 py-4"
+          style={{ borderColor: withAlpha(tier.accent, 0.14), background: "rgba(255,255,255,0.02)" }}
+        >
           <div className="flex items-baseline gap-2">
-            <span className="text-[40px] font-bold leading-none tracking-[-0.03em] tabular-nums" style={{ fontFamily: MONO, color: tier.accent }}>
+            <span className="text-[42px] font-bold leading-none tracking-[-0.03em] tabular-nums" style={{ fontFamily: MONO, color: tier.accent }}>
               {tier.price}
             </span>
             <span className="text-[12px] leading-tight text-[var(--admin-text-dim)]">
@@ -586,14 +616,14 @@ function TierCard({ tier }: { tier: Tier }) {
 
         <ul className="mb-7 flex-1 space-y-3">
           {tier.features.map((f) => (
-            <li key={f} className="flex items-start gap-2.5">
+            <li key={f} className="group/feat flex items-start gap-2.5">
               <span
-                className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full"
+                className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full transition-transform duration-150 group-hover/feat:scale-110"
                 style={{ background: withAlpha(tier.accent, 0.14) }}
               >
                 <Check size={10} style={{ color: tier.accent }} aria-hidden />
               </span>
-              <span className="text-[13px] leading-relaxed text-[var(--admin-text-muted)]">
+              <span className="text-[13px] leading-relaxed text-[var(--admin-text-muted)] transition-colors duration-150 group-hover/feat:text-[var(--admin-text)]">
                 {f}
               </span>
             </li>
@@ -609,7 +639,7 @@ function TierCard({ tier }: { tier: Tier }) {
           }`}
         >
           {tier.cta.label}
-          <ArrowRight size={14} />
+          <ArrowRight size={14} className="transition-transform duration-150 group-hover:translate-x-0.5" />
         </Link>
       </div>
     </div>
@@ -628,45 +658,83 @@ function Receipt({
   accent?: boolean;
 }) {
   return (
-    <div
-      className={`rounded-[14px] border p-5 transition-colors sm:p-6 ${
-        accent
-          ? "border-blue-500/25 bg-[var(--admin-surface-elevated)] shadow-lg shadow-blue-500/[0.06]"
-          : "border-[var(--admin-border)] bg-[var(--admin-surface)]"
-      }`}
-    >
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="text-[13px] font-semibold text-[var(--admin-text)]">{title}</div>
-          <div className="mt-0.5 text-[11px] text-[var(--admin-text-dim)]">{subtitle}</div>
-        </div>
+    <div className="relative">
+      {/* receipt-paper zigzag bottom edge — pure CSS, two stacked triangles
+          via a repeating background, offset by half a unit */}
+      <div
+        className={`pointer-events-none absolute inset-x-3 bottom-0 h-2 translate-y-full ${
+          accent ? "opacity-25" : "opacity-15"
+        }`}
+        style={{
+          background: accent ? "#3b82f6" : "var(--admin-border)",
+          clipPath:
+            "polygon(0 0, 100% 0, 100% 100%, 97.5% 0, 95% 100%, 92.5% 0, 90% 100%, 87.5% 0, 85% 100%, 82.5% 0, 80% 100%, 77.5% 0, 75% 100%, 72.5% 0, 70% 100%, 67.5% 0, 65% 100%, 62.5% 0, 60% 100%, 57.5% 0, 55% 100%, 52.5% 0, 50% 100%, 47.5% 0, 45% 100%, 42.5% 0, 40% 100%, 37.5% 0, 35% 100%, 32.5% 0, 30% 100%, 27.5% 0, 25% 100%, 22.5% 0, 20% 100%, 17.5% 0, 15% 100%, 12.5% 0, 10% 100%, 7.5% 0, 5% 100%, 2.5% 0, 0 100%)",
+        }}
+        aria-hidden
+      />
+      <div
+        className={`relative overflow-hidden rounded-t-[14px] border p-5 transition-colors sm:p-6 ${
+          accent
+            ? "border-blue-500/25 border-b-0 bg-[var(--admin-surface-elevated)] shadow-lg shadow-blue-500/[0.06]"
+            : "border-[var(--admin-border)] border-b-0 bg-[var(--admin-surface)]"
+        }`}
+      >
+        {/* faint top accent wash — the wiwi receipt reads "this is the one you want" */}
         {accent && (
-          <span className="admin-badge admin-badge-blue shrink-0">
-            <Check size={11} aria-hidden />
-            No markup
-          </span>
-        )}
-      </div>
-
-      <dl className="mt-5 space-y-2.5">
-        <ReceiptRow label="Provider usage" value={SAMPLE_BILL.provider} />
-        <ReceiptRow label="wiwi platform fee" value={SAMPLE_BILL.fee} muted />
-        <div className="!mt-4 flex items-baseline gap-3 border-t border-dashed border-[var(--admin-border)] pt-3.5">
-          <dt className="text-[12px] font-medium text-[var(--admin-text-muted)]">Total</dt>
           <span
-            className="mx-1 h-px flex-1 translate-y-[-3px]"
-            style={{
-              backgroundImage:
-                "radial-gradient(circle, var(--admin-text-dim) 1px, transparent 1px)",
-              backgroundSize: "6px 6px",
-            }}
+            className="pointer-events-none absolute inset-x-0 top-0 h-20"
+            style={{ background: "linear-gradient(180deg, rgba(59,130,246,0.07) 0%, transparent 100%)" }}
             aria-hidden
           />
-          <dd className="text-[19px] font-semibold tabular-nums text-[var(--admin-text)]" style={{ fontFamily: MONO }}>
-            {SAMPLE_BILL.total}
-          </dd>
+        )}
+
+        <div className="relative flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-start gap-3">
+            <span
+              className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] ${
+                accent ? "bg-blue-500/12 text-blue-300" : "bg-white/[0.04] text-[var(--admin-text-muted)]"
+              }`}
+            >
+              {accent ? <Route size={16} aria-hidden /> : <Zap size={16} aria-hidden />}
+            </span>
+            <div className="min-w-0">
+              <div className="text-[13px] font-semibold text-[var(--admin-text)]">{title}</div>
+              <div className="mt-0.5 text-[11px] text-[var(--admin-text-dim)]">{subtitle}</div>
+            </div>
+          </div>
+          {accent && (
+            <span className="admin-badge admin-badge-blue shrink-0">
+              <Check size={11} aria-hidden />
+              No markup
+            </span>
+          )}
         </div>
-      </dl>
+
+        <dl className="relative mt-5 space-y-2.5 rounded-[10px] border border-white/[0.04] bg-black/[0.14] px-3.5 py-3.5">
+          <ReceiptRow label="Provider usage" value={SAMPLE_BILL.provider} />
+          <ReceiptRow label="wiwi platform fee" value={SAMPLE_BILL.fee} muted />
+          <div className="!mt-4 flex items-baseline gap-3 border-t border-dashed border-[var(--admin-border)] pt-3.5">
+            <dt className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[var(--admin-text-muted)]">Total</dt>
+            <span
+              className="mx-1 h-px flex-1 translate-y-[-3px]"
+              style={{
+                backgroundImage:
+                  "radial-gradient(circle, var(--admin-text-dim) 1px, transparent 1px)",
+                backgroundSize: "6px 6px",
+              }}
+              aria-hidden
+            />
+            <dd
+              className={`text-[21px] font-bold tabular-nums ${
+                accent ? "text-blue-300" : "text-[var(--admin-text)]"
+              }`}
+              style={{ fontFamily: MONO }}
+            >
+              {SAMPLE_BILL.total}
+            </dd>
+          </div>
+        </dl>
+      </div>
     </div>
   );
 }

@@ -628,7 +628,7 @@ function ChatSidebar(props: {
         >
           <MessageSquarePlus size={18} />
         </button>
-        <div className="mt-auto flex h-8 w-8 items-center justify-center rounded-full border border-emerald-400/20 bg-emerald-400/[0.07] text-emerald-300" title="Playground session active" aria-label="Playground session active">
+        <div className="mt-auto flex h-8 w-8 items-center justify-center rounded-full border border-white/10 bg-white/[0.04] text-[var(--admin-text-dim)]" title="Playground session active" aria-label="Playground session active">
           <CircleDot size={14} />
         </div>
       </aside>
@@ -659,10 +659,10 @@ function ChatSidebar(props: {
         aria-label="Conversation history"
       >
         {/* Header */}
-        <div className="pg-sidebar-header flex items-center justify-between px-4 py-4">
+        <div className="pg-sidebar-header flex items-center justify-between px-4 py-5">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <Layers3 size={14} className="text-brand-300" aria-hidden />
+              <Layers3 size={14} className="text-[var(--admin-text-dim)]" aria-hidden />
               <span className="text-[12px] font-semibold uppercase tracking-wider text-[var(--admin-text)]">
                 Workspace
               </span>
@@ -685,9 +685,9 @@ function ChatSidebar(props: {
           <button
             type="button"
             onClick={onNew}
-            className="pg-new-chat flex min-h-11 w-full items-center gap-2 rounded-lg border border-[var(--admin-border)] bg-white/[0.025] px-3 py-2 text-[13px] font-medium text-[var(--admin-text)] transition-colors hover:border-brand-400/30 hover:bg-brand-500/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50"
+            className="pg-new-chat flex min-h-11 w-full items-center gap-2 rounded-lg border border-[var(--admin-border)] bg-white/[0.025] px-3 py-2 text-[13px] font-medium text-[var(--admin-text)] transition-colors hover:border-[var(--admin-border-hover)] hover:bg-white/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50"
           >
-            <span className="flex h-7 w-7 items-center justify-center rounded-md bg-brand-500/10 text-brand-300">
+            <span className="flex h-7 w-7 items-center justify-center rounded-md bg-white/[0.05] text-[var(--admin-text-muted)]">
               <MessageSquarePlus size={15} />
             </span>
             <span>New conversation</span>
@@ -768,14 +768,14 @@ function ChatSidebar(props: {
                             pickChat(c.id);
                           }
                         }}
-                        className="pg-chat-item group flex cursor-pointer items-start gap-2.5 rounded-lg border border-transparent px-2.5 py-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50"
+                        className="pg-chat-item group flex cursor-pointer items-start gap-3 rounded-lg border border-transparent px-3 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50"
                       >
                         <span className="pg-chat-item-icon mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--admin-text-dim)]" aria-hidden>
                           <MessageSquare size={12} />
                         </span>
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-1.5">
-                            <span className={`truncate text-[13px] ${c.id === activeId ? "text-brand-300 font-medium" : "text-[var(--admin-text-muted)]"}`}>
+                            <span className={`truncate text-[13px] ${c.id === activeId ? "text-[var(--admin-text)] font-medium" : "text-[var(--admin-text-muted)]"}`}>
                               {c.title || "New chat"}
                             </span>
                           </div>
@@ -1018,6 +1018,39 @@ export function PlaygroundPage() {
   // scroll state
   const scrollRef = useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = useState(true);
+  // The fixed beam backdrop is an SMIL-animated SVG composited with
+  // mix-blend-mode: screen over the chat. While its gradient offsets animate,
+  // Chromium must re-raster and re-blend that layer every frame; when the chat
+  // above it scrolls at the same time, each scroll frame drags the whole
+  // backdrop into the repaint and the result reads as flicker/glitch on
+  // software-rendered displays (AUDIT #518). Freezing the SVG's SMIL clock for
+  // the duration of a scroll gesture removes the per-frame invalidation with
+  // no visible change when nothing is scrolling.
+  const atmosphereRef = useRef<HTMLDivElement>(null);
+  const resumeBeamsTimer = useRef<number>(0);
+
+  const freezeBeams = useCallback(() => {
+    const svg = atmosphereRef.current?.querySelector<SVGSVGElement>(
+      ".pg-workbench-beams"
+    );
+    if (!svg || typeof svg.pauseAnimations !== "function") return;
+    svg.pauseAnimations();
+    window.clearTimeout(resumeBeamsTimer.current);
+    resumeBeamsTimer.current = window.setTimeout(() => {
+      svg.unpauseAnimations();
+    }, 250);
+  }, []);
+
+  useEffect(
+    () => () => {
+      window.clearTimeout(resumeBeamsTimer.current);
+      // Leave the clock running if we are torn down mid-gesture.
+      atmosphereRef.current
+        ?.querySelector<SVGSVGElement>(".pg-workbench-beams")
+        ?.unpauseAnimations();
+    },
+    []
+  );
 
   const groups: ModelGroup[] = modelsQ.data?.groups ?? [];
   const effectiveModel = model || groups[0]?.name || "";
@@ -1352,6 +1385,14 @@ export function PlaygroundPage() {
 
   // ── scroll management ─────────────────────────────────────────────────────
 
+  // The chat id whose empty state has already been top-aligned. A ref, not
+  // state: the layout effect below also fires on `atBottom`, which every
+  // scroll gesture flips — an unconditional `scrollTop = 0` there re-ran
+  // continuously and fought the user's own scroll, which is what made the
+  // empty "new chat" launcher flicker instead of scroll (AUDIT #517).
+  // Keying on the chat id means each new empty chat still starts at the top.
+  const emptyScrollChat = useRef<string | null>(null);
+
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
@@ -1362,20 +1403,27 @@ export function PlaygroundPage() {
     if (!el) return;
     const isEnd = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
     setAtBottom(isEnd);
-  }, []);
+    freezeBeams();
+  }, [freezeBeams]);
 
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    // An empty workbench is intentionally top-aligned. Without this guard the
-    // initial empty render is treated as an "at bottom" conversation and the
-    // long prompt launcher scrolls its own title out of view on phones.
+    // An empty workbench is intentionally top-aligned — but only once per
+    // chat. This effect also re-runs on `atBottom`, which every scroll gesture
+    // flips, so an unconditional `scrollTop = 0` here undid the user's scroll
+    // on every frame: the launcher snapped back to the top instead of
+    // scrolling, which read as a flicker/glitch (AUDIT #517).
     if (messages.length === 0) {
-      el.scrollTop = 0;
+      if (emptyScrollChat.current !== activeChatId) {
+        emptyScrollChat.current = activeChatId;
+        el.scrollTop = 0;
+      }
       return;
     }
+    emptyScrollChat.current = null;
     if (atBottom) scrollToBottom();
-  }, [messages, atBottom, scrollToBottom]);
+  }, [messages, atBottom, scrollToBottom, activeChatId]);
 
   const onSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -1398,7 +1446,11 @@ export function PlaygroundPage() {
   return (
     <div data-admin className="relative z-0 flex h-dvh flex-col overflow-hidden bg-[var(--admin-bg)] text-[var(--admin-text)]">
       {/* Shared site motion language: one restrained beam layer, no ambient glow. */}
-      <div className="pg-atmosphere pointer-events-none fixed inset-0" aria-hidden>
+      <div
+        ref={atmosphereRef}
+        className="pg-atmosphere pointer-events-none fixed inset-0"
+        aria-hidden
+      >
         <HeroBeamBackdrop beams={HERO_BEAMS_COMPACT} className="pg-workbench-beams" />
       </div>
 
