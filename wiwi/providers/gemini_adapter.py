@@ -133,10 +133,30 @@ class GeminiAdapter(WarningMixin):
             for p in m.parts:
                 if isinstance(p, ir.ToolUsePart):
                     tool_names[p.id] = p.name
+        seen_non_system = False
         for m in req.messages:
-            if m.role == "system":
+            if m.role == "system" and not seen_non_system:
                 system_parts.extend(p.text for p in m.parts if isinstance(p, ir.TextPart))
                 continue
+            if m.role == "system":
+                # Mid-conversation system message. ``contents`` accepts only
+                # user/model roles, so unlike Anthropic it cannot stay its own
+                # entry: fold it in place as explicitly-marked user text. The
+                # hoist used to move it to the front, destroying its position
+                # relative to the turns around it (AUDIT #328). The merge at
+                # the tail folds it into the adjacent user content when one
+                # precedes it, and preserves its position after a model turn.
+                role = "user"
+                parts = [{"text": f"[system]\n{p.text}"}
+                         for p in m.parts
+                         if isinstance(p, ir.TextPart) and p.text]
+                if parts:
+                    if contents and contents[-1]["role"] == role:
+                        contents[-1]["parts"].extend(parts)
+                    else:
+                        contents.append({"role": role, "parts": parts})
+                continue
+            seen_non_system = True
             role = "model" if m.role == "assistant" else "user"
             parts: list[dict[str, Any]] = []
             for p in m.parts:
