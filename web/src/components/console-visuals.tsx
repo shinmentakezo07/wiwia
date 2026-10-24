@@ -321,6 +321,7 @@ export function GaugeRing(props: {
   color?: string;
   size?: number;
   icon?: LucideIcon;
+  className?: string;
 }) {
   const size = props.size ?? 132;
   const stroke = 9;
@@ -331,7 +332,7 @@ export function GaugeRing(props: {
   const Icon = props.icon;
 
   return (
-    <div className="flex flex-col items-center px-4 py-5">
+    <div className={`flex flex-col items-center px-4 py-5 ${props.className ?? ""}`}>
       <div className="relative" style={{ width: size, height: size }}>
         <svg width={size} height={size} className="-rotate-90">
           <circle

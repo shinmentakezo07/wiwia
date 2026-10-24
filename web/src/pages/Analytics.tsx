@@ -21,6 +21,7 @@ import {
 } from "recharts";
 import {
   Activity,
+  AlertTriangle,
   ArrowDownToLine,
   ArrowUpFromLine,
   Database,
@@ -67,7 +68,7 @@ import {
   Table,
   TD,
 } from "@/components/ui";
-import { fmtInt, fmtPct, fmtTokens, fmtUsd, groupBy, mean } from "@/lib/format";
+import { fmtInt, fmtPct, fmtTokens, fmtUsd, groupBy, mean, p95 } from "@/lib/format";
 import { logsToCsv, mergeLogs } from "@/lib/csv";
 import {
   ImportCsvButton,
@@ -78,11 +79,13 @@ import { hourlySeries } from "@/lib/dashboard-metrics";
 import { downloadBlob } from "@/api/backup";
 import {
   GaugeRing,
+  LatencyRibbon,
   LivePulseMeter,
   ShareBars,
   StatusMix,
   TokenRibbon,
   VisualCard,
+  latencyProfile,
   statusSlices,
 } from "@/components/console-visuals";
 import type { PulseEvent, ShareRow } from "@/components/console-visuals";
@@ -921,6 +924,11 @@ function PricingManager(props: {
 export function AnalyticsPage() {
   const [groupDim, setGroupDim] = useState<GroupDim>("model");
   const [metric, setMetric] = useState<Metric>("requests");
+  const [hoveredSlice, setHoveredSlice] = useState<number | null>(null);
+  const [trendSeries, setTrendSeries] = useState<("requests" | "tokens" | "cost")[]>([
+    "requests",
+    "cost",
+  ]);
   const [selectedModel, setSelectedModel] = useState<string>("all");
   const [exporting, setExporting] = useState(false);
   const [exportNote, setExportNote] = useState<string | null>(null);
@@ -1121,6 +1129,8 @@ export function AnalyticsPage() {
   }, [logs]);
 
   const stats = useMemo(() => {
+    const latencies = logs.filter((l) => l.latency_ms > 0).map((l) => l.latency_ms);
+    const ttfts = logs.filter((l) => l.ttft_ms > 0).map((l) => l.ttft_ms);
     return {
       cost: logs.reduce((a, l) => a + l.cost, 0),
       avgTps: mean(logs.filter((l) => l.tps > 0).map((l) => l.tps)),
@@ -1128,6 +1138,12 @@ export function AnalyticsPage() {
       tokens: logs.reduce((a, l) => a + l.tok_in + l.tok_cached + l.tok_reasoning + l.tok_out, 0),
       errors: logs.filter((l) => l.status >= 400).length,
       errorRate: logs.length ? logs.filter((l) => l.status >= 400).length / logs.length : 0,
+      latencies,
+      avgLatency: mean(latencies),
+      p95Latency: p95(latencies),
+      ttfts,
+      avgTtft: mean(ttfts),
+      p95Ttft: p95(ttfts),
     };
   }, [logs]);
 
@@ -1330,7 +1346,7 @@ export function AnalyticsPage() {
       />
 
       {/* ── Stat cards ─────────────────────────────────────────────────── */}
-      <div className="admin-stagger grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="admin-stagger grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         <StatCard
           featured
           icon={Activity}
@@ -1377,15 +1393,37 @@ export function AnalyticsPage() {
           spark={savingsSpark}
           waiting={logs.length === 0}
         />
+        <StatCard
+          featured
+          icon={AlertTriangle}
+          tone={stats.errorRate > 0.05 ? "danger" : "brand"}
+          label="error rate"
+          value={fmtPct(stats.errorRate)}
+          numeric={stats.errorRate * 100}
+          format={(v) => fmtPct(v / 100)}
+          sub={stats.errors > 0 ? `${fmtInt(stats.errors)} failed requests` : "no errors"}
+          waiting={logs.length === 0}
+        />
+        <StatCard
+          featured
+          icon={Timer}
+          tone="brand"
+          label="avg latency"
+          value={`${fmtInt(stats.avgLatency)}ms`}
+          numeric={stats.avgLatency}
+          format={(v) => `${fmtInt(v)}ms`}
+          sub={`p95 ${fmtInt(stats.p95Latency)}ms · stream TTFT p95 ${fmtInt(stats.p95Ttft)}ms`}
+          waiting={logs.length === 0}
+        />
       </div>
 
       {/* ── Live pulse + gauges ────────────────────────────────────────── */}
-      <div className="mt-4 grid gap-4 xl:grid-cols-3">
+      <div className="mt-4 grid gap-4 xl:grid-cols-5">
         <VisualCard
           title="live pulse"
           subtitle="requests per 2s · last 60s"
           icon={Activity}
-          className="xl:col-span-2"
+          className="xl:col-span-3"
           right={
             <span className="admin-live-badge">
               <span
@@ -1405,8 +1443,12 @@ export function AnalyticsPage() {
           />
         </VisualCard>
 
-        <VisualCard title="efficiency gauges" subtitle="share of spend & traffic" icon={Gauge}>
-          <div className="grid grid-cols-2 divide-x divide-[var(--admin-border)]">
+        <VisualCard
+          title="efficiency gauges"
+          subtitle="share of spend & traffic"
+          className="xl:col-span-2"
+        >
+          <div className="flex flex-wrap items-stretch justify-center divide-x divide-[var(--admin-border)] max-sm:grid max-sm:grid-cols-1 max-sm:divide-x-0 max-sm:divide-y">
             <GaugeRing
               value={cacheSavingsRate}
               label="saved"
@@ -1414,7 +1456,8 @@ export function AnalyticsPage() {
               sub={`${fmtUsd(stats.savings)} saved`}
               color="var(--admin-success)"
               icon={Database}
-              size={124}
+              size={112}
+              className="flex-1 basis-[calc(33.333%-1rem)] min-w-0"
             />
             <GaugeRing
               value={streamingShare}
@@ -1423,9 +1466,48 @@ export function AnalyticsPage() {
               sub={`${fmtInt(logs.length)} requests`}
               color="var(--admin-accent-purple)"
               icon={Zap}
-              size={124}
+              size={112}
+              className="flex-1 basis-[calc(33.333%-1rem)] min-w-0"
+            />
+            <GaugeRing
+              value={stats.errorRate}
+              label="errors"
+              center={fmtPct(stats.errorRate)}
+              sub={stats.errors > 0 ? `${fmtInt(stats.errors)} failed` : "all clear"}
+              color={stats.errorRate > 0.05 ? "var(--admin-danger)" : "var(--admin-success)"}
+              icon={AlertTriangle}
+              size={112}
+              className="flex-1 basis-[calc(33.333%-1rem)] min-w-0"
             />
           </div>
+        </VisualCard>
+      </div>
+
+      {/* ── Latency distributions ───────────────────────────────────────── */}
+      <div className="mt-4 grid gap-4 xl:grid-cols-2">
+        <VisualCard
+          title="latency distribution"
+          subtitle="end-to-end request latency"
+          icon={Timer}
+          right={
+            <span className="font-mono text-[11px] text-[var(--admin-text-dim)]">
+              {fmtInt(stats.latencies.length)} samples
+            </span>
+          }
+        >
+          <LatencyRibbon profile={latencyProfile(stats.latencies)} />
+        </VisualCard>
+        <VisualCard
+          title="time to first token"
+          subtitle="streaming TTFT"
+          icon={Gauge}
+          right={
+            <span className="font-mono text-[11px] text-[var(--admin-text-dim)]">
+              {fmtInt(stats.ttfts.length)} samples
+            </span>
+          }
+        >
+          <LatencyRibbon profile={latencyProfile(stats.ttfts)} color={COLORS.cost} />
         </VisualCard>
       </div>
 
@@ -1515,17 +1597,42 @@ export function AnalyticsPage() {
       <Card className="mt-4">
         <CardHeader
           title="7-day trend"
-          subtitle="Daily requests and cost over the last week"
+          subtitle="Daily requests, tokens and cost over the last week"
           right={
-            <div className="flex items-center gap-4 text-[11px] text-[var(--admin-text-dim)]">
-              <span className="flex items-center gap-1.5">
-                <span className="h-0.5 w-4 rounded" style={{ backgroundColor: COLORS.requests }} />
-                requests
-              </span>
-              <span className="flex items-center gap-1.5">
-                <span className="h-0.5 w-4 rounded" style={{ backgroundColor: COLORS.cost }} />
-                cost
-              </span>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {(
+                [
+                  { key: "requests", label: "requests", color: COLORS.requests },
+                  { key: "tokens", label: "tokens", color: COLORS.tokens },
+                  { key: "cost", label: "cost", color: COLORS.cost },
+                ] as const
+              ).map((s) => {
+                const on = trendSeries.includes(s.key);
+                return (
+                  <button
+                    key={s.key}
+                    type="button"
+                    aria-pressed={on}
+                    onClick={() =>
+                      setTrendSeries((prev) =>
+                        prev.includes(s.key)
+                          ? prev.length > 1
+                            ? prev.filter((k) => k !== s.key)
+                            : prev
+                          : [...prev, s.key],
+                      )
+                    }
+                    className={`flex min-h-[24px] items-center gap-1.5 rounded-full border px-2.5 text-[11px] transition-colors pointer-coarse:min-h-[32px] ${
+                      on
+                        ? "border-white/[0.14] bg-white/[0.05] text-[var(--admin-text)]"
+                        : "border-[var(--admin-border)] text-[var(--admin-text-dim)] hover:text-[var(--admin-text-muted)]"
+                    } focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--admin-accent)]`}
+                  >
+                    <span className="h-0.5 w-3 rounded" style={{ backgroundColor: s.color }} />
+                    {s.label}
+                  </button>
+                );
+              })}
             </div>
           }
         />
@@ -1543,6 +1650,10 @@ export function AnalyticsPage() {
                   <linearGradient id="grad-cost" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="0%" stopColor={COLORS.cost} stopOpacity={0.18} />
                     <stop offset="100%" stopColor={COLORS.cost} stopOpacity={0.01} />
+                  </linearGradient>
+                  <linearGradient id="grad-tok" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={COLORS.tokens} stopOpacity={0.2} />
+                    <stop offset="100%" stopColor={COLORS.tokens} stopOpacity={0.01} />
                   </linearGradient>
                 </defs>
                 <CartesianGrid
@@ -1578,30 +1689,48 @@ export function AnalyticsPage() {
                   content={<ChartTooltip fmt={(v) => fmtInt(v)} />}
                   cursor={{ stroke: "#3b82f6", strokeOpacity: 0.2 }}
                 />
-                <Area
-                  yAxisId="left"
-                  type="monotone"
-                  dataKey="requests"
-                  name="requests"
-                  stroke={COLORS.requests}
-                  strokeWidth={2.5}
-                  fill="url(#grad-req)"
-                  fillOpacity={1}
-                  dot={{ r: 3, fill: COLORS.requests, strokeWidth: 0 }}
-                  activeDot={{ r: 5, strokeWidth: 0 }}
-                />
-                <Area
-                  yAxisId="right"
-                  type="monotone"
-                  dataKey="cost"
-                  name="cost"
-                  stroke={COLORS.cost}
-                  strokeWidth={2}
-                  fill="url(#grad-cost)"
-                  fillOpacity={1}
-                  dot={{ r: 3, fill: COLORS.cost, strokeWidth: 0 }}
-                  activeDot={{ r: 5, strokeWidth: 0 }}
-                />
+                {trendSeries.includes("requests") && (
+                  <Area
+                    yAxisId="left"
+                    type="monotone"
+                    dataKey="requests"
+                    name="requests"
+                    stroke={COLORS.requests}
+                    strokeWidth={2.5}
+                    fill="url(#grad-req)"
+                    fillOpacity={1}
+                    dot={{ r: 3, fill: COLORS.requests, strokeWidth: 0 }}
+                    activeDot={{ r: 5, strokeWidth: 0 }}
+                  />
+                )}
+                {trendSeries.includes("tokens") && (
+                  <Area
+                    yAxisId="left"
+                    type="monotone"
+                    dataKey="tokens"
+                    name="tokens"
+                    stroke={COLORS.tokens}
+                    strokeWidth={2}
+                    fill="url(#grad-tok)"
+                    fillOpacity={1}
+                    dot={{ r: 3, fill: COLORS.tokens, strokeWidth: 0 }}
+                    activeDot={{ r: 5, strokeWidth: 0 }}
+                  />
+                )}
+                {trendSeries.includes("cost") && (
+                  <Area
+                    yAxisId="right"
+                    type="monotone"
+                    dataKey="cost"
+                    name="cost"
+                    stroke={COLORS.cost}
+                    strokeWidth={2}
+                    fill="url(#grad-cost)"
+                    fillOpacity={1}
+                    dot={{ r: 3, fill: COLORS.cost, strokeWidth: 0 }}
+                    activeDot={{ r: 5, strokeWidth: 0 }}
+                  />
+                )}
               </AreaChart>
             </ResponsiveContainer>
           )}
@@ -1785,9 +1914,23 @@ export function AnalyticsPage() {
                         outerRadius={82}
                         paddingAngle={2}
                         stroke="none"
+                        onMouseEnter={(_, i) => setHoveredSlice(i)}
+                        onMouseLeave={() => setHoveredSlice(null)}
                       >
                         {donutData.map((entry, i) => (
-                          <Cell key={i} fill={entry.color} />
+                          <Cell
+                            key={i}
+                            fill={entry.color}
+                            style={{
+                              opacity: hoveredSlice === null || hoveredSlice === i ? 1 : 0.35,
+                              filter:
+                                hoveredSlice === i
+                                  ? `drop-shadow(0 0 8px ${entry.color}66)`
+                                  : undefined,
+                              transition: "opacity 200ms, filter 200ms",
+                              outline: "none",
+                            }}
+                          />
                         ))}
                       </Pie>
                       <Tooltip
@@ -1800,16 +1943,37 @@ export function AnalyticsPage() {
                   </ResponsiveContainer>
                   <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
                     <span className="text-[10px] uppercase tracking-wider text-[var(--admin-text-dim)]">
-                      total
+                      {hoveredSlice !== null && donutData[hoveredSlice]
+                        ? donutData[hoveredSlice].name.length > 18
+                          ? `${donutData[hoveredSlice].name.slice(0, 17)}…`
+                          : donutData[hoveredSlice].name
+                        : "total"}
                     </span>
                     <span className="font-mono text-lg font-semibold text-[var(--admin-text)]">
-                      {donutFmt(donutTotal)}
+                      {hoveredSlice !== null && donutData[hoveredSlice]
+                        ? donutFmt(donutData[hoveredSlice].value)
+                        : donutFmt(donutTotal)}
                     </span>
+                    {hoveredSlice !== null && donutData[hoveredSlice] && donutTotal > 0 && (
+                      <span className="mt-0.5 font-mono text-[11px] text-[var(--admin-text-dim)]">
+                        {((donutData[hoveredSlice].value / donutTotal) * 100).toFixed(1)}% of total
+                      </span>
+                    )}
                   </div>
                 </div>
                 <div className="mt-4 space-y-1.5">
-                  {donutData.slice(0, 5).map((d) => (
-                    <div key={d.name} className="flex items-center justify-between text-[12px]">
+                  {donutData.slice(0, 5).map((d, i) => (
+                    <button
+                      key={d.name}
+                      type="button"
+                      onMouseEnter={() => setHoveredSlice(i)}
+                      onMouseLeave={() => setHoveredSlice(null)}
+                      onFocus={() => setHoveredSlice(i)}
+                      onBlur={() => setHoveredSlice(null)}
+                      className={`flex w-full items-center justify-between rounded-md px-2 py-1 text-left text-[12px] transition-colors ${
+                        hoveredSlice === i ? "bg-white/[0.04]" : ""
+                      } focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--admin-accent)]`}
+                    >
                       <div className="flex min-w-0 items-center gap-2">
                         <span
                           className="h-2 w-2 shrink-0 rounded-full"
@@ -1820,7 +1984,7 @@ export function AnalyticsPage() {
                       <span className="font-mono text-[var(--admin-text-dim)]">
                         {((d.value / donutTotal) * 100).toFixed(1)}%
                       </span>
-                    </div>
+                    </button>
                   ))}
                   {donutData.length > 5 && (
                     <div className="text-[11px] text-[var(--admin-text-dim)]">
