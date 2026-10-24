@@ -498,6 +498,8 @@ export function UsagePage() {
     return rows.sort((a, b) => b.requests - a.requests);
   }, [allLogs, groupDim]);
 
+  const [hoveredSlice, setHoveredSlice] = useState<number | null>(null);
+
   const tpsBuckets = useMemo<TpsBucket[]>(
     () => (tpsQuery.data?.buckets ?? []) as TpsBucket[],
     [tpsQuery.data],
@@ -740,7 +742,7 @@ export function UsagePage() {
       <ImportedCsvNotice csv={importedCsv} scopeNote={importedScopeNote} />
 
       {/* Hero row: 4 featured stat cards with icons, sparklines, deltas */}
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="admin-stagger grid grid-cols-2 gap-3 lg:grid-cols-4">
         <StatCard
           featured
           icon={Activity}
@@ -883,12 +885,12 @@ export function UsagePage() {
       </div>
 
       {/* Live pulse + gauges */}
-      <div className="mt-4 grid gap-4 xl:grid-cols-3">
+      <div className="mt-4 grid gap-4 xl:grid-cols-5">
         <VisualCard
           title="live pulse"
           subtitle="requests per 2s · last 60s"
           icon={Activity}
-          className="xl:col-span-2"
+          className="xl:col-span-3"
           right={
             <span className="admin-live-badge">
               <span
@@ -908,8 +910,13 @@ export function UsagePage() {
           />
         </VisualCard>
 
-        <VisualCard title="window gauges" subtitle="share of traffic" icon={Gauge}>
-          <div className="grid grid-cols-2 divide-x divide-[var(--admin-border)]">
+        <VisualCard
+          title="window gauges"
+          subtitle="share of traffic"
+          icon={Gauge}
+          className="xl:col-span-2"
+        >
+          <div className="flex flex-wrap items-stretch justify-center divide-x divide-[var(--admin-border)] max-sm:grid max-sm:grid-cols-1 max-sm:divide-x-0 max-sm:divide-y">
             <GaugeRing
               value={cacheHitRate}
               label="cache hit"
@@ -917,7 +924,8 @@ export function UsagePage() {
               sub={`${fmtInt(cacheHits)} hits`}
               color="var(--admin-success)"
               icon={Zap}
-              size={124}
+              size={112}
+              className="flex-1 basis-[calc(33.333%-1rem)] min-w-0"
             />
             <GaugeRing
               value={streamingShare}
@@ -926,7 +934,18 @@ export function UsagePage() {
               sub={`${fmtInt(requests)} requests`}
               color="var(--admin-accent-purple)"
               icon={Percent}
-              size={124}
+              size={112}
+              className="flex-1 basis-[calc(33.333%-1rem)] min-w-0"
+            />
+            <GaugeRing
+              value={errorRate}
+              label="errors"
+              center={fmtPct(errorRate)}
+              sub={errors > 0 ? `${fmtInt(errors)} failed` : "all clear"}
+              color={errorRate > 0.05 ? "var(--admin-danger)" : "var(--admin-success)"}
+              icon={Activity}
+              size={112}
+              className="flex-1 basis-[calc(33.333%-1rem)] min-w-0"
             />
           </div>
         </VisualCard>
@@ -1084,9 +1103,23 @@ export function UsagePage() {
                       outerRadius={85}
                       paddingAngle={2}
                       stroke="none"
+                      onMouseEnter={(_, i) => setHoveredSlice(i)}
+                      onMouseLeave={() => setHoveredSlice(null)}
                     >
-                      {share.map((s) => (
-                        <Cell key={s.name} fill={s.color} />
+                      {share.map((s, i) => (
+                        <Cell
+                          key={s.name}
+                          fill={s.color}
+                          style={{
+                            opacity: hoveredSlice === null || hoveredSlice === i ? 1 : 0.35,
+                            filter:
+                              hoveredSlice === i
+                                ? `drop-shadow(0 0 8px ${s.color}66)`
+                                : undefined,
+                            transition: "opacity 200ms, filter 200ms",
+                            outline: "none",
+                          }}
+                        />
                       ))}
                     </Pie>
                     <Tooltip
@@ -1094,23 +1127,47 @@ export function UsagePage() {
                     />
                   </PieChart>
                 </ResponsiveContainer>
-                {/* center label overlay */}
+                {/* center label overlay — swaps to the hovered slice */}
                 <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
-                  <span className="font-mono text-[18px] font-bold tabular-nums text-[var(--admin-text)]">
-                    {fmtTokens(totalTokens)}
-                  </span>
-                  <span className="admin-label mt-1">total tokens</span>
+                  {hoveredSlice !== null && share[hoveredSlice] ? (
+                    <>
+                      <span className="admin-label">{share[hoveredSlice].name}</span>
+                      <span className="font-mono text-[18px] font-bold tabular-nums text-[var(--admin-text)]">
+                        {fmtTokens(share[hoveredSlice].value)}
+                      </span>
+                      <span className="mt-0.5 font-mono text-[11px] text-[var(--admin-text-dim)]">
+                        {totalTokens > 0 ? fmtPct(share[hoveredSlice].value / totalTokens) : "0%"}
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="font-mono text-[18px] font-bold tabular-nums text-[var(--admin-text)]">
+                        {fmtTokens(totalTokens)}
+                      </span>
+                      <span className="admin-label mt-1">total tokens</span>
+                    </>
+                  )}
                 </div>
-                {/* custom legend with percentages */}
-                <div className="absolute bottom-3 left-0 right-0 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 px-4">
-                  {share.map((s) => (
-                    <span key={s.name} className="flex items-center gap-1.5 text-[11px] text-[var(--admin-text-muted)]">
+                {/* custom legend — interactive, syncs with the donut */}
+                <div className="absolute bottom-3 left-0 right-0 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 px-4">
+                  {share.map((s, i) => (
+                    <button
+                      key={s.name}
+                      type="button"
+                      onMouseEnter={() => setHoveredSlice(i)}
+                      onMouseLeave={() => setHoveredSlice(null)}
+                      onFocus={() => setHoveredSlice(i)}
+                      onBlur={() => setHoveredSlice(null)}
+                      className={`flex min-h-[24px] items-center gap-1.5 rounded-md px-1 text-[11px] text-[var(--admin-text-muted)] transition-colors ${
+                        hoveredSlice === i ? "bg-white/[0.05]" : ""
+                      } focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--admin-accent)]`}
+                    >
                       <span className="h-0.5 w-3 rounded" style={{ backgroundColor: s.color }} />
                       {s.name}
                       <span className="font-mono tabular-nums text-[var(--admin-text-dim)]">
                         {fmtPct(s.value / totalTokens)}
                       </span>
-                    </span>
+                    </button>
                   ))}
                 </div>
               </>
