@@ -370,7 +370,90 @@ body {
   }
 }
 
-/* Admin badge */
+/* Request-log rows are the page's primary navigation, so their hover is an
+   accent-tinted gradient (not the generic flat lift) — a faint blue→violet
+   wash matching the site's beam identity. Scoped to the logs table so the
+   config tables keep their neutral hover. */
+.admin-table-logs tbody tr:hover {
+  background: linear-gradient(
+    90deg,
+    rgba(59, 130, 246, 0.045) 0%,
+    rgba(124, 58, 237, 0.03) 50%,
+    rgba(59, 130, 246, 0.045) 100%
+  );
+}
+.admin-table-logs tbody tr:hover td:first-child {
+  box-shadow: inset 2px 0 0 0 rgba(96, 165, 250, 0.45);
+}
+
+/* -- Filter deck ------------------------------------------------------------
+   The request-logs toolbar as one bordered surface, so search, dropdowns and
+   the segmented toggles read as a single control band. */
+.admin-filter-deck {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--admin-border);
+  border-radius: var(--admin-radius);
+  background: var(--admin-surface);
+}
+.admin-filter-deck-rule {
+  flex: 0 0 1px;
+  align-self: stretch;
+  width: 1px;
+  background: var(--admin-border);
+}
+
+/* Segmented control — replaces the status/range dropdowns. A reader flips
+   between four statuses or eight ranges constantly; a one-click pill beats
+   opening a menu every time. The pressed state is a quiet surface lift, the
+   same treatment selects and tabs elsewhere in the console use. */
+.admin-segment {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  padding: 2px;
+  border: 1px solid var(--admin-border);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.25);
+}
+.admin-segment-btn {
+  min-height: 28px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--admin-text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+  white-space: nowrap;
+}
+.admin-segment-btn:hover:not([aria-pressed="true"]) {
+  color: var(--admin-text-muted);
+  background: rgba(255, 255, 255, 0.04);
+}
+.admin-segment-btn:focus-visible {
+  outline: 2px solid var(--admin-accent);
+  outline-offset: 1px;
+}
+.admin-segment-btn[aria-pressed="true"] {
+  color: var(--admin-text);
+  background: rgba(255, 255, 255, 0.07);
+}
+@media (pointer: coarse) {
+  .admin-segment-btn {
+    min-height: 40px;
+    padding: 0 12px;
+  }
+}
+
+/* -- Admin badge */
 .admin-badge {
   display: inline-flex;
   align-items: center;

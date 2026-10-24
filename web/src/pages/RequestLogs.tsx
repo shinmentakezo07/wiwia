@@ -57,7 +57,6 @@ import {
   LogsFooter,
   LogsSkeleton,
   LogsTable,
-  LogsToolbar,
   LogTD,
   MonoCell,
   NumCell,
@@ -146,7 +145,6 @@ const COL = {
   cache: "hidden xl:table-cell",
   open: "hidden sm:table-cell",
 } as const;
-
 const HEAD: { label: string; cls?: string }[] = [
   { label: "Time" },
   { label: "Key", cls: COL.key },
@@ -218,6 +216,33 @@ function distinctOptions(
 // ---------------------------------------------------------------------------
 // Overview band
 // ---------------------------------------------------------------------------
+
+/** Segmented pill control — the status and range filters are flipped between
+ *  constantly, so they read as one-click options rather than dropdown menus.
+ *  Full labels in `title` tooltips; the pills themselves stay short. */
+function SegmentControl(props: {
+  value: string;
+  options: { value: string; label: string; title?: string }[];
+  onChange: (v: string) => void;
+  ariaLabel: string;
+}) {
+  return (
+    <div className="admin-segment" role="group" aria-label={props.ariaLabel}>
+      {props.options.map((o) => (
+        <button
+          key={o.value}
+          type="button"
+          aria-pressed={props.value === o.value}
+          title={o.title ?? o.label}
+          onClick={() => props.onChange(o.value)}
+          className="admin-segment-btn"
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 interface WindowStats {
   total: number;
@@ -944,13 +969,18 @@ export function RequestLogsPage() {
         right={<LiveTail live={live} onToggle={setLive} connected={connected} />}
       />
 
-      <LogsToolbar>
+      {/* Filter deck — one instrument band instead of free-floating widgets.
+          Status and range are segmented pills (flipped between constantly);
+          model / provider / surface stay dropdowns because their option sets
+          are unbounded. */}
+      <div className="admin-filter-deck mb-3" role="search">
         <SearchInput
           value={q}
           onChange={setQ}
           placeholder="filter key / model / provider / request id…"
-          className="w-full sm:w-72"
+          className="w-full sm:w-64"
         />
+        <span aria-hidden className="admin-filter-deck-rule hidden lg:block" />
         <Select value={model} onChange={setModel} options={modelOpts} className="h-8 w-[150px] text-[12px] pointer-coarse:h-11" />
         <Select
           value={providerSel}
@@ -959,27 +989,35 @@ export function RequestLogsPage() {
           className="h-8 w-[160px] text-[12px] pointer-coarse:h-11"
         />
         <Select
-          value={status}
-          onChange={(v) => setStatus(v as StatusFilter)}
-          options={[
-            { value: "all", label: "All statuses" },
-            { value: "2xx", label: "2xx" },
-            { value: "4xx", label: "4xx" },
-            { value: "5xx", label: "5xx" },
-          ]}
-          className="h-8 w-[135px] text-[12px] pointer-coarse:h-11"
-        />
-        <Select
           value={surface}
           onChange={setSurface}
           options={surfaceOpts}
           className="h-8 w-[145px] text-[12px] pointer-coarse:h-11"
         />
-        <Select
+        <span aria-hidden className="admin-filter-deck-rule hidden md:block" />
+        <SegmentControl
+          ariaLabel="Filter by status"
+          value={status}
+          onChange={(v) => setStatus(v as StatusFilter)}
+          options={[
+            { value: "all", label: "All", title: "All statuses" },
+            { value: "2xx", label: "2xx" },
+            { value: "4xx", label: "4xx" },
+            { value: "5xx", label: "5xx" },
+          ]}
+        />
+        <SegmentControl
+          ariaLabel="Filter by time range"
           value={range}
           onChange={(v) => setRange(v as RangeFilter)}
-          options={RANGE_OPTIONS}
-          className="h-8 w-[155px] text-[12px] pointer-coarse:h-11"
+          options={RANGE_OPTIONS.map((o) => ({
+            value: o.value,
+            label:
+              o.value === "all"
+                ? "All"
+                : o.label.replace("Last ", "").replace(" minutes", "m").replace(" hours", "h").replace(" days", "d"),
+            title: o.label,
+          }))}
         />
         {filtersActive && (
           <Button
@@ -992,7 +1030,7 @@ export function RequestLogsPage() {
             Reset
           </Button>
         )}
-      </LogsToolbar>
+      </div>
 
       {stats.total > 0 && (
         <WindowOverview
