@@ -8,6 +8,95 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+
+## 🟠 Live — the Playground beam backdrop invalidates its composite every frame during scroll (2026-10-24)
+
+### 518. Scrolling a Playground chat flickers/glitches because the fixed animated SVG is blend-composited over the scroll
+
+**Severity:** 🟠 High on software-rendered displays (the flicker is visible; the
+empty-chat snap of #517 is related but separate) · **Status: fixed (scroll-
+gesture freeze), pending visual confirmation on the reporting display**
+
+**Where:** `web/src/components/HeroBeamBackdrop.tsx` (SMIL `<animate
+attributeName="offset">` gradients on every beam stroke) rendered by
+`web/src/pages/Playground.tsx:1415` inside `.pg-atmosphere`, and the layering in
+`web/src/styles.css:3547` — `.pg-workbench-beams` is `position: fixed` with
+`mix-blend-mode: screen` **and** a `mask-image: linear-gradient(...)`, sitting
+directly under `.pg-message-scroll` (the scrolling chat).
+
+**Trigger.** Scroll any Playground chat — empty launcher or populated
+conversation — on a display where Chromium raster-s composites (no GPU path):
+this VM's X11 desktop, the dashboard Computer-tab view, or any machine without GPU accelerated
+compositing. Every scroll frame re-rasterises the scrolled layer,
+which forces Chromium to re-run the `screen` blend against the *entire* fixed
+SVG; simultaneously the beams' SMIL gradient offsets invalidate that same fixed
+layer once per frame. The scroll content and the animated backdrop re-blend
+against each other in the same frames → transient partial-tile artefacts read
+as flicker/glitch.
+
+**Evidence (live Chrome 156 in this VM's headed desktop, new-chat empty state):**
+- The scroll *logic* is clean: `scrollTop = 180` holds over 1 s, rAF timing
+  during 6 s of trusted CDP `mouse.wheel` scrolling stays at a rock-solid
+  `16.8 ms/frame` with zero frames above 40 ms (355 sampled, `-jank 0`), body is
+  overflow-free, and only one scrollable element exists. So the repaint defect
+  is in the compositing interplay, not the JS.
+- The only continuously animating fixed element under the scroll container is
+  the beam SVG; pausing its SMIL clock removes the per-frame invalidation.
+
+**Fix.** During an active scroll gesture, freeze the SVG's SMIL animation clock
+(`svg.pauseAnimations()`) and resume it (`unpauseAnimations()`) 250 ms after the
+gesture goes idle — implemented around `handleScroll` in `Playground.tsx` via an
+`atmosphereRef` wrapper around `.pg-atmosphere`. Zero visual change while idle;
+the beam animation resumes where it left off after scroll. `prefers-reduced-
+motion` still hides the beams entirely (existing CSS). If the flicker persists
+on the reporting screen after this, the next escalation is dropping
+`mix-blend-mode: screen`/`mask-image` from `.pg-workbench-beams` (a cheaper
+layer overall), which is deliberately *not* bundled now — one mechanism at a
+time.
+
+---
+
+
+## ✅ Fixed — the Playground empty-state scroll fought the user (2026-10-23)
+
+### 517. Scrolling a new/empty Playground chat snapped back to the top, flickering
+
+**Severity:** 🟡 Medium (the launcher was effectively unscrollable on any viewport
+where it overflows, so the last suggestions were unreachable) · **Status: fixed**
+
+**Where:** `web/src/pages/Playground.tsx` — the `useLayoutEffect` that keeps a
+conversation pinned to the newest message (the empty-state branch added by the
+earlier "mobile empty workbench" fix).
+
+**Trigger.** Open the Playground on a new (empty) chat and scroll the message
+area — any wheel, trackpad, or touch gesture. Reproduced at 400×700, where the
+empty launcher overflows its viewport (`scrollHeight 687 / clientHeight 415`).
+
+**Consequence.** The effect's dependency list includes `atBottom`, and every
+scroll event runs `handleScroll` → `setAtBottom`. Each flip re-ran the layout
+effect, whose empty branch unconditionally executed `el.scrollTop = 0`. So the
+user's scroll was undone on the very next frame: setting `scrollTop = 180`
+measured `0` a few ticks later, and dragging to the bottom `(272)` snapped back
+to `0`. The result was a visible flicker/glitch and an unreachable lower half of
+the launcher. The one-time top-align the branch was added for still worked, so
+the defect was invisible to the earlier fix's own check.
+
+**Fix.** Track the chat id whose empty state was already top-aligned in a ref
+(`emptyScrollChat`) and reset `scrollTop` only when that id changes; clear it
+once the conversation is non-empty. A new empty chat still starts at the top,
+and the non-empty stick-to-bottom behavior is untouched.
+
+**Verification (live browser, no web test runner in this repo):**
+- Post-fix, `scrollTop = 180` held at 180 across 800 ms and 5 samples (was 0
+  after ~400 ms), and a six-step 40 px drag produced a strictly increasing
+  `0 → 40 → 80 → 120 → 160 → 200 → 240` with no snap-backs.
+- Initial load of an empty chat still measured `scrollTop === 0` (top-aligned).
+- `tsc -b && vite build` green; `eslint` 0 errors (29 pre-existing warnings,
+  none in `Playground.tsx`).
+
+---
+
+
 ## ✅ Fixed — round 169: the /console/settings Import panel (2026-10-22)
 
 Found by reading `web/src/pages/Backup.tsx`, `web/src/pages/Settings.tsx` and

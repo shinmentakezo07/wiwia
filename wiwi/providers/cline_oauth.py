@@ -334,6 +334,21 @@ def resolve_expires_at(expires_in: object, now: float | None = None) -> str:
     return datetime.fromtimestamp(epoch, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
+def jwt_credential_claims(access_token: str) -> dict[str, Any]:
+    """Claims of a pool key's JWT, for accounts provisioned by credential.
+
+    An account created by pasting a WorkOS credential file never writes a
+    ``cline_oauth:<name>`` settings row, so ``/admin/cline/oauth/status``
+    found nothing and reported a real, credentialed, still-serving account
+    as ``{"connected": false}`` (AUDIT #411). The credential *is* on the
+    pool key — this decodes its ``exp``/``email`` claims so the status can
+    report an expired-but-deployed credential rather than an absent one.
+
+    Returns {} when the secret is not a decodable JWT; never raises.
+    """
+    return _jwt_claims(access_token)
+
+
 def access_fingerprint(access_token: str) -> str:
     """Stable, non-reversible id of the access token an OAuth record issued.
 

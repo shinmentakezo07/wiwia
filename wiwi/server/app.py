@@ -11,6 +11,7 @@ import sys
 import time
 import uuid as _uuid
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -6210,7 +6211,33 @@ def create_app(config: WiwiConfig) -> FastAPI:
             record = await state.config_store.get_setting(
                 _cline_oauth_setting_key(provider))
         if not record:
-            return ORJSONResponse({"connected": False})
+            # AUDIT #411: an account provisioned by pasting a credential file
+            # never creates the ``cline_oauth:<name>`` settings row, but its
+            # JWT lives on the pool key. Fall back to decoding that so the
+            # console can say "expired credential, still deployed" instead of
+            # reporting a serving account as disconnected.
+            acct = state.router.providers[provider]
+            claims: dict[str, Any] = {}
+            for k in acct.keys:
+                claims = cline_oauth.jwt_credential_claims(k.secret)
+                if claims:
+                    break
+            if not claims:
+                return ORJSONResponse({"connected": False})
+            exp = claims.get("exp")
+            exp_epoch = float(exp) if isinstance(exp, (int, float)) and not \
+                isinstance(exp, bool) else None
+            exp_iso = (datetime.fromtimestamp(exp_epoch, tz=UTC)
+                       .isoformat() if exp_epoch is not None else None)
+            return ORJSONResponse({
+                "connected": True,
+                "email": claims.get("email"),
+                "expires_at": exp_iso,
+                "needs_refresh": bool(
+                    exp_epoch is not None
+                    and exp_epoch - time.time() <= cline_oauth.REFRESH_LEAD_S),
+                "source": "credential",
+            })
         expires_epoch = cline_oauth.parse_expires_at(record.get("expires_at"))
         return ORJSONResponse({
             "connected": True,
