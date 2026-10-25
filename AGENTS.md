@@ -175,6 +175,17 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
   `@/*` path alias (tsconfig + Vite). No `../../../../` import chains.
 - **UI/UX rule (binding):** every UI change must work at 375px and desktop — no clipping, tap
   targets ≥44px, hover reveals also respond to focus/touch, keyboard + focus-visible.
+- **UI design standards (binding for ALL UI/design work in any codebase; see CLAUDE.md
+  "UI Design Standards" for the full text):** senior-frontend-architect bar. Execute
+  immediately, no fluff; reason through psychological / technical / accessibility /
+  scalability axes before non-trivial UI work; intentional minimalism — anti-template on every
+  surface, every element must earn its place; **library discipline**: if the project has a UI
+  library or shared components (Shadcn, Radix, MUI, its own kit), use them — search for an
+  existing primitive before building any modal/dropdown/button/table, never rebuild what
+  exists, no redundant one-off CSS; discover and follow the design system of the surface being
+  edited, never import one surface's style into another; no neon/glow/generic "AI dashboard"
+  flourishes unless the user asks; if the result looks like a stock template, iterate —
+  plain/generic only on explicit request.
 - **Commits:** imperative present tense, capitalized, no prefix tags. One logical change each.
   Work directly on `main` (single-developer repo; no feature branches/PRs).
 
