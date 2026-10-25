@@ -1,4 +1,4 @@
-// Pricing — three deployment tiers (Self-host, BYOK, Cloud), a "what you
+// Pricing — three flat DevPass service plans (Lite, Pro, Max), a "what you
 // actually pay" receipt visual, a feature comparison matrix, FAQ accordion,
 // and a closing CTA. Matches the dark design system shared with the admin
 // console; reuses the animated beam backdrop and ambient glow language from
@@ -8,6 +8,7 @@ import { Link } from "react-router-dom";
 import {
   Activity,
   ArrowRight,
+  ArrowUpRight,
   Boxes,
   CalendarX2,
   Check,
@@ -16,13 +17,11 @@ import {
   GitBranch,
   Infinity as InfinityIcon,
   Info,
-  KeyRound,
   Minus,
+  Rocket,
   Route,
-  Server,
   ShieldCheck,
   Sparkles,
-  Wallet,
   Zap,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -34,70 +33,70 @@ interface Tier {
   icon: LucideIcon;
   name: string;
   tag: string;
-  /** The headline number — deliberately `$0` on every tier, because "no platform
-   *  fee" is the claim this page exists to make. `payFor` says what you *do*
-   *  pay, so the zero is never mistaken for "the product is free to run". */
+  /** The headline number — the monthly subscription for the DevPass service
+   *  plans. `payFor` says what the price buys, so the 3× usage value is never
+   *  mistaken for a token-metered rate. */
   price: string;
   priceNote: string;
   payFor: string;
   features: string[];
-  cta: { label: string; to: string };
+  cta: { label: string; to: string; external?: boolean };
   accent: string;
   featured?: boolean;
 }
 
 const TIERS: Tier[] = [
   {
-    icon: Server,
-    name: "Self-host",
-    tag: "Open source",
-    price: "$0",
-    priceNote: "forever",
-    payFor: "You pay for your own infrastructure",
+    icon: Zap,
+    name: "Lite",
+    tag: "For side projects",
+    price: "$29",
+    priceNote: "/month",
+    payFor: "3× the plan price in monthly usage — $87 at provider rates",
     accent: "#34d399",
     features: [
-      "Full gateway, dashboard, and API on your own infra",
-      "Three inbound dialects, every outbound provider",
-      "Virtual keys, budgets, key pools, retries, fallbacks",
-      "Cost tracking, request logs, live observability",
-      "No seats, no minimums, no token markup",
+      "$87 of monthly model usage, metered at provider rates",
+      "200+ models: Claude, GPT, Gemini, and open-weight coders",
+      "One key for Claude Code, Cursor, Cline, Aider, Continue",
+      "Live usage dashboard with per-request cost",
+      "Cancel or self-refund anytime — no lock-in",
     ],
-    cta: { label: "Read the docs", to: "/docs" },
+    cta: { label: "Get Lite", to: "https://devpass.llmgateway.io", external: true },
   },
   {
-    icon: KeyRound,
-    name: "Bring your own keys",
-    tag: "No platform fee",
-    price: "$0",
-    priceNote: "platform fee",
-    payFor: "You pay providers directly",
+    icon: Sparkles,
+    name: "Pro",
+    tag: "Most popular",
+    price: "$79",
+    priceNote: "/month",
+    payFor: "3× the plan price in monthly usage — $237 at provider rates",
     accent: "#a855f7",
     features: [
-      "Route through your own provider API keys",
-      "Unified analytics, caching, and failover included",
-      "Virtual keys with per-key budgets and limits",
-      "No platform fee — you pay your providers",
-      "One bill across all your provider accounts",
+      "$237 of monthly model usage, metered at provider rates",
+      "Every flagship model, switched freely mid-project",
+      "Monthly Reset Passes to restore a burned allowance",
+      "Real-time metering: per-request cost and model breakdowns",
+      "Cancel or self-refund anytime — no lock-in",
     ],
-    cta: { label: "Create an account", to: "/signup" },
+    cta: { label: "Get Pro", to: "https://devpass.llmgateway.io", external: true },
+    featured: true,
   },
   {
-    icon: Wallet,
-    name: "Cloud",
-    tag: "Most popular",
-    price: "$0",
-    priceNote: "markup on tokens",
-    payFor: "You pay each provider's own token rates",
+    icon: Rocket,
+    name: "Max",
+    tag: "For heavy agents",
+    price: "$179",
+    priceNote: "/month",
+    payFor: "3× the plan price in monthly usage — $537 at provider rates",
     accent: "#60a5fa",
     features: [
-      "Managed gateway — no infra to run",
-      "Pay per-token at each provider's own rates",
-      "Automatic failover and health monitoring",
-      "New models within 48 hours of release",
-      "One bill across 40+ providers",
+      "$537 of monthly model usage, metered at provider rates",
+      "Built for always-on coding agents and long sessions",
+      "Monthly Reset Passes included every month",
+      "Real-time metering: per-request cost and model breakdowns",
+      "Cancel or self-refund anytime — no lock-in",
     ],
-    cta: { label: "Get started", to: "/signup" },
-    featured: true,
+    cta: { label: "Get Max", to: "https://devpass.llmgateway.io", external: true },
   },
 ];
 
@@ -106,9 +105,9 @@ const TIERS: Tier[] = [
 type Cell = boolean | "partial" | string;
 interface CompareRow {
   label: string;
-  self: Cell;
-  byok: Cell;
-  cloud: Cell;
+  lite: Cell;
+  pro: Cell;
+  max: Cell;
 }
 interface CompareGroup {
   heading: string;
@@ -119,48 +118,46 @@ const COMPARE: CompareGroup[] = [
   {
     heading: "Core",
     rows: [
-      { label: "Unified gateway & API", self: true, byok: true, cloud: true },
-      { label: "Admin dashboard", self: true, byok: true, cloud: true },
-      { label: "Virtual keys & budgets", self: true, byok: true, cloud: true },
-      { label: "Open source (AGPLv3)", self: true, byok: true, cloud: "Managed" },
-      { label: "Infrastructure", self: "Yours", byok: "Yours", cloud: "Managed" },
+      { label: "Monthly usage at provider rates", lite: "$87", pro: "$237", max: "$537" },
+      { label: "Models included", lite: "200+", pro: "200+", max: "200+" },
+      { label: "Flagship & open-weight models", lite: true, pro: true, max: true },
+      { label: "One key, every coding agent", lite: true, pro: true, max: true },
+      { label: "Monthly Reset Passes", lite: false, pro: true, max: true },
     ],
   },
   {
     heading: "Routing & reliability",
     rows: [
-      { label: "Key pools & weighted round-robin", self: true, byok: true, cloud: true },
-      { label: "Retries & automatic failover", self: true, byok: true, cloud: true },
-      { label: "Prompt caching", self: true, byok: true, cloud: true },
-      { label: "Health monitoring", self: true, byok: true, cloud: true },
-      { label: "New models within 48h", self: "Manual", byok: "Manual", cloud: true },
+      { label: "Automatic failover & health monitoring", lite: true, pro: true, max: true },
+      { label: "Switch models freely mid-project", lite: true, pro: true, max: true },
+      { label: "Prompt caching", lite: true, pro: true, max: true },
+      { label: "New models within 48h of release", lite: true, pro: true, max: true },
     ],
   },
   {
     heading: "Cost & billing",
     rows: [
-      { label: "Platform fee", self: "$0", byok: "$0", cloud: "$0" },
-      { label: "Token markup", self: "None", byok: "None", cloud: "None" },
-      { label: "Per-token cost tracking", self: true, byok: true, cloud: true },
-      { label: "One bill across providers", self: "Self", byok: true, cloud: true },
-      { label: "Seats / minimums", self: "None", byok: "None", cloud: "None" },
+      { label: "Monthly price", lite: "$29", pro: "$79", max: "$179" },
+      { label: "Token markup", lite: "None", pro: "None", max: "None" },
+      { label: "Real-time cost metering", lite: true, pro: true, max: true },
+      { label: "Seats / minimums beyond the plan", lite: "None", pro: "None", max: "None" },
+      { label: "Self-refund, no cancellation fee", lite: true, pro: true, max: true },
     ],
   },
   {
     heading: "Support",
     rows: [
-      { label: "Community support", self: true, byok: true, cloud: true },
-      { label: "Request logs & analytics", self: true, byok: true, cloud: true },
-      { label: "Data retention", self: "Unlimited", byok: "Unlimited", cloud: "Unlimited" },
-      { label: "SLA guarantee", self: false, byok: false, cloud: "99.99%" },
+      { label: "Community support", lite: true, pro: true, max: true },
+      { label: "Request logs & analytics", lite: true, pro: true, max: true },
+      { label: "Data retention", lite: "Unlimited", pro: "Unlimited", max: "Unlimited" },
     ],
   },
 ];
 
 const COLS = [
-  { key: "self" as const, name: "Self-host" },
-  { key: "byok" as const, name: "BYOK" },
-  { key: "cloud" as const, name: "Cloud" },
+  { key: "lite" as const, name: "Lite" },
+  { key: "pro" as const, name: "Pro" },
+  { key: "max" as const, name: "Max" },
 ];
 
 // ── FAQ ──────────────────────────────────────────────────────────────────
@@ -174,22 +171,22 @@ const FAQ_ITEMS: FaqItem[] = [
   {
     question: "How much does wiwi cost?",
     answer:
-      "Self-hosting and bring-your-own-keys are both free forever. On the managed cloud plan you pay per-token at each provider's own rates with no markup on the tokens themselves. There are no seats, no minimums, and no subscription.",
+      "DevPass service plans are a flat monthly subscription: Lite $29, Pro $79, Max $179. Each plan includes 3× the plan price in monthly model usage at provider rates — $87, $237, and $537 respectively — with no token markup on top.",
   },
   {
-    question: "Is there a fee when I bring my own API keys?",
+    question: "What is the 3× usage value?",
     answer:
-      "No platform fee at all. With your own provider keys (BYOK), routing through wiwi is free — you pay your providers directly and still get unified analytics, caching, and automatic failover.",
+      "Every dollar of your subscription becomes $3 of model usage, metered transparently at provider rates. Lite $29/mo → $87, Pro $79/mo → $237, Max $179/mo → $537. You can watch every request's cost live in the dashboard.",
   },
   {
-    question: "Can I self-host wiwi?",
+    question: "Which tools can I use it with?",
     answer:
-      "Yes. wiwi is open source under AGPLv3. Deploy the full gateway on your own infrastructure with a single Docker command — the routing layer, virtual keys, budgets, and admin dashboard are all yours to run.",
+      "Any OpenAI-compatible tool: DevPass Code, Claude Code, OpenCode, Cursor, Cline, Aider, Continue. Set two environment variables and your agent routes through the gateway with every model included.",
   },
   {
-    question: "What providers are supported?",
+    question: "What happens if I burn through my allowance?",
     answer:
-      "OpenAI, Anthropic, Gemini, OpenRouter, and any OpenAI-compatible URL. Adding a new provider is one adapter module — core code never branches on provider name. You can mix and match providers within a single key pool with weighted round-robin.",
+      "Pro and Max include monthly Reset Passes that instantly restore your premium allowance. And there is no lock-in: refund the plan yourself from the billing dashboard in a barely-used month — no email, no cancellation fee.",
   },
 ];
 
@@ -203,7 +200,7 @@ const TRUST_STATS = [
 ];
 
 const BADGES: { icon: LucideIcon; label: string }[] = [
-  { icon: CreditCard, label: "No credit card required" },
+  { icon: CreditCard, label: "3× usage value" },
   { icon: GitBranch, label: "AGPLv3 open source" },
   { icon: CalendarX2, label: "Cancel anytime" },
 ];
@@ -254,12 +251,12 @@ export function PricingPage() {
             Pricing
           </span>
           <h1 className="text-4xl font-bold leading-[1.05] tracking-[-0.03em] text-[var(--admin-text)] sm:text-5xl md:text-6xl">
-            Three ways to run it.{" "}
-            <span className="hero-gradient-text">Two are free.</span>
+            Flat monthly plans.{" "}
+            <span className="hero-gradient-text">Triple the usage.</span>
           </h1>
           <p className="mx-auto mt-6 max-w-xl text-[15px] leading-relaxed text-[var(--admin-text-muted)] sm:text-base">
-            No seats, no minimums, no token markup. Start free and only pay for
-            tokens when you use the managed cloud.
+            Three DevPass plans — Lite, Pro, Max — every dollar of your
+            subscription becomes $3 of model usage at provider rates.
           </p>
 
           {/* trust badges */}
@@ -307,11 +304,11 @@ export function PricingPage() {
         <div className="relative mb-10 text-center">
           <span className="admin-label">Plans</span>
           <h2 className="mt-2 text-2xl font-semibold tracking-[-0.01em] text-[var(--admin-text)] sm:text-3xl">
-            Pick where it runs, not what you pay
+            One service. Three flat plans.
           </h2>
           <p className="mx-auto mt-3 max-w-xl text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
-            The same gateway in every plan — the only difference is whose
-            infrastructure it runs on.
+            Every dollar of your subscription becomes $3 of model usage —
+            the only difference between plans is the size of the tank.
           </p>
         </div>
 
@@ -422,9 +419,9 @@ export function PricingPage() {
           <h2 className="mt-2 text-2xl font-semibold tracking-[-0.01em] text-[var(--admin-text)] sm:text-3xl">
             Every feature, side by side
           </h2>
-          <p className="mx-auto mt-3 max-w-xl text-[14px] text-[var(--admin-text-muted)]">
-            The same gateway core across every plan — pick where it runs and who
-            handles the infrastructure.
+          <p className="mx-auto mt-3 max-w-xl text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
+            The same gateway core behind every plan — pick the monthly
+            allowance that matches your workload.
           </p>
         </div>
         <div className="overflow-hidden rounded-[var(--admin-radius)] border border-[var(--admin-border)] bg-[var(--admin-surface)]">
@@ -513,23 +510,25 @@ export function PricingPage() {
           <div className="relative z-10">
             <span className="admin-badge admin-badge-blue mb-5 inline-flex">
               <Sparkles size={12} />
-              Free to start
+              No lock-in
             </span>
             <h2 className="text-2xl font-semibold tracking-[-0.01em] text-[var(--admin-text)] sm:text-3xl">
               Ready to start?
             </h2>
             <p className="mx-auto mt-3 max-w-md text-[14px] text-[var(--admin-text-muted)]">
-              Create a free account in seconds — no credit card, no commitment.
-              Upgrade to managed cloud only if you want us to run it.
+              Pick a plan in seconds — no token math, no commitment. Refund it
+              yourself from the billing dashboard in a barely-used month.
             </p>
             <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
-              <Link
-                to="/signup"
+              <a
+                href="https://devpass.llmgateway.io"
+                target="_blank"
+                rel="noopener noreferrer"
                 className="wiwi-shimmer group inline-flex h-12 w-full items-center justify-center gap-2 rounded-[10px] bg-gradient-to-b from-brand-500 to-brand-700 px-6 text-[13px] font-medium text-white shadow-lg shadow-brand-600/25 transition-[filter] duration-150 hover:brightness-110 sm:w-auto"
               >
-                Get started free
-                <ArrowRight size={14} className="transition-transform duration-150 group-hover:translate-x-0.5" />
-              </Link>
+                Get DevPass
+                <ArrowUpRight size={14} className="transition-transform duration-150 group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
+              </a>
               <Link
                 to="/docs"
                 className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-[10px] border border-white/[0.08] bg-white/[0.02] px-6 text-[13px] font-medium text-[var(--admin-text)] transition-colors hover:border-white/[0.14] hover:bg-white/[0.04] sm:w-auto"
@@ -630,17 +629,33 @@ function TierCard({ tier }: { tier: Tier }) {
           ))}
         </ul>
 
-        <Link
-          to={tier.cta.to}
-          className={`inline-flex h-11 w-full items-center justify-center gap-2 rounded-[10px] px-5 text-[13px] font-medium transition-all duration-150 ${
-            featured
-              ? "wiwi-shimmer bg-gradient-to-b from-brand-500 to-brand-700 text-white shadow-lg shadow-brand-600/25 hover:brightness-110"
-              : "border border-white/[0.08] bg-white/[0.02] text-[var(--admin-text)] hover:border-white/[0.14] hover:bg-white/[0.05]"
-          }`}
-        >
-          {tier.cta.label}
-          <ArrowRight size={14} className="transition-transform duration-150 group-hover:translate-x-0.5" />
-        </Link>
+        {tier.cta.external ? (
+          <a
+            href={tier.cta.to}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={`inline-flex h-11 w-full items-center justify-center gap-2 rounded-[10px] px-5 text-[13px] font-medium transition-all duration-150 ${
+              featured
+                ? "wiwi-shimmer bg-gradient-to-b from-brand-500 to-brand-700 text-white shadow-lg shadow-brand-600/25 hover:brightness-110"
+                : "border border-white/[0.08] bg-white/[0.02] text-[var(--admin-text)] hover:border-white/[0.14] hover:bg-white/[0.05]"
+            }`}
+          >
+            {tier.cta.label}
+            <ArrowUpRight size={14} className="transition-transform duration-150 group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
+          </a>
+        ) : (
+          <Link
+            to={tier.cta.to}
+            className={`inline-flex h-11 w-full items-center justify-center gap-2 rounded-[10px] px-5 text-[13px] font-medium transition-all duration-150 ${
+              featured
+                ? "wiwi-shimmer bg-gradient-to-b from-brand-500 to-brand-700 text-white shadow-lg shadow-brand-600/25 hover:brightness-110"
+                : "border border-white/[0.08] bg-white/[0.02] text-[var(--admin-text)] hover:border-white/[0.14] hover:bg-white/[0.05]"
+            }`}
+          >
+            {tier.cta.label}
+            <ArrowRight size={14} className="transition-transform duration-150 group-hover:translate-x-0.5" />
+          </Link>
+        )}
       </div>
     </div>
   );
