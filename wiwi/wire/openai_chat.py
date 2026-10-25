@@ -362,10 +362,18 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         # twin of this was AUDIT #100. Treat it as an unnamed schema — the
         # provider renders one from `name`/`strict` alone.
         js = raw_js if isinstance(raw_js, dict) else {}
-        g.response_format = ir.ResponseFormat(type=rf["type"],
-                                              json_schema=js.get("schema"),
-                                              name=js.get("name"),
-                                              strict=js.get("strict"))
+        # The INNER schema was unguarded (AUDIT #359): a junk value rode the
+        # IR and re-encoded upstream verbatim — a 400 naming no field the
+        # caller sent. Coerce like the sibling codecs' parameters_json_schema.
+        raw_inner = js.get("schema")
+        raw_inner_name = js.get("name")
+        is_js = rf["type"] == "json_schema"
+        g.response_format = ir.ResponseFormat(
+            type=rf["type"],
+            json_schema=((raw_inner if isinstance(raw_inner, dict)
+                          else {"type": "object"}) if is_js else None),
+            name=(raw_inner_name if isinstance(raw_inner_name, str) else None),
+            strict=js.get("strict"))
     stream_opts = body.get("stream_options")
     if not isinstance(stream_opts, dict):
         stream_opts = {}

@@ -10,6 +10,27 @@ Each entry below records the before→after state, the exact files and lines cha
 
 ---
 
+## Round 174 — structured-output schema coerced at every inbound decoder (AUDIT #359) (2026-10-25)
+`ResponseFormat.json_schema` is typed `dict | None` but is a plain dataclass
+with no runtime enforcement, and all three inbound decoders accepted any
+client value verbatim. A junk `{"schema": "oops"}` crossed the IR and
+re-encoded upstream — Anthropic's native `output_config.format.schema`, the
+OpenAI dialect's `response_format.json_schema.schema`, Gemini's
+`responseSchema` — producing an upstream 400 that named no field the caller
+controls. The registered entry blamed two decoders; the third (Chat) was
+unguarded on its *inner* schema (`openai_chat.py` guarded only the wrapper,
+AUDIT #100's fix), and a junk `name` rode along in all three.
+
+All three decoders now coerce a non-dict `schema` to `{"type":"object"}` and a
+non-string `name` to `None` — the same convention `parameters_json_schema`
+already uses for tool schemas. One trap closed while fixing: Chat's
+`json_object` arm must keep `json_schema=None`, or the coercion would leak a
+`json_schema` member into a wire shape (`response_format.type=json_object`)
+that has none and the API would 400.
+
+**Tests:** `tests/test_fix_round174.py` (12).
+
+
 ## Round 173 — Gemini mid-conversation system messages, pinned (2026-10-25)
 
 The Gemini **encoder**'s system-message rule, now that it is pinned

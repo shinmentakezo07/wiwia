@@ -247,8 +247,18 @@ def _decode_response_format(text_field: Any) -> ir.ResponseFormat | None:
         # an unhandled 500 (AUDIT #100). Treat it as unset.
         return None
     if fmt.get("type") == "json_schema":
-        return ir.ResponseFormat(type="json_schema", json_schema=fmt.get("schema"),
-                                 name=fmt.get("name"), strict=fmt.get("strict"))
+        # A non-dict schema rides the IR and re-encodes upstream verbatim
+        # (response_format.json_schema.schema) — a 400 naming no field the
+        # caller sent (AUDIT #359). Coerce like the sibling codecs do for
+        # parameters_json_schema; the name like every other text field.
+        raw_schema = fmt.get("schema")
+        raw_name = fmt.get("name")
+        return ir.ResponseFormat(
+            type="json_schema",
+            json_schema=(raw_schema if isinstance(raw_schema, dict)
+                         else {"type": "object"}),
+            name=(raw_name if isinstance(raw_name, str) else None),
+            strict=fmt.get("strict"))
     if fmt.get("type") == "json_object":
         return ir.ResponseFormat(type="json_object")
     return None

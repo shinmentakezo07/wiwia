@@ -16075,7 +16075,7 @@ dedicated reason, in both `_INCOMPLETE_REASONS` and the `:823` test.
 
 ### 359. `json_schema.schema` is accepted unvalidated in all three codecs
 
-**Severity:** ⚪ Low · **Status: open**
+**Severity:** ⚪ Low · **Status: fixed — round 174** (`tests/test_fix_round174.py`; wider than registered: the Chat codec's *inner* `schema` was unguarded too — `openai_chat.py:307` guarded only the wrapper — and a junk `name` rode along in all three. All three decoders now coerce a non-dict schema to `{"type":"object"}` and a non-string `name` to `None`; Chat keeps `json_object`'s schema `None` so no `json_schema` member leaks into that wire shape)
 
 **Files:** `wiwi/wire/openai_responses.py:230-232`,
 `wiwi/wire/openai_chat.py:305`, `wiwi/wire/anthropic_messages.py:392`

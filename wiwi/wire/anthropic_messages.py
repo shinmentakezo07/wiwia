@@ -448,9 +448,19 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
     oc = body.get("output_config") if isinstance(body.get("output_config"), dict) else {}
     oc_fmt = oc.get("format")
     if isinstance(oc_fmt, dict) and oc_fmt.get("type") == "json_schema":
+        # A non-dict schema ("oops") rides the IR to the adapter, which
+        # re-emits it verbatim into output_config.format.schema — an upstream
+        # 400 naming no field the caller sent (AUDIT #359). Coerce to the
+        # always-legal empty object, matching the parameters_json_schema
+        # convention; the name is coerced like every other text field.
+        raw_oc_schema = oc_fmt.get("schema")
+        raw_oc_name = oc_fmt.get("name")
         response_format = ir.ResponseFormat(
-            type="json_schema", json_schema=oc_fmt.get("schema"),
-            name=oc_fmt.get("name"), strict=oc_fmt.get("strict"))
+            type="json_schema",
+            json_schema=(raw_oc_schema if isinstance(raw_oc_schema, dict)
+                         else {"type": "object"}),
+            name=(raw_oc_name if isinstance(raw_oc_name, str) else None),
+            strict=oc_fmt.get("strict"))
     # output_config.effort is where Claude Code's /effort command, the effort
     # slider, --effort and CLAUDE_CODE_EFFORT_LEVEL all land. Only ``format``
     # used to be read and ``output_config`` was not in _PASSTHROUGH_KEYS, so
