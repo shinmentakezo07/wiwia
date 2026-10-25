@@ -4484,3 +4484,50 @@ existing tests compared `UsageFinal`/`Usage` by exact dataclass equality and
 now name the new field explicitly (`test_fix_round12.py`, `test_fix_round61.py`).
 
 **Tests:** `tests/test_fix_round170.py` (14).
+
+## Round 172 — the IR/codec seam audit: streaming halves, usage conventions, file ids, thinking modes (2026-10-25)
+
+Nine defect classes where one path (stream vs sync, decode vs encode, adapter
+vs encoder) carried an IR field its twin dropped. Full register: AUDIT #518.
+Tests: `tests/test_fix_round172.py` (34).
+
+**Translation-relevant changes:**
+
+- `Finish.stop_sequence` now reaches streaming Chat and Responses clients
+  (the Chat feed arm nulls it when a tool turn is downgraded — both guard
+  sites, matching the Anthropic encoder's single-site null).
+- `LogprobsDelta` is honoured by the Responses stream encoder: tokens collect
+  onto the terminal `response.completed` payload (no per-token event exists
+  on that surface).
+- Responses deferred thinking keeps its `encrypted_content` blob, including
+  a blob-only ThinkingDelta that arrives while a tool item is open — the
+  Codex "'encrypted_content' is required" replay failure, interleave path.
+- **Usage conventions are now re-based at the wire boundary.** The Messages
+  encoders emit `input_tokens` EXCLUSIVE of cache reads (subtracting when the
+  upstream was OpenAI-shaped); the three OpenAI surfaces emit inclusive
+  totals (adding when the upstream was Anthropic-shaped). OpenRouter, NIM,
+  opencode and Gemini adapters record `cached_in_prompt` explicitly (all
+  True — each reports the whole-prompt counter).
+- `ImagePart.file_id` decodes (Chat `file` part, Responses `input_image`
+  and `input_file`), and re-encodes as the Chat `file` content part instead
+  of the corrupt `data:…;base64,None` literal. The Chat decoder reads the
+  `file` part its own adapter emits.
+- `GenParams.thinking_type` participates in `effective_reasoning_effort`
+  (enabled/adaptive → "medium", disabled → "none") and
+  `effective_thinking_budget`; the Anthropic adapter turns thinking ON for a
+  mode-only `{"type":"enabled"}` at the default budget. The dead
+  `GenParams.metadata` field is removed (no decoder populated it; the
+  response-cache gate that read it never fired).
+- Sampling-param coercion closed for `temperature`/`top_p`/`seed`/
+  `parallel_tool_calls`/`disable_parallel_tool_use` on all four decoders via
+  the new `ir.translation.coerce_float` (the `coerce_int` sibling).
+- `reasoning.summary` rides Responses `extras` as `reasoning_summary`;
+  Anthropic stream errors map `api_connection_error` → `api_error` and
+  `service_unavailable` → `overloaded_error` (vocabulary agreement with the
+  sync `error_body`); tool-result `extra_blocks` no longer also stringify
+  into `content` when they ride natively; tool-result image `cache_control`
+  survives Anthropic replay; the OpenAI adapter stops forwarding per-message
+  `reasoning_content` to NIM; Gemini renders `input_examples` into tool
+  descriptions and warns on every drop it makes (images in function
+  responses, `redacted_thinking`, file ids); `parallel_tool_calls=true` and
+  tool `cache_control`/`defer_loading` drops are reported to the caller.

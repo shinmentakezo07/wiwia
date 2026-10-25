@@ -2504,7 +2504,6 @@ def create_app(config: WiwiConfig) -> FastAPI:
         cache_key = ""
         if (cache is not None and not cache_bypass and not ir_req.stream
                 and not any(t.builtin for t in ir_req.tools)
-                and not (ir_req.gen_params.metadata or {}).get("stream")
                 # Sampling makes the output non-reproducible: an identical
                 # prompt legitimately yields different text, and caching it
                 # would pin the caller to the first completion for the whole

@@ -172,6 +172,24 @@ def merge_extras(*layers: Any) -> dict[str, Any]:
     return merged
 
 
+def coerce_float(value: Any) -> float | None:
+    """Coerce a JSON number to ``float``, or return None when it is not one.
+
+    The sampling-param sibling of ``ir.coerce_int`` (AUDIT #83): wire decoders
+    must not forward a malformed ``temperature``/``top_p`` (object, list, bool,
+    numeric string) upstream verbatim — the provider 400s with an error naming
+    nothing the caller misused, or silently ignores it. A genuine ``bool`` is
+    rejected even though ``isinstance(True, int)`` is True: ``temperature:
+    true`` is a client bug, not ``1.0``. An int is widened (the wire type is
+    float and every provider accepts ``1`` for ``1.0``).
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
 def _log_unmapped(raw: str) -> None:
     """Log an unmapped finish reason once per distinct value, up to the cap."""
     if raw in _UNMAPPED_LOGGED:

@@ -201,6 +201,24 @@ def _count_breakpoints(req: ir.Request) -> int:
     return n
 
 
+
+
+def _flatten_extra_blocks(p: ir.ToolResultPart) -> str:
+    """The flattened form the Anthropic decoder produces for ``p``.
+
+    Mirrors ``anthropic_messages.decode_request``'s fallback exactly, so the
+    adapter can recognize a ``content`` that IS the stringified extra_blocks
+    and suppress the duplicate text block when the native blocks ride along
+    (the decode sets both when a result carried no text blocks). The
+    fallback stays readable for dialects with no block form; only the one
+    wire that carries the blocks natively drops the duplicate.
+    """
+    others = [b for b in (p.extra_blocks or [])
+              if isinstance(b, dict)
+              and b.get("type") not in ("image", "input_image")]
+    return json.dumps(others) if others else ""
+
+
 class AnthropicAdapter(WarningMixin):
     provider_type = "anthropic"
 
@@ -356,7 +374,10 @@ class AnthropicAdapter(WarningMixin):
                     blocks.append(img)
                 elif isinstance(p, ir.DocumentPart):
                     doc: dict[str, Any]
-                    if p.url:
+                    if p.file_id:
+                        doc = {"type": "document",
+                               "source": {"type": "file", "file_id": p.file_id}}
+                    elif p.url:
                         doc = {"type": "document",
                                "source": {"type": "url", "url": p.url}}
                     else:
@@ -420,8 +441,9 @@ class AnthropicAdapter(WarningMixin):
                         # model which deferred tool to load — the discovery was
                         # silently lost and the tool never became callable.
                         content_blocks: list[dict[str, Any]] = []
-                        if p.content:
-                            content_blocks.append({"type": "text", "text": p.content})
+                        if p.content and p.content != _flatten_extra_blocks(p):
+                            content_blocks.append({"type": "text",
+                                                   "text": p.content})
                         for img in p.images:
                             if img.file_id:
                                 src = {"type": "file", "file_id": img.file_id}
@@ -430,7 +452,15 @@ class AnthropicAdapter(WarningMixin):
                             else:
                                 src = {"type": "base64", "media_type": img.mime,
                                        "data": img.b64}
-                            content_blocks.append({"type": "image", "source": src})
+                            img_block: dict[str, Any] = {"type": "image",
+                                                         "source": src}
+                            # The decode captured a cache breakpoint on the
+                            # image; dropping it on replay re-billed the
+                            # prefix it marked (the defect ImagePart's own
+                            # field docstring describes).
+                            if img.cache_control:
+                                img_block["cache_control"] = img.cache_control
+                            content_blocks.append(img_block)
                         content_blocks.extend(p.extra_blocks)
                         tr["content"] = content_blocks
                     blocks.append(tr)
@@ -563,7 +593,14 @@ class AnthropicAdapter(WarningMixin):
         else:
             thinking_enabled = (g.thinking_budget is not None
                                 or (g.reasoning_effort is not None
-                                    and g.reasoning_effort != "none"))
+                                    and g.reasoning_effort != "none")
+                                # An explicit "enabled" mode turns thinking on
+                                # even with no budget: effective_thinking_budget
+                                # supplies the default level's budget. Before
+                                # this consult the request silently ran with
+                                # thinking off on the one provider that named
+                                # the mode.
+                                or g.thinking_type == "enabled")
             # A zero budget means "thinking disabled" (the inverse of
             # effort_to_thinking_budget("none") is None, and
             # thinking_budget_to_effort(0) == "none"). Before the zero guard
@@ -604,6 +641,14 @@ class AnthropicAdapter(WarningMixin):
         # off than one that was told the knob was dropped.
         if g.seed is not None:
             self.warn("seed has no Messages API equivalent and was dropped")
+        # parallel is this API's default, so a True constraint is satisfied
+        # without a field — but the caller set it explicitly and deserves the
+        # same "your knob did not apply" report the seed gets (only the False
+        # direction maps, through disable_parallel_tool_use).
+        if g.parallel_tool_calls is True:
+            self.warn(
+                "parallel_tool_calls=true has no Messages API equivalent "
+                "(parallel is the default) and was dropped")
         # OpenAI-2026 platform params the caller set (logit_bias,
         # frequency_penalty, service_tier, …). The Messages API has no such
         # fields, so the upstream honoured and billed for nothing. The

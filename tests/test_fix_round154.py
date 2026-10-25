@@ -280,7 +280,7 @@ def test_responses_defer_keeps_tail_of_oversized_chunk():
     enc._defer("text", "Z" * (cap + 5000))
     assert enc._deferred_chars == cap, (
         f"buffer should land exactly at the cap, got {enc._deferred_chars}")
-    retained = "".join(t for _, t in enc._deferred)
+    retained = "".join(t for _, t, _ in enc._deferred)
     assert len(retained) == cap
     assert retained == "Z" * cap
 
@@ -294,7 +294,7 @@ def test_responses_defer_oversized_chunk_does_not_empty_the_buffer():
     enc._defer("text", "Y" * (cap + 10))
     assert enc._deferred, "oversized chunk emptied the entire buffer"
     assert enc._deferred_chars == cap
-    joined = "".join(t for _, t in enc._deferred)
+    joined = "".join(t for _, t, _ in enc._deferred)
     assert joined == "Y" * cap, "newest content must win inside the cap"
 
 
@@ -310,7 +310,7 @@ def test_responses_defer_still_evicts_from_the_head_within_the_cap():
     enc._defer("text", "A" * cap)
     enc._defer("text", "B")
     assert enc._deferred_chars == cap
-    joined = "".join(t for _, t in enc._deferred)
+    joined = "".join(t for _, t, _ in enc._deferred)
     assert joined == "A" * (cap - 1) + "B", "newest content must be retained"
     assert not joined.startswith("A" * cap), "oldest byte should be trimmed"
 
@@ -322,7 +322,7 @@ def test_responses_defer_never_exceeds_cap():
     for n in (10, cap // 2, cap + 1, 3, cap * 2):
         enc._defer("text", "x" * n)
         assert enc._deferred_chars <= cap, f"cap exceeded at n={n}"
-        assert enc._deferred_chars == sum(len(t) for _, t in enc._deferred)
+        assert enc._deferred_chars == sum(len(t) for _, t, _ in enc._deferred)
 
 
 def test_responses_defer_oversized_chunk_is_still_flushed():

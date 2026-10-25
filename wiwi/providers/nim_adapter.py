@@ -369,7 +369,10 @@ class NimAdapter(OpenAIAdapter):
                 prompt=_token_count(u.get("prompt_tokens")),
                 cached=_token_count(dp.get("cached_tokens")),
                 reasoning=_token_count(dc.get("reasoning_tokens")),
-                output=_token_count(u.get("completion_tokens"))))
+                output=_token_count(u.get("completion_tokens")),
+                # OpenAI wire convention: prompt INCLUDES cached (the base
+                # adapter records the same; NIM inherits its stream shape).
+                cached_in_prompt=True))
 
         choices = chunk.get("choices")
         if not isinstance(choices, list):

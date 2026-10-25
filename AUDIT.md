@@ -17886,3 +17886,68 @@ fallback, and any other `.html` — is served `Cache-Control: no-cache`
 (revalidate every time; the file's ETag makes that a cheap 304). Hashed
 `/assets/*` keep their default caching. Note `StaticFiles` hands the
 mount root down as path `"."`, not `""`.
+
+### 518. The IR/codec seam audit: nine fields carried by one path and dropped by its twin (2026-10-25)
+
+**Severity:** 🟠 High (streaming clients — which is every real agent — silently lost data the non-streaming path delivered) · **Status: fixed** — round 172 (`tests/test_fix_round172.py`)
+
+**Files:** `wiwi/ir/types.py`, `wiwi/ir/translation.py`, `wiwi/wire/{openai_chat,openai_completions,anthropic_messages,openai_responses}.py`, `wiwi/providers/{openai,anthropic,gemini,openrouter,nim,opencode}_adapter.py`, `wiwi/server/app.py`
+
+**Trigger.** A read-only audit of every IR field against every producer/consumer
+found a recurring defect class: a field decoded and emitted on the non-streaming
+path, dropped on the streaming path (or vice versa), or written by adapters and
+read by nobody. Items, each pinned by a test:
+
+1. `Finish.stop_sequence` reached only the sync encoders; the Chat and Responses
+   stream `Finish` arms read `d.stop_reason` alone (AUDIT #497's missing halves).
+   Also: the Chat feed-arm downgrade nulled nothing, so a downgraded tool turn
+   carried a stale sequence through `final_frame`.
+2. `LogprobsDelta` had no `ResponsesStreamEncoder.feed` arm — streamed callers
+   paid for logprobs and never received them (the #326 failure, stream half).
+3. Thinking deferred behind an open tool item lost its `encrypted_content`:
+   `_defer` no-opped a blob-only delta and `_flush_deferred` built the item with
+   no blob — the next Codex turn 400'd (AUDIT #355 re-entering via interleave).
+4. `ImagePart.file_id` re-encoded as the corrupt literal
+   `"data:image/png;base64,None"` in the OpenAI adapter (`url or data:…,b64`);
+   the Chat decoder could not read the `file` part its own adapter emits.
+5. `GenParams.thinking_type` was invisible to `effective_reasoning_effort`/
+   `effective_thinking_budget` — `thinking: {type:"enabled"}` ran with thinking
+   OFF on every non-Anthropic backend, and mode-only requests off on Anthropic.
+6. `Usage.cached_in_prompt` was written by every adapter and read only by
+   pricing: all four wire encoders re-emitted prompt totals in the upstream's
+   convention, so a Messages client behind an OpenAI upstream double-counted
+   its cached context and an OpenAI client behind Anthropic under-counted.
+   OpenRouter/NIM/opencode/Gemini never recorded the flag at all.
+7. `reasoning.summary` was excluded from Responses `extras` by `_KNOWN_KEYS`
+   but only `.effort` was read — a real param, neither mapped nor forwarded
+   (the `text.verbosity` class, AUDIT #369).
+8. `GenParams.metadata` was populated by no decoder; the response-cache gate
+   `app.py` keyed on `.get("stream")` could never fire. Dead field removed,
+   dead gate condition removed.
+9. Sampling-param coercion (`temperature`/`top_p`/`seed`/`parallel_tool_calls`/
+   `disable_parallel_tool_use`) existed for `max_tokens`/`top_k` but not the
+   rest — typed-wrong values rode verbatim to upstream 400s (AUDIT #83 class).
+
+Also: Anthropic stream errors emitted wiwi's `api_connection_error` (no such
+Anthropic type; sync said `api_error`); tool-result `extra_blocks` were both
+stringified into `content` AND re-emitted natively (duplicated references);
+tool-result image `cache_control` dropped on replay; Gemini silently dropped
+`input_examples`, tool-result images, `redacted_thinking` data, and file ids;
+the OpenAI adapter forwarded per-message `reasoning_content` to NIM (set drift
+vs `is_native_openai`); `parallel_tool_calls=true` was silently dropped on
+Anthropic; `tool cache_control`/`defer_loading` silently on the Chat wire.
+
+**The fix.** Every stream encoder now stores `d.stop_sequence` and emits it
+(the Chat one nulls it on both downgrade sites); Responses collects
+`LogprobsDelta` onto the terminal response object; `_defer` carries the blob
+and a blob-only delta buffers an entry; `file_id` renders as the Chat `file`
+part everywhere it can and warns where it cannot; `thinking_type`
+participates in both effort accessors and the Anthropic enable gate; every
+encoder re-bases prompt totals into its own dialect's convention
+(Messages: exclusive of cache reads; the three OpenAI surfaces: inclusive);
+the flag is recorded by OpenRouter/NIM/opencode (True) and Gemini (True —
+promptTokenCount is the whole-prompt counter); `reasoning.summary` rides
+extras as `reasoning_summary`; `coerce_float` joins `coerce_int` and all four
+decoders coerce; `stream_error_type` output maps to Anthropic vocabulary; the
+flatten keeps `content` empty when the blocks ride natively; and every
+capability-driven drop names itself to the caller.

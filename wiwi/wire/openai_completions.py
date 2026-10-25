@@ -90,8 +90,8 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         text = f"{text}{suffix}"
 
     g = ir.GenParams(
-        temperature=body.get("temperature"),
-        top_p=body.get("top_p"),
+        temperature=tr.coerce_float(body.get("temperature")),
+        top_p=tr.coerce_float(body.get("top_p")),
         max_tokens=_max_token_cap(body),
         stop=_stop_list(body.get("stop")),
         seed=ir.coerce_int(body.get("seed")),
@@ -122,14 +122,19 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
     if turn.tool_calls or finish == "tool_calls":
         finish = "stop"
     u = turn.usage
+    # Usage convention re-base (the Chat twin's rule): OpenAI totals the
+    # prompt INCLUDING cached tokens; an Anthropic-shaped upstream reports
+    # input_tokens EXCLUSIVE of cache reads. Re-emit in the OpenAI convention
+    # the caller of this surface parses.
+    prompt_incl = u.prompt_tokens + (0 if u.cached_in_prompt else u.cached_tokens)
     return {
         "id": f"cmpl-{req_id}", "object": "text_completion",
         "created": int(time.time()), "model": model,
         "choices": [{"index": 0, "text": turn.text, "logprobs": None,
                      "finish_reason": finish}],
-        "usage": {"prompt_tokens": u.prompt_tokens,
+        "usage": {"prompt_tokens": prompt_incl,
                   "completion_tokens": u.completion_tokens,
-                  "total_tokens": u.prompt_tokens + u.completion_tokens},
+                  "total_tokens": prompt_incl + u.completion_tokens},
     }
 
 
@@ -204,10 +209,15 @@ class CompletionStreamEncoder:
         if self._include_usage:
             self._choice["finish_reason"] = None
             self._chunk["choices"] = []
+            # Usage convention re-base (the sync twin's rule): OpenAI totals
+            # the prompt INCLUDING cached tokens; an Anthropic-shaped upstream
+            # reports input_tokens EXCLUSIVE of cache reads.
+            prompt_incl = u.prompt + (0 if u.cached_in_prompt else u.cached)
             out += sse_frame("", orjson.dumps({
                 **self._chunk,
-                "usage": {"prompt_tokens": u.prompt, "completion_tokens": u.output,
-                          "total_tokens": u.prompt + u.output},
+                "usage": {"prompt_tokens": prompt_incl,
+                          "completion_tokens": u.output,
+                          "total_tokens": prompt_incl + u.output},
             }).decode())
         return out
 

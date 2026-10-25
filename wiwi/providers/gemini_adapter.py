@@ -165,23 +165,45 @@ class GeminiAdapter(WarningMixin):
                     # part silently vanished, breaking cross-dialect multi-turn
                     # continuity (AUDIT #102). Gemini expects it back as a
                     # thought-flagged text part, signature included.
+                    if p.block_type == "redacted_thinking":
+                        # Opaque Anthropic blob: Gemini cannot read it back and
+                        # the old arm sent ``{"text": "", "thought": true}`` —
+                        # an empty part that carried nothing. Dropped, and the
+                        # caller told, like the audio arm below.
+                        self.warn(
+                            "a redacted thinking block was dropped: Gemini "
+                            "cannot replay encrypted reasoning")
+                        continue
                     entry: dict[str, Any] = {"text": p.text, "thought": True}
                     if p.signature:
                         entry["thoughtSignature"] = p.signature
                     parts.append(entry)
-                elif isinstance(p, ir.TextPart):
-                    parts.append({"text": p.text})
                 elif isinstance(p, ir.ImagePart):
-                    if p.b64:
+                    if p.file_id:
+                        # Files-API reference: Gemini has no spelling for a
+                        # foreign provider's file id. Reported, not silent.
+                        self.warn(
+                            "a Files-API image reference was dropped: Gemini "
+                            "has no equivalent")
+                    elif p.b64:
                         parts.append({"inline_data": {"mime_type": p.mime, "data": p.b64}})
                     elif p.url:
                         parts.append({"file_data": {"file_uri": p.url}})
+                elif isinstance(p, ir.TextPart):
+                    parts.append({"text": p.text})
                 elif isinstance(p, ir.DocumentPart):
                     # PDFs arrive as DocumentPart. Gemini takes documents as
                     # inline/file data exactly like images; dropping them (the
                     # previous behaviour) meant a Claude Code PDF attachment
                     # reached the model as nothing at all (AUDIT #156).
-                    if p.b64:
+                    if p.file_id:
+                        # No b64/url to ride inline_data/file_data: a foreign
+                        # file id has no Gemini spelling. Reported, not silent
+                        # (same rule as the ImagePart arm above).
+                        self.warn(
+                            "a Files-API document reference was dropped: "
+                            "Gemini has no equivalent")
+                    elif p.b64:
                         parts.append({"inline_data": {"mime_type": p.mime, "data": p.b64}})
                     elif p.url:
                         parts.append({"file_data": {"file_uri": p.url}})
@@ -234,6 +256,16 @@ class GeminiAdapter(WarningMixin):
                              or p.tool_use_id.removeprefix("call_"))
                     parts.append({"functionResponse": {"name": fname,
                                                        "response": resp}})
+                    if p.images:
+                        # functionResponse could carry image parts
+                        # (inline_data), but the multimodal-in-response
+                        # support matrix is model-specific and rejecting an
+                        # inline blob mid-history is worse than losing it.
+                        # Reported, not silent (AUDIT #499 class).
+                        self.warn(
+                            "tool-result images were dropped: this provider "
+                            "does not reliably accept them in a function "
+                            "response")
             if parts:
                 if contents and contents[-1]["role"] == role:
                     contents[-1]["parts"].extend(parts)
@@ -295,22 +327,33 @@ class GeminiAdapter(WarningMixin):
                 }
         # Map reasoning effort to Gemini's thinkingConfig (reasoning token budget)
         thinking_budget = g.effective_thinking_budget()
-        if thinking_budget is not None:
-            gen["thinkingConfig"] = {"thinkingBudget": thinking_budget}
-        elif g.reasoning_effort == "none":
-            # explicit disable — effective_thinking_budget returns None for 'none',
-            # so without this branch thinkingConfig would never be set and
-            # thinking would stay at the model default.
+        if g.thinking_budget == 0 or g.reasoning_effort == "none":
+            # Explicit disable (either spelling): Gemini honors budget 0.
             gen["thinkingConfig"] = {"thinkingBudget": 0}
+        elif thinking_budget is not None:
+            gen["thinkingConfig"] = {"thinkingBudget": thinking_budget}
         if gen:
             body["generationConfig"] = gen
         if req.tools:
             # Function tools and hosted builtins are separate tool entries:
             # builtins render as their native key ({"google_search": {}}) —
             # Gemini takes no config for search, so builtin_config is dropped.
-            decls = [{"name": t.name, "description": t.description,
-                      "parameters": t.parameters_json_schema}
-                     for t in req.tools if t.builtin is None]
+            decls = []
+            for t in req.tools:
+                if t.builtin is not None:
+                    continue
+                desc = t.description
+                if t.input_examples:
+                    # Anthropic tool examples: no functionDeclarations field,
+                    # but the worked examples are exactly what sells a complex
+                    # schema to the model — render into the description, the
+                    # same carrier the OpenAI adapter uses. Dropping them
+                    # silently lost them only on this route.
+                    rendered = json.dumps(t.input_examples, ensure_ascii=False)
+                    desc = (f"{t.description}\n\nExample inputs:\n{rendered}"
+                            if t.description else f"Example inputs:\n{rendered}")
+                decls.append({"name": t.name, "description": desc,
+                              "parameters": t.parameters_json_schema})
             # Gemini's functionDeclarations has no ``strict`` field, and its
             # schema subset already rejects most of what strict mode implies.
             # Warn rather than silently ignoring it: a caller that relies on
@@ -441,6 +484,12 @@ class GeminiAdapter(WarningMixin):
                                + _token_count(u.get("thoughtsTokenCount"))),
             cached_tokens=_token_count(u.get("cachedContentTokenCount")),
             reasoning_tokens=_token_count(u.get("thoughtsTokenCount")),
+            # Gemini's promptTokenCount totals the prompt INCLUDING the
+            # cached content (it is the whole-prompt counter; cachedContent
+            # TokenCount is the subset served from cache) — the OpenAI
+            # convention, recorded explicitly rather than left to the
+            # deployment-wire fallback (the contract ir/types.py states).
+            cached_in_prompt=True,
         )
         return turn
 
@@ -518,7 +567,10 @@ class GeminiAdapter(WarningMixin):
                     cached=_token_count(u.get("cachedContentTokenCount")),
                     reasoning=_token_count(u.get("thoughtsTokenCount")),
                     output=(_token_count(u.get("candidatesTokenCount"))
-                            + _token_count(u.get("thoughtsTokenCount")))))
+                            + _token_count(u.get("thoughtsTokenCount"))),
+                    # Same convention as decode_response: promptTokenCount
+                    # totals the prompt INCLUDING the cached subset.
+                    cached_in_prompt=True))
             out.append(dl.Finish("content_filter"))
             out.append(dl.StreamEnd())
             self._saw_tail = True
@@ -570,7 +622,8 @@ class GeminiAdapter(WarningMixin):
                     cached=_token_count(u.get("cachedContentTokenCount")),
                     reasoning=_token_count(u.get("thoughtsTokenCount")),
                     output=(_token_count(u.get("candidatesTokenCount"))
-                            + _token_count(u.get("thoughtsTokenCount")))))
+                            + _token_count(u.get("thoughtsTokenCount"))),
+                    cached_in_prompt=True))
             # A real function call in this response wins over the mapped finish
             # reason — never sniff the serialized candidate text for "tool".
             if self._saw_function_call:
@@ -606,7 +659,8 @@ class GeminiAdapter(WarningMixin):
                 cached=_token_count(u.get("cachedContentTokenCount")),
                 reasoning=_token_count(u.get("thoughtsTokenCount")),
                 output=(_token_count(u.get("candidatesTokenCount"))
-                        + _token_count(u.get("thoughtsTokenCount")))))
+                        + _token_count(u.get("thoughtsTokenCount"))),
+                cached_in_prompt=True))
             if self._saw_function_call:
                 out.append(dl.Finish("tool_call"))
             else:

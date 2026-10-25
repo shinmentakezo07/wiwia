@@ -81,6 +81,12 @@ def _role_parts_to_content(
                         if p.content:
                             parts_out.append({"type": "text", "text": content})
                         for img in p.images:
+                            if img.file_id:
+                                # Files-API reference (see the ImagePart arm):
+                                # never stringify a null b64 into a data URL.
+                                parts_out.append({"type": "file",
+                                                  "file": {"file_id": img.file_id}})
+                                continue
                             url = img.url or f"data:{img.mime};base64,{img.b64}"
                             parts_out.append({"type": "image_url",
                                               "image_url": {"url": url}})
@@ -104,8 +110,17 @@ def _role_parts_to_content(
             elif isinstance(p, ir.ImagePart):
                 if content is None or isinstance(content, str):
                     content = ([{"type": "text", "text": content}] if content else [])
-                url = p.url or f"data:{p.mime};base64,{p.b64}"
-                content.append({"type": "image_url", "image_url": {"url": url}})
+                if p.file_id:
+                    # Files-API reference: the ONLY faithful Chat spellings
+                    # are the file content part or nothing — the old
+                    # ``url or data:…,b64`` fallback stringified a null b64
+                    # into the corrupt literal "data:…;base64,None".
+                    content.append({"type": "file",
+                                    "file": {"file_id": p.file_id}})
+                else:
+                    url = p.url or f"data:{p.mime};base64,{p.b64}"
+                    content.append({"type": "image_url",
+                                    "image_url": {"url": url}})
             elif isinstance(p, ir.AudioPart):
                 # input_audio round-trip: the chat codec decodes it into an
                 # AudioPart, so re-emit it or an audio-only turn degrades to
@@ -194,6 +209,12 @@ def _role_parts_to_content(
                     if p.content:
                         parts_out.append({"type": "text", "text": tool_content})
                     for img in p.images:
+                        if img.file_id:
+                            # Files-API reference (see the ImagePart arm):
+                            # never stringify a null b64 into a data URL.
+                            parts_out.append({"type": "file",
+                                              "file": {"file_id": img.file_id}})
+                            continue
                         url = img.url or f"data:{img.mime};base64,{img.b64}"
                         parts_out.append({"type": "image_url",
                                           "image_url": {"url": url}})
@@ -269,7 +290,11 @@ class OpenAIAdapter(WarningMixin):
         # `reasoning_content` on input).
         ptype = deployment_params.get("provider_type")
         emit_per_message_reasoning = ptype not in {
-            "openai-compatible", "gmicloud", "openrouter", "bai",
+            # Kept in lockstep with is_native_openai below: NIM rejects
+            # history reasoning_content exactly like the strict gateways do,
+            # and the two sets drifting sent it there (the docstring above
+            # describes the 400 the drift caused).
+            "openai-compatible", "gmicloud", "openrouter", "bai", "nvidia-nim",
         }
         body: dict[str, Any] = {
             "model": model_id,
@@ -424,6 +449,18 @@ class OpenAIAdapter(WarningMixin):
                 fn["description"] = (
                     f"{t.description}\n\nExample inputs:\n{rendered}"
                     if t.description else f"Example inputs:\n{rendered}")
+            # Anthropic-only tool properties with no Chat field. Real caller
+            # constraints — a cache breakpoint re-bills the prefix it marked,
+            # and defer_loading changes which tools the model sees up front —
+            # so the drop is reported, like seed/top_k above (AUDIT #498).
+            if t.cache_control is not None:
+                self.warn(
+                    "tool 'cache_control' has no Chat Completions equivalent "
+                    "and was dropped")
+            if t.defer_loading is not None:
+                self.warn(
+                    "tool 'defer_loading' has no Chat Completions equivalent "
+                    "and was dropped")
             out.append({"type": "function", "function": fn})
         return out or None
 

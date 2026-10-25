@@ -134,6 +134,30 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                         parts.append(ir.AudioPart(
                             b64=ia.get("data"),
                             mime=f"audio/{ia.get('format') or 'wav'}"))
+                elif c.get("type") == "file":
+                    # The Chat surface's own outbound document form (the
+                    # OpenAI adapter emits ``{"type": "file", "file": {...}}``
+                    # for DocumentPart) was unreadable inbound: a client
+                    # sending one got the attachment silently dropped while
+                    # our own responses carried it. file_data may be a data
+                    # URL, a remote URL, or (files API) a bare file_id.
+                    cf = c.get("file")
+                    if not isinstance(cf, dict):
+                        continue
+                    fid = cf.get("file_id")
+                    if isinstance(fid, str) and fid:
+                        parts.append(ir.ImagePart(file_id=fid))
+                        continue
+                    fraw = cf.get("file_data")
+                    if not isinstance(fraw, str) or not fraw:
+                        continue
+                    if fraw.startswith("data:"):
+                        header, _, b64 = fraw.partition(",")
+                        parts.append(ir.DocumentPart(
+                            b64=b64,
+                            mime=header[5:].split(";")[0] or "application/pdf"))
+                    else:
+                        parts.append(ir.DocumentPart(url=fraw))
         # Reasoning models (o1/o3, DeepSeek-R1, etc.) emit a separate
         # reasoning_content field on assistant messages. Lift it into a
         # ThinkingPart so the IR carries the thinking context forward —
@@ -304,17 +328,22 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         tool_choice = (ir.ToolChoiceNamed(_str_or_empty(tc_fn.get("name")))
                        if isinstance(tc_fn, dict) else None)
 
+    # Coerce the sampling/count params the way max_tokens/top_k already are
+    # (AUDIT #83 class): a typed-wrong temperature/top_p/seed/
+    # parallel_tool_calls rode the IR verbatim and the upstream 400'd naming
+    # nothing the caller sent. None-drop matches the sibling codecs.
+    raw_ptc = body.get("parallel_tool_calls")
     g = ir.GenParams(
-        temperature=body.get("temperature"),
-        top_p=body.get("top_p"),
+        temperature=tr.coerce_float(body.get("temperature")),
+        top_p=tr.coerce_float(body.get("top_p")),
         max_tokens=_max_token_cap(body),
         stop=_stop_list(body.get("stop")),
-        seed=body.get("seed"),
-        n=body.get("n") or 1,
-        parallel_tool_calls=body.get("parallel_tool_calls"),
+        seed=ir.coerce_int(body.get("seed")),
+        n=ir.coerce_int(body.get("n")) or 1,
+        parallel_tool_calls=(raw_ptc if isinstance(raw_ptc, bool) else None),
         # OpenAI has no disable_parallel_tool_use; derive from parallel_tool_calls=False.
         # parallel_tool_calls=false means parallel is disabled → disable_parallel_tool_use=true.
-        disable_parallel_tool_use=(True if body.get("parallel_tool_calls") is False else None),
+        disable_parallel_tool_use=(True if raw_ptc is False else None),
         reasoning_effort=(body.get("reasoning_effort")
                           if isinstance(body.get("reasoning_effort"), str) else None),
         # Chat Completions has no ``top_k``, but the IR models it and the other
@@ -379,9 +408,16 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
     if turn.thinking:
         message["reasoning_content"] = "".join(t.text for t in turn.thinking)
     u = turn.usage
+    # Usage convention re-base: OpenAI totals the prompt INCLUDING cached
+    # tokens, but an Anthropic-shaped upstream reports input_tokens EXCLUSIVE
+    # of cache reads (cached_in_prompt=False). Emitting that verbatim made an
+    # OpenAI client's uncached = prompt - cached go negative and its total
+    # wrong by exactly the cached amount — the exact convention fact the IR
+    # field exists to carry (ir/types.py Usage.cached_in_prompt).
+    prompt_incl = u.prompt_tokens + (0 if u.cached_in_prompt else u.cached_tokens)
     usage = {
-        "prompt_tokens": u.prompt_tokens, "completion_tokens": u.completion_tokens,
-        "total_tokens": u.prompt_tokens + u.completion_tokens,
+        "prompt_tokens": prompt_incl, "completion_tokens": u.completion_tokens,
+        "total_tokens": prompt_incl + u.completion_tokens,
         "prompt_tokens_details": {"cached_tokens": u.cached_tokens},
         "completion_tokens_details": {"reasoning_tokens": u.reasoning_tokens},
     }
@@ -422,6 +458,9 @@ class ChatStreamEncoder:
         # choices array, and only when the client asked for it via
         # stream_options.include_usage (G4).
         self._include_usage = include_usage
+        # The matched stop sequence from Finish (AUDIT #497); None until one
+        # arrives, and only emitted alongside a "stop" finish.
+        self._stop_seq: str | None = None
         self._usage: dl.UsageFinal | None = None
         self._stop: str = "stop"
         # A1 stop_reason guard: a builtin tool call was suppressed (so the
@@ -520,6 +559,11 @@ class ChatStreamEncoder:
             return None  # emitted with the Finish frame
         if isinstance(d, dl.Finish):
             self._stop = d.stop_reason
+            # The matched stop sequence rides the IR Finish (the sync twin
+            # emits it on the choice, AUDIT #497); dropping it here told a
+            # streaming client the turn stopped but never WHICH caller
+            # sequence fired.
+            self._stop_seq = d.stop_sequence
             # Tool-turn validity (ir/translation.tool_call_finish_is_valid):
             # a tool_call finish is legal only when a function tool_calls
             # frame actually reached the client. The old guard fired only
@@ -534,6 +578,11 @@ class ChatStreamEncoder:
                     self._stop,
                     emitted_calls=1 if self._saw_tool_calls else 0):
                 self._stop = "stop"
+                # The downgrade fires HERE first: null the sequence now or
+                # final_frame's re-check sees an already-"stop" reason and
+                # forwards the stale sequence (the Anthropic twin nulls at
+                # its single guard site for the same reason).
+                self._stop_seq = None
             return None  # final_frame() emits finish_reason + usage together
         if isinstance(d, dl.StreamEnd):
             return None  # [DONE] is emitted by the caller after final_frame()
@@ -564,8 +613,19 @@ class ChatStreamEncoder:
         if not tr.tool_call_finish_is_valid(
                 stop, emitted_calls=1 if self._saw_tool_calls else 0):
             stop = "stop"
+            # A downgraded tool turn never matched a caller sequence either;
+            # leaving it set made a stop_sequence-branching client see a
+            # spurious match (mirror of the Anthropic encoder's
+            # null-on-downgrade, AUDIT #156).
+            self._stop_seq = None
         fr = tr.ir_to_openai_finish(stop)
+        # The matched stop sequence (sync twin: AUDIT #497). Meaningful only
+        # alongside the stop finish it describes.
+        stop_seq = self._stop_seq if fr == "stop" else None
         out = self._shell({}, finish=fr)
+        if stop_seq:
+            self._choice["stop_sequence"] = stop_seq
+            out = sse_frame("", orjson.dumps(self._chunk).decode())
         if self._include_usage:
             # OpenAI semantics: usage arrives in a final chunk carrying an
             # EMPTY choices array (after the finish_reason chunk), not in the
@@ -573,11 +633,19 @@ class ChatStreamEncoder:
             self._choice["delta"] = None
             self._choice["finish_reason"] = None
             self._chunk["choices"] = []
+            # Usage convention re-base (the sync twin's rule): OpenAI totals
+            # the prompt INCLUDING cached tokens, but an Anthropic-shaped
+            # upstream reports input_tokens EXCLUSIVE of cache reads
+            # (cached_in_prompt=False) — emitting that verbatim made an
+            # OpenAI client's uncached = prompt - cached go negative and its
+            # total wrong by exactly the cached amount.
+            prompt_incl = u.prompt + (0 if u.cached_in_prompt else u.cached)
             out += sse_frame("", orjson.dumps({
                 **self._chunk,
                 "usage": {
-                    "prompt_tokens": u.prompt, "completion_tokens": u.output,
-                    "total_tokens": u.prompt + u.output,
+                    "prompt_tokens": prompt_incl,
+                    "completion_tokens": u.output,
+                    "total_tokens": prompt_incl + u.output,
                     "prompt_tokens_details": {"cached_tokens": u.cached},
                     "completion_tokens_details": {"reasoning_tokens": u.reasoning},
                 }}).decode())

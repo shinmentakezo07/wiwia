@@ -143,8 +143,8 @@ class ThinkingPart:
     text: str
     signature: str | None = None
     # Anthropic redacted_thinking: the block is an opaque encrypted blob in
-    # ``data``; replay must re-emit the same block type or Anthropic rejects
-    # the history (mirror of ToolResultPart.block_type). Other adapters see
+    # ``data``; replay must re-emit the same block type or Anthropic rejects the
+    # history (mirror of ToolResultPart.block_type). Other adapters see
     # an empty-text thinking part and drop it harmlessly.
     block_type: ThinkingBlockType = "thinking"
     data: str | None = None
@@ -180,6 +180,10 @@ class DocumentPart:
     mime: str = "application/pdf"
     name: str | None = None  # Anthropic block-level "title"
     context: str | None = None  # Anthropic block-level "context"
+    # Files-API reference (source.type=file). The Anthropic adapter re-emits
+    # it natively; adapters with no spelling drop it with a warning, the
+    # same policy as ImagePart.file_id.
+    file_id: str | None = None
     cache_control: CacheControl = None  # prompt-cache breakpoint (see ImagePart)
 
 
@@ -270,34 +274,40 @@ class GenParams:
     # than through the effort→budget mapping, and other providers fall back to
     # reasoning_effort when this is set.
     effort: str | None = None
-    # Anthropic thinking modes: "enabled" (budget via thinking_budget), "adaptive"
-    # (model-driven budget, no budget_tokens), "disabled" (also sets
-    # reasoning_effort="none" so OpenAI upstreams disable reasoning).
+    # Anthropic thinking modes: "enabled" (budget via thinking_budget),
+    # "adaptive" (model-driven budget, no budget_tokens), "disabled" (also
+    # sets reasoning_effort="none" so OpenAI upstreams disable reasoning).
+    # ``effective_reasoning_effort``/``effective_thinking_budget`` consult it,
+    # so a mode-only request still expresses its intent on other backends.
     thinking_type: str | None = None  # "enabled" | "adaptive" | "disabled"
     top_k: int | None = None  # Anthropic (and Gemini) sampling param; ignored by OpenAI
-    metadata: dict[str, Any] = field(default_factory=dict)
 
     def effective_reasoning_effort(self) -> str | None:
-        """Return reasoning_effort, deriving it from thinking_budget if not set.
+        """Return reasoning_effort, deriving it from the other reasoning knobs if unset.
 
-        ``effort`` (Anthropic's ``output_config.effort``) participates as a
-        fallback so a Claude Code session that sets only the effort slider
-        still produces a reasoning control on a non-Anthropic backend, which
-        has no ``output_config`` of its own.
+        Precedence is MOST-SPECIFIC-FIRST: an explicit ``reasoning_effort``,
+        then Anthropic's explicit ``output_config.effort``, then a budget
+        mapped through the inverse ladder, and only then the ``thinking_type``
+        mode as the last fallback ("enabled" → "medium", "disabled" → "none").
+        A mode outranking the budget rewrote ``thinking: {type: enabled,
+        budget_tokens: 32000}`` to "medium", silently halving a caller's
+        explicit budget on non-Anthropic backends. The "enabled" fallback is
+        what fixes the reverse hole: before it, a mode-only ``{"type":
+        "enabled"}`` produced no reasoning control at all on those backends —
+        thinking silently off for a caller who turned it on. "adaptive" stays
+        None: it is model-driven by definition, and pinning a named level
+        overrode the provider's own default (round-53's WorkBuddy "max").
         """
         if self.reasoning_effort:
             return self.reasoning_effort
-        # ``effort`` is an EXPLICIT caller selection — /effort, --effort,
-        # CLAUDE_CODE_EFFORT_LEVEL, per-skill frontmatter — so it outranks the
-        # budget-derived guess. Claude Code sends ``thinking.budget_tokens``
-        # and ``output_config.effort`` together on most turns; letting the
-        # budget win silently rewrote every non-Anthropic backend's reasoning
-        # level to whatever the budget happened to round to (8000 -> "medium"),
-        # so /effort was a no-op everywhere except a native Anthropic upstream.
+        if self.thinking_type == "disabled":
+            return "none"
         if self.effort:
             return self.effort
         if self.thinking_budget is not None:
             return thinking_budget_to_effort(self.thinking_budget)
+        if self.thinking_type == "enabled":
+            return "medium"
         return None
 
     def effective_thinking_budget(self) -> int | None:
@@ -325,6 +335,12 @@ class GenParams:
             return effort_to_thinking_budget(self.reasoning_effort)
         if self.effort:
             return effort_to_thinking_budget(self.effort)
+        # thinking_type "enabled" with no other knob: the caller asked for
+        # thinking but gave no budget. The default level's budget, not None —
+        # None means "off" to every caller and would invert the request.
+        # "adaptive" stays None (model-driven; see above).
+        if self.thinking_type == "enabled":
+            return effort_to_thinking_budget("medium")
         return None
 
 

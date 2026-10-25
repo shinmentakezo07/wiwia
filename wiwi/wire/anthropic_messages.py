@@ -232,9 +232,17 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                         if joined:
                             text = joined
                         else:
-                            # keep non-text blocks, never base64 image blobs
+                            # keep non-text blocks, never base64 image blobs.
+                            # The flattened JSON is the FALLBACK content for
+                            # dialects with no block form (the OpenAI/Gemini
+                            # arms read ``content`` as text); the Anthropic
+                            # re-emit suppresses the duplicate text block at
+                            # the adapter (see anthropic_adapter's
+                            # extra_blocks arm) rather than emptying it here —
+                            # emptying here starved the block-less dialects.
                             others = [b for b in c if isinstance(b, dict)
-                                      and b.get("type") not in ("image", "input_image")]
+                                      and b.get("type") not in
+                                      ("image", "input_image")]
                             text = json.dumps(others) if others else ""
                         for blk in c:
                             if not isinstance(blk, dict):
@@ -282,7 +290,11 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                             # reference and the model never discovered the
                             # tool (it saw a sentence and nothing else).
                             # Carried verbatim for the Anthropic encoder;
-                            # dialects without the block still get ``content``.
+                            # dialects without the block still get ``content``
+                            # — but only when it carries information the
+                            # blocks themselves do not (see the flatten note
+                            # above: a result whose only payload IS these
+                            # blocks flattens to "" so it is not duplicated).
                             if blk.get("type") != "text":
                                 extra.append(dict(blk))
                     elif c is None:
@@ -401,7 +413,11 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
     tool_choice: ir.ToolChoice | None = None
     disable_parallel: bool | None = None
     if isinstance(tc_raw, dict):
-        disable_parallel = tc_raw.get("disable_parallel_tool_use")
+        # A typed-wrong disable_parallel_tool_use (a string, a number) rode
+        # into GenParams verbatim and re-emitted straight into tool_choice,
+        # which the API rejects — the same class the top_k guard below fixes.
+        raw_dptu = tc_raw.get("disable_parallel_tool_use")
+        disable_parallel = raw_dptu if isinstance(raw_dptu, bool) else None
         tc_type = tc_raw.get("type")
         if tc_type == "any":
             tool_choice = ir.ToolChoiceRequired()
@@ -459,6 +475,14 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         thinking_budget = int(budget_raw)
     else:
         thinking_budget = None
+    # A MALFORMED budget ("abc", true, 8000.5) must not leave thinking_type
+    # "enabled" behind: the mode now legitimately turns thinking on at a
+    # default budget when no budget was given, so a junk value would be
+    # silently replaced by a real one. Drop the mode with the budget — the
+    # knob the caller sent was the budget, and it was unusable.
+    if thinking_type == "enabled" and budget_raw is not None \
+            and thinking_budget is None:
+        thinking_type = None
     mt_raw = body.get("max_tokens")
     # NB: this ladder accepts digit strings (``"77"`` -> 77) where
     # ``ir.coerce_int`` rejects them (AUDIT #83 treats a string as a client
@@ -484,8 +508,11 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
     else:
         stop_seqs = []
     g = ir.GenParams(
-        temperature=body.get("temperature"),
-        top_p=body.get("top_p"),
+        # coerce_float: the sampling-param sibling of the max_tokens/top_k
+        # ladders above (AUDIT #83 class) — a typed-wrong temperature/top_p
+        # rode verbatim to an upstream 400 naming nothing the caller sent.
+        temperature=tr.coerce_float(body.get("temperature")),
+        top_p=tr.coerce_float(body.get("top_p")),
         max_tokens=max_tokens,
         stop=stop_seqs,
         thinking_budget=thinking_budget,
@@ -652,12 +679,18 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
             emitted_calls=_tool_blocks,
             emitted_server_calls=_server_blocks):
         sr = "end_turn"
+    # Usage convention re-base: the Messages API's ``input_tokens`` EXCLUDES
+    # cache reads, but an OpenAI-shaped upstream totals the prompt INCLUDING
+    # them (cached_in_prompt=True). Emitting that verbatim made a Claude Code
+    # context meter count the cached tokens twice — over by exactly the
+    # cached amount on every turn after the first.
+    input_excl = u.prompt_tokens - (u.cached_tokens if u.cached_in_prompt else 0)
     return {
         "id": f"msg_{req_id}", "type": "message", "role": "assistant",
         "model": model, "content": content,
         "stop_reason": sr, "stop_sequence": turn.stop_sequence,
         "usage": {
-            "input_tokens": u.prompt_tokens, "output_tokens": u.completion_tokens,
+            "input_tokens": input_excl, "output_tokens": u.completion_tokens,
             "cache_read_input_tokens": u.cached_tokens,
             "cache_creation_input_tokens": u.cache_creation_tokens,
             "output_tokens_details": {
@@ -703,6 +736,11 @@ class AnthropicStreamEncoder:
         self._usage: dl.UsageFinal | None = None
         self._stop = "end_turn"
         self._stop_seq: str | None = None
+        # Usage-convention state for the re-base in message_start/message_delta:
+        # True when the upstream's prompt total INCLUDES cached tokens (the
+        # OpenAI convention). ``None`` = unknown; the re-base is a no-op then,
+        # matching the gateway's wire-shape fallback.
+        self._cached_in_prompt: bool | None = None
         # Text/thinking that arrived while a tool_use block was open. Anthropic
         # content blocks are strictly sequential, so such content cannot be
         # emitted inline — but it must not be discarded either: it is part of
@@ -939,12 +977,18 @@ class AnthropicStreamEncoder:
             # zeros left its meter pinned at 0% for the entire session
             # (AUDIT #156). Providers that report usage only at the end leave
             # these zero and the trailing message_delta carries the totals.
+            # Usage convention re-base (see the sync twin): the Messages API's
+            # input_tokens EXCLUDES cache reads; an OpenAI-shaped upstream's
+            # INCLUDES them. StreamStart carries no convention flag (the
+            # Anthropic upstream is the only one that reports here), so a
+            # known _cached_in_prompt=True re-bases; otherwise verbatim.
+            prompt0 = d.prompt - (d.cached if self._cached_in_prompt else 0)
             return self._evt("message_start", {
                 "type": "message_start",
                 "message": {"id": f"msg_{self.req_id}", "type": "message",
                             "role": "assistant", "model": self.model, "content": [],
                             "stop_reason": None, "stop_sequence": None,
-                            "usage": {"input_tokens": d.prompt,
+                            "usage": {"input_tokens": prompt0,
                                       "output_tokens": 0,
                                       "cache_read_input_tokens": d.cached,
                                       "cache_creation_input_tokens":
@@ -1155,6 +1199,10 @@ class AnthropicStreamEncoder:
             return b"".join(out)
         if isinstance(d, dl.UsageFinal):
             self._usage = d
+            # Remember the convention so a LATER StreamStart on this same
+            # encoder (a resumed/replayed attempt re-emits one) re-bases too.
+            if d.cached_in_prompt is not None:
+                self._cached_in_prompt = d.cached_in_prompt
             return None
         if isinstance(d, dl.Finish):
             self._stop = _STOP_REASON_OUT.get(d.stop_reason, "end_turn")
@@ -1222,11 +1270,14 @@ class AnthropicStreamEncoder:
         # dropping it (a dropped signature hard-400s the next turn's replay).
         out += b"".join(self._flush_pending_sig())
         u = self._usage or dl.UsageFinal()
+        # Usage convention re-base (see the sync twin): Messages input_tokens
+        # EXCLUDES cache reads; an OpenAI-shaped upstream's INCLUDES them.
+        input_excl = u.prompt - (u.cached if u.cached_in_prompt else 0)
         return out + self._evt("message_delta", {
             "type": "message_delta",
             "delta": {"stop_reason": self._stop, "stop_sequence": self._stop_seq},
             "usage": {"output_tokens": u.output,
-                      "input_tokens": u.prompt,
+                      "input_tokens": input_excl,
                       "cache_read_input_tokens": u.cached,
                       "cache_creation_input_tokens": u.cache_creation,
                       # The sync twin emits this and the streaming path did
@@ -1261,7 +1312,16 @@ def _stream_error_type(d: dl.StreamError) -> str:
 
 
 # wiwi's vocabulary -> Anthropic's, for the names the two spell differently.
-_ANTHROPIC_STREAM_TYPES: dict[str, str] = {"timeout": "timeout_error"}
+# ``api_connection_error`` is wiwi's own classification (deltas.
+# stream_error_type) for 408/500/502/503; Anthropic has no such type and the
+# sync ``error_body`` maps it to ``api_error`` — leaving it unmapped here made
+# a mid-stream 503 arrive as a type Anthropic never emits while the identical
+# pre-first-byte 503 rendered ``api_error``.
+_ANTHROPIC_STREAM_TYPES: dict[str, str] = {
+    "timeout": "timeout_error",
+    "api_connection_error": "api_error",
+    "service_unavailable": "overloaded_error",
+}
 
 
 # Fallback when the etype is one the table above has never seen. Anthropic's

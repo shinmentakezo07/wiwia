@@ -1015,7 +1015,10 @@ class OpencodeAdapter(WarningMixin):
                 prompt=ir.coerce_int(u.get("input_tokens")) or 0,
                 cached=ir.coerce_int(in_det.get("cached_tokens")) or 0,
                 reasoning=ir.coerce_int(out_det.get("reasoning_tokens")) or 0,
-                output=ir.coerce_int(u.get("output_tokens")) or 0))
+                output=ir.coerce_int(u.get("output_tokens")) or 0,
+                # Responses-wire convention: input_tokens INCLUDES cached
+                # (mirrors the base OpenAI adapter's record).
+                cached_in_prompt=True))
             for entry in sorted(self._resp_tools.values(), key=lambda e: e["index"]):
                 if not entry.get("closed"):
                     out.append(dl.ToolCallClose(index=entry["index"]))
@@ -1118,6 +1121,16 @@ def _encode_responses_request(req: ir.Request, model_id: str,
                 if p.text:
                     text_buf.append(p.text)
             elif isinstance(p, ir.ImagePart):
+                if p.file_id:
+                    # Files-API reference: no Responses input_image spelling
+                    # without bytes. Dropped with a warning rather than
+                    # stringified into an empty url (the openai base arm has
+                    # the same rule).
+                    log.warning("dropping_file_id_image", route="responses")
+                    if callable(warn):
+                        warn("a Files-API image reference was dropped: this "
+                             "route has no equivalent")
+                    continue
                 url = p.url or (f"data:{p.mime};base64,{p.b64}" if p.b64 else "")
                 if url:
                     image_parts.append({"type": "input_image", "image_url": url})
@@ -1311,5 +1324,7 @@ def _decode_responses_response(body: bytes) -> ir.AssistantTurn:
         completion_tokens=ir.coerce_int(u.get("output_tokens")) or 0,
         cached_tokens=ir.coerce_int(in_det.get("cached_tokens")) or 0,
         reasoning_tokens=ir.coerce_int(out_det.get("reasoning_tokens")) or 0,
+        # Responses-wire convention: input_tokens INCLUDES cached.
+        cached_in_prompt=True,
     )
     return turn

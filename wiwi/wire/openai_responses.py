@@ -18,6 +18,7 @@ import structlog
 
 from wiwi.core.context import RequestContext
 from wiwi.ir import builtin_tools as bt
+from wiwi.ir import translation as tr
 from wiwi.ir import types as ir
 from wiwi.streaming import deltas as dl
 from wiwi.streaming.partial_json import _repair_truncated_json
@@ -75,6 +76,12 @@ def _decode_image(url: Any) -> ir.ImagePart | None:
 
 def _decode_document(c: dict[str, Any]) -> ir.DocumentPart | None:
     """Parse an ``input_file`` content block into a DocumentPart."""
+    # ``file_id`` (the Files API reference) has no IR document carrier, but
+    # dropping the whole block silently meant a spec-legal attachment simply
+    # vanished. There is no URL/b64 to fetch from, so the honest options are
+    # drop-with-nothing or drop-with-a-warning; the IR has no warning channel
+    # at decode, so at least keep the file_data/file_url paths working and
+    # leave file_id to the message-path image handling (which does carry it).
     raw = c.get("file_data") or c.get("file_url") or ""
     if not isinstance(raw, str) or not raw:
         return None  # non-string file ref: skip rather than 500
@@ -347,6 +354,14 @@ def decode_request(body: dict[str, Any],
                         # anthropic_messages.py does for its text blocks.
                         parts.append(ir.TextPart(_str_or_empty(c.get("text"))))
                     elif ctype in ("input_image", "image"):
+                        # ``file_id`` is a spec-legal image reference the
+                        # Files API resolves server-side; ImagePart.file_id
+                        # carries it so an Anthropic upstream can re-emit it
+                        # natively instead of dropping the block.
+                        fid = c.get("file_id")
+                        if isinstance(fid, str) and fid:
+                            parts.append(ir.ImagePart(file_id=fid))
+                            continue
                         img = _decode_image(c.get("image_url") or "")
                         if img is not None:
                             parts.append(img)
@@ -439,9 +454,11 @@ def decode_request(body: dict[str, Any],
     tool_choice = _decode_tool_choice(body.get("tool_choice"))
 
     stop_raw = body.get("stop")
+    raw_ptc = body.get("parallel_tool_calls")
+    raw_reasoning = body.get("reasoning")
     g = ir.GenParams(
-        temperature=body.get("temperature"),
-        top_p=body.get("top_p"),
+        temperature=tr.coerce_float(body.get("temperature")),
+        top_p=tr.coerce_float(body.get("top_p")),
         max_tokens=ir.coerce_int(body.get("max_output_tokens")),
         # stop is not a documented Responses param, but clients that send it
         # mean the same thing; accept a bare string or a list. Anything else
@@ -449,16 +466,15 @@ def decode_request(body: dict[str, Any],
         # forwarded it verbatim and the upstream 400'd naming nothing the
         # caller sent (AUDIT #185).
         stop=_stop_list(stop_raw),
-        seed=body.get("seed"),
+        seed=ir.coerce_int(body.get("seed")),
         # Same class as `max_output_tokens` on the line above: a non-int
         # `top_k` ('7', true, {}) was forwarded upstream verbatim (AUDIT #187).
         # The Chat and Anthropic decoders both coerce their equivalents.
         top_k=ir.coerce_int(body.get("top_k")),
-        parallel_tool_calls=body.get("parallel_tool_calls"),
-        disable_parallel_tool_use=(True if body.get("parallel_tool_calls") is False else None),
-        reasoning_effort=_effort_str((body.get("reasoning") or {}).get("effort")
-                                     if isinstance(body.get("reasoning"), dict)
-                                     else None),
+        parallel_tool_calls=(raw_ptc if isinstance(raw_ptc, bool) else None),
+        disable_parallel_tool_use=(True if raw_ptc is False else None),
+        reasoning_effort=_effort_str(raw_reasoning.get("effort")
+                                     if isinstance(raw_reasoning, dict) else None),
     )
     g.response_format = _decode_response_format(body.get("text"))
     extras = {k: v for k, v in body.items() if k not in _KNOWN_KEYS}
@@ -472,6 +488,15 @@ def decode_request(body: dict[str, Any],
         if isinstance(body.get("text"), dict) else None
     if isinstance(verbosity, str):
         extras["verbosity"] = verbosity
+    # ``reasoning`` is in _KNOWN_KEYS so only ``.effort`` was read; a
+    # ``summary`` selection ("detailed"/"none"/"auto") rode nothing at all —
+    # neither mapped nor forwarded (the ``text.verbosity`` class, AUDIT #369).
+    # The OpenAI adapter has no ``reasoning`` forward arm, so hand it the
+    # documented bare-key form the upstream accepts.
+    r_summary = raw_reasoning.get("summary") \
+        if isinstance(raw_reasoning, dict) else None
+    if isinstance(r_summary, str) and r_summary:
+        extras["reasoning_summary"] = r_summary
     return ir.Request(model=model, messages=messages, tools=tools,
                       tool_choice=tool_choice, gen_params=g,
                       stream=bool(body.get("stream")),
@@ -681,9 +706,14 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
                                               json.dumps(t.args)))
         out_id += 1
     u = turn.usage
+    # Usage convention re-base: OpenAI totals the prompt INCLUDING cached
+    # tokens; an Anthropic-shaped upstream reports input_tokens EXCLUSIVE of
+    # cache reads (cached_in_prompt=False). Re-emit in this surface's own
+    # convention so an OpenAI client's totals are self-consistent.
+    prompt_incl = u.prompt_tokens + (0 if u.cached_in_prompt else u.cached_tokens)
     resp = _response_obj(
         model, req_id, turn.stop_reason, output,
-        _usage_obj(u.prompt_tokens, u.completion_tokens, u.cached_tokens,
+        _usage_obj(prompt_incl, u.completion_tokens, u.cached_tokens,
                    u.reasoning_tokens),
         created_at=int(time.time()))
     # The matched stop sequence (AUDIT #497). The Responses surface has no
@@ -712,6 +742,9 @@ class ResponsesStreamEncoder:
         self._open_out = -1                  # output_index of the currently open item
         self._usage: dl.UsageFinal | None = None
         self._stop = "stop"
+        # The matched stop sequence from Finish (the sync twin emits it,
+        # AUDIT #497); surfaced on the terminal response object.
+        self._stop_seq: str | None = None
         # Piece lists rather than repeated `+=`: joining once at close is
         # O(n) total instead of O(n^2) copying for a long stream.
         self._text_buf: list[str] = []
@@ -735,8 +768,11 @@ class ResponsesStreamEncoder:
         # This buffer used to not exist: the encoder returned None and the
         # content was silently discarded, while a comment claimed the policy
         # "mirrors the Anthropic encoder" — which in fact preserves it.
-        self._deferred: list[tuple[str, str]] = []
+        self._deferred: list[tuple[str, str, str | None]] = []
         self._deferred_chars = 0
+        # Streaming logprobs accumulator (AUDIT #326): LogprobsDelta has no
+        # Responses event, so the tokens collect here for the terminal object.
+        self._logprobs: dict[str, Any] | None = None
         # Closed item payloads (the dicts emitted by output_item.done), so the
         # terminal response.completed/response.incomplete event can carry the
         # full output array as the spec (and Codex CLI) require.
@@ -822,7 +858,8 @@ class ResponsesStreamEncoder:
             out.extend(self._flush_deferred())
         return out
 
-    def _defer(self, kind: str, text: str) -> None:
+    def _defer(self, kind: str, text: str,
+               encrypted_content: str | None = None) -> None:
         """Buffer content that arrived while a tool item was open.
 
         Capped like the Anthropic encoder's ``MAX_DEFERRED_CHARS``: evict from
@@ -836,18 +873,22 @@ class ResponsesStreamEncoder:
         oversized delta was popped whole and the loop then had nothing left to
         trim, so an over-cap chunk emptied the ENTIRE buffer — discarding prior
         in-flight content that was nowhere near the cap (AUDIT #376).
+
+        A blob-only thinking delta (no text) still buffers an entry: the
+        ``encrypted_content`` is what Codex must replay next turn (AUDIT
+        #355), and the old ``if not text: return`` dropped it entirely.
         """
-        if not text:
+        if not text and not encrypted_content:
             return
-        self._deferred.append((kind, text))
+        self._deferred.append((kind, text, encrypted_content))
         total = self._deferred_chars + len(text)
         while total > MAX_DEFERRED_CHARS and self._deferred:
-            k, t = self._deferred.pop(0)
+            k, t, b = self._deferred.pop(0)
             total -= len(t)
             if total < MAX_DEFERRED_CHARS:
                 keep = MAX_DEFERRED_CHARS - total
                 if keep > 0 and t:
-                    self._deferred.insert(0, (k, t[-keep:]))
+                    self._deferred.insert(0, (k, t[-keep:], b))
                     total += keep
                 break
         self._deferred_chars = total
@@ -865,39 +906,56 @@ class ResponsesStreamEncoder:
         if not self._deferred:
             return []
         # Merge adjacent same-kind entries into runs first, so a text run that
-        # the adapter split across deltas becomes a single output item.
-        runs: list[list[str]] = []
-        for kind, text in self._deferred:
+        # the adapter split across deltas becomes a single output item. The
+        # LAST blob in a thinking run wins: adapters send one blob per
+        # reasoning block, and a run is one block (AUDIT #355).
+        runs: list[list[Any]] = []
+        for kind, text, blob in self._deferred:
             if runs and runs[-1][0] == kind:
                 runs[-1][1] += text
+                if blob:
+                    runs[-1][2] = blob
             else:
-                runs.append([kind, text])
+                runs.append([kind, text, blob])
         out: list[bytes] = []
-        for kind, text in runs:
+        for kind, text, blob in runs:
             if kind == "thinking":
-                out.extend(self._reasoning_item_events(text))
+                out.extend(self._reasoning_item_events(
+                    text, encrypted_content=blob))
             else:
                 out.extend(self._message_item_events(text))
         self._deferred.clear()
         self._deferred_chars = 0
         return out
 
-    def _reasoning_item_events(self, text: str) -> list[bytes]:
-        """add → summary delta → summary done → item.done for a reasoning item."""
+    def _reasoning_item_events(self, text: str,
+                               encrypted_content: str | None = None) -> list[bytes]:
+        """add → summary delta → summary done → item.done for a reasoning item.
+
+        ``encrypted_content`` is the AUDIT #355 blob: when the reasoning was
+        buffered behind an open tool item, ThinkingDelta stashed it in
+        ``_think_blob`` — and this flush path dropped it, so a Codex turn
+        whose thinking interleaved with a tool call replayed WITHOUT its blob
+        and the next request was rejected with "'encrypted_content' is
+        required". The blob arrives here via _flush_deferred.
+        """
         oi = self._next_output_index()
         item_id = f"rs_{self.req_id}_{oi}"
-        return [
+        out = [
             self._evt("response.output_item.added", {
                 "output_index": oi,
                 "item": {"type": "reasoning", "id": item_id, "summary": []}}),
-            self._evt("response.reasoning_summary_text.delta", {
-                "item_id": item_id, "output_index": oi, "delta": text}),
-            self._evt("response.reasoning_summary_text.done", {
-                "item_id": item_id, "output_index": oi, "text": text}),
-            # _item_done, not a bare event: it records the item so the
-            # terminal response.completed output array carries it too.
-            self._item_done(oi, _reasoning_item(text, self.req_id, oi)),
         ]
+        if text:
+            out.append(self._evt("response.reasoning_summary_text.delta", {
+                "item_id": item_id, "output_index": oi, "delta": text}))
+            out.append(self._evt("response.reasoning_summary_text.done", {
+                "item_id": item_id, "output_index": oi, "text": text}))
+        # _item_done, not a bare event: it records the item so the
+        # terminal response.completed output array carries it too.
+        out.append(self._item_done(oi, _reasoning_item(
+            text, self.req_id, oi, encrypted_content=encrypted_content)))
+        return out
 
     def _message_item_events(self, text: str) -> list[bytes]:
         """add → content_part.added → text.done → content_part.done → item.done."""
@@ -1017,9 +1075,11 @@ class ResponsesStreamEncoder:
             # for text; thinking has the identical _close_item hazard). Buffer
             # rather than drop, for the same reason (AUDIT #367).
             if self._item_open == "tool":
-                self._defer("thinking", d.text)
-                if d.encrypted_content:
-                    self._think_blob = d.encrypted_content
+                # Blob rides the deferred entry itself: _think_blob is
+                # consumed by _close_item, which the flush bypasses (AUDIT
+                # #355's interleave hole).
+                self._defer("thinking", d.text,
+                            encrypted_content=d.encrypted_content)
                 return None
             out = []
             if self._item_open != "thinking":
@@ -1042,6 +1102,15 @@ class ResponsesStreamEncoder:
                 "item_id": f"rs_{self.req_id}_{self._open_out}",
                 "output_index": self._open_out, "delta": d.text}))
             return b"".join(out)
+        if isinstance(d, dl.LogprobsDelta):
+            # Per-token logprobs (streaming half of AUDIT #326). The sync
+            # path lifts them onto the response object; this surface has no
+            # per-token event either, so the same treatment: stash for the
+            # terminal response.completed payload. Emitting nothing mid-stream
+            # keeps the event sequence legal (no phantom item types).
+            if d.logprobs:
+                self._logprobs = d.logprobs
+            return None
         if isinstance(d, dl.ToolCallOpen):
             out: list[bytes] = []
             # Only close the open item if it's a message/thinking — parallel
@@ -1107,6 +1176,9 @@ class ResponsesStreamEncoder:
             return None
         if isinstance(d, dl.Finish):
             self._stop = d.stop_reason
+            # AUDIT #497, streaming half: the sequence must reach the client,
+            # not just the reason that something matched.
+            self._stop_seq = d.stop_sequence
             return None
         if isinstance(d, dl.StreamEnd):
             # caller emits response.completed via _completed() after the loop
@@ -1163,8 +1235,21 @@ class ResponsesStreamEncoder:
         # consults the table — reported it correctly (AUDIT #477).
         incomplete = self._stop in _INCOMPLETE_REASONS
         etype = "response.incomplete" if incomplete else "response.completed"
+        # Usage convention re-base (the sync twin's rule): OpenAI totals the
+        # prompt INCLUDING cached tokens; an Anthropic-shaped upstream reports
+        # input_tokens EXCLUSIVE of cache reads.
+        prompt_incl = u.prompt + (0 if u.cached_in_prompt else u.cached)
         resp = _response_obj(self.model, self.req_id, self._stop, self._output,
-                             _usage_obj(u.prompt, u.output, u.cached, u.reasoning))
+                             _usage_obj(prompt_incl, u.output, u.cached, u.reasoning))
+        # The matched stop sequence (AUDIT #497): the terminal object is where
+        # a Responses client reads it (the sync twin sets the same key).
+        if self._stop_seq:
+            resp["stop_sequence"] = self._stop_seq
+        # Streaming logprobs (AUDIT #326): no per-token event exists on this
+        # surface, so the collected tokens ride the terminal object — the
+        # same key the sync path emits.
+        if self._logprobs is not None:
+            resp["logprobs"] = self._logprobs
         return closing + self._evt(etype, {"response": resp})
 
 

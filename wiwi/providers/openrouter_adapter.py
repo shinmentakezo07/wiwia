@@ -325,6 +325,8 @@ class OpenRouterAdapter(OpenAIAdapter):
             completion_tokens=_token_count(u.get("completion_tokens")),
             cached_tokens=_token_count(details_p.get("cached_tokens")),
             reasoning_tokens=_token_count(details_c.get("reasoning_tokens")),
+            # OpenAI wire convention: prompt_tokens INCLUDES cached.
+            cached_in_prompt=True,
         )
         return turn
 
@@ -403,7 +405,10 @@ class OpenRouterAdapter(OpenAIAdapter):
                 prompt=_token_count(u.get("prompt_tokens")),
                 cached=_token_count(dp.get("cached_tokens")),
                 reasoning=_token_count(dc.get("reasoning_tokens")),
-                output=_token_count(u.get("completion_tokens"))))
+                output=_token_count(u.get("completion_tokens")),
+                # OpenAI wire convention: the prompt total INCLUDES cached
+                # tokens (the base adapter records the same on its stream).
+                cached_in_prompt=True))
 
         if not choices:
             return out
