@@ -12,7 +12,6 @@ import {
   KeyRound,
   Layers,
   Plus,
-  Search,
   ShieldCheck,
   Sparkles,
   Upload,
@@ -42,6 +41,7 @@ import {
   Table,
   TD,
 } from "@/components/ui";
+import { SearchInput, useNow } from "@/pages/logs-shared";
 import { fmtDateTime, fmtInt, fmtUsd } from "@/lib/format";
 
 /** "" → null (means "leave unchanged"); unparsable → NaN; otherwise the number. */
@@ -115,6 +115,44 @@ function isNearCap(k: VirtualKey): boolean {
   return used != null && used >= NEAR_CAP;
 }
 
+/** Expiry that counts down: "in 3d" for keys still live, "2d ago" for expired
+ *  ones, exact datetime always available as the title. An operator scanning
+ *  the list cares about *how soon*, not the calendar date. */
+function fmtExpiryRelative(tsSec: number, nowMs = Date.now()): string {
+  const s = (tsSec * 1000 - nowMs) / 1000;
+  const a = Math.abs(s);
+  const unit =
+    a < 3600 ? `${Math.floor(a / 60)}m` : a < 86400 ? `${Math.floor(a / 3600)}h` : `${Math.floor(a / 86400)}d`;
+  return s >= 0 ? `in ${unit}` : `${unit} ago`;
+}
+
+/** True when a key expires within the next 3 days — the window in which the
+ *  expiry deserves the amber warning treatment, matching `fmtExpiryRelative`'s
+ *  "days" granularity. */
+const EXPIRY_SOON_SEC = 3 * 86400;
+
+function expiringSoon(k: VirtualKey, nowMs = Date.now()): boolean {
+  return k.expires_at != null && !k.disabled && k.expires_at * 1000 - nowMs <= EXPIRY_SOON_SEC * 1000;
+}
+
+/** The expiry text for a row/card cell: relative by default, absolute on hover,
+ *  amber when it has already passed or is within 3 days. */
+function ExpiryText(props: { k: VirtualKey; nowMs: number }) {
+  const { k, nowMs } = props;
+  if (k.expires_at == null) return <span className="text-[var(--admin-text-dim)]">never</span>;
+  const soon = expiringSoon(k, nowMs);
+  return (
+    <span
+      title={fmtDateTime(k.expires_at)}
+      className={`font-mono text-[12px] tabular-nums ${
+        soon ? "text-amber-400" : "text-[var(--admin-text-dim)]"
+      }`}
+    >
+      {fmtExpiryRelative(k.expires_at, nowMs)}
+    </span>
+  );
+}
+
 /** Status pill with a leading colored dot. The dot carries the state color at a
  *  glance even when the label is truncated on a narrow screen; the pill uses the
  *  shared admin-badge tone so it matches the rest of the console. */
@@ -129,6 +167,14 @@ const STATUS_ICON: Record<KeyStatus["tone"], string> = {
   green: "text-emerald-400/70",
   amber: "text-amber-400/70",
   gray: "text-zinc-500",
+};
+
+/** The tile's background tint per status — barely-there, so the accent reads
+ *  as atmosphere rather than a colored block. */
+const STATUS_TILE: Record<KeyStatus["tone"], string> = {
+  green: "bg-emerald-500/[0.04]",
+  amber: "bg-amber-500/[0.05]",
+  gray: "bg-transparent",
 };
 
 function StatusBadge(props: { tone: KeyStatus["tone"]; label: string }) {
@@ -174,19 +220,21 @@ function BudgetCell(props: { k: VirtualKey }) {
   // the division to learn "how close". Print the percentage, and tint the value
   // with the same band the bar is in so the two read as one signal.
   const hot = used != null && used >= NEAR_CAP;
+  const capped = used != null && used >= 1;
   return (
     <div className="w-40 space-y-1">
       {used != null && <ProgressBar value={used} />}
-      <span className="font-mono text-[12px] tabular-nums text-[var(--admin-text)]">
+      <span
+        className={`font-mono text-[12px] tabular-nums ${
+          capped ? "text-red-400" : hot ? "text-amber-400" : "text-[var(--admin-text)]"
+        }`}
+      >
         {fmtUsd(k.spend_to_date)}
         {k.max_budget != null && (
           <span className="text-[var(--admin-text-dim)]"> / {fmtUsd(k.max_budget)}</span>
         )}
         {used != null && (
-          <span className={hot ? "text-amber-400" : "text-[var(--admin-text-dim)]"}>
-            {" "}
-            {Math.round(used * 100)}%
-          </span>
+          <span className="text-[var(--admin-text-dim)]"> {Math.round(used * 100)}%</span>
         )}
       </span>
     </div>
@@ -285,14 +333,14 @@ function Pill(props: {
       onClick={props.onClick}
       className={`inline-flex min-h-11 items-center gap-1.5 rounded-full border px-3.5 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500 ${
         props.active
-          ? "border-[#232323] bg-[#1c1c1c] text-[var(--admin-text)]"
+          ? "border-indigo-400/25 bg-[var(--admin-accent-soft)] text-[var(--admin-text)]"
           : "border-[var(--admin-border)] bg-[#0c0c0c] text-[var(--admin-text-muted)] hover:border-[#1f1f1f] hover:bg-[#141414] hover:text-[var(--admin-text)]"
       }`}
     >
       {Icon && (
         <Icon
           size={11}
-          className={props.active ? "text-[var(--admin-text)]" : "text-[var(--admin-text-dim)]"}
+          className={props.active ? "text-indigo-300" : "text-[var(--admin-text-dim)]"}
         />
       )}
       {props.label}
@@ -559,7 +607,10 @@ function KeyActions(props: KeyActionProps & { stretch?: boolean }) {
   );
 }
 
-/** The model allowlist, rendered identically in the table cell and the card. */
+/** The model allowlist, rendered identically in the table cell and the card.
+ *  Beyond three models the rest fold into a "+N" chip with the full list on
+ *  hover — a 10-model allowlist used to push the row's height and width past
+ *  every other row's. */
 function ModelList(props: { models: string[] }) {
   if (props.models.length === 0) {
     return (
@@ -571,13 +622,20 @@ function ModelList(props: { models: string[] }) {
       </span>
     );
   }
+  const shown = props.models.slice(0, 3);
+  const rest = props.models.slice(3);
   return (
     <span className="flex flex-wrap gap-1">
-      {props.models.map((m) => (
+      {shown.map((m) => (
         <Badge key={m} tone="blue">
           {m}
         </Badge>
       ))}
+      {rest.length > 0 && (
+        <Badge tone="gray" title={rest.join(", ")}>
+          +{rest.length}
+        </Badge>
+      )}
     </span>
   );
 }
@@ -588,18 +646,16 @@ function ModelList(props: { models: string[] }) {
 function KeyCard(props: KeyActionProps) {
   const { k } = props;
   const status = keyStatus(k);
-  const meta: { label: string; value: string }[] = [
-    { label: "rpm", value: k.rpm != null ? fmtInt(k.rpm) : "∞" },
-    { label: "tpm", value: k.tpm != null ? fmtInt(k.tpm) : "∞" },
-    { label: "expires", value: k.expires_at != null ? fmtDateTime(k.expires_at) : "never" },
-  ];
+  const nowMs = useNow();
   return (
     <article
       aria-label={`${k.alias}, ${status.label}`}
-      className="rounded-xl border border-[var(--admin-border)] bg-[#0c0c0c] p-3.5"
+      className="rounded-xl border border-[var(--admin-border)] bg-[#0c0c0c] p-3.5 transition-colors hover:border-[var(--admin-border-hover)]"
     >
       <div className="flex items-start gap-2.5">
-        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[var(--admin-border)] bg-white/[0.02]">
+        <span
+          className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[var(--admin-border)] ${STATUS_TILE[status.tone]}`}
+        >
           <KeyRound size={14} className={STATUS_ICON[status.tone]} />
         </span>
         <div className="min-w-0 flex-1">
@@ -619,14 +675,24 @@ function KeyCard(props: KeyActionProps) {
       </div>
 
       <dl className="mt-3 flex flex-wrap gap-x-4 gap-y-1.5 border-t border-[var(--admin-border)] pt-2.5">
-        {meta.map((m) => (
-          <div key={m.label} className="flex items-baseline gap-1.5">
-            <dt className="admin-label">{m.label}</dt>
-            <dd className="font-mono text-[11.5px] tabular-nums text-[var(--admin-text)]">
-              {m.value}
-            </dd>
-          </div>
-        ))}
+        <div className="flex items-baseline gap-1.5">
+          <dt className="admin-label">rpm</dt>
+          <dd className="font-mono text-[11.5px] tabular-nums text-[var(--admin-text)]">
+            {k.rpm != null ? fmtInt(k.rpm) : "∞"}
+          </dd>
+        </div>
+        <div className="flex items-baseline gap-1.5">
+          <dt className="admin-label">tpm</dt>
+          <dd className="font-mono text-[11.5px] tabular-nums text-[var(--admin-text)]">
+            {k.tpm != null ? fmtInt(k.tpm) : "∞"}
+          </dd>
+        </div>
+        <div className="flex items-baseline gap-1.5">
+          <dt className="admin-label">expires</dt>
+          <dd>
+            <ExpiryText k={k} nowMs={nowMs} />
+          </dd>
+        </div>
       </dl>
 
       <div className="mt-3 border-t border-[var(--admin-border)] pt-3">
@@ -639,13 +705,16 @@ function KeyCard(props: KeyActionProps) {
 function KeyRow(props: KeyActionProps) {
   const { k } = props;
   const status = keyStatus(k);
+  const nowMs = useNow();
   return (
     <tr className="group">
       {/* Sticky identity cell so horizontal scroll keeps the row's name — and
           now its status, via the tinted tile — pinned. */}
       <TD className="sticky left-0 z-10 bg-[var(--admin-surface)] after:absolute after:inset-y-0 after:right-0 after:w-px after:bg-[var(--admin-border)] after:content-['']">
         <span className="flex items-center gap-2.5">
-          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-[var(--admin-border)] bg-white/[0.02] transition-colors group-hover:border-[var(--admin-border-hover)]">
+          <span
+            className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-[var(--admin-border)] transition-colors group-hover:border-[var(--admin-border-hover)] ${STATUS_TILE[status.tone]}`}
+          >
             <KeyRound size={13} className={STATUS_ICON[status.tone]} />
           </span>
           <span className="min-w-0 truncate font-medium text-[var(--admin-text)]">{k.alias}</span>
@@ -662,8 +731,8 @@ function KeyRow(props: KeyActionProps) {
       </TD>
       <TD className="font-mono tabular-nums">{k.rpm != null ? fmtInt(k.rpm) : "—"}</TD>
       <TD className="hidden font-mono tabular-nums lg:table-cell">{k.tpm != null ? fmtInt(k.tpm) : "—"}</TD>
-      <TD className="hidden font-mono text-[12px] text-[var(--admin-text-dim)] xl:table-cell">
-        {k.expires_at != null ? fmtDateTime(k.expires_at) : "—"}
+      <TD className="hidden xl:table-cell">
+        <ExpiryText k={k} nowMs={nowMs} />
       </TD>
       <TD>
         <KeyActions {...props} />
@@ -887,6 +956,11 @@ export function VirtualKeysPage() {
   const activeCount = allKeys.filter((k) => !k.disabled).length;
   const totalSpend = allKeys.reduce((s, k) => s + (k.spend_to_date || 0), 0);
   const nearCap = allKeys.filter(isNearCap).length;
+  // Budget-cap aggregates for the Spend tile's utilization bar: the sum of all
+  // caps (uncapped keys contribute nothing — a ∞ cap would make the fraction
+  // meaningless) and how many keys actually have a cap.
+  const cappedKeys = allKeys.filter((k) => k.max_budget != null && k.max_budget > 0).length;
+  const totalBudget = allKeys.reduce((s, k) => s + (k.max_budget && k.max_budget > 0 ? k.max_budget : 0), 0);
 
   // `aria-sort` lives on the <th>, so mark the active column by its index.
   const headSort = {
@@ -940,6 +1014,16 @@ export function VirtualKeysPage() {
             numeric={totalSpend}
             format={fmtUsd}
             tone="brand"
+            sub={`${cappedKeys} of budget cap${cappedKeys === 1 ? "" : "s"} used`}
+            progress={
+              totalBudget > 0
+                ? {
+                    value: Math.min(1, totalSpend / totalBudget),
+                    color: totalSpend / totalBudget >= 1 ? "bg-red-400" : undefined,
+                  }
+                : undefined
+            }
+            progressRight={totalBudget > 0 ? `of ${fmtUsd(totalBudget)} caps` : undefined}
           />
           <StatCard
             icon={AlertTriangle}
@@ -971,30 +1055,12 @@ export function VirtualKeysPage() {
         {query.data && query.data.keys.length > 0 && (
           <div className="space-y-2.5 border-b border-[var(--admin-border)] px-4 py-3">
             <div className="flex items-center gap-3">
-              <label className="relative min-w-0 flex-1">
-                <span className="sr-only">Search keys by name or model</span>
-                <Search
-                  size={14}
-                  aria-hidden
-                  className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--admin-text-dim)]"
-                />
-                <Input
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search by name or model…"
-                  className="pl-9 pr-11"
-                />
-                {search && (
-                  <button
-                    type="button"
-                    aria-label="Clear search"
-                    onClick={() => setSearch("")}
-                    className="absolute right-0.5 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-md text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30"
-                  >
-                    <X size={13} />
-                  </button>
-                )}
-              </label>
+              <SearchInput
+                value={search}
+                onChange={setSearch}
+                placeholder="Search by name or model…"
+                className="min-w-0 flex-1"
+              />
               {/* The sortable headers live inside the table, which is hidden
                   below md — so the cards need the same control up here. */}
               <Select
@@ -1132,11 +1198,19 @@ export function VirtualKeysPage() {
         {created ? (
           <div className="flex min-h-0 flex-1 flex-col">
             <div className="-mr-1 min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
-              {/* Reveal-once secret panel — elevated neutral surface so the
-                  plaintext reads as the single focal value, no color, no
-                  transparency. */}
-              <div className="rounded-2xl border border-[#232323] bg-[#141414] p-4">
-                <div className="flex items-center gap-3">
+              {/* Reveal-once secret panel — elevated neutral surface with a
+                  faint emerald success wash, so the plaintext reads as the
+                  single focal value of a completed action. */}
+              <div className="relative overflow-hidden rounded-2xl border border-emerald-500/20 bg-[#141414] p-4">
+                <span
+                  aria-hidden
+                  className="pointer-events-none absolute inset-0"
+                  style={{
+                    background:
+                      "radial-gradient(120% 90% at 100% 0%, rgba(52,211,153,0.08) 0%, transparent 60%)",
+                  }}
+                />
+                <div className="relative flex items-center gap-3">
                   <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#1a1a1a]">
                     <Check className="h-4.5 w-4.5 text-emerald-400" />
                   </span>
@@ -1149,7 +1223,7 @@ export function VirtualKeysPage() {
                     </p>
                   </div>
                 </div>
-                <div className="mt-3.5">
+                <div className="relative mt-3.5">
                   <p className="admin-label mb-1.5">Secret key</p>
                   <p className="break-all font-mono text-[15px] leading-relaxed tracking-wide text-[var(--admin-text)]">
                     {created.key}
