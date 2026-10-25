@@ -318,8 +318,12 @@ function ModelSelector(props: {
   value: string;
   onChange: (v: string) => void;
   disabled?: boolean;
+  /** Set when the models query itself failed: the trigger then explains the
+   *  empty list and offers a retry instead of silently showing no models. */
+  loadError?: boolean;
+  onRetryLoad?: () => void;
 }) {
-  const { groups, value, onChange, disabled } = props;
+  const { groups, value, onChange, disabled, loadError, onRetryLoad } = props;
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   // Highlighted option for arrow-key navigation (combobox pattern).
@@ -482,7 +486,28 @@ function ModelSelector(props: {
             aria-label="Available models"
           >
             {filtered.length === 0 ? (
-              <div className="py-8 text-center text-[13px] text-[var(--admin-text-dim)]">No models found</div>
+              <div className="flex flex-col items-center gap-2 px-3 py-8 text-center text-[13px] text-[var(--admin-text-dim)]">
+                {loadError ? (
+                  <>
+                    <span className="inline-flex items-center gap-1.5">
+                      <AlertCircle size={13} className="text-amber-400" aria-hidden />
+                      Couldn't load models
+                    </span>
+                    {onRetryLoad && (
+                      <button
+                        type="button"
+                        onClick={onRetryLoad}
+                        className="inline-flex min-h-11 items-center gap-1.5 rounded-lg border border-[var(--admin-border)] px-3 text-[12px] text-[var(--admin-text-muted)] transition-colors hover:border-[var(--admin-border-hover)] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50"
+                      >
+                        <RefreshCcw size={12} aria-hidden />
+                        Retry
+                      </button>
+                    )}
+                  </>
+                ) : (
+                  "No models found"
+                )}
+              </div>
             ) : (
               filtered.map((g, idx) => {
                 const isSelected = g.name === value;
@@ -552,10 +577,17 @@ function ChatSidebar(props: {
   onDelete: (id: string) => void;
   onRename: (id: string, title: string) => void;
   onClearAll: () => void;
-  collapsed: boolean;
+  /** Which physical form the sidebar takes: the 52px icon rail, the desktop
+   *  column, or the mobile overlay drawer. The parent derives this from a
+   *  live matchMedia query. Deriving it here from `collapsed &&
+   *  window.innerWidth < 768` inverted the two states — the "expand" tap
+   *  rendered the desktop column (display:none below md) while attaching the
+   *  overlay's dismiss handlers to it, so the drawer never appeared and could
+   *  never be closed (AUDIT #519). */
+  variant: "rail" | "column" | "overlay";
   onToggle: () => void;
 }) {
-  const { chats, activeId, onSelect, onNew, onDelete, onRename, onClearAll, collapsed, onToggle } = props;
+  const { chats, activeId, onSelect, onNew, onDelete, onRename, onClearAll, variant, onToggle } = props;
   const [query, setQuery] = useState("");
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
@@ -564,10 +596,11 @@ function ChatSidebar(props: {
   const clearTimer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(clearTimer.current), []);
 
-  // Below 768px the sidebar is not a flex column, it is an overlay floating
-  // above the arena. It therefore needs its own dismiss affordances: Escape,
-  // and a tap-outside scrim rendered below the panel.
-  const isOverlay = collapsed && typeof window !== "undefined" && window.innerWidth < 768;
+  // The drawer form covers the arena, so it needs its own dismiss
+  // affordances: Escape, and a tap-outside scrim rendered below the panel.
+  // While the drawer is open, Escape belongs to it — the page-level
+  // "Escape stops the stream" handler explicitly yields (see PlaygroundPage).
+  const isOverlay = variant === "overlay";
   useEffect(() => {
     if (!isOverlay) return;
     const onKey = (e: KeyboardEvent) => {
@@ -606,7 +639,7 @@ function ChatSidebar(props: {
     return SIDEBAR_GROUPS.filter((g) => map.has(g)).map((g) => [g, map.get(g)!] as const);
   }, [filtered]);
 
-  if (collapsed) {
+  if (variant === "rail") {
     return (
       <aside className="pg-rail flex shrink-0 flex-col items-center gap-2 border-r border-[var(--admin-border)] bg-[var(--admin-surface)] px-2 py-3" aria-label="Conversation shortcuts">
         <button
@@ -645,7 +678,7 @@ function ChatSidebar(props: {
       {/* Tap-outside scrim. aria-hidden: it is a pointer affordance, not a control. */}
       {isOverlay && (
         <div
-          className="pg-scrim fixed inset-0 z-20 bg-black/60 backdrop-blur-[2px] md:hidden"
+          className="pg-scrim fixed inset-0 z-[60] bg-black/60 backdrop-blur-[2px]"
           onClick={onToggle}
           aria-hidden
         />
@@ -653,8 +686,11 @@ function ChatSidebar(props: {
       <aside
         className={
           isOverlay
-            ? "pg-sidebar pg-sidebar-enter fixed inset-y-0 left-0 z-30 flex flex-col border-r border-[var(--admin-border)] bg-[var(--admin-surface)] shadow-2xl shadow-black/70 md:hidden"
-            : "pg-sidebar hidden flex-col border-r border-[var(--admin-border)] bg-[var(--admin-surface)] md:flex"
+            ? // z-[70]: the drawer lives inside .pg-body (relative z-10),
+              // so the top bar (z-30, outside that context) would otherwise
+              // paint above the drawer and swallow its header controls.
+              "pg-sidebar pg-sidebar-enter fixed inset-y-0 left-0 z-[70] flex flex-col border-r border-[var(--admin-border)] bg-[var(--admin-surface)] shadow-2xl shadow-black/70"
+            : "pg-sidebar flex flex-col border-r border-[var(--admin-border)] bg-[var(--admin-surface)]"
         }
         aria-label="Conversation history"
       >
@@ -710,7 +746,7 @@ function ChatSidebar(props: {
               <button
                 type="button"
                 onClick={() => setQuery("")}
-                className="shrink-0 text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]"
+                className="-m-2.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50"
                 aria-label="Clear search"
               >
                 <X size={12} />
@@ -830,7 +866,7 @@ function ChatSidebar(props: {
           <div className="flex items-center justify-between">
             <Link
               to="/console"
-              className="flex min-h-11 items-center gap-2 text-[12px] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]"
+              className="flex min-h-11 items-center gap-2 rounded-md text-[12px] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50"
             >
               <Terminal size={12} />
               Dashboard
@@ -843,7 +879,7 @@ function ChatSidebar(props: {
                   window.clearTimeout(clearTimer.current);
                   clearTimer.current = window.setTimeout(() => setConfirmingClear(false), 4000);
                 }}
-                className="flex min-h-11 items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] text-[var(--admin-text-dim)] transition-colors hover:text-red-400"
+                className="flex min-h-11 items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] text-[var(--admin-text-dim)] transition-colors hover:text-red-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50"
                 aria-label="Clear all chats"
                 title="Clear all chats"
               >
@@ -859,14 +895,15 @@ function ChatSidebar(props: {
                     onClearAll();
                     setConfirmingClear(false);
                   }}
-                  className="rounded-md border border-red-500/30 bg-red-500/10 px-1.5 py-0.5 text-[11px] text-red-400 transition-colors hover:bg-red-500/20"
+                  className="flex min-h-11 items-center rounded-md border border-red-500/30 bg-red-500/10 px-2.5 text-[11px] text-red-400 transition-colors hover:bg-red-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50"
                 >
                   Confirm
                 </button>
                 <button
                   type="button"
                   onClick={() => setConfirmingClear(false)}
-                  className="rounded-md px-1 py-0.5 text-[11px] text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]"
+                  className="flex h-11 w-11 items-center justify-center rounded-md text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50"
+                  aria-label="Cancel clear all"
                 >
                   <X size={12} />
                 </button>
@@ -881,24 +918,25 @@ function ChatSidebar(props: {
 
 // ── Session status ─────────────────────────────────────────────────────────
 
-type SessionStatusKind = "ready" | "live" | "loading" | "warning";
+type SessionStatusKind = "ready" | "live";
 
-/** Rendered in the top bar; hides its text label below 640px. The dot + label
- *  are decorative (aria-hidden): the composer's placeholder and the send
- *  button's disabled state already convey the same state to assistive tech,
- *  and a third live region announcing every streaming transition is noise. */
+/** Rendered in the top bar; hides its text label below 640px. The dot is
+ *  decorative (aria-hidden) — the label itself is exposed through the
+ *  wrapper's polite live region so a streaming turn is announced without a
+ *  second copy of the text. */
 function SessionStatus(props: {
   status: SessionStatusKind;
   label: string;
   compact?: boolean;
 }) {
   return (
-    <span
-      className={`pg-status pg-status-${props.status} ${props.compact ? "pg-status-compact" : ""}`}
-      aria-hidden
-    >
-      <span className="pg-status-dot" aria-hidden />
-      <span className="pg-status-label">{props.label}</span>
+    <span className="pg-status-wrap" role="status" aria-live="polite">
+      <span
+        className={`pg-status pg-status-${props.status} ${props.compact ? "pg-status-compact" : ""}`}
+      >
+        <span className="pg-status-dot" aria-hidden />
+        <span className="pg-status-label">{props.label}</span>
+      </span>
     </span>
   );
 }
@@ -934,7 +972,29 @@ export function PlaygroundPage() {
   // ── Chat history state ───────────────────────────────────────────────────
   const [chats, setChats] = useState<Conversation[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(typeof window !== "undefined" && window.innerWidth < 768);
+  // Sidebar form. Desktop has a collapsible column; below md the column
+  // becomes an overlay drawer that is open-only-when-tapped and dismissed by
+  // its scrim/Escape. The two used to share one boolean derived from a
+  // window.innerWidth read that never updated on resize, which made the
+  // drawer unreachable on mobile (AUDIT #519).
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [isNarrow, setIsNarrow] = useState(() =>
+    typeof window !== "undefined" ? window.matchMedia("(max-width: 767px)").matches : false,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 767px)");
+    const onChange = (e: MediaQueryListEvent) => setIsNarrow(e.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  const sidebarVariant = isNarrow
+    ? drawerOpen
+      ? "overlay"
+      : "rail"
+    : sidebarCollapsed
+      ? "rail"
+      : "column";
   // Unsent composer text, kept per chat so switching conversations doesn't
   // lose a half-written message. Cleared entries are fine to keep around —
   // they're tiny strings, and the ref dies with the component.
@@ -955,6 +1015,17 @@ export function PlaygroundPage() {
     // focus when the composer isn't already focused elsewhere.
     if (document.activeElement?.tagName !== "TEXTAREA") textareaRef.current?.focus();
   }, []);
+  // Composer auto-grow fallback: `field-sizing: content` (the CSS route) is
+  // Chromium-only, so on Firefox/Safari the textarea stayed one row tall and
+  // long drafts scrolled invisibly inside it. Measure and set height here —
+  // identical result where both mechanisms are active.
+  useLayoutEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.setAttribute("data-autogrow", "");
+    el.style.height = "24px";
+    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+  }, [draft]);
 
   // Load chat history from localStorage on mount
   useEffect(() => {
@@ -1322,6 +1393,10 @@ export function PlaygroundPage() {
       }
       setDraft("");
       draftsRef.current[activeChatId ?? ""] = "";
+      // The turn the user just committed is the thing to watch: even if they
+      // had scrolled up through history, follow it (once — the layout effect
+      // then keeps following while `atBottom` holds).
+      setAtBottom(true);
       await runStream([...messages, { id: uid(), role: "user", content: trimmed }], trimmed);
     },
     [effectiveModel, busy, messages, runStream, activeChatId],
@@ -1343,14 +1418,18 @@ export function PlaygroundPage() {
         target?.tagName === "INPUT" ||
         (target?.tagName === "TEXTAREA" && !inComposer) ||
         target?.isContentEditable;
-      if (e.key === "Escape" && streaming && !inOtherInput) {
+      // The mobile history drawer also binds Escape (to close). Both handlers
+      // live on window/document, so neither can reliably preempt the other —
+      // the page handler must simply yield while the drawer is open.
+      const drawerHoldsKey = isNarrow && drawerOpen;
+      if (e.key === "Escape" && streaming && !inOtherInput && !drawerHoldsKey) {
         e.preventDefault();
         stop();
       }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [streaming, stop]);
+  }, [streaming, stop, isNarrow, drawerOpen]);
 
   // One-click retry of the last failed request: clears the banner and
   // replays the exact same conversation state through runStream.
@@ -1395,7 +1474,10 @@ export function PlaygroundPage() {
 
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (el) {
+      el.scrollTop = el.scrollHeight;
+      setAtBottom(true);
+    }
   }, []);
 
   const handleScroll = useCallback(() => {
@@ -1473,6 +1555,8 @@ export function PlaygroundPage() {
               groups={groups}
               value={effectiveModel}
               onChange={setModel}
+              loadError={modelsQ.isError}
+              onRetryLoad={() => void modelsQ.refetch()}
             />
           </div>
 
@@ -1491,19 +1575,32 @@ export function PlaygroundPage() {
         <div className="admin-topbar-border h-px" />
       </header>
 
-      {/* ══ Body: sidebar + chat arena ══ */}
-      <div className="pg-body relative z-10 flex min-h-0 flex-1">
+      {/* ══ Body: sidebar + chat arena ══
+          z-[40] while the mobile drawer is open: the root wrapper is itself a
+          stacking context (relative z-0), so the drawer's own z-index is
+          capped by this element's z-10 — the top bar (z-30, outside) would
+          otherwise paint above the drawer and swallow its controls. */}
+      <div
+        className={`pg-body relative flex min-h-0 flex-1 ${isNarrow && drawerOpen ? "z-[40]" : "z-10"}`}
+      >
         {/* Sidebar */}
         <ChatSidebar
           chats={chats}
           activeId={activeChatId}
           onSelect={handleSelectChat}
-          onNew={handleNewChat}
+          onNew={() => {
+            // On mobile, picking anything from the drawer also closes it.
+            if (isNarrow) setDrawerOpen(false);
+            handleNewChat();
+          }}
           onDelete={handleDeleteChat}
           onRename={handleRenameChat}
           onClearAll={handleClearAllChats}
-          collapsed={sidebarCollapsed}
-          onToggle={() => setSidebarCollapsed((v) => !v)}
+          variant={sidebarVariant}
+          onToggle={() => {
+            if (isNarrow) setDrawerOpen((v) => !v);
+            else setSidebarCollapsed((v) => !v);
+          }}
         />
 
         {/* Chat arena */}
@@ -1537,7 +1634,7 @@ export function PlaygroundPage() {
                   <button
                     type="button"
                     onClick={retryFailed}
-                    className="shrink-0 rounded-md border border-red-500/25 px-2 py-0.5 text-[11px] font-medium transition-colors hover:bg-red-500/15"
+                    className="flex min-h-11 shrink-0 items-center rounded-md border border-red-500/25 px-2.5 text-[11px] font-medium transition-colors hover:bg-red-500/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50"
                   >
                     Retry
                   </button>
@@ -1545,7 +1642,7 @@ export function PlaygroundPage() {
                 <button
                   type="button"
                   onClick={() => setErr(null)}
-                  className="shrink-0 rounded p-0.5 text-red-400/60 transition-colors hover:text-red-400"
+                  className="-m-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-red-400/60 transition-colors hover:text-red-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50"
                   aria-label="Dismiss error"
                 >
                   <X size={13} />
@@ -1734,6 +1831,35 @@ function HeroEmptyState(props: {
   const visible = heroSuggestionGroupNames;
   const current = suggestions?.[activeGroup] ?? [];
   const meta = GROUP_META[activeGroup];
+  const tabsRef = useRef<HTMLDivElement>(null);
+
+  // Tabs pattern: arrows move between tabs and activate on move (the row is
+  // short enough that selection-follows-focus is the better contract here);
+  // Home/End jump to the ends. Tab itself leaves the group.
+  const onTabKeyDown = (e: React.KeyboardEvent) => {
+    const keys = ["ArrowLeft", "ArrowRight", "Home", "End"];
+    if (!keys.includes(e.key)) return;
+    e.preventDefault();
+    const idx = visible.indexOf(activeGroup);
+    const next =
+      e.key === "Home"
+        ? 0
+        : e.key === "End"
+          ? visible.length - 1
+          : e.key === "ArrowLeft"
+            ? (idx - 1 + visible.length) % visible.length
+            : (idx + 1) % visible.length;
+    const g = visible[next];
+    if (!g) return;
+    onGroupChange(g);
+    // Focus follows selection so the ring lands on the newly active tab.
+    requestAnimationFrame(() => {
+      const el = tabsRef.current?.querySelector<HTMLButtonElement>(
+        `[data-tab="${g}"]`,
+      );
+      el?.focus();
+    });
+  };
 
   return (
     <div className="pg-hero-shell relative flex min-h-full items-center justify-center overflow-hidden px-4 py-6 sm:px-6 sm:py-10">
@@ -1772,7 +1898,13 @@ function HeroEmptyState(props: {
 
         {model && (
           <>
-            <div className="pg-hero-tabs pg-hero-tabs-scroll mt-5 inline-flex max-w-full items-center gap-1 overflow-x-auto rounded-xl p-1 sm:mt-7" role="tablist" aria-label="Prompt categories">
+            <div
+              ref={tabsRef}
+              className="pg-hero-tabs pg-hero-tabs-scroll mt-5 inline-flex max-w-full items-center gap-1 overflow-x-auto rounded-xl p-1 sm:mt-7"
+              role="tablist"
+              aria-label="Prompt categories"
+              onKeyDown={onTabKeyDown}
+            >
               {visible.map((g) => {
                 const gmeta = GROUP_META[g];
                 const Icon = gmeta.icon;
@@ -1782,7 +1914,9 @@ function HeroEmptyState(props: {
                     key={g}
                     type="button"
                     role="tab"
+                    data-tab={g}
                     aria-selected={active}
+                    tabIndex={active ? 0 : -1}
                     onClick={() => onGroupChange(g)}
                     className={`group/tab flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg px-3.5 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50 ${
                       active
@@ -1798,6 +1932,11 @@ function HeroEmptyState(props: {
             </div>
 
             <div className="pg-suggestion-grid mt-3 grid gap-2 text-left sm:grid-cols-2" role="tabpanel" aria-label={`${activeGroup} prompt suggestions`}>
+              {current.length === 0 && (
+                <div className="col-span-full flex min-h-[58px] items-center justify-center rounded-xl border border-dashed border-[var(--admin-border)] px-3.5 text-[12px] text-[var(--admin-text-dim)]">
+                  No suggestions in this group
+                </div>
+              )}
               {current.map((s, i) => {
                 const Icon = meta.icon;
                 return (

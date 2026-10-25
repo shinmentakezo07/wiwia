@@ -215,7 +215,10 @@ body {
   --admin-border-hover: rgba(255, 255, 255, 0.08);
   --admin-text: #ffffff;
   --admin-text-muted: #9ca3af;
-  --admin-text-dim: #6b7280;
+  /* gray-500 (#6b7280) measured 4.0:1 on the near-black surfaces — just
+     under WCAG AA for the small caption sizes this token is used at.
+     gray-450 keeps the "dim" intent at a compliant ratio. */
+  --admin-text-dim: #848c99;
   --admin-accent: #3b82f6;
   --admin-accent-soft: rgba(59, 130, 246, 0.1);
   --admin-accent-glow: rgba(59, 130, 246, 0.2);
@@ -3292,12 +3295,21 @@ select.admin-input option {
   .pg-typing-dot:nth-child(3) { animation-delay: 0.3s; }
 }
 
-/* Composer auto-grow textarea — hide native resize, match surface */
+/* Composer auto-grow textarea — hide native resize, match surface.
+   `field-sizing: content` does the growing on Chromium; the JS fallback in
+   Playground.tsx covers Firefox/Safari where it is unsupported. */
 .pg-textarea {
   resize: none;
   field-sizing: content;
   min-height: 24px;
   max-height: 200px;
+}
+/* JS fallback (applies everywhere; identical to field-sizing where both run):
+   shrink first so the measured scrollHeight is the true content height, then
+   grow up to max-height, at which point the element scrolls internally. */
+.pg-textarea[data-autogrow] {
+  height: 24px;
+  overflow-y: auto;
 }
 
 /* Scroll-to-bottom fade */
@@ -3597,13 +3609,19 @@ select.admin-input option {
     0 8px 24px -10px rgba(99, 51, 209, 0.5);
 }
 
-/* Composer: crisp focus state without a colored halo. */
+/* Composer: crisp focus state without a colored halo. (Base surfaces for
+   .pg-composer live in the workbench-refinement block below; this block is
+   the transition + focus treatment from the earlier polish pass.) */
 .pg-composer {
   transition: border-color 0.15s ease, background-color 0.2s ease;
 }
 .pg-composer:focus-within {
   border-color: rgba(129, 140, 248, 0.42);
   background: linear-gradient(180deg, rgba(28, 28, 34, 0.98), rgba(17, 17, 21, 0.99));
+  /* One hairline in the shared accent, outside the border so it never
+     fights the elevated background. */
+  outline: 1px solid rgba(129, 140, 248, 0.22);
+  outline-offset: 2px;
 }
 
 /* Scroll-to-bottom button: gentle float-in */
@@ -3728,9 +3746,21 @@ select.admin-input option {
   margin-top: 10px;
   background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.045), transparent);
 }
+/* Scroll-to-bottom fade — used as the message list's top mask: content
+   dissolving under the context bar reads as "more above" without a hard
+   clipping edge. The mask is paint-only (no extra element, no blend mode —
+   deliberately cheap after the #518 compositing lesson). */
+.pg-scroll-fade {
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 48px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 48px), transparent 100%);
+}
 .pg-message-scroll {
   position: relative;
   z-index: 1;
+  /* Inverted fade at the top edge only; 28px is enough to soften the cut
+     without dimming the first message's heading. */
+  mask-image: linear-gradient(to bottom, transparent 0, #000 28px);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 28px);
 }
 .pg-message-column {
   position: relative;
@@ -3842,6 +3872,16 @@ select.admin-input option {
   text-transform: uppercase;
   white-space: nowrap;
 }
+/* Live-region wrapper: visually inert, keeps role=status off the pill's own
+   box so the compact (label-hidden) form doesn't double-announce geometry.
+   pointer-events: none — the wrapper is never interactive, and the compact
+   pill beneath the top bar's right cluster would otherwise hit-test over
+   the sidebar drawer's collapse button. */
+.pg-status-wrap {
+  display: inline-flex;
+  align-items: center;
+  pointer-events: none;
+}
 .pg-status-dot {
   width: 6px;
   height: 6px;
@@ -3863,6 +3903,8 @@ select.admin-input option {
   box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
   animation: pg-status-pulse 1.6s ease-in-out infinite;
 }
+/* Loading / warning tones are kept for future states (e.g. reconnect);
+   currently unused but part of the pill's visual vocabulary. */
 .pg-status-loading {
   color: #93c5fd;
   border-color: rgba(96, 165, 250, 0.16);
@@ -3880,6 +3922,16 @@ select.admin-input option {
   border-color: transparent;
   background: transparent;
   padding-inline: 4px;
+}
+/* Compact form below sm is dot-only (6px + padding = ~16px wide). The pill
+   is decorative status chrome, but it still hit-tests over the sidebar's
+   collapse button in the drawer (header z-30 over sidebar z-30, later
+   paint wins), so take it out of pointer events on the narrow form — the
+   live region text still reads to assistive tech. */
+@media (max-width: 639px) {
+  .pg-status-compact {
+    pointer-events: none;
+  }
 }
 .pg-status-compact .pg-status-label {
   display: none;
@@ -3964,6 +4016,7 @@ select.admin-input option {
 .pg-composer {
   background: linear-gradient(180deg, rgba(24, 24, 29, 0.96), rgba(15, 15, 19, 0.98));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025), 0 16px 40px -24px rgba(0, 0, 0, 0.95);
+  position: relative;
 }
 .pg-composer:focus-within {
   border-color: rgba(129, 140, 248, 0.42);

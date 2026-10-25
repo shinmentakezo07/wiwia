@@ -56,6 +56,62 @@ time.
 
 ---
 
+## ✅ Fixed — round 170: the Playground mobile history drawer (2026-10-25)
+
+### 519. On <768px viewports the history drawer opened onto the collapsed rail and could never be dismissed
+
+**Severity:** 🟠 High on mobile (the whole chat-history surface was unusable
+there) · **Status: fixed** — same session, no regression-test file (pure
+frontend layout logic; verified live in Chromium at 375×812 and 1440×900 —
+the repo's pytest suite covers the Python side only)
+
+**Where:** `web/src/pages/Playground.tsx` — `ChatSidebar` computed
+`const isOverlay = collapsed && window.innerWidth < 768` while the render
+already used `sidebarCollapsed = window.innerWidth < 768` at mount, and
+`onToggle` was `setSidebarCollapsed((v) => !v)`.
+
+**Trigger.** Open `/playground` at any viewport under 768px (default
+`sidebarCollapsed = true`): the rail's "Expand sidebar" tap set
+`sidebarCollapsed = false`, which rendered the **desktop** column
+(`hidden … md:flex` → display:none below md) while `isOverlay` flipped true
+and attached the overlay's Escape/scrim handlers to that hidden element.
+The drawer never appeared and could never be dismissed; the flag was also
+stale across resizes (read once at mount, never updated).
+
+**Fix (as landed).**
+- `ChatSidebar` now takes an explicit `variant: "rail" | "column" | "overlay"`
+  prop; the parent derives it from a live
+  `matchMedia("(max-width: 767px)")` listener plus an explicit
+  `drawerOpen` state — no more inferring the form from the collapse flag.
+- Stacking fix uncovered while verifying: the drawer's `z-30` was trapped
+  inside `.pg-body` (`relative z-10`, under the root wrapper's own
+  `relative z-0` stacking context), so the top bar (`z-30`, outside) painted
+  **above** the open drawer and swallowed its collapse button. The body row
+  now lifts to `z-[40]` while the drawer is open, and the drawer/scrim carry
+  `z-[70]`/`z-[60]`.
+- While the drawer is open, the page-level "Escape stops the stream"
+  handler yields (`drawerHoldsKey`), so Escape closes the drawer instead of
+  killing an in-flight turn.
+- The same pass also fixed: composer auto-grow on Firefox/Safari
+  (`field-sizing` is Chromium-only; JS fallback added), no auto-scroll to
+  the new turn when the user had scrolled up (send now re-asserts
+  `atBottom`), sub-44px tap targets (banner Retry/dismiss, search-clear ✕,
+  clear-all confirm row), hero tabs gained the roving-tabindex +
+  Arrow/Home/End contract, the status pill is now an announced live region
+  instead of `aria-hidden`, the model selector surfaces a retryable load
+  error instead of an empty list, and `--admin-text-dim` was raised
+  `#6b7280 → #848c99` (4.0:1 → 6.0:1 on the near-black surfaces) so the
+  caption text it drives meets WCAG AA.
+
+**Verification.** Live Chromium via CDP: drawer opens from the rail and closes
+via its button, the scrim tap, Escape, and chat selection; `elementFromPoint`
+confirms the collapse button hit-tests above the top bar; no horizontal
+overflow at 375px; `axe-core` scoped to `main`: 0 violations (the remaining
+"incomplete" color-contrast nodes are gradient/blend backgrounds axe cannot
+resolve; spot-checked ratios 6:1–21:1). Desktop 1440px unchanged.
+
+---
+
 
 ## ✅ Fixed — the Playground empty-state scroll fought the user (2026-10-23)
 
