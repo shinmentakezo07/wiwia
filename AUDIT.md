@@ -8,6 +8,24 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — round 173: journal reads off the event loop, the Gemini system register, and the aiosqlite warning leaker (2026-10-25)
+
+Closes the three open register items the 2026-10-25 delta-flow sweep left
+flagged. Regression: `tests/test_fix_round173.py`.
+
+| # | Severity | What was wrong |
+|---|---|---|
+| 237 | 🟡 Medium | The journal's **read** paths did blocking FS work on the event loop. #105 fixed the writes, #282 fixed the 50 ms tail poll, but the reconnect gate still ran `owner_of` + `read_after` + `is_complete` — three whole-file `Path.read_bytes()` calls — synchronously per reconnect, and `open()`'s `mkdir`/`touch` were on-loop too. The gate now answers from `JournalStore.replay_state()` (one frozen `ReplayState` built off-loop; the owner scan is an unfiltered read because the owner record is `seq == 0` and the frames pass filters `seq <= last_seq` — the first cut of the consolidated read reused the filtered records and read "no owner", the exact legacy-and-open state #320/#317 exist to distinguish, caught by round 112's cross-tenant test). The tail loop's `read_next`/`truncated`/`is_expired` gained `*_async` twins, `open()` touches off-loop, and `owner_of_async`/`read_after_async`/`is_complete_async` exist for future async callers. The sync spellings stay: the sweeper runs on a worker thread, and offline tooling owns no loop |
+| 328 | 🟠 High (register-only) | The Gemini mid-conversation-system fix was **in the code and correct** (`gemini_adapter.py`: leading system → `systemInstruction`; a later system message folds in place as `[system]`-marked user text, merging into the adjacent user entry or opening its own after a model turn) but no test pinned it — round 64's mid-conversation test covers the Anthropic adapter only — and the entry still read `Status: open`. Four pins added (`tests/test_fix_round173.py`); the entry is corrected in place below |
+| 475 | ⚪ Low | The aiosqlite `Event loop is closed` worker-thread warnings that made `-W error::pytest.PytestUnhandledThreadExceptionWarning` misattribute failures: the leaker was **`tests/test_fix_round59.py`**, whose 15 `_engine()` calls never disposed their engines. Reproduced by escalation (errors land on round 59's own cache tests), fixed with a tracked `engine` fixture that disposes in `finally`; the escalated run over the affected files is now clean |
+
+**Also re-verified during this round:** #237's write half and tail half were
+already fixed (`append`/`aclose`/owner writes via `asyncio.to_thread`;
+`JournalTail` incremental cursor) — only the read half and `open()`'s touch
+remained.
+
+---
+
 
 ## 🟠 Live — the Playground beam backdrop invalidates its composite every frame during scroll (2026-10-24)
 
@@ -1874,7 +1892,7 @@ so the two surfaces simply disagreed.
 
 ### 475. Undisposed test-side `aiosqlite` connections raise `RuntimeError: Event loop is closed` on a worker thread, mis-attributed to the *next* test
 
-**Severity:** ⚪ Low (test hygiene — the default gate stays green and nothing in production is affected, but the warning class cannot be escalated and its reported nodeid is not the culprit) · **Status: open**
+**Severity:** ⚪ Low (test hygiene — the default gate stays green and nothing in production is affected, but the warning class cannot be escalated and its reported nodeid is not the culprit) · **Status: fixed — round 173**: the leaker was `tests/test_fix_round59.py` (15 `_engine()` calls, never disposed; localized by running the suite with `-W error::pytest.PytestUnhandledThreadExceptionWarning` — the errors land on round 59's own cache tests). Its engines now come from a tracked `engine` fixture that disposes in `finally`, and the escalated run over the affected files is clean. **Files:** `tests/test_fix_round59.py`
 **Files:** the leaker is unnamed (see below); the production shutdown path is *not* it — `wiwi/server/app.py:1041` creates exactly one async engine, `:1085` hands the same object to `DBSink` (`wiwi/logging_core/db_sink.py:412` stores it as `self.engine`), and `:1252` disposes it, so the sole engine is disposed on shutdown.
 **Trigger:** any full `python3 -m pytest tests/ -q` run. Result on 2026-10-17: `3383 passed, 6 skipped, 7 warnings in 217.64s`. Several of those warnings are `PytestUnhandledThreadExceptionWarning: Exception in thread Thread-NNN (_connection_worker_thread)`, each a stack of `aiosqlite/core.py:75 future.get_loop().call_soon_threadsafe(...)` → `RuntimeError: Event loop is closed`; at least four distinct thread ids appear (`Thread-464`, `-466`, `-1188`, `-1189`). An `aiosqlite` connection that is never closed outlives the loop it was bound to, and its worker thread then tries to publish a result onto a loop that is already closed. (The run's other warnings are unrelated deprecations — Starlette's `httpx`-based `TestClient` at `tests/test_fix_round139.py:49`, and SQLAlchemy's `StaticPool`-from-`mode=memory` selection at `wiwi/server/app.py:1041` — so read the 7 as a mix, and count the thread exceptions by their `_connection_worker_thread` frames rather than by the total.)
 **Why the reported nodeid is useless:** `_pytest/threadexception.py:147` collects pending thread exceptions inside `pytest_runtest_call`, i.e. at the *start* of a test's call phase, so whatever thread died during the previous teardown is charged to the next test. Escalating with `-W error::pytest.PytestUnhandledThreadExceptionWarning` proves it: a stop-at-first run (`-x`) charged the very first occurrence to `tests/test_fix_round126.py::test_an_unknown_provider_type_is_rejected_by_the_registry` — a sync registry test that opens no database — while a full escalation run (`1 failed, 3381 passed, 6 skipped, 2 warnings, 1 error`) charged `tests/test_fix_round59.py::test_query_cache_keeps_live_entries` (FAILED) and `tests/test_fix_round126.py::test_forget_owner_drops_a_dropped_journals_intent` (ERROR), the latter a pure `JournalStore` test with no DB either. Three runs, three different nodeids, all innocent.
@@ -13403,7 +13421,7 @@ both places.
 
 ### 237. Journal replay still does blocking FS I/O on the event loop and re-reads the whole file per poll — #105's read half is unfixed
 
-**Severity:** 🟡 Medium (event-loop stall proportional to concurrent reconnects)
+**Severity:** 🟡 Medium (event-loop stall proportional to concurrent reconnects) · **Status: fixed — round 173** (read half: `JournalStore.replay_state` answers the whole gate from one off-loop read, `*_async` twins for the tail loop and one-off reads, `open()`'s mkdir/touch off-loop; the tail half was already fixed by #282's `JournalTail` cursor). Regression: `tests/test_fix_round173.py`
 **File:** `wiwi/streaming/tape_store.py:233,237` (`path.exists()` / `path.read_bytes()` in `_read_records`), `:180-182` (`mkdir`/`touch` under the async lock); called from `wiwi/server/app.py:1277,1282-1284` and every 50 ms in the tail loop at `:1303-1310`
 
 AUDIT #105 is *not* fixed. The write/sweep paths were routed through
@@ -14977,7 +14995,7 @@ client had every right to receive.
 
 ### 328. Gemini hoists every `system` message, losing mid-conversation ones
 
-**Severity:** 🟠 High · **Status: open**
+**Severity:** 🟠 High · **Status: fixed** — the code fix was already in (`gemini_adapter.py` folds a mid-conversation system message in place as `[system]`-marked user text, merging into the adjacent user entry or opening its own after a model turn; only leading system blocks become `systemInstruction`); round 173 added the missing pins (`tests/test_fix_round173.py`) and corrected this stale status.
 **Files:** `wiwi/providers/gemini_adapter.py:100`, `:164`; compare `wiwi/providers/anthropic_adapter.py:414-418`
 
 `gemini_adapter.py:100`/`:164` collects **every** `system` role into

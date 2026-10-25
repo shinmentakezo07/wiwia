@@ -2375,7 +2375,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
             # virtual key that created it. Master (key_id == "master")
             # owns admin-originated streams; unscoped journals predate this
             # fix and stay readable to preserve restart-replay compat.
-            jowner = state_.journals.owner_of(replay_id)
+            # One off-loop read answers the whole gate (AUDIT #237): the old
+            # four calls did three whole-file ``read_bytes()`` on the event
+            # loop per reconnect.
+            rstate = await state_.journals.replay_state(replay_id, replay_after)
+            jowner = rstate.owner
             caller_kid = getattr(info, "key_id", None)
             # AUDIT #320: ``jowner is None`` used to mean legacy-and-open.
             # The #317 in-memory intent cannot survive a restart, so a
@@ -2391,9 +2395,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         or (jowner is None
                             and not state_.journals.has_owner_intent(replay_id))
                         or (jowner == "master" and caller_kid == "master"))
-            replay = state_.journals.read_after(replay_id, replay_after)
-            complete = state_.journals.is_complete(replay_id)
-            active = state_.journals.is_active(replay_id)
+            replay = rstate.frames
+            complete = rstate.complete
+            active = rstate.active
             # AUDIT #66: an ACTIVE journal with no replayable chunks yet
             # still means the original stream is running in THIS process —
             # falling through would dispatch and bill the request a second
@@ -2434,7 +2438,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                                       if keepalive_s > 0 else None)
                     while time.time() < deadline:
                         await asyncio.sleep(0.05)
-                        for seq, chunk, done in tail.read_next():
+                        for seq, chunk, done in await tail.read_next_async():
                             last = seq
                             if done:
                                 return
@@ -2442,7 +2446,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         if next_keepalive is not None and time.time() >= next_keepalive:
                             yield b": keep-alive\n\n"
                             next_keepalive = time.time() + keepalive_s
-                        if tail.truncated() or state_.journals.is_expired(replay_id):
+                        if (await tail.truncated_async()
+                                or await state_.journals.is_expired_async(
+                                    replay_id)):
                             return
 
                 # A replay is a request like any other and is subject to the

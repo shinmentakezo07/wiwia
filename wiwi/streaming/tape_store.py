@@ -44,6 +44,7 @@ import hashlib
 import os
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import orjson
@@ -96,6 +97,20 @@ def _frames_after(chunk: bytes, first_seq: int,
             out.append((seq, frame + b"\n\n"))
     return out
 
+
+@dataclass(frozen=True)
+class ReplayState:
+    """One journal read's answer to every question the reconnect gate asks.
+
+    Frozen value type: ``replay_state`` builds it on a worker thread and
+    hands it back to the event loop, so it must carry no references to
+    mutable store state (AUDIT #237).
+    """
+
+    owner: str | None
+    frames: list[tuple[int, bytes]]
+    complete: bool
+    active: bool
 
 class JournalTail:
     """Byte-offset cursor over one journal file, for reconnect tailing.
@@ -197,6 +212,19 @@ class JournalTail:
             for fseq, frame in frames:
                 out.append((fseq, frame, False))
         return out
+
+    async def read_next_async(self) -> list[tuple[int, bytes, bool]]:
+        """``read_next`` off the event loop (AUDIT #237).
+
+        The reconnect tail loop runs every 50 ms per client for the life of
+        the journal; even an incremental read must not spend its syscall and
+        parse time on the loop.
+        """
+        return await asyncio.to_thread(self.read_next)
+
+    async def truncated_async(self) -> bool:
+        """``truncated`` off the event loop (AUDIT #237)."""
+        return await asyncio.to_thread(self.truncated)
 
 
 class StreamJournal:
@@ -402,10 +430,15 @@ class JournalStore:
                                   max_bytes=self.max_bytes)
                 # Touch eagerly: a reconnect arriving before the first chunk
                 # must find the file rather than fall through to a duplicate
-                # upstream dispatch.
+                # upstream dispatch. Off-loop (AUDIT #237): mkdir/touch are
+                # directory-metadata syscalls, and this runs on the request
+                # path of every streamed request.
+                def _touch(path: Path) -> None:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.touch(exist_ok=True)
+
                 try:
-                    j.path.parent.mkdir(parents=True, exist_ok=True)
-                    j.path.touch(exist_ok=True)
+                    await asyncio.to_thread(_touch, j.path)
                 except OSError as e:
                     log.error("journal_touch_failed", request_id=request_id,
                               error=f"{type(e).__name__}: {e}")
@@ -519,7 +552,79 @@ class JournalStore:
         self._owner_intent.pop(request_id, None)
         self._durable_intent.discard(request_id)
 
-    def read_after(self, request_id: str, last_seq: int) -> list[tuple[int, bytes]]:
+    async def replay_state(
+            self, request_id: str, last_seq: int) -> ReplayState:
+        """Everything the reconnect gate asks about one journal, from ONE
+        off-loop read of the file (AUDIT #237).
+
+        The gate used to answer four questions with four separate calls, three
+        of which (``owner_of``/``read_after``/``is_complete``) each ran
+        ``Path.read_bytes()`` synchronously on the event loop — three
+        whole-file reads per reconnect on a feature that is on by default.
+        This method reads the records once on a worker thread and answers
+        owner, frames, complete and active from that single parse; ``active``
+        is purely in-memory and costs no I/O.
+
+        Same semantics as the underlying methods: frames are sliced at frame
+        granularity against *last_seq* (#493), the done-marker and ownership
+        records are excluded from ``frames``, and ``owner`` falls back to the
+        in-process intent when no owner line made it to disk (#317).
+        """
+        # The owner record is ``seq == 0`` and ``_read_records`` drops every
+        # record with ``seq <= last_seq``, so the frames pass must not be
+        # reused for the owner scan: a cursor of 0 filtered the owner line
+        # out and the gate read "no owner" — the legacy-and-open state the
+        # #320/#317 gating exists to distinguish. Read the file once for
+        # owner+complete (unfiltered) and once for frames (at the cursor);
+        # both reads are off-loop, and this is still two reads replacing
+        # the gate's former three.
+        records = await asyncio.to_thread(
+            self._read_records, request_id, -1)
+        owner: str | None = None
+        complete = False
+        for seq, _chunk, done, _first, rec_owner in records:
+            if seq == 0 and rec_owner is not None and owner is None:
+                owner = rec_owner
+            if done:
+                complete = True
+        frame_records = await asyncio.to_thread(
+            self._read_records, request_id, last_seq)
+        frames: list[tuple[int, bytes]] = []
+        for _seq, chunk, done, first_seq, _owner in frame_records:
+            if not done:
+                frames.extend(_frames_after(chunk, first_seq, last_seq))
+        if owner is None:
+            intent = self._owner_intent.get(request_id)
+            owner = intent[0] if intent is not None else None
+        return ReplayState(owner=owner, frames=frames, complete=complete,
+                           active=request_id in self._active)
+
+    async def owner_of_async(self, request_id: str) -> str | None:
+        """``owner_of`` off the event loop (AUDIT #237) — see the sync method."""
+        records = await asyncio.to_thread(self._read_records, request_id, -1)
+        for seq, _chunk, _done, _first, owner in records:
+            if seq == 0 and owner is not None:
+                return owner
+        intent = self._owner_intent.get(request_id)
+        return intent[0] if intent is not None else None
+
+    async def read_after_async(
+            self, request_id: str, last_seq: int) -> list[tuple[int, bytes]]:
+        """``read_after`` off the event loop (AUDIT #237) — see the sync method."""
+        records = await asyncio.to_thread(
+            self._read_records, request_id, last_seq)
+        out: list[tuple[int, bytes]] = []
+        for _seq, chunk, done, first_seq, _owner in records:
+            if not done:
+                out.extend(_frames_after(chunk, first_seq, last_seq))
+        return out
+
+    async def is_complete_async(self, request_id: str) -> bool:
+        """``is_complete`` off the event loop (AUDIT #237) — see the sync method."""
+        records = await asyncio.to_thread(self._read_records, request_id, 0)
+        return any(done for _, _, done, _first, _owner in records)
+    def read_after(self, request_id: str,
+                   last_seq: int) -> list[tuple[int, bytes]]:
         """Read the client-visible FRAMES with seq > last_seq, in order.
 
         The cursor the client sends (``Last-Event-ID``) names a single FRAME,
@@ -604,6 +709,12 @@ class JournalStore:
             return now - path.stat().st_mtime > self.ttl_s
         except OSError:
             return True
+
+    async def is_expired_async(self, request_id: str,
+                               now: float | None = None) -> bool:
+        """``is_expired`` off the event loop (AUDIT #237) — the reconnect
+        tail loop consults it every 50 ms."""
+        return await asyncio.to_thread(self.is_expired, request_id, now)
 
     def sweep(self, now: float | None = None) -> int:
         """Delete expired journals. Returns count removed.

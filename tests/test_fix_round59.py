@@ -20,6 +20,7 @@ from __future__ import annotations
 import time
 
 import httpx
+import pytest
 import sqlalchemy as sa
 from asgi_lifespan import LifespanManager
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -63,11 +64,31 @@ async def _engine():
     return eng
 
 
+@pytest.fixture
+async def engine():
+    """An ``_engine()`` that is disposed when the test ends.
+
+    AUDIT #475: this file's raw ``_engine()`` calls never disposed their
+    engines, so every test here leaked an aiosqlite worker thread bound to
+    the test's event loop. The thread's first result-publish after loop
+    close raised ``RuntimeError: Event loop is closed`` and pytest charged
+    the warning to whatever test ran next — which made
+    ``-W error::pytest.PytestUnhandledThreadExceptionWarning`` unusable as
+    a strict gate. ``await eng.dispose()`` joins the worker thread inside
+    the test's own loop, so nothing survives the test.
+    """
+    eng = await _engine()
+    try:
+        yield eng
+    finally:
+        await eng.dispose()
+
+
 # ============================================================================
 # #148 — disabling a user must revoke the keys that user owns
 # ============================================================================
 
-async def test_disabled_owner_key_is_rejected_by_the_db_check():
+async def test_disabled_owner_key_is_rejected_by_the_db_check(engine):
     """A key owned by a disabled account must not authenticate.
 
     This exercises the DB-level backstop directly (``_lookup_db``'s owner
@@ -76,7 +97,7 @@ async def test_disabled_owner_key_is_rejected_by_the_db_check():
     mid-revocation. Before the fix the lookup read ``vkeys`` alone, so the
     owner's flag was never consulted at all.
     """
-    eng = await _engine()
+    eng = engine
     users = UserService(eng, "secret")
     auth = AuthService(eng, MASTER)
     await users.startup()
@@ -96,9 +117,9 @@ async def test_disabled_owner_key_is_rejected_by_the_db_check():
     assert await auth.authenticate(plaintext) is None
 
 
-async def test_disabling_one_owner_leaves_other_owners_keys_alone():
+async def test_disabling_one_owner_leaves_other_owners_keys_alone(engine):
     """Revoking one account's keys must not touch another account's."""
-    eng = await _engine()
+    eng = engine
     users = UserService(eng, "secret")
     auth = AuthService(eng, MASTER)
     await users.startup()
@@ -119,14 +140,14 @@ async def test_disabling_one_owner_leaves_other_owners_keys_alone():
     assert await auth.authenticate(bystander_key) is not None
 
 
-async def test_key_whose_owner_row_is_missing_fails_closed():
+async def test_key_whose_owner_row_is_missing_fails_closed(engine):
     """A dangling owner_id must reject the key, not fall through as "no owner".
 
     The owner check is what makes a disabled account's keys stop working, so
     it has to default to *deny* when the owner row cannot be found. An outer
     join would read the missing owner as "not disabled" and authenticate.
     """
-    eng = await _engine()
+    eng = engine
     users = UserService(eng, "secret")
     auth = AuthService(eng, MASTER)
     await users.startup()
@@ -144,9 +165,9 @@ async def test_key_whose_owner_row_is_missing_fails_closed():
     assert await auth.authenticate(plaintext) is None
 
 
-async def test_disabling_user_does_not_revoke_unowned_admin_keys():
+async def test_disabling_user_does_not_revoke_unowned_admin_keys(engine):
     """Admin-minted keys carry owner_id=None and must survive any user patch."""
-    eng = await _engine()
+    eng = engine
     users = UserService(eng, "secret")
     auth = AuthService(eng, MASTER)
     await users.startup()
@@ -233,13 +254,13 @@ async def test_admin_disable_leaves_unowned_keys_alone():
 # #149 — price scopes must not outlive their provider
 # ============================================================================
 
-async def test_provider_rename_rewrites_price_scopes():
+async def test_provider_rename_rewrites_price_scopes(engine):
     """A scoped price must follow its provider through a rename.
 
     The scope string is the provider *name*, so a rename that leaves it
     behind strands the override on a name no provider has.
     """
-    eng = await _engine()
+    eng = engine
     cs = ConfigStore(eng)
     await cs.startup()
     await cs.add_provider("acct-a", "openai", "https://a/v1")
@@ -253,13 +274,13 @@ async def test_provider_rename_rewrites_price_scopes():
     assert [s["scope"] for s in scopes] == ["acct-b"]
 
 
-async def test_provider_delete_removes_price_scopes():
+async def test_provider_delete_removes_price_scopes(engine):
     """Deleting a provider must take its scoped prices with it.
 
     Otherwise a provider later created under the freed name inherits rates
     that were negotiated with a different upstream.
     """
-    eng = await _engine()
+    eng = engine
     cs = ConfigStore(eng)
     await cs.startup()
     await cs.add_provider("acct-a", "openai", "https://a/v1")
@@ -272,9 +293,9 @@ async def test_provider_delete_removes_price_scopes():
     assert await cs.load_price_scopes() == []
 
 
-async def test_provider_rename_leaves_other_scopes_untouched():
+async def test_provider_rename_leaves_other_scopes_untouched(engine):
     """Renaming one provider must not disturb another's scoped prices."""
-    eng = await _engine()
+    eng = engine
     cs = ConfigStore(eng)
     await cs.startup()
     await cs.add_provider("acct-a", "openai", "https://a/v1")
@@ -349,7 +370,7 @@ async def test_provider_delete_drops_the_in_memory_scope():
                                     {}).get("providers", {})
 
 
-async def test_rename_onto_a_name_that_already_has_a_scope_does_not_raise():
+async def test_rename_onto_a_name_that_already_has_a_scope_does_not_raise(engine):
     """Renaming onto an existing scope name must merge, not collide.
 
     ``model_price_scopes`` is keyed ``(model_id, scope)``, so a plain UPDATE
@@ -358,7 +379,7 @@ async def test_rename_onto_a_name_that_already_has_a_scope_does_not_raise():
     after its own provider type. That surfaced as an HTTP 500 mid-rename,
     after the child tables had already been rewritten.
     """
-    eng = await _engine()
+    eng = engine
     cs = ConfigStore(eng)
     await cs.startup()
     await cs.add_provider("acct-a", "openai", "https://a/v1")
@@ -378,9 +399,9 @@ async def test_rename_onto_a_name_that_already_has_a_scope_does_not_raise():
     assert scopes[0]["input_cost_per_token"] == 2.0
 
 
-async def test_rename_collision_keeps_scopes_for_other_models():
+async def test_rename_collision_keeps_scopes_for_other_models(engine):
     """Only the colliding model's superseded scope is dropped."""
-    eng = await _engine()
+    eng = engine
     cs = ConfigStore(eng)
     await cs.startup()
     await cs.add_provider("acct-a", "openai", "https://a/v1")
@@ -401,9 +422,9 @@ async def test_rename_collision_keeps_scopes_for_other_models():
     assert by_model["other-model"]["input_cost_per_token"] == 9.0
 
 
-async def test_provider_type_scope_survives_account_rename():
+async def test_provider_type_scope_survives_account_rename(engine):
     """A scope naming a provider *type* is not a name and must not be rewritten."""
-    eng = await _engine()
+    eng = engine
     cs = ConfigStore(eng)
     await cs.startup()
     await cs.add_provider("openrouter-main", "openrouter", "https://or/v1")
@@ -459,9 +480,9 @@ def test_bucket_sum_still_adds_the_token_counters():
     assert merged.tps_max == 20.0
 
 
-async def test_timeseries_tps_p95_never_exceeds_a_real_peak():
+async def test_timeseries_tps_p95_never_exceeds_a_real_peak(engine):
     """End-to-end: a mixed raw/rollup bucket must not report an inflated p95."""
-    eng = await _engine()
+    eng = engine
     sink = DBSink(eng)
     await sink.startup()
 
@@ -493,13 +514,13 @@ def _log_event(ts: float, tps: float):
 # #151 — the query cache must stay bounded on a read-heavy workload
 # ============================================================================
 
-async def test_query_cache_evicts_expired_entries_on_insert():
+async def test_query_cache_evicts_expired_entries_on_insert(engine):
     """The cache must not retain a key that is written once and never re-read.
 
     ``_cache_get`` only evicted the key being read, so distinct query keys
     accumulated forever on a workload that reads more than it writes.
     """
-    eng = await _engine()
+    eng = engine
     sink = DBSink(eng)
     await sink.startup()
 
@@ -515,9 +536,9 @@ async def test_query_cache_evicts_expired_entries_on_insert():
         "expired entries survived an insert — the cache grows without bound")
 
 
-async def test_query_cache_keeps_live_entries():
+async def test_query_cache_keeps_live_entries(engine):
     """Eviction must target expired entries only, never a live one."""
-    eng = await _engine()
+    eng = engine
     sink = DBSink(eng)
     await sink.startup()
 
@@ -532,13 +553,13 @@ async def test_query_cache_keeps_live_entries():
     assert sink._cache_get(("read_requests", 1, None)) == ["live"]
 
 
-async def test_query_cache_bounds_itself_when_everything_is_fresh():
+async def test_query_cache_bounds_itself_when_everything_is_fresh(engine):
     """A burst of distinct fresh keys must still be capped.
 
     The TTL sweep alone cannot bound the dict when every entry is live, so
     the oldest half is dropped — the same two-phase rule AuthService uses.
     """
-    eng = await _engine()
+    eng = engine
     sink = DBSink(eng)
     await sink.startup()
 

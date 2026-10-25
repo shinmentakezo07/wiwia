@@ -10,6 +10,27 @@ Each entry below records the before→after state, the exact files and lines cha
 
 ---
 
+## Round 173 — Gemini mid-conversation system messages, pinned (2026-10-25)
+
+The Gemini **encoder**'s system-message rule, now that it is pinned
+(`tests/test_fix_round173.py`; AUDIT #328's status corrected — the fix was in
+the code, only the pin was missing):
+
+- **Leading** `system` messages (and only those) become
+  `systemInstruction` — consecutive leading ones join.
+- A system message that appears **after** the first non-system turn cannot be
+  its own `contents` entry (Gemini accepts only `user`/`model` roles), so it
+  is folded **in place** as `[system]`-marked user text: merged into the
+  adjacent preceding user entry when there is one, or opening its own user
+  entry after a model turn. Hoisting it to the front — the pre-#328
+  behaviour — destroys its position relative to the turns around it.
+- An empty mid-conversation system part contributes nothing: no phantom user
+  entry, no empty instruction part.
+
+The Anthropic adapter keeps its own rule (mid-conversation system stays a
+`role: "system"` message, `anthropic_adapter.py`): Anthropic's wire has the
+role, Gemini's does not. Do not "unify" these into one helper.
+
 ## Round 164 — The translation layer's loss points (2026-10-19)
 
 Found while auditing the whole decode → IR → re-encode path — every inbound
