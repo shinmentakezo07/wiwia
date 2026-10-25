@@ -17863,3 +17863,26 @@ and Anthropic rejects the history; `ThinkingPart.block_type` gates the
 of forwarding it. `ToolResultPart.block_type` stays `str` on purpose: the
 decoder accepts any `*_tool_result` spelling so a new server-tool version
 replays without an IR change.
+
+### 517. The SPA entry document was served with no `Cache-Control`, so browsers heuristically cached it and pinned stale builds
+
+**Severity:** 🟡 Medium (every redeploy: returning visitors keep the old admin SPA / Playground until a heuristic cache expires) · **Status: fixed** — round 171 (`tests/test_fix_round171.py`)
+
+**Files:** `wiwi/server/app.py` (`SPAStaticFiles`)
+
+**Trigger.** Follow a link to the site or reopen a tab after a redeploy.
+`index.html` is the only unhashed file in the Vite build, and
+`SPAStaticFiles` served it (and the SPA fallback for client-side routes)
+with no freshness information at all. RFC 9111 §4.2.2 lets caches store
+such a response heuristically (typically ~10% of its `Last-Modified` age),
+so a returning browser reused the old `index.html` — which references the
+*previous* build's hashed `/assets/*` filenames. Observed in the wild as
+"the Playground mobile-drawer fix isn't there on my phone" when the
+served bundle already contained it. A plain reload revalidates anyway;
+the broken case is exactly the phone path.
+
+**The fix.** The HTML entry document — `/`, `/index.html`, the SPA
+fallback, and any other `.html` — is served `Cache-Control: no-cache`
+(revalidate every time; the file's ETag makes that a cheap 304). Hashed
+`/assets/*` keep their default caching. Note `StaticFiles` hands the
+mount root down as path `"."`, not `""`.

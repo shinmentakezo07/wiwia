@@ -7222,17 +7222,30 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     class SPAStaticFiles(StaticFiles):
         """StaticFiles with SPA history fallback: unknown paths get index.html
-        so client-side routes like /login or /app survive hard refresh."""
+        so client-side routes like /login or /app survive hard refresh.
+
+        The HTML entry document is served ``no-cache``: hashed assets under
+        /assets/ may be cached forever, but a heuristically cached index
+        pins the previous build's hashed filenames, so users keep getting
+        the old SPA after a redeploy until the heuristic expires.
+        """
 
         async def get_response(self, path: str, scope):
             try:
                 resp = await super().get_response(path, scope)
             except HTTPException as exc:
                 if exc.status_code == 404:
-                    return await super().get_response("index.html", scope)
+                    return await self._spa_fallback(scope)
                 raise
             if resp.status_code == 404:
-                return await super().get_response("index.html", scope)
+                return await self._spa_fallback(scope)
+            if path in ("", ".", "index.html") or path.endswith(".html"):
+                resp.headers["Cache-Control"] = "no-cache"
+            return resp
+
+        async def _spa_fallback(self, scope):
+            resp = await super().get_response("index.html", scope)
+            resp.headers["Cache-Control"] = "no-cache"
             return resp
 
     if static_dir.is_dir():
