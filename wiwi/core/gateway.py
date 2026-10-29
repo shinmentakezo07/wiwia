@@ -655,7 +655,6 @@ class Gateway:
             err = error_from_provider_status(resp.status_code, resp.text,
                                              dep.provider.name)
             _log_upstream_refusal(err, dep)
-            _log_upstream_refusal(err, dep)
             ra = _parse_retry_after(resp.headers.get("retry-after"))
             if ra is not None:
                 err.retry_after = ra
@@ -2008,20 +2007,18 @@ class Gateway:
             # Connection established. `started`/`ready` are deliberately NOT set
             # here — they mark the first *body line*, i.e. that the upstream has
             # begun responding (AUDIT #356).
-            parser = LineSSEParser()
             client_gone = False
             grace_drain_s = self.router.settings.stream_grace_drain_s
             grace_deadline: float | None = None  # monotonic deadline for grace drain
             loop_limit = (self.router.settings.stream_loop_limit
                           if self.router.settings.stream_loop_detection else 0)
-            # O(1) per token: tracks repetition runs for short periods only,
-            # rather than rescanning the whole window every token.
-            loop_detector = LoopDetector(loop_limit)
             # `allow_unframed`: envelope providers (Cline/WorkBuddy) answer with
             # one whole JSON object per line rather than framed SSE; without
             # this every content delta vanished and the client saw an empty
             # turn plus a spurious "ended without completion" (AUDIT #285).
             parser = LineSSEParser(allow_unframed=True)
+            # O(1) per token: tracks repetition runs for short periods only,
+            # rather than rescanning the whole window every token.
             loop_detector = LoopDetector(loop_limit)
             line_iter = resp.aiter_lines().__aiter__()
 
