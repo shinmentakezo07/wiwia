@@ -4478,6 +4478,637 @@ select.admin-input option {
   }
 }
 
+/* ─── Public model catalog (/models) ───────────────────────────────────────
+   The catalog is an index, not a gallery. A model group is one ruled row and
+   its routes read left-to-right on that same row, so eighty-one groups are
+   scanned vertically instead of paged through eighty-one cards. The console's
+   Models page is the operator's ledger of the same structure (weights, health,
+   split); this is the reader's copy, so the two share a hairline grid and
+   nothing else — no editor, no bar, no state.
+
+   Colour is spent in exactly one place: the provider dot and its label.
+
+   Naming: `mc-` = models catalog. */
+
+.mc-masthead {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  background: var(--admin-bg);
+}
+
+.mc-title {
+  font-size: clamp(2rem, 5vw, 3.25rem);
+  font-weight: 600;
+  line-height: 1.02;
+  letter-spacing: -0.032em;
+  color: var(--admin-text);
+  text-wrap: balance;
+}
+
+/* The size of the catalog, stated once, as figures rather than a sentence. */
+.mc-figures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 26px;
+  margin: 0;
+}
+.mc-figure {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-left: 26px;
+  border-left: 1px solid var(--admin-border);
+}
+.mc-figure:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+/* A wrapped divider column leaves a stray rule at the start of the second
+   line, so on a phone the figures become a 2×2 grid with no rules at all. */
+@media (max-width: 639px) {
+  .mc-figures {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px 20px;
+  }
+  .mc-figure {
+    padding-left: 0;
+    border-left: 0;
+  }
+}
+/* From lg the figures sit to the right of the title, on their own side of a
+   rule: the masthead reads as a heading and its measurement, not a heading
+   followed by a stat bar. */
+@media (min-width: 1024px) {
+  .mc-figures {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, auto));
+    gap: 18px 34px;
+    justify-content: end;
+    padding-left: 34px;
+    border-left: 1px solid var(--admin-border);
+  }
+  .mc-figures .mc-figure {
+    padding-left: 0;
+    border-left: 0;
+  }
+}
+.mc-figure-label {
+  margin: 0;
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--admin-text-dim);
+}
+.mc-figure-num {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 18px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  color: var(--admin-text);
+}
+
+/* Tool row. From sm up it sticks under the floating navbar and blurs what
+   passes beneath it, so the search and the filters stay reachable across a
+   long ledger. On a phone it scrolls away instead: two stacked control rows
+   pinned under a 66px navbar would eat a fifth of the viewport. */
+.mc-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--admin-border);
+}
+@media (min-width: 640px) {
+  .mc-toolbar {
+    position: sticky;
+    top: 72px;
+    z-index: 20;
+    background: rgba(5, 5, 5, 0.84);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+  }
+}
+
+/* Filter trigger: a field, not a chip — it opens a panel, so it is shaped
+   like the control that owns the panel below it. */
+.mc-filter-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0 11px;
+  border: 1px solid var(--admin-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  font-size: 12.5px;
+  color: var(--admin-text-muted);
+  transition: border-color 0.16s ease, color 0.16s ease, background-color 0.16s ease;
+}
+.mc-filter-btn:hover {
+  border-color: var(--admin-border-hover);
+  color: var(--admin-text);
+}
+.mc-filter-btn[aria-expanded="true"] {
+  border-color: rgba(96, 165, 250, 0.4);
+  background: rgba(59, 130, 246, 0.08);
+  color: var(--admin-text);
+}
+.mc-filter-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.45);
+}
+.mc-filter-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mc-panel {
+  flex: 1 1 100%;
+  margin-bottom: 4px;
+  border: 1px solid var(--admin-border);
+  border-radius: 12px;
+  background: var(--admin-surface);
+  padding: 12px;
+}
+.mc-panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.mc-panel-note {
+  font-size: 11px;
+  color: var(--admin-text-dim);
+}
+.mc-reset {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 4px;
+  font-size: 11.5px;
+  color: var(--admin-text-muted);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--admin-border-hover);
+}
+.mc-reset:hover {
+  color: var(--admin-text);
+}
+.mc-reset:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.45);
+  border-radius: 6px;
+}
+
+.mc-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+/* 37 accounts wrap into more than a phone viewport. The panel scrolls instead
+   of swallowing the ledger; every chip is still reachable by Tab, which
+   scrolls the focused chip into view. */
+@media (max-width: 639px) {
+  .mc-chips {
+    max-height: 40vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-right: 2px;
+  }
+}
+/* 36px reads as a tag on a mouse-driven screen and still clears the 44px
+   floor under a finger. */
+.mc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  max-width: 100%;
+  padding: 0 10px;
+  border: 1px solid var(--admin-border);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--admin-text-muted);
+  transition: border-color 0.16s ease, color 0.16s ease, background-color 0.16s ease;
+}
+.mc-chip:hover {
+  border-color: var(--admin-border-hover);
+  color: var(--admin-text);
+}
+.mc-chip[aria-pressed="true"] {
+  border-color: rgba(96, 165, 250, 0.5);
+  background: rgba(59, 130, 246, 0.12);
+  color: #bfdbfe;
+}
+.mc-chip:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.45);
+}
+.mc-chip-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (pointer: coarse) {
+  .mc-chip {
+    min-height: 44px;
+  }
+}
+
+/* Sort: a field, like the filter beside it — one control that names the order
+   it is in, so the toolbar reads as three tools rather than a segmented
+   widget with a floating label. */
+.mc-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 44px;
+  padding: 0 11px;
+  border: 1px solid var(--admin-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  font-size: 12.5px;
+  color: var(--admin-text-muted);
+  transition: border-color 0.16s ease, color 0.16s ease;
+}
+.mc-sort:hover {
+  border-color: var(--admin-border-hover);
+  color: var(--admin-text);
+}
+.mc-sort:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.45);
+}
+
+.mc-count {
+  margin-left: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--admin-text-dim);
+}
+
+/* ── the ledger ─────────────────────────────────────────────────────────── */
+
+.mc-ledger {
+  border: 1px solid var(--admin-border);
+  border-radius: var(--admin-radius);
+  background: var(--admin-surface);
+  overflow: hidden;
+}
+
+/* Column header. Uppercase micro-labels are the house chrome, and here they
+   name the two columns instead of decorating every value. */
+.mc-ledger-head {
+  display: none;
+}
+@media (min-width: 768px) {
+  .mc-ledger-head {
+    display: grid;
+    grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+    gap: 18px;
+    padding: 9px 18px;
+    border-bottom: 1px solid var(--admin-border);
+    background: rgba(255, 255, 255, 0.012);
+  }
+  .mc-ledger-head span {
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--admin-text-dim);
+  }
+}
+
+.mc-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 7px;
+  padding: 13px 18px;
+  border-top: 1px solid rgba(255, 255, 255, 0.045);
+  transition: background-color 0.18s ease;
+}
+/* The row's provider, as a spine: colour marks the row you are on without
+   tinting the text of eighty-one rows. */
+.mc-row::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: hsl(var(--p-hue, 217) 80% 62% / 0);
+  transition: background-color 0.18s ease;
+}
+.mc-row:hover::before,
+.mc-row:focus-within::before {
+  background: hsl(var(--p-hue, 217) 80% 62% / 0.55);
+}
+.mc-row:first-child {
+  border-top: 0;
+}
+.mc-row:hover,
+.mc-row:focus-within {
+  background: rgba(255, 255, 255, 0.018);
+}
+@media (min-width: 768px) {
+  .mc-row {
+    grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+    align-items: center;
+    gap: 18px;
+    padding: 11px 18px;
+  }
+}
+
+/* The group name is the id the caller sends, so it is set in the mono face —
+   the one place the page raises its voice. */
+.mc-idcell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.mc-name {
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--admin-text);
+  overflow-wrap: anywhere;
+}
+.mc-alias {
+  flex: none;
+  border: 1px solid var(--admin-border);
+  border-radius: 5px;
+  padding: 1px 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  color: var(--admin-text-muted);
+  white-space: nowrap;
+}
+.mc-copy {
+  margin-left: auto;
+}
+/* On a phone the copy button is pinned to the row's top-right instead of
+   sharing the name's line: a long group id would otherwise either push the
+   button onto a second line or squeeze the name into a narrow column. */
+@media (max-width: 767px) {
+  .mc-idcell {
+    padding-right: 46px;
+  }
+  .mc-row .mc-copy {
+    position: absolute;
+    top: 8px;
+    right: 10px;
+    margin-left: 0;
+  }
+}
+
+/* Routes: provider account + the upstream id it maps to. Colour appears only
+   in the dot and in the account name that dot labels. */
+.mc-routes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 18px;
+  min-width: 0;
+}
+.mc-route {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  max-width: 100%;
+}
+.mc-dot {
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: hsl(var(--p-hue, 217) 80% 62%);
+  box-shadow: 0 0 7px hsl(var(--p-hue, 217) 85% 62% / 0.55);
+}
+.mc-prov {
+  flex: none;
+  max-width: 9rem;
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: hsl(var(--p-hue, 217) 62% 82%);
+}
+.mc-mid {
+  min-width: 0;
+  overflow: hidden;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  color: var(--admin-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* On a phone the id wraps instead of truncating: a `title` tooltip is no use
+   to a finger, and the upstream id is the fact the reader came for. */
+@media (max-width: 767px) {
+  .mc-mid {
+    overflow: visible;
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+}
+
+/* ── layout switch + card view ────────────────────────────────────────────
+   Two readings of the same catalog: the ledger scans a long list, the cards
+   let a group be looked at on its own. Same data, same filters, same sort. */
+
+.mc-view {
+  display: inline-flex;
+  flex: none;
+  overflow: hidden;
+  border: 1px solid var(--admin-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.mc-view-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  min-height: 44px;
+  color: var(--admin-text-dim);
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+.mc-view-btn + .mc-view-btn {
+  border-left: 1px solid var(--admin-border);
+}
+.mc-view-btn:hover {
+  color: var(--admin-text);
+}
+.mc-view-btn[aria-pressed="true"] {
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--admin-text);
+}
+.mc-view-btn:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px rgba(59, 130, 246, 0.5);
+}
+
+/* Separate boxes on a gap, not a hairline matrix: a matrix leaves the empty
+   cells of a partial last row painted in the gap colour. */
+.mc-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+}
+@media (min-width: 640px) {
+  .mc-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (min-width: 1024px) {
+  .mc-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.mc-card {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--admin-border);
+  border-radius: var(--admin-radius);
+  background: var(--admin-surface);
+  padding: 8px 10px 12px 14px;
+  transition: border-color 0.2s ease, background-color 0.2s ease;
+}
+/* The card's own provider hue, as a wash from its top edge — the one effect
+   on the page, and it only exists while the card is hovered or focused. The
+   gradient is declared in that state rather than always-on at opacity 0, so
+   automated contrast checks can still measure the resting card. */
+.mc-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  border-radius: inherit;
+  opacity: 0;
+}
+.mc-card:hover::after,
+.mc-card:focus-within::after {
+  background: radial-gradient(
+    130% 90% at 100% 0%,
+    hsl(var(--p-hue, 217) 85% 60% / 0.09),
+    transparent 62%
+  );
+  opacity: 1;
+}
+.mc-card:hover,
+.mc-card:focus-within {
+  border-color: hsl(var(--p-hue, 217) 80% 62% / 0.32);
+  background: rgba(255, 255, 255, 0.014);
+}
+
+/* Provider badges: the brand tile from web/public/logos/, or a letter tile in
+   the account's hue when the type has no badge. */
+.mc-marks {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+.mc-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  overflow: hidden;
+  border-radius: 7px;
+}
+.mc-mark-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.mc-mark-letter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  border: 1px solid hsl(var(--p-hue, 217) 80% 62% / 0.3);
+  border-radius: 7px;
+  background: hsl(var(--p-hue, 217) 80% 62% / 0.14);
+  font-size: 11px;
+  font-weight: 600;
+  color: hsl(var(--p-hue, 217) 70% 84%);
+}
+.mc-mark-more {
+  flex: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  color: var(--admin-text-dim);
+}
+.mc-card-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.mc-card-name {
+  min-width: 0;
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.45;
+  color: var(--admin-text);
+  overflow-wrap: anywhere;
+}
+.mc-card-aliases {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+/* The routes sit at the foot of the card, so a short card in a tall row does
+   not open a hole in the middle of it. */
+.mc-card-routes {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: auto 0 0;
+  padding: 8px 0 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.045);
+  list-style: none;
+}
+.mc-card-route {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
 /* ── Touch number stepper (unlayered on purpose) ─────────────────────────────
    On a touch screen the 26px vertical column splits into two ~17px buttons,
    far under the 44px floor, and stacking two 44px buttons inside a 34px-tall
