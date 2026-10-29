@@ -139,13 +139,21 @@ class Tracer:
                 span.set_attribute(key, value)
         return span
 
-    def close(self, span: Any, **attrs: Any) -> None:
+    def close(self, span: Any, status: int | None = None, **attrs: Any) -> None:
         """Set final attributes on a span from :meth:`open` and end it.
 
         Idempotent: several layers close defensively (the error helper, the
         execution body's ``finally``, the entrypoint's ``finally``), and an
         already-ended span must not be re-annotated or re-ended. The SDK's
         ``is_recording`` reports exactly that.
+
+        ``status`` is the HTTP-ish outcome of the span (``None`` = success). A
+        failure marks the span ERROR with the status as its description, so a
+        collector's error filters and APM error rates see the request at all:
+        an attribute named ``wiwi.attempt_status`` is not one. Before this, a
+        failed upstream attempt exported as UNSET and every failure count read
+        zero. The design spec defines ``set_status`` on the span interface and
+        requires a failed attempt to be observable in the exported span.
         """
         if span is None:
             return
@@ -158,6 +166,12 @@ class Tracer:
             if value is not None:
                 with contextlib.suppress(Exception):
                     span.set_attribute(key, value)
+        if status is not None:
+            with contextlib.suppress(Exception):
+                from opentelemetry.trace import Status, StatusCode
+                code = (StatusCode.ERROR if status >= 400
+                        else StatusCode.UNSET)
+                span.set_status(Status(code, f"http_{status}"))
         with contextlib.suppress(Exception):
             span.end()
 

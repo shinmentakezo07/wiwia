@@ -151,7 +151,13 @@ def _end_attempt_span(span: Any, ctx: RequestContext, before: int) -> None:
     if span is None:
         return
     record = ctx.attempts[before] if len(ctx.attempts) > before else None
-    tracer.close(span, **{
+    # A failed attempt must export as ERROR, not just carry a status string:
+    # collectors filter on span status, so an ``http_500``/``TimeoutException``
+    # recorded only as an attribute left the error rate at zero. The record's
+    # status is either ``"ok"``/``"ok_after_refresh"`` or the failure's short
+    # name, so anything else means this attempt did not succeed.
+    ok = record.status in ("ok", "ok_after_refresh") if record else True
+    tracer.close(span, status=None if ok else 500, **{
         "wiwi.attempt_status": record.status if record else None,
         "wiwi.latency_ms": record.latency_ms if record else None})
 
@@ -364,6 +370,14 @@ def merge_resume_context(origin: RequestContext,
             ou.estimated = ou.estimated or ru.estimated
     origin.cost = float(getattr(origin, "cost", 0.0) or 0.0) + \
         float(getattr(resumed, "cost", 0.0) or 0.0)
+    # ``cache_hit`` is a property of the request, not of one attempt: the
+    # resumed attempt's ``_price_stream`` sets it from its own cached tokens,
+    # and the usage merged above already includes those tokens. Leaving the
+    # origin's flag alone made ``wiwi_prompt_cache_hits_total`` undercount a
+    # failover whose second attempt read the provider's prompt cache. OR, never
+    # overwrite: a hit on either attempt means the client's prompt was cached.
+    origin.cache_hit = bool(getattr(origin, "cache_hit", False)
+                            or getattr(resumed, "cache_hit", False))
     # The encoder reports the stream usage from `_stream_usage`; sum the
     # resumed attempt's UsageFinal into it. Assigning it wholesale showed the
     # client only the last attempt's tokens while `cost`/`usage` above billed
@@ -423,6 +437,7 @@ def accumulated_stream_usage(ctx: RequestContext) -> dl.UsageFinal | None:
                 prompt=u.prompt_tokens, cached=u.cached_tokens,
                 reasoning=u.reasoning_tokens, output=u.completion_tokens,
                 cache_creation=u.cache_creation_tokens, estimated=u.estimated,
+                cost=getattr(source, "cost", 0.0) or 0.0,
                 cached_in_prompt=u.cached_in_prompt)
         else:
             total = dl.UsageFinal(
@@ -434,6 +449,12 @@ def accumulated_stream_usage(ctx: RequestContext) -> dl.UsageFinal | None:
                 # Same rule as `merge_resume_context`: a total containing any
                 # estimated tokens is itself an estimate (AUDIT #131).
                 estimated=total.estimated or u.estimated,
+                # And the summed cost, for the same reason as the tokens: the
+                # frame replaces the per-attempt one every encoder sees, so a
+                # total that omitted cost would report $0.00 for a request
+                # that was billed for two attempts. ``merge_resume_context``
+                # sums the same field.
+                cost=total.cost + (getattr(source, "cost", 0.0) or 0.0),
                 # And the usage convention is inherited, not recomputed — the
                 # summed tokens all came from the same deployment wire.
                 cached_in_prompt=(total.cached_in_prompt
@@ -799,6 +820,22 @@ class Gateway:
                         # fall through to the pump loop below.
                         resp = retry_resp
                         resp_cm = retry_cm
+                        # The 401 above already recorded ``http_401`` for this
+                        # attempt; a successful reconnect is a *second*
+                        # attempt and must appear as one. ``_call_once`` and
+                        # the pump both record ``ok_after_refresh`` here, and
+                        # ``_end_attempt_span`` documents that the 401-refresh
+                        # path appends it — this arm never did, so the request
+                        # log credited an OAuth refresh with nothing and the
+                        # attempt span closed on the failure's record.
+                        ctx.note_attempt(f"{dep.group}/{dep.model_id}",
+                                         dep.provider.name, key.label,
+                                         "ok_after_refresh",
+                                         int((time.monotonic() - t0) * 1000),
+                                         model_id=dep.model_id)
+                        _log_attempt(self.router, ctx, dep, key,
+                                     "ok_after_refresh",
+                                     int((time.monotonic() - t0) * 1000))
                     else:
                         await retry_cm.__aexit__(None, None, None)
                         raise err
@@ -1529,7 +1566,19 @@ class Gateway:
             resume_ctx = RequestContext(
                 surface=ctx.surface, ir_req=resume_req, auth=ctx.auth,
                 group=ctx.group, cancel=ctx.cancel,
-                forward_headers=dict(ctx.forward_headers))
+                forward_headers=dict(ctx.forward_headers),
+                # The request span rides along. ``_attempt_span`` parents each
+                # ``wiwi.upstream`` span on ``ctx.span`` explicitly, precisely
+                # because the pump's task context cannot be relied on to
+                # inherit it — so a resume context without the span parented
+                # the failover attempt on nothing and emitted it as a *second
+                # root trace*. One client request then appeared as two traces,
+                # and an operator chasing the failure saw the half that
+                # succeeded. ``session_id`` rides along for the same reason it
+                # does on the original context: deployment affinity is a
+                # property of the client's session, and a failover is the
+                # moment it matters most.
+                span=ctx.span, session_id=ctx.session_id)
             resume_ctx.est_tokens = getattr(ctx, "est_tokens", 0)
             # Reserve under the *resume* context's id: the pump prices into
             # `resume_ctx`, so its `settle_tokens` matches this reservation.
@@ -2490,6 +2539,20 @@ class Gateway:
     def _price_stream(self, ctx: RequestContext, dep: Deployment,
                       u: dl.UsageFinal) -> None:
         model_key = f"{dep.provider.provider_type}/{dep.model_id}"
+        # Publish the priced frame on the context, next to the usage it was
+        # derived from. ``_stream_usage`` is what the encoder reports the
+        # client's usage block from, and what ``merge_resume_context`` sums a
+        # resumed attempt into — but its only other writer was the server's
+        # ``_capture_delta``, which runs solely when prompt capture is on
+        # (``store_prompts_in_spend_logs`` or a Responses store). Under the
+        # default config that left the field None, so after a mid-stream
+        # failover the merge had nothing to add: the client saw the last
+        # attempt's tokens while spend billed every attempt (the same
+        # divergence AUDIT_REPORT M5 records for ``> 1`` retries). Publishing
+        # here, at the one place every streaming cost is finalized — the pump,
+        # ``_price_partial`` and the force-stream arm all route through it —
+        # makes the readers independent of an unrelated capture setting.
+        ctx._stream_usage = u  # type: ignore[attr-defined]
         ctx.usage = ir.Usage(prompt_tokens=u.prompt, completion_tokens=u.output,
                              cached_tokens=u.cached, reasoning_tokens=u.reasoning,
                              estimated=u.estimated,

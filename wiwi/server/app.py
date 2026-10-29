@@ -2067,11 +2067,22 @@ def create_app(config: WiwiConfig) -> FastAPI:
              request: Request, surface: str = "chat",
              span: Any = None) -> ORJSONResponse:
         rid = getattr(request.state, "request_id", "")
+        headers = {"x-wiwi-request-id": rid}
         # Telemetry (spec C): record the outcome on the request span here rather
         # than at each return site that builds an error response. Sites that
         # pass nothing are covered by the execution body's ``finally``.
         if span is not None:
-            tracer.close(span, **{"wiwi.status": status, "wiwi.error_type": etype})
+            tracer.close(span, status=status,
+                         **{"wiwi.status": status, "wiwi.error_type": etype})
+            # Spec §4 requires the trace id on success *and* error responses.
+            # It was emitted only on the success path, so a caller reporting a
+            # failed request — exactly the case where a trace is wanted — had
+            # nothing to quote to the collector. Read it after ``close``: the
+            # context is still valid, and closing first keeps the error the
+            # span's recorded outcome.
+            _trace_id = tracer.trace_id_of(span)
+            if _trace_id:
+                headers["x-wiwi-trace-id"] = _trace_id
         # Only the Anthropic dialect echoes the id inside the body (the real
         # Messages API always does, and Claude Code surfaces it in bug
         # reports). The OpenAI-shaped dialects carry it as a header only, so
@@ -2080,8 +2091,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             body = am.error_body(status, etype, message, request_id=rid)
         else:
             body = _error_body_for(surface)(status, etype, message)
-        return ORJSONResponse(body, status_code=status,
-                              headers={"x-wiwi-request-id": rid})
+        return ORJSONResponse(body, status_code=status, headers=headers)
 
     # Pure ASGI middleware (replaces @app.middleware("http") / BaseHTTPMiddleware,
     # which breaks streaming responses during graceful shutdown — see RequestIdMiddleware).

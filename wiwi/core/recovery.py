@@ -361,10 +361,37 @@ class HealthHealer:
 
         async def run_one(dep, key):
             did = (dep.group, dep.provider.name, dep.model_id)
-            credit_dep = did not in credited
-            credited.add(did)
             async with sem:
-                await self._probe_pair(dep, key, credit_dep=credit_dep)
+                credit_dep = did not in credited
+                # Claim the deployment's restore credit only *as* the probe is
+                # attempted, and only if that probe actually reports back. It
+                # used to be claimed before the probe ran, so a probe that
+                # raised marked its deployment credited while contributing
+                # nothing — every sibling key in the same sweep then skipped
+                # the streak and the deployment could never reach
+                # ``probes_to_restore``.
+                credited.add(did)
+                # One target's failure must not cost the others their probe.
+                # ``_probe`` builds the adapter, body, URL and headers outside
+                # its own ``try`` and catches only ``httpx.TransportError``, so
+                # an adapter that raises while encoding (a provider-specific
+                # ``build_url_for_key``, a malformed extra_headers, a decoder
+                # that rejects the probe request) propagated out of the gather
+                # — aborting the whole batch and leaving every other sick
+                # target unprobed for that tick, with only the outer
+                # ``healer_sweep_error`` to show for it. Isolate per target;
+                # the sweep is best-effort by construction.
+                try:
+                    await self._probe_pair(dep, key, credit_dep=credit_dep)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # noqa: BLE001 — see comment above
+                    # Give the credit back: this probe told us nothing, so the
+                    # deployment must still be creditable by a sibling.
+                    credited.discard(did)
+                    log.warning("healer_probe_error", deployment=f"{did[0]}/{did[2]}",
+                                provider=did[1], key=key.label,
+                                error=type(e).__name__, detail=str(e)[:200])
 
         await asyncio.gather(*(run_one(d, k) for d, k in batch))
         return len(batch)

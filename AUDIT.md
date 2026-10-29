@@ -18239,3 +18239,103 @@ body (8 of 15, on exactly the intended assertions); `test_fix_round34.py`'s
 everything except the envelope identity. The round-34 e2e test's `__init__` stub
 was rewritten to delegate to the real constructor, because its hand-copied
 attribute list silently omitted the new `disabled` field.
+
+### 525. Resume/usage merge lost data when prompt capture was off
+
+🟠 **Medium** — `wiwi/core/gateway.py:_price_stream`, `merge_resume_context`,
+`accumulated_stream_usage`
+
+`_stream_usage` — the frame the encoder reports the client's usage block from and
+the field `merge_resume_context` sums a resumed attempt into — was written only by
+the server's `_capture_delta`, which runs solely when prompt capture is on
+(`store_prompts_in_spend_logs` or a Responses store). Under the default config the
+field stayed `None`, so after a mid-stream failover the merge had nothing to add:
+the client saw the last attempt's tokens while spend billed every attempt (the same
+divergence `AUDIT_REPORT` M5 records for `stream_resume_max_retries > 1`, which
+recurred on the default config once that retry count was raised). Two further
+fields were dropped by the same merge:
+
+- `cache_hit` was never OR-ed from the resumed context, so a failover whose second
+  attempt read the provider's prompt cache never reached
+  `wiwi_prompt_cache_hits_total`.
+- `accumulated_stream_usage` builds the `UsageFinal` that *replaces* the
+  per-attempt frame for every encoder, but never set `cost` — while its documented
+  twin `merge_resume_context` sums it. The docstring claimed "the same arithmetic";
+  it was not.
+
+**Status: fixed** — `_price_stream` publishes the priced frame on the context at the
+one choke point every streaming cost routes through (pump, `_price_partial`,
+force-stream), so the readers no longer depend on an unrelated capture setting;
+`merge_resume_context` ORs `cache_hit`; `accumulated_stream_usage` sums `cost`.
+
+Pinned by `tests/test_fix_round178.py` (3 tests; all 3 fail against the pre-fix
+body).
+
+### 526. Resumed attempts started a second trace, and failed spans never exported as errors
+
+🟠 **Medium** — `wiwi/core/gateway.py:_attempt_resume`, `_end_attempt_span`;
+`wiwi/core/telemetry.py:Tracer.close`; `wiwi/server/app.py:_err`
+
+Three telemetry gaps, all of which made a failure invisible in exactly the place an
+operator looks:
+
+1. `resume_ctx` propagated `cancel`, `forward_headers` and `est_tokens` but not
+   `span`. `_attempt_span` parents each `wiwi.upstream` span on `ctx.span`
+   *explicitly*, because the pump's task context cannot be relied on to inherit —
+   so a resume context without the span parented the failover attempt on nothing
+   and emitted it as a second root trace. One client request appeared as two traces,
+   and an operator chasing the failure saw only the half that succeeded. `session_id`
+   was dropped the same way, which matters most at a failover.
+2. `set_status` existed only on `_NoopSpan`: no real span was ever marked ERROR.
+   `_end_attempt_span` recorded `wiwi.attempt_status` as a plain attribute, so every
+   failed upstream attempt exported as UNSET and APM error rates read zero.
+3. `x-wiwi-trace-id` was emitted only on success, though spec C requires it "on
+   success and error responses" — a caller reporting a failed request, the case
+   where a trace is most wanted, had nothing to quote.
+
+**Status: fixed** — `resume_ctx` carries `span` and `session_id`; `Tracer.close`
+takes `status` and marks `StatusCode.ERROR` (description `http_<status>`) for any
+4xx/5xx, called from `_end_attempt_span` (non-`ok` attempt) and `_err`;
+`_err` adds `x-wiwi-trace-id` from the span it already closes.
+
+**Verified:** live ASGI app with telemetry on — a 404 on `/v1/chat/completions`
+returns `x-wiwi-trace-id: d1633f97…` (32 hex); with telemetry off the header is
+absent and the 404 is unchanged. Span status pinned against a real
+`InMemorySpanExporter` (`ERROR`/`http_500` for a failed attempt, `UNSET` for a
+clean one) in `tests/test_fix_round178.py`.
+
+### 527. One bad probe aborted the whole health-healer sweep
+
+🟡 **Low** — `wiwi/core/recovery.py:HealthHealer._sweep`
+
+`_probe` builds the adapter, body, URL and headers *outside* its `try` and catches
+only `httpx.TransportError`, and `_sweep` gathered every probe with no
+`return_exceptions`. An adapter that raised while encoding therefore propagated out
+of the `gather` and aborted the batch — every other sick target in that tick went
+unprobed, with only the outer `healer_sweep_error` to show for it. Separately, the
+deployment's restore credit was claimed *before* the probe ran, so a probe that
+raised still marked its deployment credited and no sibling key could advance the
+streak: the deployment could never reach `probes_to_restore`. The healer is off by
+default, which is why this never surfaced in production.
+
+**Status: fixed** — each target is isolated (`CancelledError` re-raised, everything
+else logged as `healer_probe_error` with deployment/provider/key), the credit is
+claimed inside the semaphore and returned with `discard` when the probe raised.
+
+Pinned by `tests/test_fix_round178.py` (2 tests, both fail against the pre-fix
+body).
+
+### 528. The force-stream 401 refresh retried without recording the attempt
+
+🟡 **Low** — `wiwi/core/gateway.py:_complete_via_stream`
+
+A 401 from an OAuth-backed provider triggers a token refresh and one reconnect.
+`_call_once` and the pump both record `ok_after_refresh` for that second attempt;
+`_complete_via_stream` — the arm Cline and WorkBuddy take for every non-streaming
+caller — fell through to the pump loop on the retry's 200 without recording
+anything, though `_end_attempt_span`'s docstring states "the 401-refresh path
+appends `ok_after_refresh` or `http_401`". The request log therefore credited an
+OAuth refresh with nothing, and the attempt ended on the failure's record.
+
+**Status: fixed** — the successful reconnect records `ok_after_refresh` in both
+`ctx.attempts` and `_log_attempt`, matching the other two arms.

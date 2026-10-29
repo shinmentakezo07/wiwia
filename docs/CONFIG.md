@@ -310,12 +310,15 @@ telemetry:
 
 | Span | Meaning |
 |---|---|
-| `wiwi.upstream` | One per upstream attempt (so each retry is its own span): `wiwi.deployment`, `wiwi.provider`, `wiwi.attempt`, `wiwi.attempt_status`, `wiwi.latency_ms`. |
+| `wiwi.upstream` | One per upstream attempt (so each retry is its own span): `wiwi.deployment`, `wiwi.provider`, `wiwi.attempt`, `wiwi.attempt_status`, `wiwi.latency_ms`. A failed attempt closes with status **ERROR** (`http_<status>`), a clean one UNSET, so collector error filters and APM error rates count it. |
 | `wiwi.retrieve` | A `previous_response_id` transcript read (stateful Responses): `wiwi.found`. |
 | `wiwi.persist` | A stored response write: `wiwi.store_id`. |
 
 Responses carry `x-wiwi-trace-id: <32-hex>` alongside `x-wiwi-request-id` when
-tracing is on, so a caller can quote the exact trace.
+tracing is on — on **success and error** responses alike, so a caller reporting a
+failed request can still quote the exact trace. A resumed stream (mid-stream
+failover) continues the same trace: the resumed attempt's span is parented on the
+request span, not started as a new root.
 
 **Propagation.** A valid inbound W3C `traceparent` is continued — the request
 span becomes its child and keeps the caller's trace id. Each outbound upstream

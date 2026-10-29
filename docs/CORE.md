@@ -83,7 +83,8 @@ Surface-agnostic engine executing one IR request:
 
 - `Router.resolve_group(name)` — alias chain + `alias_to_provider` → model group.
 - `pick_deployment` — smooth WRR over healthy deployments (exact-proportion semantics pinned by tests; no jitter).
-- `execute_with_retries` — wraps connect + first-token phase: retry per attempt budget with `Backoff` (honors `Retry-After`), failover across deployments, then fallback groups; records `AttemptRecord`s on the context; skips/cool-downs failing keys.
+- `execute_with_retries` — wraps connect + first-token phase: retry per attempt budget with `Backoff` (honors `Retry-After`), failover across deployments, then fallback groups; records `AttemptRecord`s on the context — including the `ok_after_refresh` second attempt a 401 token refresh produces, on all three arms (`_call_once`, the pump, `_complete_via_stream`); skips/cool-downs failing keys.
+- Attempt spans are parented explicitly on `ctx.span`, and a resumed (mid-stream failover) context **carries** that span — otherwise the failover attempt becomes a second root trace. `_price_stream` publishes the priced `UsageFinal` on `ctx._stream_usage`, which `merge_resume_context` sums and the encoder reports from; it is set by pricing, not by the server's prompt-capture flag. That merge also ORs `cache_hit` and sums `cost`, so the client's usage block and the spend log agree after a failover.
 - Health scoring (**spec only, not implemented** — `docs/superpowers/specs/2026-08-31-router-health-overhaul-design.md`): opt-in `router_settings.health_model: scored` would add EWMA latency + success-rate window gating of deployment/key selection; `adaptive_cooldown` would extend cooldowns by recent failure rate. Neither field exists in `RouterSettings`.
 
 ## 5. Recovery (`core/recovery.py`)
@@ -93,7 +94,7 @@ Shared primitives (contracts only — no dialect/provider branching; must never 
 - `Backoff(base_s, cap_s, jitter_s)` — exponential delay + jitter honoring upstream `retry_after`: `min(cap, max(retry_after, base·2^attempt)) + jitter`.
 - `CircuitBreaker` — per-dependency open/half-open/closed states; used by the Cline/WorkBuddy auto-refresh services.
 - `parse_retry_after`, `build_url` — small shared helpers extracted from three deduplicated sites.
-- `HealthHealer` (opt-in via `HealerSettings`, default off) — background service: probes sick keys/deployments with 1-token requests, graduated probation recovery, wired in lifespan alongside the refresh services.
+- `HealthHealer` (opt-in via `HealerSettings`, default off) — background service: probes sick keys/deployments with 1-token requests, graduated probation recovery, wired in lifespan alongside the refresh services. Each target is isolated: a probe that raises is logged (`healer_probe_error`) and returns its deployment's restore credit instead of aborting the sweep.
 
 ## 6. Wire codecs (`wire/`)
 
