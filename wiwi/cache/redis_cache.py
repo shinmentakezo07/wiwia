@@ -27,8 +27,11 @@ import time
 from typing import Any
 
 import orjson
+import structlog
 
 from wiwi.cache.interface import CacheEntry
+
+log = structlog.get_logger("wiwi.cache.redis")
 
 _DEFAULT_PREFIX = "wiwi:rsp"
 
@@ -52,6 +55,18 @@ class RedisResponseCache:
         # is the sole owner of whatever it is using, and a half-closed cache
         # would be a subtler bug than a closed caller-supplied client.
         self._client = client
+        # Observability for the swallow-everything policy below. A backend that
+        # is *configured* but never reachable makes every request a miss while
+        # the operator believes a shared, restart-durable cache is serving
+        # traffic — the failure ``build_response_cache`` already refuses to
+        # hide for the missing-package case. Swallowing the exception keeps
+        # requests correct; staying silent about it is what made the outage
+        # invisible (no log, no counter, no /health field, no metric).
+        # ``_degraded`` latches the current state so the warning is emitted on
+        # the healthy→broken edge only: one line per outage, not one per
+        # request on the hot path. ``errors`` is the lifetime count.
+        self._degraded = False
+        self.errors = 0
 
     async def _redis(self) -> Any:
         """Lazily create the client so import never requires redis installed."""
@@ -62,6 +77,27 @@ class RedisResponseCache:
 
     def _key(self, key: str) -> str:
         return f"{self.prefix}:{key}"
+
+    def _failed(self, op: str, e: Exception) -> None:
+        """Record a swallowed Redis failure; warn once per outage.
+
+        The request path must never raise from the cache, so callers still get
+        ``None``/a no-op. This is the operator surface instead: ``errors``
+        counts every failure, and the ``warning`` fires only on the transition
+        into the degraded state. The first success afterwards clears the latch
+        so a *later* outage warns again, without logging a recovery line for
+        every request that starts succeeding.
+        """
+        self.errors += 1
+        if not self._degraded:
+            self._degraded = True
+            log.warning("redis_cache_error", op=op, url=self.url,
+                        detail=f"{type(e).__name__}: {e}",
+                        note="response cache is serving nothing; every request "
+                             "misses until Redis is reachable again")
+
+    def _succeeded(self) -> None:
+        self._degraded = False
 
     # -- serialization ------------------------------------------------------
     # ``CacheEntry.payload`` is bytes and orjson refuses to serialize bytes
@@ -97,8 +133,10 @@ class RedisResponseCache:
         try:
             r = await self._redis()
             raw = await r.get(self._key(key))
-        except Exception:  # noqa: BLE001 — cache is advisory, never fatal
+        except Exception as e:  # noqa: BLE001 — cache is advisory, never fatal
+            self._failed("get", e)
             return None
+        self._succeeded()
         if raw is None:
             return None
         return self._decode(raw)
@@ -116,15 +154,17 @@ class RedisResponseCache:
         try:
             r = await self._redis()
             await r.setex(self._key(key), ttl, payload)
-        except Exception:  # noqa: BLE001, S110 — a failed write is just a miss
-            pass
+        except Exception as e:  # noqa: BLE001 — a failed write is just a miss
+            self._failed("set", e)
+            return
+        self._succeeded()
 
     async def delete(self, key: str) -> None:
         try:
             r = await self._redis()
             await r.delete(self._key(key))
-        except Exception:  # noqa: BLE001, S110
-            pass
+        except Exception as e:  # noqa: BLE001
+            self._failed("delete", e)
 
     async def aclose(self) -> None:
         if self._client is None:
