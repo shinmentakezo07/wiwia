@@ -1103,6 +1103,16 @@ class AnthropicStreamEncoder:
             # tool calls are siblings, not sequential.
             if self._open_block is not None and self._open_block != "tool":
                 out.extend(self._close_block())
+            # A repeat Open on an index that is STILL open supersedes it, and
+            # the mapping below is about to be overwritten — so the old
+            # ``content_block_stop`` could never be emitted, leaving a
+            # ``tool_use`` block open for the rest of the message (Anthropic
+            # clients reject/ignore the rest of such a stream, and the block is
+            # never closed even by ``message_delta``). The adapters dispose of
+            # this case the same way upstream (see ``_flush_open_tools``);
+            # close the superseded block here first. Round 176 fixed the
+            # adapter half; this is the encoder half.
+            out.extend(self._close_block(tool_index=d.index))
             # `id` must be a string (Claude Code rejects "string id" style
             # errors when a provider hands back an integer tool id).
             tool_id = d.id if isinstance(d.id, str) else str(d.id)

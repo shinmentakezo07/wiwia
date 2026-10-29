@@ -18124,3 +18124,118 @@ round-trips bytes/headers/`stored_at` and emits nothing; against
 against the pre-fix body (`errors == 0`, no log) and passes after.
 
 ---
+
+### 523. An index-reusing `ToolCallOpen` orphaned the superseded block/item in the Anthropic and Responses encoders
+
+**Severity:** 🟠 High (client-visible truncation on any provider that reuses a tool index) · **Status: fixed** — round 176 (`tests/test_fix_round176.py`)
+
+**Files:** `wiwi/wire/anthropic_messages.py` (`AnthropicStreamEncoder.feed`, `ToolCallOpen` arm), `wiwi/wire/openai_responses.py` (`ResponsesStreamEncoder.feed`, `ToolCallOpen` arm)
+
+**Trigger.** A second `ToolCallOpen` on an index that is still open. Both
+encoders keyed their per-block bookkeeping by *IR index* and assigned
+unconditionally (`self._tool_blocks[d.index] = self._block_idx`,
+`self._tools[n] = {...}`), so the entry identifying the first block was gone
+before anything could close it. Round 176 taught the *adapters* to emit a
+`ToolCallClose` before re-opening (`AUDIT #243`); the encoders had no equivalent,
+so the IR was legal and the wire was not.
+
+**Reproduced** — same 7-delta IR prefix through both encoders:
+
+```
+anthropic: content_block_start ×2, content_block_stop ×1   -> block 0 never closed
+responses: output_item.added  ×2, output_item.done   ×1   -> fc_r_0 never completed
+```
+
+The Anthropic stream then ended with `message_delta`/`end_turn` and an open
+`tool_use` block — a client sees the turn complete but the call truncated. The
+Responses stream advanced `output_index` while an earlier item was still
+`in_progress`.
+
+**Why it matters more on the encode side.** `deltas.py` is the binding contract
+and adapters are required to guarantee legality; the encoders are documented as
+never defending. That is the right rule for *malformed IR* — but an index reuse
+is legal IR (the adapters produce it deliberately, and all four dispose of it
+upstream), so the encoder must render it as the two distinct calls it is. The
+OpenAI Chat encoder needs no change: it emits a delta stream with no
+open/close invariant, and a second Open at the same index merges into one
+`tool_calls[0]` with the id replaced.
+
+**The fix.** Close the open entry for that index before overwriting it —
+`self._close_block(tool_index=d.index)` / `self._close_tool(n)`. Both helpers
+were already parallel-safe and already clear `_open_block`/`_open_tool` when
+they match, so the arms below re-establish that state as before.
+
+**Verified:** balanced `start`/`stop` and `added`/`done` at 2/2 for both.
+Regressions fail pre-fix (`1 == 2` on the stop and done counts).
+
+---
+
+### 524. A non-positive cache TTL crashed gateway startup on the Redis backend only, and a cache hit was served under the producing request's id
+
+**Severity:** 🟠 Medium (a config the schema declares legal refuses to boot; and on the Responses surface a hit hands the caller an id naming another request's stored object) · **Status: fixed** — round 177 (`tests/test_fix_round177.py`)
+
+**Files:** `wiwi/cache/redis_cache.py`, `wiwi/cache/__init__.py`,
+`wiwi/cache/hit_rebase.py` (new), `wiwi/server/app.py` (hit branch)
+
+**Trigger.** Either of:
+
+1. `cache_settings.ttl_s: 0` (or negative) with `general_settings.redis_url`
+   set. `RedisResponseCache.__init__` raised `ValueError("ttl_s must be
+   positive")`, and that constructor runs inside `create_app` via
+   `build_response_cache` — so the process died at startup. The *same* config
+   without `redis_url` booted fine, because `MemoryResponseCache` accepts it and
+   simply expires everything at once (`time.time() - stored_at > ttl_s` is
+   always true). Whether a config was legal depended on which backend happened
+   to be selected. `CacheSettings` validates nothing, and `wiwi/config.py` uses
+   no numeric constraints anywhere (deliberate), so nothing rejected the value
+   earlier.
+2. Second and distinct: a cache hit replayed the stored bytes verbatim,
+   envelope included. The caller received the **producing** request's `id`
+   (`chatcmpl-…`, `msg_…`, `cmpl-…`, `resp_…`) and its frozen
+   `created`/`created_at`, while its own `x-wiwi-request-id` — and its own log
+   row — carried a different id. Chat/Messages ids are opaque handles, so there
+   the mismatch was cosmetic. On the Responses surface `resp_<request_id>` is
+   dereferenced by `GET /v1/responses/{id}` and by `previous_response_id`, so
+   the hit handed the caller a handle naming *someone else's* stored object.
+   Both ids resolve, which is what hid it: resolution alone cannot distinguish
+   "my object" from "a different request's object".
+
+**The fix.** Two separate changes, matching the two triggers:
+
+- *TTL.* The constructor no longer raises. `ttl_s <= 0` now means what it
+  already meant on the memory backend — **disabled: never serve, never store** —
+  via a `disabled` flag that short-circuits `get`/`set` before the client is
+  touched (a disabled cache must not even contact Redis, and must not serve a
+  value another instance left under the key). `build_response_cache` emits one
+  `response_cache_disabled_by_ttl` **warning** before backend selection, so it
+  fires for Redis and memory alike: a cache the operator enabled but that can
+  never hit is the same silent-cost trap as entry #520, one config field over.
+- *Identity.* `wiwi/cache/hit_rebase.py:rebase_cached_body` rewrites only the
+  envelope identity onto the serving request: `id` is regenerated from the
+  current request id reusing the separator the cached id already carried (`-`
+  or `_`), so it needs no per-dialect prefix table and cannot drift when a
+  surface picks a new one; `created` and `created_at` are set to now. An id with
+  no separator, or any non-`str`, is left untouched — mangling a foreign value
+  would be worse than the stale one. Because the body now carries the hit's own
+  id, the hit is also **persisted** under `resp_<ctx.request_id>` exactly as the
+  upstream path persists a fresh response, otherwise the returned handle would
+  dangle; a store failure there is logged (`response_store_put_on_cache_hit_failed`)
+  and the hit still serves, the same never-fail-the-request rule as the cache.
+
+Nothing else in the payload changes: the body is otherwise byte-identical, and
+`LogEvent` accounting was already correct (own `request_id`, `response_cache_hit`
+not `cache_hit`, `tok_in`/`tok_out` zero, reservation refunded).
+
+**Verified:** `ttl_s` of `0` and `-5` with `redis_url` boot and yield a disabled
+`RedisResponseCache`; `60` still selects an enabled one. All four surfaces
+(`/v1/chat/completions`, `/v1/messages`, `/v1/completions`, `/v1/responses`)
+return `id == f"<prefix><own x-wiwi-request-id>"` on a hit, and on Responses
+`GET /v1/responses/<hit id>` returns 200 naming that same id and
+`previous_response_id` continues (200). Regressions fail against the pre-fix
+body (8 of 15, on exactly the intended assertions); `test_fix_round34.py`'s
+`test_redis_cache_rejects_nonpositive_ttl`, which pinned the removed
+`ValueError`, is replaced by one pinning the disabled semantics, and the two
+`r1.json() == r2.json()` assertions that pinned body-verbatim replay now compare
+everything except the envelope identity. The round-34 e2e test's `__init__` stub
+was rewritten to delegate to the real constructor, because its hand-copied
+attribute list silently omitted the new `disabled` field.

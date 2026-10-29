@@ -1,7 +1,9 @@
-"""Round 176 — three decoder defects that violate the stream contract.
+"""Round 176 — stream-contract defects across decoders, encoders and seams.
 
 Each case is a legal upstream shape whose decode produced a delta sequence no
-wire encoder can render honestly (AUDIT #242, #243, #244).
+wire encoder can render honestly (AUDIT #242, #243, #244), an encoder that
+orphaned a block when an index was reused (#523), or a seam that broke its own
+"never raise" promise (#522).
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from wiwi.providers.gemini_adapter import GeminiAdapter
 from wiwi.providers.openrouter_adapter import OpenRouterAdapter
 from wiwi.streaming import deltas as dl
 from wiwi.wire.anthropic_messages import AnthropicStreamEncoder
+from wiwi.wire.openai_responses import ResponsesStreamEncoder
 
 
 def _ev(adapter, event: str, payload: dict):
@@ -197,3 +200,70 @@ def test_validate_tool_args_never_raises_on_a_non_str_payload(raw):
     assert isinstance(msg, str)
 
 
+
+
+# -- #523: an encoder must close a block an index-reusing Open supersedes ---
+
+
+def _reopened_stream():
+    """A legal delta prefix whose index 0 is opened twice (reuse, no Close)."""
+    return [
+        dl.StreamStart(model="m"),
+        dl.ToolCallOpen(index=0, id="a", name="f1"),
+        dl.ToolCallArgsDelta(index=0, args_fragment='{"x":1}'),
+        dl.ToolCallOpen(index=0, id="b", name="f2"),
+        dl.ToolCallArgsDelta(index=0, args_fragment='{"y":2}'),
+        dl.ToolCallClose(index=0),
+        dl.Finish(),
+    ]
+
+
+def test_anthropic_encoder_closes_a_block_superseded_by_index_reuse():
+    """``_tool_blocks[index]`` was overwritten, orphaning the first block.
+
+    Every Anthropic content block a client is told to open must be closed. The
+    old block's ``content_block_stop`` could never be emitted because the
+    mapping that identifies it was gone, so the message ended with an open
+    ``tool_use`` block and the client saw a truncated call.
+    """
+    enc = AnthropicStreamEncoder(model="m", req_id="r")
+    raw = b"".join(
+        (enc.feed(d) or b"") for d in _reopened_stream()).decode()
+
+    starts = [l for l in raw.splitlines() if '"content_block_start"' in l]
+    stops = [l for l in raw.splitlines() if '"content_block_stop"' in l]
+    assert len(starts) == 2, raw
+    assert len(stops) == 2, f"{len(starts)} blocks opened, {len(stops)} closed"
+
+    opened = {json.loads(l[6:])["index"] for l in starts}
+    closed = {json.loads(l[6:])["index"] for l in stops}
+    assert opened == closed, f"unclosed block(s): {opened - closed}"
+
+
+def test_responses_encoder_completes_an_item_superseded_by_index_reuse():
+    """``self._tools[index]`` was overwritten, orphaning the first item.
+
+    The Responses protocol pairs ``output_item.added`` with
+    ``output_item.done``; an item that is added and never done is rendered as
+    truncated even though the turn completed.
+    """
+    enc = ResponsesStreamEncoder(model="m", req_id="r")
+    raw = b"".join(
+        (enc.feed(d) or b"") for d in _reopened_stream()
+        + [dl.StreamEnd()]).decode()
+
+    def _frames(kind: str) -> list[dict]:
+        out = []
+        for line in raw.splitlines():
+            if not line.startswith("data: "):
+                continue
+            body = json.loads(line[6:])
+            if body.get("type") == f"response.{kind}":
+                out.append(body)
+        return out
+
+    added, done = _frames("output_item.added"), _frames("output_item.done")
+    assert len(added) == 2, raw
+    assert len(done) == 2, f"{len(added)} items added, {len(done)} done"
+    assert ({a["output_index"] for a in added}
+            == {d["output_index"] for d in done})

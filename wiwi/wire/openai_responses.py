@@ -1129,6 +1129,15 @@ class ResponsesStreamEncoder:
             if self._item_open is not None and self._item_open != "tool":
                 out.extend(self._close_item())
             n = d.index
+            # A repeat Open on an index that is STILL open supersedes it, and
+            # the assignment below is about to overwrite ``self._tools[n]`` —
+            # so the superseded item could never be ``output_item.done``, and
+            # the client saw an item that was added and never completed (which
+            # the Responses client renders as a truncated call) while the
+            # output index ran on. Close it first. Same disposition as the
+            # Anthropic encoder and the adapters' ``_flush_open_tools``;
+            # round 176 fixed the adapter half, this is the encoder half.
+            out.extend(self._close_tool(n))
             oi = self._next_output_index()
             self._tools[n] = {"index": n, "name": d.name,
                               "call_id": d.id, "args": "", "output_index": oi,
