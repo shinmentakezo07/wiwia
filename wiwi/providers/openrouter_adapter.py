@@ -374,19 +374,21 @@ class OpenRouterAdapter(OpenAIAdapter):
             # ``"message": null`` frame. Coerce like ClineAdapter's arm
             # (AUDIT #200).
             msg = str(top_error.get("message") or "OpenRouter stream error")
-            out: list[dl.IRStreamDelta] = [dl.StreamError(message=msg, kind="status")]
-            if choices and isinstance(choices[0], dict) \
-                    and choices[0].get("finish_reason") == "error":
-                # Close any open tool calls before the error
-                for open_idx in sorted(self._open_tool_indices):
-                    if open_idx in self._pending_opens:
-                        cid, cname = self._pending_opens.pop(open_idx)
-                        out.append(dl.ToolCallOpen(index=open_idx, id=cid, name=cname))
-                    out.append(dl.ToolCallClose(index=open_idx))
-                self._open_tool_indices.clear()
-                self._tool_names.clear()
-                self._pending_opens.clear()
-                self._open_tool_ids.clear()
+            # Close any open tool calls BEFORE the error, in every shape.
+            #
+            # The close loop used to be gated on
+            # ``choices[0].finish_reason == "error"``, but the error frame that
+            # actually occurs carries no ``choices`` at all — so an upstream
+            # failure mid-tool-call delivered a ``tool_use`` block the client
+            # had already received, followed by an error, with no
+            # ``content_block_stop`` in between. The stream contract allows
+            # ``StreamError`` to terminate at any time, but a call the client
+            # was told about must still be closed for the encoder to render it
+            # as a finished block (AUDIT #242). ``_flush_open_tools`` also
+            # flushes Opens still deferred for want of a complete name, so the
+            # Close never names an index that never opened.
+            out = self._flush_open_tools()
+            out.append(dl.StreamError(message=msg, kind="status"))
             return out
 
         out: list[dl.IRStreamDelta] = []

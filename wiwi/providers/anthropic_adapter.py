@@ -950,6 +950,19 @@ class AnthropicAdapter(WarningMixin):
                     text="", block_type="redacted_thinking",
                     data=cb.get("data", "")))
             elif cb.get("type") in ("tool_use", "server_tool_use", "mcp_tool_use"):
+                if idx in self._tool_indices:
+                    # A second ``content_block_start`` on an index that is
+                    # still OPEN supersedes the first call. Emitting a second
+                    # ``ToolCallOpen`` broke the strictly nested
+                    # ``Open -> ArgsDelta* -> Close`` contract: the encoder
+                    # remapped the new block to a fresh index, so the client
+                    # was left with a ``tool_use`` block (the superseded call's)
+                    # that never received its ``content_block_stop`` (AUDIT
+                    # #243). Close the superseded call first — the same
+                    # disposition the OpenAI-wire decoders apply to a new id on
+                    # a live index (#473/#156).
+                    out.append(dl.ToolCallClose(index=idx))
+                    self._tool_indices.discard(idx)
                 self._tool_indices.add(idx)
                 # server_tool_use = provider-hosted builtin call (web_search,
                 # code_execution, ...): tag the delta so downstream encoders

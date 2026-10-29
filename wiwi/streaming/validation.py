@@ -49,6 +49,20 @@ def validate_tool_args(
     # defence in depth for every other caller.
     if not isinstance(schema, dict) or not schema:
         return True, ""
+    # ``raw_args`` is typed ``str`` but this is a public seam, and three
+    # later reads assume it: ``raw_args.encode`` (here, and in the oversize
+    # and invalid-JSON log paths, both via ``_fingerprint``). A non-string
+    # — a dict from an adapter that skipped ``coerce_args_fragment``, an
+    # int from a hand-written caller — raised ``AttributeError`` out of the
+    # pump's mid-stream handler, which is exactly the failure this module's
+    # docstring promises it never produces. Coerce once, here, so every
+    # later use sees the documented type. (A dict still fingerprint/logs as
+    # its JSON text rather than being silently dropped.)
+    if not isinstance(raw_args, str):
+        if isinstance(raw_args, dict):
+            raw_args = json.dumps(raw_args)
+        else:
+            raw_args = ""
     # Reject oversize payloads up front so a hostile/malformed model cannot
     # push megabytes of args into a JSON parse. We never log the payload
     # itself — just length and a short fingerprint.

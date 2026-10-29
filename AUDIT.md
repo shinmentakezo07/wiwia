@@ -13548,6 +13548,12 @@ the Chat/Responses encoders do not track block state), so this is latent.
 **Fix:** hoist the flush above the `StreamError` append and drop the
 `finish_reason == "error"` gate.
 
+**Status: fixed** — the arm now calls `self._flush_open_tools()` before appending
+`StreamError`, unconditionally, so an error frame with no `choices` (the shape
+that actually occurs) also closes what it opened. The helper also flushes Opens
+still deferred for want of a complete name, which the old inline loop did not.
+Regression: `tests/test_fix_round176.py`.
+
 ### 243. Anthropic: a repeated `content_block_start` on an open index orphans a block
 
 **Severity:** ⚪ Low (malformed-upstream only; leaves an unterminated client block)
@@ -13562,6 +13568,11 @@ the previous one" branch; Anthropic is the one adapter missing it.
 
 **Fix:** `if idx in self._tool_indices: out.append(dl.ToolCallClose(index=idx))`
 before the new `ToolCallOpen`.
+
+**Status: fixed** — the `tool_use` arm of `content_block_start` now emits
+`ToolCallClose(index=idx)` for a live index before re-opening it, so each call
+gets exactly one Open and one Close and the encoder stops every block it opened.
+Regression: `tests/test_fix_round176.py`.
 
 ### 244. Gemini: a mid-stream `promptFeedback.blockReason` truncates a partially-delivered answer
 
@@ -13584,6 +13595,12 @@ in production.
 
 **Fix:** guard the block arm with `not self._saw_tail`, and when content already
 flowed emit `Finish("content_filter")` without discarding the frame's parts.
+
+**Status: fixed** — the block terminal moved *after* the part loop, so parts
+riding the blocked frame (and their usage) are decoded first and `Finish(...)` +
+`StreamEnd()` close the turn last. The arm stays unconditional on `_saw_tail`:
+emitting it on the first blocked frame is what keeps a prompt-level block from
+being read as a truncation (AUDIT #76). Regression: `tests/test_fix_round176.py`.
 
 ### 245. An unguarded `finally: await resp_cm.__aexit__()` can mask the real exception
 
@@ -17970,52 +17987,91 @@ decoders coerce; `stream_error_type` output maps to Anthropic vocabulary; the
 flatten keeps `content` empty when the blocks ride natively; and every
 capability-driven drop names itself to the caller.
 
+## ✅ Fixed — round 176: tape accounting let logprobs deltas grow the tape unbounded (2026-10-29)
 
----
+### 521. `_delta_size` charged `LogprobsDelta` zero bytes, so the tape's 256 KiB bound never engaged for a `logprobs` stream
 
-## ✅ Fixed — round 175: a configured-but-broken Redis response cache failed silently (2026-10-29)
+**Severity:** 🟠 Medium (unbounded per-stream memory on a client-controlled request field) · **Status: fixed** — round 176 (`tests/test_fix_round176.py`)
 
-Found by running the backend against a live `redis-server` and then against an
-unreachable one; the second run produced no output of any kind.
+**File:** `wiwi/streaming/resume.py` (`_delta_size`)
 
-### 520. `RedisResponseCache` swallowed every Redis error with no log and no counter, so an outage was indistinguishable from a cold cache
+**Trigger.** A caller sends `logprobs: true` (or `top_logprobs: N`) to an
+OpenAI-wire provider. `OpenAIAdapter.decode_stream_event` emits one
+`LogprobsDelta` per token (`openai_adapter.py:719`), and `StreamTape.append`
+records it. `_delta_size` had no arm for the type, so it fell through to the
+final `return 0` and `StreamTape.bytes` never rose. `_evict` only pops while
+`self._bytes > self._max_bytes`, so nothing was ever evicted.
 
-**Severity:** 🟠 Medium (silent cost + correctness expectation — the operator is billed at the uncached rate while believing a shared cache is serving) · **Status: fixed** — round 175 (`tests/test_fix_round175.py`)
+**Reproduced** (pre-fix):
 
-**Files:** `wiwi/cache/redis_cache.py`
+```
+20000 x LogprobsDelta (a top-5 frame, ~270 JSON bytes)
+  -> entries: 20000   tape.bytes: 0   retained: ~5.0 MB
+```
 
-**Trigger.** `general_settings.redis_url` (or `REDIS_URL`) set, Redis later
-down, credentials wrong, or the server restarted under a different ACL. Every
-`get`/`set`/`delete` raised inside the backend, the bare `except Exception`
-turned that into `None`/a no-op, and nothing else happened: no `structlog` line,
-no counter, no `/health` field, no metric. Every request then missed, so the
-gateway silently paid upstream for traffic the operator had configured a shared,
-restart-durable cache to absorb. A cold cache and a dead cache looked identical.
+The 256 KiB bound advertised in the module docstring (`resume.py:10`) and in
+`StreamTape`'s own docstring held for every delta type except this one — and
+`ServerToolResultDelta` (AUDIT #133 class), whose zero charge is deliberate
+because it never re-enters the continuation.
 
-**Why the existing guards did not catch it.** `build_response_cache` refuses to
-hide exactly this trap for the *missing-package* case (`except ImportError` →
-warn + fall back to memory). That guard is import-time only; the runtime path it
-is meant to protect — Redis constructed but failing — had no equivalent. Round
-34's contract ("a cache must never fail a request") is correct and unchanged,
-but it was read as "must also be silent", which is the same class of defect as
-`record_spend`'s bare `except` returning `True` (AUDIT #179).
+**Why the existing guards did not catch it.** The zero-charge decision was made
+for provider-hosted tool deltas, where charging real size let a `web_search`-heavy
+stream evict the client-dispatched deltas a continuation needs — correct for
+those, because `build_continuation_messages` filters them out. `LogprobsDelta`
+is *not* filtered from the continuation; it simply never feeds it (`replay_text`
+and `build_continuation_messages` read text and tool calls only). Copying the
+"excluded from the continuation ⇒ charge 0" rationale onto it confused *not
+consumed* with *not stored*, and storing is what the budget bounds.
 
-**The fix.** Swallowing stays: a request still never fails and still degrades to
-a miss. The failures are now observable:
+**The fix.** `_delta_size` charges `len(orjson.dumps(delta.logprobs))` for a
+populated `LogprobsDelta` (0 when `logprobs` is `None`, the empty case).
+Billing/continuation behaviour is unchanged — only the accounting.
 
-- `RedisResponseCache.errors` counts every failed `get`/`set`/`delete`;
-- one `redis_cache_error` **warning** (with `op`, `url`, exception type and
-  message) fires on the healthy → broken transition and *not* per request, so a
-  hot path cannot flood the log during an outage;
-- the first success afterwards clears the latch, so a later outage warns again
-  without a recovery line per request;
-- a corrupt/foreign value stays an ordinary miss (`_decode` returns `None`) and
-  is deliberately *not* counted as an outage — that is a producer bug, not a
-  connection failure.
+**Verified:** the same 20000-frame probe now reports `charged: 224` for one
+frame and bounds the tape at 1170 entries / 262080 bytes. Regression test fails
+against the pre-fix body (`tape.bytes == 0`) and passes after.
 
-**Verified:** against live `redis-server` on `127.0.0.1:6379` the healthy path
-round-trips bytes/headers/`stored_at` and emits nothing; against
-`127.0.0.1:1` it emits exactly one warning per outage. The regression test fails
-against the pre-fix body (`errors == 0`, no log) and passes after.
+### 522. `validate_tool_args` raised `AttributeError` on a non-`str` payload, breaking its own "never raise" contract
 
----
+**Severity:** 🟡 Low (latent — no in-repo caller can reach it today) · **Status: fixed** — round 176 (`tests/test_fix_round176.py`)
+
+**File:** `wiwi/streaming/validation.py` (`validate_tool_args`, `_fingerprint`)
+
+**Trigger.** Any caller passing a non-`str` `raw_args`. The oversize check reads
+`len(raw_args.encode("utf-8", "replace"))` and both log paths call
+`_fingerprint(raw_args)`, which encodes again. `raw_args` is *typed* `str`, and
+the docstring opens with "Violations are logged but never raise" — the module
+exists so a malformed tool call cannot take down a stream, yet a malformed
+*argument type* did exactly that.
+
+**Reproduced** (pre-fix):
+
+```
+validate_tool_args("t", None,     schema) -> AttributeError: 'NoneType' object has no attribute 'encode'
+validate_tool_args("t", 5,        schema) -> AttributeError: 'int' object has no attribute 'encode'
+validate_tool_args("t", [1],      schema) -> AttributeError: 'list' object has no attribute 'encode'
+validate_tool_args("t", {"a": 1}, schema) -> AttributeError: 'dict' object has no attribute 'encode'
+```
+
+**Why the existing guards did not catch it.** Every guard added here targets a
+malformed *schema* (`AUDIT_REPORT H4`, `AUDIT #192`) or a malformed *payload
+content* — `schema` is `isinstance`-checked first, and the JSON body is parsed
+inside a `try`. The payload's *type* was assumed by the signature and never
+checked, so the one input shape the signature excludes is the one shape that
+crashes.
+
+**Reachability.** Not reachable from the pump today: `_arg_bufs` is built only
+from `dl.ToolCallArgsDelta.args_fragment`, which is contractually `str`, and
+every adapter guards its emit site with `isinstance(..., str)` or
+`coerce_args_fragment` (`providers/base.py:361`). It is fixed regardless
+because the function is a documented public seam whose contract is the reason it
+exists — the next caller that skips the coercion must not be the one that
+discovers this.
+
+**The fix.** Coerce once at the top: a `dict` becomes its JSON text (so it still
+fingerprints and logs meaningfully), anything else becomes `""`. Every later
+read then sees the documented type.
+
+**Verified:** the same probe reports `errors: 0`. Regression is parametrized
+over `None`/`5`/`1.5`/`[1]`/`{"a": 1}`/`True`/`b"x"` and fails pre-fix with
+`AttributeError`.

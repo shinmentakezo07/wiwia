@@ -18,6 +18,8 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 
+import orjson
+
 from wiwi.streaming import deltas as dl
 
 # Sentinel for deltas that don't carry client-visible content (control only).
@@ -66,7 +68,15 @@ class StreamTape:
         return self._seq
 
     def replay(self, last_seq: int = 0) -> list[dl.IRStreamDelta]:
-        """Return all deltas with seq > *last_seq* in order."""
+        """Return all deltas with seq > *last_seq* in order.
+
+        Returns the tape **verbatim**: hosted (builtin) tool deltas are
+        recorded and replayed like any other. They are charged 0 bytes by
+        ``_delta_size`` so they cannot evict the client-dispatched deltas a
+        continuation needs, and ``build_continuation_messages`` is what keeps
+        them out of the continuation prefix (``tc.builtin is None``). Callers
+        that need the client-visible subset must filter; this method does not.
+        """
         return [e.delta for e in self._entries if e.seq > last_seq]
 
     def head_evicted(self, last_seq: int) -> bool:
@@ -224,13 +234,14 @@ class StreamTape:
 def _delta_size(delta: dl.IRStreamDelta) -> int:
     """Approximate byte size of a delta for tape accounting.
 
-    Provider-hosted (builtin) tool deltas account as zero. They are excluded
-    from the continuation prefix (``build_continuation_messages`` filters
-    ``t.builtin is None``) and from the client-visible replay, so charging
-    them against the 256 KiB budget let a server-tool-heavy stream — long
-    ``web_search`` result bodies especially — evict the CLIENT-dispatched
-    tool deltas the continuation actually needs. Accounting and replay now
-    agree on what the tape is for.
+    Provider-hosted (builtin) tool deltas account as zero. They ARE kept on
+    the tape and returned by ``replay``, but they are excluded from the
+    continuation prefix (``build_continuation_messages`` filters
+    ``t.builtin is None``), so charging them against the 256 KiB budget let a
+    server-tool-heavy stream — long ``web_search`` result bodies especially —
+    evict the CLIENT-dispatched tool deltas the continuation actually needs.
+    Accounting now matches what the continuation consumes; eviction and replay
+    both still see every entry.
     """
     if isinstance(delta, dl.TextDelta):
         return len(delta.text)
@@ -248,6 +259,16 @@ def _delta_size(delta: dl.IRStreamDelta) -> int:
     if isinstance(delta, dl.ServerToolResultDelta):
         # A hosted call's result: same exclusion, same reason.
         return 0
+    if isinstance(delta, dl.LogprobsDelta):
+        # Per-token logprobs are large (a top-5 frame is ~270 bytes) and arrive
+        # once per token. They never enter the continuation (only ``text`` and
+        # tool calls do), but they ARE recorded on the tape, so charging 0 let
+        # them accumulate past the budget without ever triggering eviction —
+        # a 20k-token response with ``logprobs`` retained ~5 MB against a
+        # ``bytes == 0`` accounting. Charge their real size so the bound holds.
+        if not delta.logprobs:
+            return 0
+        return len(orjson.dumps(delta.logprobs))
     if isinstance(delta, dl.UsageFinal):
         return 32
     if isinstance(delta, dl.Finish):

@@ -559,22 +559,13 @@ class GeminiAdapter(WarningMixin):
             self._saw_function_call = False
             self._tool_seq = 0
             self._saw_tail = False
-        if block_reason:
-            u = payload.get("usageMetadata")
-            if isinstance(u, dict):
-                out.append(dl.UsageFinal(
-                    prompt=_token_count(u.get("promptTokenCount")),
-                    cached=_token_count(u.get("cachedContentTokenCount")),
-                    reasoning=_token_count(u.get("thoughtsTokenCount")),
-                    output=(_token_count(u.get("candidatesTokenCount"))
-                            + _token_count(u.get("thoughtsTokenCount"))),
-                    # Same convention as decode_response: promptTokenCount
-                    # totals the prompt INCLUDING the cached subset.
-                    cached_in_prompt=True))
-            out.append(dl.Finish("content_filter"))
-            out.append(dl.StreamEnd())
-            self._saw_tail = True
-            return out
+        # A blocked frame may still carry content: Gemini attaches
+        # ``promptFeedback.blockReason`` to a frame that also holds the last
+        # parts it produced. The old block arm returned before decoding them,
+        # so that content was silently dropped — a partial answer the client
+        # never saw while the turn's usage still billed for it (AUDIT #244).
+        # The parts are decoded first and the block's terminal emitted last, so
+        # no part ever follows ``StreamEnd``.
         cand = cands[0] if isinstance(cands, list) and cands else {}
         content = cand.get("content")
         parts = content.get("parts") if isinstance(content, dict) else None
@@ -609,6 +600,25 @@ class GeminiAdapter(WarningMixin):
                 out.append(dl.ToolCallArgsDelta(index=n,
                                                 args_fragment=json.dumps(fc.get("args") or {})))
                 out.append(dl.ToolCallClose(index=n))
+        if block_reason:
+            # The prompt-level block terminates the turn with ``content_filter``
+            # regardless of what the frame carried (AUDIT #76/#244). Its usage
+            # rides the same frame and is priced like any other terminal.
+            u = payload.get("usageMetadata")
+            if isinstance(u, dict):
+                out.append(dl.UsageFinal(
+                    prompt=_token_count(u.get("promptTokenCount")),
+                    cached=_token_count(u.get("cachedContentTokenCount")),
+                    reasoning=_token_count(u.get("thoughtsTokenCount")),
+                    output=(_token_count(u.get("candidatesTokenCount"))
+                            + _token_count(u.get("thoughtsTokenCount"))),
+                    # Same convention as decode_response: promptTokenCount
+                    # totals the prompt INCLUDING the cached subset.
+                    cached_in_prompt=True))
+            out.append(dl.Finish("content_filter"))
+            out.append(dl.StreamEnd())
+            self._saw_tail = True
+            return out
         u = payload.get("usageMetadata")
         if not isinstance(u, dict):
             # A truthy non-dict usageMetadata must not reach u.get (AUDIT
