@@ -7346,6 +7346,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 "name": gname,
                 "deployments": [{
                     "provider": d.provider.name,
+                    # The adapter type is not a secret (it is already published
+                    # on the docs page), and the public catalog needs it to show
+                    # the provider's own badge rather than a bare name.
+                    "type": d.provider.provider_type,
                     "model_id": d.model_id,
                 } for d in deps],
             })

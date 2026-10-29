@@ -282,7 +282,13 @@ export interface User {
 /** Public, secret-free model catalog entry (from /public/models). */
 export interface PublicModelGroup {
   name: string;
-  deployments: { provider: string; model_id: string }[];
+  deployments: {
+    provider: string;
+    /** Adapter type of the provider account (e.g. `openrouter`), when the
+     *  gateway publishes it — used for the provider's badge. */
+    type?: string;
+    model_id: string;
+  }[];
 }
 
 /** A built-in provider type that ships with wiwi (from /admin/provider-catalog). */

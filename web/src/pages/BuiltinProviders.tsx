@@ -8,6 +8,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowRight, ExternalLink, Plus, RefreshCw, Search, Server, X } from "lucide-react";
 import { getBuiltinProviders, getProviders } from "@/api/client";
 import type { BuiltinProvider, Provider } from "@/api/types";
+import { providerLogo } from "@/lib/provider-logos";
 import {
   Badge,
   Button,
@@ -18,29 +19,6 @@ import {
   PageHeader,
   Spinner,
 } from "@/components/ui";
-
-// The canonical provider badges from `web/public/logos/` — the same tiles the
-// README and the docs page embed. One entry per type in
-// `wiwi/config.py:PROVIDER_TYPES`; anything missing falls back to a generic
-// server glyph.
-const PROVIDER_LOGO: Record<string, string> = {
-  openai: "/logos/openai.svg",
-  anthropic: "/logos/anthropic.svg",
-  gemini: "/logos/gemini.svg",
-  openrouter: "/logos/openrouter.svg",
-  "openai-compatible": "/logos/openai-compatible.svg",
-  gmicloud: "/logos/gmicloud.svg",
-  bai: "/logos/bai.svg",
-  cline: "/logos/cline.svg",
-  workbuddy: "/logos/workbuddy.svg",
-  "nvidia-nim": "/logos/nvidia-nim.svg",
-  opencode: "/logos/opencode.svg",
-  hermes: "/logos/hermes.svg",
-};
-
-function providerLogo(type: string): string | null {
-  return PROVIDER_LOGO[type] ?? null;
-}
 
 function ProviderCatalogCard(props: {
   p: BuiltinProvider;
