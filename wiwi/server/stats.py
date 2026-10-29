@@ -163,15 +163,23 @@ def timeseries(events: list[LogEvent], bucket: str, metric: str, minutes: int,
         n_buckets = max(1, minutes * 60 // size)
         first_t = int(now // size) * size - (n_buckets - 1) * size
     else:
-        starts = [int(e.ts // size) * size for e in win]
-        n_buckets = (max(starts) - min(starts)) // size + 1 if starts else 0
-        first_t = min(starts) if starts else int(now // size) * size
+        # All-time has no fixed grid: it spans the populated buckets. The set is
+        # deduped because ``n_buckets`` counts bucket starts, not events.
+        starts = sorted({int(e.ts // size) * size for e in win})
+        n_buckets = (starts[-1] - starts[0]) // size + 1 if starts else 0
+        first_t = starts[0] if starts else int(now // size) * size
     token_buckets = [[0, 0, 0, 0, 0] for _ in range(n_buckets)]
     tps_buckets: list[list[float]] = [[] for _ in range(n_buckets)]
     # Requests per bucket, including those with no TPS sample, so the buckets
     # can publish the coverage of their own tps_avg.
     req_buckets = [0 for _ in range(n_buckets)]
     for e in win:
+        # Arithmetic, never a search over ``starts``: the buckets are a
+        # contiguous grid from ``first_t`` (empty buckets included), so the
+        # index is the offset divided by the width. A ``bisect`` over the
+        # *populated* starts would both mis-place a row in the first bucket
+        # (duplicates) and compress the gaps, sliding a row that follows an
+        # empty bucket one or more buckets earlier (AUDIT #532).
         idx = int((e.ts - first_t) // size)
         # A row inside the window must appear in *some* bucket. The grid is
         # bucket-aligned while ``window_events`` admits everything from

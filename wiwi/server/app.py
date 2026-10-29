@@ -266,7 +266,11 @@ from wiwi.router.router import (
     _refund_deployment_slot,
 )
 from wiwi.server import stats as stats_mod
-from wiwi.server.config_store import ConfigStore, ConfigStoreNotFound
+from wiwi.server.config_store import (
+    DEPLOYMENT_LIMIT_FIELDS,
+    ConfigStore,
+    ConfigStoreNotFound,
+)
 from wiwi.server.response_store import ResponseStore
 from wiwi.streaming.tape_store import JournalStore
 from wiwi.wire import anthropic_messages as am
@@ -1015,10 +1019,16 @@ class AppState:
         self.config_store: ConfigStore | None = None
         self.response_store: ResponseStore | None = None
         self.users: UserService | None = None
-        # Pending Cline OAuth sessions for the automatic (redirect-based)
-        # connect flow: state_token → {provider, created_at}. Consumed once
-        # by the /cline/oauth/callback redirect, evicted after 10 minutes.
-        self.cline_pending: dict[str, dict[str, Any]] = {}
+        # Pending browser OAuth sessions for every connect flow — Cline's
+        # redirect connect, Hermes's device code and WorkBuddy's login:
+        # state_token → {kind, provider, created_at, ttl_s}. Each flow stamps
+        # its own TTL at creation so one sweep cannot shorten another's window
+        # (AUDIT #424: Hermes used to piggyback on the Cline map and its
+        # Cline-specific 10-minute rule).
+        self.oauth_pending: dict[str, dict[str, Any]] = {}
+        # Serializes provider creation so the duplicate-name guard and the
+        # insert cannot interleave across their await (AUDIT #373).
+        self.provider_create_lock = asyncio.Lock()
         self.cline_refresh: Any = None
         self.workbuddy_refresh: Any = None
         self.hermes_refresh: Any = None
@@ -1061,6 +1071,19 @@ class AppState:
         # event loop instead of blocking uvicorn's graceful-shutdown drain
         # (which otherwise hangs at "Waiting for connections to close").
         self.shutdown_event: asyncio.Event | None = None
+
+    def evict_expired_pending(self, now: float | None = None) -> None:
+        """Drop every expired pending OAuth session, whatever its flow.
+
+        The three browser flows share :attr:`oauth_pending` but not a TTL, so
+        the rule lives on the session (``ttl_s``, stamped at creation) rather
+        than in the sweep. A new flow therefore needs no new map and cannot
+        inherit another provider's eviction policy (AUDIT #424).
+        """
+        now = time.time() if now is None else now
+        for tok, sess in list(self.oauth_pending.items()):
+            if now - sess.get("created_at", now) > sess.get("ttl_s", 600.0):
+                self.oauth_pending.pop(tok, None)
 
     async def init_db(self) -> None:
         import sqlalchemy.ext.asyncio as saa
@@ -1182,8 +1205,12 @@ class AppState:
         data = await self.config_store.load_all()
         # providers
         for p in data["providers"]:
-            if p["name"] in self.router.providers:
-                continue  # YAML-sourced, skip
+            if p.get("detached"):
+                # Tombstone: an operator renamed or removed this account, and a
+                # YAML entry of the same name must not bring it back (AUDIT
+                # #319).
+                self.router.providers.pop(p["name"], None)
+                continue
             if p["provider_type"] not in PROVIDER_TYPES:
                 # Re-validate what the DB hands back. The YAML path enforces
                 # this (``ProviderDef.provider`` is ``Literal[PROVIDER_TYPES]``)
@@ -1206,12 +1233,26 @@ class AppState:
                     provider=p["name"], provider_type=p["provider_type"],
                     known=sorted(PROVIDER_TYPES))
                 continue
-            self.router.providers[p["name"]] = ProviderAccount(
-                name=p["name"], provider_type=p["provider_type"],
-                base_url=p["base_url"], timeout_s=p["timeout_s"],
-                extra_headers=p.get("extra_headers", {}),
-                round_robin=p.get("round_robin", True),
-                alias_id=p.get("alias_id"))
+            acct = self.router.providers.get(p["name"])
+            if acct is None:
+                self.router.providers[p["name"]] = ProviderAccount(
+                    name=p["name"], provider_type=p["provider_type"],
+                    base_url=p["base_url"], timeout_s=p["timeout_s"],
+                    extra_headers=p.get("extra_headers", {}),
+                    round_robin=p.get("round_robin", True),
+                    alias_id=p.get("alias_id"))
+                continue
+            # The account came from YAML and a DB row exists for it: that row is
+            # an operator override (a PATCH, or a rotated OAuth credential) and
+            # wins over the YAML fields, so the edit survives the restart
+            # (AUDIT #319). ``alias_id`` is written with the full desired state
+            # whenever the row is created, so NULL here means "cleared".
+            acct.provider_type = p["provider_type"]
+            acct.base_url = p["base_url"]
+            acct.timeout_s = p["timeout_s"]
+            acct.extra_headers = p.get("extra_headers", {})
+            acct.round_robin = p.get("round_robin", True)
+            acct.alias_id = p.get("alias_id")
         # reapply admin-saved alias_id (and the alias-to-provider map)
         for p in data["providers"]:
             alias = p.get("alias_id")
@@ -1223,8 +1264,25 @@ class AppState:
         # keys
         for k in data["keys"]:
             acct = self.router.providers.get(k["provider_name"])
-            if acct is None or acct.get_key(k["label"]) is not None:
-                continue  # provider missing or label from YAML
+            if acct is None:
+                continue
+            existing = acct.get_key(k["label"])
+            if k.get("detached"):
+                # Tombstone: the operator deleted a key that only existed in
+                # YAML, and it must not come back on the next start (AUDIT
+                # #319).
+                if existing is not None:
+                    acct.keys = [x for x in acct.keys if x.label != k["label"]]
+                continue
+            if existing is not None:
+                # DB row overrides the YAML key. An empty stored secret is a
+                # routing-only row (backup import without secrets), so it must
+                # not blank a working credential.
+                if k["secret"]:
+                    existing.secret = k["secret"]
+                existing.weight = k["weight"]
+                existing.enabled = k["enabled"]
+                continue
             acct.keys.append(ProviderKey(
                 label=k["label"], secret=k["secret"], weight=k["weight"],
                 enabled=k["enabled"]))
@@ -1253,9 +1311,19 @@ class AppState:
                 # page), so apply it rather than discard it — otherwise every
                 # weight edit reverted on the next restart (AUDIT #296).
                 existing.weight = d["weight"]
+                # Same rule for the per-deployment limits (AUDIT #461): a
+                # stored value overrides the YAML one, and NULL means it was
+                # never stored, so the YAML value stands.
+                for field in DEPLOYMENT_LIMIT_FIELDS:
+                    value = d.get(field)
+                    if value is not None:
+                        setattr(existing, field, value)
                 continue
+            limits = {f: d[f] for f in DEPLOYMENT_LIMIT_FIELDS
+                      if d.get(f) is not None}
             dep = Deployment(group=d["group_name"], provider=acct,
-                             model_id=d["model_id"], weight=d["weight"])
+                             model_id=d["model_id"], weight=d["weight"],
+                             **limits)
             self.router.groups.setdefault(d["group_name"], []).append(dep)
         # cross-provider pools may have grown from admin-added deployments
         self.router.rebuild_cross_provider_pools()
@@ -3847,15 +3915,16 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 await state.config_store.update_key(
                     name, label,
                     weight=diff.get("weight"),
-                    enabled=diff.get("enabled"))
+                    enabled=diff.get("enabled"),
+                    # AUDIT #319: a YAML-defined key has no row, and the
+                    # fallback insert needs the live credential so the DB
+                    # override does not blank it at startup.
+                    secret=key.secret)
             except ConfigStoreNotFound:
-                # YAML-defined account: no DB row, so the edit applies in
-                # memory only and reverts on restart (AUDIT #319).
                 import structlog
                 structlog.get_logger().warning(
                     "provider_key_update_not_persisted", provider=name, label=label,
-                    reason="provider is YAML-defined; edit is in-memory only"
-                           " and will not survive restart")
+                    reason="no DB row and no credential to seed one with")
         await state.logs.log_audit(actor="master", action="provider_key.update",
                                    target=f"{name}/{label}", diff=diff)
         return ORJSONResponse({"key": _key_view(key, time.monotonic(), time.time())})
@@ -3916,16 +3985,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         f"unknown key '{label}' on provider '{name}'", request)
         acct.keys = [k for k in acct.keys if k.label != label]
         if state.config_store:
-            try:
-                await state.config_store.delete_key(name, label)
-            except ConfigStoreNotFound:
-                # YAML-defined account: nothing to delete in the DB, so the
-                # key comes back on the next restart (AUDIT #319).
-                import structlog
-                structlog.get_logger().warning("provider_key_delete_not_persisted",
-                            provider=name, label=label,
-                            reason="provider is YAML-defined; delete is "
-                                   "in-memory only and will not survive restart")
+            # A key that exists only in ``wiwi.yaml`` has no row to delete, so
+            # the store writes a ``detached`` tombstone that startup applies
+            # (AUDIT #319) instead of the delete coming back on the next start.
+            await state.config_store.delete_key(name, label)
         # Reclaim the WorkBuddy per-account lock / generation counter / circuit
         # entry. ``mark_dead`` is permanent (only a successful rotation calls
         # ``CircuitBreaker.clear``, and ``_rotate_locked``'s ``blocked()`` gate
@@ -3986,48 +4049,55 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if not name or not secret:
             return _err(400, "invalid_request_error", "name and key are required",
                         request)
-        if name in state.router.providers:
-            return _err(409, "invalid_request_error",
-                        f"provider '{name}' already exists", request)
-        if ptype not in PROVIDER_TYPES:
-            return _err(400, "invalid_request_error",
-                        f"unsupported provider type '{ptype}'", request)
-        if not base_url:
-            return _err(400, "invalid_request_error",
-                        f"base_url is required for provider type '{ptype}'",
-                        request)
-        if alias_id is not None and alias_id in state.router.alias_to_provider:
-            return _err(409, "invalid_request_error",
-                        f"alias_id '{alias_id}' already used by provider"
-                        f" '{state.router.alias_to_provider[alias_id]}'",
-                        request)
-        # An alias equal to another account's *name* would capture it in
-        # resolve_group (the alias arm is reached for names the groups table
-        # lacks, and a provider is routable under its own name), making that
-        # account unreachable.  Same rule the config validator enforces.
-        if (alias_id is not None and alias_id != name
-                and alias_id in state.router.providers):
-            return _err(409, "invalid_request_error",
-                        f"alias_id '{alias_id}' is the name of an existing"
-                        " provider — pick a different alias", request)
-        # Persist before exposing a routable account. A failed DB write must
-        # not leave a ghost provider (and plaintext key) in memory (AUDIT #364).
-        if state.config_store:
-            await state.config_store.add_provider(name, ptype, base_url,
-                                                  alias_id=alias_id)
-            try:
-                await state.config_store.add_key(name, label, secret)
-            except Exception:
-                # Do not leave a keyless provider row behind either.
-                with contextlib.suppress(Exception):
-                    await state.config_store.delete_provider(name)
-                raise
-        state.router.providers[name] = ProviderAccount(
-            name=name, provider_type=ptype, base_url=base_url,
-            keys=[ProviderKey(label=label, secret=secret)],
-            alias_id=alias_id)
-        if alias_id is not None:
-            state.router.alias_to_provider[alias_id] = name
+        # AUDIT #373: the duplicate-name guard and the insert are one critical
+        # section. They used to straddle an await with nothing reserving the
+        # name, so two concurrent creates for one name both passed the guard —
+        # the DB kept the first key (first-wins on the PK) while the router
+        # kept the last, leaving memory and storage disagreeing.
+        async with state.provider_create_lock:
+            if name in state.router.providers:
+                return _err(409, "invalid_request_error",
+                            f"provider '{name}' already exists", request)
+            if ptype not in PROVIDER_TYPES:
+                return _err(400, "invalid_request_error",
+                            f"unsupported provider type '{ptype}'", request)
+            if not base_url:
+                return _err(400, "invalid_request_error",
+                            f"base_url is required for provider type '{ptype}'",
+                            request)
+            if alias_id is not None and alias_id in state.router.alias_to_provider:
+                return _err(409, "invalid_request_error",
+                            f"alias_id '{alias_id}' already used by provider"
+                            f" '{state.router.alias_to_provider[alias_id]}'",
+                            request)
+            # An alias equal to another account's *name* would capture it in
+            # resolve_group (the alias arm is reached for names the groups table
+            # lacks, and a provider is routable under its own name), making that
+            # account unreachable.  Same rule the config validator enforces.
+            if (alias_id is not None and alias_id != name
+                    and alias_id in state.router.providers):
+                return _err(409, "invalid_request_error",
+                            f"alias_id '{alias_id}' is the name of an existing"
+                            " provider — pick a different alias", request)
+            # Persist before exposing a routable account. A failed DB write must
+            # not leave a ghost provider (and plaintext key) in memory (AUDIT
+            # #364).
+            if state.config_store:
+                await state.config_store.add_provider(name, ptype, base_url,
+                                                      alias_id=alias_id)
+                try:
+                    await state.config_store.add_key(name, label, secret)
+                except Exception:
+                    # Do not leave a keyless provider row behind either.
+                    with contextlib.suppress(Exception):
+                        await state.config_store.delete_provider(name)
+                    raise
+            state.router.providers[name] = ProviderAccount(
+                name=name, provider_type=ptype, base_url=base_url,
+                keys=[ProviderKey(label=label, secret=secret)],
+                alias_id=alias_id)
+            if alias_id is not None:
+                state.router.alias_to_provider[alias_id] = name
         # If a Cline provider was just added and global default models are
         # persisted, auto-deploy them for the new account so it joins the
         # cross-account WRR pool immediately (no manual setup required).
@@ -4245,16 +4315,29 @@ def create_app(config: WiwiConfig) -> FastAPI:
             try:
                 await state.config_store.update_provider(name, **update_kwargs)
             except ConfigStoreNotFound:
-                # The account is YAML-defined and so has no DB row to update.
-                # The edit applies in memory for this process and is lost on
-                # restart (AUDIT #319). Rejecting with 409 would be the real
-                # fix, but it would also make every provider un-editable on
-                # the HF Space deployment, where YAML is the only source of
-                # providers — so this stays an in-memory edit and says so.
-                import structlog
-                structlog.get_logger().warning("provider_edit_not_persisted", provider=name,
-                            reason="provider is YAML-defined; edit is "
-                                   "in-memory only and will not survive restart")
+                # AUDIT #319: the account is YAML-defined, so there was no row
+                # to update. Write the operator's full desired state as an
+                # override row — startup layers DB rows over YAML, so the edit
+                # survives the restart — and tombstone the old name when the
+                # edit is a rename, or the YAML copy would return alongside it.
+                final_name = new_name or name
+                await state.config_store.add_provider(
+                    final_name,
+                    new_ptype or acct.provider_type,
+                    new_base_url or acct.base_url,
+                    timeout_s=acct.timeout_s,
+                    extra_headers=acct.extra_headers,
+                    round_robin=(new_round_robin if new_round_robin is not None
+                                 else acct.round_robin),
+                    alias_id=(alias_change[0] if alias_change is not None
+                              else acct.alias_id))
+                if final_name != name:
+                    await state.config_store.add_provider(
+                        name, acct.provider_type, acct.base_url,
+                        timeout_s=acct.timeout_s,
+                        extra_headers=acct.extra_headers,
+                        round_robin=acct.round_robin,
+                        alias_id=acct.alias_id, detached=True)
         if new_ptype is not None:
             acct.provider_type = new_ptype
         if new_base_url is not None:
@@ -6132,16 +6215,16 @@ def create_app(config: WiwiConfig) -> FastAPI:
         # Guard against open redirect: only allow relative /console paths.
         if not return_path.startswith("/console/") and return_path != "/console":
             return_path = "/console/oauth"
-        # Evict expired pending sessions (TTL 10 min).
+        # Evict every expired pending session, whichever flow owns it.
+        state.evict_expired_pending()
         now = time.time()
-        for tok, sess in list(state.cline_pending.items()):
-            if now - sess["created_at"] > 600:
-                state.cline_pending.pop(tok, None)
         state_token = secrets.token_urlsafe(24)
-        state.cline_pending[state_token] = {
+        state.oauth_pending[state_token] = {
+            "kind": "cline_redirect",
             "provider": provider,
             "return_path": return_path,
             "created_at": now,
+            "ttl_s": 600.0,
         }
         # The callback_url Cline redirects to after login. It carries the
         # state token so we can match the pending session on return.
@@ -6167,7 +6250,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         state_token = request.query_params.get("state", "").strip()
         if not code or not state_token:
             return _cline_callback_error(request, "missing code or state")
-        sess = state.cline_pending.pop(state_token, None)
+        sess = state.oauth_pending.pop(state_token, None)
         if sess is None:
             return _cline_callback_error(request, "invalid or expired session")
         provider = sess["provider"]
@@ -6494,13 +6577,15 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         f"Nous Portal device-code request failed: {e}", request)
         # Stash the device code so /poll can exchange it; TTL 10 minutes,
         # matching the Cline pending-session window.
+        state.evict_expired_pending()
         token = secrets.token_urlsafe(24)
-        state.cline_pending[token] = {
+        state.oauth_pending[token] = {
             "kind": "hermes_device_code",
             "provider": provider,
             "device_code": device["device_code"],
             "interval": int(device["interval"]),
             "created_at": time.time(),
+            "ttl_s": 600.0,
         }
         return ORJSONResponse({
             "state": token,
@@ -6527,16 +6612,16 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if jerr:
             return jerr
         token = str(body.get("state") or "").strip()
-        sess = state.cline_pending.get(token)
+        sess = state.oauth_pending.get(token)
         if not sess or sess.get("kind") != "hermes_device_code":
             return _err(404, "not_found_error", "unknown or expired session", request)
         provider = sess["provider"]
         if provider not in state.router.providers:
-            state.cline_pending.pop(token, None)
+            state.oauth_pending.pop(token, None)
             return _err(404, "not_found_error",
                         f"unknown provider '{provider}'", request)
         if time.time() - sess["created_at"] > 600:
-            state.cline_pending.pop(token, None)
+            state.oauth_pending.pop(token, None)
             return _err(410, "invalid_request_error",
                         "device-code session expired; start a new one", request)
         try:
@@ -6550,7 +6635,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 poll_interval=sess.get("interval", 5),
                 single_poll=True)
         except hermes_oauth.HermesAuthError as e:
-            state.cline_pending.pop(token, None)
+            state.oauth_pending.pop(token, None)
             if e.relogin_required:
                 return _err(401, "authentication_error", str(e), request)
             return _err(400, "invalid_request_error", str(e), request)
@@ -6560,7 +6645,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if tokens is None:
             # authorization_pending: keep the session, tell the SPA to retry.
             return ORJSONResponse({"pending": True})
-        state.cline_pending.pop(token, None)
+        state.oauth_pending.pop(token, None)
         access = tokens["access_token"]
         expires_at = hermes_oauth.compute_expires_at(
             tokens.get("expires_in"), time.time())
@@ -7090,13 +7175,15 @@ def create_app(config: WiwiConfig) -> FastAPI:
         # the upstream identifier is what the token leg authenticates with,
         # so it stays server-side. Same store (and shape) as the Cline and
         # Hermes flows — the three are told apart by ``kind``.
+        state.evict_expired_pending()
         token = secrets.token_urlsafe(24)
-        state.cline_pending[token] = {
+        state.oauth_pending[token] = {
             "kind": "workbuddy_login",
             "provider": provider,
             "realm": realm,
             "state": started.state,
             "created_at": time.time(),
+            "ttl_s": workbuddy_auth.LOGIN_TTL_S,
         }
         return ORJSONResponse({
             "state": token,
@@ -7126,13 +7213,13 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if jerr:
             return jerr
         token = str(body.get("state") or "").strip()
-        sess = state.cline_pending.get(token)
+        sess = state.oauth_pending.get(token)
         if not sess or sess.get("kind") != "workbuddy_login":
             return _err(404, "not_found_error",
                         "unknown or already-completed login session", request)
         provider = sess["provider"]
         if time.time() - sess["created_at"] > workbuddy_auth.LOGIN_TTL_S:
-            state.cline_pending.pop(token, None)
+            state.oauth_pending.pop(token, None)
             return _err(410, "invalid_request_error",
                         "login session expired; start a new one", request)
         # Type-check BEFORE spending the login: the token leg is single-use,
@@ -7140,7 +7227,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         # a real login for nothing.
         acct = state.router.providers.get(provider)
         if acct is not None and acct.provider_type != "workbuddy":
-            state.cline_pending.pop(token, None)
+            state.oauth_pending.pop(token, None)
             return _err(409, "invalid_request_error",
                         f"provider '{provider}' exists with type "
                         f"'{acct.provider_type}'", request)
@@ -7151,7 +7238,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         f"WorkBuddy login poll failed: {e}", request)
         if auth is None:
             return ORJSONResponse({"pending": True})
-        state.cline_pending.pop(token, None)
+        state.oauth_pending.pop(token, None)
 
         secret = auth.to_secret()
         # Label the key by the ACCOUNT, never the credential blob: pool-key

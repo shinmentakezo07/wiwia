@@ -61,6 +61,13 @@ class ClineAutoRefresh:
         # operator learns *why* a re-login is required instead of being told
         # only that the refresh failed.
         self._dead_codes: dict[str, str] = {}
+        # A completed rotation whose OAuth-record write failed. The replacement
+        # single-use grant exists nowhere else — the upstream already consumed
+        # the old one — so it is held here and re-persisted before any later
+        # refresh. Without it the next tick presented the consumed grant, got
+        # ``invalid_grant``, and retired a provider the operator had to re-login
+        # (AUDIT #462).
+        self._pending: dict[str, dict[str, Any]] = {}
         self._circuit = CircuitBreaker(base_s=CIRCUIT_BASE_S, cap_s=CIRCUIT_CAP_S,
                                        clock=time.time)
 
@@ -119,10 +126,62 @@ class ClineAutoRefresh:
 
     async def _check_provider(self, name: str, record: dict[str, Any]) -> None:
         """Refresh one provider's token if it's about to expire."""
+        if name in self._pending:
+            # A rotation is waiting to be persisted. Flush it before anything
+            # else, whatever the *stored* record says: its refresh_token is the
+            # consumed one, so presenting it would kill the provider (#462).
+            await self.flush_pending(name)
+            return
         expires_epoch = cline_oauth.parse_expires_at(record.get("expires_at"))
         if expires_epoch is None or not cline_oauth.expires_within_lead(expires_epoch):
             return  # not due for refresh
         await self._refresh_locked(name, require_due=True)
+
+    async def flush_pending(self, name: str) -> bool:
+        """Retry the record write for a completed rotation, under the lock.
+
+        Returns True once the pending rotation is durable. Public so the sweep
+        can flush without risking a fresh rotation (``_refresh_locked`` with
+        ``require_due=False`` would rotate when nothing is pending).
+        """
+        lock = self._locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            return await self._persist_pending(name) is not None
+
+    async def _persist_pending(self, name: str) -> dict[str, Any] | None:
+        """Write a pending rotation's record (and pool key) to storage.
+
+        Callers must hold ``self._locks[name]``. Returns the persisted record,
+        or None when nothing is pending or the write failed again — in which
+        case the grant stays in memory for the next attempt rather than being
+        dropped.
+        """
+        pending = self._pending.get(name)
+        if pending is None:
+            return None
+        cs = self._state.config_store
+        if cs is None:
+            return None
+        try:
+            await cs.set_setting(f"cline_oauth:{name}", pending["record"])
+        except Exception as e:  # noqa: BLE001 — retried on the next tick
+            log.error("cline_auto_refresh_record_persist_retry_failed",
+                      provider=name, error=str(e))
+            return None
+        # Durable now, so the grant is safe: drop the pending entry before the
+        # pool-key write, which a later refresh can redo from the record.
+        self._pending.pop(name, None)
+        try:
+            await self.store_access_token(name, pending["access_token"],
+                                          owned=pending.get("owned"))
+        except Exception as e:  # noqa: BLE001 — the record is already good
+            log.error("cline_auto_refresh_key_persist_failed", provider=name,
+                      error=str(e))
+            return None
+        self._generations[name] = self._generations.get(name, 0) + 1
+        self._circuit.clear(name)
+        log.info("cline_auto_refresh_pending_persisted", provider=name)
+        return pending["record"]
 
     async def refresh_now(self, name: str) -> bool:
         """On-demand refresh for the gateway's 401 hook.
@@ -176,6 +235,20 @@ class ClineAutoRefresh:
             record = await cs.get_setting(f"cline_oauth:{name}")
             if not record or not record.get("refresh_token"):
                 return False
+            if name in self._pending:
+                # A previous rotation never reached the store. Persist it now:
+                # the stored record still holds the *consumed* grant, so any
+                # refresh attempted against it would be rejected as
+                # ``invalid_grant`` and retire the provider (AUDIT #462).
+                flushed = await self._persist_pending(name)
+                if flushed is None:
+                    return False
+                expires_epoch = cline_oauth.parse_expires_at(
+                    flushed.get("expires_at"))
+                if (expires_epoch is not None
+                        and not cline_oauth.expires_within_lead(expires_epoch)):
+                    return True  # the flushed rotation is fresh; nothing to do
+                record = flushed
             if require_due:
                 expires_epoch = cline_oauth.parse_expires_at(record.get("expires_at"))
                 if expires_epoch is None or not cline_oauth.expires_within_lead(
@@ -236,6 +309,19 @@ class ClineAutoRefresh:
         except Exception as e:  # noqa: BLE001 — never break the 401 hook path
             log.error("cline_auto_refresh_record_persist_failed", provider=name,
                       error=str(e))
+            # Keep the replacement grant: the upstream has already consumed the
+            # old one, so this in-memory copy is the only surviving proof of the
+            # login. The next tick (or the next on-demand refresh) re-persists
+            # it instead of presenting the dead grant (AUDIT #462).
+            self._pending[name] = {
+                "record": record,
+                "access_token": result["access_token"],
+                "owned": owned,
+            }
+            # The pool is left alone deliberately: ``owned`` fingerprints the
+            # grant the record last issued, and a pool key carrying a token the
+            # record does not know about would no longer be recognised as owned
+            # by the rotation that lands next. The flush writes both.
             return False
         try:
             await self.store_access_token(name, result["access_token"],
@@ -298,14 +384,17 @@ class ClineAutoRefresh:
             k.cooldown_until = 0.0
             try:
                 await self._state.config_store.update_key_secret(
-                    provider, k.label, secret)
-            except Exception as e:  # noqa: BLE001 — YAML/DB path varies
-                # YAML-defined provider: no DB row to update. The in-memory
-                # assignment above is still correct for this process; refusing
-                # here would break OAuth refresh on YAML-only deployments.
+                    provider, k.label, secret,
+                    weight=k.weight, enabled=k.enabled)
+            except Exception as e:  # noqa: BLE001 — DB failure must not break refresh
+                # The in-memory assignment above is still correct for this
+                # process; refusing here would break OAuth refresh. A YAML-only
+                # deployment used to land here too (no row to update) and lost
+                # the rotation on restart — the store now inserts the row
+                # instead, so this is a genuine write failure (AUDIT #319).
                 structlog.get_logger().warning(
                     "oauth_secret_not_persisted", provider=provider, key=k.label,
-                    reason="provider is YAML-defined; rotation is in-memory only",
+                    reason="config store write failed; rotation is in-memory only",
                     error=type(e).__name__)
         return len(targets)
 
@@ -348,6 +437,7 @@ class ClineAutoRefresh:
         self._locks.pop(provider, None)
         self._generations.pop(provider, None)
         self._dead_codes.pop(provider, None)
+        self._pending.pop(provider, None)
         self._circuit.clear(provider)
 
 

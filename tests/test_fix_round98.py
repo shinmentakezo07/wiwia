@@ -358,7 +358,13 @@ async def test_pump_terminal_preserves_provider_error_metadata(monkeypatch):
 
 @respx.mock
 async def test_pump_terminal_uses_status_for_key_health(monkeypatch):
-    """A preserved 429 follows normal key-pool rate-limit accounting."""
+    """A 429 with no Retry-After is charged to the deployment, not the key.
+
+    AUDIT #469: without a stated window the upstream is reporting deployment
+    availability, and cooling the credential retired every sibling deployment
+    that shares it (the OpenCode free tier's ``anonymous`` sentinel is shared
+    by every free model).
+    """
     respx.post("https://api.openai.com/v1/chat/completions").mock(
         return_value=httpx.Response(200, content=b"data: {}\n\n")
     )
@@ -392,22 +398,28 @@ async def test_pump_terminal_uses_status_for_key_health(monkeypatch):
         await gateway.aclose()
 
     key = gateway.router.providers["openai"].keys[0]
-    assert key.status == "cooling"
-    assert not key.available
+    deployment = gateway.router.groups["gpt-4o"][0]
+    assert key.status == "active"
+    assert key.available
+    assert deployment.fails != []
 
 
 @pytest.mark.parametrize(
-    ("status", "etype", "expected_key_status"),
+    ("status", "etype", "expected_key_status", "expect_dep_fail"),
     [
-        (429, "rate_limit_error", "cooling"),
-        (403, "permission_error", "active"),
-        (400, "invalid_request_error", "active"),
+        (429, "rate_limit_error", "active", True),
+        (403, "permission_error", "active", False),
+        (400, "invalid_request_error", "active", False),
     ],
 )
 async def test_note_stream_failure_respects_provider_health_policy(
-    status, etype, expected_key_status
+    status, etype, expected_key_status, expect_dep_fail
 ):
-    """Explicit status and etype follow the same pool policy as pre-connect errors."""
+    """Explicit status and etype follow the same pool policy as pre-connect errors.
+
+    A bare 429 (no Retry-After) is a deployment failure and leaves the
+    credential in rotation (AUDIT #469).
+    """
     config = _single_openai_config()
     config.router_settings.failover_mode = "standard"
     gateway = Gateway(Router(config), CostEngine())
@@ -422,7 +434,7 @@ async def test_note_stream_failure_respects_provider_health_policy(
 
     assert key.status == expected_key_status
     assert bool(key.available) is (expected_key_status == "active")
-    assert deployment.fails == []
+    assert bool(deployment.fails) is expect_dep_fail
 
 
 @pytest.mark.parametrize("resume_mode", ["off", "content_only"])

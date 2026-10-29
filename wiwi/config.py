@@ -541,6 +541,60 @@ class HealerSettings(BaseModel):
     # so a healer-restored key is always reachable (AUDIT #238).
     probation_weight: float = 0.5
 
+    @field_validator("tick_s", "probe_timeout_s")
+    @classmethod
+    def _healer_timing_must_be_positive(cls, v: float, info) -> float:
+        """Reject a zero/negative sweep cadence or probe timeout.
+
+        These gate real provider spend, so the degenerate values are refused
+        rather than clamped (AUDIT #383). ``tick_s: 0`` makes the sweeper's
+        ``wait_for(self._stop.wait(), timeout=0)`` return immediately every
+        iteration — a tight busy-loop that probes every cooling deployment
+        with a paid 1-token completion as fast as the loop runs, starting the
+        instant the process boots. A non-positive ``probe_timeout_s`` makes
+        every probe time out, which reads as "still sick" forever.
+        """
+        if not v > 0:
+            raise ValueError(
+                f"{info.field_name} must be greater than 0 (got {v}); the "
+                "healer probes spend real provider money, so a zero cadence "
+                "or timeout is never meaningful")
+        return v
+
+    @field_validator("max_probes_per_sweep", "probes_to_restore")
+    @classmethod
+    def _healer_counts_must_be_at_least_one(cls, v: int, info) -> int:
+        """Reject a count that disables its own guard.
+
+        ``max_probes_per_sweep: 0`` silently probes nothing (the healer looks
+        dead while ``enabled``); ``probes_to_restore: 0`` satisfies
+        ``streak >= probes_to_restore`` on the FIRST healthy probe, so a key
+        that intermittently 401s returns to rotation on one lucky probe — the
+        premature restore the streak exists to prevent (AUDIT #383).
+        """
+        if v < 1:
+            raise ValueError(
+                f"{info.field_name} must be at least 1 (got {v}); 0 disables "
+                "the guard it exists to provide")
+        return v
+
+    @field_validator("min_probe_interval_s", "probe_backoff_base_s",
+                     "probe_backoff_cap_s")
+    @classmethod
+    def _healer_intervals_must_not_be_negative(cls, v: float, info) -> float:
+        """Reject a negative interval.
+
+        Zero stays legal — it means "no minimum interval", a coherent choice
+        for a fast environment (and what the tests use) — but a negative
+        window is meaningless arithmetic inside ``CircuitBreaker.trip`` and
+        would make every target immediately due again.
+        """
+        if v < 0:
+            raise ValueError(
+                f"{info.field_name} must not be negative (got {v}); 0 means "
+                "no minimum interval")
+        return v
+
     @field_validator("probation_weight")
     @classmethod
     def _probation_weight_reachable(cls, v: float) -> float:

@@ -223,15 +223,16 @@ class WorkBuddyAutoRefresh:
         if self._state.config_store is not None:
             try:
                 await self._state.config_store.update_key_secret(
-                    provider, label, secret)
+                    provider, label, secret,
+                    weight=key.weight, enabled=key.enabled)
             except ConfigStoreNotFound:
-                # YAML-defined provider: no DB row to update. The in-memory
-                # assignment above is still correct for this process; refusing
-                # here would break OAuth refresh on YAML-only deployments.
+                # A YAML-only deployment used to land here too and lost the
+                # rotation on restart; the store now inserts the row, so this
+                # is a genuine write failure (AUDIT #319).
                 import structlog
                 structlog.get_logger().warning(
                     "oauth_secret_not_persisted", provider=provider,
-                    reason="provider is YAML-defined; rotation is in-memory only")
+                    reason="config store write failed; rotation is in-memory only")
 
     def _trip_circuit(self, ident: tuple[str, str]) -> None:
         self._circuit.trip(ident)

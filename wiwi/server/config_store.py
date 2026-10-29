@@ -17,26 +17,47 @@ always reloaded from the file.  Only admin-created entries are persisted.
 
 from __future__ import annotations
 
+from typing import Any
+
 import orjson
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from wiwi.auth.users import widen_pg_floats
 
+#: Per-deployment limits stored on the ``deployments`` table (AUDIT #461).
+DEPLOYMENT_LIMIT_FIELDS = ("rpm", "tpm", "timeout", "max_tokens",
+                           "prompt_cache")
+
+
+class _Unset:
+    """Sentinel for "no value supplied" in a deployment upsert.
+
+    Distinct from ``None``, which means "clear the stored value": an upsert
+    that could not tell the two apart wiped every stored limit whenever the
+    caller only meant to write a weight.
+    """
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "<unset>"
+
+
+_UNSET = _Unset()
+
 
 class ConfigStoreNotFound(LookupError):
     """A targeted UPDATE/DELETE matched no row.
 
-    The dominant way this happens is a YAML-defined provider: the
-    startup merge skips any DB provider whose name already exists in
-    the router (``app.py``), so the account has no DB row at all — yet
-    the admin API still mutates it, because the PATCH handler checks
-    existence in ``router.providers``, which *includes* YAML providers.
-    The write silently matched zero rows and the handler answered 200,
-    so the edit appeared to apply and reverted on the next restart
-    (AUDIT #319). Renames were lost outright, deleted keys resurrected,
-    and a Cline/WorkBuddy OAuth token rotation — which goes through
-    :meth:`update_key_secret` — never persisted.
+    A YAML-defined provider has no DB row until something writes one, and the
+    startup merge layers DB rows *over* YAML (AUDIT #319). The admin PATCH
+    handler therefore treats this exception as "no override row yet" and writes
+    the operator's full desired state as one, so the edit survives a restart;
+    renames additionally tombstone the old name. ``update_key_secret`` and
+    ``delete_key`` no longer raise for that case — they insert the override row
+    or a tombstone instead, which is what makes a rotated OAuth credential
+    survive a restart. ``update_provider`` still raises (the handler needs the
+    signal), and ``update_key`` raises only when it has no credential to seed a
+    row with.
     """
 
 PROVIDER_DDL = """
@@ -47,7 +68,8 @@ CREATE TABLE IF NOT EXISTS providers (
   timeout_s DOUBLE PRECISION NOT NULL DEFAULT 120.0,
   extra_headers TEXT NOT NULL DEFAULT '{}',
   round_robin INTEGER NOT NULL DEFAULT 1,
-  alias_id TEXT
+  alias_id TEXT,
+  detached INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -59,6 +81,7 @@ CREATE TABLE IF NOT EXISTS provider_keys (
   secret TEXT NOT NULL,
   weight INTEGER NOT NULL DEFAULT 1,
   enabled INTEGER NOT NULL DEFAULT 1,
+  detached INTEGER NOT NULL DEFAULT 0,
   UNIQUE(provider_name, label)
 );
 """
@@ -71,6 +94,7 @@ CREATE TABLE IF NOT EXISTS provider_keys (
   secret TEXT NOT NULL,
   weight INTEGER NOT NULL DEFAULT 1,
   enabled INTEGER NOT NULL DEFAULT 1,
+  detached INTEGER NOT NULL DEFAULT 0,
   UNIQUE(provider_name, label)
 );
 """
@@ -83,6 +107,11 @@ CREATE TABLE IF NOT EXISTS deployments (
   model_id TEXT NOT NULL,
   weight INTEGER NOT NULL DEFAULT 1,
   detached INTEGER NOT NULL DEFAULT 0,
+  rpm INTEGER,
+  tpm INTEGER,
+  timeout REAL,
+  max_tokens INTEGER,
+  prompt_cache INTEGER,
   UNIQUE(group_name, provider_name, model_id)
 );
 """
@@ -95,6 +124,11 @@ CREATE TABLE IF NOT EXISTS deployments (
   model_id TEXT NOT NULL,
   weight INTEGER NOT NULL DEFAULT 1,
   detached INTEGER NOT NULL DEFAULT 0,
+  rpm INTEGER,
+  tpm INTEGER,
+  timeout DOUBLE PRECISION,
+  max_tokens INTEGER,
+  prompt_cache INTEGER,
   UNIQUE(group_name, provider_name, model_id)
 );
 """
@@ -188,6 +222,17 @@ class ConfigStore:
         if "alias_id" not in cols:
             await conn.execute(sa.text(
                 "ALTER TABLE providers ADD COLUMN alias_id TEXT"))
+        # providers/provider_keys.detached: a YAML-defined account (or key) has
+        # no DB row, so a rename or a key delete could only be applied in
+        # memory and the YAML entry came back on the next restart. A tombstone
+        # row records the decision so startup drops it (AUDIT #319).
+        if "detached" not in cols:
+            await conn.execute(sa.text(
+                "ALTER TABLE providers ADD COLUMN detached INTEGER NOT NULL DEFAULT 0"))
+        key_cols = await self._table_columns(conn, "provider_keys")
+        if key_cols and "detached" not in key_cols:
+            await conn.execute(sa.text(
+                "ALTER TABLE provider_keys ADD COLUMN detached INTEGER NOT NULL DEFAULT 0"))
         # deployments.detached: a YAML ``model_list`` deployment has no DB row,
         # so deleting it through the admin API could only remove it from memory
         # and it reappeared on the next restart. A tombstone row records the
@@ -196,6 +241,19 @@ class ConfigStore:
         if dep_cols and "detached" not in dep_cols:
             await conn.execute(sa.text(
                 "ALTER TABLE deployments ADD COLUMN detached INTEGER NOT NULL DEFAULT 0"))
+        # Per-deployment limits (AUDIT #461): real on the live ``Deployment``
+        # and set from the YAML ``wiwi_params``, but the table had no column for
+        # any of them, so a backup/restore round trip and the DB overlay both
+        # dropped them. NULL means "not stored" — the YAML value stands.
+        dep_limit_cols = {
+            "rpm": "INTEGER", "tpm": "INTEGER",
+            "timeout": "DOUBLE PRECISION" if self._is_pg else "REAL",
+            "max_tokens": "INTEGER", "prompt_cache": "INTEGER",
+        }
+        for col, sql_type in dep_limit_cols.items():
+            if dep_cols and col not in dep_cols:
+                await conn.execute(sa.text(
+                    f"ALTER TABLE deployments ADD COLUMN {col} {sql_type}"))
         # cache_creation_input_cost_per_token: the admin PUT accepted and the
         # GET echoed this rate, but there was no column for it, so it lived in
         # memory only and was lost on restart.
@@ -231,31 +289,40 @@ class ConfigStore:
                            timeout_s: float = 120.0,
                            extra_headers: dict | None = None,
                            round_robin: bool = True,
-                           alias_id: str | None = None) -> None:
+                           alias_id: str | None = None,
+                           detached: bool = False) -> None:
+        """Upsert a provider row (an override row for a YAML account too).
+
+        ``detached=True`` writes a tombstone instead: startup drops the account
+        — including the YAML copy — and a later upsert with ``detached=False``
+        re-attaches it. That is what makes a rename of a YAML-defined account
+        survive a restart (AUDIT #319).
+        """
         hdrs = orjson.dumps(extra_headers or {}).decode()
         rr = int(round_robin)
         if self._is_pg:
             sql = ("INSERT INTO providers"
                    " (name, provider_type, base_url, timeout_s, extra_headers,"
-                   "  round_robin, alias_id)"
-                   " VALUES (:n,:t,:b,:s,:h,:r,:a)"
+                   "  round_robin, alias_id, detached)"
+                   " VALUES (:n,:t,:b,:s,:h,:r,:a,:d)"
                    " ON CONFLICT (name) DO UPDATE SET"
                    " provider_type=EXCLUDED.provider_type,"
                    " base_url=EXCLUDED.base_url,"
                    " timeout_s=EXCLUDED.timeout_s,"
                    " extra_headers=EXCLUDED.extra_headers,"
                    " round_robin=EXCLUDED.round_robin,"
-                   " alias_id=EXCLUDED.alias_id")
+                   " alias_id=EXCLUDED.alias_id,"
+                   " detached=EXCLUDED.detached")
         else:
             sql = ("INSERT OR REPLACE INTO providers"
                    " (name, provider_type, base_url, timeout_s, extra_headers,"
-                   "  round_robin, alias_id)"
-                   " VALUES (:n,:t,:b,:s,:h,:r,:a)")
+                   "  round_robin, alias_id, detached)"
+                   " VALUES (:n,:t,:b,:s,:h,:r,:a,:d)")
         async with self.engine.begin() as conn:
             await conn.execute(sa.text(sql),
                                {"n": name, "t": provider_type, "b": base_url,
                                 "s": timeout_s, "h": hdrs, "r": rr,
-                                "a": alias_id})
+                                "a": alias_id, "d": int(detached)})
 
     async def update_provider(self, name: str, *, provider_type: str | None = None,
                               base_url: str | None = None,
@@ -357,34 +424,50 @@ class ConfigStore:
     # -- keys -------------------------------------------------------------------
 
     async def add_key(self, provider_name: str, label: str, secret: str,
-                      weight: int = 1, enabled: bool = True) -> None:
+                      weight: int = 1, enabled: bool = True,
+                      detached: bool = False) -> None:
         if self._is_pg:
             sql = ("INSERT INTO provider_keys"
-                   " (provider_name, label, secret, weight, enabled)"
-                   " VALUES (:p,:l,:s,:w,:e)"
+                   " (provider_name, label, secret, weight, enabled, detached)"
+                   " VALUES (:p,:l,:s,:w,:e,:d)"
                    " ON CONFLICT (provider_name, label) DO UPDATE SET"
                    " secret=EXCLUDED.secret, weight=EXCLUDED.weight,"
-                   " enabled=EXCLUDED.enabled")
+                   " enabled=EXCLUDED.enabled, detached=EXCLUDED.detached")
         else:
             sql = ("INSERT OR REPLACE INTO provider_keys"
-                   " (provider_name, label, secret, weight, enabled)"
-                   " VALUES (:p,:l,:s,:w,:e)")
+                   " (provider_name, label, secret, weight, enabled, detached)"
+                   " VALUES (:p,:l,:s,:w,:e,:d)")
         async with self.engine.begin() as conn:
             await conn.execute(sa.text(sql),
                                {"p": provider_name, "l": label, "s": secret,
-                                "w": weight, "e": int(enabled)})
+                                "w": weight, "e": int(enabled),
+                                "d": int(detached)})
 
     async def update_key_secret(self, provider_name: str, label: str,
-                                secret: str) -> None:
-        """Replace a stored key's secret (used by Cline OAuth token rotation)."""
+                                secret: str, *, weight: int = 1,
+                                enabled: bool = True) -> None:
+        """Replace a stored key's secret (used by OAuth token rotation).
+
+        A key that has no row yet — the normal case for a YAML-defined account
+        — is INSERTed rather than refused, with the caller's live routing
+        fields. Refusing left the rotated single-use grant in memory only, so
+        the next restart resurrected the YAML credential and the account died
+        on its next refresh (AUDIT #319).
+        """
         async with self.engine.begin() as conn:
             res = await conn.execute(
-                sa.text("UPDATE provider_keys SET secret = :s"
+                sa.text("UPDATE provider_keys SET secret = :s, detached = 0"
                         " WHERE provider_name = :p AND label = :l"),
                 {"p": provider_name, "l": label, "s": secret})
             if res.rowcount != 1:
-                raise ConfigStoreNotFound(
-                    f"no persisted key {provider_name!r}/{label!r}")
+                await conn.execute(sa.text(
+                    "INSERT INTO provider_keys"
+                    " (provider_name, label, secret, weight, enabled, detached)"
+                    " VALUES (:p,:l,:s,:w,:e,0)"
+                    " ON CONFLICT (provider_name, label) DO UPDATE SET"
+                    " secret=excluded.secret, detached=0"),
+                    {"p": provider_name, "l": label, "s": secret,
+                     "w": weight, "e": int(enabled)})
 
     async def upsert_key_routing(self, provider_name: str, label: str, *,
                                   weight: int, enabled: bool) -> None:
@@ -423,7 +506,16 @@ class ConfigStore:
 
     async def update_key(self, provider_name: str, label: str, *,
                          weight: int | None = None,
-                         enabled: bool | None = None) -> None:
+                         enabled: bool | None = None,
+                         secret: str | None = None) -> None:
+        """Set a key's routing fields, creating an override row when needed.
+
+        A YAML-defined key has no row, so the edit used to apply in memory and
+        revert on restart (AUDIT #319). With ``secret`` supplied the row is
+        created — carrying the live credential, so the DB override does not
+        blank the key at startup. Without it there is nothing safe to insert and
+        the historical ``ConfigStoreNotFound`` is raised.
+        """
         sets: list[str] = []
         params: dict = {"p": provider_name, "l": label}
         if weight is not None:
@@ -439,40 +531,93 @@ class ConfigStore:
                 sa.text(f"UPDATE provider_keys SET {', '.join(sets)}"
                         " WHERE provider_name = :p AND label = :l"),
                 params)
-            if res.rowcount != 1:
+            if res.rowcount == 1:
+                return
+            if secret is None:
                 raise ConfigStoreNotFound(
                     f"no persisted key {provider_name!r}/{label!r}")
+            await conn.execute(sa.text(
+                "INSERT INTO provider_keys"
+                " (provider_name, label, secret, weight, enabled, detached)"
+                " VALUES (:p,:l,:s,:w,:e,0)"
+                " ON CONFLICT (provider_name, label) DO UPDATE SET"
+                f" {', '.join(sets)}, detached=0"),
+                {**params, "s": secret,
+                 "w": weight if weight is not None else 1,
+                 "e": int(enabled) if enabled is not None else 1})
 
     async def delete_key(self, provider_name: str, label: str) -> None:
+        """Delete a key, or tombstone a YAML-defined one.
+
+        A hard DELETE only removes admin-created rows; a key that exists only in
+        ``wiwi.yaml`` had nothing to delete, so it reappeared on the next
+        restart (AUDIT #319). A zero-row match therefore writes a ``detached``
+        tombstone, which startup applies to the YAML pool.
+        """
         async with self.engine.begin() as conn:
             res = await conn.execute(
                 sa.text("DELETE FROM provider_keys"
                         " WHERE provider_name = :p AND label = :l"),
                 {"p": provider_name, "l": label})
-            if res.rowcount != 1:
-                raise ConfigStoreNotFound(
-                    f"no persisted key {provider_name!r}/{label!r}")
+            if res.rowcount == 1:
+                return
+            await conn.execute(sa.text(
+                "INSERT INTO provider_keys"
+                " (provider_name, label, secret, weight, enabled, detached)"
+                " VALUES (:p,:l,'',1,0,1)"
+                " ON CONFLICT (provider_name, label) DO UPDATE SET"
+                " detached=1, enabled=0"),
+                {"p": provider_name, "l": label})
 
     # -- deployments ------------------------------------------------------------
 
     async def add_deployment(self, group_name: str, provider_name: str,
-                             model_id: str, weight: int = 1) -> None:
-        # detached=0: re-attaching a deployment must clear any tombstone left
-        # by an earlier detach, or startup would keep skipping it.
-        if self._is_pg:
-            sql = ("INSERT INTO deployments"
-                   " (group_name, provider_name, model_id, weight, detached)"
-                   " VALUES (:g,:p,:m,:w,0)"
-                   " ON CONFLICT (group_name, provider_name, model_id)"
-                   " DO UPDATE SET weight=EXCLUDED.weight, detached=0")
-        else:
-            sql = ("INSERT OR REPLACE INTO deployments"
-                   " (group_name, provider_name, model_id, weight, detached)"
-                   " VALUES (:g,:p,:m,:w,0)")
+                             model_id: str, weight: int = 1, *,
+                             rpm: Any = _UNSET, tpm: Any = _UNSET,
+                             timeout: Any = _UNSET, max_tokens: Any = _UNSET,
+                             prompt_cache: Any = _UNSET) -> None:
+        """Upsert one deployment row, re-attaching it (``detached=0``).
+
+        A limit left at :data:`_UNSET` keeps whatever the row already stores,
+        so a plain weight edit — ``update_deployment_weight`` goes through here
+        — cannot wipe limits an earlier import or restore persisted. Passing an
+        explicit ``None`` clears a stored limit (AUDIT #461).
+        """
+        supplied = {"rpm": rpm, "tpm": tpm, "timeout": timeout,
+                    "max_tokens": max_tokens, "prompt_cache": prompt_cache}
         async with self.engine.begin() as conn:
-            await conn.execute(sa.text(sql),
-                               {"g": group_name, "p": provider_name,
-                                "m": model_id, "w": weight})
+            row = (await conn.execute(sa.text(
+                "SELECT rpm, tpm, timeout, max_tokens, prompt_cache"
+                " FROM deployments WHERE group_name=:g AND provider_name=:p"
+                " AND model_id=:m"),
+                {"g": group_name, "p": provider_name, "m": model_id})).first()
+            stored = (dict(zip(DEPLOYMENT_LIMIT_FIELDS, row))
+                      if row is not None else {})
+            values = {c: (stored.get(c) if v is _UNSET else v)
+                      for c, v in supplied.items()}
+            cache = values["prompt_cache"]
+            values["prompt_cache"] = None if cache is None else int(bool(cache))
+            params = {"g": group_name, "p": provider_name, "m": model_id,
+                      "w": weight, **values}
+            if self._is_pg:
+                sql = ("INSERT INTO deployments"
+                       " (group_name, provider_name, model_id, weight, detached,"
+                       "  rpm, tpm, timeout, max_tokens, prompt_cache)"
+                       " VALUES (:g,:p,:m,:w,0,:rpm,:tpm,:timeout,:max_tokens,"
+                       " :prompt_cache)"
+                       " ON CONFLICT (group_name, provider_name, model_id)"
+                       " DO UPDATE SET weight=EXCLUDED.weight, detached=0,"
+                       " rpm=EXCLUDED.rpm, tpm=EXCLUDED.tpm,"
+                       " timeout=EXCLUDED.timeout,"
+                       " max_tokens=EXCLUDED.max_tokens,"
+                       " prompt_cache=EXCLUDED.prompt_cache")
+            else:
+                sql = ("INSERT OR REPLACE INTO deployments"
+                       " (group_name, provider_name, model_id, weight, detached,"
+                       "  rpm, tpm, timeout, max_tokens, prompt_cache)"
+                       " VALUES (:g,:p,:m,:w,0,:rpm,:tpm,:timeout,:max_tokens,"
+                       " :prompt_cache)")
+            await conn.execute(sa.text(sql), params)
 
     async def update_deployment_weight(self, group_name: str, provider_name: str,
                                        model_id: str, weight: int) -> None:
@@ -496,28 +641,22 @@ class ConfigStore:
         ``detached=1`` records the decision for both cases; ``add_deployment``
         clears it if the operator re-attaches the same triple.
         """
-        # ``weight`` is always spelled in the INSERT, but on an existing row the
-        # tombstone must not restate it: SQLite's ``INSERT OR REPLACE`` is a
-        # DELETE + INSERT that would reset a stored weight to the placeholder
-        # here (1) while Postgres' ``DO UPDATE SET detached=1`` preserves it, so
-        # re-attaching the deployment later restored 1 instead of the operator's
-        # value on SQLite only (round 108).
-        if self._is_pg:
-            sql = ("INSERT INTO deployments"
-                   " (group_name, provider_name, model_id, weight, detached)"
-                   " VALUES (:g,:p,:m,1,1)"
-                   " ON CONFLICT (group_name, provider_name, model_id)"
-                   " DO UPDATE SET detached=1")
-        else:
-            sql = ("INSERT OR REPLACE INTO deployments"
-                   " (group_name, provider_name, model_id, weight, detached)"
-                   " VALUES (:g,:p,:m,"
-                   "  COALESCE((SELECT weight FROM deployments"
-                   "            WHERE group_name=:g AND provider_name=:p"
-                   "            AND model_id=:m), 1), 1)")
+        # ``weight`` and the per-deployment limits are preserved: an UPDATE on an
+        # existing row never restates them, and SQLite's ``INSERT OR REPLACE``
+        # would be a DELETE + INSERT that reset the weight to the placeholder
+        # below (round 108). Only a triple with no row at all gets the
+        # placeholder weight.
         async with self.engine.begin() as conn:
-            await conn.execute(sa.text(sql),
-                               {"g": group_name, "p": provider_name, "m": model_id})
+            res = await conn.execute(sa.text(
+                "UPDATE deployments SET detached=1"
+                " WHERE group_name=:g AND provider_name=:p AND model_id=:m"),
+                {"g": group_name, "p": provider_name, "m": model_id})
+            if not res.rowcount:
+                await conn.execute(sa.text(
+                    "INSERT INTO deployments"
+                    " (group_name, provider_name, model_id, weight, detached)"
+                    " VALUES (:g,:p,:m,1,1)"),
+                    {"g": group_name, "p": provider_name, "m": model_id})
 
     # -- model pricing ---------------------------------------------------------
 
@@ -684,28 +823,36 @@ class ConfigStore:
         async with self.engine.connect() as conn:
             prov_rows = (await conn.execute(sa.text(
                 "SELECT name, provider_type, base_url, timeout_s, extra_headers,"
-                " round_robin, alias_id FROM providers ORDER BY name"))).all()
+                " round_robin, alias_id, detached FROM providers ORDER BY name"))).all()
             key_rows = (await conn.execute(sa.text(
-                "SELECT provider_name, label, secret, weight, enabled"
+                "SELECT provider_name, label, secret, weight, enabled, detached"
                 " FROM provider_keys ORDER BY id"))).all()
             dep_rows = (await conn.execute(sa.text(
-                "SELECT group_name, provider_name, model_id, weight, detached"
+                "SELECT group_name, provider_name, model_id, weight, detached,"
+                " rpm, tpm, timeout, max_tokens, prompt_cache"
                 " FROM deployments ORDER BY id"))).all()
         return {
             "providers": [
                 {"name": r[0], "provider_type": r[1], "base_url": r[2],
                  "timeout_s": r[3], "extra_headers": orjson.loads(r[4]),
-                 "round_robin": bool(r[5]), "alias_id": r[6]}
+                 "round_robin": bool(r[5]), "alias_id": r[6],
+                 "detached": bool(r[7])}
                 for r in prov_rows
             ],
             "keys": [
                 {"provider_name": r[0], "label": r[1], "secret": r[2],
-                 "weight": r[3], "enabled": bool(r[4])}
+                 "weight": r[3], "enabled": bool(r[4]),
+                 "detached": bool(r[5])}
                 for r in key_rows
             ],
             "deployments": [
                 {"group_name": r[0], "provider_name": r[1], "model_id": r[2],
-                 "weight": r[3], "detached": bool(r[4])}
+                 "weight": r[3], "detached": bool(r[4]),
+                 # NULL means the limit was never stored, so the YAML value
+                 # stands; only a real value overrides it (AUDIT #461).
+                 "rpm": r[5], "tpm": r[6], "timeout": r[7],
+                 "max_tokens": r[8],
+                 "prompt_cache": (None if r[9] is None else bool(r[9]))}
                 for r in dep_rows
             ],
         }

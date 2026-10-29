@@ -266,14 +266,16 @@ class HermesAutoRefresh:
             k.cooldown_until = 0.0
             try:
                 await self._state.config_store.update_key_secret(
-                    provider, label, secret)
-            except Exception as e:  # noqa: BLE001 — YAML-defined: no DB row
-                # YAML-defined provider: no DB row to update. The in-memory
-                # assignment above is still correct for this process; refusing
-                # here would break OAuth refresh on YAML-only deployments.
+                    provider, label, secret,
+                    weight=k.weight, enabled=k.enabled)
+            except Exception as e:  # noqa: BLE001 — DB failure must not break refresh
+                # A YAML-only deployment used to land here too (no row to
+                # update) and lost the rotation on restart; the store now
+                # inserts the row, so this is a genuine write failure
+                # (AUDIT #319).
                 structlog.get_logger().warning(
                     "oauth_secret_not_persisted", provider=provider, key=label,
-                    reason="provider is YAML-defined; rotation is in-memory only",
+                    reason="config store write failed; rotation is in-memory only",
                     error=type(e).__name__)
             return
 

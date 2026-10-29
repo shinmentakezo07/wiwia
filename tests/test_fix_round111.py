@@ -210,7 +210,7 @@ async def _boot(tmp_path, monkeypatch):
 
 
 async def test_yaml_provider_edit_is_not_silently_discarded(tmp_path, monkeypatch):
-    """AUDIT #319: the UPDATE matched zero rows and the handler answered 200."""
+    """AUDIT #319: the edit persists as an override row and survives a restart."""
     app, lm, client = await _boot(tmp_path, monkeypatch)
     try:
         async with client:
@@ -218,31 +218,38 @@ async def test_yaml_provider_edit_is_not_silently_discarded(tmp_path, monkeypatc
                 "provider_type": "anthropic",
                 "base_url": "https://admin-edited.example",
             })
-            # A YAML-defined provider cannot persist an edit, so the request
-            # still answers 200 and applies in memory — rejecting outright
-            # would break every YAML-only deployment (the HF Space defines all
-            # of its providers in YAML). What must not happen is the *silent*
-            # version: the store must refuse the zero-row write and the
-            # handler must log it.
             assert r.status_code == 200, r.text
+            # ``update_provider`` still refuses a bare zero-row UPDATE — that
+            # refusal is what tells the handler to create the override row.
             with pytest.raises(ConfigStoreNotFound):
                 await app.state.wiwi.config_store.update_provider(
-                    "p1", base_url="https://never.example")
+                    "p-missing", base_url="https://never.example")
     finally:
         await lm.__aexit__(None, None, None)
+    # A fresh boot over the same DB layers the DB row over the YAML account.
+    app2, lm2, _client2 = await _boot(tmp_path, monkeypatch)
+    try:
+        acct = app2.state.wiwi.router.providers["p1"]
+        assert acct.base_url == "https://admin-edited.example"
+        assert acct.provider_type == "anthropic"
+    finally:
+        await lm2.__aexit__(None, None, None)
 
 
 async def test_yaml_provider_delete_key_is_not_silently_discarded(tmp_path, monkeypatch):
-    """AUDIT #319: a deleted YAML key resurrected on the next restart."""
-    app, lm, client = await _boot(tmp_path, monkeypatch)
+    """AUDIT #319: a deleted YAML key no longer resurrects on the next restart."""
+    _app, lm, client = await _boot(tmp_path, monkeypatch)
     try:
         async with client:
             r = await client.delete("/admin/providers/p1/keys/default")
             assert r.status_code == 200, r.text
-            with pytest.raises(ConfigStoreNotFound):
-                await app.state.wiwi.config_store.delete_key("p1", "default")
     finally:
         await lm.__aexit__(None, None, None)
+    app2, lm2, _client2 = await _boot(tmp_path, monkeypatch)
+    try:
+        assert app2.state.wiwi.router.providers["p1"].keys == []
+    finally:
+        await lm2.__aexit__(None, None, None)
 
 
 async def test_db_provider_edit_still_persists(tmp_path, monkeypatch):
@@ -288,22 +295,31 @@ async def test_db_provider_edit_still_persists(tmp_path, monkeypatch):
 
 
 async def test_update_provider_secret_rejects_yaml_provider(tmp_path, monkeypatch):
-    """AUDIT #319: a refreshed OAuth token must not be reported as persisted.
+    """AUDIT #319: a rotated token on a YAML account is now persisted.
 
-    ``_update_provider_secret`` persists before touching memory precisely so
-    this path can report failure instead of running on a token a restart
-    would revert.
+    ``update_key_secret`` used to raise for a YAML-defined key, so an OAuth
+    rotation lived in memory only and the YAML credential came back on restart.
+    It now inserts the override row with the caller's live routing fields.
     """
-    from wiwi.server.config_store import ConfigStoreNotFound
+    import sqlalchemy as sa
+    from sqlalchemy.ext.asyncio import create_async_engine
 
     app, lm, client = await _boot(tmp_path, monkeypatch)
     try:
         async with client:
-            with pytest.raises(ConfigStoreNotFound):
-                await app.state.wiwi.config_store.update_key_secret(
-                    "p1", "default", "ROTATED-TOKEN")
+            await app.state.wiwi.config_store.update_key_secret(
+                "p1", "default", "ROTATED-TOKEN", weight=3, enabled=True)
     finally:
         await lm.__aexit__(None, None, None)
+    eng = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/app.db")
+    try:
+        async with eng.begin() as conn:
+            rows = (await conn.execute(sa.text(
+                "SELECT secret, weight FROM provider_keys"
+                " WHERE provider_name='p1' AND label='default'"))).fetchall()
+    finally:
+        await eng.dispose()
+    assert [tuple(r) for r in rows] == [("ROTATED-TOKEN", 3)]
 
 
 async def test_update_key_rejects_yaml_provider(tmp_path, monkeypatch):

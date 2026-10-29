@@ -57,11 +57,11 @@ two things that remove anything are both removals the *source* recorded as
 removals: a ``detached`` deployment and an ``alias: null`` tombstone.
 
 **What is not in the file is not round-trippable, so it is not in the file.**
-The export carries what the tables can hold. The five per-deployment limits
-(``rpm``/``tpm``/``timeout``/``max_tokens``/``prompt_cache``) are the standing
-example: ``deployments`` has no column for any of them, so exporting them
-promised a persistence the restore could not deliver — see
-:func:`_export_deployments`. Absent means *unknown*, never *reset*.
+The export carries what the tables can hold, and the tables now hold the five
+per-deployment limits (``rpm``/``tpm``/``timeout``/``max_tokens``/
+``prompt_cache``) — AUDIT #461 gave ``deployments`` a column for each — so they
+travel with the deployment that owns them. Absent still means *unknown*, never
+*reset*: a document without them leaves the target's values alone.
 """
 
 from __future__ import annotations
@@ -83,6 +83,7 @@ from wiwi.config import (
     coerce_alias_value,
 )
 from wiwi.router.router import _default_base_url
+from wiwi.server.config_store import DEPLOYMENT_LIMIT_FIELDS
 
 #: Bumped when a section changes shape incompatibly. ``validate_backup``
 #: refuses a document whose version it does not recognise rather than importing
@@ -462,26 +463,28 @@ async def _export_keys(state, include_secrets: bool) -> list[dict]:
 async def _export_deployments(state) -> list[dict]:
     """Model-group deployments (the provider/model combos).
 
-    Only what the ``deployments`` table can actually hold back: ``group_name``,
-    ``provider_name``, ``model_id``, ``weight``. The five per-deployment limits
-    — ``rpm``, ``tpm``, ``timeout``, ``max_tokens``, ``prompt_cache`` — are
-    deliberately **not** exported. They are real on the live ``Deployment``,
-    but the table has no column for any of them, so a restore could only ever
-    set them in memory and the next restart would rebuild them at their
-    defaults. Shipping them advertised a persistence the format cannot deliver:
-    a restored gateway looked throttled until it was rebooted. They are
-    YAML/``wiwi_params``-owned — ``model_list`` on the source is the durable
-    home for them, and it moves with the instance's config.
+    Carries everything the ``deployments`` table can hold back:
+    ``group_name``, ``provider_name``, ``model_id``, ``weight`` and the five
+    per-deployment limits — ``rpm``, ``tpm``, ``timeout``, ``max_tokens``,
+    ``prompt_cache`` (:data:`wiwi.server.config_store.DEPLOYMENT_LIMIT_FIELDS`).
+    The limits were withheld while the table had no column for them, because a
+    restore could only set them in memory and the next restart rebuilt them at
+    their defaults (AUDIT #461 added the columns, so they round-trip now).
     """
     out = []
     for gname in sorted(state.router.groups):
         for d in state.router.groups[gname]:
-            out.append({
+            entry = {
                 "group_name": gname,
                 "provider_name": d.provider.name,
                 "model_id": d.model_id,
                 "weight": d.weight,
-            })
+            }
+            for field in DEPLOYMENT_LIMIT_FIELDS:
+                value = getattr(d, field, None)
+                if value is not None:
+                    entry[field] = value
+            out.append(entry)
     return out
 
 
@@ -1062,22 +1065,12 @@ def _validate_keys(state, doc: dict, plan: dict) -> None:
     plan["keys"] = out
 
 
-#: Deployment limits that exist on the live ``Deployment`` but have no column in
-#: the ``deployments`` table, and are therefore not exported (see
-#: :func:`_export_deployments`). A document may still carry them — an older
-#: export, or a hand-written one — and they are applied to the in-memory
-#: deployment so the file is honoured for the life of the process. Absent means
-#: *unknown*: the target's own value is left alone rather than reset to the
-#: default.
-_DEPLOYMENT_LIMITS = ("rpm", "tpm", "timeout", "max_tokens", "prompt_cache")
-
-
 def _validate_deployments(state, doc: dict, plan: dict) -> None:
     """Parse the deployments section.
 
-    See :data:`_DEPLOYMENT_LIMITS`: only the fields the document actually
-    carries end up in the plan, so a merge cannot clobber a limit the target
-    set locally with a ``None`` the file never mentioned.
+    Only the fields the document actually carries end up in the plan, so a
+    merge cannot clobber a limit the target set locally with a ``None`` the
+    file never mentioned.
     """
     raw = _section_list(doc, "deployments")
     known = _future_providers(state, {p["name"] for p in plan["providers"]})
@@ -1741,14 +1734,12 @@ async def _apply_keys(state, entries: list[dict]) -> int:
 
 
 async def _apply_deployments(state, entries: list[dict]) -> int:
-    """Merge deployments, persisting only what the table can hold.
+    """Merge deployments, persisting the limits the document carries.
 
-    ``add_deployment`` takes ``(group, provider, model, weight)`` — the
-    ``deployments`` table has no column for the five limits in
-    :data:`_DEPLOYMENT_LIMITS`, so a document that carries them is honoured on
-    the in-memory ``Deployment`` for the life of the process and dropped from
-    there on restart. They are not exported any more
-    (:func:`_export_deployments`); this path only serves older files.
+    Every field in :data:`wiwi.server.config_store.DEPLOYMENT_LIMIT_FIELDS` is
+    written to the row when present, so a restore survives the next restart
+    (AUDIT #461). A field the document omits is left at the target's value —
+    absent means unknown, never reset.
     """
     from wiwi.router.router import Deployment
 
@@ -1780,18 +1771,23 @@ async def _apply_deployments(state, entries: list[dict]) -> int:
             bucket.append(Deployment(
                 group=d["group_name"], provider=acct, model_id=d["model_id"],
                 weight=d["weight"],
-                **{f: d[f] for f in _DEPLOYMENT_LIMITS if f in d}))
+                **{f: d[f] for f in DEPLOYMENT_LIMIT_FIELDS if f in d}))
             state.router.groups[d["group_name"]] = bucket
         else:
             existing.weight = d["weight"]
-            for field in _DEPLOYMENT_LIMITS:
+            for field in DEPLOYMENT_LIMIT_FIELDS:
                 # Absent = unknown: leave whatever the target had.
                 if field in d:
                     setattr(existing, field, d[field])
         if store is not None:
             # add_deployment is an upsert that clears any detached tombstone.
-            await store.add_deployment(d["group_name"], d["provider_name"],
-                                       d["model_id"], d["weight"])
+            # The limits travel with it so the restore survives a restart; a
+            # field the document omitted stays _UNSET and keeps its stored
+            # value (AUDIT #461).
+            await store.add_deployment(
+                d["group_name"], d["provider_name"], d["model_id"],
+                d["weight"],
+                **{f: d[f] for f in DEPLOYMENT_LIMIT_FIELDS if f in d})
         applied += 1
     # Mandatory: without it a group that gained a second provider keeps stale
     # cross-provider WRR membership.

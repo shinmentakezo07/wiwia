@@ -8,6 +8,37 @@ Each finding verified against source by reading the cited lines. Severities: �
 
 ---
 
+## ✅ Fixed — round 180: the 2026-10-29 sweep (2026-10-29)
+
+Eleven entries closed in one pass, plus the drift corrections the sweep turned
+up. Regression coverage: `tests/test_fix_round180.py` (22 tests), with rounds
+98, 111 and 142 updated where the *contract* changed rather than a test detail.
+
+| # | Severity | What was wrong |
+|---|---|---|
+| 319 | 🔴 Critical | Admin edits to a YAML-defined provider applied in memory only: renames were lost, deleted keys resurrected, and an OAuth rotation (which goes through `update_key_secret`) never persisted. The startup merge now layers DB rows **over** YAML for providers and keys, `providers`/`provider_keys` carry `detached` tombstones for a rename or a key delete, `update_key_secret` inserts the override row with the live routing fields, and `update_key`/`delete_key` write an override/tombstone instead of refusing. The PATCH handler's `ConfigStoreNotFound` fallback writes the operator's full desired state (plus a tombstone for the old name on a rename) |
+| 383 | 🟠 High | `HealerSettings` validated only `probation_weight`, so `tick_s: 0` made the paid probe loop a tight busy-spin, `max_probes_per_sweep` had no floor, and `probes_to_restore: 0` restored a key on one lucky probe. The spend knobs now reject the degenerate values (`tick_s`/`probe_timeout_s` > 0, counts ≥ 1, intervals not negative) while small cadences and a `0` minimum interval stay legal |
+| 373 | 🟠 High | Two concurrent `POST /admin/providers` for one name both answered 200 — the duplicate guard ran before the first `await` and nothing reserved the name, so the DB kept the first key and the router the last. Guard + persist + insert are now one critical section under `AppState.provider_create_lock` |
+| 469 | 🟡 Medium | Any upstream 429 cooled the *key*, and the OpenCode free tier shares one `anonymous` sentinel, so one model's blip retired every free deployment for the cooldown. A 429 with no `Retry-After` is now a deployment failure (`deployment_scoped_failure`), charged through `record_fail`, and the credential stays in rotation; a 429 **with** a stated window is still a quota statement and still cools the key |
+| 424 | 🟡 Medium | Hermes device-code sessions were stashed in the Cline pending map and swept by Cline's single TTL. One generic `AppState.oauth_pending` now holds all three browser flows with a per-session `ttl_s`, swept by `evict_expired_pending()` |
+| 461 | 🟡 Medium | Per-deployment `rpm`/`tpm`/`timeout`/`max_tokens`/`prompt_cache` had no column, so they never survived a backup/restore or the DB overlay. Both DDLs and the `_migrate` ALTER list gained the five columns; `add_deployment` takes them as keyword-only `_UNSET`-defaulted values (a weight edit cannot wipe them, `None` clears one); `load_all`, the startup merge and the backup export/apply all carry them. `delete_deployment` now UPDATEs the tombstone so a detach preserves weight and limits |
+| 462 | 🟠 Medium | A failed Cline OAuth *record* write dropped the replacement single-use grant: the next tick presented the consumed token, got `invalid_grant`, and retired the provider. The rotation is now held in `_pending` and re-persisted by `flush_pending` (sweep) or `_refresh_locked` (401 hook / admin refresh) **before** any new rotation is attempted |
+| 532 | 🟡 Medium | All-time `stats.timeseries` bucketing was wrong for any chart with more than one populated bucket: `starts` held one entry per event, so `bisect_right` returned the index after the last equal element and an event in bucket 0 was attributed to bucket N (clamped onto the last day). The index is arithmetic again over the contiguous grid (a deduped `bisect` would compress the gaps) — full entry at the end of this file |
+| 486 | 🟡 Medium | `.admin-btn`/`.admin-input` rendered at ~36/38 px and the shell's sidebar/sign-out controls at 32-42 px, under the binding 44 px touch floor. Raised in the unlayered coarse-pointer block (and `pointer-coarse:` variants on the shell controls); desktop density is unchanged |
+| 377 | 🟠 High | On touch the 88 px stepper painted over the 72 px weight field (its `padding-right` lived in `@layer components` and lost to the caller's `px-*` utility), and a suffixed `NumberInput` lost its `pr-16` because `{...rest}` re-applied the caller's `className` after it. The stepper is now a **sibling** of the input on coarse pointers (unlayered rule), so no padding has to win a layer fight, and `NumberInput` merges the two class names |
+| 378 | ⚪ Low | The weight editor PATCHed twice on Enter (the 500 ms debounce stayed armed) and stuck on a typed decimal (`parseInt("2.5")` saved 2 while `dirty` kept comparing "2.5"). `commit` disarms the timer, `save` normalizes the field to the committed integer, and a `savedRef` makes a duplicate commit a no-op |
+
+**Also corrected in this pass (register drift, #340):**
+
+* #411 (Cline OAuth status) was marked open but is fixed — `cline_oauth_status`
+  falls back to decoding the pool key's JWT (`app.py:6252-6279`).
+* #351 carried a second, stale `**Status: open**` line under its "fixed"
+  marker; the guard exists at `wiwi/ir/types.py:412`.
+* #350 was already marked fixed and the code confirms it (`app.py:2238-2246`).
+
+---
+
+
 ## ✅ Fixed — round 173: journal reads off the event loop, the Gemini system register, and the aiosqlite warning leaker (2026-10-25)
 
 Closes the three open register items the 2026-10-25 delta-flow sweep left
@@ -1559,9 +1590,10 @@ naive version would have gone wrong:
   whatever comes back.
 - **The SPA polls with a wiwi-side token, not the upstream `state`.** The
   upstream identifier is the one the token leg authenticates with, so it stays
-  server-side; the pending session lives in the shared `cline_pending` store as
-  `{"kind": "workbuddy_login", "provider", "realm", "state", "created_at"}` and
-  is told apart from the Cline/Hermes entries by `"kind"`.
+  server-side; the pending session lives in the shared `oauth_pending` store
+  (renamed from `cline_pending` in round 180, #424) as
+  `{"kind": "workbuddy_login", "provider", "realm", "state", "created_at",
+  "ttl_s"}` and is told apart from the Cline/Hermes entries by `"kind"`.
 - **A poll that finds the login still pending does not consume the session**
   (almost every first poll lands before the human has typed a password), while
   success and every terminal error do — and the provider *type* is checked
@@ -1575,7 +1607,7 @@ they connect Cline and Hermes, with no out-of-band file.
 
 ### 486. Every `.admin-btn` / `.admin-input` in the console renders under the binding 44 px touch target
 
-**Severity:** 🟡 Medium (a binding house rule is violated console-wide; cost is mis-taps on a phone, not data loss) · **Status: open**
+**Severity:** 🟡 Medium (a binding house rule is violated console-wide; cost is mis-taps on a phone, not data loss) · **Status: fixed** — round 180 (`web/src/styles.css`, `web/src/components/Layout.tsx`)
 **Files:** `web/src/styles.css` (`.admin-input` :452 `padding: 8px 12px` → ~38 px, `.admin-btn` :580 `padding: 7px 14px` → ~36 px); unfixed examples in the app shell around `web/src/pages/WorkBuddyAccounts.tsx` (`Close sidebar` 36×36, sidebar nav 237×42, `Sign out` 40×32, `Open sidebar` 40×40)
 
 Measured, not eyeballed, on the running console at 375×812 with
@@ -2137,7 +2169,7 @@ fallback rather than a cache bug.
 
 ### 469. One upstream 429 cools the `anonymous` key and retires every free Zen deployment
 
-**Severity:** 🟡 Medium (a single flawed upstream model becomes a whole-tier outage for the length of the key's cooldown) · **Status: open**
+**Severity:** 🟡 Medium (a single flawed upstream model becomes a whole-tier outage for the length of the key's cooldown) · **Status: fixed** — round 180 (`tests/test_fix_round180.py`)
 **Files:** `wiwi/router/router.py` — `if status == 429: key.mark_cooling(retry_after if retry_after and retry_after > 0 else 30.0)` (standard mode, ~line 263); `wiwi/providers/base.py:67-68` — `status_for_key_pool()` reports 429 for any 429; `wiwi/providers/opencode_adapter.py` — the `anonymous` sentinel is one credential shared by every free deployment.
 **Trigger:** any free Zen model whose upstream answers 429 while the pool declares a single `anonymous` key entry — the shape `wiwi.yaml.example` recommends. Measured live 2026-10-15 through `create_app` (one key): `step-5-preview-free` answered `429 … Upstream request failed: Endpoint is unavailable.` and the **next 16 consecutive requests** — nine other free models across all three inbound dialects — answered `503 no healthy deployment for '<group>'`. A second run lost 25 the same way after `cat-jam-free` 429'd. Declaring two `anonymous` entries cut the same blip to three requests. The sentinel is not an account, so cooling "the key" retires the single path every free deployment shares, and this 429 is an upstream-availability blip rather than a quota signal about the credential.
 **Fix sketch:** decide the cooldown's scope from the error, not the status: a 429 carrying no `Retry-After` and no quota wording should cool the *deployment* (as `record_fail` already does for 5xx) and leave the key in rotation — or let an adapter declare a credential non-coolable when it is a shared anonymous marker. Regression to write: two deployments on one sentinel key, one answers 429, the other must still serve without a cold window.
@@ -2308,10 +2340,10 @@ below are what the sweep found still wrong. Entries #424-#426.
 
 ### 424. Hermes OAuth sessions reuse the Cline pending map and share its eviction, so a Cline sweep can drop a live Hermes login
 
-**Severity:** 🟠 Medium · **Status: open**
-**Files:** `wiwi/server/app.py:5971-5975` (device-code stash), `:5712-5716` (shared TTL sweep)
+**Severity:** 🟠 Medium · **Status: fixed** — round 180 (`tests/test_fix_round180.py`)
+**Files:** `wiwi/server/app.py` (`AppState.oauth_pending` + `evict_expired_pending`), the three connect flows
 
-The Hermes device-code session is stashed in `state.cline_pending[token]` with
+The Hermes device-code session used to be stashed in `state.cline_pending[token]` with
 `kind: "hermes_device_code"`, and the eviction sweep iterates every entry in
 that map with a single `created_at > 600s` rule. Functionally correct today (the
 10-minute window matches Nous's `expires_in`, and the `kind` discriminator keeps
@@ -2864,7 +2896,7 @@ opened, a false "Copied" would be worse than an error.
 ---
 
 ### 411. `/admin/cline/oauth/status` reads a settings row that a credential-provisioned account never creates
-**Severity:** 🟠 High (the console reports real, credentialed accounts as disconnected) · **Status: open**
+**Severity:** 🟠 High (the console reports real, credentialed accounts as disconnected) · **Status: fixed** — re-verified 2026-10-29 (round 180); the fallback exists at `app.py:6252-6279`
 **Files:** `wiwi/server/app.py:5692-5715` (`cline_oauth_status`), reading
 `config_store` key `cline_oauth:<provider>` minted at `:5465-5466`; credentials actually live
 in `provider_keys` (written by `connect` at `:5520`)
@@ -3186,7 +3218,7 @@ deployment `rpm`. Neither covers `RouterSettings`.
 
 ### 383. Healer settings that gate real provider spend are unvalidated; `tick_s: 0` makes the probe loop a busy-spin
 
-**Severity:** 🟠 High (unbounded real-money probe spend) · **Status: open**
+**Severity:** 🟠 High (unbounded real-money probe spend) · **Status: fixed** — round 180 (`tests/test_fix_round180.py`)
 **Files:** `wiwi/config.py:408-436` (`HealerSettings` — only `probation_weight` is
 validated), consumers `wiwi/core/recovery.py:330-342`, `:356`, `:392`, `:456`
 
@@ -4510,9 +4542,8 @@ regression test yet.
 
 ### 373. Concurrent `POST /admin/providers` for one name both succeed, splitting DB and memory
 
-**Severity:** 🟠 High · **Status: open**
-**Files:** `wiwi/server/app.py` (`admin_create_provider`, the duplicate-name
-guard and the persist-first block added for #364)
+**Severity:** 🟠 High · **Status: fixed** — round 180 (`tests/test_fix_round180.py`)
+**Files:** `wiwi/server/app.py` (`admin_add_provider`, `AppState.provider_create_lock`)
 
 #364 moved the DB write ahead of the in-memory insert. The `name in
 state.router.providers` guard now runs before an `await`, and nothing reserves
@@ -4619,8 +4650,8 @@ exactly at the cap instead of losing content it had room for. Tests:
 
 ### 377. On touch devices the stepper buttons cover the number input
 
-**Severity:** 🟠 High · **Status: open**
-**Files:** `web/src/styles.css` (`@media (hover: none)` stepper rule),
+**Severity:** 🟠 High · **Status: fixed** — round 180 (`web/src/styles.css`, `web/src/components/ui.tsx`; verified by `npm run build` + `npm run lint`)
+**Files:** `web/src/styles.css` (unlayered coarse-pointer stepper block),
 `web/src/pages/Models.tsx` (`WeightEditor`, `w-[5.5rem] px-1`),
 `web/src/pages/VirtualKeys.tsx:463,493` (`suffix`)
 
@@ -4637,7 +4668,7 @@ utility, and widen the Models editor on touch.
 
 ### 378. Models weight editor: double save on Enter, and a stuck decimal
 
-**Severity:** ⚪ Low · **Status: open**
+**Severity:** ⚪ Low · **Status: fixed** — round 180 (`web/src/pages/Models.tsx`; verified by `npm run build` + `npm run lint`)
 **Files:** `web/src/pages/Models.tsx` (`WeightEditor`)
 
 Enter commits but leaves the 500 ms debounce armed, so it can PATCH twice
@@ -14679,7 +14710,28 @@ in "Probe" blocks are real output. 🟠/🟡 entries were confirmed against sour
 
 ### 319. Admin edits to a YAML-defined provider are silently discarded — the DB write matches zero rows
 
-**Severity:** 🔴 Critical · **Status: partially fixed — the silent failure is closed, persistence is not**
+**Severity:** 🔴 Critical · **Status: fixed** — round 180 (`tests/test_fix_round180.py`; rounds 111/142 updated to the new contract)
+
+**Round 180 — the product decision was made and implemented: DB rows override
+YAML.** A YAML-defined account has no DB row, so the startup merge used to skip
+it entirely and every admin mutation was memory-only. Now:
+
+* `providers` and `provider_keys` carry a `detached` tombstone column.
+  `_load_db_config` drops a tombstoned account (or key) — including its YAML
+  copy — and otherwise layers the DB row's fields **over** the YAML account
+  (`provider_type`, `base_url`, `timeout_s`, `extra_headers`, `round_robin`,
+  `alias_id`) and over a same-label YAML key (`secret`/`weight`/`enabled`).
+* `update_key_secret` inserts the override row with the caller's live routing
+  fields instead of raising, so an OAuth rotation now survives a restart.
+* `update_key` seeds a row from the live secret; `delete_key` writes a
+  tombstone when the row does not exist.
+* The PATCH handler's `ConfigStoreNotFound` fallback writes the operator's full
+  desired state as an override row, and a rename additionally tombstones the
+  old name so the YAML copy cannot return beside it.
+
+Still YAML-owned by design: the *set* of providers and keys comes from the file,
+so removing a YAML provider from the file still removes the account (a
+tombstone only overrides a name that is present).
 
 **Fixed:** `ConfigStore.update_provider` / `update_key_secret` / `delete_key` now assert
 `rowcount == 1` and raise `ConfigStoreNotFound` (`wiwi/server/config_store.py`), so the
@@ -14688,15 +14740,11 @@ key-delete handlers, `_update_provider_secret`, both auto-refresh modules
 (`cline_auto_refresh.py`, `workbuddy_auto_refresh.py`) and the import/upsert path all
 log `provider_edit_not_persisted` (and siblings) with the reason.
 
-**Deliberately NOT fixed — needs a product decision.** Rejecting these edits with a 409
-is the real fix, but it was reverted: **27 existing tests assert a 200**, and the
-documented HF Space deployment (`shimen/yapapa`) defines *every* provider in
-`wiwi.yaml`, so a 409 would make no provider editable on that deployment. The current
-behaviour — apply in memory, log that it will not survive a restart — is a compromise
-chosen to keep that deployment usable. The actual product question is unanswered:
-**should the DB layer take precedence over YAML, or should YAML-sourced accounts be
-read-only in the admin API?** A DB row cannot currently override a YAML provider at
-all, because the startup merge skips same-named entries (`app.py:841-842`).
+**Superseded — the decision.** The earlier compromise (apply in memory, log that
+it will not survive a restart) existed because a 409 would have made every
+provider un-editable on the HF Space deployment, where YAML is the only source.
+Round 180 took the other option the entry listed — persist an override row — so
+edits and rotations now persist on that deployment too.
 
 **Files:** `wiwi/server/app.py:841-842` (the skip rule), `wiwi/server/config_store.py:244` (`update_provider`), `:357` (`update_key_secret`), `:385` (`delete_key`)
 
@@ -15803,9 +15851,9 @@ loses context and appears to forget what it was asked, with no error anywhere.
 **Severity:** 🔴 Critical · **Status: fixed** — re-verified 2026-10-11 (round 127 sweep). `effort_to_thinking_budget` now guards with `isinstance(effort, str)` (`wiwi/ir/types.py`) and the Responses decoder coerces via `_effort_str` (`wiwi/wire/openai_responses.py`): `reasoning.effort` of `["low"]`/`{"a":1}`/`5` decodes to `reasoning_effort=None`, so nothing unhashable reaches an adapter. Body preserved unchanged.
 
 
-**Severity:** 🔴 Critical · **Status: open**
+**Severity:** 🔴 Critical · **Status: fixed** — re-verified 2026-10-29 (round 180 sweep); the guard is at `wiwi/ir/types.py:412`, and the second, stale `Status: open` line that used to sit below is removed.
 
-**Files:** `wiwi/wire/openai_responses.py:411-413` (effort read untyped),
+**Files (original finding, kept for the record):** `wiwi/wire/openai_responses.py:411-413` (effort read untyped),
 `wiwi/ir/types.py:296` (`_EFFORT_BUDGETS.get(effort)`),
 reached from `wiwi/providers/anthropic_adapter.py:520` and
 `wiwi/providers/gemini_adapter.py:190`
@@ -17456,7 +17504,7 @@ it.
 
 ### 461. Per-deployment limits are not persisted by the `deployments` table, so they cannot survive a backup/restore round trip
 
-**Severity:** 🟡 Medium · **Status: open**
+**Severity:** 🟡 Medium · **Status: fixed** — round 180 (`tests/test_fix_round180.py`)
 
 **Files:** `wiwi/server/config_store.py:78-99` (`DEPLOYMENT_DDL_SQLITE` /
 `DEPLOYMENT_DDL_PG` — no `rpm`, `tpm`, `timeout`, `max_tokens` or
@@ -17466,7 +17514,7 @@ ALTER list — currently carries only `detached`), `wiwi/server/config_store.py`
 which rebuilds each deployment from those columns), `wiwi/server/backup.py`
 (`_export_deployments` / `_apply_deployments`)
 
-#456 chose the honest-lossy fix: `_export_deployments` no longer emits the five
+#456 chose the honest-lossy fix at the time: `_export_deployments` no longer emits the five
 per-deployment limits, and import leaves a target's limits alone rather than
 writing values the table cannot store. So a backup never claims a limit it cannot
 restore — but the underlying storage gap is untouched, and per-deployment limits
@@ -17475,8 +17523,12 @@ do not survive into the DB overlay either. An operator who set
 `gpt-5/prod: {rpm: 20, max_tokens: 4000}` in YAML and later added the deployment
 through the console still cannot have those limits round-tripped.
 
-The honest fix — persisting them — is `config_store.py` work that has not been
-done:
+The honest fix — persisting them — was round 180's `config_store.py` work, done
+exactly as the four steps below describe (both DDLs, the `_migrate` ALTER list,
+`add_deployment` with `_UNSET` sentinels so a weight edit cannot blank a limit,
+`load_all` / `_load_db_config`, and the backup export/apply pair). The five
+per-deployment limits are now DB-backed, so a restore round-trips them and the
+`#456` "honest-lossy" export is gone. Original sketch, kept for the record:
 
 1. Add the five columns to both `DEPLOYMENT_DDL_SQLITE` and
    `DEPLOYMENT_DDL_PG`.
@@ -17494,10 +17546,15 @@ a silent loss — but it is still a gap.
 
 ### 462. A failed OAuth *record* write still costs the Cline operator their login
 
-**Severity:** 🟠 Medium · **Status: open**
+**Severity:** 🟠 Medium · **Status: fixed** — round 180 (`tests/test_fix_round180.py`)
 
-**Files:** `wiwi/providers/cline_auto_refresh.py` (`_do_refresh`),
-`wiwi/providers/cline_oauth.py` (`refresh_token`)
+**Files:** `wiwi/providers/cline_auto_refresh.py` (`_do_refresh`, `_pending`,
+`flush_pending`, `_persist_pending`), `wiwi/providers/cline_oauth.py` (`refresh_token`)
+
+Round 180 keeps the rotation in `_pending` after a failed `set_setting` and
+re-persists it **before** any new rotation is attempted — from the sweep
+(`_check_provider`), from the 401 hook and from an admin refresh
+(`_refresh_locked`), via the public `flush_pending`. `forget` drops the entry.
 
 Found while closing the test gap on #446 (round 143). #446 fixed the *ordering*
 and *guarding*: the record is now written first, both writes are wrapped, and an
@@ -18414,3 +18471,51 @@ can reach a provider that never declared it, and the drop now calls
 `self.warn(...)` so the caller sees it.
 
 **Status: fixed** — pinned by `tests/test_fix_round179.py`.
+
+---
+
+## ✅ Fixed — round 180: the all-time timeseries bucketing (2026-10-29)
+
+### 532. `stats.timeseries` attributed every bucket-0 event to the last bucket
+
+🟡 **Medium (wrong numbers on the dashboard's only all-time chart)** —
+`wiwi/server/stats.py` (`timeseries`, the all-time branch)
+
+The all-time branch builds a fixed bucket grid (one bucket per day, capped at
+30) and located each event with
+
+```python
+starts = [int(e.ts // size) * size for e in win]
+idx = bisect.bisect_right(starts, int(e.ts // size) * size) - 1
+```
+
+`starts` holds **one entry per event**, not one per bucket, so it is full of
+duplicates. `bisect_right` returns the position *after* the last element equal
+to the key, so an event in the first bucket — whose start is repeated by every
+other event in that bucket — resolved to the index of the last duplicate, i.e.
+a later bucket, and `max(0, min(idx, len(buckets) - 1))` clamped it onto the
+final day.
+
+**Probe** (two events 6 s apart at the start of the window, `buckets=2`):
+
+```
+expected [6, 100]   got [0, 106]
+```
+
+Every all-time chart therefore showed activity on the *wrong* day, and the
+more events a day held the further its count was displaced. The regression came
+in with an uncommitted rewrite of the function; the same rewrite carried a
+comment that no longer described the code (a note about "private-use
+characters", left over from an unrelated change).
+
+**Fix:** the index is arithmetic again — `idx = int((e.ts - first_t) // size)`
+— because the buckets are a *contiguous* grid from `first_t` with the empty
+buckets included; the `starts` set is only used to size that grid (and is
+deduped, since `n_buckets` counts bucket starts, not events). Deduping alone
+would not have been enough: a `bisect` over the *populated* starts compresses
+the gaps, so a row following a silent day slides into that empty bucket. Both
+shapes are pinned by `tests/test_fix_round180.py` — the two-day probe above and
+a day-0/day-2 case asserting `[3, 0, 100]` with the middle bucket empty.
+
+**Status: fixed** — round 180.
+

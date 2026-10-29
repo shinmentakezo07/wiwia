@@ -244,6 +244,17 @@ class ProviderAccount:
                 log.info("healer_probation_graduated", kind="key",
                          provider=self.name, key=key.label)
             return
+        if status == 429 and not (retry_after and retry_after > 0):
+            # A 429 that states no Retry-After is an availability signal about
+            # the DEPLOYMENT, not a quota statement about the credential: the
+            # caller charges it to the deployment (``deployment_scoped_failure``)
+            # and the key stays in rotation (AUDIT #469). Cooling the key here
+            # retired every sibling deployment sharing it, and the OpenCode free
+            # tier's single ``anonymous`` sentinel is shared by every free
+            # model — so one model's 429 answered 503 for the whole tier for the
+            # length of the cooldown. A 429 WITH a Retry-After is a quota
+            # statement and still cools the key, below.
+            return
         if failover_mode == "any_error":
             key.err_count += 2 if status in (401, 403) else 1
             if key.err_count >= key_max_consecutive_fails:
@@ -1607,7 +1618,7 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                     _proxy("warn",
                            f"upstream {status} on {dep.group}/{dep.model_id} "
                            f"[{dep.provider.name}/{key.label}]: {cause}{e.message}")
-                if status in (408, 500, 502, 503, 504, 529):
+                if deployment_scoped_failure(status, e.retry_after):
                     dep.record_fail(router.settings.allowed_fails,
                                     router.settings.cooldown_time)
                 if not e.retryable:
@@ -1658,6 +1669,24 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
 
 def _status_of(e: WiwiError) -> int | None:
     return status_for_key_pool(e)
+
+
+def deployment_scoped_failure(status: int | None,
+                              retry_after: float | None) -> bool:
+    """True when a failure must cool the DEPLOYMENT rather than the key.
+
+    ``408``/``5xx``/``529`` are deployment faults. So is a ``429`` that states
+    no ``Retry-After``: without a stated window the upstream is saying "this
+    model is unavailable right now", not "this credential is over quota"
+    (AUDIT #469). The credential stays in rotation, so sibling deployments that
+    share it — the ``anonymous`` sentinel of the OpenCode free tier, in
+    particular — keep serving instead of inheriting one model's outage.
+    """
+    if status is None:
+        return False
+    if status in (408, 500, 502, 503, 504, 529):
+        return True
+    return status == 429 and not (retry_after and retry_after > 0)
 
 
 def _refund_deployment_slot(dep: Deployment, ctx: RequestContext) -> None:

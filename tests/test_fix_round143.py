@@ -791,9 +791,9 @@ async def test_oauth_record_is_persisted_before_the_pool_key(app):
         order.append(f"set_setting:{key}")
         return await real_set(key, value)
 
-    async def spy_key(provider, label, secret):
+    async def spy_key(provider, label, secret, **kwargs):
         order.append(f"update_key_secret:{label}")
-        return await real_key(provider, label, secret)
+        return await real_key(provider, label, secret, **kwargs)
 
     restore_set = _patched(cs, "set_setting", spy_set)
     restore_key = _patched(cs, "update_key_secret", spy_key)

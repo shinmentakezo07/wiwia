@@ -32,7 +32,12 @@ from wiwi.providers.base import (
     take_adapter_warnings,
 )
 from wiwi.providers.registry import fresh_adapter
-from wiwi.router.router import Deployment, Router, execute_with_retries
+from wiwi.router.router import (
+    Deployment,
+    Router,
+    deployment_scoped_failure,
+    execute_with_retries,
+)
 from wiwi.streaming import deltas as dl
 from wiwi.streaming.coalesce import DeltaCoalescer
 from wiwi.streaming.loopdetect import LoopDetector
@@ -1611,7 +1616,7 @@ class Gateway:
             # so a provider that keeps failing on resume cools off.
             status = status_for_key_pool(err_box[0])
             await dep.provider.on_result_locked(key, status, err_box[0].retry_after)
-            if status in (408, 500, 502, 503, 504, 529):
+            if deployment_scoped_failure(status, err_box[0].retry_after):
                 dep.record_fail(self.router.settings.allowed_fails,
                                 self.router.settings.cooldown_time)
             # This attempt may still have priced a partial delivery before it
@@ -2386,7 +2391,7 @@ class Gateway:
             }.get(etype or "", 502)
         pool_status = status_for_key_pool(WiwiError(
             health_status, etype or "api_error", "stream failure"))
-        if health_status in {408, 500, 502, 503, 504, 529}:
+        if deployment_scoped_failure(health_status, None):
             dep.record_fail(self.router.settings.allowed_fails,
                             self.router.settings.cooldown_time)
         self.router.log_proxy(

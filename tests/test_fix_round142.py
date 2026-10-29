@@ -285,22 +285,33 @@ async def test_truncated_matches_the_document_type_contract():
 # ---------------------------------------------------------------------------
 
 
-async def test_deployment_limits_the_table_cannot_store_are_not_exported(client):
-    """``deployments`` has (group, provider, model, weight, detached) only.
+async def test_deployment_limits_are_exported_and_persisted(client):
+    """AUDIT #461: the table stores the limits now, so they round-trip.
 
-    Exporting ``rpm``/``tpm``/``timeout``/``max_tokens``/``prompt_cache``
-    advertises persistence the restore does not deliver: they reach the
-    in-memory ``Deployment`` and are dropped by ``add_deployment``, so the next
-    restart serves the defaults. They are YAML/``wiwi_params``-owned.
+    ``deployments`` gained a column per limit, so the export carries every
+    limit the live deployment actually sets and a restore writes it to the row
+    instead of dropping it on the next restart.
     """
+    target = client.wiwi.router.groups["gpt-4o"][0]
+    target.rpm, target.tpm, target.timeout = 11, 2200, 9.5
+    target.max_tokens, target.prompt_cache = 1234, True
+
     doc = await _export(client, sections="deployments")
-    assert doc["deployments"], "the fixture must define one deployment"
-    for entry in doc["deployments"]:
-        for field in ("rpm", "tpm", "timeout", "max_tokens", "prompt_cache"):
-            assert field not in entry, (
-                f"deployments exported {field!r}, which the deployments table "
-                "cannot persist — it would be restored and then silently "
-                "reverted on the next restart")
+    entry = next(e for e in doc["deployments"] if e["model_id"] == "gpt-4o")
+    assert (entry["rpm"], entry["tpm"], entry["timeout"],
+            entry["max_tokens"], entry["prompt_cache"]) == \
+        (11, 2200, 9.5, 1234, True)
+
+    r = await client.post("/admin/backup/import", headers=H, json=doc)
+    assert r.status_code == 200, r.text
+    import sqlalchemy as sa
+
+    async with client.wiwi.config_store.engine.connect() as conn:
+        row = (await conn.execute(sa.text(
+            "SELECT rpm, tpm, timeout, max_tokens, prompt_cache"
+            " FROM deployments WHERE group_name='gpt-4o'"
+            " AND model_id='gpt-4o'"))).first()
+    assert tuple(row) == (11, 2200, 9.5, 1234, 1)
 
 
 async def test_import_leaves_target_deployment_limits_alone_when_absent(client):
