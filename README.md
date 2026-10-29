@@ -628,8 +628,8 @@ general_settings:
 
 cache_settings:         # opt-in exact-match response cache — off by default
   enabled: false
-  ttl_s: 3600
-  max_entries: 256
+  ttl_s: 3600           # <= 0 disables the cache entirely (one startup warning)
+  max_entries: 256      # memory backend only
   bypass_header: x-wiwi-no-cache
 
 healer:                 # opt-in background prober — off by default, it spends money

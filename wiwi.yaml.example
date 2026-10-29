@@ -151,7 +151,10 @@ router_settings:
 # the `x-wiwi-no-cache: true` header.
 cache_settings:
   enabled: false
-  # ttl_s: 3600
+  # ttl_s: 3600        # <= 0 disables the cache on both backends (never serve,
+  #                    # never store) and logs one response_cache_disabled_by_ttl
+  #                    # warning at startup, so a zero is visible rather than
+  #                    # silently costing full upstream price on every call.
   # max_entries: 256   # memory backend only; Redis is bounded by Redis itself
   # Exact-match cache: only non-streaming, deterministic requests are stored.
   # A request with temperature > 0 (or n > 1) is never cached — an identical

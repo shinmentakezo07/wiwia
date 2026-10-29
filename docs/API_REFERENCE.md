@@ -80,6 +80,7 @@ OpenAI-style model list of the model groups visible to the authenticated key.
 | Header | Meaning |
 |---|---|
 | `x-wiwi-request-id` | Request ID, echoed as a response header on every reply |
+| `x-wiwi-cache` | `HIT` **only** when the reply was served from the gateway's exact-match response cache (see `docs/CONFIG.md` § `cache_settings`). Absent on a miss. A hit still carries its own `x-wiwi-request-id`, and the body's `id` / `created` describe the request being answered, not the one that populated the entry |
 | `x-wiwi-trace-id` | Trace ID (32 hex), only when `telemetry.enabled`. Pair it with the collector to pull the exact trace; see `docs/CONFIG.md` § `telemetry` |
 | `x-wiwi-stream-id` | Stream journal ID — pass back on reconnect to replay |
 | `x-wiwi-translation-warnings` | Present **only** when the request asked for something the chosen provider could not honour — a provider-hosted tool the backend cannot run, a sampling parameter it has no field for, a dropped attachment, an unsigned thinking block. The messages are `;`-separated. The same list is always in the request log (`translation_warnings`). Absent when nothing was dropped. |

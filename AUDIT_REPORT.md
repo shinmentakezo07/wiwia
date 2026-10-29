@@ -468,3 +468,16 @@ UI.
 | M4 redis guard | import-blocked probe | returns `RedisResponseCache`, not memory |
 | M6 metrics | `promtool check metrics`, Go `expfmt` | 12 lint errors; histograms parse empty |
 | Frontend reachability | import-graph walk from `main.tsx` | 31 zero-importer modules |
+
+> **Resolution status.** Rows above record what each probe observed at the time
+> of this audit; they are not kept current. Two have since been closed:
+> **C2 cache collision** was judged by design for the *body* (the key includes
+> `key_id`/`group`/`surface`, so colliding requests are genuinely identical and
+> a verbatim replay is the intended contract) but the envelope identity was not
+> — a hit handed the caller the producing request's `id`/`created`, which on the
+> Responses surface is a dereferenceable handle naming another request's stored
+> object. Fixed in AUDIT `#524` (`wiwi/cache/hit_rebase.py`): a hit is now
+> rebased onto the serving request and persisted under its own id.
+> **M4 redis guard** (a configured Redis silently falling through to memory) was
+> fixed earlier and its runtime counterpart — a configured-but-unreachable Redis
+> failing silently — in AUDIT `#520`.
