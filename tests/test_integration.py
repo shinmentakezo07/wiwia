@@ -549,7 +549,7 @@ def test_openai_ir_survives_the_anthropic_dialect(text, stop):
     This is the direction the gateway actually runs for an OpenAI client on a
     Claude deployment: IR -> OpenAI Chat body -> IR.
     """
-    turn = ir.AssistantTurn(raw={})
+    turn = ir.AssistantTurn()
     turn.text = text
     turn.stop_reason = {
         "end_turn": "stop", "max_tokens": "length",

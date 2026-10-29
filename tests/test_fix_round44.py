@@ -108,7 +108,10 @@ def test_is_stale_at_ttl_boundary():
 
 def test_is_stale_when_never_fetched():
     wv._set_cached_for_tests(None, 0.0)
-    assert wv.is_stale(time.monotonic()) is True
+    # Use an explicit now far past the TTL rather than a live monotonic clock:
+    # on a freshly booted machine (e.g. a CI sandbox) real elapsed uptime is
+    # less than TTL_S, which would make the assertion depend on boot time.
+    assert wv.is_stale(now=10_000_000.0) is True
 
 
 # -- registry refresh --------------------------------------------------------
