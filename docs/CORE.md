@@ -122,7 +122,7 @@ Encoders are one-directional state machines over the IR delta taxonomy; they ass
 Sliding-window counters per key: `memory.py` (default) and `redis.py` (multi-instance). Enforced after auth, before routing.
 
 ### Response cache (`cache/`)
-Exact-match, non-streaming only, no builtin tools. Key = normalized IR + group + surface + key id (`keygen.py`). Backends: `MemoryResponseCache` (LRU + lazy TTL) and Redis. Per-request bypass: `x-wiwi-no-cache`. Hit accounting uses `response_cache_hit`, never `cache_hit` (that's the provider prompt-cache flag).
+Exact-match, non-streaming only, no builtin tools. Key = normalized IR + group + surface + key id (`keygen.py`). Backends: `MemoryResponseCache` (LRU + lazy TTL) and Redis. Per-request bypass: `x-wiwi-no-cache`. Hit accounting uses `response_cache_hit`, never `cache_hit` (that's the provider prompt-cache flag). `ttl_s <= 0` disables the cache on both backends (one startup warning). A hit is rebased onto the serving request's identity — `id` and `created`/`created_at` describe the request being answered, so a Responses hit's `resp_…` id stays dereferenceable (`hit_rebase.py`).
 
 ### Cost (`cost/`)
 `CostEngine` resolves tokens → USD from DB-backed `model_prices` (`server/config_store.py`) with a bundled fallback table; `estimate_tokens_async` provides the chars/4-style estimate when usage is missing (`UsageFinal.estimated=True`).

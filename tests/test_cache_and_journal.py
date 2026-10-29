@@ -145,7 +145,14 @@ async def test_response_cache_hit_serves_without_upstream(tmp_path):
             r1 = await c.post("/v1/chat/completions", json=body, headers=headers)
             r2 = await c.post("/v1/chat/completions", json=body, headers=headers)
             assert r1.status_code == 200 and r2.status_code == 200
-            assert r1.json() == r2.json()
+            # Byte-identical except the envelope identity: the hit is served
+            # under its OWN request id (AUDIT #523), so ``id`` must equal
+            # this request's, and everything the caller asked for must match.
+            b1, b2 = r1.json(), r2.json()
+            assert b2["id"] == f"chatcmpl-{r2.headers['x-wiwi-request-id']}"
+            assert b1["id"] != b2["id"]
+            b1.pop("id"); b2.pop("id"); b1.pop("created"); b2.pop("created")
+            assert b1 == b2
             assert r2.headers.get("x-wiwi-cache") == "HIT"
             assert route.call_count == 1
             h2 = {**headers, "x-wiwi-no-cache": "true"}

@@ -1,4 +1,9 @@
-"""Response cache subsystem (docs/CORE.md §6): keygen + backend + entry."""
+"""Response cache subsystem (docs/CORE.md §6): keygen + backend + entry.
+
+``hit_rebase`` is imported by module path (``wiwi.cache.hit_rebase``) from the
+hit branch in ``wiwi/server/app.py``, like the other single-consumer helpers
+here (``keygen``), so it is deliberately not re-exported below.
+"""
 
 import structlog
 
@@ -30,6 +35,13 @@ def build_response_cache(settings, redis_url: str = "") -> CacheBackend:
     set ``general_settings.redis_url`` believing a shared, restart-durable
     cache was serving traffic while every request was actually a miss.
     """
+    if settings.ttl_s <= 0:
+        # Both backends treat a non-positive TTL as "disabled: never serve,
+        # never store" (see RedisResponseCache.__init__). Say so once at
+        # startup: a cache the operator enabled but that can never hit is the
+        # same silent-cost trap as an unreachable Redis, one config field over.
+        # Checked before backend selection so it fires for Redis too.
+        log.warning("response_cache_disabled_by_ttl", ttl_s=settings.ttl_s)
     if redis_url:
         # The probe must happen here, not inside RedisResponseCache: that class
         # defers its own import to the first get(), so constructing it proves

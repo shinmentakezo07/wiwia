@@ -46,11 +46,21 @@ class RedisResponseCache:
     def __init__(self, url: str, ttl_s: float = 3600.0,
                  prefix: str = _DEFAULT_PREFIX,
                  client: Any | None = None) -> None:
-        if ttl_s <= 0:
-            raise ValueError("ttl_s must be positive")
+        # ``ttl_s <= 0`` must NOT raise here: ``build_response_cache`` runs it
+        # inside ``create_app``, so a zero/negative TTL in wiwi.yaml would make
+        # the whole gateway refuse to boot — but only when ``redis_url`` was
+        # set. The memory backend accepts the same config and simply expires
+        # everything immediately (``time.time() - stored_at > ttl_s`` is always
+        # true for ttl_s <= 0), i.e. "cache disabled by TTL". Whether a config
+        # is legal must not depend on which backend happens to be selected, so
+        # this backend reproduces that meaning: never serve, never store.
         self.url = url
         self.ttl_s = ttl_s
         self.prefix = prefix
+        # ``ttl_s <= 0`` makes this backend a permanent miss, mirroring
+        # ``MemoryResponseCache`` (a disabled-by-TTL cache). Short-circuits
+        # below keep the meaning explicit instead of relying on SETEX's clamp.
+        self.disabled = ttl_s <= 0
         # An injected client is closed on aclose() like any other: the cache
         # is the sole owner of whatever it is using, and a half-closed cache
         # would be a subtler bug than a closed caller-supplied client.
@@ -130,6 +140,8 @@ class RedisResponseCache:
 
     # -- CacheBackend -------------------------------------------------------
     async def get(self, key: str) -> CacheEntry | None:
+        if self.disabled:
+            return None
         try:
             r = await self._redis()
             raw = await r.get(self._key(key))
@@ -142,6 +154,11 @@ class RedisResponseCache:
         return self._decode(raw)
 
     async def set(self, key: str, entry: CacheEntry) -> None:
+        # TTL <= 0 is a disabled cache (see __init__): storing would leave an
+        # entry SETEX could only clamp to 1s, so a later get could briefly
+        # serve something the operator's config said was off.
+        if self.disabled:
+            return
         # SETEX rejects a non-positive expiry, and int(0.9) == 0 would raise
         # mid-request for a sub-second TTL. Clamp instead.
         ttl = max(1, int(self.ttl_s))

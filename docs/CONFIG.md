@@ -236,11 +236,13 @@ cache_settings:
 | Field | Default | Notes |
 |---|---|---|
 | `enabled` | `false` | Response cache is off by default. |
-| `ttl_s` | `3600.0` | Time-to-live for cached responses. |
-| `max_entries` | `256` | LRU eviction cap. |
+| `ttl_s` | `3600.0` | Time-to-live for cached responses. `<= 0` disables the cache (never serve, never store) and logs one `response_cache_disabled_by_ttl` warning at startup — identically on both backends. |
+| `max_entries` | `256` | LRU eviction cap (memory backend only). |
 | `bypass_header` | `x-wiwi-no-cache` | Send this header to skip the cache for one call. |
 
 The response cache is exact-match: same normalized IR + group + surface + key id → same cached response. Not used for streaming requests or requests with builtin tools.
+
+A hit is replayed under the **serving** request's identity: the response `id` and `created`/`created_at` belong to the request being answered (so on `/v1/responses` the returned `resp_…` id resolves through `GET /v1/responses/{id}` and `previous_response_id`), while the rest of the body is byte-identical to the entry that produced it.
 
 There is no `backend` field. The backend is chosen from `general_settings.redis_url` (or `REDIS_URL`): Redis when set **and** the `[redis]` extra imports, otherwise in-process memory.
 

@@ -153,6 +153,7 @@ from wiwi.auth.keys import mask_key
 from wiwi.auth.service import AuthService
 from wiwi.auth.users import SESSION_TTL, UserInfo, UserService, sign_session
 from wiwi.cache import build_response_cache
+from wiwi.cache.hit_rebase import rebase_cached_body
 from wiwi.cache.interface import CacheBackend, CacheEntry
 from wiwi.cache.keygen import is_cacheable_request, response_cache_key
 from wiwi.config import (
@@ -2528,13 +2529,36 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 ctx.metadata["response_cache_hit"] = True
                 state_.logs.log_proxy("info", "response cache hit",
                                       ctx.request_id)
+                served = rebase_cached_body(orjson.loads(entry.payload),
+                                            ctx.request_id)
+                # The body now carries THIS request's id, so that id must name
+                # a stored object or the caller holds a dangling handle:
+                # ``GET /v1/responses/{id}`` and ``previous_response_id`` both
+                # dereference it. Persist the hit exactly as the upstream path
+                # persists a fresh response (same key, same TTL policy) rather
+                # than leaving the id resolvable only to the earlier request.
+                if (store_response and state_.response_store is not None
+                        and body.get("store") is not False):
+                    try:
+                        await state_.response_store.put(
+                            f"resp_{ctx.request_id}",
+                            info.key_id if info is not None else "master",
+                            group or ir_req.model, _stored_input_items(body),
+                            served)
+                    except Exception as e:  # noqa: BLE001
+                        # A cache hit must never fail the request because the
+                        # store could not be written (same rule as the cache
+                        # itself): log it and serve.
+                        structlog.get_logger().warning(
+                            "response_store_put_on_cache_hit_failed",
+                            request_id=ctx.request_id, detail=str(e))
                 state_.logs.log_request(build_log_event(ctx))
                 # Served locally: the upstream consumed zero tokens, so the
                 # estimated reservation taken at admission must be refunded.
                 await _release_tpm_reservation(info, ctx)
                 tracer.close(ctx.span, **{"wiwi.status": 200, "wiwi.cache_hit": True})
                 return ORJSONResponse(
-                    orjson.loads(entry.payload),
+                    served,
                     headers={**success_headers, "x-wiwi-cache": "HIT"})
         try:
             if ir_req.stream:

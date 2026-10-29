@@ -240,9 +240,27 @@ async def test_redis_cache_aclose_without_client_is_safe():
     await c.aclose()  # must not raise
 
 
-def test_redis_cache_rejects_nonpositive_ttl():
-    with pytest.raises(ValueError):
-        RedisResponseCache(url="redis://unused", ttl_s=0, client=None)
+async def test_redis_cache_treats_nonpositive_ttl_as_disabled():
+    # A non-positive TTL must NOT raise: this construction runs inside
+    # ``create_app``, so raising made the gateway refuse to boot on a
+    # ``cache_settings.ttl_s: 0`` that the memory backend accepts — the same
+    # config was legal or fatal depending only on whether ``redis_url`` was
+    # set (AUDIT #523). Both backends mean the same thing by it: a cache that
+    # never serves and never stores.
+    fake = _FakeRedis()
+    c = RedisResponseCache(url="redis://unused", ttl_s=0, client=fake)
+    assert c.disabled is True
+    await c.set("k", _entry(b"{}"))
+    assert fake.expiries == {}, "a disabled cache must not write"
+    fake.store["wiwi:rsp:k"] = b'{"payload": "e30="}'
+    assert await c.get("k") is None, "a disabled cache must not serve"
+
+    negative = RedisResponseCache(url="redis://unused", ttl_s=-5, client=fake)
+    assert negative.disabled is True
+
+    # Control: a positive TTL is enabled and still writes.
+    enabled = RedisResponseCache(url="redis://unused", ttl_s=60.0, client=_FakeRedis())
+    assert enabled.disabled is False
 
 
 # ---------------------------------------------------------------------------
@@ -361,11 +379,18 @@ async def test_e2e_redis_url_selects_redis_backend(tmp_path, monkeypatch):
 
         async def aclose(self): pass
 
+    # Bind the real constructor BEFORE monkeypatch replaces the class attribute;
+    # looking it up through the class inside ``_init`` would re-enter the patched
+    # one and recurse.
+    real_init = rc_mod.RedisResponseCache.__init__
+
     def _init(self, url, ttl_s=3600.0, prefix="wiwi:rsp", client=None):
-        self.url = url
-        self.ttl_s = ttl_s
-        self.prefix = prefix
-        self._client = client or _Shared()
+        # Delegate to the real constructor and only substitute the server.
+        # Re-listing the attributes here drifted the moment the class gained
+        # one: ``disabled`` was missing, so every get() raised AttributeError
+        # inside the swallow-all handler and the test's cache silently missed.
+        real_init(self, url, ttl_s=ttl_s, prefix=prefix,
+                  client=client or _Shared())
 
     monkeypatch.setattr(rc_mod.RedisResponseCache, "__init__", _init)
 
@@ -377,7 +402,13 @@ async def test_e2e_redis_url_selects_redis_backend(tmp_path, monkeypatch):
     r1, r2, calls = await _two_calls(app, body)
     assert r2.headers.get("x-wiwi-cache") == "HIT"
     assert calls == 1
-    assert r1.json() == r2.json()
+    # The replay is body-identical except the envelope identity, which belongs
+    # to the request being served (AUDIT #523), not to the one that populated
+    # the entry.
+    b1, b2 = r1.json(), r2.json()
+    assert b2["id"] == f"chatcmpl-{r2.headers['x-wiwi-request-id']}"
+    b1.pop("id"); b2.pop("id"); b1.pop("created"); b2.pop("created")
+    assert b1 == b2
     # Payload really landed in the (fake) Redis, namespaced.
     assert [k for k in shared if k.startswith("wiwi:rsp:")]
 
