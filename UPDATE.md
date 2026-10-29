@@ -10,6 +10,31 @@ Each entry below records the before→after state, the exact files and lines cha
 
 ---
 
+## Round 179 — unknown server tools round-trip on their own surface (AUDIT #531) (2026-10-29)
+
+`builtin_config["_wire_type"]` was written by both decoders and read by nobody.
+An Anthropic client that sent a server tool the canonical registry does not
+know (`code_execution_20250522`, `bash_20250124`, `computer_*`, `memory_*`, …)
+got a silently tool-less request even against an Anthropic deployment, because
+`anthropic_adapter._encode_tools` consulted `wire_type_for()` alone and dropped
+what it could not map. The drop was visible only to the operator.
+
+- `builtin_tools.WIRE_SURFACE_KEY` (`"_wire_surface"`) now records the surface
+  that DECLARED the spelling, written beside `_wire_type` by
+  `wire/anthropic_messages.py` and `wire/openai_responses.py`.
+- `builtin_tools.passthrough_wire_type(surface, tool)` returns that raw type
+  only when it names the target surface, and is total against a missing /
+  non-mapping config or a non-`str` value.
+- The Anthropic encoder re-emits the raw spelling for its own surface and keeps
+  dropping a foreign one (Responses' `file_search` must never become a Messages
+  tool). Every drop now also calls `self.warn(...)`, so the caller learns the
+  tool did not apply (the #498 channel).
+- Other adapters are unchanged: Gemini/OpenAI still drop an Anthropic-declared
+  unknown builtin, pinned by a test.
+
+**Tests:** `tests/test_fix_round179.py` (12; also pins AUDIT #529/#530).
+
+
 ## Round 174 — structured-output schema coerced at every inbound decoder (AUDIT #359) (2026-10-25)
 `ResponseFormat.json_schema` is typed `dict | None` but is a plain dataclass
 with no runtime enforcement, and all three inbound decoders accepted any

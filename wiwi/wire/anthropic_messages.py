@@ -403,11 +403,15 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         else:
             # Unknown server tool (code_execution, computer, ...): preserve it
             # as an unmapped builtin so no surface mangles it into a function
-            # tool; providers that can't host it drop it with a warning.
+            # tool. The raw wire type and the surface that declared it ride
+            # builtin_config, so an Anthropic -> Anthropic round trip can
+            # re-emit it verbatim (round 178) while a provider that cannot host
+            # it still drops it with a warning.
             tools.append(ir.Tool(
                 name=t.get("name") or ttype,
                 builtin=ttype,
-                builtin_config={bt.WIRE_TYPE_KEY: ttype},
+                builtin_config={bt.WIRE_TYPE_KEY: ttype,
+                                bt.WIRE_SURFACE_KEY: "anthropic"},
                 cache_control=t.get("cache_control")))
     tc_raw = body.get("tool_choice") or {}
     tool_choice: ir.ToolChoice | None = None

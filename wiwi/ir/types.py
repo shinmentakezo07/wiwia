@@ -209,8 +209,12 @@ class Tool:
     cache_control: CacheControl = None  # Anthropic prompt-cache breakpoint on tool def
     # Provider-hosted builtin tool (e.g. web_search): canonical name from
     # ir/builtin_tools.py, not a function tool the model defines. builtin_config
-    # carries the provider-common subset (max_uses, allowed_domains, ...);
-    # an unknown builtin keeps its raw wire type under "_wire_type".
+    # carries the provider-common subset (max_uses, allowed_domains, ...).
+    # For a builtin the registry does not know, ``builtin`` is the RAW wire type
+    # the inbound surface declared (e.g. "code_execution_20250522"), and
+    # builtin_config records ``_wire_type`` + ``_wire_surface`` so a surface
+    # that owns that spelling can re-emit it verbatim
+    # (``builtin_tools.passthrough_wire_type``) while others drop it.
     builtin: str | None = None
     builtin_config: dict[str, Any] | None = None
     # Anthropic tool search: the tool's definition is sent on every request but
@@ -285,10 +289,18 @@ class GenParams:
     def effective_reasoning_effort(self) -> str | None:
         """Return reasoning_effort, deriving it from the other reasoning knobs if unset.
 
-        Precedence is MOST-SPECIFIC-FIRST: an explicit ``reasoning_effort``,
-        then Anthropic's explicit ``output_config.effort``, then a budget
-        mapped through the inverse ladder, and only then the ``thinking_type``
-        mode as the last fallback ("enabled" → "medium", "disabled" → "none").
+        Precedence, most-specific-first:
+
+        1. an explicit ``reasoning_effort``;
+        2. ``thinking_type == "disabled"`` → "none" (an explicit *off* switch
+           outranks every "how hard should it think" knob — including
+           Anthropic's ``output_config.effort``; the mode and the effort are
+           independent wire fields and a caller can send both);
+        3. Anthropic's explicit ``output_config.effort``;
+        4. a budget mapped through the inverse ladder;
+        5. the ``thinking_type`` mode as the last fallback ("enabled" →
+           "medium", "adaptive" stays None).
+
         A mode outranking the budget rewrote ``thinking: {type: enabled,
         budget_tokens: 32000}`` to "medium", silently halving a caller's
         explicit budget on non-Anthropic backends. The "enabled" fallback is
@@ -297,6 +309,11 @@ class GenParams:
         thinking silently off for a caller who turned it on. "adaptive" stays
         None: it is model-driven by definition, and pinning a named level
         overrode the provider's own default (round-53's WorkBuddy "max").
+
+        The order above is the code's order. It was previously documented as
+        effort-before-mode while the code checked ``disabled`` first; the two
+        are reconciled here in favour of the code, because "off" must not be
+        re-enabled by a separate effort knob (round 178).
         """
         if self.reasoning_effort:
             return self.reasoning_effort
@@ -313,9 +330,19 @@ class GenParams:
     def effective_thinking_budget(self) -> int | None:
         """Return thinking_budget, deriving it from reasoning_effort if not set.
 
-        Returns None when reasoning_effort is 'none' (thinking disabled) or
+        Returns None when thinking is explicitly OFF — either
+        ``reasoning_effort == "none"`` or ``thinking_type == "disabled"`` — and
         when neither field is set, so adapters can distinguish 'no thinking'
         from 'use a default budget.'
+
+        The two off-switches are checked BEFORE the direct budget. A caller can
+        send ``thinking: {type: disabled}`` beside a stale ``budget_tokens``
+        (or ``reasoning_effort: "none"`` beside a direct budget); returning the
+        budget anyway turned thinking back ON on the two consumers of this
+        accessor (Anthropic and Gemini), contradicting the sibling
+        ``effective_reasoning_effort``, which already reported "none". The
+        docstring below has always promised this; the code now honours it
+        (round 178).
 
         Returns None for an UNUSABLE budget (a non-numeric value, or a ``bool``)
         rather than forwarding it: this is typed ``int | None`` but
@@ -328,6 +355,9 @@ class GenParams:
         way an unknown effort does, instead of 500ing. A float is preserved:
         the callers only compare and add, so ``8000.0`` has always been usable.
         """
+        # Explicit off-switches outrank a direct budget (see docstring).
+        if self.thinking_type == "disabled" or self.reasoning_effort == "none":
+            return None
         budget = coerce_int(self.thinking_budget)
         if budget is not None:
             return budget

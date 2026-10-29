@@ -18339,3 +18339,78 @@ OAuth refresh with nothing, and the attempt ended on the failure's record.
 
 **Status: fixed** — the successful reconnect records `ok_after_refresh` in both
 `ctx.attempts` and `_log_attempt`, matching the other two arms.
+
+---
+
+## ✅ Fixed — round 179: three latent IR defects found by reading the module against its consumers (2026-10-29)
+
+None of these raised on a live wire path, which is why they survived: each
+produced a plausible-looking result rather than an error. Fixed together with
+`tests/test_fix_round179.py` (12 tests).
+
+### 529. `effective_thinking_budget` ignored both explicit off-switches
+
+🟡 **Medium** — `wiwi/ir/types.py:GenParams.effective_thinking_budget`
+
+The accessor's docstring has always promised "Returns None when
+`reasoning_effort` is 'none' (thinking disabled)", but the code read the direct
+budget first and returned it. Two states therefore disagreed with their own
+sibling: `GenParams(thinking_type="disabled", thinking_budget=32000)` reported
+`effective_reasoning_effort() == "none"` while `effective_thinking_budget()`
+returned `32000`, and `reasoning_effort="none"` beside a budget did the same.
+Both consumers of the accessor — the Anthropic and Gemini adapters — would turn
+thinking ON for a caller who had explicitly turned it off.
+
+Not reachable from a wire today (the Anthropic codec only reads `budget_tokens`
+when `type == "enabled"`, and the other three surfaces never set
+`thinking_budget`), which is the only reason it is Medium. `GenParams` is a
+plain dataclass with no runtime enforcement, and this is the same class of
+latent defect as #388/#389.
+
+**Status: fixed** — both off-switches are checked before the budget, so the
+accessor agrees with `effective_reasoning_effort`.
+
+### 530. `effective_reasoning_effort`'s documented precedence was not the code's
+
+⚪ **Low** — `wiwi/ir/types.py:GenParams.effective_reasoning_effort`
+
+The docstring described "reasoning_effort, then effort, then budget, then the
+`thinking_type` mode as the last fallback". The code checks
+`thinking_type == "disabled"` *second*, ahead of `effort` and the budget, so
+`GenParams(effort="high", thinking_type="disabled")` returned `"none"` where the
+doc promised `"high"`.
+
+The code's order is the correct one — an explicit off switch must not be
+re-enabled by a separate "how hard should it think" knob, and the two are
+independent wire fields a caller can send together — so the docstring was
+corrected to match rather than the behaviour changed.
+
+**Status: fixed** (documentation; behaviour pinned by a test).
+
+### 531. An unknown provider-hosted builtin was dropped even on its own surface
+
+🟠 **High (fidelity)** — `wiwi/providers/anthropic_adapter.py:_encode_tools`,
+`wiwi/ir/builtin_tools.py`, `wiwi/wire/{anthropic_messages,openai_responses}.py`
+
+The registry only knows `web_search` and `tool_search_*`, so any other server
+tool decodes to a builtin `ir.Tool` carrying its raw wire type under
+`builtin_config["_wire_type"]`. Nothing ever read that key: the Anthropic
+encoder consulted `wire_type_for()` alone, got `None`, and dropped the tool.
+
+An Anthropic client that sent `code_execution_20250522` or `bash_20250124` to
+an Anthropic deployment therefore received a **silently tool-less** request —
+the model could not use the tool it had been asked to use — and the only signal
+was a server-side `log.warning`, not the caller-visible warning channel
+(#498). The behaviour was pinned by
+`test_anthropic_encode_drops_unhostable_builtin_with_warning`, whose premise
+("unhostable") is wrong for Anthropic's own tools.
+
+**Fix:** the decoders now record the surface that declared the spelling
+(`builtin_config["_wire_surface"]`), and the Anthropic encoder re-emits the raw
+type only when that surface is its own
+(`builtin_tools.passthrough_wire_type`, total against junk). A spelling from
+another surface — Responses' `file_search` — is still dropped, so nothing new
+can reach a provider that never declared it, and the drop now calls
+`self.warn(...)` so the caller sees it.
+
+**Status: fixed** — pinned by `tests/test_fix_round179.py`.

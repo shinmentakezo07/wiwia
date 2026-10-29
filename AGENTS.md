@@ -292,9 +292,9 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
 - **Property tests:** `hypothesis` (`test_property_roundtrip.py`) for IR/codec round-trips and
   stream-SSE legality invariants.
 - **Regression convention:** new bugfix regressions go in the next unused
-  `tests/test_fix_roundN.py`. Latest present: `test_fix_round177.py` → next is `round178`
+  `tests/test_fix_roundN.py`. Latest present: `test_fix_round179.py` → next is `round180`
   (confirm numerically, never with a plain `ls` — it sorts lexicographically, so `round9.py`
-  looks newest). 176 such files exist; gaps at 1, 102 and 147 (`test_bugfix_round5.py` is the
+  looks newest). 175 such files exist; gaps at 1, 102 and 147 (`test_bugfix_round5.py` is the
   legacy filename for 5).
 - **Subsystem map (rough):** `test_codecs.py` / `test_extra_body.py` — wire unit; `test_router.py`,
   `test_round_robin.py`, `test_fix_cycle_failover.py` — routing; `test_admin_api.py`,

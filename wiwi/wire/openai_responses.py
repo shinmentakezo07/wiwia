@@ -186,15 +186,18 @@ def _decode_tool(t: dict[str, Any]) -> ir.Tool:
             config["blocked_domains"] = filters["blocked_domains"]
         return ir.Tool(name=canonical, builtin=canonical, builtin_config=config)
     # Unknown hosted tool (file_search, computer, ...): keep it
-    # builtin-shaped so no surface mangles it into a function tool;
-    # providers that can't host it drop it with a warning. Both operands of
+    # builtin-shaped so no surface mangles it into a function tool.
+    # The raw wire type and the surface that declared it ride builtin_config,
+    # so a surface that owns the spelling can re-emit it verbatim (round 178);
+    # every other surface drops it with a warning. Both operands of
     # `name or ttype` can be a non-string (an explicit null name, or a
     # non-string type that the guard above turned into None), and `Tool.name`
     # is typed str — a null there crashes the fallback estimator's " ".join
     # (AUDIT #184/#186).
     return ir.Tool(name=(_str_or_empty(t.get("name")) or _str_or_empty(ttype)),
                    builtin=ttype,
-                   builtin_config={bt.WIRE_TYPE_KEY: ttype})
+                   builtin_config={bt.WIRE_TYPE_KEY: ttype,
+                                   bt.WIRE_SURFACE_KEY: "openai_responses"})
 
 
 def _decode_tool_choice(tc_raw: Any) -> ir.ToolChoice | None:

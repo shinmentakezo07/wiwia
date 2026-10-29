@@ -12,6 +12,8 @@ config-subset keys). Per-dialect parsing/rendering stays in ``wire/`` and
 
 from __future__ import annotations
 
+from typing import Any
+
 # canonical name -> per-surface wire tool "type" string. None means the
 # surface has no representation for that builtin (decoders never produce it,
 # encoders drop it with a warning).
@@ -66,6 +68,16 @@ BUILTIN_CONFIG_KEYS = (
 # no surface mangles them into function tools, and providers that cannot
 # host them drop them with a warning.
 WIRE_TYPE_KEY = "_wire_type"
+
+# The surface that DECLARED that raw wire type, recorded beside it. A wire
+# spelling is only meaningful to the surface that owns it: Anthropic's
+# ``code_execution_20250522`` sent to Gemini is a 400, while the same spelling
+# sent back to Anthropic is exactly right. Without this, an unknown builtin was
+# dropped even on an Anthropic -> Anthropic round trip, so a client that asked
+# for code execution got a silently tool-less request (round 178). Read only by
+# ``passthrough_wire_type``; every encoder keeps dropping a builtin whose
+# source surface is not its own.
+WIRE_SURFACE_KEY = "_wire_surface"
 
 # Surfaces that can carry a builtin tool definition. openai_chat has no
 # hosted-tool representation today (kept in the set so helpers stay uniform).
@@ -146,3 +158,27 @@ def is_builtin_name(name: str) -> bool:
     every present and future caller.
     """
     return isinstance(name, str) and name in BUILTIN_TOOL_TYPES
+
+
+def passthrough_wire_type(surface: str, tool: Any) -> str | None:
+    """Raw wire type to re-emit for *tool* on *surface*, or None.
+
+    A builtin the registry does not know is kept on the IR with its original
+    spelling in ``builtin_config`` (``WIRE_TYPE_KEY``) plus the surface that
+    declared it (``WIRE_SURFACE_KEY``). Dropping it is right when the target
+    surface never declared it — Anthropic's ``code_execution`` sent to Gemini
+    must not be emitted as a Gemini tool — but wrong when the target IS the
+    surface that produced it: an Anthropic client that asked for
+    ``code_execution_20250522`` was getting a silently tool-less request,
+    because the encoder only consulted the canonical registry (round 178).
+
+    Total: a missing/non-mapping ``builtin_config``, a missing key, or a
+    non-``str`` value all return None, so a caller never raises on junk.
+    """
+    cfg = getattr(tool, "builtin_config", None)
+    if not isinstance(cfg, dict):
+        return None
+    if cfg.get(WIRE_SURFACE_KEY) != surface:
+        return None
+    raw = cfg.get(WIRE_TYPE_KEY)
+    return raw if isinstance(raw, str) and raw else None

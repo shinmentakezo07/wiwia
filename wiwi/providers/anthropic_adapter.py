@@ -681,10 +681,22 @@ class AnthropicAdapter(WarningMixin):
                     continue
                 wt = bt.wire_type_for("anthropic", t.builtin)
                 if wt is None:
-                    # Unhostable on Anthropic (e.g. code_execution from another
-                    # surface, or an unknown server tool): drop, don't mangle.
+                    # A builtin the canonical registry does not know. Re-emit
+                    # its original spelling only when THIS surface declared it
+                    # (an Anthropic client's own code_execution / bash / …), so
+                    # an Anthropic -> Anthropic round trip keeps the tool
+                    # instead of silently serving a tool-less request (round
+                    # 178). A spelling from another surface stays dropped.
+                    wt = bt.passthrough_wire_type("anthropic", t)
+                if wt is None:
+                    # Unhostable on Anthropic (a builtin decoded on another
+                    # surface): drop, don't mangle — and tell the caller, who
+                    # set the tool and is the one paying for the request.
                     log.warning("dropping_unhostable_builtin_tool",
                                 builtin=t.builtin, provider="anthropic")
+                    self.warn(
+                        f"builtin tool '{t.name or t.builtin}' has no "
+                        "Messages API equivalent and was dropped")
                     continue
                 # Native server-tool shape: type + canonical name + the config
                 # keys Anthropic understands. search_context_size has no
