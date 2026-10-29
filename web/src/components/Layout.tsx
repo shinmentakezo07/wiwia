@@ -375,7 +375,7 @@ export function AdminLayout() {
                 type="button"
                 onClick={() => setMobileOpen(false)}
                 aria-label="Close sidebar"
-                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-white/[0.04] bg-white/[0.02] text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.05] hover:text-[var(--admin-text)] lg:hidden"
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-white/[0.04] bg-white/[0.02] text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.05] hover:text-[var(--admin-text)] pointer-coarse:h-11 pointer-coarse:w-11 lg:hidden"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -398,7 +398,7 @@ export function AdminLayout() {
                       end={item.end}
                       title={showCollapsed ? item.label : undefined}
                       className={({ isActive }) =>
-                        `group relative flex min-h-[42px] items-center gap-3 rounded-[12px] px-3 py-[9px] text-[13px] transition-all duration-200 lg:min-h-0 ${
+                        `group relative flex min-h-[44px] items-center gap-3 rounded-[12px] px-3 py-[9px] text-[13px] transition-all duration-200 lg:min-h-0 ${
                           showCollapsed ? "justify-center px-2" : ""
                         } ${
                           isActive
@@ -535,7 +535,7 @@ export function AdminLayout() {
               aria-label="Open sidebar"
               aria-expanded={mobileOpen}
               aria-controls="admin-sidebar"
-              className="-ml-1 flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-white/[0.04] bg-white/[0.02] text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.05] hover:text-[var(--admin-text)] lg:hidden"
+              className="-ml-1 flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-white/[0.04] bg-white/[0.02] text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.05] hover:text-[var(--admin-text)] pointer-coarse:h-11 pointer-coarse:w-11 lg:hidden"
             >
               <Menu className="h-5 w-5" />
             </button>
@@ -575,7 +575,7 @@ export function AdminLayout() {
                   void logout();
                   navigate("/login");
                 }}
-                className="flex items-center gap-2 rounded-xl border border-white/[0.04] bg-white/[0.02] px-3 py-2 text-[12px] text-[var(--admin-text-dim)] transition-all duration-200 hover:border-white/[0.08] hover:bg-white/[0.03] hover:text-red-400"
+                className="flex items-center gap-2 rounded-xl border border-white/[0.04] bg-white/[0.02] px-3 py-2 text-[12px] text-[var(--admin-text-dim)] transition-all duration-200 hover:border-white/[0.08] hover:bg-white/[0.03] hover:text-red-400 pointer-coarse:min-h-11"
               >
                 <LogOut className="h-3.5 w-3.5" />
                 <span className="hidden sm:inline">Sign out</span>

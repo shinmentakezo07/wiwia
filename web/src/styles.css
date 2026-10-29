@@ -646,30 +646,10 @@ input[type="number"].admin-input::-webkit-inner-spin-button {
   opacity: 0.35;
   cursor: not-allowed;
 }
-/* Touch: the 26px column splits into two ~17px buttons, far under the 44px
-   floor, and stacking two 44px buttons inside a 34px-tall field would clip
-   them (the wrapper is overflow:hidden). Lay the steppers out horizontally
-   instead — each becomes a 44x44 square beside the input, so the field only
-   has to grow to one stepper tall rather than two. */
-@media (hover: none) {
-  .admin-number-field .admin-input {
-    min-height: 44px;
-    padding-right: 92px;
-  }
-  .admin-number-stepper {
-    width: 88px;
-    flex-direction: row;
-    border-left: 1px solid var(--admin-border);
-  }
-  .admin-number-stepper button {
-    flex: 1;
-    min-height: 44px;
-  }
-  .admin-number-stepper button + button {
-    border-top: 0;
-    border-left: 1px solid var(--admin-border);
-  }
-}
+/* Touch stepper layout lives OUTSIDE this layer — see the "Touch number
+   stepper" block at the end of the file. Inside `@layer components` its
+   padding lost to the caller's `px-*` utility, so the 88px stepper painted
+   over the whole 72px weight field (AUDIT #377). */
 select.admin-input option {
   background: var(--admin-surface-elevated);
   color: var(--admin-text);
@@ -4495,5 +4475,63 @@ select.admin-input option {
   /* The group band is a block too, so its split bar gets the full width. */
   .wl-group td {
     display: block;
+  }
+}
+
+/* ── Touch number stepper (unlayered on purpose) ─────────────────────────────
+   On a touch screen the 26px vertical column splits into two ~17px buttons,
+   far under the 44px floor, and stacking two 44px buttons inside a 34px-tall
+   field would clip them (the wrapper is overflow:hidden). The field therefore
+   becomes a row: the input, then an 88px stepper laid out horizontally.
+
+   This must stay OUTSIDE `@layer components`. A caller's `px-*` utility lives
+   in `@layer utilities` and beats every components-layer rule regardless of
+   specificity, so the padding that reserved room for the stepper was dropped
+   and the 88px stepper painted over the whole 72px weight field — the field
+   could not be tapped to type at all (AUDIT #377). Making the stepper a
+   sibling removes the need to reserve padding, so no utility can undo it. */
+@media (hover: none), (pointer: coarse) {
+  .admin-number-field {
+    display: flex;
+    align-items: stretch;
+    gap: 6px;
+  }
+  .admin-number-field .admin-input {
+    min-height: 44px;
+    /* Let the input shrink beside the stepper instead of overflowing. */
+    min-width: 0;
+  }
+  .admin-number-stepper {
+    position: static;
+    width: 88px;
+    flex: none;
+    flex-direction: row;
+    border: 1px solid var(--admin-border);
+    border-radius: var(--admin-radius-sm);
+  }
+  .admin-number-stepper button {
+    flex: 1;
+    min-height: 44px;
+  }
+  .admin-number-stepper button + button {
+    border-top: 0;
+    border-left: 1px solid var(--admin-border);
+  }
+  /* The suffix label is positioned against the field, whose right edge is now
+     the stepper's: shift it back over the input's own edge. */
+  .admin-number-field > span.pointer-events-none {
+    right: calc(94px + 8px);
+  }
+  /* The weight editor is the one field whose own width (72px) leaves no room
+     to type once the stepper is a sibling. */
+  .wl-weight {
+    width: 5.5rem;
+  }
+  /* The shared control classes land at ~36px and ~38px, under the binding
+     44px touch floor (AUDIT #486). Raised here rather than in the layer so a
+     caller's height utility cannot shrink them back on a phone. */
+  .admin-btn,
+  .admin-input {
+    min-height: 44px;
   }
 }

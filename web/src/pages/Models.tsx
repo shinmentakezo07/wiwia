@@ -236,11 +236,19 @@ function WeightEditor(props: {
 }) {
   const [value, setValue] = useState(String(props.weight));
   const dirty = value !== String(props.weight);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The last weight this field committed. Enter and the debounce both commit,
+  // and without this a single keystroke PATCHed twice (two audit rows, two
+  // config writes) — AUDIT #378.
+  const savedRef = useRef<number | null>(null);
 
   // Track the server value while idle so a refetch corrects the field, but
   // never yank the box out from under someone mid-edit.
   useEffect(() => {
-    if (!dirty) setValue(String(props.weight));
+    if (!dirty) {
+      setValue(String(props.weight));
+      savedRef.current = props.weight;
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.weight]);
 
@@ -249,22 +257,47 @@ function WeightEditor(props: {
     saveRef.current = props.onSave;
   });
 
+  const save = useCallback((n: number) => {
+    if (savedRef.current === n) return;
+    savedRef.current = n;
+    saveRef.current(n);
+    // Show exactly what was committed. ``parseInt`` truncates a typed decimal,
+    // and leaving "2.5" in the box kept ``dirty`` true forever, so every later
+    // refetch was ignored and the field never agreed with the server
+    // (AUDIT #378).
+    setValue(String(n));
+  }, []);
+
   useEffect(() => {
     if (!dirty || props.disabled) return;
     const n = parseInt(value, 10);
     if (!Number.isFinite(n) || n < 1) return;
-    const t = setTimeout(() => saveRef.current(n), 500);
-    return () => clearTimeout(t);
-  }, [value, dirty, props.disabled]);
+    const t = setTimeout(() => {
+      timerRef.current = null;
+      save(n);
+    }, 500);
+    timerRef.current = t;
+    return () => {
+      clearTimeout(t);
+      if (timerRef.current === t) timerRef.current = null;
+    };
+  }, [value, dirty, props.disabled, save]);
 
   const commit = useCallback(() => {
+    // Enter commits now, so disarm the debounce first: leaving it armed PATCHed
+    // the same weight a second time 500 ms later (AUDIT #378).
+    if (timerRef.current !== null) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
     const n = parseInt(value, 10);
     if (!Number.isFinite(n) || n < 1) {
       setValue(String(props.weight));
       return;
     }
-    if (n !== props.weight) saveRef.current(n);
-  }, [value, props.weight]);
+    if (n !== props.weight) save(n);
+    else setValue(String(n));
+  }, [value, props.weight, save]);
 
   if (props.disabled) {
     return (

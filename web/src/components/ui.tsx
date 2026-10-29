@@ -136,7 +136,8 @@ export function NumberInput(props: {
   /** Forwarded to the inner input — Enter/Escape handling lives on callers. */
   onKeyDown?: (e: ReactKeyboardEvent<HTMLInputElement>) => void;
 }) {
-  const { value, onChange, min, step, suffix, disabled, onKeyDown, ...rest } = props;
+  const { value, onChange, min, step, suffix, disabled, onKeyDown,
+          className, ...rest } = props;
   const stepN = step === "any" || step == null ? 1 : step;
   const num = value === "" ? null : Number(value);
   const atMin = min != null && num != null && !Number.isNaN(num) && num <= min;
@@ -160,7 +161,10 @@ export function NumberInput(props: {
         min={min}
         step={step}
         disabled={disabled}
-        className={suffix ? "pr-16" : undefined}
+        // Merged, not overwritten: `{...rest}` used to carry the caller's
+        // className back over this one, so a suffixed field lost its `pr-16`
+        // and the USD/hrs label sat under the typed number (AUDIT #377).
+        className={suffix ? `pr-16 ${className ?? ""}`.trim() : className}
         {...rest}
       />
       {suffix && (
