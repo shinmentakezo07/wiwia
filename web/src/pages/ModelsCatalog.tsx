@@ -38,10 +38,10 @@ function providerHue(provider: string): number {
 function providerAccent(provider: string): CSSProperties {
   const h = providerHue(provider);
   return {
-    ["--p" as string]: `hsl(${h} 80% 68%)`,
-    ["--p-soft" as string]: `hsl(${h} 80% 68% / 0.12)`,
-    ["--p-border" as string]: `hsl(${h} 80% 68% / 0.22)`,
-    ["--p-glow" as string]: `hsl(${h} 80% 60% / 0.09)`,
+    ["--p" as string]: `hsl(${h} 88% 74%)`,
+    ["--p-soft" as string]: `hsl(${h} 88% 74% / 0.16)`,
+    ["--p-border" as string]: `hsl(${h} 88% 74% / 0.30)`,
+    ["--p-glow" as string]: `hsl(${h} 92% 66% / 0.15)`,
   } as CSSProperties;
 }
 
@@ -74,7 +74,7 @@ function aliasChipsByGroup(aliases: Record<string, string>): Record<string, Alia
 function Stat(props: { value: number; label: string }) {
   return (
     <div className="text-center">
-      <div className="font-mono text-2xl font-semibold text-[var(--admin-text)] sm:text-3xl" style={{ fontFamily: MONO }}>
+      <div className="font-mono text-2xl font-semibold text-[var(--admin-text)] drop-shadow-[0_0_14px_rgba(255,255,255,0.12)] sm:text-3xl" style={{ fontFamily: MONO }}>
         {props.value}
       </div>
       <div className="mt-1 text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--admin-text-dim)]">
@@ -92,7 +92,7 @@ function FilterChip(props: { active: boolean; onClick: () => void; children: Rea
       onClick={props.onClick}
       className={`rounded-full border px-3 py-1.5 text-[12px] font-medium transition-colors ${FOCUS_RING} ${
         props.active
-          ? "border-blue-500/40 bg-blue-500/10 text-blue-300"
+          ? "border-blue-400/60 bg-blue-500/20 text-blue-200 shadow-[0_0_16px_rgba(59,130,246,0.18)]"
           : "border-[var(--admin-border)] text-[var(--admin-text-muted)] hover:border-[var(--admin-border-hover)] hover:text-[var(--admin-text)]"
       }`}
     >
@@ -148,9 +148,9 @@ function GroupCard(props: { g: PublicModelGroup; aliases: AliasChip[] }) {
   const accent = providerAccent(provs[0] ?? "");
   return (
     <div className="group h-full" style={accent}>
-      <Card className="flex h-full flex-col p-5 transition-[border-color,box-shadow] duration-300">
+      <Card className="flex h-full flex-col p-5 transition-colors duration-300 hover:border-[var(--p-border)]">
       <div
-        className="pointer-events-none absolute inset-x-0 top-0 h-24 opacity-0 transition-opacity duration-500 group-hover:opacity-100"
+        className="pointer-events-none absolute inset-x-0 top-0 h-24 opacity-70 transition-opacity duration-500 group-hover:opacity-100"
         style={{ background: "radial-gradient(120% 100% at 50% 0%, var(--p-glow) 0%, transparent 70%)" }}
         aria-hidden
       />
@@ -183,15 +183,15 @@ function GroupCard(props: { g: PublicModelGroup; aliases: AliasChip[] }) {
       </p>
       <div className="relative mt-3 space-y-1.5">
         {g.deployments.map((d) => {
-          const dot = `hsl(${providerHue(d.provider)} 80% 62%)`;
+          const dot = `hsl(${providerHue(d.provider)} 90% 70%)`;
           return (
             <div
               key={`${d.provider}/${d.model_id}`}
-              className="flex items-center gap-2 rounded-lg border border-[var(--admin-border)] bg-white/[0.015] px-2.5 py-1.5 transition-colors hover:border-[var(--admin-border-hover)]"
+              className="flex items-center gap-2 rounded-lg border border-[var(--admin-border)] bg-white/[0.02] px-2.5 py-1.5 transition-colors hover:border-[var(--admin-border-hover)] hover:bg-white/[0.035]"
             >
               <span
-                className="size-1.5 shrink-0 rounded-full"
-                style={{ background: dot, boxShadow: `0 0 6px ${dot}` }}
+                className="size-2 shrink-0 rounded-full"
+                style={{ background: dot, boxShadow: `0 0 8px ${dot}` }}
                 aria-hidden
               />
               <span
@@ -210,7 +210,7 @@ function GroupCard(props: { g: PublicModelGroup; aliases: AliasChip[] }) {
       <div className="relative mt-auto pt-4">
         <Link
           to="/playground"
-          className={`inline-flex h-8 items-center gap-1.5 rounded-full border border-[var(--p-border)] bg-[var(--p-soft)] px-3 text-[12px] font-medium transition-colors duration-150 hover:bg-[var(--p-border)] ${FOCUS_RING}`}
+          className={`inline-flex h-8 items-center gap-1.5 rounded-full border border-[var(--p-border)] bg-[var(--p-soft)] px-3 text-[12px] font-medium text-[var(--p)] shadow-[0_0_14px_var(--p-glow)] transition-colors duration-150 hover:bg-[var(--p-border)] ${FOCUS_RING}`}
         >
           Try in playground
           <ArrowRight size={12} className="transition-transform duration-150 group-hover:translate-x-0.5" />
@@ -270,11 +270,11 @@ export function ModelsCatalogPage() {
     <div className="pb-20">
       {/* ════════ hero ════════ */}
       <section className="full-bleed relative flex min-h-[420px] items-center justify-center overflow-hidden bg-[var(--admin-bg)] px-6 pb-10 pt-14 text-center sm:px-12">
-        <HeroBeamBackdrop beams={HERO_BEAMS_CATALOG} className="opacity-50" />
+        <HeroBeamBackdrop beams={HERO_BEAMS_CATALOG} className="opacity-75" />
         {/* soft radial glow behind the headline */}
         <div
           className="pointer-events-none absolute left-1/2 top-6 h-64 w-[560px] max-w-full -translate-x-1/2 rounded-full"
-          style={{ background: "radial-gradient(circle, rgba(59,130,246,0.08) 0%, transparent 65%)" }}
+          style={{ background: "radial-gradient(circle, rgba(59,130,246,0.16) 0%, transparent 65%)" }}
           aria-hidden
         />
         <div className="animate-hero-enter relative z-10 mx-auto max-w-3xl">
