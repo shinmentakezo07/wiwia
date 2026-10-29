@@ -206,6 +206,54 @@ def _log_attempt(router: Router, ctx: RequestContext, dep: Deployment,
         ctx.request_id,
     )
 
+
+def _merge_logprobs(acc: dict[str, Any] | None,
+                    new: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Accumulate per-token logprobs across successive ``LogprobsDelta`` frames.
+
+    A non-streaming response carries the whole turn's tokens in one
+    ``logprobs.content`` list, while the stream delivers one frame per token —
+    so a reassembling arm must concatenate the list-valued members
+    (``content``, ``refusal``) rather than keep the last frame, which would
+    hand the caller logprobs for the final token only. Scalar members keep the
+    first value seen. ``None`` in, ``None`` out, so a provider that sends no
+    logprobs never grows a phantom field (see ``AssistantTurn.logprobs``).
+    """
+    if not new:
+        return acc
+    if not acc:
+        return new
+    out = dict(acc)
+    for key, val in new.items():
+        cur = out.get(key)
+        if isinstance(cur, list) and isinstance(val, list):
+            out[key] = cur + val
+        elif cur is None:
+            out[key] = val
+    return out
+
+
+def _retry_failure_error(status: int, body: str, headers: Any,
+                         dep: Deployment) -> WiwiError:
+    """The error to surface when a post-refresh retry *also* failed.
+
+    Built from the **retry's** status, body and ``Retry-After`` — never the
+    stale 401 that triggered the refresh. That 401 describes a token the
+    rotation just replaced, so reporting it told the caller to re-authenticate
+    for a credential that is already good, and charged the freshly-rotated key
+    with a *credential* failure (``status_for_key_pool`` maps 401 to the key
+    pool, and three of those retire a key — AUDIT #69). The stream pump has
+    always done this inline; both non-streaming arms share this construction so
+    the three paths cannot drift again (AUDIT #533).
+    """
+    err = error_from_provider_status(status, body, dep.provider.name)
+    _log_upstream_refusal(err, dep)
+    ra = _parse_retry_after(headers.get("retry-after"))
+    if ra is not None:
+        err.retry_after = ra
+    return err
+
+
 def _decode_response_guarded(adapter, status_code: int, content: bytes,
                              provider_name: str):
     """Decode a 200 body, converting any decode failure into a retryable 502.
@@ -413,6 +461,32 @@ def merge_resume_context(origin: RequestContext,
                                   if ou_su.cached_in_prompt is not None
                                   else su.cached_in_prompt),
             )
+    # Advisory channels are per-REQUEST, not per-attempt: a resumed attempt
+    # that dropped a construct the caller asked for must still say so, and the
+    # only readers (`build_log_event`, the `x-wiwi-*` response headers) look at
+    # the originating context. Without this, a mid-stream failover silently
+    # swallowed the warnings of the attempt that served the client — the exact
+    # "the caller learns nothing" shape AUDIT #498 fixed for the primary path
+    # (AUDIT #535). Deduped, because both attempts usually translate the same
+    # request and would otherwise repeat every message.
+    resumed_meta = getattr(resumed, "metadata", None) or {}
+    for key in ("translation_warnings", "tool_args_violations"):
+        extra = resumed_meta.get(key)
+        if not isinstance(extra, list) or not extra:
+            continue
+        bucket = origin.metadata.setdefault(key, [])
+        for msg in extra:
+            if msg not in bucket:
+                bucket.append(msg)
+    # Dollars saved by prompt caching are a per-attempt figure and the log
+    # reports one total, so they add. (`unpriced_model` needs no merge: pricing
+    # logs it per attempt and the caller's surface is a response header, so
+    # nothing reads it off the context — AUDIT #536.)
+    resumed_savings = resumed_meta.get("cache_savings")
+    if isinstance(resumed_savings, (int, float)) and resumed_savings:
+        origin.metadata["cache_savings"] = (
+            float(origin.metadata.get("cache_savings") or 0.0)
+            + float(resumed_savings))
 
 
 def accumulated_stream_usage(ctx: RequestContext) -> dl.UsageFinal | None:
@@ -684,6 +758,13 @@ class Gateway:
                             url, json=body, headers=retry_headers,
                             timeout=dep.timeout or dep.provider.timeout_s)
                     except httpx.TransportError as e:
+                        retry_latency = int((time.monotonic() - t0) * 1000)
+                        ctx.note_attempt(f"{dep.group}/{dep.model_id}",
+                                         dep.provider.name, key.label,
+                                         type(e).__name__, retry_latency,
+                                         model_id=dep.model_id)
+                        _log_attempt(self.router, ctx, dep, key,
+                                     type(e).__name__, retry_latency)
                         raise WiwiError(502, "api_connection_error",
                                         _transport_message(e),
                                         retryable=True) from e
@@ -700,6 +781,20 @@ class Gateway:
                             retry_resp.content, dep.provider.name)
                         self._price(ctx, dep, turn.usage)
                         return turn
+                    # The retry failed too. Record it as the second attempt it
+                    # is, then surface the retry's own error — the credential
+                    # was just rotated, so the 401 says nothing about this
+                    # answer (AUDIT #533).
+                    retry_latency = int((time.monotonic() - t0) * 1000)
+                    ctx.note_attempt(f"{dep.group}/{dep.model_id}",
+                                     dep.provider.name, key.label,
+                                     f"http_{retry_resp.status_code}",
+                                     retry_latency, model_id=dep.model_id)
+                    _log_attempt(self.router, ctx, dep, key,
+                                 f"http_{retry_resp.status_code}", retry_latency)
+                    raise _retry_failure_error(retry_resp.status_code,
+                                               retry_resp.text,
+                                               retry_resp.headers, dep)
             raise err
         ctx.note_attempt(f"{dep.group}/{dep.model_id}", dep.provider.name, key.label,
                          "ok", latency, model_id=dep.model_id)
@@ -816,6 +911,13 @@ class Gateway:
                             timeout=timeout)
                         retry_resp = await retry_cm.__aenter__()
                     except httpx.TransportError as e:
+                        retry_latency = int((time.monotonic() - t0) * 1000)
+                        ctx.note_attempt(f"{dep.group}/{dep.model_id}",
+                                         dep.provider.name, key.label,
+                                         type(e).__name__, retry_latency,
+                                         model_id=dep.model_id)
+                        _log_attempt(self.router, ctx, dep, key,
+                                     type(e).__name__, retry_latency)
                         raise WiwiError(502, "api_connection_error",
                                         f"upstream {type(e).__name__}",
                                         retryable=True) from e
@@ -841,8 +943,37 @@ class Gateway:
                                      "ok_after_refresh",
                                      int((time.monotonic() - t0) * 1000))
                     else:
+                        # The refresh rotated the credential and the retry
+                        # still failed: record the second attempt and surface
+                        # *its* error, not the stale 401 (AUDIT #533). The body
+                        # must be read before the response is released, exactly
+                        # as the pump does on this arm.
+                        retry_latency = int((time.monotonic() - t0) * 1000)
+                        try:
+                            raw = await retry_resp.aread()
+                        except httpx.TransportError as e:
+                            await retry_cm.__aexit__(None, None, None)
+                            ctx.note_attempt(f"{dep.group}/{dep.model_id}",
+                                             dep.provider.name, key.label,
+                                             type(e).__name__, retry_latency,
+                                             model_id=dep.model_id)
+                            _log_attempt(self.router, ctx, dep, key,
+                                         type(e).__name__, retry_latency)
+                            raise WiwiError(502, "api_connection_error",
+                                            f"upstream {type(e).__name__}",
+                                            retryable=True) from e
+                        ctx.note_attempt(f"{dep.group}/{dep.model_id}",
+                                         dep.provider.name, key.label,
+                                         f"http_{retry_resp.status_code}",
+                                         retry_latency, model_id=dep.model_id)
+                        _log_attempt(self.router, ctx, dep, key,
+                                     f"http_{retry_resp.status_code}",
+                                     retry_latency)
                         await retry_cm.__aexit__(None, None, None)
-                        raise err
+                        raise _retry_failure_error(
+                            retry_resp.status_code,
+                            raw.decode(errors="replace"),
+                            retry_resp.headers, dep)
                 else:
                     raise err
             else:
@@ -857,6 +988,26 @@ class Gateway:
         arg_bufs: dict[int, list[str]] = {}
         usage = ir.Usage()
         stop_reason: ir.StopReason = "stop"
+        # Carriers this arm used to drop while the pump kept them (AUDIT #534):
+        # provider-hosted tool results, per-token logprobs, and the matched stop
+        # sequence. All three are IR fields the sync encoders read, so losing
+        # them here meant a non-streaming caller of a force_stream provider
+        # received a turn that differed from the same request streamed.
+        server_blocks: list[dict[str, Any]] = []
+        logprobs: dict[str, Any] | None = None
+        stop_sequence: str | None = None
+        # Advisory tool-arg validation, same schemas as the pump: builtin tools
+        # are provider-hosted and carry no schema, so they are excluded.
+        tool_schemas = {t.name: t.parameters_json_schema
+                        for t in (ctx.ir_req.tools or [])
+                        if t.builtin is None}
+        # Repetition-loop detection (AUDIT #108/#534): the pump aborts a runaway
+        # generation; without it here, a looping model on this arm burns to
+        # `max_tokens` and bills for all of it.
+        loop_limit = (self.router.settings.stream_loop_limit
+                      if self.router.settings.stream_loop_detection else 0)
+        loop_detector = LoopDetector(loop_limit)
+        loop_tripped = False
         # Set once the adapter reported a real terminal (Finish or
         # StreamEnd). An abrupt upstream close without one is a
         # truncated turn, not a successful one (AUDIT #284).
@@ -904,15 +1055,29 @@ class Gateway:
                 the pre-content phase is allowed to be far longer than a gap
                 between content chunks (AUDIT #356).
                 """
-                nonlocal usage, stop_reason, saw_terminal
+                nonlocal usage, stop_reason, saw_terminal, stop_sequence
+                nonlocal logprobs, loop_tripped
                 content = False
                 for d in adapter.decode_stream_event(evt.event, evt.data):
-                    if isinstance(d, dl.TextDelta):
+                    if isinstance(d, dl.StreamStart):
+                        # Providers that report prompt/cache usage up front
+                        # (Anthropic's ``message_start``) put it here, and a
+                        # closing frame may never arrive. ``usage_fallback``
+                        # reads this when the usage frame carries no prompt
+                        # count — the pump records it for the same reason.
+                        ctx._stream_start_usage = d  # type: ignore[attr-defined]
+                    elif isinstance(d, dl.TextDelta):
                         text_parts.append(d.text)
                         content = True
+                        if loop_detector.feed(d.text):
+                            loop_tripped = True
                     elif isinstance(d, dl.ThinkingDelta):
                         thinking_parts.append(d.text)
                         content = True
+                        # Reasoning text is fed too: a model can run away inside
+                        # its thinking trace (AUDIT #280).
+                        if loop_detector.feed(d.text):
+                            loop_tripped = True
                     elif isinstance(d, dl.ToolCallOpen):
                         open_calls[d.index] = ir.ToolUsePart(
                             id=d.id, name=d.name, args={}, raw_args="")
@@ -933,6 +1098,23 @@ class Gateway:
                             else:
                                 tc.raw_args = raw
                             tool_calls.append(tc)
+                            # Advisory, never stream-failing — the same check
+                            # the pump runs at every Close (AUDIT #534).
+                            self._check_tool_args(ctx, tc.name, raw,
+                                                  tool_schemas.get(tc.name))
+                    elif isinstance(d, dl.ServerToolResultDelta):
+                        # A provider-hosted tool's result block, carried
+                        # verbatim onto the turn so the sync encoders can
+                        # re-emit it (AUDIT #534). Dropping it lost the search
+                        # hits the model reasoned over.
+                        if isinstance(d.block, dict):
+                            server_blocks.append(d.block)
+                        content = True
+                    elif isinstance(d, dl.LogprobsDelta):
+                        # Per-token logprobs: concatenated, because a
+                        # non-streaming response reports the whole turn in one
+                        # ``content`` list (AUDIT #534).
+                        logprobs = _merge_logprobs(logprobs, d.logprobs)
                     elif isinstance(d, dl.UsageFinal):
                         usage = ir.Usage(
                             prompt_tokens=d.prompt,
@@ -944,6 +1126,7 @@ class Gateway:
                         )
                     elif isinstance(d, dl.Finish):
                         stop_reason = d.stop_reason
+                        stop_sequence = d.stop_sequence
                         saw_terminal = True
                     elif isinstance(d, dl.StreamEnd):
                         saw_terminal = True
@@ -997,12 +1180,27 @@ class Gateway:
                 evt = parser.feed_line(line)
                 if evt is not None and _apply_event(evt):
                     via_stream_saw_content = True
+                if loop_tripped:
+                    # A repetition loop is a model-quality failure, not a
+                    # provider or credential fault. 400 is the one status
+                    # ``status_for_key_pool`` treats as saying nothing about the
+                    # key, and ``retryable=False`` keeps the retry loop from
+                    # re-burning the same prompt on another deployment — both
+                    # required by AUDIT #108. The outer handler bills what was
+                    # delivered before this raises (AUDIT #534).
+                    raise WiwiError(
+                        400, "api_error",
+                        f"model loop detected ({loop_limit} repeating chunks)")
             # Flush any frame buffered without a trailing blank line
             # (DeepSeek/B.A.I close with "data: [DONE]\n"). Without this the
             # final content delta is silently dropped.
             _flushed = parser.flush()
             if _flushed is not None:
                 _apply_event(_flushed)
+                if loop_tripped:
+                    raise WiwiError(
+                        400, "api_error",
+                        f"model loop detected ({loop_limit} repeating chunks)")
             # Flush still-open tool calls (stream ended mid-tool-call).
             for idx in sorted(open_calls):
                 tc = open_calls[idx]
@@ -1015,6 +1213,11 @@ class Gateway:
                 else:
                     tc.raw_args = raw
                 tool_calls.append(tc)
+                # Validate the calls that never got a Close, exactly as the
+                # pump's ``_validate_leftover_tool_args`` does — otherwise the
+                # advisory signal covers only cleanly-closed calls (AUDIT #534).
+                self._check_tool_args(ctx, tc.name, raw,
+                                      tool_schemas.get(tc.name))
         except asyncio.CancelledError:
             # Client went away mid-read. Price what was already consumed before
             # re-raising, exactly as the streaming pump does — otherwise the
@@ -1057,7 +1260,9 @@ class Gateway:
         _log_attempt(self.router, ctx, dep, key, "ok", latency)
         dep.latencies.append(latency)
         turn = ir.AssistantTurn(text="".join(text_parts), tool_calls=tool_calls,
-                                stop_reason=stop_reason, usage=usage)
+                                stop_reason=stop_reason, usage=usage,
+                                stop_sequence=stop_sequence,
+                                server_blocks=server_blocks, logprobs=logprobs)
         thinking = "".join(thinking_parts)
         if thinking:
             turn.thinking.append(ir.ThinkingPart(text=thinking))
@@ -2519,8 +2724,15 @@ class Gateway:
         ctx.cache_hit = u.cached_tokens > 0
         ctx.metadata["cache_savings"] = self._cache_savings(dep, model_key, u)
         if state.unpriced:
-            ctx.metadata["unpriced_model"] = True
-            ctx.metadata["unpriced_model_id"] = model_key
+            # An unpriced model bills $0.00, which reads as "free" rather than
+            # "unknown". The metadata keys this used to write had no reader
+            # anywhere (AUDIT #536), so say it where an operator looks — the
+            # proxy log, beside the request. The caller's own surface is the
+            # ``x-wiwi-unpriced-model`` header the app sets at admission.
+            log.warning("unpriced_model", model=model_key,
+                        provider=dep.provider.name, group=dep.group,
+                        prompt_tokens=u.prompt_tokens,
+                        completion_tokens=u.completion_tokens)
 
     def _cache_savings(self, dep: Deployment, model_key: str,
                        u: ir.Usage) -> float:
@@ -2577,8 +2789,11 @@ class Gateway:
         ctx.metadata["cache_savings"] = self._cache_savings(dep, model_key,
                                                             ctx.usage)
         if state.unpriced:
-            ctx.metadata["unpriced_model"] = True
-            ctx.metadata["unpriced_model_id"] = model_key
+            # Same disposition as ``_price``: the log line is the surface
+            # (AUDIT #536).
+            log.warning("unpriced_model", model=model_key,
+                        provider=dep.provider.name, group=dep.group,
+                        prompt_tokens=u.prompt, completion_tokens=u.output)
 
 
 def flatten_request_text(ctx: RequestContext) -> str:

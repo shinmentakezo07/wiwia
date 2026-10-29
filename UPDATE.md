@@ -4598,3 +4598,46 @@ Tests: `tests/test_fix_round172.py` (34).
   descriptions and warns on every drop it makes (images in function
   responses, `redacted_thinking`, file ids); `parallel_tool_calls=true` and
   tool `cache_control`/`defer_loading` drops are reported to the caller.
+
+## Round 181 — the two non-streaming upstream arms stop drifting from the pump (2026-10-29)
+
+`core/gateway.py` has three hand-written upstream paths — `_call_once` (JSON),
+`_complete_via_stream` (streaming-only upstream, non-streaming caller) and
+`_pump_once` (streaming caller) — and only the pump got each later fix. Two of
+the drifted behaviours were translation-relevant. Full register: AUDIT
+#533–#537. Tests: `tests/test_fix_round181.py` (11).
+
+**Translation-relevant changes:**
+
+- **A failed post-refresh retry now surfaces the retry's own error.** Both
+  non-streaming arms raised the error built from the *first* response, so a
+  real 500/429 behind a rotated 401 reached the caller as
+  `401 authentication_error` with no `Retry-After`, and the freshly-rotated
+  key took a credential-failure hit (`status_for_key_pool`). One helper,
+  `_retry_failure_error`, builds the error from the retry (status, body,
+  `Retry-After`) and both arms `note_attempt` the retry's status, matching
+  `_pump_once:1981-1992`. Note `error_from_provider_status` normalizes a bare
+  5xx to 502, so a 500 upstream arrives as `502 api_connection_error` carrying
+  the upstream's own message.
+- **`_complete_via_stream` keeps the three carriers it dropped.**
+  `ServerToolResultDelta` accumulates into `turn.server_blocks` (reachable:
+  OpenCode's Messages route delegates to `AnthropicAdapter` and declares
+  `force_stream`), `LogprobsDelta` concatenates its list members instead of
+  keeping only the last frame's tokens, and `Finish.stop_sequence` is carried
+  onto `AssistantTurn.stop_sequence` (the #497 encoder half was already right).
+- **The same arm now runs the pump's two post-steps**: `_check_tool_args` on
+  every closed and leftover open tool call, and the loop detector built from
+  `stream_loop_limit`/`stream_loop_detection`. A tripped loop raises
+  `WiwiError(400, "api_error", …)` — the one status the key pool ignores, and
+  `retryable=False` so the router does not re-burn the prompt (#108) — instead
+  of billing a repetition loop out to `max_tokens`.
+- **The advisory channels survive a resumed attempt.** `merge_resume_context`
+  now extends `translation_warnings` and `tool_args_violations` (deduped) and
+  sums `cache_savings`, so a mid-stream failover that dropped a construct is
+  visible in `x-wiwi-translation-warnings` and the request log (#498 shape).
+- **`tool_args_violations` has a caller surface**: `x-wiwi-tool-args-warnings`,
+  emitted beside the translation list by the same filter/truncation helper and
+  documented in `docs/API_REFERENCE.md`. `unpriced_model`/`response_cached`
+  metadata writes are gone — the header and `LogEvent.response_cache_hit`
+  already carried those facts, so the metadata copies were a second convention
+  for one value.

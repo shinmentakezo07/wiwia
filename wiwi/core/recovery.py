@@ -242,8 +242,11 @@ def parse_retry_after(value: str | None) -> float | None:
     return None
 
 
-MODEL_BAD_DEAD_STREAK = 3  # consecutive creds-valid/model-bad probes before a
-                           # deployment circuit is marked permanently dead
+MODEL_BAD_DEAD_STREAK = 3  # consecutive creds-valid/model-bad probes before the
+                           # escalation is logged as an error. The circuit keeps
+                           # escalating its (capped) backoff rather than going
+                           # permanently dead, so the deployment is re-probed
+                           # once `probe_backoff_cap_s` elapses (AUDIT #537).
 PROBE_MAX_TOKENS = 1
 _PROBE_CONCURRENCY = 4
 
@@ -505,15 +508,24 @@ class HealthHealer:
             # generation, so it proves nothing about whether the key can serve
             # traffic. Growing the key's restore streak here restored keys that
             # were never exercised (AUDIT #97); reset it instead. The
-            # deployment still escalates toward dead.
+            # deployment still escalates.
             kst.streak = 0
             if credit_dep:
                 self._circuits["dep"].trip(did)
-                if self._circuits["dep"].streak(did) >= MODEL_BAD_DEAD_STREAK:
-                    self._circuits["dep"].mark_dead(did)
-                    log.error("healer_deployment_marked_dead",
+                streak = self._circuits["dep"].streak(did)
+                if streak >= MODEL_BAD_DEAD_STREAK:
+                    # This used to `mark_dead`, which ``blocked()`` honours
+                    # forever and nothing clears: ``_collect_pairs`` then
+                    # filtered the deployment out of every later sweep, so three
+                    # 400/404 probes — including a 400 caused by the probe's own
+                    # shape — retired it from healing for the life of the
+                    # process (AUDIT #537). Keep escalating the circuit instead:
+                    # its backoff caps at ``probe_backoff_cap_s``, so a model
+                    # that comes back is probed again within that window and the
+                    # deployment heals through the normal restore path.
+                    log.error("healer_deployment_model_bad",
                               provider=dep.provider.name, group=dep.group,
-                              model=dep.model_id, detail=detail)
+                              model=dep.model_id, detail=detail, streak=streak)
                     return
                 log.warning("healer_probe_model_bad",
                             provider=dep.provider.name, key=key.label,

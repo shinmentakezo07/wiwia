@@ -15,6 +15,7 @@ from wiwi.config import (
     WiwiConfig,
 )
 from wiwi.core.recovery import (
+    MODEL_BAD_DEAD_STREAK,
     Backoff,
     CircuitBreaker,
     HealthHealer,
@@ -388,7 +389,16 @@ class TestHealthHealer:
         await h.stop()
 
     @respx.mock
-    async def test_400_on_cooled_dep_marks_it_dead(self):
+    async def test_400_on_cooled_dep_escalates_without_retiring_it(self):
+        """A model-bad streak escalates the backoff, it does not retire the dep.
+
+        AUDIT #537: this used to assert ``circuit.dead``, which nothing clears —
+        ``_collect_pairs`` then filtered the deployment out of every later sweep,
+        so three 400/404 probes (including a 400 raised by the probe's own
+        shape) ended its healing for the life of the process. The escalation is
+        now the circuit's capped backoff, so the deployment is probed again once
+        that window elapses.
+        """
         r, dep, _key = _sick_dep_router()
         respx.post(OPENAI_URL).respond(
             status_code=400, json={"error": {"message": "model not found"}})
@@ -396,8 +406,13 @@ class TestHealthHealer:
         await h._sweep()
         await h._sweep()
         await h._sweep()
-        assert h._circuits["dep"].dead(("g", "p1", "m"))
+        did = ("g", "p1", "m")
+        assert not h._circuits["dep"].dead(did)
+        assert h._circuits["dep"].streak(did) >= MODEL_BAD_DEAD_STREAK
         assert dep.cooldown_until > time.monotonic()  # never restored
+        # Still a candidate: a zero-base circuit is unblocked immediately, so
+        # the next sweep probes it again instead of skipping it forever.
+        assert h._collect_pairs(), "the deployment was retired from healing"
         await h.stop()
 
     @respx.mock

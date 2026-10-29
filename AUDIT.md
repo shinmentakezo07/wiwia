@@ -18519,3 +18519,234 @@ a day-0/day-2 case asserting `[3, 0, 100]` with the middle bucket empty.
 
 **Status: fixed** — round 180.
 
+---
+
+## ✅ Fixed — `wiwi/core/` sweep (2026-10-29)
+
+Read of `core/gateway.py` (2,739 lines), `core/recovery.py`, `core/context.py`
+and `core/telemetry.py` against their callers. Five findings; none is a
+duplicate of an existing entry (checked by symptom and by file:line). The theme
+is the same one #356/#528 came from: **`core/gateway.py` has three hand-written
+upstream call paths, and they have drifted.** `_call_once` (non-streaming JSON),
+`_complete_via_stream` (streaming-only upstream, non-streaming caller) and
+`_pump_once` (streaming caller) each re-implement connect, 401-refresh,
+accumulation and accounting; only one of them gets each fix.
+
+### 533. A failed 401-refresh retry is reported as the *stale* 401, and the rotated key is charged for it
+
+🟠 **High (mis-retires a healthy credential)** — `wiwi/core/gateway.py:703`
+(`_call_once`), `:843-845` (`_complete_via_stream`); contrast `:1981-1992`
+(`_pump_once`)
+
+Both non-streaming arms build `err` from the *first* response and, when the
+post-refresh retry also fails, fall through to `raise err` without ever looking
+at `retry_resp`. The pump does the opposite and says so in a comment — "surface
+the *retry's* error, not the stale 401" — rebuilding the error from the retry's
+status and body and parsing its `Retry-After`.
+
+Three consequences, all in the wrong direction:
+
+1. The caller is told `401 authentication_error` when the upstream's real answer
+   was, say, 500 or 429. A client that handles 401 by re-authenticating is sent
+   to fix a credential that the refresh already fixed.
+2. `status_for_key_pool` maps that stale 401 to a **credential** failure
+   (`wiwi/providers/base.py:67-73`), so a key that was rotated microseconds
+   earlier takes an `err_count` hit and a cooldown. AUDIT #69 records that three
+   401/403s retire a key — this path manufactures them out of unrelated 5xx/429
+   answers.
+3. The retry's `Retry-After` is dropped, so the deployment cooldown is computed
+   from nothing, and no `AttemptRecord` is written for the retry (only
+   `ok_after_refresh` is, on success — round 178). The request log shows one
+   attempt that "returned 401" while the upstream returned two different
+   statuses.
+
+**Fix sketch:** mirror `_pump_once:1981-1992` in both arms — on a non-200 retry,
+build the error with `error_from_provider_status(retry_resp.status_code,
+retry_resp.text, …)`, call `_log_upstream_refusal`, copy `Retry-After` onto it,
+`ctx.note_attempt(…, f"http_{retry_resp.status_code}", …)`, and raise *that*.
+
+**Status: fixed** — round 181 (`tests/test_fix_round181.py::test_refresh_retry_failure_surfaces_the_retry_error`,
+`::test_refresh_retry_failure_on_the_force_stream_arm_surfaces_the_retry_error`).
+Both arms now go through one new helper, `_retry_failure_error(status, body,
+headers, dep)`: it builds the error with `error_from_provider_status`, logs the
+refusal once, and copies `Retry-After` onto the error. Each arm also
+`note_attempt`s the retry's own `http_<status>` before raising, and the
+transport-error arms record `transport_error` the same way, so the request log
+shows both upstream answers instead of one phantom 401. The rotated key is no
+longer charged: the raised status is the retry's, and `status_for_key_pool` only
+sees that one.
+
+### 534. `_complete_via_stream` drops three delta kinds and two post-processing steps the pump performs
+
+🟡 **Medium (silent fidelity loss on Cline / WorkBuddy / OpenCode)** —
+`wiwi/core/gateway.py:900-960` (`_apply_event`), `:945-946` (the `Finish` arm);
+contrast `_pump_once` at `:2018-2019` (loop detector), `:2035-2095` (all arms),
+`:2205` (`_validate_leftover_tool_args`)
+
+`streaming/deltas.py` defines thirteen delta variants. `_apply_event` handles
+nine. Missing:
+
+* `ServerToolResultDelta` — the provider-hosted tool result (`web_search` hits,
+  `tool_reference` entries). It is emitted by
+  `wiwi/providers/anthropic_adapter.py:1012`, and `opencode_adapter` delegates
+  its Messages route to that adapter (`opencode_adapter.py:532`,
+  `self._msg = AnthropicAdapter()`) while declaring `force_stream = True`
+  (`:527`). A non-streaming Messages request to an OpenCode `claude-*`
+  deployment therefore returns a turn whose `server_blocks` is empty, and the
+  encoder has nothing to re-emit — the search hits the model reasoned over are
+  gone from the response.
+* `LogprobsDelta` — emitted by `wiwi/providers/openai_adapter.py:719`, reachable
+  through OpenCode's chat route. `/v1/chat/completions` with `logprobs: true`
+  returns tokens with logprobs when streamed and **without** them when not.
+* `Finish.stop_sequence` — the arm copies `stop_reason` only (`:946`), so
+  `AssistantTurn.stop_sequence` stays `None` on this path. #497 fixed the
+  encoder half; the carrier still drops it here.
+
+Plus two steps the pump runs and this arm does not: the loop detector
+(`stream_loop_detection` / `stream_loop_limit` are read *only* at `:2018-2019`),
+so a repetition loop on a non-streaming request to a `force_stream` provider
+burns to `max_tokens` where the streaming path aborts; and
+`_validate_closed_tool_args` / `_validate_leftover_tool_args`, so the advisory
+tool-arg signal is never produced for these providers.
+
+**Fix sketch:** extend `_apply_event` with the three missing arms
+(`ServerToolResultDelta` → append to a `server_blocks` list; `LogprobsDelta` →
+accumulate; `Finish` → carry `stop_sequence`), and run the same two post-steps
+the pump runs. Better: one shared delta→turn folder used by both arms, so the
+next delta variant cannot be added to one and forgotten in the other.
+
+**Status: fixed** — round 181 (`tests/test_fix_round181.py::test_force_stream_reassembly_keeps_server_blocks_logprobs_and_stop_sequence`,
+`::test_force_stream_reassembly_aborts_a_repetition_loop`). The three missing
+arms are in (`ServerToolResultDelta` → `server_blocks`, `LogprobsDelta` →
+`_merge_logprobs` which concatenates the list members instead of keeping the
+last frame, `Finish` → `stop_sequence`), and the two post-steps now run:
+`ToolCallClose` and the leftover open calls both go through
+`self._check_tool_args`, and the read loop feeds `TextDelta`/`ThinkingDelta`
+chunks to a `LoopDetector` built from `stream_loop_limit` /
+`stream_loop_detection`. A tripped loop raises `WiwiError(400, "api_error", …)`
+— 400 is the one status `status_for_key_pool` ignores, and the default
+`retryable=False` stops the router re-burning the same prompt, matching the
+pump's #108 rationale. The fuller fix (one shared delta→turn folder) is still
+open as design work; the arms now agree, which is what this entry tracked.
+
+### 535. `merge_resume_context` folds a resumed attempt's usage but not its `metadata`
+
+🟡 **Medium (the caller is not told a constraint was dropped)** —
+`wiwi/core/gateway.py:342-415` (`merge_resume_context`), `:56-67`
+(`_record_translation_warnings` writes to *this* context's metadata),
+`:2672-2725` (`build_log_event` reads the originating context only)
+
+A mid-stream failover runs the continuation on a fresh `RequestContext`
+(`_attempt_resume`), and every advisory signal is written to *that* context:
+`translation_warnings`, `tool_args_violations`, `cache_savings`,
+`unpriced_model`. The merge folds `attempts`, `usage`, `cost`, `cache_hit` and
+`_stream_usage` — and stops there. So a resumed attempt that dropped a
+construct (an `anthropic-beta`-gated field, a `strict` mode, a sampling param)
+contributes no warning: the `x-wiwi-translation-warnings` header the app builds
+from `ctx.metadata` (`app.py:814`) is empty and the request-log column is empty,
+which is exactly the "the caller learns nothing" shape #498 was fixed for.
+
+`cache_savings` and `unpriced_model` need a decision rather than a blind merge
+(the origin's `cache_savings` is a dollar figure for its own attempt), but
+`translation_warnings` and `tool_args_violations` are per-request advisory lists
+and should be extended, not overwritten.
+
+**Fix sketch:** in `merge_resume_context`, extend `translation_warnings` and
+`tool_args_violations` from the resumed context (create the list if absent), and
+decide explicitly whether `unpriced_model`/`cache_savings` propagate — writing
+the answer down either way.
+
+**Status: fixed** — round 181 (`tests/test_fix_round181.py::test_merge_resume_context_carries_the_advisory_channels`).
+`merge_resume_context` now extends `translation_warnings` and
+`tool_args_violations` from the resumed context (deduped, order-preserving) and
+**sums** `cache_savings` — the two attempts are billed separately, so the dollar
+figures add. The `unpriced_model` half is moot: #536 removed that write
+entirely, since its reader was the `x-wiwi-unpriced-model` header, which is
+built from the pricing result rather than from metadata.
+
+### 536. Three `ctx.metadata` keys are write-only — nothing reads them
+
+⚪ **Low (dead channel; one of them is documented as reaching the request log)**
+— `wiwi/core/gateway.py:53` (`tool_args_violations`), `:2520-2523` and
+`:2577-2581` (`unpriced_model`, `unpriced_model_id`), `wiwi/server/app.py:2418-2421`
+(same pair, with the comment "Surfaced to the request log via metadata"),
+`:2772` (`response_cached`); `wiwi/logging_core/events.py` has no field for any
+of them
+
+`build_log_event` (`gateway.py:2672-2725`) reads `cache_savings`,
+`response_cache_hit`, `translation_warnings`, `request_body` and `response_body`
+— not these three. `_with_warnings` (`app.py:795-822`) forwards only
+`translation_warnings`. Repo-wide, `tool_args_violations` appears only in the
+gateway and in `tests/test_fix_round20.py`, which asserts the *write*;
+`response_cached` appears only at its single write. AUDIT #141 noticed the
+`tool_args_violations` half in passing ("a flag nothing reads") but no entry
+tracks it.
+
+Consequence: the advisory tool-arg signal reaches an operator only as the
+`tool_args_*` proxy-log line from `streaming/validation.py`, never the request
+log or the caller; and the `unpriced_model` comment promises a log surface that
+does not exist (the response *header* path does work — `app.py:2429`).
+
+**Fix sketch:** either add the three to `LogEvent` (plus the DB column and the
+`_with_warnings` merge for the tool-arg list) or delete the writes and correct
+the comments. Half a channel is worse than none: it reads as wired.
+
+**Status: fixed** — round 181 (`tests/test_fix_round181.py::test_tool_arg_violations_reach_the_caller_as_a_header`,
+`::test_both_advisory_channels_ride_the_same_response`,
+`::test_pricing_no_longer_writes_metadata_nothing_reads`). The tool-arg list got
+the reader it was missing rather than a new `LogEvent` field: `_with_warnings`
+(`app.py`) now emits `x-wiwi-tool-args-warnings` beside the translation list
+(shared `_warning_header_value` filter/truncation, both documented in
+`docs/API_REFERENCE.md`), and #535 makes the resumed attempt's list reach it.
+The request log still has no `tool_args_violations` column — the header is the
+caller surface, documented as such, and the operator surface stays the
+`tool_args_*` proxy-log lines; adding the column would be a schema change with
+no consumer today. `unpriced_model`/`unpriced_model_id` were **deleted** from both `_price` and
+`_price_stream` and replaced with a `log.warning("unpriced_model", …)` carrying
+model, provider, group and token counts — the caller surface was always the
+header, and the metadata copy had no reader. The misleading
+"Surfaced to the request log via metadata" comment at `app.py:2418` went with
+it. `response_cached` was deleted too: `LogEvent.response_cache_hit` already
+carries the fact, so the metadata key was a second convention for one value.
+
+### 537. A deployment the healer marked "dead" is never probed again
+
+⚪ **Low (in-memory only — a restart clears it; traffic is unaffected)** —
+`wiwi/core/recovery.py:245` (`MODEL_BAD_DEAD_STREAK`), `:510-517`
+(`mark_dead`), `:415-419` and `:446` (`ok()` gates on `blocked()`, which is true
+for a dead target), `:486` (the only `clear`)
+
+`_probe_pair` marks the deployment's circuit dead after three consecutive
+`CREDS_VALID_MODEL_BAD` verdicts, and `probe_verdict` maps **400 and 404** to
+that verdict. `CircuitBreaker.blocked()` returns True for a dead target, so
+`_collect_pairs` filters the deployment out of every later sweep, and the only
+`clear(did)` sits on the HEALTHY-restore path — which is now unreachable for
+that key. A transient 404 (model momentarily unpublished, a bad deploy on the
+provider side) or a 400 raised by the *probe's own* shape is therefore enough to
+retire the deployment from healing for the life of the process, with one
+`healer_deployment_marked_dead` error line and no way to undo it short of a
+restart. Nothing in the admin API clears it (no healer route exists).
+
+Note this is the *healer's* circuit, not the deployment's cooldown: traffic
+still resumes when `cooldown_until` expires, so the cost is that a recovered
+deployment is never restored *early* and never probed again.
+
+**Fix sketch:** treat "dead" as a long backoff rather than a permanent state
+(the breaker already has `trip()` for that), or clear the dep circuit when a
+real client request through that deployment succeeds (`record_success`), or
+expose a reset on the admin healer surface.
+
+**Status: fixed** — round 181 (`tests/test_fix_round181.py::test_model_bad_deployment_is_probed_again_after_the_backoff`;
+`tests/test_recovery.py::TestHealthHealer::test_400_on_cooled_dep_escalates_without_retiring_it`,
+which pinned the old `dead` assertion and was rewritten). The first of the three
+sketches: "dead" is now a long backoff. `_probe_pair`'s
+`CREDS_VALID_MODEL_BAD` branch no longer calls `mark_dead` — it trips the dep
+circuit, so the capped exponential backoff keeps escalating, and once the window
+elapses `_collect_pairs` offers the deployment again. At
+`streak >= MODEL_BAD_DEAD_STREAK` it logs `healer_deployment_model_bad` at
+error level (the operator signal the old `mark_dead` line carried) and returns;
+below that it stays a `healer_probe_model_bad` warning. The `mark_dead` state
+itself is left in `CircuitBreaker` for its other callers, and the comment on
+`MODEL_BAD_DEAD_STREAK` now says what the constant actually gates.
+
+

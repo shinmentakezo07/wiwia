@@ -792,36 +792,54 @@ def _alias_first_hop(entry_map: dict, name: str) -> str | ModelAliasEntry | None
 _MAX_WARNING_HEADER = 900
 
 
-def _with_warnings(headers: dict[str, str], ctx: RequestContext) -> dict[str, str]:
-    """Add the caller-visible translation warnings to a response's headers.
+def _warning_header_value(raw: object) -> str:
+    """Join a metadata warning list into one legal header value, or ``""``.
 
-    The ``translation_warnings`` channel was built for exactly this: a
-    construct the caller asked for that the provider could not honour
-    (a hosted tool the backend cannot run, a ``strict`` mode it cannot
-    enforce, a sampling param it has no field for). Until now the warnings
-    went to the *operator* — the proxy log and the request log — and the
-    CALLER, who set the constraint and pays for the request, learned
-    nothing (AUDIT #498).
-
-    The header is the only way to tell the caller, because the response
-    body is dialect-owned: an OpenAI-shaped body cannot carry an
-    Anthropic-shaped note without breaking the client's schema
-    expectations. A header is additive and every HTTP client surfaces it.
-
-    Absent when there are no warnings, so a clean request's response is
-    byte-identical to what it was before.
+    Entries are filtered to non-empty strings because the list is written by
+    several producers (adapter warnings, the tool-arg validator) and a header
+    built from a non-string would raise inside the response path.
     """
-    warnings = ctx.metadata.get("translation_warnings")
-    if not isinstance(warnings, list) or not warnings:
-        return headers
-    msgs = [w for w in warnings if isinstance(w, str) and w]
+    if not isinstance(raw, list):
+        return ""
+    msgs = [w for w in raw if isinstance(w, str) and w]
     if not msgs:
-        return headers
+        return ""
     value = "; ".join(msgs)
     if len(value) > _MAX_WARNING_HEADER:
         value = value[:_MAX_WARNING_HEADER - 1] + "…"
+    return value
+
+
+def _with_warnings(headers: dict[str, str], ctx: RequestContext) -> dict[str, str]:
+    """Add the caller-visible advisory warnings to a response's headers.
+
+    Two channels, both built for exactly this — a construct the caller asked
+    for that the request could not honour as stated:
+
+    * ``translation_warnings`` — the provider cannot express it (a hosted tool
+      the backend cannot run, a ``strict`` mode it cannot enforce, a sampling
+      param it has no field for). Until AUDIT #498 these went to the *operator*
+      only, so the caller, who set the constraint and pays for the request,
+      learned nothing.
+    * ``tool_args_violations`` — the model emitted a tool call whose arguments
+      do not match the schema the caller declared. Advisory: the call is still
+      delivered, because agents handle their own errors, but an agent that
+      validates what it receives needs to know the arguments it was handed are
+      malformed. Written by the gateway since round 20 and read by nothing until
+      AUDIT #536.
+
+    The header is the only way to tell the caller: the response body is
+    dialect-owned, and an OpenAI-shaped body cannot carry an Anthropic-shaped
+    note without breaking the client's schema expectations. Headers are
+    additive and every HTTP client surfaces them. Both are absent when empty, so
+    a clean request's response is byte-identical to what it was before.
+    """
     out = dict(headers)
-    out["x-wiwi-translation-warnings"] = value
+    for key, header in (("translation_warnings", "x-wiwi-translation-warnings"),
+                        ("tool_args_violations", "x-wiwi-tool-args-warnings")):
+        value = _warning_header_value(ctx.metadata.get(key))
+        if value:
+            out[header] = value
     return out
 
 
@@ -2415,10 +2433,6 @@ def create_app(config: WiwiConfig) -> FastAPI:
                              session_id=_session_id(request))
         ctx.span = req_span
         ctx.budget_reserved = reserved
-        if unpriced_model:
-            # Surfaced to the request log via metadata and to the client via
-            # the x-wiwi-unpriced-model response header below.
-            ctx.metadata["unpriced_model"] = unpriced_model
         success_headers = {"x-wiwi-request-id": request_id}
         # Telemetry (spec C): a caller can quote the trace id to an operator to
         # pull the exact trace. Present only when tracing is enabled.
@@ -2769,7 +2783,6 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         request_id=ctx.request_id,
                         model=resp_model,
                     ))
-                ctx.metadata["response_cached"] = True
             if (store_response and state_.response_store is not None
                     and body.get("store") is not False):
                 # Persist the dialect response object so GET replays it verbatim,
