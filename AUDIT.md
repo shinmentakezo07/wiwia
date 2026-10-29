@@ -18075,3 +18075,52 @@ read then sees the documented type.
 **Verified:** the same probe reports `errors: 0`. Regression is parametrized
 over `None`/`5`/`1.5`/`[1]`/`{"a": 1}`/`True`/`b"x"` and fails pre-fix with
 `AttributeError`.
+
+---
+
+## ✅ Fixed — round 175: a configured-but-broken Redis response cache failed silently (2026-10-29)
+
+Found by running the backend against a live `redis-server` and then against an
+unreachable one; the second run produced no output of any kind.
+
+### 520. `RedisResponseCache` swallowed every Redis error with no log and no counter, so an outage was indistinguishable from a cold cache
+
+**Severity:** 🟠 Medium (silent cost + correctness expectation — the operator is billed at the uncached rate while believing a shared cache is serving) · **Status: fixed** — round 175 (`tests/test_fix_round175.py`)
+
+**Files:** `wiwi/cache/redis_cache.py`
+
+**Trigger.** `general_settings.redis_url` (or `REDIS_URL`) set, Redis later
+down, credentials wrong, or the server restarted under a different ACL. Every
+`get`/`set`/`delete` raised inside the backend, the bare `except Exception`
+turned that into `None`/a no-op, and nothing else happened: no `structlog` line,
+no counter, no `/health` field, no metric. Every request then missed, so the
+gateway silently paid upstream for traffic the operator had configured a shared,
+restart-durable cache to absorb. A cold cache and a dead cache looked identical.
+
+**Why the existing guards did not catch it.** `build_response_cache` refuses to
+hide exactly this trap for the *missing-package* case (`except ImportError` →
+warn + fall back to memory). That guard is import-time only; the runtime path it
+is meant to protect — Redis constructed but failing — had no equivalent. Round
+34's contract ("a cache must never fail a request") is correct and unchanged,
+but it was read as "must also be silent", which is the same class of defect as
+`record_spend`'s bare `except` returning `True` (AUDIT #179).
+
+**The fix.** Swallowing stays: a request still never fails and still degrades to
+a miss. The failures are now observable:
+
+- `RedisResponseCache.errors` counts every failed `get`/`set`/`delete`;
+- one `redis_cache_error` **warning** (with `op`, `url`, exception type and
+  message) fires on the healthy → broken transition and *not* per request, so a
+  hot path cannot flood the log during an outage;
+- the first success afterwards clears the latch, so a later outage warns again
+  without a recovery line per request;
+- a corrupt/foreign value stays an ordinary miss (`_decode` returns `None`) and
+  is deliberately *not* counted as an outage — that is a producer bug, not a
+  connection failure.
+
+**Verified:** against live `redis-server` on `127.0.0.1:6379` the healthy path
+round-trips bytes/headers/`stored_at` and emits nothing; against
+`127.0.0.1:1` it emits exactly one warning per outage. The regression test fails
+against the pre-fix body (`errors == 0`, no log) and passes after.
+
+---
