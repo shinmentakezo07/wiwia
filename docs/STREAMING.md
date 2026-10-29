@@ -68,6 +68,8 @@ Client disconnect: the surface sets `ctx.cancel`; the pump notices, releases the
 
 **Tool-call framing in adapters** (`openai_adapter.py` reference): index-tracked `ToolCallOpen`/`Close`, **one pair per call**; a repeated `id` on an open index continues that call (OpenAI sends `id`+`name` only on a call's first chunk, but several OpenAI-compatible upstreams echo both on every arguments chunk), and only a *different* id closes the previous call and opens a new one; all parallel tools close at `finish_reason`; `raw_args` preserved on `ToolUsePart`.
 
+When that close-and-reopen repeats an index, the adapter must emit the `ToolCallClose` for the superseded call **before** the new `ToolCallOpen` — never just replace its own bookkeeping. Any encoder that keys blocks by index loses the handle to the first block otherwise, and the client is told to open a block it is never told to close (AUDIT #243 fixed the adapters, #523 the encoders; both halves are required, and the encoders now close a superseded entry defensively as well).
+
 ---
 
 ## 3. StreamTape — mid-stream failover & client resume (`resume.py`)
@@ -75,7 +77,9 @@ Client disconnect: the surface sets `ctx.cancel`; the pump notices, releases the
 A bounded ring buffer of emitted deltas with two roles:
 
 1. **Mid-stream failover**: on upstream death after content has flowed, the tape holds the text deltas already emitted so a retry can prepend them as an assistant-prefix **continuation request** (the Anthropic capture-and-resume pattern). `build_continuation_messages()` synthesizes those messages from the tape; the retry lands on a fallback deployment and the client sees one continuous stream.
-2. **Last-Event-ID replay**: when a client reconnects with `Last-Event-ID`, the **journal** store re-serves frames after that point. (`StreamTape.replay` is a separate in-process mechanism with no production caller — see the Historical note.)
+2. **Last-Event-ID replay**: when a client reconnects with `Last-Event-ID`, the **journal** store re-serves frames after that point. (`StreamTape.replay` is a separate in-process mechanism with no production caller — see the Historical note. It returns the recorded entries verbatim, failing over to `build_continuation_messages` only when the entries were evicted; it is *not* a filtered client view.)
+
+**The byte budget charges every stored delta.** `_delta_size` is the eviction currency, so a delta that is primitive-typed but left out of the sum makes the ring unbounded in practice. `LogprobsDelta` was one: recorded on the tape, charged 0 bytes, so a `logprobs` stream retained ~5 MB while `tape.bytes` stayed at 0 and the 256 KiB bound never evicted (AUDIT #521). It is charged its serialized size now. `ServerToolResultDelta` is deliberately still 0 — a `web_search`-heavy turn would otherwise evict the client-dispatched deltas the continuation needs. Do not confuse "not consumed by the continuation" with "not stored": builtin deltas are stored and are returned by `replay()`; only `build_continuation_messages` filters them (`tc.builtin is None`).
 
 ---
 
@@ -116,6 +120,8 @@ Ports the Vercel AI SDK partial-json approach for streaming tool-call arguments.
 ### Tool-args validation (`validation.py`)
 On `ToolCallClose`, validates accumulated args against the tool's JSON schema (`MAX_TOOL_ARGS_BYTES` caps accumulation). Violations are logged via structlog and attached to request metadata (`tool_args_violations`) — the client still receives the tool call, flagged as advisory.
 
+`validate_tool_args` is a **never-raise** seam: it sits inside the pump's mid-stream handler, where an exception costs the caller a `StreamError` and cools the deployment/key for a payload that carries no validation semantics. Every caller-controlled shape is therefore guarded rather than trusted — a non-dict *schema*, a non-list `required`, a non-dict `properties`, an unhashable `required` member, and (since AUDIT #522) a non-`str` `raw_args` are all degraded to "skip this check", never raised on. Anything added here must keep that property.
+
 ---
 
 ## 6. Wire encoders (client side)
@@ -130,6 +136,11 @@ Each dialect owns a `StreamEncoder` in `wiwi/wire/`:
 | (gateway pump, not the encoder) | `/v1/messages` | `ping` — emitted by `core/gateway.py` when the upstream goes quiet for `stream_ping_interval_s`, gated on `ctx.surface == "messages"`. The encoder does not produce it. |
 
 Encoders consume the delta taxonomy in order; legality is the adapters' guarantee, so encoders do not attempt full defensive parsing. They do carry a small number of **targeted drops** for sequences that would otherwise corrupt the client's view — an `ToolCallArgsDelta` arriving with no preceding `ToolCallOpen` is dropped rather than synthesized against the wrong `output_index` (all three encoders), and signature-only `ThinkingDelta`s are ignored on surfaces with no representation for them. These are narrow guards, not general malformed-input handling. SSE framing (BOM, CRLF, `:` heartbeat comments, multi-line `data:` joining) is handled by `LineSSEParser` upstream; outbound framing helpers live in `sse.py`.
+
+**A repeated `ToolCallOpen` on a still-open index is handled, not dropped.** It is *legal* IR — the adapters produce it deliberately, closing the previous call before re-opening (see the adapter rule in §2, and `_flush_open_tools`), and all four do. The block-oriented encoders used to key their per-block state by IR index and overwrite it unconditionally, losing the only handle to the first block: `AnthropicStreamEncoder` then emitted a `content_block_start` with no matching `content_block_stop`, and `ResponsesStreamEncoder` an `output_item.added` with no `output_item.done` — both render as a truncated call on a message that otherwise finishes normally (AUDIT #523). They now close the superseded entry first. `ChatStreamEncoder` needs no equivalent: a chunk stream has no open/close invariant, so a repeat Open merges into the same `tool_calls[index]` with the id replaced.
+
+The broader rule this illustrates: **a delta is "malformed" only if the adapters cannot produce it.** Anything a well-behaved adapter emits is the encoder's problem to render, and an open/close pair it is told to start must be one it finishes.
+
 
 ---
 

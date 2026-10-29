@@ -8,7 +8,7 @@ in its log row). On the OpenAI Chat and Anthropic Messages surfaces the ``id``
 is an opaque handle, so the mismatch is cosmetic. On the Responses surface it
 is not: ``resp_<request_id>`` is dereferenced by ``GET /v1/responses/{id}`` and
 by ``previous_response_id``, so a hit handed the caller an id naming *someone
-else's* stored object (AUDIT #523).
+else's* stored object (AUDIT #524).
 
 The body is already dialect-shaped at this point and this module has no
 business branching on dialects, so the rebase is mechanical: keep everything

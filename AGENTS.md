@@ -104,7 +104,7 @@ with no `Finish`. All delta variants are `@dataclass(frozen=True)`.
 | `wiwi/streaming/` | `deltas.py` (taxonomy), `sse.py`, `partial_json.py`, `validation.py`, `resume.py` (`StreamTape`), `tape_store.py` (`JournalStore`), `coalesce.py`, `loopdetect.py` |
 | `wiwi/auth/` | `service.py` (`AuthService`: virtual keys SHA-256 at rest, budgets), `users.py`, `keys.py` |
 | `wiwi/ratelimit/` | `memory.py`, `redis.py` |
-| `wiwi/cache/` | `build_response_cache()`, `keygen.py`, `response_cache.py`, `redis_cache.py`, `interface.py` |
+| `wiwi/cache/` | `build_response_cache()`, `keygen.py`, `response_cache.py`, `redis_cache.py`, `interface.py`, `hit_rebase.py` (rebases a hit's `id`/`created` onto the serving request) |
 | `wiwi/cost/` | `pricing.py` |
 | `wiwi/logging_core/` | `db_sink.py`, `events.py`, `subsystem.py` (structlog workers), `hist.py`, `retention.py` |
 | `wiwi/server/` | `app.py` (~7.2k lines: `create_app`, `AppState`, `lifespan`, the error handlers, and the routes that are still inline closures), `config_store.py` (SQL DDL + admin persistence), `response_store.py` (Responses-API state), `backup.py`, `metrics.py`, `stats.py`, `static/` (built SPA) |
@@ -116,7 +116,7 @@ with no `Finish`. All delta variants are `@dataclass(frozen=True)`.
 | `wiwi/config.py` | Pydantic v2 config models + `load_config`; `PROVIDER_TYPES` is the single source of truth |
 | `wiwi/main.py` | CLI entrypoint (`wiwi.main:cli`) |
 | `web/` | Admin SPA + public site (React 19, TS strict, Vite 6, Tailwind 4) — 64 components in `src/pages/`, builds to `wiwi/server/static/` |
-| `tests/` | pytest suite — 213 files collecting ~3,642 tests; bugfix regressions in `test_fix_roundN.py` |
+| `tests/` | pytest suite — 223 files collecting ~3,750 tests; bugfix regressions in `test_fix_roundN.py` |
 | `docs/` | Design specs (see **Important Files**) |
 
 ## Development Commands
@@ -292,10 +292,10 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
 - **Property tests:** `hypothesis` (`test_property_roundtrip.py`) for IR/codec round-trips and
   stream-SSE legality invariants.
 - **Regression convention:** new bugfix regressions go in the next unused
-  `tests/test_fix_roundN.py`. Latest present: `test_fix_round168.py` → next is `round169`
+  `tests/test_fix_roundN.py`. Latest present: `test_fix_round177.py` → next is `round178`
   (confirm numerically, never with a plain `ls` — it sorts lexicographically, so `round9.py`
-  looks newest). 165 such files exist; gaps at 1, 5 (`test_bugfix_round5.py` is the legacy
-  filename), 102 and 147.
+  looks newest). 176 such files exist; gaps at 1, 102 and 147 (`test_bugfix_round5.py` is the
+  legacy filename for 5).
 - **Subsystem map (rough):** `test_codecs.py` / `test_extra_body.py` — wire unit; `test_router.py`,
   `test_round_robin.py`, `test_fix_cycle_failover.py` — routing; `test_admin_api.py`,
   `test_config*.py`, `test_provider_admin.py`, `test_pricing_admin.py` — server/admin;
@@ -303,8 +303,8 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
   `test_recovery.py`, `test_cache_and_journal.py` — streaming/recovery; `test_<provider>_adapter.py`
   — per-adapter.
 - **Coverage expectation:** none configured; the bare gate is the full suite green. Don't trust a
-  pinned pass-count in docs/README badges — run the suite. Measured baseline 2026-10-22:
-  `3632 passed, 11 skipped, 5 warnings in 254.29s` (3,642 collected). Some warnings are `aiosqlite`
+  pinned pass-count in docs/README badges — run the suite. Measured baseline 2026-10-29:
+  `3739 passed, 11 skipped, 2 warnings in 242s` (3,750 collected). Some warnings are `aiosqlite`
   worker threads outliving their event loop (`AUDIT.md` #475) — harmless, but escalating that
   warning class to an error charges the failure to an unrelated test, so don't.
 - **Verification gate before claiming done:** `python3 -m pytest tests/ -q && ruff check wiwi/ tests/`
