@@ -442,7 +442,7 @@ class GeminiAdapter(WarningMixin):
         _cands = as_list(data.get("candidates"))
         cand = as_dict(_cands[0]) if _cands else {}
         content = as_dict(cand.get("content"))
-        turn = ir.AssistantTurn(raw=data)
+        turn = ir.AssistantTurn()
         for part in as_list(content.get("parts")):
             if not isinstance(part, dict):
                 continue

@@ -733,7 +733,7 @@ class AnthropicAdapter(WarningMixin):
 
     def decode_response(self, status: int, body: bytes) -> ir.AssistantTurn:
         data = orjson.loads(body)
-        turn = ir.AssistantTurn(raw=data)
+        turn = ir.AssistantTurn()
         for block in as_list(data.get("content")):
             if not isinstance(block, dict):
                 # An explicit null / typed-wrong entry must be skipped, not

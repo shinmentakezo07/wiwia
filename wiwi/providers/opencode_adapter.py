@@ -1267,7 +1267,7 @@ def _encode_responses_request(req: ir.Request, model_id: str,
 
 def _decode_responses_response(body: bytes) -> ir.AssistantTurn:
     data = orjson.loads(body)
-    turn = ir.AssistantTurn(raw=data if isinstance(data, dict) else {})
+    turn = ir.AssistantTurn()
     if not isinstance(data, dict):
         return turn
     for item in as_list(data.get("output")):

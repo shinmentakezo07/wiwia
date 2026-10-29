@@ -253,7 +253,7 @@ class OpenRouterAdapter(OpenAIAdapter):
             )
         elif not isinstance(content, str):
             content = message.get("refusal") if isinstance(message.get("refusal"), str) else ""
-        turn = ir.AssistantTurn(text=content, raw=data)
+        turn = ir.AssistantTurn(text=content)
 
         # OpenRouter returns reasoning in ``reasoning`` (string) or
         # ``reasoning_details`` (array of structured objects).  The string

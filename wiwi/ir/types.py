@@ -492,7 +492,6 @@ class AssistantTurn:
     stop_reason: StopReason = "stop"
     stop_sequence: str | None = None  # matched stop sequence (Anthropic surfaces it)
     usage: Usage = field(default_factory=Usage)
-    raw: dict[str, Any] | None = None  # provider-native response for passthrough extras
     # Blocks a provider-executed tool produced, in emission order
     # (``web_search_tool_result``, ``tool_search_tool_result``, ...). The
     # Anthropic encoder re-emits them after the calls they answer — without
