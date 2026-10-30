@@ -1262,6 +1262,17 @@ class AnthropicStreamEncoder:
             out = self._close_block()
             for idx in sorted(self._tool_blocks):
                 out.extend(self._close_block(tool_index=idx))
+            # The error frame is TERMINAL: nothing content-bearing may follow
+            # it. The caller still calls final_frame() on this path to end the
+            # stream well-formed (message_delta + message_stop), and that
+            # flush emitted the buffered interleaved text/thinking as FRESH
+            # content blocks *after* the error — the client saw blocks 1..n,
+            # then ``event: error``, then more blocks and their stops. Drop the
+            # buffer (and any unflushed thinking signature, which would ride
+            # the same late flush).
+            self._deferred.clear()
+            self._deferred_chars = 0
+            self._pending_sig = None
             out.append(self._evt("error", {
                 "type": "error",
                 "error": {"type": _stream_error_type(d),

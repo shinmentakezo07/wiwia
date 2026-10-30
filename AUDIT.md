@@ -18749,4 +18749,410 @@ below that it stays a `healer_probe_model_bad` warning. The `mark_dead` state
 itself is left in `CircuitBreaker` for its other callers, and the comment on
 `MODEL_BAD_DEAD_STREAK` now says what the constant actually gates.
 
+---
+
+## Round 182 — the cache / server / streaming / wire sweep (2026-10-30)
+
+Eighteen entries from an audit pass over `wiwi/cache`, `wiwi/server`,
+`wiwi/streaming` and `wiwi/wire`. Regression coverage:
+`tests/test_fix_round182.py` (24 tests), with `tests/test_fix_round172.py`
+(`::test_chat_decode_reads_file_part`) and `tests/test_bugfix_round5.py`
+(`::test_responses_encoder_args_buf_is_instance_attr`) updated where the audit
+changed the behaviour they pinned. Baseline after this round: `3837 passed, 13
+skipped` (227 test files), ruff clean.
+
+### 538. A warning header over the cap appends U+2026, turning a billed 200 into a 500
+
+🟠 **High (billed turn lost; SDK retry double-bills)** —
+`wiwi/server/app.py:792` (`_MAX_WARNING_HEADER`), `:795-822`
+(`_warning_header_value`), consumed at `:2822` (streaming `StreamingResponse`
+headers) and `:2876` (`ORJSONResponse`)
+
+`_warning_header_value` joined the advisory warning list and truncated at 900
+chars with `value[:899] + "…"`. Starlette encodes response headers as **latin-1
+at response-construction time**, so the ellipsis raised `UnicodeEncodeError`
+before a byte went out. Reachable on any Messages→OpenAI route where ~7 tools
+carry `cache_control`/`defer_loading` (each emits a 71-char warning,
+`providers/openai_adapter.py:463-470`), or on any request whose warnings pass
+900 chars. The blanket `except Exception` at `:2878` then answered 500 —
+**after** `record_spend` at `:2839` had charged the key, so the SDK's retry
+billed the same turn twice. The streaming branch raised after
+`handed_off[0] = True` and after the journal opened, leaving the journal
+unfinished and unreleased.
+
+The same class sat at `:2470`: `x-wiwi-unpriced-model` was set to
+`ir_req.model`, a client/config-supplied group name that may carry any
+Unicode.
+
+**Fix sketch:** truncate with ASCII `...` and coerce the value to latin-1
+(`encode("latin-1", "replace").decode("latin-1")`); do the same for the
+unpriced-model header.
+
+**Status: fixed** — round 182
+(`tests/test_fix_round182.py::test_warning_header_value_is_latin1_safe_and_ascii_truncated`,
+`::test_many_dropped_tool_flags_still_answer_200_with_a_header`). The ellipsis
+is ASCII and every header value is coerced through latin-1 with `replace`, so
+a non-latin-1 character in an operator-named model or tool name can no longer
+raise. The end-to-end test drives 13 dropped tool flags (923 chars of
+warnings) through `/v1/messages` on an OpenAI deployment and asserts a 200
+with a latin-1-safe header.
+
+### 539. Deleting a YAML-defined provider never recorded the decision
+
+🟠 **High (deleted account — and its plaintext key — resurrects on restart)** —
+`wiwi/server/app.py:4216-4245` (`admin_delete_provider`),
+`wiwi/server/config_store.py:407-422` (`delete_provider`), `:1244-1250`
+(`_load_db_config`); the rename path already did it at `:4415-4426`
+
+`DELETE /admin/providers/{name}` called `config_store.delete_provider(name)`,
+which is a plain `DELETE ... WHERE name`. A YAML-defined account has **no row**,
+so nothing recorded the operator's decision and the next startup rebuilt the
+account from `providers:` — plaintext key included. For Cline it was worse: the
+lifespan re-applies the persisted default models
+(`_apply_cline_default_models`), so the "deleted" account was auto-redeployed
+into `cline:<model>` and became routable again.
+`tests/test_provider_admin.py:144` only asserted that the *groups* were empty
+after restart, so it never saw the account come back.
+
+**Fix sketch:** mirror the rename path — after `delete_provider`, upsert the
+account with `detached=True` so `_load_db_config` pops the YAML copy.
+
+**Status: fixed** — round 182
+(`tests/test_fix_round182.py::test_deleting_a_yaml_provider_survives_restart`).
+The delete handler now writes the tombstone. That exposed a second half: the
+startup merge skipped a *deployment* tombstone whenever the account was already
+gone (`acct is None: continue`), so the YAML-built group kept a Deployment
+object pointing at a deleted provider and stayed routable — the old test passed
+only because the provider itself came back. `_load_db_config` now matches
+deployment tombstones by provider **name** (`app.py:1326-1355`), which is
+equivalent for the normal case and correct for a tombstoned account.
+
+### 540. A corrupt response-cache entry raised out of the hit path
+
+🟡 **Medium (undialected 500, no request log, un-refunded admission)** —
+`wiwi/server/app.py:2633-2658`
+
+`served = rebase_cached_body(orjson.loads(entry.payload), ctx.request_id)` ran
+**outside** the `try` that begins at `:2696`, so an entry whose payload is not a
+JSON object (a foreign writer sharing the Redis namespace, an older format, a
+partial restore) escaped as `JSONDecodeError` → 500. Reproduced with a stub
+cache returning `CacheEntry(payload=b'{"not":"what we stored"', ...)`: no
+request-log row, and the admission-time rate-limit/budget reservation was never
+refunded. `wiwi/cache/redis_cache.py` states the contract the request path broke:
+a cache must never fail a request.
+
+**Fix sketch:** guard the decode, treat a failure as a MISS, drop the entry.
+
+**Status: fixed** — round 182
+(`tests/test_fix_round182.py::test_corrupt_cache_entry_degrades_to_a_miss`). The
+parse and rebase are wrapped; a non-object or unparseable payload logs
+`response_cache_corrupt_entry`, calls `cache.delete`, and falls through to the
+upstream dispatch. `CacheBackend` gained `delete` (the Redis backend already
+had one; the memory backend now implements it) so the bad entry is dropped
+rather than re-failing on every identical request for the rest of the TTL.
+
+### 541. The Cline OAuth callback never enforced its pending-session TTL
+
+⚪ **Low (a leaked state token stayed usable for the process lifetime)** —
+`wiwi/server/app.py:6367-6374`, session stamped at `:6288-6297`; contrast the
+Hermes callback at `:6670-6676`
+
+`cline_oauth_callback` popped the pending session and went straight to
+`exchange_code`. Expiry was applied only by `evict_expired_pending()`, which
+runs when a *new* flow starts, so an unused token never aged out. Hermes and
+WorkBuddy re-check `created_at`/`ttl_s` on the read path.
+
+**Fix sketch:** add the same `created_at`/`ttl_s` check before `exchange_code`.
+
+**Status: fixed** — round 182
+(`tests/test_fix_round182.py::test_cline_callback_rejects_an_expired_state_token`).
+The check runs after the pop (single-use is preserved) and answers the same
+400 the missing-session case does.
+
+### 542. A stream that ends with no usage never refunded its admission slot
+
+⚪ **Low (the reported trigger is narrower than it first looked)** —
+`wiwi/server/app.py:3040-3052` (`_teardown_tail`), `:1955-1989`
+(`_release_tpm_reservation`), `wiwi/ratelimit/memory.py:109-180` (`check`
+reserves in the key **and** global scopes), `:233-296` (`release`)
+
+The streaming teardown refunded the budget reservation and nothing else, so a
+request that reached the tail with `ctx.usage is None` kept its RPM slot and its
+`len(body)/4` estimated TPM in both scopes for the 60 s window. Every
+non-streaming error exit funnels through `_release_tpm_reservation`; this path
+did not. Note the audit's original trigger (a client abort before
+`UsageFinal`) does **not** reproduce: the pump prices the partial delivery
+(`gateway.py:2422-2426`, `:2492-2498`) and sets `ctx.usage`, which makes the
+reservation a real charge. The exposure is the exit where pricing itself could
+not run — its exception is suppressed so the client's error survives — and that
+exit is now refunded like every other.
+
+**Fix sketch:** call `await _release_tpm_reservation(ctx.auth, ctx)` in the
+tail's no-usage arm.
+
+**Status: fixed** — round 182
+(`tests/test_fix_round182.py::test_a_stream_that_exits_without_usage_refunds_its_slot`).
+The tail now routes the no-usage arm through `_release_tpm_reservation`, which
+releases the budget reservation and the estimated RPM/TPM events. It runs for
+master keys too: a `global_rpm`/`global_tpm` cap reserves a slot for every
+caller, and only the key-scoped windows are skipped for master.
+
+### 543. `/metrics` was bearer-only while every other operator surface accepts a session
+
+⚪ **Low (an admin logged into the console could not load the scrape endpoint)** —
+`wiwi/server/app.py:3590-3605`; the private guard it used lived at `:1705-1709`
+
+`prometheus_metrics` authorized with a bespoke `is_admin(request)` — an
+`hmac.compare_digest` over the bearer token. Every `/admin/*` route (and the
+SSE channel) authorizes through `require_admin_dep`, which resolves a signed
+session cookie **or** the bearer master key; README and `docs/ADMIN.md` both
+promise either credential. Two guards for one rule is how they drift.
+
+**Fix sketch:** `await require_admin_dep(request)` and delete `is_admin`.
+
+**Status: fixed** — round 182
+(`tests/test_fix_round182.py::test_metrics_accepts_an_admin_session_cookie`).
+The route now uses the shared guard and `is_admin` is gone, so a third
+convention cannot grow back.
+
+### 544. The last-admin guard was check-then-act across three awaits
+
+⚪ **Low (two concurrent demotions left zero DB admins)** —
+`wiwi/server/app.py:5830-5850`; lock added at `:1062-1068`
+
+`admin_patch_user` read the target, counted admins and patched — three awaits
+with nothing serializing them. Two concurrent `PATCH /admin/users/{uid}`
+demotions of the two remaining DB admins both read "2 admins", both passed the
+guard, and both committed. The synthetic master still worked, so nothing
+noticed until an operator needed a session admin.
+
+**Fix sketch:** serialize with an `asyncio.Lock` on `AppState`, like
+`provider_create_lock` (AUDIT #373).
+
+**Status: fixed** — round 182
+(`tests/test_fix_round182.py::test_concurrent_demotions_cannot_leave_zero_admins`).
+`AppState.user_mutation_lock` covers the read → count → write critical section;
+the test demotes both admins concurrently and asserts exactly one 200 and one
+400, with one admin left.
+
+### 545. Deleting a Cline default model popped the whole `cline:<id>` group
+
+⚪ **Low (an operator's own deployment in that group was deleted with it)** —
+`wiwi/server/app.py:5150-5185`
+
+`admin_delete_cline_default_model` did `state.router.groups.pop(group_name)`
+regardless of provider type. `cline:<model>` is an ordinary model group, so a
+deployment an operator attached to it by hand (any provider type) disappeared
+with the Cline ones.
+
+**Fix sketch:** filter to `d.provider.provider_type == "cline"`; pop the group
+only when nothing remains.
+
+**Status: fixed** — round 182
+(`tests/test_fix_round182.py::test_deleting_a_cline_default_model_keeps_other_providers`).
+Only the Cline deployments are removed and persisted as tombstones; the group
+survives with the others.
+
+### 546. `context_window_exceeded` encoded as `finish_reason: "stop"` on the Chat and Completions surfaces
+
+🟡 **Medium (a Chat client loses its auto-compact signal)** —
+`wiwi/ir/translation.py:51-64` (`_IR_TO_OPENAI_FINISH`), `:96-103`
+(`ir_to_openai_finish`); consumed by `wire/openai_chat.py` (sync and stream) and
+`wire/openai_completions.py`
+
+The IR vocabulary carries `context_window_exceeded` precisely so an overflow is
+distinguishable from a normal completion (`ir/types.py:16-25`), but the IR→OpenAI
+map had no entry for it, so the fallback produced `"stop"` — the one value an
+OpenAI-shaped client does *not* read as "the context is full". The Responses
+surface reports `incomplete` correctly (AUDIT #358), so the two OpenAI-shaped
+surfaces disagreed.
+
+**Fix sketch:** map `context_window_exceeded` → `length` (OpenAI's own spelling
+for "truncated for budget").
+
+**Status: fixed** — round 182
+(`tests/test_fix_round182.py::test_context_window_exceeded_maps_to_length`).
+`pause_turn`/`compaction` keep the documented fallback: they genuinely have no
+OpenAI spelling.
+
+### 547. The legacy `functions` / `function_call` tool protocol was silently dropped
+
+🟡 **Medium (a whole legacy tool catalog reached the model as nothing)** —
+`wiwi/wire/openai_chat.py:88-120` (role guard), `:126-137` (`function_call`),
+`:337-372` (`tools`), `:398-412` (`function_call` choice)
+
+Only `body["tools"]` was read, and only with `type == "function"`; `functions`
+was never consulted. On the message side the role guard coerced `"function"`
+to `"user"`, so a tool result arrived as ordinary chat text with the call left
+unanswered, and `assistant.function_call` was ignored entirely. Reproduced:
+`{"functions":[{"name":"f",...}]}` → `tools: []`, and a `function_call` +
+`role:"function"` replay → `[Message(assistant, []), Message(user, [Text("42")])]`.
+
+**Fix sketch:** treat a type-less `tools[]`/`functions[]` entry as
+`type=="function"`, lift `function_call` into a `ToolUsePart`, and decode the
+`function` role as a `ToolResultPart`.
+
+**Status: fixed** — round 182
+(`tests/test_fix_round182.py::test_legacy_functions_list_is_decoded_as_tools`,
+`::test_typeless_tools_entry_is_decoded_as_a_function`,
+`::test_legacy_function_call_replay_pairs_the_result`,
+`::test_legacy_function_call_sets_the_tool_choice`). The legacy wire carries no
+call id on either side of the pair, so `_legacy_call_id(name)` derives a
+deterministic id from the function name — the same name on both sides then
+pairs, which is exactly the association the old protocol encodes. A typeless
+`tools[]` entry is accepted whether the function object is wrapped or inline.
+The request-level `function_call` maps onto the same `ToolChoice` the modern
+`tool_choice` produces.
+
+### 548. `/v1/completions` rejected `logprobs: false` and `echo: false`
+
+🟡 **Medium (a shared parameter template 400'd on a no-op)** —
+`wiwi/wire/openai_completions.py:77-92`
+
+The guard was `if body.get(key) is not None: raise`. `false` is the **default**
+for both fields, so a client that sends one parameter template to every surface
+was refused for asking nothing the surface cannot do. In the same block,
+`best_of: "2"` slipped past `ir.coerce_int` (which returns `None` for a string)
+and landed in `extras`, where it was forwarded upstream as a real `best_of`
+request.
+
+**Fix sketch:** `if body.get(key) not in (None, False)` and reject a present
+but non-integer `best_of`.
+
+**Status: fixed** — round 182
+(`tests/test_fix_round182.py::test_completions_accepts_false_logprobs_and_echo`,
+`::test_completions_still_rejects_a_real_logprobs_request`,
+`::test_completions_rejects_a_non_integer_best_of`). A truthy request is still a
+400, and `best_of` must be an integer when present.
+
+### 549. The Anthropic encoder emitted content blocks after the terminal `error` event
+
+🟡 **Medium (a client saw blocks after the stream had failed)** —
+`wiwi/wire/anthropic_messages.py:1254-1283` (`StreamError` arm), `:1290-1300`
+(`final_frame`); caller `server/app.py:3216-3222`
+
+The `StreamError` arm closed the open blocks and emitted `event: error` but
+never cleared the interleaved-text buffer, so the `final_frame()` the app calls
+on the error path flushed that buffer as **fresh content blocks after the
+error**. Probe order: `content_block_stop` → `event: error` →
+`content_block_start`/`text_delta`/`content_block_stop` → `message_delta` →
+`message_stop`. The error frame is terminal by contract; nothing
+content-bearing may follow it.
+
+**Fix sketch:** clear `_deferred`/`_deferred_chars` (and the pending signature)
+in the `StreamError` arm.
+
+**Status: fixed** — round 182
+(`tests/test_fix_round182.py::test_anthropic_stream_error_drops_buffered_content`).
+The stream still terminates well-formed (`message_delta` + `message_stop`), it
+just no longer resurrects buffered content after the failure.
+
+### 550. A hosted `tool_search` item had one id in `output_item.added` and another in `output_item.done`
+
+🟡 **Medium (a client saw two items where the server had one)** —
+`wiwi/wire/openai_responses.py:1156-1180` (open), `:839-845` (close, pre-fix),
+helper at `:835-845`
+
+The open frame minted `ts_{req}_{n}` for a tool search and `ws_{req}_{n}`
+otherwise; the close frame always minted `ws_{req}_{n}` when the upstream sent
+no call id. So the same hosted item was announced as `ts_r_0` and completed as
+`ws_r_0`.
+
+**Fix sketch:** one helper used by both arms.
+
+**Status: fixed** — round 182
+(`tests/test_fix_round182.py::test_hosted_tool_search_uses_one_id_in_added_and_done`).
+`_hosted_item_id` picks `ts_`/`ws_` from the builtin and is called by both
+frames.
+
+### 551. Responses accumulated tool arguments with `+=` (quadratic)
+
+🟡 **Medium (event-loop stall on a large tool call)** —
+`wiwi/wire/openai_responses.py:1214`; the buffer is created at `:1163-1166`
+
+`t["args"] += d.args_fragment` re-copies the whole buffer per fragment: 256 KB
+of arguments in 8-byte fragments is gigabytes of memcpy **on the event loop**.
+The gateway pump and the Anthropic encoder already accumulate into a list and
+`"".join` once.
+
+**Fix sketch:** store a list, join in `_close_tool`.
+
+**Status: fixed** — round 182
+(`tests/test_fix_round182.py::test_responses_tool_args_accumulate_in_order`,
+which also pins the list shape). `tests/test_bugfix_round5.py::test_responses_encoder_args_buf_is_instance_attr`
+was updated to the list shape — its subject is per-encoder isolation, which is
+unchanged.
+
+### 552. A Chat `file` block with `file_id` decoded to an `ImagePart`
+
+⚪ **Low (a PDF file id was re-encoded as an `image` block and rejected)** —
+`wiwi/wire/openai_chat.py:186-196`; the encoder half at
+`providers/openai_adapter.py:144-150`
+
+`{"type":"file","file":{"file_id":…}}` decoded to `ImagePart(file_id=…)` while
+the `file_data` spelling of the same block decoded to `DocumentPart`. On an
+Anthropic upstream a document therefore rendered as an `image` block, which the
+API rejects. The adapter also had no `file_id` arm for a `DocumentPart`, so the
+reference was dropped on the way out.
+
+**Fix sketch:** decode to `DocumentPart(file_id=…)` and re-emit the reference in
+the adapter.
+
+**Status: fixed** — round 182
+(`tests/test_fix_round182.py::test_chat_file_id_decodes_to_a_document`).
+`tests/test_fix_round172.py::test_chat_decode_reads_file_part` was updated: it
+had pinned the ImagePart decode, which is the defect.
+
+### 553. The Chat `input_audio` arm had no type guard
+
+⚪ **Low (a non-string payload was forwarded verbatim)** —
+`wiwi/wire/openai_chat.py:161-176`; contrast the Responses twin at
+`wire/openai_responses.py:386-397`
+
+`AudioPart(b64=ia.get("data"), mime=f"audio/{ia.get('format') or 'wav'}")` passed
+whatever was there — probe: `AudioPart(b64=5, mime="audio/{'a': 1}")` — and the
+adapter serialized it into the upstream body, which 400s naming nothing the
+caller sent. The Responses codec already requires `isinstance(data, str) and data`.
+
+**Fix sketch:** mirror the Responses guard.
+
+**Status: fixed** — round 182
+(`tests/test_fix_round182.py::test_chat_input_audio_requires_a_string_payload`).
+The block is dropped rather than forwarded, and a non-string `format` falls back
+to `wav`.
+
+### 554. `with_history` swallowed a malformed `input` before the decoder could reject it
+
+⚪ **Low (the caller's turn vanished instead of a 400)** —
+`wiwi/wire/openai_responses.py:291-311`; the rejection it pre-empted is at
+`:330-345`
+
+`with_history` merged stored history and then unconditionally set
+`merged["input"] = items`, so a non-list/non-string `input` (`{"q": 1}`) was
+replaced by the history alone. Because the helper runs *before*
+`decode_request` (AUDIT #352's rejection), the caller's turn disappeared and the
+model answered a question nobody asked, with no error anywhere.
+
+**Fix sketch:** leave a malformed `input` untouched so the decoder's own
+rejection fires.
+
+**Status: fixed** — round 182
+(`tests/test_fix_round182.py::test_with_history_leaves_a_malformed_input_to_the_decoder`).
+
+### 555. `JournalStore.is_complete` read from cursor 0, hiding a zero-frame stream's done record
+
+⚪ **Low (latent — no caller today, but the gate reads as working)** —
+`wiwi/streaming/tape_store.py:703-711` and `:622-632`
+
+Both helpers called `_read_records(request_id, 0)`, which drops `seq <=
+last_seq`. A stream that emitted **zero frames** writes its done record at
+`seq == 0` (`finish(_seq)` with `_seq == 0`), so the journal read as incomplete
+forever. `replay_state` and `owner_of_async` already use `-1` for exactly this
+reason.
+
+**Fix sketch:** read from `-1`.
+
+**Status: fixed** — round 182
+(`tests/test_fix_round182.py::test_is_complete_sees_a_zero_frame_done_record`).
+
 

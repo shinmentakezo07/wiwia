@@ -299,6 +299,14 @@ def with_history(body: dict[str, Any],
         items.append({"type": "message", "role": "user", "content": existing})
     elif isinstance(existing, list):
         items.extend(existing)
+    elif existing is not None:
+        # A malformed ``input`` ({"q": 1}, 123, true) is left EXACTLY as the
+        # caller sent it so ``decode_request``'s own shape rejection fires.
+        # Overwriting it with the history alone dropped the caller's turn
+        # silently, and because this helper runs before the decoder the
+        # rejection never had a chance to run (AUDIT #352's precondition).
+        merged["input"] = existing
+        return merged
     merged["input"] = items
     return merged
 
@@ -824,6 +832,19 @@ class ResponsesStreamEncoder:
         return self._evt("response.output_item.done",
                          {"output_index": idx, "item": item})
 
+    def _hosted_item_id(self, n: int, call_id: str | None,
+                        builtin: str | None) -> str:
+        """One id per hosted item, shared by its ``added`` and ``done`` frames.
+
+        ``ts_`` for a tool search, ``ws_`` for any other hosted call. The two
+        sites used to derive this independently, and the ``done`` half always
+        minted ``ws_`` — so a tool_search with no upstream call id was added
+        as ``ts_<req>_<n>`` and completed as ``ws_<req>_<n>``. A client keying
+        on the item id then saw two items where the server had one.
+        """
+        prefix = "ts" if _builtin_is_tool_search(builtin) else "ws"
+        return call_id or f"{prefix}_{self.req_id}_{n}"
+
     def _close_tool(self, index: int) -> list[bytes]:
         """Close a specific tool item by IR index (parallel-safe)."""
         if self._item_open == "tool" and self._open_tool == index:
@@ -834,11 +855,17 @@ class ResponsesStreamEncoder:
             return []
         idx = t["output_index"]
         n = t["index"]
+        # Fragments accumulate in a list and are joined once here: ``+=`` on
+        # the accumulated string made a large tool call quadratic (256 KB of
+        # args in 8-byte fragments is ~gigabytes of memcpy on the event loop).
+        # The gateway pump and the Anthropic encoder already use this shape.
+        args = "".join(t["args"])
         if t.get("builtin"):
             # Stream path has only the accumulated raw argument string.
-            item = _builtin_call_item(t["call_id"] or f"ws_{self.req_id}_{n}",
-                                      _builtin_query(t["args"]),
-                                      t.get("builtin"))
+            item = _builtin_call_item(
+                self._hosted_item_id(n, t["call_id"], t.get("builtin")),
+                _builtin_query(args),
+                t.get("builtin"))
             out = [self._item_done(idx, item)]
         else:
             # The item id keys on the OUTPUT INDEX, not the IR tool index.
@@ -853,10 +880,10 @@ class ResponsesStreamEncoder:
             # sync-shaped payload pointed at a different item, and the gap
             # grew with every preceding item (AUDIT #356).
             item_id = f"fc_{self.req_id}_{idx}"
-            item = _function_call_item(item_id, t["call_id"], t["name"], t["args"])
+            item = _function_call_item(item_id, t["call_id"], t["name"], args)
             out = [self._evt("response.function_call_arguments.done", {
                         "item_id": item_id, "output_index": idx,
-                        "arguments": t["args"]}),
+                        "arguments": args}),
                    self._item_done(idx, item)]
         # Once the LAST open tool is closed the buffer is safe to emit (AUDIT
         # #367). It goes after the tool's own done event, preserving the order
@@ -1143,22 +1170,23 @@ class ResponsesStreamEncoder:
             out.extend(self._close_tool(n))
             oi = self._next_output_index()
             self._tools[n] = {"index": n, "name": d.name,
-                              "call_id": d.id, "args": "", "output_index": oi,
+                              "call_id": d.id, "args": [], "output_index": oi,
                               "builtin": d.builtin}
             self._open_tool = n
             # A1 carve-out: hosted builtin calls open as self-contained items
             # (replay-safe: no separate result item exists in this protocol).
             # A tool search opens as its own item type, not a web search.
             if d.builtin is not None:
+                item_id = self._hosted_item_id(n, d.id, d.builtin)
                 if _builtin_is_tool_search(d.builtin):
                     item: dict[str, Any] = {
                         "type": "tool_search_call",
-                        "id": d.id or f"ts_{self.req_id}_{n}",
+                        "id": item_id,
                         "status": "in_progress", "execution": "server",
                         "call_id": None, "arguments": {}}
                 else:
                     item = {"type": "web_search_call",
-                            "id": d.id or f"ws_{self.req_id}_{n}",
+                            "id": item_id,
                             "status": "in_progress",
                             "action": {"type": "search", "query": ""}}
             else:
@@ -1183,7 +1211,7 @@ class ResponsesStreamEncoder:
             # frame would reference a phantom fc_<req>_<n> id that never had
             # an output_item.added (Codex CLI accumulates fragments against a
             # nonexistent function item).
-            t["args"] += d.args_fragment
+            t["args"].append(d.args_fragment)
             if t.get("builtin"):
                 return None
             self._open_tool = d.index

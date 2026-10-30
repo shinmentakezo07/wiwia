@@ -10,6 +10,69 @@ Each entry below records the before→after state, the exact files and lines cha
 
 ---
 
+## Round 182 — the wire half of the cache/server/streaming/wire sweep (AUDIT #546-#554) (2026-10-30)
+
+Nine codec/translation defects, one of them (the finish-reason map) reachable
+from every inbound surface. Nothing here changes a *shape* the adapters already
+emit; each fix makes an inbound dialect decode, or an outbound encoder emit,
+what the sibling surface already did.
+
+- **`context_window_exceeded` → `length`** (`ir/translation.py`). The IR keeps
+  the overflow reason distinct so an auto-compact client can see it, but
+  `_IR_TO_OPENAI_FINISH` had no entry and the fallback produced `"stop"` — the
+  one value a Chat/Completions client does *not* read as "context full". The
+  Responses surface already reported `incomplete` (AUDIT #358); the two
+  OpenAI-shaped surfaces now agree. `pause_turn`/`compaction` keep the
+  documented fallback (no OpenAI spelling exists).
+- **Legacy `functions` / `function_call` / `role:"function"`**
+  (`wire/openai_chat.py`). `functions[]` is decoded into the same `ir.Tool` set
+  as `tools[]` (a type-less entry counts as `type=="function"`, wrapped or
+  inline), `assistant.function_call` becomes a `ToolUsePart`, and a
+  `role:"function"` message becomes a `ToolResultPart` instead of being coerced
+  to `"user"`. The old protocol carries **no call id** on either side of the
+  pair, so `_legacy_call_id(name)` derives one from the function name: the same
+  name on both sides pairs, which is exactly the association the legacy wire
+  encodes. The request-level `function_call` maps onto the same `ToolChoice`
+  the modern `tool_choice` produces.
+- **`/v1/completions` explicit defaults** (`wire/openai_completions.py`).
+  `logprobs: false` and `echo: false` are the wire defaults and are now
+  accepted (only a truthy request is unsupported); a present but non-integer
+  `best_of` (`"2"`) is a 400 instead of being forwarded through `extras`.
+- **Nothing content-bearing after `event: error`**
+  (`wire/anthropic_messages.py`). The `StreamError` arm now clears the
+  interleaved-text buffer and the pending thinking signature. The app still
+  calls `final_frame()` on that path to terminate the stream well-formed
+  (`message_delta` + `message_stop`); it no longer resurrects buffered content
+  as new blocks *after* the terminal error.
+- **One id per hosted item, and linear argument accumulation**
+  (`wire/openai_responses.py`). `_hosted_item_id` mints `ts_`/`ws_` from the
+  builtin for both `output_item.added` and `output_item.done` (the close half
+  always minted `ws_`, so a `tool_search` was announced as one item and
+  completed as another). Tool arguments accumulate into a **list** joined once
+  in `_close_tool`; the previous `+=` per fragment made a large call quadratic
+  on the event loop, the same shape the gateway pump and the Anthropic encoder
+  already use.
+- **A `file` block with `file_id` is a DOCUMENT** (`wire/openai_chat.py`, plus
+  `providers/openai_adapter.py`). It decoded to `ImagePart` while `file_data`
+  decoded to `DocumentPart`, so a PDF file id re-encoded on an Anthropic
+  upstream as an `image` block and was rejected. The adapter now re-emits
+  `{"type":"file","file":{"file_id":…}}` for a `DocumentPart` instead of
+  dropping the reference.
+- **`input_audio` type guard** (`wire/openai_chat.py`). A non-string payload
+  (`data: 5`, a dict) is dropped rather than forwarded as `AudioPart(b64=5)`,
+  matching the Responses twin; a non-string `format` falls back to `wav`.
+- **`with_history` leaves a malformed `input` alone**
+  (`wire/openai_responses.py`). It used to replace a non-list/non-string
+  `input` with the stored history, so the caller's turn vanished and
+  `decode_request`'s own rejection (AUDIT #352) never ran. The bad value now
+  reaches the decoder, which answers 400.
+
+**Tests:** `tests/test_fix_round182.py`; `tests/test_fix_round172.py::
+test_chat_decode_reads_file_part` and `tests/test_bugfix_round5.py::
+test_responses_encoder_args_buf_is_instance_attr` were updated where the audit
+changed the behaviour they pinned.
+
+
 ## Round 179 — unknown server tools round-trip on their own surface (AUDIT #531) (2026-10-29)
 
 `builtin_config["_wire_type"]` was written by both decoders and read by nobody.

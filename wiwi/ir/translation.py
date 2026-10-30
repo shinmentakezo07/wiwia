@@ -53,6 +53,13 @@ _IR_TO_OPENAI_FINISH: dict[str, str] = {
     "length": "length",
     "tool_call": "tool_calls",
     "content_filter": "content_filter",
+    # ``context_window_exceeded`` is OpenAI's own ``length`` (truncated for
+    # budget), not a plain stop. The fallback turned it into "stop", which is
+    # the one value an OpenAI-shaped client does NOT read as "the context is
+    # full" — so Claude-Code-via-Chat lost its auto-compact trigger while the
+    # Responses surface (which reports ``incomplete``) kept it (AUDIT #358's
+    # Chat/Completions twin).
+    "context_window_exceeded": "length",
 }
 
 # Terminal reason an OpenAI client is guaranteed to understand.

@@ -798,6 +798,16 @@ def _warning_header_value(raw: object) -> str:
     Entries are filtered to non-empty strings because the list is written by
     several producers (adapter warnings, the tool-arg validator) and a header
     built from a non-string would raise inside the response path.
+
+    The result is additionally forced into latin-1: Starlette encodes response
+    headers with that codec at construction time, so any other character raises
+    ``UnicodeEncodeError`` BEFORE a byte is sent — after the upstream was billed
+    and (non-streaming) after ``record_spend``, converting a successful turn
+    into a 500 with a double-billed retry behind it. Two producers could hit
+    that: the truncation marker used to be U+2026, and a model/tool name inside
+    an adapter warning can carry any Unicode the operator typed. The ellipsis
+    is ASCII ``...`` and everything else is coerced per character (U+FFFD-free:
+    latin-1's 256 code points are a straight low-byte truncation).
     """
     if not isinstance(raw, list):
         return ""
@@ -806,8 +816,10 @@ def _warning_header_value(raw: object) -> str:
         return ""
     value = "; ".join(msgs)
     if len(value) > _MAX_WARNING_HEADER:
-        value = value[:_MAX_WARNING_HEADER - 1] + "…"
-    return value
+        value = value[:_MAX_WARNING_HEADER - 3] + "..."
+    # Headers are latin-1 on the wire (Starlette encodes at response build
+    # time). Coerce rather than let the response constructor raise.
+    return value.encode("latin-1", "replace").decode("latin-1")
 
 
 def _with_warnings(headers: dict[str, str], ctx: RequestContext) -> dict[str, str]:
@@ -1047,6 +1059,13 @@ class AppState:
         # Serializes provider creation so the duplicate-name guard and the
         # insert cannot interleave across their await (AUDIT #373).
         self.provider_create_lock = asyncio.Lock()
+        # Serializes user-role/disabled mutations so the last-admin guard's
+        # read → count → write cannot interleave with a sibling PATCH. Two
+        # concurrent demotions of the two remaining DB admins both read
+        # "2 admins", both passed the guard, and both committed — leaving the
+        # users table with zero admins (the synthetic master still worked, so
+        # nothing noticed until an operator needed a session admin).
+        self.user_mutation_lock = asyncio.Lock()
         self.cline_refresh: Any = None
         self.workbuddy_refresh: Any = None
         self.hermes_refresh: Any = None
@@ -1307,22 +1326,32 @@ class AppState:
         # deployments
         for d in data["deployments"]:
             acct = self.router.providers.get(d["provider_name"])
-            if acct is None:
-                continue
             deps = self.router.groups.get(d["group_name"], [])
-            existing = next(
-                (dep for dep in deps
-                 if dep.provider is acct and dep.model_id == d["model_id"]),
-                None)
             if d.get("detached"):
                 # Tombstone: the operator detached this deployment from the
                 # admin UI. A YAML-sourced one has no other record, so drop it
                 # here or it silently returns on every restart (AUDIT #297).
-                if existing is not None:
-                    deps.remove(existing)
-                    if not deps:
-                        self.router.groups.pop(d["group_name"], None)
+                #
+                # Matched by provider NAME, not by account identity: when the
+                # account itself is tombstoned (a deleted YAML provider) it is
+                # already out of ``router.providers``, yet the YAML-built group
+                # still holds its Deployment objects. The old ``acct is None:
+                # continue`` skipped the tombstone in exactly that case, so the
+                # group stayed routable against a deleted account.
+                gone = [dep for dep in deps
+                        if dep.provider.name == d["provider_name"]
+                        and dep.model_id == d["model_id"]]
+                for dep in gone:
+                    deps.remove(dep)
+                if not deps:
+                    self.router.groups.pop(d["group_name"], None)
                 continue
+            if acct is None:
+                continue
+            existing = next(
+                (dep for dep in deps
+                 if dep.provider is acct and dep.model_id == d["model_id"]),
+                None)
             if existing is not None:
                 # The deployment came from YAML. A DB row for the same triple
                 # is an operator override (e.g. a weight edited in the Combos
@@ -1689,12 +1718,6 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return None
         raw = raw.strip()
         return raw[:128] or None
-
-    def is_admin(request: Request) -> bool:
-        mk = config.general_settings.master_key
-        if not mk:
-            return False
-        return hmac.compare_digest(bearer(request).encode(), mk.encode())
 
     async def _model_group_is_unpriced(group: str) -> bool:
         """True when nothing in *group*'s deployment set has a pricing row.
@@ -2440,7 +2463,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if _trace_id:
             success_headers["x-wiwi-trace-id"] = _trace_id
         if unpriced_model:
-            success_headers["x-wiwi-unpriced-model"] = unpriced_model
+            # A model-group name is operator-defined and may carry any
+            # Unicode; a response header is latin-1 on the wire, so coerce
+            # rather than let the response constructor raise (same class as
+            # the warning-header truncation bug).
+            success_headers["x-wiwi-unpriced-model"] = (
+                unpriced_model.encode("latin-1", "replace").decode("latin-1"))
         # Per-deployment tpm admission needs the request's size up front. The
         # same body-size estimate that feeds the virtual-key limiter is good
         # enough for a sliding-window cap and costs nothing extra; it is
@@ -2613,7 +2641,32 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 # Header-coupled to the body on the Anthropic surface.
                 request.headers.get("anthropic-beta", ""))
             entry = await cache.get(cache_key)
+            served = None
             if entry is not None:
+                # A cache is advisory: a backend that stored something that is
+                # not a JSON object (a foreign writer sharing the Redis
+                # namespace, an entry from an older format, a partial restore)
+                # must degrade to a MISS, never raise into the request path.
+                # This decode used to run unguarded, outside the try below, so
+                # a corrupt entry surfaced as an undialected 500 with no
+                # request-log row and an un-refunded admission reservation.
+                try:
+                    parsed = orjson.loads(entry.payload)
+                    if not isinstance(parsed, dict):
+                        raise TypeError(
+                            f"cached payload is {type(parsed).__name__},"
+                            " not a JSON object")
+                    served = rebase_cached_body(parsed, ctx.request_id)
+                except Exception as e:  # noqa: BLE001 — corrupt entry = miss
+                    served = None
+                    structlog.get_logger().warning(
+                        "response_cache_corrupt_entry",
+                        request_id=ctx.request_id,
+                        detail=f"{type(e).__name__}: {e}",
+                        note="dropping the entry and dispatching upstream")
+                    with contextlib.suppress(Exception):
+                        await cache.delete(cache_key)
+            if served is not None:
                 ctx.status = 200
                 # cache_hit stays False: LogEvent.cache_hit means a provider
                 # prompt-cache hit; a gateway response-cache hit is not one
@@ -2621,8 +2674,6 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 ctx.metadata["response_cache_hit"] = True
                 state_.logs.log_proxy("info", "response cache hit",
                                       ctx.request_id)
-                served = rebase_cached_body(orjson.loads(entry.payload),
-                                            ctx.request_id)
                 # The body now carries THIS request's id, so that id must name
                 # a stored object or the caller holds a dangling handle:
                 # ``GET /v1/responses/{id}`` and ``previous_response_id`` both
@@ -2973,8 +3024,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         _streamed_response_payload(
                             ctx, store_model, stream_text, stream_thinking,
                             stream_tools))
-            if ctx.auth and ctx.auth.key_type != "master":
-                if ctx.usage:
+            if ctx.usage:
+                if ctx.auth and ctx.auth.key_type != "master":
                     # The response was already streamed, so a budget breach
                     # can't turn into a 402 here. record_spend releases the
                     # admission reservation before the conditional UPDATE (so
@@ -2984,15 +3035,21 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     # admission instead of letting spend run past the cap
                     # forever (AUDIT_REPORT C1).
                     await record_spend(ctx.auth.key_id, ctx.cost, ctx)
-                elif ctx.budget_reserved > 0:
-                    # No usage: the upstream died or the client hung up. The
-                    # tail runs on every exit, so release the reservation
-                    # untouched — the estimate must not be billed for a
-                    # request that produced nothing (AUDIT #324).
-                    with contextlib.suppress(Exception):
-                        await state.auth.release_budget_reservation(
-                            ctx.auth.key_id, ctx.budget_reserved)
-                    ctx.budget_reserved = 0.0
+            else:
+                # No usage: the upstream died, or the peer hung up before
+                # UsageFinal. The tail runs on every exit, so give back
+                # everything admission reserved — the budget estimate
+                # (AUDIT #324) AND the RPM/estimated-TPM slot. The rate-limit
+                # half used to be refunded only on the non-streaming error
+                # exits, so a stream that opened and then aborted burned one
+                # RPM slot and ``len(body)/4`` estimated TPM for the rest of
+                # the 60s window, in the key scope *and* the global one — the
+                # exact throttling failure mode of AUDIT #347. It runs for
+                # master too: a global rpm/tpm cap reserves a slot for every
+                # caller, master included, and only the key-scoped windows
+                # skip it. ``_release_tpm_reservation`` is a no-op when usage
+                # is known, so it cannot double-refund a served turn.
+                await _release_tpm_reservation(ctx.auth, ctx)
             # Telemetry (spec C): the request span stays open for the whole life
             # of a stream — the body runs inside the generator handed to
             # Starlette, long after the entrypoint returned — so this teardown,
@@ -3557,9 +3614,13 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 media_type="text/plain; charset=utf-8",
                 status_code=404,
             )
-        if not is_admin(request):
-            return _err(401, "authentication_error", "master key required",
-                        request, "chat")
+        # Authorize like every other operator surface: a signed session cookie
+        # OR the bearer master key. This used to be a private bearer-only
+        # check, so an admin logged into the console could not load /metrics
+        # (the audit's "one guard per surface, not two" rule).
+        gate = await require_admin_dep(request)
+        if gate is not None:
+            return gate
         events = [e for _, e in await state.logs.sse.replay("request", 0)]
         # The loss counters and the process-lifetime totals cannot be
         # derived from the ring: a dropped event is absent from it by
@@ -4165,6 +4226,23 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if state.config_store:
             await state.config_store.delete_provider(name)
             await state.config_store.delete_setting(_cline_oauth_setting_key(name))
+            # ``delete_provider`` matches zero rows for a YAML-defined
+            # account (it has no DB row), so nothing above records the
+            # decision — and on the next restart the YAML loader rebuilds
+            # the account, plaintext key included, and (for Cline) the
+            # lifespan re-applies the persisted default models, making the
+            # "deleted" account routable again. Write the same ``detached``
+            # tombstone the rename path writes for the old name (see the
+            # PATCH handler's ``ConfigStoreNotFound`` fallback): startup's
+            # ``_load_db_config`` consumes it and drops the YAML copy
+            # (AUDIT #319's third arm — rename and key-delete got the
+            # tombstone, account-delete did not).
+            await state.config_store.add_provider(
+                name, acct.provider_type, acct.base_url,
+                timeout_s=acct.timeout_s,
+                extra_headers=acct.extra_headers,
+                round_robin=acct.round_robin,
+                alias_id=acct.alias_id, detached=True)
         # Deleting the account deletes the credential, so the Cline refresh
         # state must go with it: the OAuth record is already being dropped, and
         # ``CircuitBreaker._dead`` survives forever (nothing else popped it), so
@@ -5044,8 +5122,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     @app.delete("/admin/cline/settings/default-models/{model_id:path}")
     async def admin_delete_cline_default_model(model_id: str, request: Request):
-        """Remove one model id from the persisted list and drop every
-        deployment under the ``cline:<model_id>`` group."""
+        """Remove one model id from the persisted list and drop the Cline
+        deployments under the ``cline:<model_id>`` group.
+
+        Other provider types in the same group are left alone: the group is a
+        plain model group and may carry an operator's own deployments.
+        """
         resp = await require_admin_dep(request)
         if resp:
             return resp
@@ -5068,10 +5150,22 @@ def create_app(config: WiwiConfig) -> FastAPI:
         group_name = f"cline:{mid}"
         removed = 0
         if group_name in state.router.groups:
-            deps = state.router.groups.pop(group_name)
-            removed = len(deps)
+            # ``cline:<model>`` is an ordinary model group, so a deployment an
+            # operator attached to it by hand (any provider type) is not ours
+            # to delete. The old code popped the whole group regardless of
+            # provider type; filter to the Cline deployments this endpoint
+            # auto-deployed and leave the rest routable.
+            deps = state.router.groups[group_name]
+            cline_deps = [d for d in deps if d.provider.provider_type == "cline"]
+            keep = [d for d in deps if d.provider.provider_type != "cline"]
+            if cline_deps:
+                if keep:
+                    state.router.groups[group_name] = keep
+                else:
+                    state.router.groups.pop(group_name, None)
+            removed = len(cline_deps)
             if state.config_store is not None:
-                for d in deps:
+                for d in cline_deps:
                     try:
                         await state.config_store.delete_deployment(
                             group_name, d.provider.name, d.model_id)
@@ -5734,16 +5828,22 @@ def create_app(config: WiwiConfig) -> FastAPI:
         # Last-admin guard: if demoting or disabling an admin would leave zero
         # active admins, reject. The master-key admin (id="master") is synthetic
         # and not in the users table, so count_admins() only counts DB admins.
-        if role == "user" or disabled is True:
-            cur = await state.users.get(uid)
-            if (cur is not None and cur.role == "admin" and not cur.disabled
-                    and await state.users.count_admins() <= 1):
-                return _err(400, "invalid_request_error",
-                            "cannot demote or disable the last admin", request)
-        try:
-            updated = await state.users.patch(uid, role=role, disabled=disabled)
-        except ValueError as e:
-            return _err(400, "invalid_request_error", str(e), request)
+        #
+        # The guard and the write are ONE critical section: both straddle
+        # awaits (get, count, patch), so two concurrent demotions of the two
+        # remaining admins each read "2 admins" and both committed, leaving the
+        # table with no admin at all.
+        async with state.user_mutation_lock:
+            if role == "user" or disabled is True:
+                cur = await state.users.get(uid)
+                if (cur is not None and cur.role == "admin" and not cur.disabled
+                        and await state.users.count_admins() <= 1):
+                    return _err(400, "invalid_request_error",
+                                "cannot demote or disable the last admin", request)
+            try:
+                updated = await state.users.patch(uid, role=role, disabled=disabled)
+            except ValueError as e:
+                return _err(400, "invalid_request_error", str(e), request)
         if updated is None:
             return _err(404, "not_found_error", "user not found", request)
         # Disabling an account must revoke the keys it owns (AUDIT #148).
@@ -6265,6 +6365,13 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return _cline_callback_error(request, "missing code or state")
         sess = state.oauth_pending.pop(state_token, None)
         if sess is None:
+            return _cline_callback_error(request, "invalid or expired session")
+        # Enforce the pending session's own TTL on the READ path, the way the
+        # Hermes and WorkBuddy callbacks already do. Without this the state
+        # token stayed usable for the whole process lifetime: expiry was only
+        # applied by ``evict_expired_pending()``, which runs when a *new* flow
+        # starts, so a leaked/unused token never aged out.
+        if time.time() - sess.get("created_at", 0.0) > sess.get("ttl_s", 600.0):
             return _cline_callback_error(request, "invalid or expired session")
         provider = sess["provider"]
         return_path = sess["return_path"]

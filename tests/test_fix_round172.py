@@ -227,7 +227,11 @@ def test_chat_decode_reads_file_part():
                      "file": {"file_id": "file-123"}}]}]}
     r = oc.decode_request(body)
     part = r.messages[0].parts[0]
-    assert isinstance(part, ir.ImagePart) and part.file_id == "file-123"
+    # A Files-API reference is a DOCUMENT — the same block type ``file_data``
+    # decodes to just below. It used to decode to ImagePart, so a PDF file id
+    # re-encoded on an Anthropic upstream as an ``image`` block and was
+    # rejected (round 182).
+    assert isinstance(part, ir.DocumentPart) and part.file_id == "file-123"
 
 
 def test_chat_decode_reads_file_data_document():

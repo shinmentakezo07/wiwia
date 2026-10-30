@@ -31,6 +31,18 @@ def _str_or_empty(raw: Any) -> str:
     return raw if isinstance(raw, str) else ""
 
 
+def _legacy_call_id(name: str) -> str:
+    """Deterministic synthetic call id for the legacy ``functions`` protocol.
+
+    The pre-2023 shape carries no call id on either side of the pair — the
+    assistant turn has ``function_call: {name, arguments}`` and the reply has
+    ``role: "function", name: <same>``. The IR (and every adapter) requires an
+    id, so derive one from the function name: the same name on both sides then
+    pairs, which is exactly the association the legacy wire encodes.
+    """
+    return f"call_legacy_{name}"
+
+
 def _max_token_cap(body: dict) -> int | None:
     """Resolve the output-token cap, preferring ``max_tokens``.
 
@@ -90,6 +102,13 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
             # OpenAI's newer name for system-level instructions; unify so
             # non-OpenAI upstreams fold it into the system prompt once.
             role = "system"
+        if role == "function":
+            # Legacy tool-RESULT role (the pre-``tools`` protocol pairs it
+            # with ``functions``/``function_call``). Without this it fell
+            # through the unknown-role guard below and became a ``user``
+            # message: the result reached the model as ordinary chat text and
+            # the call it answered stayed unanswered.
+            role = "tool"
         if role not in ("system", "user", "assistant", "tool"):
             # A non-string role (7, ["user"], {"a": 1}, null) has no wire
             # representation, and it was forwarded upstream verbatim — the
@@ -104,6 +123,16 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         raw_tool_calls = m.get("tool_calls")
         tool_calls = [tc for tc in raw_tool_calls if isinstance(tc, dict)] \
             if isinstance(raw_tool_calls, list) else []
+        if role == "assistant" and not tool_calls:
+            # Legacy single-call protocol: ``function_call`` replaces
+            # ``tool_calls`` and carries no id. Synthesize the deterministic id
+            # so the paired ``role:"function"`` reply answers this call.
+            legacy_fc = m.get("function_call")
+            if (isinstance(legacy_fc, dict)
+                    and isinstance(legacy_fc.get("name"), str)
+                    and legacy_fc["name"]):
+                tool_calls = [{"id": _legacy_call_id(legacy_fc["name"]),
+                               "function": legacy_fc}]
         if isinstance(content, str):
             parts.append(ir.TextPart(content))
         elif isinstance(content, list):
@@ -130,10 +159,18 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                         parts.append(ir.ImagePart(url=url))
                 elif c.get("type") == "input_audio":
                     ia = c.get("input_audio")
-                    if isinstance(ia, dict):
+                    # The payload must be a non-empty STRING. A truthy
+                    # non-string (5, a dict, a list) used to be forwarded
+                    # verbatim — ``AudioPart(b64=5)`` — and the adapter
+                    # serialized it into the upstream body, which 400s naming
+                    # nothing the caller sent. Mirror the Responses twin's
+                    # guard: drop the block rather than pass it on.
+                    data = ia.get("data") if isinstance(ia, dict) else None
+                    if isinstance(data, str) and data:
+                        fmt = ia.get("format")
                         parts.append(ir.AudioPart(
-                            b64=ia.get("data"),
-                            mime=f"audio/{ia.get('format') or 'wav'}"))
+                            b64=data,
+                            mime=f"audio/{fmt if isinstance(fmt, str) and fmt else 'wav'}"))
                 elif c.get("type") == "file":
                     # The Chat surface's own outbound document form (the
                     # OpenAI adapter emits ``{"type": "file", "file": {...}}``
@@ -146,7 +183,13 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                         continue
                     fid = cf.get("file_id")
                     if isinstance(fid, str) and fid:
-                        parts.append(ir.ImagePart(file_id=fid))
+                        # A Files-API reference is a DOCUMENT, matching what
+                        # ``file_data`` decodes to just below. It used to
+                        # decode to ImagePart, so a PDF file id re-encoded on
+                        # an Anthropic upstream as an ``image`` block and was
+                        # rejected; the two spellings of one block type
+                        # disagreed.
+                        parts.append(ir.DocumentPart(file_id=fid))
                         continue
                     fraw = cf.get("file_data")
                     if not isinstance(fraw, str) or not fraw:
@@ -267,6 +310,13 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
             # substituting an empty placeholder id.
             raw_tool_call_id = m.get("tool_call_id")
             if not isinstance(raw_tool_call_id, str) or not raw_tool_call_id:
+                # Legacy ``role:"function"`` replies carry ``name`` instead of
+                # an id; ``_legacy_call_id`` is the same derivation the
+                # assistant side used, so the pair still matches.
+                legacy_name = m.get("name")
+                if isinstance(legacy_name, str) and legacy_name:
+                    raw_tool_call_id = _legacy_call_id(legacy_name)
+            if not isinstance(raw_tool_call_id, str) or not raw_tool_call_id:
                 raise DialectError("tool message is missing 'tool_call_id'")
             parts = [ir.ToolResultPart(tool_use_id=raw_tool_call_id,
                                        content=tool_content,
@@ -282,10 +332,28 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         # is either not iterable or iterates into junk, and the TypeError
         # escaped as a 500. Reject it on the 400 path.
         raise DialectError("'tools' must be a list")
-    for t in raw_tools or []:
-        if not isinstance(t, dict) or t.get("type") != "function":
+    # The pre-``tools`` protocol puts the function objects straight into
+    # ``functions`` (no wrapper, no ``type``). Both lists are decoded into the
+    # same IR tool set: dropping ``functions`` meant a legacy catalog reached
+    # the model as nothing at all, with no warning anywhere.
+    legacy_functions = body.get("functions")
+    if legacy_functions is not None and not isinstance(legacy_functions, list):
+        raise DialectError("'functions' must be a list")
+    tool_entries: list[dict] = [t for t in (raw_tools or []) if isinstance(t, dict)]
+    tool_entries.extend({"type": "function", "function": f}
+                        for f in (legacy_functions or []) if isinstance(f, dict))
+    for t in tool_entries:
+        ttype = t.get("type")
+        if ttype is None:
+            # A typeless entry is a function definition: ``tools`` may carry
+            # the function object inline, and that used to be skipped whole.
+            ttype = "function"
+        if ttype != "function":
             continue  # non-function (or malformed) entry: skip, don't crash
         fn = t.get("function")
+        if not isinstance(fn, dict):
+            # Typeless entry with the function object at the top level.
+            fn = t if isinstance(t.get("name"), str) else None
         if not isinstance(fn, dict):
             continue
         raw_params = fn.get("parameters")
@@ -327,6 +395,19 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         # which already lands on "".
         tool_choice = (ir.ToolChoiceNamed(_str_or_empty(tc_fn.get("name")))
                        if isinstance(tc_fn, dict) else None)
+    if tool_choice is None:
+        # Legacy ``function_call`` is ``tool_choice`` in the old protocol:
+        # ``"auto"|"none"`` or ``{"name": ...}``. Ignoring it let the model
+        # answer freely (or call anything) while the caller believed the
+        # choice was pinned.
+        legacy_tc = body.get("function_call")
+        if legacy_tc == "auto":
+            tool_choice = ir.ToolChoiceAuto()
+        elif legacy_tc == "none":
+            tool_choice = ir.ToolChoiceNone()
+        elif isinstance(legacy_tc, dict):
+            tool_choice = ir.ToolChoiceNamed(
+                _str_or_empty(legacy_tc.get("name")))
 
     # Coerce the sampling/count params the way max_tokens/top_k already are
     # (AUDIT #83 class): a typed-wrong temperature/top_p/seed/

@@ -621,7 +621,12 @@ class JournalStore:
 
     async def is_complete_async(self, request_id: str) -> bool:
         """``is_complete`` off the event loop (AUDIT #237) — see the sync method."""
-        records = await asyncio.to_thread(self._read_records, request_id, 0)
+        # Cursor -1, not 0: ``_read_records`` drops ``seq <= last_seq``, so a
+        # cursor of 0 skipped the done record of a stream that emitted ZERO
+        # frames (``finish(0)`` writes it at seq 0) and the journal read as
+        # incomplete forever. ``replay_state``/``owner_of_async`` already use
+        # -1 for exactly this reason.
+        records = await asyncio.to_thread(self._read_records, request_id, -1)
         return any(done for _, _, done, _first, _owner in records)
     def read_after(self, request_id: str,
                    last_seq: int) -> list[tuple[int, bytes]]:
@@ -696,9 +701,13 @@ class JournalStore:
         return JournalTail(self.path_for(request_id), last_seq)
 
     def is_complete(self, request_id: str) -> bool:
-        """True when the journal carries the original stream's done record."""
+        """True when the journal carries the original stream's done record.
+
+        Reads from cursor ``-1`` so the done record of a zero-frame stream
+        (written at seq 0) counts — see :meth:`is_complete_async`.
+        """
         return any(done for _, _, done, _first, _owner
-                   in self._read_records(request_id, 0))
+                   in self._read_records(request_id, -1))
 
     def is_expired(self, request_id: str, now: float | None = None) -> bool:
         path = self.path_for(request_id)

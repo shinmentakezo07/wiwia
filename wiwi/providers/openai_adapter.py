@@ -141,7 +141,14 @@ def _role_parts_to_content(
                 # question (AUDIT #156).
                 if content is None or isinstance(content, str):
                     content = ([{"type": "text", "text": content}] if content else [])
-                if p.url:
+                if p.file_id:
+                    # Files-API reference: re-emit it as the reference rather
+                    # than dropping it, so the Chat codec's own inbound
+                    # ``{"type":"file","file":{"file_id":...}}`` form survives
+                    # a round trip through this adapter.
+                    content.append({"type": "file",
+                                    "file": {"file_id": p.file_id}})
+                elif p.url:
                     content.append({"type": "file",
                                     "file": {"file_data": p.url}})
                 elif p.b64:

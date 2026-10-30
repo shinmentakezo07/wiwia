@@ -35,6 +35,12 @@ class MemoryResponseCache(CacheBackend):
         while len(self._entries) > self.max_entries:
             self._entries.popitem(last=False)
 
+    async def delete(self, key: str) -> None:
+        # Used to drop an entry the request path could not decode: leaving it
+        # in place would re-pay the failure on every identical request for the
+        # rest of the TTL.
+        self._entries.pop(key, None)
+
     async def aclose(self) -> None:
         self._entries.clear()
 

@@ -75,11 +75,23 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
     if body.get("n") not in (None, 1):
         raise DialectError("'n' must be 1 (multiple choices unsupported)")
     for key in ("logprobs", "echo"):
-        if body.get(key) is not None:
+        # ``false`` is the DEFAULT for both fields. A client that shares one
+        # parameter template across surfaces sends them explicitly, and the
+        # old ``is not None`` test turned that no-op into a 400: the request
+        # asked for nothing the surface cannot do. Only a truthy request is
+        # genuinely unsupported (we cannot render logprobs, and echo would
+        # have to return the prompt).
+        if body.get(key) not in (None, False):
             raise DialectError(f"'{key}' is not supported on this surface")
-    best_of = ir.coerce_int(body.get("best_of"))
+    raw_best_of = body.get("best_of")
+    best_of = ir.coerce_int(raw_best_of)
     if best_of is not None and best_of > 1:
         raise DialectError("'best_of' must be 1 (unsupported on this surface)")
+    if best_of is None and raw_best_of is not None:
+        # A non-integer ``best_of`` ("2", [2], 1.5) has no IR spelling, so the
+        # old code left it in the body, ``carry_extras`` forwarded it, and the
+        # upstream answered a question the caller never asked.
+        raise DialectError("'best_of' must be an integer")
 
     text = _prompt_text(body)
     suffix = body.get("suffix")

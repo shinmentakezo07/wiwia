@@ -83,9 +83,11 @@ def test_responses_encoder_args_buf_is_instance_attr():
     enc2.feed(dl.StreamStart(model="m", group=""))
     enc1.feed(dl.ToolCallOpen(index=0, id="a", name="f"))
     enc1.feed(dl.ToolCallArgsDelta(index=0, args_fragment='{"k":"v1"}'))
-    # enc2 should have its own empty per-index args
+    # enc2 should have its own empty per-index args. The buffer is a LIST of
+    # fragments joined once at close (round 182: string ``+=`` per fragment
+    # made a large tool call quadratic on the event loop).
     assert enc2._tools == {}
-    assert enc1._tools[0]["args"] == '{"k":"v1"}'
+    assert enc1._tools[0]["args"] == ['{"k":"v1"}']
 
 
 # -- Fix #2: ctx.stop_reason set from Finish delta ------------------------------
