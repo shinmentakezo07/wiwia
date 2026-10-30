@@ -83,3 +83,6 @@ kye
 # Superdesign scratch (generated component HTML) — never commit
 .superdesign/tmp/
 .playwright-mcp/
+
+# Separate local checkout, not part of this repo
+workbuddy2api-hub/
