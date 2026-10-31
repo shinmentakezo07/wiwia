@@ -1,6 +1,6 @@
 # wiwi — Provider Setup Guide
 
-wiwi ships **12 provider types** (`PROVIDER_TYPES` in `wiwi/config.py`): `openai`, `anthropic`, `gemini`, `openai-compatible`, `openrouter`, `gmicloud`, `bai`, `nvidia-nim`, `cline`, `workbuddy`, `opencode`, `hermes`. Each maps to an adapter in `wiwi/providers/` that encodes IR → provider wire format and decodes responses/stream events back to IR.
+wiwi ships **13 provider types** (`PROVIDER_TYPES` in `wiwi/config.py`): `openai`, `anthropic`, `gemini`, `openai-compatible`, `openrouter`, `gmicloud`, `bai`, `nvidia-nim`, `cline`, `workbuddy`, `opencode`, `hermes`, `ifm`. Each maps to an adapter in `wiwi/providers/` that encodes IR → provider wire format and decodes responses/stream events back to IR.
 
 Adding a provider = new adapter module + one branch in `get_adapter()` (`wiwi/providers/registry.py`) + the entry in `PROVIDER_TYPES`. The registry has an import-time assert that fails loudly if a type has no branch.
 
@@ -20,6 +20,7 @@ Adding a provider = new adapter module + one branch in `get_adapter()` (`wiwi/pr
 | `workbuddy` | Chat Completions | Access token from auth JSON | Tencent CodeBuddy quirks + auto-refresh |
 | `opencode` | Per-model: 4 upstream protocols | Bearer key | Multi-protocol routing, live User-Agent refresh |
 | `hermes` | Chat Completions | Nous API key **or** OAuth device-code token (`hermes:` prefix) | Nous Portal (`inference-api.nousresearch.com`); no Realtime WS surface |
+| `ifm` | Chat Completions | Bearer key | IFM / MBZUAI: `reasoning_content` replay, effort via `chat_template_kwargs`, `X-Session-ID` affinity, text-only |
 
 ---
 
@@ -322,6 +323,41 @@ Hermes Agent CLI's own OAuth client (`hermes_cli/auth_nous.py` +
 (`portal.nousresearch.com/api/oauth/device/code`, `…/api/oauth/token`). See
 [API_REFERENCE.md](API_REFERENCE.md) § OAuth providers (Hermes) for the full
 request/response shapes.
+
+
+## `ifm`
+
+IFM — MBZUAI's Institute of Foundation Models (`api.ifm.ai`) — serves K2
+Horizon and Jais 3 (512K context) over an OpenAI Chat Completions endpoint, so
+`IFMAdapter` subclasses `OpenAIAdapter`. The K2 Horizon / Jais 3 chat templates
+add four requirements a plain OpenAI-shaped body does not meet; all four live
+in `wiwi/providers/ifm.py` and are applied by the adapter.
+
+```yaml
+providers:
+  - name: ifm-main
+    provider: ifm
+    base_url: https://api.ifm.ai/v1   # default
+    keys:
+      - {label: main, key: os.environ/IFM_API_KEY}
+```
+
+| Quirk | What the adapter does |
+|---|---|
+| **`reasoning_content` replay** | Every assistant history message carries a string `reasoning_content`; turns whose trace the caller's transcript lost are padded with `""` (a legal trace). The model is stateless, so turn 2 is rejected with a 400 if the field is missing — IFM's own harness profiles (Pi, OpenCode, Hermes) all exist to enforce this. |
+| **Text-only, string content** | Content-parts arrays are flattened to a string; `image_url` / `input_audio` / `file` parts are dropped and reported to the caller as a translation warning. `content: null` on a tool-call-only assistant turn becomes `""`. |
+| **`reasoning_effort` in `chat_template_kwargs`** | The resolved effort (`reasoning_effort`, Anthropic's `thinking` budget or `output_config.effort`, reconciled by the IR) is clamped to IFM's `low` / `medium` / `high` and sent as `chat_template_kwargs.reasoning_effort`. `"none"` cannot be honoured — IFM always reasons — so it is dropped with a warning. |
+| **`X-Session-ID` affinity** | A stable id per conversation pins it to one compute node so the prefix's KV cache is reused. Taken from the caller's `x-wiwi-session-id` when set, otherwise derived from the shared prefix (system prompt + first user turn). Latency-only; results never depend on it. |
+
+Also handled: `top_k` is forwarded (the upstream is vLLM-backed and documents
+it; `supports_top_k` on the adapter), `stop` is capped at four sequences, and
+OpenAI-platform parameters IFM does not document (`store`, `metadata`,
+`prompt_cache_key`, `logit_bias`, `service_tier`, …) are dropped with a
+caller-visible warning. Streaming carries reasoning on `reasoning_content`
+deltas, which the base adapter already decodes into `ThinkingDelta`.
+
+Limits: 10,000,000 tokens per API key per day (resets 00:00 UTC); `429` with
+`Retry-After` past the cap. Docs: <https://docs.ifm.ai/>.
 
 
 ## Mixing providers in one model group

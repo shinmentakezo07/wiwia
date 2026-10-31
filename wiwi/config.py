@@ -47,6 +47,7 @@ PROVIDER_TYPES: tuple[str, ...] = (
     "workbuddy",
     "opencode",
     "hermes",
+    "ifm",
 )
 
 

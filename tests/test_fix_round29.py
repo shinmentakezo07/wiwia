@@ -25,9 +25,10 @@ These tests pin:
 - every model gets the four metadata headers, anonymous key or real key
 - the ids are stable across header rebuilds within one request (the
   401-refresh retry path rebuilds headers)
-- the session id is reused per credential (free-tier quota is accounted per
-  session) while the request id is fresh per request; `reset()` rotates only
-  the request id
+- the session id is reused per credential (mirroring the client; the free
+  allowance itself is accounted per account/workspace/network, not per session)
+  while the request id is fresh per request; `reset()` rotates only the request
+  id
 - the gateway end-to-end sends them upstream, streaming included
 """
 

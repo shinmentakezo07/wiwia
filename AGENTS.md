@@ -2,7 +2,7 @@
 
 Agent guide for **wiwi** — a self-hosted unified LLM gateway proxy (FastAPI; `requires-python
 >=3.11`, ambient interpreter is 3.13).
-Three inbound API dialects route through one canonical internal representation (IR) to twelve
+Three inbound API dialects route through one canonical internal representation (IR) to thirteen
 outbound provider types; responses are always re-encoded in the caller's inbound dialect. Two
 further inbound routes reuse that same pipeline rather than adding a fourth dialect: legacy
 `POST /v1/completions` (bare `prompt` in, `choices[].text` out) and
@@ -79,11 +79,13 @@ print('v1', len([r for r in routes if r[1].startswith('/v1')]),
       'admin', len([r for r in routes if r[1].startswith('/admin')]))"
 ```
 
-### Outbound provider types (12)
+### Outbound provider types (13)
 
 `openai`, `openai-compatible`, `gmicloud`, `bai` (all four share the OpenAI wire shape —
 `registry._OPENAI_WIRE_TYPES`), `anthropic`, `gemini`, `openrouter`, `nvidia-nim`, `opencode`
-(Zen), `cline` (OAuth), `workbuddy` (OAuth), `hermes` (Nous Portal).
+(Zen), `cline` (OAuth), `workbuddy` (OAuth), `hermes` (Nous Portal), `ifm` (MBZUAI — Chat
+wire with `reasoning_content` replay, `chat_template_kwargs` effort and `X-Session-ID`
+affinity).
 
 ### Streaming contract (`wiwi/streaming/deltas.py`) — binding
 
@@ -132,8 +134,8 @@ python3 -m pytest tests/ -q
 python3 -m pytest tests/test_codecs.py -q                       # single file
 python3 -m pytest tests/test_router.py -k cooling               # -k substring
 python3 -m pytest tests/test_integration.py::test_chat_completion_happy_path -q
-ruff check wiwi/ tests/
-python3 -m pytest tests/ -q && ruff check wiwi/ tests/          # run BOTH before claiming done
+ruff check wiwi/ tests/ scripts/
+python3 -m pytest tests/ -q && ruff check wiwi/ tests/ scripts/          # run BOTH before claiming done
 
 # admin UI (npm)
 cd web && npm install && npm run dev        # Vite :5173, proxies /admin /auth /public /v1 /health → :4000
@@ -262,7 +264,7 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
 - Redis is an optional extra (`.[redis]`); without it the response cache silently falls back to
   the in-memory LRU. `asyncpg` (Postgres) is a core dep.
 - Build backend hatchling; entry point `wiwi = "wiwi.main:cli"`.
-- **No CI and no pre-commit config.** The manual `pytest` + `ruff` gate is binding.
+- **CI exists, pre-commit does not.** `.github/workflows/ci.yml` runs `ruff`, `scripts/audit_lint.py`, `pytest`, and the web lint/build on push and PR. The manual `pytest` + `ruff` gate is still binding locally — CI is a backstop, not a substitute.
 - **Never commit:** `wiwi.yaml`, `wiwi.db`, `.env`, `key.md`, `opencode.json(c)`, `*.har`, or
   anything under `.wiwi/` or `.verify/` — live keys and runtime state. Provider keys enter via
   `os.environ/NAME` in config; admin endpoints require `WIWI_MASTER_KEY`.
@@ -307,5 +309,5 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
   `3813 passed, 13 skipped, 2 warnings in 242s` (3,825 collected, 227 files). Some warnings are `aiosqlite`
   worker threads outliving their event loop (`AUDIT.md` #475) — harmless, but escalating that
   warning class to an error charges the failure to an unrelated test, so don't.
-- **Verification gate before claiming done:** `python3 -m pytest tests/ -q && ruff check wiwi/ tests/`
+- **Verification gate before claiming done:** `python3 -m pytest tests/ -q && ruff check wiwi/ tests/ scripts/`
   both green, plus a live-path smoke test (server or UI) for user-visible changes.

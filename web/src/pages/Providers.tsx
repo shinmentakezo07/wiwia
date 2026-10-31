@@ -69,6 +69,7 @@ const PROVIDER_BADGE: Record<string, string> = {
   cline: "/logos/cline.svg",
   opencode: "/logos/opencode.svg",
   hermes: "/logos/hermes.svg",
+  ifm: "/logos/ifm.svg",
 };
 
 const PROVIDER_TYPE_OPTIONS = [
@@ -83,6 +84,7 @@ const PROVIDER_TYPE_OPTIONS = [
   { value: "cline", label: "Cline" },
   { value: "opencode", label: "OpenCode Zen" },
   { value: "hermes", label: "Hermes (Nous Portal)" },
+  { value: "ifm", label: "IFM (MBZUAI)" },
   { value: "openai-compatible", label: "OpenAI-compatible URL" },
 ];
 
@@ -614,7 +616,7 @@ export function ProvidersPage() {
               options={PROVIDER_TYPE_OPTIONS}
             />
           </Field>
-          <Field label="Base URL" hint="Optional for openai/anthropic/gemini/openrouter/gmicloud/bai/workbuddy/nvidia-nim/cline/opencode/hermes. Required for compatible URLs.">
+          <Field label="Base URL" hint="Optional for openai/anthropic/gemini/openrouter/gmicloud/bai/workbuddy/nvidia-nim/cline/opencode/hermes/ifm. Required for compatible URLs.">
             <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://…" />
           </Field>
           <Field label="First key label">

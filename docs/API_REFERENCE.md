@@ -157,7 +157,7 @@ request-log row is written per session.
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/admin/provider-catalog` | GET | Catalog of the 12 provider types (from `PROVIDER_TYPES`) with required fields. |
+| `/admin/provider-catalog` | GET | Catalog of the 13 provider types (from `PROVIDER_TYPES`) with required fields. |
 | `/admin/providers` | GET | List configured providers + key pools + health states. |
 | `/admin/providers` | POST | Add a provider account. |
 | `/admin/providers/{name}` | PATCH | Edit provider (name/type/base_url/timeout). |

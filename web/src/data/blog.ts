@@ -31,7 +31,7 @@ export const BLOG_POSTS: BlogPost[] = [
     facts: [
       { label: "Pattern", value: "Hub-and-spoke translation" },
       { label: "wiwi inbound", value: "3 dialects" },
-      { label: "wiwi outbound", value: "12 provider types" },
+      { label: "wiwi outbound", value: "13 provider types" },
       { label: "Deployment", value: "Single Docker image or binary" },
     ],
     sections: [

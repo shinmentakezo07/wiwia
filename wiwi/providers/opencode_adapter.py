@@ -98,9 +98,23 @@ not (see :mod:`wiwi.providers.opencode_version`).
 
 The decoy tools stay behind ``opencode_free_tier_cloak``, which is **on by
 default** because the gate needs them; set it ``false`` for a deployment that
-serves only paid models. Free quota is accounted per session (the client reuses
-one long-lived session per identity), so ``x-opencode-session`` is reused per
-credential rather than re-minted per request.
+serves only paid models. The session id is reused per credential rather than
+re-minted per request: the upstream's allowance is accounted against the
+account, the workspace **and the network** (OpenCode's own support statement,
+2026-10-22), so churning sessions neither buys quota nor looks like the client.
+
+**The free allowance is a quota, not a rate limit.** Once it is spent the
+upstream answers ``429 FreeUsageLimitError`` ("Free usage limit reached.
+Subscribe to OpenCode Go …") and the reset window is not exposed to clients.
+``wiwi.providers.base.error_from_provider_status`` therefore classifies that
+429 as a 402 ``permission_error`` (quota exhausted) instead of a rate limit, so
+the shared ``anonymous`` sentinel is not cooled and the free tier's other
+deployments keep serving; the mid-stream envelope takes the same
+classification through :func:`_stream_error`. What this adapter deliberately
+does *not* do is rotate the session id or the source address on that error:
+the vendor counts the allowance per account/workspace/network and flags
+"abusive traffic from this IP address" as its own refusal, so a rotation would
+be quota evasion rather than a fix (AUDIT #556).
 
 **DeepSeek models on the chat route carry DeepSeek's thinking-mode rule.**
 Zen's catalogue includes the ``deepseek-*`` models, and the provider *behind*
@@ -142,6 +156,7 @@ from wiwi.providers.base import (
     WarningMixin,
     as_dict,
     as_list,
+    is_quota_refusal,
     take_adapter_warnings,
     unhonoured_platform_params,
 )
@@ -293,12 +308,15 @@ def canonical_session_id() -> str:
             + "".join(random.choice(_BASE62) for _ in range(_ID_TAIL)))
 
 
-# Upstream free-tier quota is accounted **per session**. Minting a fresh
-# session for every request spreads the traffic over new buckets and returns
-# 429 FreeUsageLimitError with growing reset-after delays; the real CLI reuses
-# one long-lived session per identity. Bucket by credential (anonymous free
-# setups share one bucket), LRU-capped and TTL-evicted so the map cannot grow
-# with the number of distinct keys ever seen.
+# The upstream's free allowance is accounted against the account, the
+# workspace **and the network** (OpenCode support, 2026-10-22), and the client
+# presents one long-lived session per identity. Minting a fresh session for
+# every request neither buys quota nor looks like the client, and it has been
+# measured returning `429 FreeUsageLimitError` sooner; a rotation *on* the
+# exhaustion error is quota evasion against the vendor's own abuse control, so
+# this adapter never does it. Bucket by credential (anonymous free setups share
+# one bucket), LRU-capped and TTL-evicted so the map cannot grow with the
+# number of distinct keys ever seen.
 _SESSION_TTL_S = 3600.0
 _MAX_SESSION_BUCKETS = 1000
 _stable_sessions: dict[str, tuple[str, float]] = {}
@@ -647,9 +665,11 @@ class OpencodeAdapter(WarningMixin):
         # client's `ses_` + 12 hex + 14 base62 shape, so a uuid-hex id — same
         # length, wrong alphabet — is rejected with 403 FreeTierError (and so is
         # the v2 CLI's own `ses_`+64-hex form, which is a different id space
-        # than this header carries). The upstream also accounts free quota per
-        # session, so the id is reused per credential rather than re-minted per
-        # request (429 class). It stays stable on one adapter instance across the
+        # than this header carries). The id is reused per credential rather than
+        # re-minted per request, mirroring the client: the free allowance is
+        # accounted per account/workspace/network, so a fresh session buys no
+        # quota and only stops looking like the client. It stays stable on one
+        # adapter instance across the
         # 401-refresh retry path's header rebuilds and rotates on reset()/fresh
         # instance.
         if self._spoof_session is None:
@@ -1047,8 +1067,35 @@ class OpencodeAdapter(WarningMixin):
             self._resp_tools.clear()
             self._resp_next_index = 0
             self._resp_ended = True
-            return out + [dl.StreamError(message=msg, kind="status")]
+            vendor_type = err_obj.get("type")
+            type_body = (orjson.dumps({"error": {"type": vendor_type}})
+                         if isinstance(vendor_type, str) and vendor_type else "")
+            return out + [_stream_error(msg, type_body)]
         return out
+
+
+def _stream_error(msg: str, body_text: str = "") -> dl.StreamError:
+    """Build a mid-stream error frame, classified like the pre-connect one.
+
+    A free-tier quota exhaustion can arrive inside a 200 event stream
+    (``FreeUsageLimitError: io rate limited: Free usage limit reached …``).
+    Left as a bare ``kind="status"`` frame it reaches
+    ``Gateway._note_stream_failure`` with no status and no vendor type, which
+    derives 502 → 429-class accounting and charges the shared ``anonymous``
+    sentinel — the whole-tier cooldown the 429 path avoids (AUDIT #469 / #556).
+    ``402 permission_error`` is the classification
+    ``error_from_provider_status`` gives the identical body before the stream
+    opens, so a streamed and a non-streamed refusal are charged the same way
+    and the client sees the same ``permission_error``.
+
+    *body_text* is the raw error object when there is one (it may carry the
+    vendor's ``type``); the human *msg* is always consulted for the wording.
+    """
+    if is_quota_refusal(body_text, msg):
+        log.warning("opencode_free_quota_exhausted", message=msg)
+        return dl.StreamError(message=msg, kind="status", status=402,
+                              etype="permission_error")
+    return dl.StreamError(message=msg, kind="status")
 
 
 def _envelope_stream_error(data: str) -> dl.StreamError | None:
@@ -1064,10 +1111,10 @@ def _envelope_stream_error(data: str) -> dl.StreamError | None:
     err = chunk.get("error")
     if isinstance(err, dict):
         msg = str(err.get("message") or "opencode stream error")
-        return dl.StreamError(message=msg, kind="status")
+        return _stream_error(msg, data)
     if isinstance(err, str) and err.strip():
         # Zen also sends the bare-string shape: {"error": "rate limited"}.
-        return dl.StreamError(message=err.strip(), kind="status")
+        return _stream_error(err.strip())
     return None
 
 

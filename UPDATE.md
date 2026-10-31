@@ -10,6 +10,149 @@ Each entry below records the before→after state, the exact files and lines cha
 
 ---
 
+## IFM (MBZUAI) adapter — reasoning_content replay and `chat_template_kwargs` effort (2026-10-30)
+
+New provider type `ifm` (`wiwi/providers/ifm.py`, `wiwi/providers/ifm_adapter.py`).
+IFM's hosted API is OpenAI Chat Completions shaped, but its K2 Horizon / Jais 3
+chat templates reject an ordinary OpenAI body. Each requirement is documented at
+`docs.ifm.ai` and is provider-specific, so it lives under `providers/`:
+
+- **`reasoning_content` on every assistant turn.** The model is stateless, and
+  a history turn whose trace was stripped is rejected with a 400 on turn 2.
+  The field is `reasoning_content` (`reasoning` is a mirror), and **`""` is a
+  legal trace** — it must be replayed rather than dropped or sent as `null`.
+  The base `OpenAIAdapter` only emits the field when the IR turn carried
+  reasoning, so the IFM adapter pads the rest with `""`. This is the same
+  *presence* rule the DeepSeek helper applies (`providers/deepseek.py`), but
+  unconditional here: IFM has no "tools required" gate.
+- **Text-only string content.** Content-parts arrays are flattened and
+  `image_url` / `input_audio` / `file` parts are dropped with a
+  caller-visible warning; `content: null` on a tool-call-only assistant turn
+  becomes `""`.
+- **`reasoning_effort` via `chat_template_kwargs`.** The base adapter emits a
+  top-level `reasoning_effort` for any provider type it does not recognise as
+  a compatible gateway, so the adapter removes that and writes
+  `chat_template_kwargs.reasoning_effort`, clamped to IFM's `low` / `medium` /
+  `high`. `minimal`→`low`, `xhigh`/`max`→`high`; `"none"` is dropped with a
+  warning because IFM always reasons.
+- **`X-Session-ID` affinity.** Stable per conversation — the caller's
+  `x-wiwi-session-id` when present, otherwise a digest of the shared prefix
+  (model, system prompt, first user turn) — so turn N+1 lands on the worker
+  holding the prefix's KV cache. The gateway now passes `ctx.session_id` into
+  `encode_request`'s `deployment_params` on all three paths as generic request
+  context.
+- **`stop` capped at four sequences**; **`top_k` forwarded** (see below);
+  OpenAI-platform parameters IFM does not document (`store`, `metadata`,
+  `prompt_cache_key`, `logit_bias`, `service_tier`, …) dropped with warnings.
+- **`OpenAIAdapter.supports_top_k`.** The base adapter used to drop `top_k`
+  with a warning for every Chat-wire provider. A vLLM-backed upstream that
+  honours it now opts in via the class flag; the default (`False`) keeps every
+  existing provider byte-identical.
+
+Coverage: `tests/test_ifm_adapter.py` (29 tests), including an end-to-end
+Anthropic-in → IFM-out → Anthropic-back request against a mocked endpoint.
+
+---
+
+## Round 186 — an unreadable Anthropic block index is dropped, not guessed onto block 0 (AUDIT #419) (2026-10-30)
+
+`wiwi/providers/anthropic_adapter.py` — the upstream Messages SSE decoder.
+
+- **`_block_index` now returns `int | None`.** A numerically whole float is
+  still normalized (`1.0` → `1`, the same block); a value that names no block
+  (list/dict/str/bool/non-integral float) returns `None` instead of `0`. Round
+  128's `0` fallback kept the frame "so the fragment is not lost", but `0` is a
+  real block: with a call open there, the fragment was appended to a
+  *different* call's JSON and the stream still terminated cleanly, so no
+  downstream layer could detect the corruption.
+- **`input_json_delta` gates on `idx in self._tool_indices`.** An args fragment
+  is only emitted inside `ToolCallOpen → ArgsDelta* → ToolCallClose`; an orphan
+  fragment (unreadable index, or a block that never opened) is dropped instead
+  of emitted for the encoders to discard.
+- **The start and result arms drop an unreadable index too**, so a malformed
+  `content_block_start` cannot supersede the call already live on block 0.
+- **An unreadable `content_block_stop` closes the only open call** when exactly
+  one is open (the only block it can refer to); with several open it is
+  ambiguous and the frame is dropped rather than closing the wrong call. This
+  keeps a tool block from being orphaned by a malformed stop.
+- **#420 re-pinned, unchanged.** The `[DONE]` terminator on an anthropic-typed
+  upstream was already fixed in round 162; the new coverage keeps it fixed.
+
+Coverage: `tests/test_fix_round186.py` (10 tests), plus the round-128 and
+round-78 tests that had pinned the `0` fallback (they now open the block they
+send a fragment for, which is the IR contract).
+
+---
+
+## Round 184 — the flagged-network 403 is an entitlement refusal (AUDIT #557) (2026-10-30)
+
+One classification gap in `wiwi/providers/base.py`, in the same family as the
+quota 429 above.
+
+- **`403` + network-abuse wording → `permission_error`.** OpenCode's free tier
+  refuses a request from a flagged egress with a 403 that says "we've detected
+  abusive traffic from this IP address. This isn't related to your account." No
+  entitlement marker matched, so `_classify_provider_status` took the credential
+  branch: `authentication_error`, `status_for_key_pool` 403, and
+  `ProviderAccount.on_result` retired a healthy key for 600 s — the one reading
+  the vendor's body rules out. `_entitlement_kind` now returns a third kind,
+  `"network"` (markers `_NETWORK_BLOCK_MARKERS`), and the classifier renders
+  `403 permission_error` with "blocked this network" in the message. The key is
+  left in rotation and the request still fails over.
+- **Deliberately not fixed by rotation.** The same egress gets the same 403;
+  changing the source address or session is the vendor's abuse control, not a
+  repair. The docstring and `docs/OPENCODE.md` say so, so the next agent does
+  not read "blocked network" as "retry harder".
+
+Coverage: `tests/test_fix_round184.py` (7 tests) — the live wording and three
+variants, the key-not-retired accounting, and controls for a genuine 403 and the
+`FreeTierError` shape refusal.
+
+---
+
+## Round 183 — a quota 429 is an entitlement refusal, not a rate limit (AUDIT #556) (2026-10-30)
+
+One classification defect, reachable from every inbound dialect through the
+`opencode` provider, plus the mid-stream half of the same defect.
+
+- **`429` + quota marker → `402 permission_error`** (`wiwi/providers/base.py`).
+  `_classify_provider_status` keyed the 429 arm on the status alone, so OpenCode
+  Zen's `429 FreeUsageLimitError` ("Free usage limit reached … subscribe to
+  OpenCode Go") became `429 rate_limit_error` and `status_for_key_pool` charged
+  it to the key. Every free Zen deployment shares one `anonymous` sentinel, so
+  one exhausted allowance cooled the only credential they all use and the tier
+  answered `503 no healthy deployment` for the stated `Retry-After` (hours).
+  The arm now consults `is_quota_refusal(body_text)` — the same billing markers
+  the 401/403 branch already used (`FreeUsageLimitError`, `GoUsageLimitError`,
+  `BlackUsageLimitError`, `MonthlyLimitError`, `UserLimitError`, plus the
+  "usage limit reached" wording) — and returns `402 permission_error`,
+  `retryable=True`, `upstream_type` preserved. The key is left in rotation and
+  the request still fails over. A 429 with no quota wording is unchanged.
+  `status_for_key_pool`'s docstring records the new branch.
+- **The mid-stream envelope takes the same classification**
+  (`wiwi/providers/opencode_adapter.py`). A refusal can arrive inside a 200 SSE
+  stream, where there is no HTTP status; `_envelope_stream_error` and the
+  Responses `response.failed` arm now build their frame through `_stream_error`,
+  which tags a quota refusal `status=402, etype="permission_error"` and logs
+  `opencode_free_quota_exhausted`. Without it, `Gateway._note_stream_failure`
+  derived 502 → 429-class accounting from the bare frame and charged the shared
+  sentinel mid-stream.
+- **Docs corrected, not appended** (`docs/OPENCODE.md`, adapter docstring).
+  The claim "free quota is accounted per session" was wrong: OpenCode's support
+  statement (2026-10-22, issue #58205) says the allowance is enforced for the
+  account, workspace **and network**, and the reset window is not exposed. The
+  adapter reuses one session per credential because that is what the client
+  does, not because it buys quota, and it deliberately does **not** rotate the
+  session id or the egress address on an exhaustion error — the vendor's
+  separate "abusive traffic from this IP address" refusal exists to detect
+  exactly that.
+
+Coverage: `tests/test_fix_round183.py` (13 tests) — classification from the type
+and from the wording alone, plain-429 control, sentinel-in-rotation in both
+failover modes, mid-stream and Responses tagging, generic-stream control.
+
+---
+
 ## Round 182 — the wire half of the cache/server/streaming/wire sweep (AUDIT #546-#554) (2026-10-30)
 
 Nine codec/translation defects, one of them (the finish-reason map) reachable

@@ -1342,6 +1342,25 @@ BUILTIN_PROVIDER_TYPES: list[dict[str, str | list[str]]] = [
         "context_window": "varies per model",
         "docs_url": "https://hermes-agent.nousresearch.com/docs/",
     },
+    {
+        "provider_type": "ifm",
+        "label": "IFM (MBZUAI)",
+        "default_base_url": "https://api.ifm.ai/v1",
+        "description": (
+            "MBZUAI's Institute of Foundation Models hosted API: K2 Horizon "
+            "and Jais 3 reasoning models (512K context) over an "
+            "OpenAI-compatible Chat Completions endpoint. The adapter replays "
+            "reasoning_content on every assistant turn (an empty trace "
+            "included), sends reasoning_effort through chat_template_kwargs, "
+            "and pins conversation affinity with X-Session-ID."
+        ),
+        "latest_models": [
+            "IFM/K2-Horizon-375B-A23B",
+            "IFM/Jais-3-MoVA-36B-A4B",
+        ],
+        "context_window": "512K tokens",
+        "docs_url": "https://docs.ifm.ai/",
+    },
 ]
 
 

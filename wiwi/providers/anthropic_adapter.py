@@ -822,8 +822,8 @@ class AnthropicAdapter(WarningMixin):
         return turn
 
     @staticmethod
-    def _block_index(payload: dict[str, Any]) -> int:
-        """The frame's content-block index, coerced to a usable ``int``.
+    def _block_index(payload: dict[str, Any]) -> int | None:
+        """The frame's content-block index, or ``None`` when it names no block.
 
         ``payload.get("index", 0)`` defaults only a MISSING key: an upstream
         frame (or a re-serializing proxy) carrying ``"index": [0]`` put a list
@@ -842,9 +842,13 @@ class AnthropicAdapter(WarningMixin):
           tool call's argument fragments onto a *different* tool call, whose
           args then concatenate into unparseable JSON (AUDIT #419).
         * **Anything else** (a list/dict/str, a bool, a non-integral float)
-          names no block that can be recovered, so ``0`` is the only coherent
-          fallback and the frame is kept rather than dropped — the client paid
-          for the tokens.
+          names no block that can be recovered, so it returns ``None`` and the
+          caller drops the frame. Round 128 used to guess ``0`` here "so the
+          frame is kept", but ``0`` is a real block: when a call is open there,
+          the fragment is appended to that *different* tool call's JSON — the
+          exact corruption #419 documents, and one that a client cannot detect
+          because the stream still terminates cleanly. An unreadable index
+          loses one fragment; guessing loses a healthy call's arguments.
 
         ``bool`` is rejected even though ``isinstance(True, int)`` is True, per
         the sibling decoders (AUDIT #384): ``True`` would collide with ``1`` as
@@ -858,11 +862,11 @@ class AnthropicAdapter(WarningMixin):
         """
         idx = payload.get("index", 0)
         if isinstance(idx, bool):
-            return 0
+            return None
         if isinstance(idx, float) and idx.is_integer():
             return int(idx)
         if not isinstance(idx, int):
-            return 0
+            return None
         return idx
 
     def _flush_open_tools(self) -> list[dl.IRStreamDelta]:
@@ -962,6 +966,12 @@ class AnthropicAdapter(WarningMixin):
                     text="", block_type="redacted_thinking",
                     data=cb.get("data", "")))
             elif cb.get("type") in ("tool_use", "server_tool_use", "mcp_tool_use"):
+                if idx is None:
+                    # The frame names no recoverable block, so there is no
+                    # index to open the call on. Guessing 0 would supersede
+                    # (and close) whatever call is open there, and route this
+                    # call's arguments onto it (AUDIT #419).
+                    return out
                 if idx in self._tool_indices:
                     # A second ``content_block_start`` on an index that is
                     # still OPEN supersedes the first call. Emitting a second
@@ -1009,6 +1019,11 @@ class AnthropicAdapter(WarningMixin):
                 # (``as_str`` on the id above, ``isinstance(..., str)`` on the
                 # block type), so use the same helper here.
                 tid = cb.get("tool_use_id")
+                if idx is None:
+                    # Same rule as the call arms: an unreadable index names no
+                    # block, and the result's own numbering cannot be guessed
+                    # without misnumbering the client's content blocks.
+                    return out
                 out.append(dl.ServerToolResultDelta(
                     index=idx, block=cb,
                     builtin=self._tool_names_by_id.get(
@@ -1033,13 +1048,32 @@ class AnthropicAdapter(WarningMixin):
                 # a null raised mid-stream after the client already had a 200
                 # (AUDIT #160). Gate exactly like the sibling arms above.
                 frag = d.get("partial_json")
-                out.append(dl.ToolCallArgsDelta(
-                    index=self._block_index(payload),
-                    args_fragment=frag if isinstance(frag, str) else ""))
+                idx = self._block_index(payload)
+                # The fragment is only meaningful for a call that is OPEN: the
+                # IR contract puts ToolCallArgsDelta strictly inside
+                # Open -> ArgsDelta* -> Close. An unreadable index (None) or
+                # one that never opened used to emit a delta anyway, which is
+                # either an orphan every encoder drops or — when block 0 is
+                # open — another call's arguments appended to block 0's JSON
+                # (AUDIT #419). Drop it; there is no block it can belong to.
+                if idx is not None and idx in self._tool_indices:
+                    out.append(dl.ToolCallArgsDelta(
+                        index=idx,
+                        args_fragment=frag if isinstance(frag, str) else ""))
         elif etype == "content_block_stop":
             # only tool_use blocks close a tool call; text/thinking stops are not
             # tool-call lifecycle events
             idx = self._block_index(payload)
+            if idx is None:
+                # An unreadable stop index names no block. With exactly one
+                # call open there is only one thing it can refer to, so close
+                # that one — leaving it open emits a tool_use block that never
+                # stops, which the client's next replay is rejected for. With
+                # several open it is genuinely ambiguous: drop the frame rather
+                # than close the wrong call (AUDIT #419).
+                if len(self._tool_indices) != 1:
+                    return out
+                idx = next(iter(self._tool_indices))
             if idx in self._tool_indices:
                 self._tool_indices.discard(idx)
                 out.append(dl.ToolCallClose(index=idx))

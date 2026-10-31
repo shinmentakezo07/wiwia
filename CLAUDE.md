@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-**wiwi** is a self-hosted unified LLM gateway proxy (LiteLLM-shaped): three inbound API dialects — OpenAI Chat, OpenAI Responses (Codex CLI), Anthropic Messages — plus the legacy OpenAI Completions shape and a browser-session twin of Chat, all route through one canonical internal representation (IR) to any of twelve outbound provider types; responses are always re-encoded in the caller's inbound dialect (e.g. Claude Code backed by GPT). Adds virtual keys, budgets, rate limits, key pools with smooth weighted round-robin, retries/cooldowns/fallbacks, a health healer, cost tracking, request logs, and an admin web UI.
+**wiwi** is a self-hosted unified LLM gateway proxy (LiteLLM-shaped): three inbound API dialects — OpenAI Chat, OpenAI Responses (Codex CLI), Anthropic Messages — plus the legacy OpenAI Completions shape and a browser-session twin of Chat, all route through one canonical internal representation (IR) to any of thirteen outbound provider types; responses are always re-encoded in the caller's inbound dialect (e.g. Claude Code backed by GPT). Adds virtual keys, budgets, rate limits, key pools with smooth weighted round-robin, retries/cooldowns/fallbacks, a health healer, cost tracking, request logs, and an admin web UI.
 
 **Scale, verified 2026-10-29** (re-measure rather than trust): 90 Python files under `wiwi/`, `__init__.py`s included; `wiwi/server/app.py` ~7.4k lines and `wiwi/core/gateway.py` ~3.0k; `wiwi/wire/` 4 codecs, `wiwi/providers/` 12 types across 25 files; 9 `/v1` routes and 59 `/admin` routes; 227 test files collecting 3,825 tests; 64 components in `web/src/pages/`. Counts drift — the commands below are the source of truth.
 
@@ -32,7 +32,7 @@ python3 -m pytest tests/test_router.py -k cooling           # -k matches test-na
 python3 -m pytest tests/test_integration.py::test_chat_completion_happy_path -q   # single test
 
 # lint (ruff, line-length 100, target py311)
-ruff check wiwi/ tests/
+ruff check wiwi/ tests/ scripts/
 
 # admin UI
 cd web && npm install && npm run dev     # dev server (proxies /admin /auth /public /v1 /health → :4000)
@@ -50,7 +50,7 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100
 
 **npm is authoritative for `web/`.** `web/package-lock.json` and `start.sh` use npm; do not mix package managers in one session.
 
-There is **no CI and no pre-commit config**. The manual `pytest` + `ruff` gate is binding: run both, both green, before claiming work done or committing.
+`.github/workflows/ci.yml` runs the gate on every push to `main` and every pull request: `ruff check wiwi/ tests/ scripts/`, `scripts/audit_lint.py`, `pytest tests/ -q`, and `cd web && npm ci && npm run lint && npm run build` (the build is `tsc -b && vite build`, so it type-checks). There is still **no pre-commit config**, and CI is a backstop, not permission to skip the gate locally: run `pytest` + `ruff` green before claiming work done or committing.
 
 Config precedence: `--config`/`-c` flag > `WIWI_CONFIG` env (inline YAML) > `wiwi.yaml`. `load_env()` (python-dotenv, `override=False`) runs before config parse, so real environment variables win.
 
@@ -69,7 +69,7 @@ Adding an inbound surface = one new module in `wiwi/wire/`; adding a provider = 
 
 Inbound surfaces: `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages`, `POST /v1/messages/count_tokens`, the legacy `POST /v1/completions` (`wire/openai_completions.py`, `choices[].text` not a chat transcript), and `POST /v1/playground/completions` — the Chat pipeline gated by the `wiwi_session` cookie instead of a bearer key; plus `GET`/`DELETE /v1/responses/{response_id}` (wiwi-owned stored Responses state, `server/response_store.py` — ids are key-scoped, not capability tokens), `GET /v1/models`, `GET /public/models`, `GET /health`, a configurable Prometheus metrics path (`server/metrics.py`), `/admin/*` (master key), `/auth/*` (user sessions), `/cline/oauth/callback`.
 
-`PROVIDER_TYPES` (`wiwi/config.py`) is the outbound-type source of truth — twelve: `openai`, `anthropic`, `gemini`, `openai-compatible`, `openrouter`, `gmicloud`, `bai`, `nvidia-nim`, `cline`, `workbuddy`, `opencode`, `hermes`.
+`PROVIDER_TYPES` (`wiwi/config.py`) is the outbound-type source of truth — thirteen: `openai`, `anthropic`, `gemini`, `openai-compatible`, `openrouter`, `gmicloud`, `bai`, `nvidia-nim`, `cline`, `workbuddy`, `opencode`, `hermes`, `ifm`.
 
 ### `wiwi/` layout
 
@@ -242,7 +242,7 @@ When an agent discovers a bug, error, or suspicious behavior in this codebase:
 
 1. **Report it in `AUDIT.md` before or alongside fixing it.** Do not silently fix a bug and leave no trace. Any agent that finds a real defect must add an entry to `AUDIT.md` using the existing format: a severity badge (`🔴`/`🟠`/`🟡`/`⚪`), a short title, the exact file:line citations, a trigger description, and a one-line fix sketch. If the bug is already in `AUDIT.md`, skip to step 2.
 
-2. **When fixing a bug that is already in `AUDIT.md`, mark it as fixed in place.** Update the entry to record that it is resolved — add a `**Status: fixed**` line and the commit or description that fixed it, or move it into the `## ✅ Fixed` section at the top of the file with the original finding preserved. Never delete a finding without a trace. The goal is that a fresh agent opening `AUDIT.md` can tell at a glance which bugs are still live and which have already been resolved, so they do not waste time re-fixing or re-investigating something that is done.
+2. **When fixing a bug that is already in `AUDIT.md`, mark it as fixed in place.** Update the entry to record that it is resolved — add a `**Status: fixed**` line and the commit or description that fixed it. Never delete a finding without a trace. Closed rounds move to `docs/audit-archive/fixed.md`; there is no `## ✅ Fixed` section in `AUDIT.md` any more (the archive holds 73 closed sections verbatim). `scripts/audit_lint.py`, run in CI, fails any numbered entry that carries no `**Status:**` line and sits under no `**Section status:**`, so an unmarked finding can no longer accumulate silently. The goal is that a fresh agent opening `AUDIT.md` can tell at a glance which bugs are still live and which have already been resolved, so they do not waste time re-fixing or re-investigating something that is done.
 
 3. **Link the fix to its AUDIT.md entry.** When a fix lands for a bug that has an `AUDIT.md` entry, the commit message or PR description must reference the entry number or title so the connection is recoverable. If the fix introduces a new regression test in a `test_fix_roundN.py` file, mention that test in the `AUDIT.md` entry as well.
 

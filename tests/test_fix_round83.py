@@ -424,7 +424,7 @@ def test_shipped_example_config_still_loads(monkeypatch):
     — each one drops, none of them errors — while every drop is now reported."""
     for var in ("OPENAI_API_KEY", "OPENAI_API_KEY_2", "ANTHROPIC_API_KEY",
                 "OPENROUTER_API_KEY", "GMI_API_KEY", "BAI_API_KEY",
-                "NVIDIA_NIM_API_KEY", "OPENCODE_API_KEY"):
+                "NVIDIA_NIM_API_KEY", "OPENCODE_API_KEY", "IFM_API_KEY"):
         monkeypatch.delenv(var, raising=False)
     example = Path(__file__).resolve().parent.parent / "wiwi.yaml.example"
     with structlog.testing.capture_logs() as logs:
@@ -436,7 +436,7 @@ def test_shipped_example_config_still_loads(monkeypatch):
     hits = [e for e in logs if e.get("event") == "provider_dropped_no_key"]
     assert {h["provider"] for h in hits} == {
         "openai-main", "anthropic-main", "openrouter", "gmicloud", "bai",
-        "nvidia-nim", "opencode-zen"}
+        "nvidia-nim", "opencode-zen", "ifm-main"}
     assert all(h["env_vars"] for h in hits), (
         "every drop must name the env var its keys resolved from: "
         f"{[(h['provider'], h['env_vars']) for h in hits]}")

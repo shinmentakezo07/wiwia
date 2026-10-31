@@ -46,26 +46,30 @@ def _tool_start(index) -> str:
 
 
 def test_unhashable_index_does_not_crash_content_block_start():
-    """The regression: ``index: [0]`` raised ``TypeError: unhashable type``."""
+    """The regression: ``index: [0]`` raised ``TypeError: unhashable type``.
+
+    The frame is dropped rather than opened on a guessed index. ``0`` is a
+    real block, so opening a call there would supersede whichever call is live
+    on it and route this call's arguments onto that one — the corruption
+    AUDIT #419 records (round 186 closed the second half).
+    """
     a = fresh_adapter("anthropic")
     out = a.decode_stream_event("content_block_start", _start([0], {
         "type": "tool_use", "id": "toolu_1", "name": "f"}))
-    assert len(out) == 1
-    assert isinstance(out[0], dl.ToolCallOpen)
-    # Coerced to a usable int rather than propagated.
-    assert isinstance(out[0].index, int)
-    assert not isinstance(out[0].index, bool)
+    assert out == [], out
 
 
 def test_unhashable_index_does_not_crash_input_json_delta():
-    """The ``input_json_delta`` arm reads ``index`` too (args must route right)."""
+    """The ``input_json_delta`` arm reads ``index`` too (args must route right).
+
+    No call is open for an unreadable index, so there is nothing the fragment
+    can belong to: it is dropped rather than guessed onto block 0 (AUDIT #419).
+    """
     a = fresh_adapter("anthropic")
     out = a.decode_stream_event("content_block_delta", _frame(
         type="content_block_delta", index=[1],
         delta={"type": "input_json_delta", "partial_json": '{"a":'}))
-    assert len(out) == 1
-    assert isinstance(out[0], dl.ToolCallArgsDelta)
-    assert isinstance(out[0].index, int)
+    assert out == [], out
 
 
 def test_unhashable_index_does_not_crash_content_block_stop():
@@ -83,12 +87,11 @@ def test_unhashable_index_does_not_crash_content_block_stop():
     assert out[0].index == 0
 
 
-def test_bool_index_is_coerced_away():
+def test_bool_index_is_rejected_not_coerced_to_block_one():
     """``isinstance(True, int)`` is True, so a bool must be rejected explicitly."""
     a = fresh_adapter("anthropic")
     out = a.decode_stream_event("content_block_start", _tool_start(True))
-    assert isinstance(out[0].index, int)
-    assert not isinstance(out[0].index, bool)
+    assert out == [], out
 
 
 def test_genuine_int_index_is_preserved():
@@ -221,17 +224,15 @@ def test_hostile_frames_do_not_cool_a_healthy_key():
 # A wrong-but-numeric index must not be silently rerouted to block 0
 # ---------------------------------------------------------------------------
 #
-# `_block_index` coerces any non-int to ``0``. That is the right answer for an
-# UNUSABLE index (an unhashable list/dict has no block to belong to, and 0 is
-# the only coherent fallback), but it is the WRONG answer for a *numeric* index
-# that merely lost its int-ness in transit: ``1.0`` names block 1, and sending
-# its args to block 0 corrupts a live tool call rather than failing one.
+# `_block_index` normalizes a numerically whole float (``1.0`` -> ``1``) and
+# returns ``None`` for a value that names no block at all (round 186). Neither
+# answer may be ``0`` for an unusable value: ``0`` is a real block, and sending
+# another call's args there corrupts a live tool call rather than failing one.
 #
 # The distinction matters because Anthropic's ``index`` is the provider's own
 # content-block id, NOT an array position — the openai/nim decoders can fall
 # back to the loop's array index ``i`` because their index is positional, but an
-# Anthropic block id has no such fallback. Rerouting is therefore the only
-# option there, and it must reroute to the RIGHT block.
+# Anthropic block id has no such fallback.
 #
 # Note ``hash(1.0) == hash(1)``, so a membership test against the open set
 # would have silently passed; the guard has to test the TYPE.
@@ -265,6 +266,7 @@ def test_float_index_keeps_its_own_tool_call_args():
     for raw in [
         _frame(type="message_start", message={"model": "m"}),
         _tool_start_at(0, "A", "Grep"),
+        _tool_start_at(1, "B", "Read"),
         _args_delta(1.0, '{"p":"a"}'),
     ]:
         decoded.append((orjson.loads(raw).get("type"), raw))
@@ -300,6 +302,7 @@ def test_float_index_does_not_concatenate_into_a_sibling_tool():
 def test_float_index_still_emits_deltas_for_a_valid_block():
     """The delta itself must survive — not be dropped along with the bad routing."""
     a = fresh_adapter("anthropic")
+    a.decode_stream_event("content_block_start", _tool_start_at(1, "B", "Read"))
     out = a.decode_stream_event(
         "content_block_delta",
         _args_delta(1.0, '{"city":"Paris"}'))
@@ -312,32 +315,36 @@ def test_float_index_still_emits_deltas_for_a_valid_block():
 def test_genuine_int_index_is_untouched():
     """Control: the common path must be unaffected."""
     a = fresh_adapter("anthropic")
+    a.decode_stream_event("content_block_start", _tool_start_at(1, "B", "Read"))
     out = a.decode_stream_event("content_block_delta", _args_delta(1, '{"a":1}'))
     assert out[0].index == 1
 
 
-def test_unusable_index_still_falls_back_to_zero():
-    """Control: a genuinely unaddressable index keeps the round-128 fallback.
+def test_unusable_index_is_dropped_not_guessed():
+    """An unaddressable index names no block, so the fragment is dropped.
 
-    An unhashable value names no block at all, so there is nothing better than
-    block 0 — and dropping the frame would lose content the client paid for.
+    Round 128 kept the frame and routed it to block 0 "so the client is not
+    charged for a lost fragment". That guess is the corruption AUDIT #419
+    records: when a call is live on block 0, the fragment is appended to a
+    DIFFERENT call's arguments and the stream still terminates cleanly, so
+    nothing downstream can detect it. A fragment with no block is dropped.
     """
     a = fresh_adapter("anthropic")
-    for bad in ([0], {"i": 0}, "1", None, True):
+    for bad in ([0], {"i": 0}, "1", None, True, 1.5):
         out = a.decode_stream_event("content_block_delta", _args_delta(bad, "{"))
-        assert len(out) == 1, bad
-        assert out[0].index == 0, f"{bad!r} -> {out[0].index}"
+        assert out == [], bad
 
 
 def test_numeric_string_index_is_not_treated_as_numeric():
     """``"1"`` is a coercion hazard, not a number: it must not become block 1.
 
-    Accepting it would be worse than the current fallback — ``"1"`` and ``1``
+    Accepting it would be worse than dropping the frame — ``"1"`` and ``1``
     are distinct dict keys, so it would split one tool call across two blocks.
     """
     a = fresh_adapter("anthropic")
+    a.decode_stream_event("content_block_start", _tool_start_at(1, "B", "Read"))
     out = a.decode_stream_event("content_block_delta", _args_delta("1", "{"))
-    assert out[0].index == 0, out[0].index
+    assert out == [], out
 
 
 def test_float_start_and_stop_stay_paired():

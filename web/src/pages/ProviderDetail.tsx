@@ -5,7 +5,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Boxes, Briefcase, CheckCircle2, ChevronDown, ChevronUp, Cloud, Cpu, Eye, EyeOff, Globe, Layers, Link2, Loader2, LogIn, Plus, RefreshCw, Search, Server, Sparkles, Trash2, Unlink, X, Zap } from "lucide-react";
+import { ArrowLeft, Boxes, Briefcase, CheckCircle2, ChevronDown, ChevronUp, Cloud, Cpu, Eye, EyeOff, Globe, Layers, Link2, Loader2, LogIn, Plus, RefreshCw, Search, Server, Sparkles, Sunrise, Trash2, Unlink, X, Zap } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
   addDeployment,
@@ -77,6 +77,7 @@ const PROVIDER_ICON: Record<string, LucideIcon> = {
   cline: Link2,
   opencode: Layers,
   hermes: Sparkles,
+  ifm: Sunrise,
 };
 
 const PROVIDER_TYPE_OPTIONS = [
@@ -91,6 +92,7 @@ const PROVIDER_TYPE_OPTIONS = [
   { value: "cline", label: "Cline" },
   { value: "opencode", label: "OpenCode Zen" },
   { value: "hermes", label: "Hermes (Nous Portal)" },
+  { value: "ifm", label: "IFM (MBZUAI)" },
   { value: "openai-compatible", label: "OpenAI-compatible URL" },
 ];
 
@@ -1036,7 +1038,7 @@ function AccountSettingsCard(props: { p: Provider; onError: (m: string) => void 
             />
           </Field>
         </div>
-        <Field label="Base URL" hint="Optional for openai/anthropic/gemini/openrouter/gmicloud/bai/workbuddy/nvidia-nim/cline/opencode/hermes. Required for compatible URLs.">
+        <Field label="Base URL" hint="Optional for openai/anthropic/gemini/openrouter/gmicloud/bai/workbuddy/nvidia-nim/cline/opencode/hermes/ifm. Required for compatible URLs.">
           <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://…" />
         </Field>
         <Field

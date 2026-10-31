@@ -21,6 +21,7 @@ from wiwi.providers.base import ProviderAdapter
 from wiwi.providers.cline_adapter import ClineAdapter
 from wiwi.providers.gemini_adapter import GeminiAdapter
 from wiwi.providers.hermes_adapter import HermesAdapter
+from wiwi.providers.ifm_adapter import IFMAdapter
 from wiwi.providers.nim_adapter import NimAdapter
 from wiwi.providers.openai_adapter import OpenAIAdapter
 from wiwi.providers.opencode_adapter import OpencodeAdapter
@@ -43,6 +44,7 @@ _SINGLETONS: dict[str, ProviderAdapter] = {
     "bai": BAIAdapter(),
     "workbuddy": WorkBuddyAdapter(),
     "opencode": OpencodeAdapter(),
+    "ifm": IFMAdapter(),
 }
 
 
@@ -87,6 +89,8 @@ def fresh_adapter(provider_type: str) -> ProviderAdapter:
         return OpencodeAdapter()
     if provider_type == "bai":
         return BAIAdapter()
+    if provider_type == "ifm":
+        return IFMAdapter()
     if provider_type in _OPENAI_WIRE_TYPES:
         return OpenAIAdapter()
     raise ValueError(f"unsupported provider type {provider_type!r}")
@@ -97,7 +101,7 @@ def fresh_adapter(provider_type: str) -> ProviderAdapter:
 # fallback. Catches drift at import time.
 _unhandled = set(PROVIDER_TYPES) - _OPENAI_WIRE_TYPES - {
     "anthropic", "gemini", "openrouter", "nvidia-nim", "cline", "workbuddy",
-    "opencode", "hermes"}
+    "opencode", "hermes", "ifm"}
 assert not _unhandled, (
     f"provider types {_unhandled} are in PROVIDER_TYPES but have no adapter "
     f"branch in get_adapter — add one"

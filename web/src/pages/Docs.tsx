@@ -533,6 +533,7 @@ const PROVIDERS: {
   { label: "OpenRouter", id: "openrouter", src: "/logos/openrouter.svg", family: "chat" },
   { label: "NVIDIA NIM", id: "nvidia-nim", src: "/logos/nvidia-nim.svg", family: "chat" },
   { label: "Hermes", id: "hermes", src: "/logos/hermes.svg", family: "chat" },
+  { label: "IFM", id: "ifm", src: "/logos/ifm.svg", family: "chat" },
   { label: "Anthropic", id: "anthropic", src: "/logos/anthropic.svg", family: "native" },
   { label: "Gemini", id: "gemini", src: "/logos/gemini.svg", family: "native" },
   { label: "Cline", id: "cline", src: "/logos/cline.svg", family: "sse" },
@@ -1162,7 +1163,7 @@ export function DocsPage() {
             <div className="mt-6 flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-[13px] text-[var(--admin-text-muted)]">
               {[
                 "3 inbound dialects",
-                "12 provider types",
+                "13 provider types",
                 "1 canonical IR",
                 "9 /v1 routes",
               ].map((fact) => (

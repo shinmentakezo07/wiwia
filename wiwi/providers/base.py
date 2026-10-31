@@ -19,7 +19,8 @@ class WiwiError(Exception):
 
     def __init__(self, status: int, etype: str, message: str,
                  retryable: bool = False, retry_after: float | None = None,
-                 upstream_type: str | None = None):
+                 upstream_type: str | None = None,
+                 egress_scoped: bool = False):
         super().__init__(message)
         self.status = status
         self.etype = etype  # invalid_request_error | authentication_error | permission_error |
@@ -38,6 +39,12 @@ class WiwiError(Exception):
         # request. Keeping the vendor's own label means the diagnostic starts
         # from what the vendor actually said. See docs/UPSTREAM_DIAGNOSIS.md.
         self.upstream_type = upstream_type
+        # True when the refusal names the *egress address* rather than the
+        # credential, the account or the request (AUDIT #557). The router
+        # cannot act on it by itself — the same exit will answer the same way —
+        # but an operator-supplied egress pool can: it is the only signal that
+        # retiring this exit and drawing another is the right response.
+        self.egress_scoped = egress_scoped
 
 
 RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504, 529}
@@ -60,6 +67,13 @@ def status_for_key_pool(e: WiwiError) -> int | None:
     one policy rejection into a self-inflicted outage. They return ``None`` so
     the key is left alone; the request still fails over to another
     deployment/provider because the error stays retryable.
+
+    The same holds for a ``429`` that names a quota marker
+    (``FreeUsageLimitError`` and friends): ``error_from_provider_status``
+    renders it as ``402 permission_error``, so it reports ``None`` here too and
+    one exhausted free allowance cannot cool a credential that every sibling
+    deployment shares. A plain 429 — a rate limit with no quota wording — still
+    reports 429.
 
     Shared by the router's retry loop and the gateway's stream pump/resume
     path.
@@ -225,6 +239,24 @@ _POLICY_MESSAGE_MARKERS = (
     "model is not supported",
 )
 
+# The vendor refused the *network* the request left from, not the credential.
+# OpenCode's free tier answers 403 with "free models aren't available from your
+# current network because we've detected abusive traffic from this IP address —
+# this isn't related to your account", and another gateway reports the variants
+# "Forbidden, OpenCode Free Model Gateway Detect Abuse Traffic" and "Abuse of
+# traffic" (opencode2api, internal/gateway/abuse.go). Left unclassified it took
+# the credential branch: a 403 `authentication_error`, which retired a healthy
+# key for 600 s and told the caller to re-authenticate a key that was never the
+# problem. It is an account/exit-level refusal, so it belongs with the
+# entitlement refusals — and it must never be answered by retrying the same
+# egress, which is why the message names the network instead of the key.
+_NETWORK_BLOCK_MARKERS = (
+    "abusive traffic",
+    "abuse traffic",
+    "abuse of traffic",
+    "from your current network",
+)
+
 # Phrase fallbacks for upstreams that refuse on the *shape* of the request
 # rather than on the account — the caller is a client the vendor does not
 # serve from that channel. Sent as a 400, so it never reaches the 401/403
@@ -248,9 +280,10 @@ _CHANNEL_REFUSAL_MARKERS = (
 def _entitlement_kind(body_text: str, msg: str) -> str | None:
     """Classify a 401/403 as an account-level refusal, else ``None``.
 
-    Returns ``"billing"`` (payment/credit/quota) or ``"policy"`` (region,
-    data, model access) when the body names an account-wide condition rather
-    than a bad credential; ``None`` means it is a genuine auth failure.
+    Returns ``"billing"`` (payment/credit/quota), ``"policy"`` (region, data,
+    model access) or ``"network"`` (the egress address was flagged) when the
+    body names a condition that applies to the whole account/exit rather than
+    to a bad credential; ``None`` means it is a genuine auth failure.
     """
     etype = _extract_error_type(body_text)
     if etype in _BILLING_ERROR_TYPES:
@@ -258,11 +291,36 @@ def _entitlement_kind(body_text: str, msg: str) -> str | None:
     if etype in _POLICY_ERROR_TYPES:
         return "policy"
     low = msg.lower()
+    if any(marker in low for marker in _NETWORK_BLOCK_MARKERS):
+        return "network"
     if any(marker in low for marker in _BILLING_MESSAGE_MARKERS):
         return "billing"
     if any(marker in low for marker in _POLICY_MESSAGE_MARKERS):
         return "policy"
     return None
+
+
+def is_quota_refusal(body_text: str = "", message: str = "") -> bool:
+    """True when a refusal names an account/network quota condition.
+
+    The same markers that turn a 401/403 into an entitlement refusal also
+    arrive on ``429``: OpenCode's free tier answers ``429 FreeUsageLimitError``
+    ("Free usage limit reached … subscribe to OpenCode Go") when the allowance
+    for the account, workspace or network is spent, and its subscription tiers
+    use ``GoUsageLimitError`` / ``BlackUsageLimitError``. That is a statement
+    about an allowance, not about the credential's health, so the caller needs
+    to charge it the way it charges an entitlement refusal.
+
+    ``body_text`` is the raw error body; ``message`` is the human text when the
+    caller already extracted it (and is what the marker fallback reads). Public
+    because the OpenCode adapter makes the same call on a refusal that arrives
+    *inside* a 200 event stream, where there is no HTTP status to classify
+    (`opencode_adapter._stream_error`). One predicate keeps the pre-connect and
+    mid-stream paths from drifting.
+
+    Total: no body, no message, or no marker yields ``False``.
+    """
+    return _entitlement_kind(body_text, message or _extract_error_message(body_text)) == "billing"
 
 
 def error_from_provider_status(status: int, body_text: str, provider: str) -> WiwiError:
@@ -305,6 +363,18 @@ def _classify_provider_status(status: int, body_text: str, provider: str) -> Wiw
             return WiwiError(403, "permission_error",
                              f"{provider} denied access ({status}): {msg}",
                              retryable=True)
+        if kind == "network":
+            # The egress address was flagged, not the key: the body says so
+            # ("this isn't related to your account"). Retrying the *same* exit
+            # cannot succeed, but a fallback group on another provider can, so
+            # it stays retryable; the message names the network so the operator
+            # does not go looking for a credential or a request-shape bug.
+            # `egress_scoped` marks it as the one class of refusal an egress
+            # pool (when the operator configured one) can answer by retiring
+            # the exit that carried the request.
+            return WiwiError(403, "permission_error",
+                             f"{provider} blocked this network ({status}): {msg}",
+                             retryable=True, egress_scoped=True)
         # Preserve the auth-failure status so the router can invalidate the key
         # (ProviderKey.mark_invalid); retryable stays True so the request fails
         # over to the next key in the pool instead of hard-failing the client.
@@ -312,6 +382,21 @@ def _classify_provider_status(status: int, body_text: str, provider: str) -> Wiw
                          f"{provider} rejected credentials ({status}): {msg}",
                          retryable=True)
     if status == 429:
+        # A 429 that names a quota/billing condition is a statement about an
+        # allowance, not about this credential's health: OpenCode's free tier
+        # answers ``429 FreeUsageLimitError`` once the free allowance for the
+        # account/workspace/network is spent, and every free deployment there
+        # shares one ``anonymous`` sentinel — charging that to key health
+        # retired the whole tier for the cooldown (the sibling of AUDIT #469,
+        # which only covered a 429 that states no window at all). Classified
+        # as an entitlement refusal (402 ``permission_error``) so
+        # ``status_for_key_pool`` leaves the key alone, the client is not told
+        # to "retry in a second" for a daily allowance, and the request still
+        # fails over because the error stays retryable.
+        if is_quota_refusal(body_text):
+            return WiwiError(402, "permission_error",
+                             f"{provider} quota exhausted ({status}): {msg}",
+                             retryable=True)
         return WiwiError(429, "rate_limit_error", f"{provider} rate limited: {msg}", retryable=True)
     if status == 504:
         return WiwiError(504, "timeout", f"{provider} timed out: {msg}", retryable=True)

@@ -128,10 +128,14 @@ Note the session id: the **v2 CLI's own** `ses_<64 hex>` ids are rejected. That
 `^ses_[0-9a-f]{64}$` pattern found in the binary belongs to a different id space;
 the header carries the 26-char form, which is what we already minted.
 
-Free quota is accounted **per session**, so `x-opencode-session` is reused per
-credential (TTL 1 h, LRU-capped at 1000 buckets) rather than re-minted per
-request — fresh ids spread traffic over new buckets and invite
-`429 FreeUsageLimitError`.
+The session id is reused per credential (TTL 1 h, LRU-capped at 1000 buckets)
+rather than re-minted per request, mirroring the client. The allowance itself is
+**not** accounted per session: OpenCode's support statement (2026-10-22) says it
+is set and enforced for the *account, workspace and network*, and the reset
+window is not exposed to clients. Re-minting ids buys no quota — it only stops
+the request looking like the client — and rotating them on an exhaustion error
+would be quota evasion against the vendor's own abuse control, so this adapter
+never does it.
 
 ---
 
@@ -213,19 +217,70 @@ answers `429 … Endpoint is unavailable.` from its own upstream. (`exo-free` an
 that change nothing on the anonymous path: a body `metadata`, `store` or
 `prompt_cache_key`.
 
+### The free allowance is a quota, not a rate limit
+
+When the allowance is spent, Console answers **`429 FreeUsageLimitError`**:
+
+```
+io rate limited: Free usage limit reached. Free models work in OpenCode
+(https://opencode.ai); subscribe to OpenCode Go to keep going:
+https://opencode.ai/go
+```
+
+Two things about that refusal matter more than its status:
+
+- **It is not a request-shape problem and not a bad key.** The same request that
+  answered 200 a minute earlier gets it, and a real Zen key gets it *sooner* than
+  the `anonymous` sentinel (probed 2026-09-19: a paid key is charged against the
+  same allowance). The fix is a fresh allowance — a paid Console balance, a Go
+  subscription (`opencode-go/*` models), or another provider — never a new
+  fingerprint.
+- **The window is real but not disclosed.** The error usually carries a
+  `Retry-After` (measured: `retryAfterMs: 32217000`, ~9 h), and users report the
+  countdown restarting without usage ([#58205], [#58284], [#59387]). Nothing in
+  the CLI/API exposes the reset time, so an operator cannot schedule around it.
+
+A *separate* refusal means the **source address** was flagged:
+
+```
+OpenCode's free models aren't available from your current network because we've
+detected abusive traffic from this IP address.
+```
+
+That one is explicitly about the network, not the account, and OpenCode says
+only their team can lift it. Both refusals are the vendor's abuse/allowance
+control, so wiwi does not rotate the session id or the egress address to get
+around them — that is exactly the behaviour they exist to detect.
+
+[#58205]: https://github.com/anomalyco/opencode/issues/58205
+[#58284]: https://github.com/anomalyco/opencode/issues/58284
+[#59387]: https://github.com/anomalyco/opencode/issues/59387
+
+**What wiwi does with it** (`wiwi/providers/base.py:is_quota_refusal`): a 429
+whose body names a quota marker (`FreeUsageLimitError`, `GoUsageLimitError`,
+`BlackUsageLimitError`, `MonthlyLimitError`, `UserLimitError`, or the wording
+"usage limit reached") is classified as an entitlement refusal — **402
+`permission_error`, retryable, vendor type preserved** — not as a rate limit.
+`status_for_key_pool` therefore reports `None`, so the shared `anonymous`
+sentinel is **not** cooled and the tier's other deployments keep serving; the
+request still fails over because the error stays retryable. A refusal that
+arrives inside a 200 event stream gets the same classification from
+`opencode_adapter._stream_error`. A plain 429 — a rate limit with no quota
+wording — keeps the old path (`429` → cool the key for its `Retry-After`).
+
 **A single upstream 429 can read as a whole-tier outage.** Every free
-deployment shares the `anonymous` marker, and a 429 is a key-health signal
-(`base.status_for_key_pool`): the router cools *that key* for its `Retry-After`,
-else 30 s (`wiwi/router/router.py`, standard mode — `cooldown_time` is not the
-knob on that path). Measured 2026-10-15 through the gateway: with **one**
-`anonymous` key entry, one model's `429 … Endpoint is unavailable.`
-(`step-5-preview-free`) left the next 16 consecutive requests — every other free
-model, all three inbound dialects — answering `503 no healthy deployment for
-'<group>'`, and a second run lost 25 the same way. With **two** entries for the
-marker the same blip cost three requests. The sentinel is not an account, so
-"cooling the key" retires the only path every free model shares. Serve free
-models for real? Declare more than one entry for `anonymous`. Tracked as
-`AUDIT.md` #469.
+deployment shares the `anonymous` marker, and an ordinary 429 is a key-health
+signal (`base.status_for_key_pool`): the router cools *that key* for its
+`Retry-After`, else 30 s (`wiwi/router/router.py`, standard mode —
+`cooldown_time` is not the knob on that path). Measured 2026-10-15 through the
+gateway: with **one** `anonymous` key entry, one model's `429 … Endpoint is
+unavailable.` (`step-5-preview-free`) left the next 16 consecutive requests —
+every other free model, all three inbound dialects — answering `503 no healthy
+deployment for '<group>'`, and a second run lost 25 the same way. With **two**
+entries for the marker the same blip cost three requests. The sentinel is not an
+account, so "cooling the key" retires the only path every free model shares.
+Serve free models for real? Declare more than one entry for `anonymous`.
+Tracked as `AUDIT.md` #469, whose quota half is #556.
 
 ---
 
@@ -341,6 +396,22 @@ provider behind it, which objects to the caller's `metadata` block, not to the
 fingerprint. See
 [The caller's `metadata` block is refused upstream](#the-callers-metadata-block-is-refused-upstream).
 
+A **`402 io quota exhausted (429): io rate limited: Free usage limit reached …`**
+is the free allowance, not a key: `FreeUsageLimitError` on a 429 is classified as
+an entitlement refusal, so the key is left in rotation and the tier keeps
+serving (see [The free allowance is a quota](#the-free-allowance-is-a-quota-not-a-rate-limit)).
+The vendor's own advice in the message is the remedy — paid Console credit, a Go
+subscription, or another provider. Do **not** answer it by rotating the session
+id or the egress IP: both are the vendor's abuse controls, and the flagged-IP
+refusal above is what that buys.
+
+A **`403 io blocked this network (403): … abusive traffic from this IP address`**
+is the flagged-egress refusal, classified as `permission_error` rather than as a
+bad credential (AUDIT #557). The key is left in rotation and a fallback group on
+another provider can still serve; retrying the same egress cannot, and
+`docs/UPSTREAM_DIAGNOSIS.md`'s "is it the credential, the entitlement, or the
+request shape" test does not apply — this one is about the network.
+
 **Triage order** when a `*-free` model suddenly 403s — check the cheap ones
 first:
 
@@ -361,6 +432,7 @@ opencode_credential_omitted     route=...    reason=anonymous_sentinel
 opencode_credential_scheme      route=... scheme=...   (a wrong scheme is silently unread upstream)
 opencode_decoy_call_dropped     tool=... index=...
 opencode_client_metadata_dropped route=...    (a caller's `metadata` block, refused upstream)
+opencode_free_quota_exhausted   message=...   (warning: the free allowance is spent)
 opencode_version_refreshed      version=...
 ```
 

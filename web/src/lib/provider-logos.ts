@@ -19,6 +19,7 @@ export const PROVIDER_LOGO: Record<string, string> = {
   "nvidia-nim": "/logos/nvidia-nim.svg",
   opencode: "/logos/opencode.svg",
   hermes: "/logos/hermes.svg",
+  ifm: "/logos/ifm.svg",
 };
 
 /** Badge URL for a provider type, or null when the type has no badge. */

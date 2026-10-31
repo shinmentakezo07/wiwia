@@ -94,6 +94,11 @@ def test_anthropic_null_partial_json_folds_to_empty_string():
     a ``None`` — mid-stream, after the client already had a 200.
     """
     a = AnthropicAdapter()
+    # Round 186: an args fragment is only emitted for an OPEN call (the IR
+    # contract), so open block 0 first — the subject here is the null coercion.
+    a.decode_stream_event("", json.dumps({
+        "type": "content_block_start", "index": 0,
+        "content_block": {"type": "tool_use", "id": "t", "name": "f"}}))
     out = a.decode_stream_event("", json.dumps({
         "type": "content_block_delta", "index": 0,
         "delta": {"type": "input_json_delta", "partial_json": None}}))
@@ -104,6 +109,9 @@ def test_anthropic_null_partial_json_folds_to_empty_string():
 def test_anthropic_typed_wrong_partial_json_folds_to_empty_string():
     """Any non-string ``partial_json`` reads as ``""`` (sibling-arm parity)."""
     a = AnthropicAdapter()
+    a.decode_stream_event("", json.dumps({
+        "type": "content_block_start", "index": 0,
+        "content_block": {"type": "tool_use", "id": "t", "name": "f"}}))
     for junk in (None, 5, True, {"a": 1}, ["x"]):
         out = a.decode_stream_event("", json.dumps({
             "type": "content_block_delta", "index": 0,
@@ -114,6 +122,10 @@ def test_anthropic_typed_wrong_partial_json_folds_to_empty_string():
 def test_anthropic_real_partial_json_still_forwarded():
     """Control: a genuine string fragment is untouched (still splits JSON)."""
     a = AnthropicAdapter()
+    # Round 186: open the block first — args only flow inside Open..Close.
+    a.decode_stream_event("", json.dumps({
+        "type": "content_block_start", "index": 0,
+        "content_block": {"type": "tool_use", "id": "t", "name": "f"}}))
     out = a.decode_stream_event("", json.dumps({
         "type": "content_block_delta", "index": 0,
         "delta": {"type": "input_json_delta", "partial_json": '{"a":'}}))

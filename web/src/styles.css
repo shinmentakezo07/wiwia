@@ -2120,7 +2120,7 @@ select.admin-input option {
 }
 
 /* Tile entrance: the same stagger the feature grid uses, compressed — this
-   grid is read as a map, so twelve tiles should not take a second to arrive. */
+   grid is read as a map, so thirteen tiles should not take a second to arrive. */
 @media (prefers-reduced-motion: no-preference) {
   .docs-provider-grid.is-revealed .docs-provider-item {
     animation: docs-tile-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;

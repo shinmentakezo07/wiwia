@@ -141,7 +141,7 @@ function ProviderMark(props: { name: string; type?: string }) {
       title={props.type ? `${props.name} · ${props.type}` : props.name}
     >
       {src ? (
-        // Not lazy: there are only twelve distinct badges, so the browser
+        // Not lazy: there are only thirteen distinct badges, so the browser
         // fetches each once — and a badge that pops in after the card has
         // painted reads as a broken tile.
         <img src={src} alt="" className="mc-mark-img" width={24} height={24} />

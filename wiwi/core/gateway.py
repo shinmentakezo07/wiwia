@@ -705,7 +705,12 @@ class Gateway:
                                   "prompt_cache_min_tokens": dep.prompt_cache_min_tokens,
                                   "opencode_free_tier_cloak":
                                       dep.opencode_free_tier_cloak,
-                                  "provider_type": dep.provider.provider_type}
+                                  "provider_type": dep.provider.provider_type,
+                                  # Generic request context: the caller's
+                                  # session identity, for adapters whose
+                                  # upstream offers session affinity (IFM's
+                                  # X-Session-ID). Unused keys are ignored.
+                                  "session_id": ctx.session_id}
         url = _build_url(adapter, dep, key, False)
         body = adapter.encode_request(ctx.ir_req, dep.model_id, params)
         if hasattr(adapter, "set_tool_context"):
@@ -831,7 +836,12 @@ class Gateway:
                                   "prompt_cache_min_tokens": dep.prompt_cache_min_tokens,
                                   "opencode_free_tier_cloak":
                                       dep.opencode_free_tier_cloak,
-                                  "provider_type": dep.provider.provider_type}
+                                  "provider_type": dep.provider.provider_type,
+                                  # Generic request context: the caller's
+                                  # session identity, for adapters whose
+                                  # upstream offers session affinity (IFM's
+                                  # X-Session-ID). Unused keys are ignored.
+                                  "session_id": ctx.session_id}
         url = _build_url(adapter, dep, key, True)
         body = adapter.encode_request(ctx.ir_req, dep.model_id, params)
         if hasattr(adapter, "set_tool_context"):
@@ -1926,7 +1936,12 @@ class Gateway:
                                   "prompt_cache_min_tokens": dep.prompt_cache_min_tokens,
                                   "opencode_free_tier_cloak":
                                       dep.opencode_free_tier_cloak,
-                                  "provider_type": dep.provider.provider_type}
+                                  "provider_type": dep.provider.provider_type,
+                                  # Generic request context: the caller's
+                                  # session identity, for adapters whose
+                                  # upstream offers session affinity (IFM's
+                                  # X-Session-ID). Unused keys are ignored.
+                                  "session_id": ctx.session_id}
         url = _build_url(adapter, dep, key, True)
         try:
             body = adapter.encode_request(ctx.ir_req, dep.model_id, params)

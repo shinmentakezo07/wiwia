@@ -259,6 +259,12 @@ def _role_parts_to_content(
 class OpenAIAdapter(WarningMixin):
     provider_type = "openai"
     force_stream = False  # set True on adapters whose upstream is streaming-only
+    # Whether the upstream honours a top-level ``top_k`` sampling parameter.
+    # Chat Completions has no field for it, so the base adapter drops it and
+    # reports the drop; a vLLM-backed provider (IFM) accepts it natively and
+    # opts in here rather than the caller being told a supported knob was
+    # discarded.
+    supports_top_k = False
 
     def headers(self, key: ProviderKeyRef) -> dict[str, str]:
         h = {"Authorization": f"Bearer {key.secret}"}
@@ -406,10 +412,22 @@ class OpenAIAdapter(WarningMixin):
         # real constraints the caller set, so the drop is reported to the
         # CALLER too (AUDIT #498) — the operator log alone left an agent that
         # asked for a deterministic-ish decode with no idea its ``top_k`` was
-        # silently discarded.
+        # silently discarded. A vLLM-backed upstream that does honour it
+        # (``supports_top_k``) gets the parameter instead of the warning.
         if g.top_k is not None:
-            self.warn(
-                "top_k has no Chat Completions equivalent and was dropped")
+            top_k = ir.coerce_int(g.top_k)
+            if top_k is None:
+                # A malformed value (a string, a bool, an object) is a
+                # different fact from a wire that cannot carry the knob at
+                # all: on a ``supports_top_k`` upstream the latter is false,
+                # so name the real reason instead of claiming the provider
+                # has no equivalent.
+                self.warn("top_k was not a usable integer and was dropped")
+            elif self.supports_top_k:
+                body["top_k"] = top_k
+            else:
+                self.warn(
+                    "top_k has no Chat Completions equivalent and was dropped")
         return body
 
     def _encode_tools(self, req: ir.Request) -> list[dict[str, Any]] | None:

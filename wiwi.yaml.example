@@ -43,6 +43,18 @@ providers:
     keys:
       - {label: main, key: os.environ/NVIDIA_NIM_API_KEY}
 
+  - name: ifm-main
+    provider: ifm
+    # Defaults to https://api.ifm.ai/v1 when omitted.
+    base_url: https://api.ifm.ai/v1
+    keys:
+      - {label: main, key: os.environ/IFM_API_KEY}
+    # K2 Horizon / Jais 3 are reasoning models: every assistant turn replays
+    # its reasoning_content (the adapter pads a missing trace with ""), and
+    # reasoning_effort rides chat_template_kwargs at low | medium | high.
+    # Point a model_list entry at the hosted ids, e.g.
+    #   model: IFM/K2-Horizon-375B-A23B   or   IFM/Jais-3-MoVA-36B-A4B
+
   - name: opencode-zen
     provider: opencode
     # Leave `base_url` unset: the adapter defaults to

@@ -37,9 +37,9 @@ The design mirrors LiteLLM's mental model (config-driven `model_list`, model gro
              │        ┌──────────┬──────────┬────┴─────┬─────────┐    │
  Admin UI ───┼─► /admin/* + /auth/* + /public/*        │         │    │
  (SPA)       │        ▼          ▼          ▼          ▼         ▼    │
-             │   12 provider adapters (openai, anthropic, gemini,     │
+             │   13 provider adapters (openai, anthropic, gemini,     │
              │   openai-compatible, openrouter, gmicloud, bai,        │
-             │   nvidia-nim, cline, workbuddy, opencode, hermes)      │
+             │   nvidia-nim, cline, workbuddy, opencode, hermes, ifm) │
              └────────────────────────────────────────────────────────┘
 ```
 

@@ -5,7 +5,7 @@
 # 🌀 wiwi
 
 **Speak** OpenAI Chat · OpenAI Responses (Codex CLI) · Anthropic Messages (Claude Code) **on the inbound.**<br/>
-**Route to** OpenAI · Anthropic · Gemini · OpenRouter · NVIDIA NIM · Cline · WorkBuddy · GMI Cloud · B.AI · OpenCode Zen · Hermes (Nous Portal) · any OpenAI-compatible endpoint.
+**Route to** OpenAI · Anthropic · Gemini · OpenRouter · NVIDIA NIM · Cline · WorkBuddy · GMI Cloud · B.AI · OpenCode Zen · Hermes (Nous Portal) · IFM (MBZUAI) · any OpenAI-compatible endpoint.
 
 <p>
   <a href="#-quickstart"><img alt="Get started" src="https://img.shields.io/badge/get%20started-%20quickstart-6366f1?style=for-the-badge"></a>
@@ -93,8 +93,8 @@ the envelope is OpenAI's.
   </tr>
   <tr>
     <td>
-      <img alt="Hub-and-spoke architecture: three inbound dialects decode into one canonical IR, which the router dispatches to twelve outbound providers" src="docs/assets/wiwi-hub-spoke.svg" width="100%">
-      <br/><sub>Three codecs in, one IR, twelve adapters out — adding either side is one module.</sub>
+      <img alt="Hub-and-spoke architecture: three inbound dialects decode into one canonical IR, which the router dispatches to thirteen outbound providers" src="docs/assets/wiwi-hub-spoke.svg" width="100%">
+      <br/><sub>Three codecs in, one IR, thirteen adapters out — adding either side is one module.</sub>
     </td>
   </tr>
 </table>
@@ -499,6 +499,7 @@ Any inbound dialect works with any outbound provider — the IR handles translat
     <td align="center"><img src="web/public/logos/bai.svg" width="16" alt="B.AI"></td>
     <td align="center"><img src="web/public/logos/opencode.svg" width="16" alt="OpenCode Zen"></td>
     <td align="center"><img src="web/public/logos/hermes.svg" width="16" alt="Hermes"></td>
+    <td align="center"><img src="web/public/logos/ifm.svg" width="16" alt="IFM"></td>
     <td align="center"><img src="web/public/logos/openai-compatible.svg" width="16" alt="OpenAI-compatible"></td>
   </tr>
   <tr>
@@ -506,18 +507,21 @@ Any inbound dialect works with any outbound provider — the IR handles translat
     <td align="center">✅</td><td align="center">✅</td><td align="center">✅</td><td align="center">✅</td>
     <td align="center">✅</td><td align="center">✅</td><td align="center">✅</td><td align="center">✅</td>
     <td align="center">✅</td><td align="center">✅</td><td align="center">✅</td><td align="center">✅</td>
+    <td align="center">✅</td>
   </tr>
   <tr>
     <td align="right"><b>🟣 Responses</b></td>
     <td align="center">✅</td><td align="center">✅</td><td align="center">✅</td><td align="center">✅</td>
     <td align="center">✅</td><td align="center">✅</td><td align="center">✅</td><td align="center">✅</td>
     <td align="center">✅</td><td align="center">✅</td><td align="center">✅</td><td align="center">✅</td>
+    <td align="center">✅</td>
   </tr>
   <tr>
     <td align="right"><b>🟠 Messages</b></td>
     <td align="center">✅</td><td align="center">✅</td><td align="center">✅</td><td align="center">✅</td>
     <td align="center">✅</td><td align="center">✅</td><td align="center">✅</td><td align="center">✅</td>
     <td align="center">✅</td><td align="center">✅</td><td align="center">✅</td><td align="center">✅</td>
+    <td align="center">✅</td>
   </tr>
 </table>
 
@@ -531,7 +535,7 @@ because it is the escape hatch — it works with anything behind a URL.</sub>
 
 ### Outbound providers
 
-All 12 types live in `wiwi/config.py:PROVIDER_TYPES`, the single source of truth. The router catalog, admin
+All 13 types live in `wiwi/config.py:PROVIDER_TYPES`, the single source of truth. The router catalog, admin
 validation, and the Pydantic schema all reference it, and import-time `assert`s fail loudly if a type is added
 without a matching adapter.
 
@@ -550,6 +554,7 @@ without a matching adapter.
 | `bai` | `https://api.b.ai/v1` | one key across Chat / Responses / Messages |
 | `opencode` | `https://opencode.ai/inference/v1` | per-model protocol routing with a live `User-Agent` |
 | `hermes` | `https://inference-api.nousresearch.com/v1` | Nous Portal; API key or OAuth device-code token (`hermes:` prefix); declines Realtime |
+| `ifm` | `https://api.ifm.ai/v1` | IFM (MBZUAI) K2 Horizon / Jais 3; replays `reasoning_content` on every assistant turn, effort via `chat_template_kwargs`, `X-Session-ID` affinity, text-only |
 | `openai-compatible` | *(you supply it)* | any URL — Ollama, vLLM, LM Studio, Together, Groq, DeepSeek |
 
 > 🔐 Provider keys enter as `os.environ/NAME` in YAML. **Nothing is committed** — `wiwi.yaml`, `wiwi.db`, `.env`,
@@ -571,7 +576,7 @@ providers:              # named provider accounts, each with a pool of keyed ent
   - name: openai-main
     provider: openai    # openai | anthropic | gemini | openai-compatible | openrouter
                         # | gmicloud | bai | nvidia-nim | cline | workbuddy
-                        # | opencode | hermes
+                        # | opencode | hermes | ifm
     keys:
       - {label: main,   key: os.environ/OPENAI_API_KEY,   weight: 3}
       - {label: backup, key: os.environ/OPENAI_API_KEY_2, weight: 1}

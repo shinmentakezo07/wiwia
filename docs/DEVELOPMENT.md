@@ -103,7 +103,7 @@ Verify in a mobile-sized viewport and a desktop viewport; put a screenshot or sh
 
 ## 8. Bugfix workflow (binding)
 
-1. Read `AUDIT.md` first — avoid redoing a known fix; record any newly discovered bug there (severity badge, file:line, trigger, fix sketch) before or alongside fixing it, and mark fixed entries `**Status: fixed**`.
+1. Read `AUDIT.md` first — avoid redoing a known fix; record any newly discovered bug there (severity badge, file:line, trigger, fix sketch) before or alongside fixing it, and mark fixed entries `**Status: fixed**`. Closed rounds live in `docs/audit-archive/fixed.md`, and `scripts/audit_lint.py` (run in CI) fails any numbered entry with no status.
 2. Read `UPDATE.md` — the **binding changelog** for OpenAI ↔ Anthropic cross-provider translation, the OpenRouter adapter, and multi-turn conversation fixes. Required reading before touching `wiwi/wire/` codecs, the OpenAI/Anthropic/OpenRouter adapters, or anything handling `reasoning_effort`/`reasoning`, `tool_result`, `content: null`, `stream_options`, or upstream error extraction. Add an entry when a new fix lands in those areas.
 3. Follow systematic debugging — root cause before patching.
 4. **An upstream refusal (`4xx` you cannot explain) is its own workflow** — read [UPSTREAM_DIAGNOSIS.md](UPSTREAM_DIAGNOSIS.md) first. Do not act on the error text: wiwi's own error classification relabels causes, and "requires billing" has already meant "our request does not look like the vendor's client". Separate credential / entitlement / request-shape before patching, and never conclude that an offer was withdrawn on the strength of one failing probe.
@@ -120,7 +120,7 @@ Verify in a mobile-sized viewport and a desktop viewport; put a screenshot or sh
 | [QUICKSTART.md](QUICKSTART.md) | Install, run, first request |
 | [CONFIG.md](CONFIG.md) | `wiwi.yaml` reference, env vars |
 | [API_REFERENCE.md](API_REFERENCE.md) | All endpoints |
-| [PROVIDERS.md](PROVIDERS.md) | The 12 provider types, quirks, key pools |
+| [PROVIDERS.md](PROVIDERS.md) | The 13 provider types, quirks, key pools |
 | [UPSTREAM_DIAGNOSIS.md](UPSTREAM_DIAGNOSIS.md) | Playbook for an unexplained upstream `4xx`: credential vs entitlement vs request shape |
 | [OPENCODE.md](OPENCODE.md) | OpenCode Console deep dive — the free-tier request-shape gate (worked example) |
 | [STREAMING.md](STREAMING.md) | Delta taxonomy, pump, failover/journals, guards |

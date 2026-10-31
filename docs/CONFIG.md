@@ -437,6 +437,7 @@ There is no `api_key` field and no `budget_cap` field on a provider — keys liv
 | `workbuddy` | `https://copilot.tencent.com` | OAuth → access token |
 | `opencode` | `https://opencode.ai/inference/v1` | per-wire (Bearer / `x-api-key` / `x-goog-api-key`) |
 | `hermes` | `https://inference-api.nousresearch.com/v1` | `Authorization: Bearer` (API key or OAuth device-code token) |
+| `ifm` | `https://api.ifm.ai/v1` | `Authorization: Bearer` (+ `X-Session-ID` conversation affinity) |
 
 The `anthropic` default ends in `/v1` because the adapter appends only `/messages` — setting `https://api.anthropic.com` produces the invalid endpoint `api.anthropic.com/messages`.
 
@@ -518,7 +519,7 @@ All config is parsed through Pydantic v2 models in `wiwi/config.py`:
 - `DeploymentParams` — per-deployment overrides (`provider`, `model`, `weight`, `max_tokens`, `rpm`, `tpm`, `timeout`, `extra_headers`, `extra_body`, `prompt_cache`, …)
 - `ModelEntry` — model_list entry (`model_name`, `wiwi_params`)
 
-`PROVIDER_TYPES` is a module-level tuple in `config.py` listing all 12 provider types. It is the single source of truth — the router, admin API, and Pydantic schema all reference it.
+`PROVIDER_TYPES` is a module-level tuple in `config.py` listing all 13 provider types. It is the single source of truth — the router, admin API, and Pydantic schema all reference it.
 
 ## Validation at startup
 
