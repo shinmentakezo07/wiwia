@@ -1268,14 +1268,18 @@ export function DocsPage() {
       {/* Two-column: left rail + document */}
       <div className="docs-grid">
         <aside className="docs-sidebar">
-          <nav className="space-y-0.5" aria-label="Documentation sections">
-            <div className="mb-3 flex items-baseline justify-between pr-2">
+          <nav aria-label="Documentation sections">
+            {/* Header: the eyebrow sits on the same left edge as the section
+                numbers, closed by a hairline that spans the whole rail. */}
+            <div className="docs-rail-head">
               <span className="admin-label">On this page</span>
-              <span className="font-mono text-[9px] tabular-nums text-[var(--admin-text-dim)]">
-                {String(activeIndex).padStart(2, "0")}
-                <span className="opacity-50"> / {String(SECTIONS.length).padStart(2, "0")}</span>
+              <span className="docs-rail-count">
+                <b>{String(activeIndex).padStart(2, "0")}</b>
+                <span className="docs-rail-count-sep">/</span>
+                <span>{String(SECTIONS.length).padStart(2, "0")}</span>
               </span>
             </div>
+
             <div className="docs-rail">
               <span className="docs-rail-line" aria-hidden />
               <span
@@ -1283,71 +1287,68 @@ export function DocsPage() {
                 style={{ "--docs-rail-progress": progress.toFixed(4) } as CSSProperties}
                 aria-hidden
               />
-              {SECTIONS.map((s, i) => {
-                const Icon = s.icon;
-                const isActive = active === s.id;
-                // Completed = everything the reader has already passed, so a
-                // partially-read document still reads as progress.
-                const isDone = i + 1 < activeIndex;
-                return (
-                  <button
-                    key={s.id}
-                    type="button"
-                    onClick={() => handleClick(s.id)}
-                    aria-current={isActive ? "true" : undefined}
-                    className={`docs-nav-item flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left text-[12px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/40 ${
-                      isActive
-                        ? "is-active"
-                        : isDone
-                          ? "text-[var(--admin-text-muted)] hover:text-[var(--admin-text)]"
-                          : "text-[var(--admin-text-dim)] hover:text-[var(--admin-text)]"
-                    }`}
-                  >
-                    <span
-                      className={`docs-nav-num font-mono text-[10px] tabular-nums ${isDone ? "is-done" : "opacity-50"}`}
-                      aria-hidden
-                    >
-                      {isDone ? <Check size={10} strokeWidth={2.5} /> : String(i + 1).padStart(2, "0")}
-                    </span>
-                    <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden />
-                    <span className="flex-1">{s.label}</span>
-                  </button>
-                );
-              })}
+              <ul className="docs-rail-list">
+                {SECTIONS.map((s, i) => {
+                  const Icon = s.icon;
+                  const isActive = active === s.id;
+                  // Completed = everything the reader has already passed, so a
+                  // partially-read document still reads as progress.
+                  const isDone = i + 1 < activeIndex;
+                  return (
+                    <li key={s.id}>
+                      <button
+                        type="button"
+                        onClick={() => handleClick(s.id)}
+                        aria-current={isActive ? "location" : undefined}
+                        data-active={isActive}
+                        data-done={isDone}
+                        className="docs-nav-item"
+                      >
+                        <span className="docs-nav-num" aria-hidden>
+                          {isDone ? (
+                            <Check size={10} strokeWidth={2.5} />
+                          ) : (
+                            String(i + 1).padStart(2, "0")
+                          )}
+                        </span>
+                        <span className="docs-nav-icon" aria-hidden>
+                          <Icon size={14} />
+                        </span>
+                        <span className="docs-nav-label">{s.label}</span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
             </div>
-            {/* Rail footer: a quiet progress meter. The filled width mirrors
-                the reading-progress hairline at the top of the viewport, so
-                the rail always states how much of the document remains. */}
-            <div
-              className="docs-rail-progress mt-5 border-t border-[var(--admin-border)] pt-4"
-              aria-hidden
-            >
-              <div className="docs-rail-track">
-                <div
-                  className="docs-rail-fill"
-                  style={{ transform: `scaleX(${progress.toFixed(4)})` }}
-                />
+
+            {/* Rail footer: one tick per section, so the meter states how many
+                sections are behind the reader rather than a bare percentage,
+                and the readout repeats the same number in words. */}
+            <div className="docs-rail-foot">
+              <div className="docs-rail-meter" aria-hidden>
+                {SECTIONS.map((s, i) => (
+                  <span
+                    key={s.id}
+                    className="docs-rail-tick"
+                    data-state={
+                      i + 1 < activeIndex ? "done" : i + 1 === activeIndex ? "current" : "todo"
+                    }
+                  />
+                ))}
               </div>
               {/* --admin-text-dim is #6b7280 on #0a0a0a, which fails 4.5:1 at
                   9px. --admin-text-muted (#9ca3af) clears it. */}
-              <p className="mt-2 font-mono text-[9px] tabular-nums text-[var(--admin-text-muted)]">
-                {Math.round(progress * 100)}% read
+              <p className="docs-rail-read">
+                <span className="docs-rail-read-num">{Math.round(progress * 100)}%</span> read
               </p>
             </div>
-            <div className="mt-3">
-              <Link
-                to="/playground"
-                className="group/play flex items-center gap-2 rounded-lg px-2 py-2 text-[12px] font-medium text-[var(--admin-text-muted)] transition-colors hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/40"
-              >
-                <Terminal size={13} className="text-blue-300/80" aria-hidden />
-                <span className="flex-1">Open playground</span>
-                <ArrowRight
-                  size={12}
-                  className="opacity-0 transition-opacity group-hover/play:opacity-100 group-focus-visible/play:opacity-100"
-                  aria-hidden
-                />
-              </Link>
-            </div>
+
+            <Link to="/playground" className="docs-rail-cta">
+              <Terminal size={13} className="docs-rail-cta-icon" aria-hidden />
+              <span className="docs-rail-cta-label">Open playground</span>
+              <ArrowRight size={12} className="docs-rail-cta-arrow" aria-hidden />
+            </Link>
           </nav>
         </aside>
 

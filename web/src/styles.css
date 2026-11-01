@@ -1490,7 +1490,10 @@ select.admin-input option {
 
 /* ── left rail ──────────────────────────────────────────────────────────
    A hairline spine with a progress fill, so the reader's position in the
-   document is always visible without reading a number. */
+   document is always visible without reading a number. Rows are quiet
+   targets: the one you are in carries a neutral wash and a dot on the spine,
+   the ones behind you carry a tick. The accent stays in the spine and the
+   dot — no glow, no tinted hover wash. */
 
 .docs-sidebar {
   position: sticky;
@@ -1498,7 +1501,18 @@ select.admin-input option {
   align-self: start;
   max-height: calc(100vh - 116px);
   overflow-y: auto;
-  padding-left: 16px;
+  padding-left: 18px;
+  /* The rail only scrolls on a short viewport; when it does, keep the
+     scrollbar as thin as the spine it sits beside. */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+}
+.docs-sidebar::-webkit-scrollbar {
+  width: 4px;
+}
+.docs-sidebar::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
 }
 @media (max-width: 1023px) {
   .docs-grid {
@@ -1509,29 +1523,65 @@ select.admin-input option {
   }
 }
 
+/* Header: eyebrow and position readout on one baseline, closed by a hairline
+   that spans the rail. Both align with the section numbers below. */
+.docs-rail-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 0 6px 10px 22px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.docs-rail-count {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  color: var(--admin-text-dim);
+}
+.docs-rail-count b {
+  color: var(--admin-text-muted);
+  font-weight: 600;
+}
+.docs-rail-count-sep {
+  opacity: 0.45;
+}
+
 .docs-rail {
   position: relative;
-  padding-left: 12px;
+  padding-left: 14px;
+}
+.docs-rail-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 .docs-rail-line {
   position: absolute;
-  top: 8px;
-  bottom: 8px;
+  top: 6px;
+  bottom: 6px;
   left: 0;
   width: 1px;
-  background: var(--admin-border);
+  background: rgba(255, 255, 255, 0.07);
 }
 .docs-rail-line-fill {
   position: absolute;
-  top: 8px;
-  bottom: 8px;
+  top: 6px;
+  bottom: 6px;
   left: 0;
   width: 1px;
   border-radius: 1px;
   background: linear-gradient(180deg, #60a5fa, #a78bfa);
-  box-shadow: 0 0 10px rgba(96, 165, 250, 0.5);
-  /* scaleY (not height) keeps the fill on the compositor, matching the
-     horizontal track below — otherwise every scroll frame relayouts it. */
+  /* scaleY (not height) keeps the fill on the compositor, so scrolling never
+     triggers a layout on the spine. */
   transform: scaleY(var(--docs-rail-progress, 0));
   transform-origin: top;
   transition: transform 0.15s linear;
@@ -1549,68 +1599,212 @@ select.admin-input option {
   border-top: 0;
 }
 
-/* Section navigation */
+/* Section navigation. Each row is a full-width target so the whole line is
+   clickable, and the active row is a quiet filled pill rather than coloured
+   text — the accent is spent on the dot on the spine. */
 .docs-nav-item {
   position: relative;
-  min-height: 36px;
-  transition: color 0.2s ease, background-color 0.2s ease;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 38px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  color: var(--admin-text-dim);
+  font-size: 12.5px;
+  line-height: 1.25;
+  text-align: left;
+  transition:
+    color 0.18s ease,
+    background-color 0.18s ease;
 }
-.docs-nav-item:hover,
-.docs-nav-item:focus-visible {
-  color: var(--admin-text);
+/* Hover only for devices that actually hover, so a tap never leaves a row
+   stuck highlighted. */
+@media (hover: hover) {
+  .docs-nav-item:hover {
+    color: var(--admin-text);
+    background: rgba(255, 255, 255, 0.035);
+  }
 }
 .docs-nav-item:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.28);
+  color: var(--admin-text);
+  box-shadow: inset 0 0 0 1px rgba(96, 165, 250, 0.45);
 }
-.docs-nav-item.is-active {
-  color: #bfdbfe;
+.docs-nav-item[data-active="true"] {
+  color: var(--admin-text);
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
 }
-/* The active marker sits on the rail spine itself, so "you are here" and
-   "how far in you are" are the same line. */
-.docs-nav-item.is-active::before {
+/* "You are here" is a dot on the spine itself, so position and progress are
+   the same line. The ring is the page colour, which breaks the spine cleanly
+   around the dot instead of faking a glow. */
+.docs-nav-item[data-active="true"]::before {
   content: "";
   position: absolute;
-  left: -12px;
-  top: 20%;
-  bottom: 20%;
-  width: 2px;
-  border-radius: 2px;
-  background: linear-gradient(180deg, #60a5fa, #a78bfa);
-  box-shadow: 0 0 12px rgba(96, 165, 250, 0.55);
+  top: 50%;
+  left: -17.5px; /* rail padding (14px) + half the dot */
+  width: 7px;
+  height: 7px;
+  margin-top: -3.5px;
+  border-radius: 999px;
+  background: #93c5fd;
+  box-shadow: 0 0 0 3px var(--admin-bg);
+}
+.docs-nav-item[data-active="true"] .docs-nav-label {
+  font-weight: 500;
 }
 
-/* Completed-section marker: a tick replaces the number, tinted like the
-   active spine so "done" reads as a lighter form of "here". */
+/* Ordinal column: fixed width so every label starts on the same x, whether
+   the row is numbered or ticked. */
 .docs-nav-num {
   display: inline-flex;
+  flex: none;
   align-items: center;
   justify-content: center;
-  min-width: 18px;
-  transition: color 0.2s ease, opacity 0.2s ease;
+  width: 16px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  /* 0.9 keeps the ordinal above 4.5:1 on the page background; dimmer than the
+     label, still legible at 10px. */
+  opacity: 0.9;
+  transition:
+    color 0.18s ease,
+    opacity 0.18s ease;
 }
-.docs-nav-num.is-done {
+/* Completed-section marker: a tick tinted like the spine so "done" reads as a
+   lighter form of "here". */
+.docs-nav-item[data-done="true"] .docs-nav-num {
   color: #4ade80;
+  opacity: 0.9;
+}
+.docs-nav-item[data-active="true"] .docs-nav-num {
+  color: #bfdbfe;
+  opacity: 1;
+}
+.docs-nav-icon {
+  display: inline-flex;
+  flex: none;
   opacity: 0.85;
+  transition:
+    color 0.18s ease,
+    opacity 0.18s ease;
+}
+.docs-nav-item[data-active="true"] .docs-nav-icon {
+  color: #93c5fd;
+  opacity: 1;
+}
+.docs-nav-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-/* Rail footer: a 2px progress track. scaleX (not width) keeps the transform
-   on the compositor, so scrolling never triggers a layout on this element. */
-.docs-rail-progress {
+/* Rail footer: one tick per section. Filled ticks are the sections already
+   behind the reader, so the meter answers "how much is left" in the document's
+   own units rather than as a bare percentage. */
+.docs-rail-foot {
+  margin-top: 16px;
+  padding: 14px 6px 0 22px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+.docs-rail-meter {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: 3px;
+}
+.docs-rail-tick {
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  transition: background-color 0.25s ease;
+}
+.docs-rail-tick[data-state="done"] {
+  background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+}
+.docs-rail-tick[data-state="current"] {
+  background: #93c5fd;
+}
+.docs-rail-read {
+  margin-top: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  color: var(--admin-text-muted);
+}
+.docs-rail-read-num {
+  color: var(--admin-text);
+}
+
+/* Playground link — the rail's one affordance that leaves the page, so it is
+   framed as a button rather than as another section row. */
+.docs-rail-cta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  margin: 12px 0 0 14px;
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--admin-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  transition:
+    color 0.18s ease,
+    border-color 0.18s ease,
+    background-color 0.18s ease,
+    transform 0.18s ease;
+}
+@media (hover: hover) {
+  .docs-rail-cta:hover {
+    color: var(--admin-text);
+    border-color: rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.04);
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .docs-rail-cta:active {
+    transform: translateY(1px);
+  }
+}
+.docs-rail-cta:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.45);
+}
+.docs-rail-cta-icon {
+  flex: none;
+  color: #93c5fd;
+  opacity: 0.9;
+}
+.docs-rail-cta-label {
+  flex: 1;
   min-width: 0;
 }
-.docs-rail-track {
-  height: 2px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.05);
+.docs-rail-cta-arrow {
+  flex: none;
+  opacity: 0;
+  transform: translateX(-3px);
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s ease;
 }
-.docs-rail-fill {
-  height: 100%;
-  width: 100%;
-  transform-origin: left;
-  background: linear-gradient(90deg, #3b82f6, #8b5cf6 55%, #d946ef);
-  transition: transform 0.12s linear;
+@media (hover: hover) {
+  .docs-rail-cta:hover .docs-rail-cta-arrow {
+    opacity: 1;
+    transform: none;
+  }
+}
+.docs-rail-cta:focus-visible .docs-rail-cta-arrow {
+  opacity: 1;
+  transform: none;
 }
 
 /* ── section headings ───────────────────────────────────────────────────
@@ -2682,7 +2876,12 @@ select.admin-input option {
 @media (prefers-reduced-motion: reduce) {
   .docs-progress-fill,
   .docs-rail-line-fill,
-  .docs-rail-fill,
+  .docs-rail-tick,
+  .docs-nav-item,
+  .docs-nav-num,
+  .docs-nav-icon,
+  .docs-rail-cta,
+  .docs-rail-cta-arrow,
   .docs-backtop,
   .docs-anchor,
   .docs-feature-icon,
