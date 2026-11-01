@@ -86,9 +86,21 @@ function useScrollSpy(ids: string[]) {
   return active;
 }
 
+// Honour the OS preference and the console's own reduce-motion toggle. The
+// CSS already disables the page's transitions for both; this is for the two
+// places where the browser animates scroll on our behalf.
+function motionReduced() {
+  return (
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches ||
+    document.documentElement.classList.contains("reduce-motion")
+  );
+}
+
 function scrollToId(id: string) {
   const el = document.getElementById(id);
-  if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  // `auto` would still honour `:root { scroll-behavior: smooth }`, so reduced
+  // motion has to ask for `instant` explicitly.
+  if (el) el.scrollIntoView({ behavior: motionReduced() ? "instant" : "smooth", block: "start" });
 }
 
 // Reports true the first time an element enters the viewport, then stops.
@@ -157,7 +169,9 @@ function BackToTop() {
     <button
       type="button"
       aria-label="Back to top"
-      onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+      onClick={() =>
+        window.scrollTo({ top: 0, behavior: motionReduced() ? "instant" : "smooth" })
+      }
       className={`docs-backtop ${visible ? "is-visible" : ""}`}
     >
       <ArrowUp size={16} />
@@ -1252,7 +1266,7 @@ export function DocsPage() {
               <span className="docs-rail-line" aria-hidden />
               <span
                 className="docs-rail-line-fill"
-                style={{ height: `${(progress * 100).toFixed(2)}%` }}
+                style={{ "--docs-rail-progress": progress.toFixed(4) } as CSSProperties}
                 aria-hidden
               />
               {SECTIONS.map((s, i) => {

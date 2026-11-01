@@ -885,8 +885,13 @@ select.admin-input option {
     transform: translateY(0);
   }
 }
+/* `backwards`, not `both`: with `both` the final `translateY(0)` keyframe is
+   retained after the animation, so the element keeps a computed transform.
+   A transformed ancestor becomes the containing block for `position: fixed`
+   descendants — which silently un-pins fixed UI on the page (the docs reading
+   progress bar and back-to-top control both scrolled away with the document). */
 .admin-stagger > * {
-  animation: admin-fade-up 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: admin-fade-up 0.5s cubic-bezier(0.16, 1, 0.3, 1) backwards;
 }
 .admin-stagger > *:nth-child(1) { animation-delay: 0ms; }
 .admin-stagger > *:nth-child(2) { animation-delay: 60ms; }
@@ -1519,12 +1524,17 @@ select.admin-input option {
 .docs-rail-line-fill {
   position: absolute;
   top: 8px;
+  bottom: 8px;
   left: 0;
   width: 1px;
   border-radius: 1px;
   background: linear-gradient(180deg, #60a5fa, #a78bfa);
   box-shadow: 0 0 10px rgba(96, 165, 250, 0.5);
-  transition: height 0.15s linear;
+  /* scaleY (not height) keeps the fill on the compositor, matching the
+     horizontal track below — otherwise every scroll frame relayouts it. */
+  transform: scaleY(var(--docs-rail-progress, 0));
+  transform-origin: top;
+  transition: transform 0.15s linear;
 }
 
 /* Sections are separated by hairlines, not cards. */
@@ -2569,6 +2579,22 @@ select.admin-input option {
   box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.3);
 }
 
+/* Reduced motion: the progress meters, the back-to-top lift, and the tile
+   hover nudges are decorative, so they snap instead of sliding. */
+@media (prefers-reduced-motion: reduce) {
+  .docs-progress-fill,
+  .docs-rail-line-fill,
+  .docs-rail-fill,
+  .docs-backtop,
+  .docs-anchor,
+  .docs-provider-logo,
+  .docs-feature-icon,
+  .docs-core-provider,
+  .docs-spotlight {
+    transition: none;
+  }
+}
+
 /* Hero action buttons stretch to the full measure on phones */
 @media (max-width: 479px) {
   .docs-hero-actions > a,
@@ -2957,8 +2983,12 @@ select.admin-input option {
 }
 
 @media (prefers-reduced-motion: no-preference) {
+  /* `backwards` (not `both`) so the final `translateY(0)` / `blur(0)` is not
+     retained: a non-`none` transform *or* filter makes the element a
+     containing block for fixed descendants and a stacking context for the
+     rest of the page. */
   .animate-hero-enter {
-    animation: hero-enter 0.9s cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation: hero-enter 0.9s cubic-bezier(0.22, 1, 0.36, 1) backwards;
   }
   .hero-enter-delay-1 { animation-delay: 0.15s; }
   .hero-enter-delay-2 { animation-delay: 0.3s; }
