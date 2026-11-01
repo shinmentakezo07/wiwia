@@ -11246,3 +11246,64 @@ its contract is "wrap aiter_lines into (event, data) tuples".
 **Fix:** after the line loop, `evt = parser.flush()` and yield it when present.
 `flush` is idempotent, so a body that already ended on a blank line yields
 nothing extra.
+
+---
+
+## Round 191 — the upstream SSE ingest split frames on legal payload characters (2026-11-01)
+
+### 566. Every streaming path tore any `data:` frame whose JSON payload contained U+2028, U+2029 or U+0085, silently dropping that delta
+
+**Severity:** 🔴 Critical (silent content loss on the hot path, with a clean
+terminal frame after it so nothing downstream can detect it) · **Status: fixed** — round 191
+(`tests/test_fix_round191.py`, 22 tests)
+**Files:** `wiwi/core/gateway.py:1154` and `:2258` (both stream arms, now `iter_sse_lines`),
+`wiwi/core/recovery.py:205` (now `split_sse_lines`); helpers in
+`wiwi/streaming/sse.py:22-110` (`SSELineSplitter`, `split_sse_lines`, `iter_sse_lines`)
+
+`httpx.Response.aiter_lines()` splits with `str.splitlines`' **full Unicode
+newline set** — `\n \r \x0b \x0c \x1c \x1d \x1e \x85 U+2028 U+2029` — not the
+three terminators the SSE wire defines (CRLF, CR, LF). Three of those extras
+(`\x85` NEL, U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR) are legal
+**unescaped** inside a JSON string, and `orjson` — the serializer every adapter's
+upstream and wiwi's own encoders use — emits them raw. So any model reply
+containing one produced a `data:` line the transport tore in half: the parser saw
+a truncated payload, each adapter's `decode_stream_event` answered `[]` for it
+(a malformed JSON frame is dropped, never raised), and the client received the
+turn with that text missing.
+
+Executed pre-fix against the real `LineSSEParser` and httpx transport:
+
+```
+wire:  data: {"...","text":"before<U+2028>after"}}
+lines: ['data: {"...","text":"before', 'after"}}', '']
+event: ['{"...","text":"before']        <- truncated
+       orjson.loads -> JSONDecodeError unexpected end of data
+```
+
+The same body through the fixed splitter yields one whole frame that decodes.
+
+**Trigger:** ordinary model output. A language model emitting a Unicode line or
+paragraph separator is routine for multilingual text, generated documents, and
+any reply quoting such text; no hostile input is required. The corruption is
+invisible to the caller — the stream still ends with a clean `finish_reason` /
+`[DONE]`, so an agent sees a shorter answer, not an error.
+
+**Second site, same defect:** `_body_is_error_envelope` (`recovery.py`) split a
+probe body with `text.splitlines()`. A 200 probe whose **error** envelope carried
+U+2028 was torn, no error object was found, the classifier answered HEALTHY, and
+the healer restored a key that was still failing. Verified pre-fix:
+
+```
+probe_verdict(200, 'data: {"error": {"message": "bad<U+2029>key"}}\n\n')
+  -> ProbeVerdict.HEALTHY        (should be UNREACHABLE)
+```
+
+**Fix:** `SSELineSplitter` splits only on `\r\n|\r|\n` (WHATWG HTML §9.2.6),
+holding back a trailing CR that may be half of a CRLF whose LF is still in
+flight, and `iter_sse_lines` feeds it incrementally-decoded `aiter_bytes()`
+chunks. Both stream arms and the probe classifier now use it; `aiter_lines` and
+`splitlines` are gone from the ingest path. `errors="replace"` matches httpx's
+own decoder, and `resp.encoding` is honoured so a declared charset still works.
+
+**Note:** the browser client is unaffected — `web/src/api/sse.ts:79` splits on
+`"\n\n"` explicitly.

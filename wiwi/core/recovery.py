@@ -26,7 +26,7 @@ from wiwi.config import HealerSettings
 from wiwi.ir import types as ir
 from wiwi.providers.base import ProviderKeyRef, error_from_provider_status
 from wiwi.providers.registry import fresh_adapter
-from wiwi.streaming.sse import LineSSEParser
+from wiwi.streaming.sse import LineSSEParser, split_sse_lines
 
 log = structlog.get_logger("wiwi.recovery")
 
@@ -197,7 +197,12 @@ def _body_is_error_envelope(body: bytes | str | None) -> bool:
     # classified as a healthy probe (AUDIT #285).
     parser = LineSSEParser(allow_unframed=True)
     text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else body
-    for line in text.splitlines():
+    # ``split_sse_lines``, not ``str.splitlines()``: the latter also splits on
+    # U+2028/U+2029/U+0085, which are legal unescaped inside a JSON string, so a
+    # probe frame carrying one was torn and its payload never parsed — an error
+    # envelope in that shape would have been classified HEALTHY and a broken key
+    # restored into rotation (AUDIT #566).
+    for line in split_sse_lines(text):
         event = parser.feed_line(line)
         if event is not None and is_error_payload(event.data):
             return True

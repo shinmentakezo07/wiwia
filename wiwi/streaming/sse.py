@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import codecs
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
@@ -10,6 +12,102 @@ from dataclasses import dataclass
 class SSEEvent:
     event: str  # event name ("" when absent, e.g. OpenAI data-only frames)
     data: str   # joined data payload
+
+
+# The SSE wire format defines exactly three line terminators (WHATWG HTML §9.2.6):
+# CRLF, a lone CR, and LF. Nothing else ends a line.
+_LINE_END = re.compile(r"\r\n|\r|\n")
+
+
+class SSELineSplitter:
+    """Split a decoded SSE body into lines on the wire's own terminators.
+
+    **Not** ``str.splitlines``. That splits on the whole Unicode newline family
+    — ``\\x0b \\x0c \\x1c \\x1d \\x1e \\x85 \\u2028 \\u2029`` as well as CR/LF —
+    and three of those (``\\x85`` NEL, ``\\u2028`` LINE SEPARATOR, ``\\u2029``
+    PARAGRAPH SEPARATOR) are legal *unescaped* inside a JSON string, which is
+    what ``orjson`` emits. An upstream reply containing U+2028 therefore used to
+    arrive here as two half-lines: the parser saw a truncated ``data:`` payload,
+    every adapter's ``decode_stream_event`` answered ``[]`` for it (a bad JSON
+    frame is dropped, never raised), and the client silently lost that delta
+    with a clean terminal frame after it — a corrupted turn that nothing
+    downstream can detect (AUDIT #566).
+
+    ``httpx.Response.aiter_lines`` has exactly this defect, so the streaming
+    paths must not use it; feed :func:`iter_sse_lines` the raw body chunks
+    instead.
+
+    ``feed``/``flush`` mirror :class:`LineSSEParser`'s shape: ``feed`` returns
+    every line completed by the text so far, holding back a trailing CR that
+    may be the first half of a CRLF whose LF is still in flight; ``flush``
+    returns the final unterminated line.
+    """
+
+    def __init__(self) -> None:
+        self._buf = ""
+
+    def feed(self, text: str) -> list[str]:
+        self._buf += text
+        out: list[str] = []
+        start = 0
+        while True:
+            m = _LINE_END.search(self._buf, start)
+            if m is None:
+                break
+            # A CR at the very end may be half of a CRLF split across chunks;
+            # wait for the next feed rather than inventing a line boundary.
+            if m.group() == "\r" and m.end() == len(self._buf):
+                break
+            out.append(self._buf[start:m.start()])
+            start = m.end()
+        self._buf = self._buf[start:]
+        return out
+
+    def flush(self) -> list[str]:
+        """Emit the final line, terminated or not (a body may end on its last
+        ``data:`` line — DeepSeek/B.A.I close with ``"data: [DONE]\\n"``)."""
+        buf, self._buf = self._buf, ""
+        if not buf:
+            return []
+        # A trailing CR is a terminator once the body is over, not half of a
+        # CRLF that will never arrive.
+        buf = buf.removesuffix("\r")
+        return _LINE_END.split(buf)
+
+
+def split_sse_lines(text: str) -> list[str]:
+    """Split an already-decoded SSE body into lines (see :class:`SSELineSplitter`).
+
+    The whole-body counterpart of :func:`iter_sse_lines`, for callers that hold
+    the complete body rather than a chunk stream — the healer's probe
+    classifier is the one in-tree user.
+    """
+    splitter = SSELineSplitter()
+    return splitter.feed(text) + splitter.flush()
+
+
+async def iter_sse_lines(chunks: AsyncIterator[bytes],
+                         encoding: str = "utf-8") -> AsyncIterator[str]:
+    """Turn raw upstream body chunks into SSE lines.
+
+    Use this instead of ``httpx.Response.aiter_lines()``, which splits on the
+    Unicode newline family rather than the SSE wire's terminators and so tears
+    any frame whose JSON payload carries U+2028/U+2029/U+0085 (AUDIT #566).
+
+    Decoding is incremental, so a multi-byte character split across two chunks
+    is reassembled rather than mangled; ``errors="replace"`` matches what httpx
+    itself does. Pass ``resp.encoding`` so a non-UTF-8 body is decoded the way
+    the response declared.
+    """
+    decoder = codecs.getincrementaldecoder(encoding or "utf-8")(errors="replace")
+    splitter = SSELineSplitter()
+    async for chunk in chunks:
+        for line in splitter.feed(decoder.decode(chunk)):
+            yield line
+    for line in splitter.feed(decoder.decode(b"", True)):
+        yield line
+    for line in splitter.flush():
+        yield line
 
 
 def _looks_like_payload(line: str) -> bool:
@@ -26,7 +124,7 @@ def _looks_like_payload(line: str) -> bool:
 
 
 class LineSSEParser:
-    """Feed lines from `aiter_lines()`; yields SSEEvent at blank-line boundaries.
+    """Feed lines from :func:`iter_sse_lines`; yields SSEEvent at blank-line boundaries.
 
     ``allow_unframed`` handles providers that answer a "streaming" request with
     **one whole JSON object per line** instead of framed SSE — Cline and
@@ -142,7 +240,9 @@ def sse_frame(event: str, payload: str | bytes,
 
 
 async def iter_sse_events(lines: AsyncIterator[str]) -> AsyncIterator[tuple[str, str]]:
-    """Convenience: wrap aiter_lines() into (event, data) tuples. Yields ("done","[DONE]") sentinels too.
+    """Convenience: wrap :func:`iter_sse_lines` into (event, data) tuples.
+
+    Yields the ("done", "[DONE]") sentinels too.
 
     The parser is flushed once the line feed ends. ``feed_line`` only emits at a
     blank-line boundary, so a body that closes on its last ``data:`` line with

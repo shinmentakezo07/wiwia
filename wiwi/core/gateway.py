@@ -42,7 +42,7 @@ from wiwi.streaming import deltas as dl
 from wiwi.streaming.coalesce import DeltaCoalescer
 from wiwi.streaming.loopdetect import LoopDetector
 from wiwi.streaming.resume import StreamTape, build_continuation_messages
-from wiwi.streaming.sse import LineSSEParser, SSEEvent
+from wiwi.streaming.sse import LineSSEParser, SSEEvent, iter_sse_lines
 from wiwi.streaming.validation import MAX_TOOL_ARGS_BYTES, validate_tool_args
 
 log = structlog.get_logger(__name__)
@@ -1145,7 +1145,14 @@ class Gateway:
                                         retryable=d.kind != "status")
                 return content
 
-            line_iter = resp.aiter_lines().__aiter__()
+            # ``iter_sse_lines``, NOT ``resp.aiter_lines()``: httpx splits on the
+            # Unicode newline family (``str.splitlines``), and U+2028/U+2029/
+            # U+0085 are legal unescaped inside a JSON string — which is what
+            # orjson emits. A reply containing one was torn into two half-lines,
+            # both dropped by the adapter as bad JSON, so the client silently
+            # lost that delta (AUDIT #566).
+            line_iter = iter_sse_lines(resp.aiter_bytes(),
+                                       resp.encoding or "utf-8").__aiter__()
             # Content-bearing deltas seen so far. A streaming-only upstream that
             # answers a long reasoning turn produces nothing for minutes, so the
             # pre-content phase gets the generous budget while a gap *between*
@@ -2245,7 +2252,11 @@ class Gateway:
             # O(1) per token: tracks repetition runs for short periods only,
             # rather than rescanning the whole window every token.
             loop_detector = LoopDetector(loop_limit)
-            line_iter = resp.aiter_lines().__aiter__()
+            # See the sibling comment on the other stream arm: httpx's own line
+            # splitter tears any frame whose JSON payload carries a Unicode
+            # line separator (AUDIT #566).
+            line_iter = iter_sse_lines(resp.aiter_bytes(),
+                                       resp.encoding or "utf-8").__aiter__()
 
             async def _apply_delta(deltas: list[dl.IRStreamDelta]) -> bool:
                 """Route one decoded event's deltas; returns True = abort pump."""
