@@ -11153,3 +11153,96 @@ with no horizontal overflow).
 
 ---
 
+## Round 189 — the IR's exported lookups were not total (2026-10-31)
+
+Three helpers in `wiwi/ir/` document "map or None, never raise" (or are relied
+on for it) but raised on hostile input. Every live caller passes a `str` today,
+so each is latent rather than live — fixed at the helper because that is where
+the contract lives, the same reasoning AUDIT #351/#387/#388 used. Verified by
+executing the real helpers before and after.
+
+### 562. `canonical_for` raises on a non-`str` wire type (unhashable lookup, then `.startswith`)
+
+**Severity:** ⚪ Low (latent — both wire callers pre-guard) · **Status: fixed** — round 189 (`tests/test_fix_round189.py`)
+**Files:** `wiwi/ir/builtin_tools.py:115-136` (`canonical_for`)
+
+A truthy non-`str` `wire_type` passed `if not wire_type: return None` and then
+raised in two different places: the reverse-map lookup (`TypeError: unhashable
+type: 'list'` for a list/dict) and the Anthropic family-prefix loop
+(`AttributeError: 'int' object has no attribute 'startswith'` for an int, float
+or bool). Executed pre-fix:
+
+```
+canonical_for("anthropic", 5)               -> AttributeError
+canonical_for("anthropic", ["web_search"])  -> TypeError: unhashable type: 'list'
+canonical_for("anthropic", "web_search_20250305") -> web_search   (control)
+```
+
+AUDIT #126 recorded that the helper-level guard "was NOT done" and left the
+crash unreachable rather than fixed at the source; `is_builtin_name`'s
+docstring already claims the sibling guard. Non-`str` surfaces had the same
+unhashable-lookup hole.
+
+**Fix:** `if not isinstance(surface, str) or not isinstance(wire_type, str) or not wire_type: return None`.
+
+### 563. `wire_type_for` raises on an unhashable canonical
+
+**Severity:** ⚪ Low (latent — every caller reads a `str`-typed field) · **Status: fixed** — round 189 (`tests/test_fix_round189.py`)
+**Files:** `wiwi/ir/builtin_tools.py:139-146` (`wire_type_for`)
+
+`BUILTIN_TOOL_TYPES.get(canonical)` hashes the argument, so a list/dict
+`canonical` (a hand-built `IR Tool.builtin`) raised `TypeError`. The helper's
+contract is "map or None".
+
+**Fix:** reject a non-`str` surface/canonical before the lookup.
+
+### 564. `carry_extras` raises on a mapping with mixed key types despite its totality contract
+
+**Severity:** ⚪ Low (latent — JSON object keys are always strings) · **Status: fixed** — round 189 (`tests/test_fix_round189.py`)
+**Files:** `wiwi/ir/translation.py:149-165` (`carry_extras`)
+
+The docstring promises "Total — a non-mapping `source` yields `{}` instead of
+raising", but the debug line's `sorted(extras)` is evaluated before the log
+call, so a mapping with mixed key types raised `TypeError: '<' not supported
+between instances of 'int' and 'str'` and no extras were returned at all.
+`carry_extras` accepts `Any` and is exported; a hand-built `Request.extras` is
+the trigger.
+
+**Fix:** `sorted(extras, key=str)` — the log stays readable and the returned
+mapping is unchanged.
+
+---
+
+## Round 190 — `iter_sse_events` dropped the final frame (2026-10-31)
+
+### 565. The SSE convenience wrapper never flushed the parser, so a body ending on its last `data:` line lost that frame
+
+**Severity:** 🟡 Medium (silent loss of the terminal sentinel; currently no
+in-tree caller) · **Status: fixed** — round 190 (`tests/test_fix_round190.py`)
+**Files:** `wiwi/streaming/sse.py:144-150` (`iter_sse_events`)
+
+`LineSSEParser.feed_line` emits only at a blank-line boundary, and
+`LineSSEParser.flush` exists precisely for the body that ends on its last
+`data:` line with no trailing blank line — DeepSeek/B.A.I close with
+`"data: [DONE]\n"`, and the docstring on `flush` names that case. The
+convenience wrapper `iter_sse_events` never called it, so the final event —
+including the `[DONE]` sentinel every decoder needs to terminate a turn
+cleanly — was silently dropped. Executed pre-fix:
+
+```
+lines ['data: {"a": 1}', 'data: [DONE]'] -> [('', '{"a": 1}')]      # [DONE] lost
+lines ['data: {"a": 1}', '', 'data: [DONE]', ''] -> both frames     # control
+```
+
+A dropped `[DONE]` is the exact shape AUDIT #420 records: the decoder sees a
+truncated stream, emits a mid-stream `error` frame, and a healthy deployment is
+cooled. That entry fixed the terminator handling in the Anthropic decoder; this
+is the transport helper underneath it.
+
+No in-tree caller uses the wrapper today (the adapters drive `LineSSEParser`
+directly), which is why the loss never surfaced — but the helper is exported and
+its contract is "wrap aiter_lines into (event, data) tuples".
+
+**Fix:** after the line loop, `evt = parser.flush()` and yield it when present.
+`flush` is idempotent, so a body that already ended on a blank line yields
+nothing extra.

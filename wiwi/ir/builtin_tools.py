@@ -118,8 +118,16 @@ def canonical_for(surface: str, wire_type: str) -> str | None:
     Accepts the Anthropic versioned family (any ``web_search_*`` string) so
     future tool versions decode without a registry change. Returns None for
     wire types that are not a known builtin on that surface.
+
+    Total by construction, like ``is_builtin_name`` below: a truthy non-``str``
+    wire type used to reach the reverse-map lookup (an unhashable ``list``/
+    ``dict`` raised ``TypeError``) and then the Anthropic family-prefix loop
+    (an ``int``/``float``/``bool`` raised ``AttributeError`` on
+    ``.startswith``). Both wire callers pre-guard today, so the crash is
+    latent rather than live (AUDIT #126), but this helper is exported and its
+    contract is "map or None", so the guard belongs here (AUDIT #562).
     """
-    if not wire_type:
+    if not isinstance(surface, str) or not isinstance(wire_type, str) or not wire_type:
         return None
     hit = _REVERSE.get(surface, {}).get(wire_type)
     if hit is None:
@@ -137,7 +145,15 @@ def canonical_for(surface: str, wire_type: str) -> str | None:
 
 
 def wire_type_for(surface: str, canonical: str) -> str | None:
-    """Map a canonical builtin name to the surface's wire tool type (or None)."""
+    """Map a canonical builtin name to the surface's wire tool type (or None).
+
+    Total, mirroring ``canonical_for``: an unhashable ``canonical`` (a
+    ``list``/``dict`` off a hostile IR ``Tool.builtin``) raised ``TypeError``
+    from the dict lookup. Every live caller reads a ``str``-typed field, so the
+    crash is latent, but the helper's contract is "map or None" (AUDIT #563).
+    """
+    if not isinstance(surface, str) or not isinstance(canonical, str):
+        return None
     row = BUILTIN_TOOL_TYPES.get(canonical)
     if row is None:
         return None

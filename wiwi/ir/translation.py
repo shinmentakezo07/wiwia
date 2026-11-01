@@ -152,6 +152,13 @@ def carry_extras(source: Any, known: frozenset[str]) -> dict[str, Any]:
     The denylist shape ``wiwi/wire/openai_chat.py`` already uses: every key the
     codec did not model is carried through to the provider untouched. Total —
     a non-mapping ``source`` yields ``{}`` instead of raising.
+
+    Keys are not assumed to be strings. JSON object keys always are, but this
+    helper is exported and accepts ``Any``: ``sorted(extras)`` on a mapping
+    with mixed key types (a hand-built ``Request.extras``, an internal caller)
+    raised ``TypeError`` before the log call even ran, violating the totality
+    contract above (AUDIT #564). The sort key makes the debug line safe without
+    changing the returned mapping.
     """
     if not isinstance(source, dict):
         return {}
@@ -159,7 +166,7 @@ def carry_extras(source: Any, known: frozenset[str]) -> dict[str, Any]:
     if extras:
         log.debug(
             "extras_carried",
-            carried=sorted(extras),
+            carried=sorted(extras, key=str),
             known_count=len(known),
         )
     return extras

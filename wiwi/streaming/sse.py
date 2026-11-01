@@ -142,9 +142,20 @@ def sse_frame(event: str, payload: str | bytes,
 
 
 async def iter_sse_events(lines: AsyncIterator[str]) -> AsyncIterator[tuple[str, str]]:
-    """Convenience: wrap aiter_lines() into (event, data) tuples. Yields ("done","[DONE]") sentinels too."""
+    """Convenience: wrap aiter_lines() into (event, data) tuples. Yields ("done","[DONE]") sentinels too.
+
+    The parser is flushed once the line feed ends. ``feed_line`` only emits at a
+    blank-line boundary, so a body that closes on its last ``data:`` line with
+    no trailing blank line — DeepSeek/B.A.I end with ``"data: [DONE]\\n"`` —
+    would lose that final frame, and with it the terminal sentinel every
+    decoder needs to finish a turn cleanly (AUDIT #565). ``flush`` is
+    idempotent, so a body that *does* end on a blank line yields nothing extra.
+    """
     parser = LineSSEParser()
     async for line in lines:
         evt = parser.feed_line(line)
         if evt is not None:
             yield evt.event, evt.data
+    evt = parser.flush()
+    if evt is not None:
+        yield evt.event, evt.data
