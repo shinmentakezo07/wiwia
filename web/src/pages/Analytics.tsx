@@ -49,6 +49,7 @@ import {
   upsertPricing,
 } from "@/api/client";
 import { useLiveInvalidation } from "@/api/stream";
+import { useAuth } from "@/api/auth";
 import type { ModelPrice, RequestLogEntry } from "@/api/types";
 import {
   Alert,
@@ -922,6 +923,11 @@ function PricingManager(props: {
 // -- main component ---------------------------------------------------------
 
 export function AnalyticsPage() {
+  // Pricing (GET /admin/pricing) and its editor are admin-only. Every
+  // authenticated user can still read their own request logs, so the charts
+  // stay useful; only the price table is gated.
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
   const [groupDim, setGroupDim] = useState<GroupDim>("model");
   const [metric, setMetric] = useState<Metric>("requests");
   const [hoveredSlice, setHoveredSlice] = useState<number | null>(null);
@@ -943,6 +949,7 @@ export function AnalyticsPage() {
     queryKey: ["pricing"],
     queryFn: getPricing,
     staleTime: 5 * 60 * 1000,
+    enabled: isAdmin,
   });
 
   // Live SSE invalidation: refresh request logs immediately when a new request
@@ -1576,22 +1583,26 @@ export function AnalyticsPage() {
       )}
 
       {/* ── Pricing management (add / edit / delete, persisted in DB) ──── */}
-      <PricingManager
-        models={allPricing}
-        onEdit={openEditPricing}
-        onAdd={openAddPricing}
-      />
-      <PricingDialog
-        open={pricingOpen}
-        initial={pricingInitial}
-        isNew={pricingIsNew}
-        existingIds={allPricing.flatMap((p) => [
-          scopeKey(p.model_id, ""),
-          ...(p.scopes ?? []).map((s) => scopeKey(p.model_id, s.provider)),
-        ])}
-        onClose={closePricing}
-        onSaved={closePricing}
-      />
+      {isAdmin && (
+        <>
+          <PricingManager
+            models={allPricing}
+            onEdit={openEditPricing}
+            onAdd={openAddPricing}
+          />
+          <PricingDialog
+            open={pricingOpen}
+            initial={pricingInitial}
+            isNew={pricingIsNew}
+            existingIds={allPricing.flatMap((p) => [
+              scopeKey(p.model_id, ""),
+              ...(p.scopes ?? []).map((s) => scopeKey(p.model_id, s.provider)),
+            ])}
+            onClose={closePricing}
+            onSaved={closePricing}
+          />
+        </>
+      )}
 
       {/* ── Daily trend ─────────────────────────────────────────────────── */}
       <Card className="mt-4">

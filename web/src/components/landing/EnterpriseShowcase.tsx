@@ -5,44 +5,44 @@
 // Copy is carried over verbatim from the original enterprise surfaces.
 
 import { Link } from "react-router-dom";
-import { ArrowRight, Building2, Check, Lock, Server, Zap } from "lucide-react";
+import { ArrowRight, Building2, Check, Gauge, LifeBuoy, Puzzle, Server } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 const CAPABILITIES: { icon: LucideIcon; title: string; body: string }[] = [
   {
-    icon: Lock,
-    title: "Enterprise SSO",
-    body: "SAML & OIDC single sign-on with role-based access control across every key and model.",
-  },
-  {
     icon: Server,
-    title: "Self-hosted or Managed",
-    body: "Deploy on your own infrastructure or let us run it for you with a 99.9% uptime SLA.",
+    title: "Self-hosted by default",
+    body: "Run the gateway, console, and database on your own infrastructure. Nothing has to leave your network.",
   },
   {
-    icon: Zap,
-    title: "Volume Pricing",
-    body: "Custom rate limits and pricing that scales with your usage — no per-seat licence.",
+    icon: Puzzle,
+    title: "Custom adapters",
+    body: "A provider, wire format, or translation rule that does not exist yet can be built against the adapter interface.",
   },
   {
-    icon: Building2,
-    title: "White-label Ready",
-    body: "Brand the gateway and admin UI as your own. Your callers never see the wiwi name.",
+    icon: LifeBuoy,
+    title: "Deployment help",
+    body: "Hands-on help with config, Postgres, key pools, and the migration from another gateway.",
+  },
+  {
+    icon: Gauge,
+    title: "Priority triage",
+    body: "Issues that block your rollout get looked at first. No seat licence and no platform fee.",
   },
 ];
 
 const PROOF: { value: string; label: string }[] = [
-  { value: "99.9%", label: "Uptime SLA" },
-  { value: "SOC 2", label: "Type II" },
-  { value: "100B+", label: "Tokens routed" },
-  { value: "40+", label: "Providers" },
+  { value: "13", label: "Provider types" },
+  { value: "3", label: "Inbound dialects" },
+  { value: "MIT", label: "Licence" },
+  { value: "0", label: "Platform fee" },
 ];
 
 const INCLUDED = [
-  "Dedicated support",
-  "Compliance controls",
-  "Custom SLAs",
-  "On-boarding assistance",
+  "Deployment assistance",
+  "Custom adapter work",
+  "Priority triage",
+  "Architecture review",
 ];
 
 const DEFAULT_SECONDARY_CTA = { label: "Explore Enterprise", to: "/enterprise" };
@@ -104,8 +104,9 @@ export function EnterpriseShowcase(props: {
             </Heading>
 
             <p className="mx-auto mt-5 max-w-xl text-[15px] leading-relaxed text-[var(--admin-text-muted)] sm:text-base">
-              When your LLM infrastructure becomes mission-critical, you need dedicated support,
-              compliance controls, and infrastructure that matches your ambitions.
+              When the gateway becomes mission-critical, you may want help running it —
+              deployment, custom adapters, and a direct line when something blocks you.
+              The software stays the same MIT-licensed build.
             </p>
 
             <div className="mt-9 flex flex-col items-center justify-center gap-3 sm:flex-row">
@@ -113,7 +114,7 @@ export function EnterpriseShowcase(props: {
                 to="/contact"
                 className="wiwi-shimmer group inline-flex h-11 w-full items-center justify-center gap-2 rounded-full bg-gradient-to-b from-brand-400 to-brand-700 px-7 text-sm font-semibold text-white shadow-lg shadow-brand-600/25 transition-[transform,filter] duration-150 hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/60 active:scale-[0.98] sm:w-auto"
               >
-                Talk to Sales
+                Talk to us
                 <ArrowRight
                   size={15}
                   className="transition-transform duration-150 group-hover:translate-x-0.5"

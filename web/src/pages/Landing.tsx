@@ -1,13 +1,12 @@
-// Landing — public marketing front door for the gateway. Adapted from
-// llmgateway.io's landing page: hero with trust badges, feature grid (tiered),
-// hub-and-spoke graph, tabbed code examples, pricing strip, FAQ accordion,
-// enterprise CTA, and final CTA. All in wiwi's dark design system.
+// Landing — public marketing front door for the gateway: hero with trust
+// badges, feature grid, hub-and-spoke graph, tabbed code examples, pricing
+// strip, FAQ accordion, enterprise CTA, and final CTA. All in wiwi's dark
+// design system.
 
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import {
   ArrowRight,
-  ArrowDown,
   BookOpen,
   Check,
   ChevronDown,
@@ -16,7 +15,6 @@ import {
   Minus,
   Server,
   Terminal,
-  Wallet,
 } from "lucide-react";
 import { Card } from "@/components/ui";
 import { GraphSection, OpenAIIcon, AnthropicIcon, GeminiIcon, OpenRouterIcon, MoonshotIcon } from "@/components/AnimatedBeam";
@@ -28,48 +26,13 @@ const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
 // ── data ───────────────────────────────────────────────────────────────────
 
 const STATS = [
-  { value: "40+", label: "Providers" },
-  { value: "200+", label: "Models" },
-  { value: "100B+", label: "Tokens routed" },
-  { value: "99.9999%", label: "Uptime" },
+  { value: "3", label: "Inbound dialects" },
+  { value: "13", label: "Provider types" },
+  { value: "MIT", label: "Licence" },
+  { value: "1", label: "Process" },
 ];
 
-// ── Uptime / Reliability data ──────────────────────────────────────────────
-
-const UPTIME_PROVIDERS = [
-  { name: "Anthropic", outages: [[8, 10], [42, 44], [78, 80]] as [number, number][] },
-  { name: "AWS Bedrock", outages: [[3, 5], [30, 32], [63, 65]] as [number, number][] },
-  { name: "Google Vertex", outages: [[18, 20], [50, 52], [72, 74]] as [number, number][] },
-  { name: "Azure OpenAI", outages: [[13, 15], [37, 39], [86, 88]] as [number, number][] },
-  { name: "Fireworks AI", outages: [[23, 25], [55, 57], [95, 97]] as [number, number][] },
-];
-
-function buildSegments(outages: [number, number][]) {
-  const segments: { type: "up" | "down"; width: number }[] = [];
-  let pos = 0;
-  for (const [start, end] of outages) {
-    if (start > pos) segments.push({ type: "up", width: start - pos });
-    segments.push({ type: "down", width: end - start });
-    pos = end;
-  }
-  if (pos < 100) segments.push({ type: "up", width: 100 - pos });
-  return segments;
-}
-
-// ── Testimonials data ──────────────────────────────────────────────────────
-
-const TESTIMONIALS = [
-  { handle: "@awakecoding", name: "Marc-André Moreau", text: "I found exactly what I was looking for: an @llmgateway DevPass MAX subscription that gives me 3X the amount of tokens for what I would normally pay with regular API pricing. There's a weekly limit for premium models, but that's the only limitation!" },
-  { handle: "@pxng0lin", name: "pxng0lin", text: "@llmgateway is my new OpenRouter. The total models are less, but I luv the integration with my projects, the response and help from the team and the cost (or rather lack of) to use it with Claude. I'm currently on $0.44 spending running my workflow with Claude Code! Win!" },
-  { handle: "@dabit3", name: "nader dabit", text: "LLM Gateway - the Open Source Alternative of OpenRouter @llmgateway feat. @smakosh and @steebchen" },
-  { handle: "@montekkundan", name: "Montek", text: "adding all 93 models to chaichat by @llmgateway. It would be easier to experiment with all models and you just need one api key! will be live on dev site soon. thanks @steebchen for the help!" },
-  { handle: "@stormix_dev", name: "Stormix", text: "Known @steebchen and @smakosh for 8+ years! They've always shipped great stuff. Their latest project @llmgateway is no exception 🚀" },
-  { handle: "@ossalternative", name: "OpenAlternative", text: "🚀 Just published: LLM Gateway @llmgateway — Unified API for all LLM providers with analytics. Route, manage, and analyze LLM requests across multiple providers with one API." },
-  { handle: "@Andy_AJT", name: "Andy T", text: "Wow. What a night, incredible builders, incredible venue & incredible team. The AI Hack Night was a complete success! Feeling incredibly grateful to @llmgateway for making it so easy for us to hack with any model." },
-  { handle: "@iTanayVaswani", name: "Tanay Vaswani", text: "List 10 great open-source repositories 👇🏻 I will go first: - @calcom - @mail0dotcom - @cap - @documenso - @aisdk (by @vercel) - @onyx_dot_app - @daytonaio - @langfuse - @llmgateway - @qdrant_engine" },
-];
-
-// ── Platform Capabilities (ported from llmgateway-ref features.tsx) ────────
+// ── Platform capabilities ──────────────────────────────────────────────────
 
 const features: { icon: React.ReactNode; title: string; description: string; slug: string }[] = [
   {
@@ -95,7 +58,7 @@ const features: { icon: React.ReactNode; title: string; description: string; slu
       </svg>
     ),
     title: "Multi-provider Support",
-    description: "Access 40+ providers through one integration—no vendor lock-in, switch models instantly.",
+    description: "Reach thirteen provider types through one integration — no vendor lock-in, switch models instantly.",
     slug: "multi-provider-support",
   },
   {
@@ -142,9 +105,9 @@ const features: { icon: React.ReactNode; title: string; description: string; slu
         <circle cx="106.797" cy="126.012" r="3.98224" fill="#77B359" />
       </svg>
     ),
-    title: "Self-hosted or Cloud",
-    description: "Run on your own infrastructure for full control, or let us handle it—your choice.",
-    slug: "self-hosted-or-cloud",
+    title: "Self-hosted",
+    description: "One process on your own infrastructure, with SQLite by default and Postgres when you need it.",
+    slug: "self-hosted",
   },
   {
     icon: (
@@ -236,9 +199,9 @@ const features: { icon: React.ReactNode; title: string; description: string; slu
         <path d="M64 72l-8-8-6 6 14 14 24-24-6-6-18 18Z" fill="#020617" />
       </svg>
     ),
-    title: "LLM Guardrails",
-    description: "Prevent prompt injection, detect PII, and block malicious requests with intelligent guardrails.",
-    slug: "guardrails",
+    title: "Durable stream journals",
+    description: "Every encoded SSE frame is journaled, so a reconnecting client can replay a stream even after a restart.",
+    slug: "stream-journals",
   },
 ];
 
@@ -248,9 +211,9 @@ const tier2Features = features.slice(3);
 const CODE_EXAMPLES: { label: string; code: string }[] = [
   {
     label: "curl",
-    code: `curl -X POST https://api.llmgateway.io/v1/chat/completions \\
+    code: `curl -X POST http://localhost:4000/v1/chat/completions \\
   -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer $LLM_GATEWAY_API_KEY" \\
+  -H "Authorization: Bearer $WIWI_VIRTUAL_KEY" \\
   -d '{
   "model": "gpt-4o",
   "messages": [
@@ -263,8 +226,8 @@ const CODE_EXAMPLES: { label: string; code: string }[] = [
     code: `import OpenAI from "openai";
 
 const client = new OpenAI({
-  apiKey: process.env.LLM_GATEWAY_API_KEY,
-  baseURL: "https://api.llmgateway.io/v1/"
+  apiKey: process.env.WIWI_VIRTUAL_KEY,
+  baseURL: "http://localhost:4000/v1/"
 });
 
 const response = await client.chat.completions.create({
@@ -278,14 +241,17 @@ console.log(response.choices[0].message.content);`,
   },
   {
     label: "next.js",
-    code: `import { createLLMGateway } from "@llmgateway/ai-sdk-provider";
-import { generateText } from 'ai';
+    code: `import { createOpenAI } from "@ai-sdk/openai";
+import { generateText } from "ai";
 
-const llmgateway = createLLMGateway({ apiKey });
+const gateway = createOpenAI({
+  baseURL: "http://localhost:4000/v1",
+  apiKey: process.env.WIWI_VIRTUAL_KEY,
+});
 
 const { text } = await generateText({
-  model: llmgateway('openai/gpt-4o'),
-  prompt: 'Write a vegetarian lasagna recipe for 4 people.',
+  model: gateway("gpt-5"),
+  prompt: "Write a vegetarian lasagna recipe for 4 people.",
 });`,
   },
   {
@@ -293,8 +259,8 @@ const { text } = await generateText({
     code: `import openai
 
 client = openai.OpenAI(
-    api_key="YOUR_LLM_GATEWAY_API_KEY",
-    base_url="https://api.llmgateway.io/v1"
+    api_key="YOUR_WIWI_VIRTUAL_KEY",
+    base_url="http://localhost:4000/v1"
 )
 
 response = client.chat.completions.create(
@@ -312,9 +278,9 @@ import java.util.List;
 
 public class Main {
     public static void main(String[] args) {
-        String apiKey = System.getenv("LLM_GATEWAY_API_KEY");
+        String apiKey = System.getenv("WIWI_VIRTUAL_KEY");
         OpenAiService service = new OpenAiService(apiKey, 60);
-        service.setOpenAiApiUrl("https://api.llmgateway.io/v1/");
+        service.setOpenAiApiUrl("http://localhost:4000/v1/");
 
         ChatMessage message = new ChatMessage("user", "Hello, how are you?");
         ChatCompletionRequest request = ChatCompletionRequest.builder()
@@ -335,8 +301,8 @@ use std::env;
 
 #[tokio::main]
 async fn main() {
-    let api_key = env::var("LLM_GATEWAY_API_KEY").unwrap();
-    let openai = OpenAI::new(&api_key).with_base_url("https://api.llmgateway.io/v1");
+    let api_key = env::var("WIWI_VIRTUAL_KEY").unwrap();
+    let openai = OpenAI::new(&api_key).with_base_url("http://localhost:4000/v1");
 
     let request = ChatCompletionRequest::new(
         "gpt-4o",
@@ -361,8 +327,8 @@ import (
 
 func main() {
     client := openai.NewClientWithConfig(openai.DefaultConfig(
-        os.Getenv("LLM_GATEWAY_API_KEY"),
-        "https://api.llmgateway.io/v1",
+        os.Getenv("WIWI_VIRTUAL_KEY"),
+        "http://localhost:4000/v1",
     ))
     resp, err := client.CreateChatCompletion(
         context.Background(),
@@ -382,8 +348,8 @@ func main() {
     code: `<?php
 require 'vendor/autoload.php';
 
-$client = OpenAI::client('YOUR_LLM_GATEWAY_API_KEY', [
-    'base_uri' => 'https://api.llmgateway.io/v1',
+$client = OpenAI::client('YOUR_WIWI_VIRTUAL_KEY', [
+    'base_uri' => 'http://localhost:4000/v1',
 ]);
 
 $response = $client->chat()->create([
@@ -401,8 +367,8 @@ echo $response['choices'][0]['message']['content'];
     code: `require "openai"
 
 client = OpenAI::Client.new(
-  access_token: ENV["LLM_GATEWAY_API_KEY"],
-  uri_base: "https://api.llmgateway.io/v1"
+  access_token: ENV["WIWI_VIRTUAL_KEY"],
+  uri_base: "http://localhost:4000/v1"
 )
 
 response = client.chat(
@@ -418,42 +384,36 @@ puts response.dig("choices", 0, "message", "content")`,
 
 const PRICING = [
   {
-    icon: Wallet,
-    name: "Credits",
-    price: "5% flat fee",
-    description: "Pay-as-you-go credits for any model at provider rates, with a flat platform fee on top-ups. No subscription, no markup on tokens.",
+    icon: Server,
+    name: "Self-host",
+    price: "Free",
+    description: "Run the whole gateway on your own infrastructure. MIT-licensed, with SQLite by default and Postgres when you need it.",
+    featured: true,
   },
   {
     icon: KeyRound,
     name: "Bring your own keys",
-    price: "Free",
-    description: "Route through your own provider API keys and pay providers directly. Routing, tracking, and analytics included at no cost.",
-    featured: true,
-  },
-  {
-    icon: Server,
-    name: "Self-host",
-    price: "Free forever",
-    description: "Deploy the AGPLv3-licensed gateway on your own infrastructure. The full routing layer, yours to run.",
+    price: "No fee",
+    description: "Route through your own provider accounts and pay providers directly. There is no platform fee and no token markup.",
   },
 ];
 
 const FAQ = [
   {
     q: "What makes WIWI Gateway different from OpenRouter?",
-    a: "Unlike OpenRouter, we offer: Full self-hosting under an AGPLv3 license – run the gateway entirely on your infra. Deeper, real-time cost & latency analytics for every request. Bring Your Own Keys – use your own provider API keys for free. Flexible enterprise add-ons (dedicated shard, custom SLAs).",
+    a: "You run it. The gateway is MIT-licensed and self-hosted, so keys, logs, and budgets stay on your infrastructure. It also accepts three inbound dialects natively — OpenAI Chat, OpenAI Responses, and Anthropic Messages — so Claude Code and Codex CLI work against any provider.",
   },
   {
-    q: "What models do you support?",
-    a: "We support 200+ models across 40+ providers—including GPT-4o, Claude, Gemini, Llama, Mistral, and more. We add new releases within 48 hours of launch.",
+    q: "Which providers does it support?",
+    a: "Thirteen outbound provider types: OpenAI, Anthropic, Gemini, OpenRouter, NVIDIA NIM, GMI Cloud, B.AI, OpenCode, Cline, WorkBuddy, Hermes, IFM, and any OpenAI-compatible endpoint. Model names come from your own model_list, so the catalog is whatever you configure.",
   },
   {
-    q: "What is your uptime guarantee?",
-    a: "Our public status page posts real-time metrics. Enterprise instances come with a 99.9% uptime SLA; self-host installations depend on your infrastructure.",
+    q: "What happens when a provider fails?",
+    a: "Retryable upstream errors (408, 429, 500, 502, 503, 504, 529) trigger backoff and a retry against another key or deployment. Keys that keep failing cool down, and an optional healer probes them with a one-token request.",
   },
   {
     q: "How much does it cost?",
-    a: "Credits: Pay-as-you-go with a flat 5% platform fee. BYOK: Use your own provider API keys for free. Enterprise: Custom SLA, dedicated infrastructure, and volume discounts. Self-host: Deploy free forever under AGPLv3 license.",
+    a: "Nothing for the software. You pay your providers directly at their rates. There is no platform fee, no credit balance, and no per-seat licence; enterprise support is a separate conversation.",
   },
 ];
 
@@ -798,7 +758,7 @@ export function LandingPage() {
         </div>
       </section>
 
-      {/* ══ reliability / uptime ══ */}
+      {/* ══ reliability ══ */}
       <section className="scroll-reveal py-20 sm:py-28">
         <div className="mx-auto max-w-5xl">
           <div className="mb-12 text-center sm:mb-16">
@@ -810,170 +770,31 @@ export function LandingPage() {
               <span className="font-mono text-xs tracking-wider text-emerald-400">RELIABILITY</span>
             </div>
             <h2 className="mb-4 text-3xl font-bold tracking-tight text-[var(--admin-text)] sm:text-4xl lg:text-5xl">
-              Never go down.{" "}
-              <span className="text-[var(--admin-text-muted)]">Even when your providers do.</span>
+              Retries and failover,{" "}
+              <span className="text-[var(--admin-text-muted)]">not a status page.</span>
             </h2>
             <p className="mx-auto max-w-3xl text-lg leading-relaxed text-[var(--admin-text-muted)]">
-              WIWI Gateway automatically routes requests to healthy providers in real-time. When one goes down,
-              your traffic seamlessly fails over—your users never notice.
+              When a key is throttled or a provider returns a retryable error, the router
+              backs off, tries another key or deployment, and records every attempt.
             </p>
           </div>
-
-          {/* Timeline visualization */}
-          <div className="rounded-2xl border border-[var(--admin-border)] bg-[var(--admin-surface)] p-4 sm:p-8" role="img" aria-label="Provider uptime visualization">
-            <div className="space-y-2.5 sm:space-y-3">
-              {UPTIME_PROVIDERS.map((provider, index) => {
-                const segments = buildSegments(provider.outages);
-                const totalDown = provider.outages.reduce((sum, [s, e]) => sum + (e - s), 0);
-                return (
-                  <div key={provider.name} className="flex items-center gap-2 sm:gap-4">
-                    <div className="w-20 shrink-0 text-right sm:w-28">
-                      <span className="text-xs font-medium text-[var(--admin-text-muted)] sm:text-sm">{provider.name}</span>
-                    </div>
-                    <div className="relative h-5 flex-1 overflow-hidden rounded sm:h-7">
-                      <div className="absolute inset-0 bg-white/[0.04]" />
-                      <div className="flex h-full" style={{ clipPath: "inset(0 0 0 0)", transition: `clip-path 1.2s cubic-bezier(0.16, 1, 0.3, 1) ${index * 150}ms` }}>
-                        {segments.map((seg, i) => (
-                          <div key={i} className={seg.type === "up" ? "h-full bg-emerald-500/30" : "h-full bg-red-500/50"} style={{ width: `${seg.width}%` }} />
-                        ))}
-                      </div>
-                    </div>
-                    <div className="w-12 shrink-0 text-right sm:w-20">
-                      <span className="font-mono text-xs text-[var(--admin-text-muted)] sm:text-sm">{100 - totalDown}%</span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* Routing indicator */}
-            <div className="my-4 flex items-center gap-2 sm:my-6 sm:gap-4">
-              <div className="w-20 shrink-0 sm:w-28" />
-              <div className="relative flex-1 border-t border-dashed border-[var(--admin-border)]">
-                <div className="absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 items-center gap-1.5 whitespace-nowrap bg-[var(--admin-surface)] px-3 py-0.5 font-mono text-xs text-[var(--admin-text-muted)]">
-                  <ArrowDown className="h-3 w-3 text-blue-500" />
-                  Automatic failover
-                </div>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {[
+              { title: "Key pools", body: "Several keys per provider, spread by smooth weighted round-robin." },
+              { title: "Cooldowns", body: "A failing key is cooled down and skipped instead of retried forever." },
+              { title: "Fallbacks", body: "Deployment and model-group chains pick the next healthy route." },
+              { title: "Health healer", body: "An opt-in probe restores cooling keys early, on probation at first." },
+            ].map((item) => (
+              <div key={item.title} className="rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] p-5">
+                <h3 className="text-[15px] font-semibold text-[var(--admin-text)]">{item.title}</h3>
+                <p className="mt-2 text-[13px] leading-relaxed text-[var(--admin-text-muted)]">{item.body}</p>
               </div>
-              <div className="w-12 shrink-0 sm:w-20" />
-            </div>
-
-            {/* Gateway combined bar */}
-            <div className="flex items-center gap-2 sm:gap-4">
-              <div className="w-20 shrink-0 text-right sm:w-28">
-                <span className="text-xs font-bold text-[var(--admin-text)] sm:text-sm">WIWI Gateway</span>
-              </div>
-              <div className="relative h-5 flex-1 overflow-hidden rounded sm:h-7">
-                <div className="absolute inset-0 bg-white/[0.04]" />
-                <div className="absolute inset-0 rounded bg-emerald-500" style={{ clipPath: "inset(0 0 0 0)", transition: "clip-path 1.4s cubic-bezier(0.16, 1, 0.3, 1)", transitionDelay: "900ms" }} />
-                <div className="pointer-events-none absolute inset-0 rounded" style={{ boxShadow: "0 0 20px rgba(16,185,129,0.3), inset 0 1px 0 rgba(52,211,153,0.2)", opacity: 1, transition: "opacity 0.5s ease", transitionDelay: "2s" }} />
-              </div>
-              <div className="w-12 shrink-0 text-right sm:w-20">
-                <span className="font-mono text-xs font-bold text-emerald-400 sm:text-sm">99.9999%</span>
-              </div>
-            </div>
+            ))}
           </div>
-
-          {/* Before/After comparison */}
-          <div className="mt-8 grid gap-4 sm:mt-12 sm:grid-cols-2 sm:gap-6">
-            <div className="rounded-xl border border-red-500/20 bg-red-500/[0.03] p-5 sm:p-6">
-              <div className="mb-3 font-mono text-xs tracking-wider text-red-400">WITHOUT WIWI GATEWAY</div>
-              <div className="font-mono text-3xl font-bold sm:text-4xl text-[var(--admin-text)]">94%</div>
-              <div className="mt-1 text-sm text-[var(--admin-text-muted)]">uptime per provider</div>
-              <div className="mt-4 border-t border-red-500/10 pt-4">
-                <div className="font-mono text-lg font-bold text-red-400">~22 days</div>
-                <div className="text-sm text-[var(--admin-text-muted)]">of downtime per year</div>
-              </div>
-            </div>
-            <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/[0.03] p-5 sm:p-6">
-              <div className="mb-3 font-mono text-xs tracking-wider text-emerald-400">WITH WIWI GATEWAY</div>
-              <div className="font-mono text-3xl font-bold text-emerald-400 sm:text-4xl">99.9999%</div>
-              <div className="mt-1 text-sm text-[var(--admin-text-muted)]">combined uptime across providers</div>
-              <div className="mt-4 border-t border-emerald-500/10 pt-4">
-                <div className="font-mono text-lg font-bold text-emerald-400">&lt;32 seconds</div>
-                <div className="text-sm text-[var(--admin-text-muted)]">of downtime per year</div>
-              </div>
-            </div>
-          </div>
-          <p className="mx-auto mt-6 max-w-2xl text-center text-sm leading-relaxed text-[var(--admin-text-muted)]">
-            Each provider averages ~94% uptime independently. With automatic failover across multiple providers,
-            the probability of simultaneous downtime drops to near zero—giving you effective uptime of 99.9999%.
-          </p>
-        </div>
-      </section>
-
-      {/* ══ testimonials ══ */}
-      <section className="scroll-reveal bg-noise relative overflow-hidden py-24 md:py-32">
-        <div className="relative">
-          <div className="mx-auto mb-16 max-w-7xl px-6 lg:px-8">
-            <p className="mb-4 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--admin-text-dim)]">Community</p>
-            <h2 className="text-4xl font-bold tracking-tight text-[var(--admin-text)] md:text-5xl">
-              Trusted by developers worldwide
-            </h2>
-          </div>
-          <div className="space-y-6">
-            {/* Row 1 */}
-            <div className="flex gap-6 overflow-hidden">
-              <div className="animate-marquee flex shrink-0 gap-6 hover:[animation-play-state:paused]" style={{ ["--duration" as string]: "40s" }}>
-                {TESTIMONIALS.slice(0, 5).map((t, i) => (
-                  <div key={i} className="w-80 shrink-0 rounded-2xl border border-[var(--admin-border)] bg-[var(--admin-surface)] p-5 shadow-sm">
-                    <p className="text-sm leading-relaxed text-[var(--admin-text-muted)]">{t.text}</p>
-                    <div className="mt-3 flex items-center gap-2">
-                      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-500/10 text-xs font-bold text-blue-400">{t.name[0]}</div>
-                      <div>
-                        <div className="text-xs font-medium text-[var(--admin-text)]">{t.name}</div>
-                        <div className="text-[11px] text-[var(--admin-text-dim)]">{t.handle}</div>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div className="animate-marquee flex shrink-0 gap-6 hover:[animation-play-state:paused]" aria-hidden>
-                {TESTIMONIALS.slice(0, 5).map((t, i) => (
-                  <div key={i} className="w-80 shrink-0 rounded-2xl border border-[var(--admin-border)] bg-[var(--admin-surface)] p-5 shadow-sm">
-                    <p className="text-sm leading-relaxed text-[var(--admin-text-muted)]">{t.text}</p>
-                    <div className="mt-3 flex items-center gap-2">
-                      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-500/10 text-xs font-bold text-blue-400">{t.name[0]}</div>
-                      <div>
-                        <div className="text-xs font-medium text-[var(--admin-text)]">{t.name}</div>
-                        <div className="text-[11px] text-[var(--admin-text-dim)]">{t.handle}</div>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-            {/* Row 2 */}
-            <div className="flex gap-6 overflow-hidden">
-              <div className="animate-marquee-reverse flex shrink-0 gap-6 hover:[animation-play-state:paused]" style={{ ["--duration" as string]: "40s" }}>
-                {TESTIMONIALS.slice(5).map((t, i) => (
-                  <div key={i} className="w-80 shrink-0 rounded-2xl border border-[var(--admin-border)] bg-[var(--admin-surface)] p-5 shadow-sm">
-                    <p className="text-sm leading-relaxed text-[var(--admin-text-muted)]">{t.text}</p>
-                    <div className="mt-3 flex items-center gap-2">
-                      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-fuchsia-500/10 text-xs font-bold text-fuchsia-400">{t.name[0]}</div>
-                      <div>
-                        <div className="text-xs font-medium text-[var(--admin-text)]">{t.name}</div>
-                        <div className="text-[11px] text-[var(--admin-text-dim)]">{t.handle}</div>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div className="animate-marquee-reverse flex shrink-0 gap-6 hover:[animation-play-state:paused]" aria-hidden>
-                {TESTIMONIALS.slice(5).map((t, i) => (
-                  <div key={i} className="w-80 shrink-0 rounded-2xl border border-[var(--admin-border)] bg-[var(--admin-surface)] p-5 shadow-sm">
-                    <p className="text-sm leading-relaxed text-[var(--admin-text-muted)]">{t.text}</p>
-                    <div className="mt-3 flex items-center gap-2">
-                      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-fuchsia-500/10 text-xs font-bold text-fuchsia-400">{t.name[0]}</div>
-                      <div>
-                        <div className="text-xs font-medium text-[var(--admin-text)]">{t.name}</div>
-                        <div className="text-[11px] text-[var(--admin-text-dim)]">{t.handle}</div>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
+          <div className="mt-8 text-center">
+            <Link to="/reliability" className="inline-flex items-center gap-1.5 text-sm font-medium text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]">
+              How recovery works <ArrowRight size={14} />
+            </Link>
           </div>
         </div>
       </section>
@@ -984,13 +805,13 @@ export function LandingPage() {
         <div className="mb-12 text-center">
           <p className="mb-4 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--admin-text-dim)]">Pricing</p>
           <h2 className="text-3xl font-bold tracking-tight text-[var(--admin-text)] md:text-4xl lg:text-5xl">
-            Three ways to run it. Two are free.
+            One build. No platform fee.
           </h2>
           <p className="mx-auto mt-4 max-w-2xl text-lg text-[var(--admin-text-muted)]">
-            No seats, no minimums, no token markup. Start free and only pay when you top up credits.
+            No seats, no minimums, no token markup. You pay your providers; the gateway is yours to run.
           </p>
         </div>
-        <div className="mx-auto grid max-w-5xl grid-cols-1 gap-4 md:grid-cols-3">
+        <div className="mx-auto grid max-w-5xl grid-cols-1 gap-4 md:grid-cols-2">
           {PRICING.map((p) => {
             const Icon = p.icon;
             return (
@@ -1009,7 +830,7 @@ export function LandingPage() {
         </div>
         <div className="mt-8 text-center">
           <Link to="/pricing" className="inline-flex items-center gap-1.5 text-sm font-medium text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]">
-            Compare all plans, including Enterprise <ArrowRight size={14} />
+See pricing and support <ArrowRight size={14} />
           </Link>
         </div>
       </section>
@@ -1089,8 +910,8 @@ export function LandingPage() {
               <span className="text-brand-400">in 30 seconds</span>
             </h2>
             <p className="mt-6 max-w-xl text-base leading-relaxed text-[var(--admin-text-muted)]">
-              Join thousands of developers processing 100B+ tokens through WIWI Gateway.
-              Free tier included, no credit card required.
+              Start the binary, mint a virtual key, and send any dialect. No account,
+              credit card, or control plane required.
             </p>
             <div className="mt-10 flex flex-col gap-3 sm:flex-row">
               <Link

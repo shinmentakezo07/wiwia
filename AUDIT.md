@@ -11098,3 +11098,58 @@ was dropped"; the "no equivalent" wording is reserved for adapters whose
 **Status: fixed** — round 187
 (`tests/test_fix_round187.py`: the IFM split plus a control on a
 `supports_top_k=False` adapter).
+
+---
+
+## Round 188 — the public site still shipped another product's copy (2026-10-31)
+
+### 560. User-role console pages called admin-only endpoints and rendered a 403 banner
+
+🟠 **Medium (a page a user is allowed to open reports a permission error that
+is not theirs to fix)** —
+`web/src/pages/BudgetsAlerts.tsx` (alert-rules query),
+`web/src/pages/Analytics.tsx` (pricing query and `PricingManager`)
+
+`/console/budgets` and `/console/analytics` sit inside the `RequireUser` shell —
+any authenticated user may open them — but both fetched admin-guarded endpoints
+unconditionally: `GET /admin/alert-rules` and `GET /admin/pricing` (plus the
+pricing editor's mutations). A `role: "user"` session therefore saw an error
+card where its own budgets and traffic charts should have been, and the
+analytics page offered a price editor whose save would always 403.
+
+**Fix:** both pages read `useAuth()` and gate only the admin surface — the
+rules query and card in Budgets, the pricing query and manager/dialog in
+Analytics — with `enabled: isAdmin` and `{isAdmin && …}`. The per-key budget
+and request-log data a user owns still loads.
+
+**Status: fixed** — round 188 (web only; `tsc -b`, `npm run lint`, `npm test`
+and `npm run build` green, pages exercised in a browser as an admin session).
+
+### 561. The public marketing pages still carried another gateway's URLs, products and numbers
+
+🟡 **Low (user-visible false claims: a self-hosted MIT project describing
+another company's hosted product)** —
+`web/src/pages/Landing.tsx`, `Integrations.tsx`, `Guides.tsx`,
+`GuideDetail.tsx`, `TokenCostCalculator.tsx`, `Contact.tsx`, `About.tsx`,
+`pages/{Rankings,Timeline,Apps,Partners,Referrals,SSO,Connect,Ship,Templates,Agents}.tsx`
+
+The site was adapted from llmgateway's marketing pages and never de-branded:
+it linked `api.llmgateway.io` and `devpass.llmgateway.io`, advertised DevPass
+plans, a 200+ model hosted router, a flat 5% platform fee, "zero markup" price
+comparison routing, fake testimonials and uptime, and fabricated rankings,
+timeline and app pages. Several console links pointed at pages that did not
+exist (`/blog` → hub, `/reliability` → hub, and a `https://discord.com` social
+link with no server behind it).
+
+**Fix:** competitor URLs, products and testimonials removed; the fabricated
+pages and their data files deleted; nav/footer entries point at real routes;
+remaining claims reduced to what the code does (thirteen provider types, MIT,
+self-hosted, no billing layer); calculators rewritten to use prices the reader
+enters, since the gateway publishes no price list. Licence copy corrected to
+MIT (the repo's `LICENSE`).
+
+**Status: fixed** — round 188 (web only; pages exercised at 375 px and 1280 px
+with no horizontal overflow).
+
+---
+

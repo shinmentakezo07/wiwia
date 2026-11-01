@@ -89,51 +89,6 @@ wire encoder (inbound) ◄──IRStreamDelta◄──adapter.decode── provi
     related: ["multi-provider-routing", "self-hosting-guide"],
   },
   {
-    slug: "copilot-cost-calculator",
-    date: "2026-08-15",
-    title: "How to estimate your GitHub Copilot bill in 2026",
-    summary:
-      "Copilot moved to usage-based AI Credits. Here's how the billing works and how to estimate your team's monthly cost.",
-    category: "Cost",
-    readMinutes: 5,
-    intro:
-      "GitHub Copilot's premium requests became metered AI Credits — a per-seat allowance plus usage-based overage. That makes the bill a function of who on your team runs long agent sessions, and agent sessions are token-hungry. This post walks through the math and links our calculator.",
-    facts: [
-      { label: "Model", value: "Per-seat credit allowance + overage" },
-      { label: "Biggest driver", value: "Agent-mode sessions" },
-      { label: "Alternative", value: "Pass-through tokens + hard caps" },
-      { label: "Tool", value: "/copilot-cost-calculator" },
-    ],
-    sections: [
-      {
-        heading: "Where the credits go",
-        paragraphs: [
-          "A tab completion is nearly free. A chat message costs one premium request. An agent session — where the model plans, reads files, edits, runs commands, and iterates — burns credits with every turn, because each turn re-sends the growing conversation context. Teams consistently underestimate the last one: the same \"obvious\" task can cost 3 requests in chat and 40 in agent mode.",
-        ],
-        bullets: [
-          "Count seats, then classify users: light (chat only), medium (daily agent work), heavy (agentic refactors, long contexts).",
-          "Estimate agent sessions per heavy user per day, and turns per session.",
-          "Model growth: 128k-token context sessions bill their full input every turn unless the provider discounts cached prefixes.",
-        ],
-      },
-      {
-        heading: "The prompt-cache discount most teams miss",
-        paragraphs: [
-          "Frontier providers bill cached input at roughly a tenth of the uncached rate, and agent sessions are the ideal cache shape: a stable prefix (system prompt, repo context) with small suffix growth each turn. A gateway that routes all of a team's traffic to one provider account keeps those caches warm across users working in the same repo. On wiwi the discount surfaces as the `cache_hit` flag and the `wiwi_prompt_cache_hits_total` metric — you can watch the effective rate fall.",
-        ],
-      },
-      {
-        heading: "Running the numbers",
-        paragraphs: [
-          "Our calculator takes seats, usage mix, and context sizes, then compares the credit bill against routing the same workload through wiwi at provider pass-through rates — where the levers are budgets per key and a model that fits the task instead of a credit counter that resets monthly. If you're already estimating Copilot spend, it's worth pricing the same workload twice.",
-        ],
-        callout:
-          "The gateway path costs what providers charge — no markup, no seat math. Caps are hard: a virtual key over budget returns 402 before a request leaves.",
-      },
-    ],
-    related: ["prompt-caching-deep-dive", "model-comparison-2026"],
-  },
-  {
     slug: "prompt-caching-deep-dive",
     date: "2026-08-10",
     title: "Prompt caching: how it works and what it saves",
@@ -184,7 +139,7 @@ wiwi_response_cache_hits_total # gateway answered from cache`,
           "Anthropic bills cache writes at 1.25× for the first look; a short one-off prompt with a big prefix can lose money. Caching pays off when the same prefix is reused multiple times.",
       },
     ],
-    related: ["ai-gateway-101", "copilot-cost-calculator"],
+    related: ["ai-gateway-101", "multi-provider-routing"],
   },
   {
     slug: "multi-provider-routing",

@@ -191,6 +191,16 @@ export interface ProxyLogEntry {
   request_id?: string;
 }
 
+/** public_dict(LogEvent) for the audit stream, plus the mutation diff. */
+export interface AuditLogEntry {
+  stream: "audit";
+  ts: number;
+  actor: string;
+  action: string;
+  target: string;
+  diff: Record<string, unknown>;
+}
+
 export interface OverviewStats {
   window_minutes: number;
   generated_at: number;

@@ -1,5 +1,4 @@
-// Guides — step-by-step integration tutorials. Adapted from the llmgateway.io
-// guides page with inlined data, in the dark design system.
+// Guides — step-by-step integration tutorials.
 
 import { Link } from "react-router-dom";
 import { ArrowRight } from "lucide-react";
@@ -17,7 +16,6 @@ const GUIDES: Guide[] = [
   { slug: "cursor", title: "Cursor IDE", description: "Use the gateway with Cursor in plan and agent mode. Tab autocomplete and inline edit stay on Cursor's backend.", category: "IDE" },
   { slug: "cline", title: "Cline (VS Code)", description: "Integrate the gateway with Cline for AI-powered coding assistance directly in VS Code.", category: "IDE" },
   { slug: "codex-cli", title: "Codex CLI", description: "Use the gateway with OpenAI's Codex CLI for AI-powered terminal coding.", category: "Terminal" },
-  { slug: "devpass-code", title: "DevPass Code", description: "Open-source terminal coding agent built for the gateway. One browser login, every model.", category: "Terminal" },
   { slug: "n8n", title: "n8n Workflows", description: "Connect n8n workflow automation to the gateway for AI-powered automation pipelines.", category: "Automation" },
   { slug: "opencode", title: "OpenCode", description: "Use the gateway with OpenCode CLI for AI-powered development workflows.", category: "Terminal" },
   { slug: "continue", title: "Continue CLI", description: "Use the gateway with Continue's open-source AI code assistant CLI.", category: "Terminal" },

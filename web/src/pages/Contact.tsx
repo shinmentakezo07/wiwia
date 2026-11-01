@@ -3,24 +3,16 @@
 
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { BookOpen, Github, Mail, Send } from "lucide-react";
+import { BookOpen, Github, Send } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Button, Card, Input } from "@/components/ui";
 
-const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
-
 const CHANNELS: { icon: LucideIcon; label: string; value: string; href: string; external?: boolean }[] = [
   {
-    icon: Mail,
-    label: "Email",
-    value: "hello@wiwi.dev",
-    href: "mailto:hello@wiwi.dev",
-  },
-  {
     icon: Github,
-    label: "GitHub",
-    value: "github.com/wiwi",
-    href: "https://github.com/shinmentakezo07/wiwia",
+    label: "GitHub issues",
+    value: "github.com/shinmentakezo07/wiwia/issues",
+    href: "https://github.com/shinmentakezo07/wiwia/issues",
     external: true,
   },
   {
@@ -39,6 +31,15 @@ export function ContactPage() {
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    // There is no server-side contact endpoint. Compose the message into a
+    // prefilled GitHub issue so the form actually reaches someone instead of
+    // pretending to send and dropping the text.
+    const title = `Contact: ${name}`.slice(0, 120);
+    const body = `${message}\n\n— ${name} <${email}>`;
+    const url = `https://github.com/shinmentakezo07/wiwia/issues/new?title=${encodeURIComponent(
+      title,
+    )}&body=${encodeURIComponent(body)}`;
+    window.open(url, "_blank", "noopener,noreferrer");
     setSent(true);
   }
 
@@ -53,9 +54,8 @@ export function ContactPage() {
           </span>
         </h1>
         <p className="mx-auto mt-4 max-w-xl text-[15px] leading-relaxed text-[var(--admin-text-muted)]">
-          Questions about self-hosting, routing, or provider support? Pick whichever
-          channel suits you — email gets a reply from a human, usually within one
-          business day.
+          Questions about self-hosting, routing, or provider support? The issue tracker
+          is the fastest channel; the form below prefills an issue for you.
         </p>
       </section>
 
@@ -73,9 +73,10 @@ export function ContactPage() {
               <div className="flex h-12 w-12 items-center justify-center rounded-full bg-emerald-500/10 ring-1 ring-emerald-500/20">
                 <Send size={20} className="text-emerald-400" />
               </div>
-              <h3 className="mt-4 text-[16px] font-semibold text-[var(--admin-text)]">Message sent</h3>
+              <h3 className="mt-4 text-[16px] font-semibold text-[var(--admin-text)]">Opening GitHub</h3>
               <p className="mt-1.5 text-[13px] text-[var(--admin-text-muted)]">
-                Thanks for reaching out. We will get back to you shortly.
+                Your message was prefilled into a new issue. Review it and submit it
+                there — the form itself does not store anything.
               </p>
               <Button
                 variant="outline"
@@ -167,8 +168,8 @@ export function ContactPage() {
           <Card className="p-5">
             <span className="admin-label mb-2 block">Response time</span>
             <p className="text-[13px] leading-relaxed text-[var(--admin-text-muted)]">
-              We typically reply within one business day. For urgent production issues,
-              open an issue on{" "}
+              There is no support inbox behind this site — the form opens a prefilled
+              issue on{" "}
               <a
                 href="https://github.com/shinmentakezo07/wiwia"
                 target="_blank"
@@ -179,10 +180,6 @@ export function ContactPage() {
               </a>
               .
             </p>
-            <div className="mt-3 flex items-center gap-1.5 font-mono text-[10px] text-[var(--admin-text-dim)]">
-              <Mail size={10} />
-              <code style={{ fontFamily: MONO }}>hello@wiwi.dev</code>
-            </div>
           </Card>
         </div>
       </section>

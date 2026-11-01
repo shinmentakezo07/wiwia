@@ -19,6 +19,7 @@ import {
   CreditCard,
   Database,
   Hexagon,
+  History,
   KeyRound,
   LayoutDashboard,
   Layers,
@@ -122,6 +123,7 @@ const ADMIN_ONLY_SECTIONS: NavSection[] = [
     title: "Admin",
     items: [
       { to: "/console/proxy-logs", label: "Proxy Logs", icon: Terminal },
+      { to: "/console/audit", label: "Audit Log", icon: History },
       { to: "/console/users", label: "Users", icon: Users },
       { to: "/console/settings", label: "Settings", icon: CreditCard },
     ],
@@ -132,6 +134,7 @@ const PAGE_META: Record<string, { title: string; section: string }> = {
   "/console": { title: "Dashboard", section: "Overview" },
   "/console/request-logs": { title: "Request Logs", section: "Traffic" },
   "/console/proxy-logs": { title: "Proxy Logs", section: "Traffic" },
+  "/console/audit": { title: "Audit Log", section: "Admin" },
   "/console/usage": { title: "Usage", section: "Traffic" },
   "/console/analytics": { title: "Analytics", section: "Traffic" },
   "/console/providers": { title: "Providers", section: "Configuration" },

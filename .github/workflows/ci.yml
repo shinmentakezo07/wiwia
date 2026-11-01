@@ -42,7 +42,7 @@ jobs:
         run: python3 -m pytest tests/ -q
 
   web:
-    name: web (lint, typecheck, build)
+    name: web (lint, test, typecheck, build)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -62,6 +62,9 @@ jobs:
 
       - name: Lint
         run: npm run lint
+
+      - name: Test
+        run: npm test
 
       # `npm run build` is `tsc -b && vite build`, so this is also the typecheck.
       - name: Build

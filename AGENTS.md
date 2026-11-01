@@ -141,6 +141,7 @@ python3 -m pytest tests/ -q && ruff check wiwi/ tests/ scripts/          # run B
 cd web && npm install && npm run dev        # Vite :5173, proxies /admin /auth /public /v1 /health → :4000
 cd web && npm run build                     # tsc -b && vite build → wiwi/server/static/
 cd web && npm run lint                      # eslint src (web/ is NOT covered by ruff)
+cd web && npm test                          # vitest over src/**/*.test.ts
 
 # docker (Postgres + Redis have healthcheck-gated depends_on; no --profile)
 docker compose up --build

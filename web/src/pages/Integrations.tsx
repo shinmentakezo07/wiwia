@@ -1,9 +1,8 @@
-// Integrations — connect the gateway with your favorite tools. Adapted from
-// the llmgateway.io integrations page with inlined data, in the dark design system.
+// Integrations — connect the gateway with your favorite tools.
 
 import { Link } from "react-router-dom";
-import { ArrowRight, Clock, Terminal, Zap } from "lucide-react";
-import { Badge, Card } from "@/components/ui";
+import { ArrowRight, Clock } from "lucide-react";
+import { Card } from "@/components/ui";
 
 interface Integration {
   name: string;
@@ -14,7 +13,6 @@ interface Integration {
 }
 
 const INTEGRATIONS: Integration[] = [
-  { name: "DevPass Code", description: "Open-source terminal coding agent built for the gateway. One browser login, every model, no per-provider keys.", href: "/guides/devpass-code", comingSoon: false },
   { name: "Claude Code", description: "Use the gateway with Claude Code for AI-powered terminal assistance and coding.", href: "/guides/claude-code", comingSoon: false },
   { name: "Cursor", description: "Use the gateway with Cursor IDE in plan and agent mode. Tab autocomplete and inline edit stay on Cursor's backend.", href: "/guides/cursor", comingSoon: false, badge: "Plan + Agent mode" },
   { name: "Codex CLI", description: "Use the gateway with OpenAI's Codex CLI for AI-powered terminal coding.", href: "/guides/codex-cli", comingSoon: false },
@@ -42,46 +40,6 @@ export function IntegrationsPage() {
           capabilities wherever you work.
         </p>
       </section>
-
-      {/* ── DevPass CTA ── */}
-      <a
-        href="https://devpass.llmgateway.io"
-        target="_blank"
-        rel="noopener noreferrer"
-        className="group relative block overflow-hidden rounded-2xl border border-[var(--admin-border)] bg-[var(--admin-surface)] transition-all hover:border-[var(--admin-border-hover)]"
-      >
-        <div className="relative flex flex-col gap-6 p-6 md:flex-row md:items-center md:justify-between md:gap-10">
-          <div className="flex-1 space-y-3">
-            <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[var(--admin-text)] text-[var(--admin-bg)]">
-                <Terminal size={18} strokeWidth={1.5} />
-              </div>
-              <h3 className="text-[18px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
-                DevPass
-              </h3>
-              <Badge tone="blue">New</Badge>
-            </div>
-            <p className="max-w-lg text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
-              Fixed-price monthly plans for Claude Code, Cursor, Cline, and every coding
-              tool. One API key, 200+ models, predictable billing.
-            </p>
-            <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-[13px] text-[var(--admin-text-muted)]">
-              <span className="flex items-center gap-1.5">
-                <Zap size={14} />
-                From $29/mo
-              </span>
-              <span className="hidden text-[var(--admin-text-dim)] sm:inline">|</span>
-              <span>Every model included</span>
-            </div>
-          </div>
-          <div className="shrink-0">
-            <span className="inline-flex items-center gap-2 rounded-[10px] bg-gradient-to-b from-brand-500 to-brand-700 px-6 py-2.5 text-[14px] font-medium text-white">
-              Get started
-              <ArrowRight size={16} className="transition-transform duration-300 group-hover:translate-x-0.5" />
-            </span>
-          </div>
-        </div>
-      </a>
 
       {/* ── integration cards ── */}
       <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">

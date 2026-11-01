@@ -66,9 +66,9 @@ export function ComparePage() {
           wiwi vs the alternatives
         </h1>
         <p className="mt-3 max-w-xl text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
-          An open-source AI gateway that routes requests to 40+ providers through one
-          endpoint. Here's where it differs from the gateways teams usually evaluate
-          alongside it.
+          An open-source AI gateway that routes requests to thirteen provider types
+          through one endpoint. Here's where it differs from the gateways teams usually
+          evaluate alongside it.
         </p>
       </section>
 

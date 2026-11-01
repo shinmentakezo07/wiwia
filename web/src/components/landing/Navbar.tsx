@@ -6,7 +6,6 @@ import { useEffect, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/api/auth";
 import {
-  Activity,
   ArrowRight,
   Blocks,
   BookOpen,
@@ -15,29 +14,20 @@ import {
   Building2,
   Calculator,
   ChevronDown,
-  Clock,
   GitCompare,
-  Gift,
-  Handshake,
-  KeyRound,
   LayoutGrid,
   Menu,
   MessagesSquare,
   Network,
   Newspaper,
   ScrollText,
-  Server,
-  Shield,
   ShieldCheck,
   Sparkles,
-  Trophy,
-  Wrench,
   X,
   Zap,
 } from "lucide-react";
 
 const GITHUB_URL = "https://github.com/shinmentakezo07/wiwia";
-const DISCORD_URL = "https://discord.com";
 
 // ── dropdown link data ────────────────────────────────────────────────────
 
@@ -53,52 +43,54 @@ interface NavLink {
 const productsLinks: NavLink[] = [
   {
     title: "AI Gateway",
-    href: "/models",
-    description: "Route requests to 200+ LLMs through a single, unified API endpoint.",
+    href: "/products",
+    description: "Route every inbound dialect to thirteen provider types through one endpoint.",
     icon: Network,
     gradient: "hover:from-violet-500/20 hover:to-purple-600/30 group-hover/product:text-violet-400",
   },
   {
     title: "Playground",
     href: "/playground",
-    description: "Every frontier model in one chat — plus image, video and audio studios.",
+    description: "Chat with the models configured on this gateway, with full usage logging.",
     icon: MessagesSquare,
     gradient: "hover:from-blue-500/20 hover:to-cyan-600/30 group-hover/product:text-blue-400",
   },
   {
-    title: "Observability",
-    href: "/docs",
-    description: "Monitor usage, costs, and latency with real-time analytics dashboards.",
-    icon: Activity,
+    title: "Open Source",
+    href: "/open-source",
+    description: "The MIT-licensed source, the Docker quickstart, and the self-hosting story.",
+    icon: Boxes,
     gradient: "hover:from-emerald-500/20 hover:to-teal-600/30 group-hover/product:text-emerald-400",
+  },
+  {
+    title: "Enterprise",
+    href: "/enterprise",
+    description: "Deployment help, custom adapters, and priority triage for teams.",
+    icon: Building2,
+    gradient: "hover:from-amber-500/20 hover:to-orange-600/30 group-hover/product:text-amber-400",
   },
 ];
 
 const resourcesLinks: NavLink[] = [
-  { title: "Enterprise", href: "/enterprise", description: "Custom billing, extended retention, and priority support for teams.", icon: Building2, gradient: "hover:from-blue-500/20 hover:to-blue-600/30 group-hover/product:text-blue-400" },
-  { title: "Blog", href: "/changelog", description: "Product updates, tutorials, benchmarks, and announcements.", icon: Newspaper, gradient: "hover:from-amber-500/20 hover:to-orange-600/30 group-hover/product:text-amber-400" },
-  { title: "Changelog", href: "/changelog", description: "What's new in wiwi across releases.", icon: ScrollText, gradient: "hover:from-violet-500/20 hover:to-purple-600/30 group-hover/product:text-violet-400" },
-  { title: "Integrations", href: "/docs", description: "Connect seamlessly with popular frameworks, SDKs, and tools.", icon: Blocks, gradient: "hover:from-indigo-500/20 hover:to-blue-600/30 group-hover/product:text-indigo-400" },
-  { title: "Reliability", href: "/docs", description: "Automatic failover and 99.9999% effective uptime across providers.", icon: ShieldCheck, gradient: "hover:from-emerald-500/20 hover:to-teal-600/30 group-hover/product:text-emerald-400" },
-  { title: "Guardrails", href: "/docs", description: "Protect your AI with content moderation and safety filters.", icon: Shield, gradient: "hover:from-rose-500/20 hover:to-red-600/30 group-hover/product:text-rose-400" },
-  { title: "Providers", href: "/models", description: "Connect and manage your provider API keys.", icon: KeyRound, gradient: "hover:from-cyan-500/20 hover:to-blue-600/30 group-hover/product:text-cyan-400" },
-  { title: "Partners", href: "/about", description: "The inference partners powering the gateway.", icon: Handshake, gradient: "hover:from-teal-500/20 hover:to-emerald-600/30 group-hover/product:text-teal-400" },
-  { title: "Rankings", href: "/models", description: "Top models by real token volume routed through the gateway.", icon: Trophy, gradient: "hover:from-amber-500/20 hover:to-yellow-600/30 group-hover/product:text-amber-400" },
-  { title: "Apps", href: "/docs", description: "Browse apps and tools that work with wiwi.", icon: LayoutGrid, gradient: "hover:from-pink-500/20 hover:to-rose-600/30 group-hover/product:text-pink-400" },
-  { title: "Models", href: "/models", description: "Browse all available LLM models and capabilities.", icon: Boxes, gradient: "hover:from-purple-500/20 hover:to-fuchsia-600/30 group-hover/product:text-purple-400" },
-  { title: "Timeline", href: "/changelog", description: "Track the release history of all models.", icon: Clock, gradient: "hover:from-teal-500/20 hover:to-cyan-600/30 group-hover/product:text-teal-400" },
-  { title: "Compare", href: "/compare", description: "Compare models side by side.", icon: GitCompare, gradient: "hover:from-sky-500/20 hover:to-blue-600/30 group-hover/product:text-sky-400" },
-  { title: "Token Cost Calculator", href: "/pricing", description: "Calculate your LLM token costs and savings instantly.", icon: Calculator, gradient: "hover:from-green-500/20 hover:to-emerald-600/30 group-hover/product:text-green-400" },
-  { title: "Referral Program", href: "/about", description: "Earn 1% of LLM spending.", icon: Gift, gradient: "hover:from-yellow-500/20 hover:to-amber-600/30 group-hover/product:text-yellow-400" },
+  { title: "Documentation", href: "/docs", description: "Quickstart, endpoints, configuration, and streaming.", icon: BookOpen, gradient: "hover:from-blue-500/20 hover:to-indigo-600/30 group-hover/product:text-blue-400" },
+  { title: "Models", href: "/models", description: "The public model catalog served by this gateway.", icon: Boxes, gradient: "hover:from-purple-500/20 hover:to-fuchsia-600/30 group-hover/product:text-purple-400" },
+  { title: "Integrations", href: "/integrations", description: "Clients and tools that work with the gateway.", icon: Blocks, gradient: "hover:from-indigo-500/20 hover:to-blue-600/30 group-hover/product:text-indigo-400" },
+  { title: "Guides", href: "/guides", description: "Step-by-step setup for Claude Code, Cursor, Cline, and more.", icon: BookOpen, gradient: "hover:from-emerald-500/20 hover:to-teal-600/30 group-hover/product:text-emerald-400" },
+  { title: "Migration", href: "/migration", description: "Move from OpenRouter, LiteLLM, Portkey, or another gateway.", icon: GitCompare, gradient: "hover:from-cyan-500/20 hover:to-blue-600/30 group-hover/product:text-cyan-400" },
+  { title: "Reliability", href: "/reliability", description: "Retries, cooldowns, fallbacks, and the optional health healer.", icon: ShieldCheck, gradient: "hover:from-emerald-500/20 hover:to-teal-600/30 group-hover/product:text-emerald-400" },
+  { title: "Compare", href: "/compare", description: "How the gateway differs from OpenRouter, LiteLLM, and Portkey.", icon: GitCompare, gradient: "hover:from-sky-500/20 hover:to-blue-600/30 group-hover/product:text-sky-400" },
+  { title: "Changelog", href: "/changelog", description: "What changed across releases.", icon: ScrollText, gradient: "hover:from-violet-500/20 hover:to-purple-600/30 group-hover/product:text-violet-400" },
+  { title: "Blog", href: "/blog", description: "Guides, benchmarks, and notes from the project.", icon: Newspaper, gradient: "hover:from-amber-500/20 hover:to-orange-600/30 group-hover/product:text-amber-400" },
+  { title: "Token Cost Calculator", href: "/token-cost-calculator", description: "Estimate spend for a model and monthly volume.", icon: Calculator, gradient: "hover:from-green-500/20 hover:to-emerald-600/30 group-hover/product:text-green-400" },
 ];
 
 const aiLinks: NavLink[] = [
-  { title: "MCP Server", href: "/docs", description: "Connect AI assistants to 200+ LLMs via MCP protocol.", icon: Server, gradient: "hover:from-cyan-500/20 hover:to-blue-600/30 group-hover/product:text-cyan-400" },
-  { title: "Agents", href: "/docs", description: "Pre-built AI agents with tool calling capabilities.", icon: Bot, gradient: "hover:from-violet-500/20 hover:to-purple-600/30 group-hover/product:text-violet-400" },
-  { title: "AI SDK Provider", href: GITHUB_URL, description: "Use wiwi with Vercel's AI SDK.", icon: Zap, gradient: "hover:from-amber-500/20 hover:to-orange-600/30 group-hover/product:text-amber-400", external: true },
-  { title: "Agent Skills", href: GITHUB_URL, description: "Skills for Claude Code and other AI agents.", icon: Sparkles, gradient: "hover:from-pink-500/20 hover:to-rose-600/30 group-hover/product:text-pink-400", external: true },
-  { title: "Templates", href: "/docs", description: "Production-ready templates for AI applications.", icon: Wrench, gradient: "hover:from-emerald-500/20 hover:to-teal-600/30 group-hover/product:text-emerald-400" },
-  { title: "Guides", href: "/docs", description: "Integration and usage guides for every framework.", icon: BookOpen, gradient: "hover:from-blue-500/20 hover:to-indigo-600/30 group-hover/product:text-blue-400" },
+  { title: "Claude Code", href: "/guides/claude-code", description: "Anthropic Messages in, any provider out.", icon: Bot, gradient: "hover:from-violet-500/20 hover:to-purple-600/30 group-hover/product:text-violet-400" },
+  { title: "Codex CLI", href: "/guides/codex-cli", description: "OpenAI Responses in, any provider out.", icon: Zap, gradient: "hover:from-amber-500/20 hover:to-orange-600/30 group-hover/product:text-amber-400" },
+  { title: "OpenCode", href: "/guides/opencode", description: "Point the OpenCode CLI at the gateway.", icon: Network, gradient: "hover:from-cyan-500/20 hover:to-blue-600/30 group-hover/product:text-cyan-400" },
+  { title: "Cline", href: "/guides/cline", description: "OpenAI-compatible provider setup in VS Code.", icon: Blocks, gradient: "hover:from-indigo-500/20 hover:to-blue-600/30 group-hover/product:text-indigo-400" },
+  { title: "Cursor", href: "/guides/cursor", description: "Override the OpenAI base URL in Cursor.", icon: LayoutGrid, gradient: "hover:from-pink-500/20 hover:to-rose-600/30 group-hover/product:text-pink-400" },
+  { title: "GitHub Copilot", href: "/guides/github-copilot", description: "Use the gateway as a BYOK provider in the Copilot app.", icon: Sparkles, gradient: "hover:from-emerald-500/20 hover:to-teal-600/30 group-hover/product:text-emerald-400" },
 ];
 
 const mobileSections = [
@@ -127,11 +119,6 @@ const GITHUB_ICON = (
   </svg>
 );
 
-const DISCORD_ICON = (
-  <svg className="size-[18px]" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-    <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z" />
-  </svg>
-);
 // Primary CTA — premium gradient pill with animated shimmer sweep, colored
 // glow, inset top highlight, and press feedback. Mirrors the hero CTA language
 // (wiwi-shimmer + brand gradient) so the nav reads as one system.
@@ -271,7 +258,7 @@ export function Navbar({ sticky = true }: { sticky?: boolean }) {
                 aria-expanded={menuState}
                 aria-controls="mobile-nav"
                 aria-label={menuState ? "Close Menu" : "Open Menu"}
-                className="-m-1.5 cursor-pointer rounded-lg p-2 text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.05] hover:text-[var(--admin-text)] lg:hidden"
+                className="flex size-11 cursor-pointer items-center justify-center rounded-lg text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.05] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20 lg:hidden"
               >
                 {menuState ? <X className="size-6" /> : <Menu className="size-6" />}
               </button>
@@ -310,9 +297,6 @@ export function Navbar({ sticky = true }: { sticky?: boolean }) {
             {/* Right side controls */}
             <div className="hidden shrink-0 items-center gap-2 lg:flex">
               <div className="mr-1 hidden items-center gap-1.5 min-[1280px]:flex">
-                <a href={DISCORD_URL} target="_blank" rel="noopener noreferrer" className={SOCIAL_ICON_BTN} aria-label="Discord">
-                  {DISCORD_ICON}
-                </a>
                 <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer" className={SOCIAL_ICON_BTN} aria-label="GitHub">
                   {GITHUB_ICON}
                 </a>
@@ -401,9 +385,6 @@ export function Navbar({ sticky = true }: { sticky?: boolean }) {
               ))}
 
               <div className="mt-2 flex items-center gap-2 border-t border-white/[0.06] pt-4">
-                <a href={DISCORD_URL} target="_blank" rel="noopener noreferrer" className={SOCIAL_ICON_BTN} aria-label="Discord">
-                  {DISCORD_ICON}
-                </a>
                 <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer" className={SOCIAL_ICON_BTN} aria-label="GitHub">
                   {GITHUB_ICON}
                 </a>

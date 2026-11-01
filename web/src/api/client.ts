@@ -131,6 +131,7 @@ export async function api<T>(
 
 import type {
   AlertRule,
+  AuditLogEntry,
   BuiltinProvider,
   ClineConnectResponse,
   ClineDisconnectResponse,
@@ -643,3 +644,9 @@ export const importProviders = (providers: ProviderBackup[]) =>
     method: "POST",
     body: JSON.stringify({ providers }),
   });
+
+// -- Audit log (admin only) ----------------------------------------------------
+
+/** Newest-first admin mutation trail. The endpoint caps `limit` at 5000. */
+export const getAuditLogs = (limit = 200) =>
+  api<{ logs: AuditLogEntry[] }>(`/admin/logs/audit?limit=${limit}`);

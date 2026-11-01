@@ -148,6 +148,9 @@ export function HermesConnectDialog(props: {
     return () => {
       if (pollRef.current) window.clearTimeout(pollRef.current);
     };
+    // Deliberately keyed on open/close only: `existing` is read to pick a
+    // non-colliding default name, not a trigger to reset the dialog.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.open]);
 
   // When opening for a brand-new account, pre-fill a name that does not

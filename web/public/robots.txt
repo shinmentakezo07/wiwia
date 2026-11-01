@@ -1,0 +1,16 @@
+User-agent: *
+Allow: /
+
+# Console, auth, and API surfaces are not content.
+Disallow: /console
+Disallow: /app
+Disallow: /login
+Disallow: /signup
+Disallow: /playground
+Disallow: /admin
+Disallow: /auth
+Disallow: /public
+Disallow: /v1
+Disallow: /health
+
+Sitemap: https://shimen-yapapa.hf.space/sitemap.xml

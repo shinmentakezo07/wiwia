@@ -119,22 +119,6 @@ Model ID:  gpt-4o   # any model in your wiwi model list`,
       },
     ],
   },
-  "devpass-code": {
-    title: "DevPass Code",
-    category: "Terminal",
-    intro:
-      "DevPass Code is an open-source terminal coding agent built for the gateway — one browser login, every model, no per-provider keys.",
-    steps: [
-      {
-        title: "Log in once",
-        body: "DevPass Code authorizes against the gateway in the browser; no API keys to copy.",
-      },
-      {
-        title: "Pick a model and go",
-        body: "Every model in the gateway's catalog is available. Requests ride the same virtual-key path as any other client.",
-      },
-    ],
-  },
   n8n: {
     title: "n8n Workflows",
     category: "Automation",

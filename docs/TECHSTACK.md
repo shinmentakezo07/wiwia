@@ -52,7 +52,7 @@ Runtime dependencies: 12. That count is a feature.
 | App-level harness | asgi-lifespan `LifespanManager` + `httpx.ASGITransport` |
 | Property-based | hypothesis >= 6.100 |
 | Python lint | ruff only (line 100, py311, no black/isort) |
-| Frontend checks | `tsc -b` (in build) + `npm run lint` (ESLint) |
+| Frontend checks | `tsc -b` (in build) + `npm run lint` (ESLint) + `npm test` (vitest) |
 | Coverage | none (no pytest-cov, not enforced) |
 
 ---

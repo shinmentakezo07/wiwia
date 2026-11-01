@@ -12,7 +12,7 @@ const VALUES: { icon: LucideIcon; title: string; body: string }[] = [
   {
     icon: GitFork,
     title: "Open source first",
-    body: "The entire platform — gateway, dashboard, and API — is AGPLv3. Anyone can audit the code, self-host it, or contribute. No proprietary core, no open-core bait-and-switch.",
+    body: "The entire platform — gateway, dashboard, and API — is MIT-licensed. Anyone can audit the code, self-host it, or contribute. No proprietary core, no open-core bait-and-switch.",
   },
   {
     icon: Server,

@@ -12,6 +12,7 @@ import {
   putAlertRules,
 } from "@/api/client";
 import type { AlertRule, RequestLogEntry, VirtualKey } from "@/api/types";
+import { useAuth } from "@/api/auth";
 import {
   Button,
   Card,
@@ -218,6 +219,11 @@ function RuleRow(props: { d: RuleDraft; onChange: (patch: Partial<RuleDraft>) =>
 
 export function BudgetsAlertsPage() {
   const qc = useQueryClient();
+  // Alert rules are an admin-only endpoint (GET/PUT /admin/alert-rules), but
+  // per-key budgets are readable by every authenticated user. Gate only the
+  // rules section so a normal user does not get a 403 banner on this page.
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
 
   // -- keys + projections -------------------------------------------------------
   const keysQuery = useQuery({ queryKey: ["keys"], queryFn: listKeys, refetchInterval: 15_000 });
@@ -268,7 +274,11 @@ export function BudgetsAlertsPage() {
   });
 
   // -- alert rules ------------------------------------------------------------------
-  const rulesQuery = useQuery({ queryKey: ["alert-rules"], queryFn: getAlertRules });
+  const rulesQuery = useQuery({
+    queryKey: ["alert-rules"],
+    queryFn: getAlertRules,
+    enabled: isAdmin,
+  });
   const [drafts, setDrafts] = useState<RuleDraft[] | null>(null);
   const [rulesError, setRulesError] = useState<string | null>(null);
 
@@ -356,64 +366,66 @@ export function BudgetsAlertsPage() {
           ))}
       </Card>
 
-      {/* -- alert rules -------------------------------------------------------- */}
-      <Card>
-        <CardHeader
-          title="Alert rules"
-          right={
-            <Button variant="outline" onClick={addRule}>
-              <Plus size={14} /> Add rule
-            </Button>
-          }
-        />
-        {rulesQuery.isLoading && (
-          <div className="flex justify-center py-10">
-            <Spinner />
-          </div>
-        )}
-        {rulesQuery.error && (
-          <div className="p-4">
-            <ErrorText>{rulesQuery.error.message}</ErrorText>
-          </div>
-        )}
-        {drafts != null && (
-          <form
-            className="space-y-3 p-4"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!drafts || !draftsValid(drafts)) return;
-              setRulesError(null);
-              saveRules.mutate(drafts.map(draftToRule));
-            }}
-          >
-            {drafts.length === 0 ? (
-              <EmptyState>No alert rules yet. Add one to get notified.</EmptyState>
-            ) : (
-              drafts.map((d) => (
-                <RuleRow
-                  key={d.id}
-                  d={d}
-                  onChange={(patch) => updateRule(d.id, patch)}
-                  onRemove={() => removeRule(d.id)}
-                />
-              ))
-            )}
-            <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-              <span className="font-mono text-[11px] text-[var(--admin-text-dim)]">
-                storage only — evaluation engine ships post-MVP
-              </span>
-              <Button type="submit" disabled={!draftsValid(drafts) || saveRules.isPending}>
-                Save rules
+      {/* -- alert rules (admin only) ------------------------------------------- */}
+      {isAdmin && (
+        <Card>
+          <CardHeader
+            title="Alert rules"
+            right={
+              <Button variant="outline" onClick={addRule}>
+                <Plus size={14} /> Add rule
               </Button>
+            }
+          />
+          {rulesQuery.isLoading && (
+            <div className="flex justify-center py-10">
+              <Spinner />
             </div>
-          </form>
-        )}
-        {rulesError && (
-          <div className="px-4 pb-4">
-            <ErrorText>{rulesError}</ErrorText>
-          </div>
-        )}
-      </Card>
+          )}
+          {rulesQuery.error && (
+            <div className="p-4">
+              <ErrorText>{rulesQuery.error.message}</ErrorText>
+            </div>
+          )}
+          {drafts != null && (
+            <form
+              className="space-y-3 p-4"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (!drafts || !draftsValid(drafts)) return;
+                setRulesError(null);
+                saveRules.mutate(drafts.map(draftToRule));
+              }}
+            >
+              {drafts.length === 0 ? (
+                <EmptyState>No alert rules yet. Add one to get notified.</EmptyState>
+              ) : (
+                drafts.map((d) => (
+                  <RuleRow
+                    key={d.id}
+                    d={d}
+                    onChange={(patch) => updateRule(d.id, patch)}
+                    onRemove={() => removeRule(d.id)}
+                  />
+                ))
+              )}
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                <span className="font-mono text-[11px] text-[var(--admin-text-dim)]">
+                  storage only — evaluation engine ships post-MVP
+                </span>
+                <Button type="submit" disabled={!draftsValid(drafts) || saveRules.isPending}>
+                  Save rules
+                </Button>
+              </div>
+            </form>
+          )}
+          {rulesError && (
+            <div className="px-4 pb-4">
+              <ErrorText>{rulesError}</ErrorText>
+            </div>
+          )}
+        </Card>
+      )}
 
       {/* -- edit-budget dialog ----------------------------------------------- */}
       <Dialog

@@ -1,4 +1,4 @@
-import { StrictMode } from "react";
+import { StrictMode, lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useParams } from "react-router-dom";
 import { MutationCache, QueryCache, QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -7,69 +7,63 @@ import { AuthProvider, useAuth } from "@/api/auth";
 import { AdminStreamProvider } from "@/api/stream";
 import { AdminLayout } from "@/components/Layout";
 import { PublicLayout } from "@/components/PublicLayout";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { RouteFallback } from "@/components/RouteFallback";
 import { RequireAdmin, RequireUser } from "@/components/guards";
 import "@/styles.css";
 
-import { LoginPage } from "@/pages/Login";
-import { SignupPage } from "@/pages/Signup";
-import { LandingPage } from "@/pages/Landing";
-import { PlaygroundPage } from "@/pages/Playground";
-import { ModelsCatalogPage } from "@/pages/ModelsCatalog";
-import { DocsPage } from "@/pages/Docs";
-import { PricingPage } from "@/pages/Pricing";
-import { AboutPage } from "@/pages/About";
-import { ContactPage } from "@/pages/Contact";
-import { EnterprisePage } from "@/pages/Enterprise";
-import { ComparePage } from "@/pages/Compare";
-import { CompareDetailPage } from "@/pages/CompareDetail";
-import { LegalPage } from "@/pages/Legal";
-import { ChangelogPage } from "@/pages/Changelog";
-import { BlogPage } from "@/pages/Blog";
-import { BlogDetailPage } from "@/pages/BlogDetail";
-import { BrandPage } from "@/pages/Brand";
-import { PartnersPage } from "@/pages/Partners";
-import { ReliabilityPage } from "@/pages/Reliability";
-import { RankingsPage } from "@/pages/Rankings";
-import { IntegrationsPage } from "@/pages/Integrations";
-import { GuidesPage } from "@/pages/Guides";
-import { GuideDetailPage } from "@/pages/GuideDetail";
-import { MigrationPage } from "@/pages/Migration";
-import { MigrationDetailPage } from "@/pages/MigrationDetail";
-import { OpenSourcePage } from "@/pages/OpenSource";
-import { CopilotCostCalculatorPage } from "@/pages/CopilotCostCalculator";
-import { TokenCostCalculatorPage } from "@/pages/TokenCostCalculator";
-import { TimelinePage } from "@/pages/Timeline";
-import { TemplatesPage } from "@/pages/Templates";
-import { TemplateDetailPage } from "@/pages/TemplateDetail";
-import { AgentsPage } from "@/pages/Agents";
-import { AgentDetailPage } from "@/pages/AgentDetail";
-import { AppsPage } from "@/pages/Apps";
-import { SSOPage } from "@/pages/SSO";
-import { ReferralsPage } from "@/pages/Referrals";
-import { ShipPage } from "@/pages/Ship";
-import { ConnectPage } from "@/pages/Connect";
-import { OnboardingPage } from "@/pages/Onboarding";
-import { ProductsPage } from "@/pages/Products";
-import { UsersPage } from "@/pages/Users";
+const LoginPage = lazy(() => import("@/pages/Login").then((m) => ({ default: m.LoginPage })));
+const SignupPage = lazy(() => import("@/pages/Signup").then((m) => ({ default: m.SignupPage })));
+const LandingPage = lazy(() => import("@/pages/Landing").then((m) => ({ default: m.LandingPage })));
+const PlaygroundPage = lazy(() => import("@/pages/Playground").then((m) => ({ default: m.PlaygroundPage })));
+const ModelsCatalogPage = lazy(() => import("@/pages/ModelsCatalog").then((m) => ({ default: m.ModelsCatalogPage })));
+const DocsPage = lazy(() => import("@/pages/Docs").then((m) => ({ default: m.DocsPage })));
+const PricingPage = lazy(() => import("@/pages/Pricing").then((m) => ({ default: m.PricingPage })));
+const AboutPage = lazy(() => import("@/pages/About").then((m) => ({ default: m.AboutPage })));
+const ContactPage = lazy(() => import("@/pages/Contact").then((m) => ({ default: m.ContactPage })));
+const EnterprisePage = lazy(() => import("@/pages/Enterprise").then((m) => ({ default: m.EnterprisePage })));
+const ComparePage = lazy(() => import("@/pages/Compare").then((m) => ({ default: m.ComparePage })));
+const CompareDetailPage = lazy(() => import("@/pages/CompareDetail").then((m) => ({ default: m.CompareDetailPage })));
+const LegalPage = lazy(() => import("@/pages/Legal").then((m) => ({ default: m.LegalPage })));
+const ChangelogPage = lazy(() => import("@/pages/Changelog").then((m) => ({ default: m.ChangelogPage })));
+const BlogPage = lazy(() => import("@/pages/Blog").then((m) => ({ default: m.BlogPage })));
+const BlogDetailPage = lazy(() => import("@/pages/BlogDetail").then((m) => ({ default: m.BlogDetailPage })));
+const BrandPage = lazy(() => import("@/pages/Brand").then((m) => ({ default: m.BrandPage })));
 
-import { DashboardPage } from "@/pages/Dashboard";
-import { ProvidersPage } from "@/pages/Providers";
-import { ProviderDetailPage } from "@/pages/ProviderDetail";
-import { BuiltinProvidersPage } from "@/pages/BuiltinProviders";
-import { OAuthProvidersPage } from "@/pages/OAuthProviders";
-import { WorkBuddyAccountsPage } from "@/pages/WorkBuddyAccounts";
-import { AccountLoginPage } from "@/pages/AccountLogin";
-import { HermesPage } from "@/pages/Hermes";
-import { HermesOAuthPage } from "@/pages/HermesOAuth";
-import { VirtualKeysPage } from "@/pages/VirtualKeys";
-import { ModelsPage } from "@/pages/Models";
-import { CombosPage } from "@/pages/Combos";
-import { RequestLogsPage } from "@/pages/RequestLogs";
-import { ProxyLogsPage } from "@/pages/ProxyLogs";
-import { UsagePage } from "@/pages/Usage";
-import { AnalyticsPage } from "@/pages/Analytics";
-import { BudgetsAlertsPage } from "@/pages/BudgetsAlerts";
-import { SettingsPage } from "@/pages/Settings";
+const ReliabilityPage = lazy(() => import("@/pages/Reliability").then((m) => ({ default: m.ReliabilityPage })));
+
+const IntegrationsPage = lazy(() => import("@/pages/Integrations").then((m) => ({ default: m.IntegrationsPage })));
+const GuidesPage = lazy(() => import("@/pages/Guides").then((m) => ({ default: m.GuidesPage })));
+const GuideDetailPage = lazy(() => import("@/pages/GuideDetail").then((m) => ({ default: m.GuideDetailPage })));
+const MigrationPage = lazy(() => import("@/pages/Migration").then((m) => ({ default: m.MigrationPage })));
+const MigrationDetailPage = lazy(() => import("@/pages/MigrationDetail").then((m) => ({ default: m.MigrationDetailPage })));
+const OpenSourcePage = lazy(() => import("@/pages/OpenSource").then((m) => ({ default: m.OpenSourcePage })));
+const TokenCostCalculatorPage = lazy(() => import("@/pages/TokenCostCalculator").then((m) => ({ default: m.TokenCostCalculatorPage })));
+
+const OnboardingPage = lazy(() => import("@/pages/Onboarding").then((m) => ({ default: m.OnboardingPage })));
+const ProductsPage = lazy(() => import("@/pages/Products").then((m) => ({ default: m.ProductsPage })));
+const UsersPage = lazy(() => import("@/pages/Users").then((m) => ({ default: m.UsersPage })));
+const AuditLogPage = lazy(() => import("@/pages/AuditLog").then((m) => ({ default: m.AuditLogPage })));
+const NotFoundPage = lazy(() => import("@/pages/NotFound").then((m) => ({ default: m.NotFoundPage })));
+
+const DashboardPage = lazy(() => import("@/pages/Dashboard").then((m) => ({ default: m.DashboardPage })));
+const ProvidersPage = lazy(() => import("@/pages/Providers").then((m) => ({ default: m.ProvidersPage })));
+const ProviderDetailPage = lazy(() => import("@/pages/ProviderDetail").then((m) => ({ default: m.ProviderDetailPage })));
+const BuiltinProvidersPage = lazy(() => import("@/pages/BuiltinProviders").then((m) => ({ default: m.BuiltinProvidersPage })));
+const OAuthProvidersPage = lazy(() => import("@/pages/OAuthProviders").then((m) => ({ default: m.OAuthProvidersPage })));
+const WorkBuddyAccountsPage = lazy(() => import("@/pages/WorkBuddyAccounts").then((m) => ({ default: m.WorkBuddyAccountsPage })));
+const AccountLoginPage = lazy(() => import("@/pages/AccountLogin").then((m) => ({ default: m.AccountLoginPage })));
+const HermesPage = lazy(() => import("@/pages/Hermes").then((m) => ({ default: m.HermesPage })));
+const HermesOAuthPage = lazy(() => import("@/pages/HermesOAuth").then((m) => ({ default: m.HermesOAuthPage })));
+const VirtualKeysPage = lazy(() => import("@/pages/VirtualKeys").then((m) => ({ default: m.VirtualKeysPage })));
+const ModelsPage = lazy(() => import("@/pages/Models").then((m) => ({ default: m.ModelsPage })));
+const CombosPage = lazy(() => import("@/pages/Combos").then((m) => ({ default: m.CombosPage })));
+const RequestLogsPage = lazy(() => import("@/pages/RequestLogs").then((m) => ({ default: m.RequestLogsPage })));
+const ProxyLogsPage = lazy(() => import("@/pages/ProxyLogs").then((m) => ({ default: m.ProxyLogsPage })));
+const UsagePage = lazy(() => import("@/pages/Usage").then((m) => ({ default: m.UsagePage })));
+const AnalyticsPage = lazy(() => import("@/pages/Analytics").then((m) => ({ default: m.AnalyticsPage })));
+const BudgetsAlertsPage = lazy(() => import("@/pages/BudgetsAlerts").then((m) => ({ default: m.BudgetsAlertsPage })));
+const SettingsPage = lazy(() => import("@/pages/Settings").then((m) => ({ default: m.SettingsPage })));
 
 // The console is dark-only (Dra-style design system).
 document.documentElement.classList.add("dark");
@@ -120,7 +114,8 @@ function AppRoutes() {
   const loc = useLocation();
   if (loading) return null;
   return (
-    <Routes>
+    <Suspense fallback={<RouteFallback />}>
+      <Routes>
       {/* Public front */}
       <Route element={<PublicLayout />}>
         <Route path="/" element={<LandingPage />} />
@@ -141,29 +136,19 @@ function AppRoutes() {
         <Route path="/blog" element={<BlogPage />} />
         <Route path="/blog/:slug" element={<BlogDetailPage />} />
         <Route path="/brand" element={<BrandPage />} />
-        <Route path="/partners" element={<PartnersPage />} />
         <Route path="/reliability" element={<ReliabilityPage />} />
-        <Route path="/rankings" element={<RankingsPage />} />
         <Route path="/integrations" element={<IntegrationsPage />} />
         <Route path="/guides" element={<GuidesPage />} />
         <Route path="/guides/:slug" element={<GuideDetailPage />} />
         <Route path="/migration" element={<MigrationPage />} />
         <Route path="/migration/:slug" element={<MigrationDetailPage />} />
         <Route path="/open-source" element={<OpenSourcePage />} />
-        <Route path="/copilot-cost-calculator" element={<CopilotCostCalculatorPage />} />
         <Route path="/token-cost-calculator" element={<TokenCostCalculatorPage />} />
-        <Route path="/timeline" element={<TimelinePage />} />
-        <Route path="/templates" element={<TemplatesPage />} />
-        <Route path="/templates/:slug" element={<TemplateDetailPage />} />
-        <Route path="/agents" element={<AgentsPage />} />
-        <Route path="/agents/:slug" element={<AgentDetailPage />} />
-        <Route path="/apps" element={<AppsPage />} />
-        <Route path="/sso" element={<SSOPage />} />
-        <Route path="/referrals" element={<ReferralsPage />} />
-        <Route path="/ship" element={<ShipPage />} />
-        <Route path="/connect" element={<ConnectPage />} />
         <Route path="/onboarding" element={<OnboardingPage />} />
         <Route path="/products" element={<ProductsPage />} />
+        {/* Unknown paths get a real 404 inside the public chrome instead of a
+            silent redirect to the landing page. */}
+        <Route path="*" element={<NotFoundPage />} />
       </Route>
 
       {/* Playground is gated but lives outside the admin shell */}
@@ -278,6 +263,14 @@ function AppRoutes() {
           }
         />
         <Route
+          path="/console/audit"
+          element={
+            <RequireAdmin>
+              <AuditLogPage />
+            </RequireAdmin>
+          }
+        />
+        <Route
           path="/console/settings"
           element={
             <RequireAdmin>
@@ -312,8 +305,8 @@ function AppRoutes() {
       <Route path="/proxy-logs" element={<Navigate to={legacyTarget("/console/proxy-logs", loc)} replace />} />
       <Route path="/builtin-providers" element={<Navigate to={legacyTarget("/console/builtin-providers", loc)} replace />} />
       <Route path="/dashboard" element={<Navigate to={legacyTarget("/console", loc)} replace />} />
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+      </Routes>
+    </Suspense>
   );
 }
 
@@ -322,7 +315,9 @@ createRoot(document.getElementById("root")!).render(
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
         <BrowserRouter basename={import.meta.env.BASE_URL}>
-          <AppRoutes />
+          <ErrorBoundary>
+            <AppRoutes />
+          </ErrorBoundary>
         </BrowserRouter>
       </AuthProvider>
     </QueryClientProvider>

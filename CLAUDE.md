@@ -38,6 +38,7 @@ ruff check wiwi/ tests/ scripts/
 cd web && npm install && npm run dev     # dev server (proxies /admin /auth /public /v1 /health → :4000)
 cd web && npm run build                  # tsc -b && vite build → wiwi/server/static/
 cd web && npm run lint                   # eslint src (web/ is NOT covered by ruff)
+cd web && npm test                       # vitest over src/**/*.test.ts
 ./start.sh                               # backend (:4000) + Vite (:5173) together, prefixed logs
 
 # docker (Postgres is a plain service with a healthcheck-gated depends_on — there is no --profile pg)
@@ -50,7 +51,7 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100
 
 **npm is authoritative for `web/`.** `web/package-lock.json` and `start.sh` use npm; do not mix package managers in one session.
 
-`.github/workflows/ci.yml` runs the gate on every push to `main` and every pull request: `ruff check wiwi/ tests/ scripts/`, `scripts/audit_lint.py`, `pytest tests/ -q`, and `cd web && npm ci && npm run lint && npm run build` (the build is `tsc -b && vite build`, so it type-checks). There is still **no pre-commit config**, and CI is a backstop, not permission to skip the gate locally: run `pytest` + `ruff` green before claiming work done or committing.
+`.github/workflows/ci.yml` runs the gate on every push to `main` and every pull request: `ruff check wiwi/ tests/ scripts/`, `scripts/audit_lint.py`, `pytest tests/ -q`, and `cd web && npm ci && npm run lint && npm test && npm run build` (the build is `tsc -b && vite build`, so it type-checks; `npm test` is vitest over `web/src/**/*.test.ts`). There is still **no pre-commit config**, and CI is a backstop, not permission to skip the gate locally: run `pytest` + `ruff` green before claiming work done or committing.
 
 Config precedence: `--config`/`-c` flag > `WIWI_CONFIG` env (inline YAML) > `wiwi.yaml`. `load_env()` (python-dotenv, `override=False`) runs before config parse, so real environment variables win.
 

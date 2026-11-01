@@ -1,5 +1,5 @@
-// Open Source — the open source LLM gateway. Adapted from the llmgateway.io
-// open-source page with inlined data, in the dark design system.
+// Open Source — how to run the gateway yourself. Every command on this page is
+// taken from the repository's own Docker/Compose setup and quickstart.
 
 import { Link } from "react-router-dom";
 import { ArrowRight, Check, GitFork, Lock, ServerCog, ShieldCheck } from "lucide-react";
@@ -13,13 +13,13 @@ const REASONS: { icon: LucideIcon; title: string; description: string }[] = [
     icon: Lock,
     title: "No vendor lock-in",
     description:
-      "The whole platform is AGPLv3. Fork it, audit it, and run it forever — no proprietary control plane you can be cut off from.",
+      "The whole platform is MIT-licensed. Fork it, audit it, and run it forever — no proprietary control plane you can be cut off from.",
   },
   {
     icon: ServerCog,
     title: "Self-host the full stack",
     description:
-      "Gateway, dashboard, and worker ship in a single Docker image. Keep every request and key inside your own infrastructure.",
+      "Gateway, admin console, and public site ship as one process. Keep every request and key inside your own infrastructure.",
   },
   {
     icon: ShieldCheck,
@@ -39,32 +39,32 @@ const FAQS: { question: string; answer: string }[] = [
   {
     question: "Is the gateway really open source?",
     answer:
-      "Yes. The entire platform — gateway, API, dashboard, and worker — is licensed under AGPLv3 and free to self-host forever. Most alternatives only open-source a thin router, or nothing at all.",
+      "Yes. The entire platform — gateway, API, dashboard, and public site — is licensed under MIT and free to self-host forever. There is no closed control plane and no paid build.",
   },
   {
-    question: "What does the AGPLv3 license mean for my company?",
+    question: "What does the MIT license mean for my company?",
     answer:
-      "You can run the gateway internally and in production for free. AGPLv3's source-availability requirement applies when you offer a modified version to others as a network service. For commercial terms outside AGPLv3, an enterprise license is available.",
+      "You can run, modify, and redistribute the gateway, including inside a commercial product, as long as the copyright and permission notice are kept. There is no source-availability requirement and no enterprise licence to buy.",
   },
   {
     question: "How do I self-host the WIWI Gateway?",
     answer:
-      "One Docker command runs the unified image with the gateway, dashboard, and worker. Point your OpenAI-compatible client at your own deployment and you are live — no managed account required.",
+      "Copy wiwi.yaml.example to wiwi.yaml, set WIWI_MASTER_KEY and your provider keys, then run docker compose up --build (or install the package and run wiwi --config wiwi.yaml). The gateway listens on port 4000 and serves the console at the root.",
   },
   {
-    question: "Is there a managed option too?",
+    question: "Do I need a hosted account?",
     answer:
-      "Yes. If you would rather not run infrastructure, the hosted gateway is pay-as-you-go with a flat 5% platform fee on credits, or 0% when you bring your own provider keys. Optional full data retention is billed separately.",
+      "No. Everything runs locally with SQLite by default; point DATABASE_URL at Postgres when you need it. There is no managed billing layer and no platform fee — you pay your providers directly.",
   },
   {
-    question: "Which models does the open-source gateway support?",
+    question: "Which providers does the gateway support?",
     answer:
-      "200+ models across 40+ providers — OpenAI, Anthropic, Google, Mistral, Llama and more — through one OpenAI-compatible endpoint, whether you self-host or use the managed service.",
+      "Thirteen outbound provider types — OpenAI, Anthropic, Gemini, OpenRouter, NVIDIA NIM, GMI Cloud, B.AI, OpenCode, Cline, WorkBuddy, Hermes, IFM, and any OpenAI-compatible endpoint — through one OpenAI-compatible inbound API.",
   },
 ];
 
 const CLOSED_COMPARISON: { name: string; scope: string; selfHost: boolean | "Partial" }[] = [
-  { name: "WIWI Gateway", scope: "Full platform (AGPLv3)", selfHost: true },
+  { name: "WIWI Gateway", scope: "Full platform (MIT)", selfHost: true },
   { name: "OpenRouter", scope: "Closed source", selfHost: false },
   { name: "Vercel AI Gateway", scope: "Closed source", selfHost: false },
   { name: "Cloudflare AI Gateway", scope: "Closed source", selfHost: false },
@@ -72,19 +72,20 @@ const CLOSED_COMPARISON: { name: string; scope: string; selfHost: boolean | "Par
   { name: "LiteLLM", scope: "Library/proxy (MIT)", selfHost: true },
 ];
 
-const DOCKER_COMMAND = `docker run -d \\
-  --name llmgateway \\
-  -p 3002:3002 -p 4001:4001 -p 4002:4002 \\
-  -e AUTH_SECRET="your-secret" \\
-  -e GATEWAY_API_KEY_HASH_SECRET="your-hash-secret" \\
-  ghcr.io/theopenco/llmgateway-unified:latest`;
+const DOCKER_COMMAND = `cp wiwi.yaml.example wiwi.yaml
+# set WIWI_MASTER_KEY and your provider keys in wiwi.yaml
+docker compose up --build
+
+# or without Docker
+uv pip install -e .
+wiwi --config wiwi.yaml   # http://localhost:4000`;
 
 export function OpenSourcePage() {
   return (
     <div className="mx-auto max-w-4xl space-y-10 pb-16">
       {/* ── hero ── */}
       <section className="text-center">
-        <Badge tone="violet">AGPLv3 · Self-hostable</Badge>
+        <Badge tone="violet">MIT · Self-hostable</Badge>
         <h1 className="mt-4 text-3xl font-semibold tracking-[-0.02em] text-[var(--admin-text)] sm:text-4xl">
           The Open Source{" "}
           <span className="bg-gradient-to-r from-violet-400 to-fuchsia-400 bg-clip-text text-transparent">
@@ -92,9 +93,9 @@ export function OpenSourcePage() {
           </span>
         </h1>
         <p className="mx-auto mt-4 max-w-2xl text-[15px] leading-relaxed text-[var(--admin-text-muted)]">
-          Route 200+ models across 40+ providers through one OpenAI-compatible API — and
-          run the entire platform on your own infrastructure. Open source,
-          self-hostable, no lock-in.
+          Route every dialect to thirteen provider types through one API — and run the
+          entire platform on your own infrastructure. Open source, self-hostable, no
+          lock-in.
         </p>
         <div className="mt-6 flex flex-col items-center justify-center gap-3 sm:flex-row">
           <Link
@@ -146,7 +147,7 @@ export function OpenSourcePage() {
             Self-host in one command
           </h2>
           <p className="mt-1 text-[14px] text-[var(--admin-text-muted)]">
-            The gateway, dashboard, and worker in a single image.
+            The gateway, console, and public site in one process.
           </p>
         </div>
         <div className="overflow-hidden rounded-xl border border-[var(--admin-border)] bg-zinc-950">
@@ -163,11 +164,11 @@ export function OpenSourcePage() {
           </pre>
         </div>
         <p className="mt-4 text-center text-[13px] text-[var(--admin-text-muted)]">
-          Prefer not to run infrastructure? The{" "}
-          <Link to="/pricing" className="underline">
-            managed gateway
-          </Link>{" "}
-          is pay-as-you-go, or free with your own provider keys.
+          The full configuration reference is in{" "}
+          <Link to="/docs" className="underline">
+            the docs
+          </Link>
+          . Nothing else is required to run it.
         </p>
       </section>
 

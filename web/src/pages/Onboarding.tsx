@@ -30,7 +30,7 @@ const STEPS: { icon: LucideIcon; title: string; description: string; detail: str
     icon: Server,
     title: "Connect a provider",
     description: "Add your OpenAI, Anthropic, Gemini, or OpenRouter API keys.",
-    detail: "Provider keys enter via environment interpolation in your config — they are never stored in plaintext. The gateway routes to them automatically.",
+    detail: "Provider keys enter through your config's `os.environ/NAME` interpolation, so the gateway reads them from the environment instead of a checked-in file. The router picks an account and key automatically.",
   },
   {
     icon: Code2,
@@ -47,8 +47,8 @@ const STEPS: { icon: LucideIcon; title: string; description: string; detail: str
   {
     icon: Users,
     title: "Invite your team",
-    description: "Add team members and assign roles.",
-    detail: "Create user accounts with admin or member roles. Each member gets their own API keys with shared access to the gateway's model list.",
+    description: "Add accounts and assign roles.",
+    detail: "Create user accounts on the Users page with the admin or user role. Each person signs in and mints their own virtual keys against the shared model list.",
   },
   {
     icon: Rocket,
