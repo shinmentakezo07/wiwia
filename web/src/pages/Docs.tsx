@@ -668,17 +668,21 @@ function Pipeline() {
 // ── how it works: the live translation diagram ────────────────────────────
 
 const HERO_DIALECTS = [
-  { chip: "chat/completions", tone: "text-blue-300" },
-  { chip: "responses", tone: "text-cyan-300" },
-  { chip: "messages", tone: "text-fuchsia-300" },
+  { chip: "chat/completions", tone: "text-blue-300", hue: "#60a5fa" },
+  { chip: "responses", tone: "text-cyan-300", hue: "#22d3ee" },
+  { chip: "messages", tone: "text-fuchsia-300", hue: "#e879f9" },
 ];
 
+// Each outbound edge ends in its provider's hue while every one of them starts
+// at the hub's violet, so the fan-out reads as "one IR, many wire formats".
 const HERO_PROVIDERS = [
-  { label: "OpenAI", src: "/logos/openai.svg" },
-  { label: "Anthropic", src: "/logos/anthropic.svg" },
-  { label: "Gemini", src: "/logos/gemini.svg" },
-  { label: "OpenRouter", src: "/logos/openrouter.svg" },
+  { label: "OpenAI", src: "/logos/openai.svg", hue: "#60a5fa" },
+  { label: "Anthropic", src: "/logos/anthropic.svg", hue: "#fb923c" },
+  { label: "Gemini", src: "/logos/gemini.svg", hue: "#34d399" },
+  { label: "OpenRouter", src: "/logos/openrouter.svg", hue: "#c084fc" },
 ];
+
+const IR_HUE = "#a78bfa";
 
 // The provider pills under the masthead, in the landing page's style: a
 // rounded chip carrying the brand mark and the name. The marks are the same
@@ -709,22 +713,17 @@ function TranslationCore() {
 
   const dialectRefs = [d0, d1, d2];
   const providerRefs = [p0, p1, p2, p3];
-  const providerHues = [
-    ["#3b82f6", "#8b5cf6"],
-    ["#f59e0b", "#ef4444"],
-    ["#22c55e", "#3b82f6"],
-    ["#06b6d4", "#8b5cf6"],
-  ];
 
   return (
     <div className="docs-core">
       {/* A vertical flow — dialects in, hub in the middle, providers out. The
           panel is a narrow column, so top-to-bottom is the only arrangement
           that gives every node room and still reads as one diagram. */}
-      {/* A vertical flow — dialects in, hub in the middle, providers out. The
-          panel is a narrow column, so top-to-bottom is the only arrangement
-          that gives every node room and still reads as one diagram. */}
       <div className="docs-core-body" ref={containerRef}>
+        {/* Ambient stage: a wash and a dot field that fade out well before the
+            section's edges, so the diagram sits in light rather than in a box. */}
+        <div className="docs-core-stage" aria-hidden />
+
         {/* Inbound dialects */}
         <div className="docs-core-row docs-core-row-in">
           {HERO_DIALECTS.map((d, i) => (
@@ -740,21 +739,22 @@ function TranslationCore() {
         <div className="docs-core-hub-wrap">
           <div ref={hub} className="docs-core-hub">
             <span className="docs-core-hub-ring" aria-hidden />
+            <span className="docs-core-hub-ring docs-core-hub-ring-2" aria-hidden />
             <img src="/wiwi-logo.png" alt="" className="docs-core-hub-logo" />
           </div>
           <span className="docs-core-hub-label">wiwi IR</span>
         </div>
 
-        {/* Upstream providers */}
+        {/* Upstream providers. The name is real text rather than a `title`
+            tooltip, so the marks are identifiable without hovering — and on
+            touch, where a tooltip never appears. */}
         <div className="docs-core-row docs-core-row-out">
           {HERO_PROVIDERS.map((p, i) => (
-            <div
-              key={p.label}
-              ref={providerRefs[i]}
-              className="docs-core-provider"
-              title={p.label}
-            >
-              <img src={p.src} alt={p.label} className="h-full w-full object-contain" />
+            <div key={p.label} className="docs-core-provider">
+              <div ref={providerRefs[i]} className="docs-core-provider-tile">
+                <img src={p.src} alt="" className="docs-core-provider-logo" />
+              </div>
+              <span className="docs-core-provider-name">{p.label}</span>
             </div>
           ))}
         </div>
@@ -762,40 +762,42 @@ function TranslationCore() {
         {/* Beams — inbound to hub, hub to outbound. A negative curvature puts
             the control point below the start, so each beam leaves its node
             travelling down the panel instead of cutting sideways through
-            the row it starts in. */}
+            the row it starts in. The packet dot travels the same path, which
+            is what makes the direction of flow unambiguous. */}
         {dialectRefs.map((ref, i) => (
           <AnimatedBeam
             key={`in-${i}`}
             containerRef={containerRef}
             fromRef={ref}
             toRef={hub}
-            curvature={-30}
+            curvature={-34}
+            pathColor="rgba(255, 255, 255, 0.45)"
             pathWidth={2}
-            pathOpacity={0.3}
-            gradientStart="#60a5fa"
-            gradientStop="#a78bfa"
+            pathOpacity={0.35}
+            gradientStart={HERO_DIALECTS[i]?.hue ?? "#60a5fa"}
+            gradientStop={IR_HUE}
             duration={3.2}
             delay={i * 0.35}
+            packet
           />
         ))}
-        {providerRefs.map((ref, i) => {
-          const [g0, g1] = providerHues[i] ?? ["#8b5cf6", "#ec4899"];
-          return (
-            <AnimatedBeam
-              key={`out-${i}`}
-              containerRef={containerRef}
-              fromRef={hub}
-              toRef={ref}
-              curvature={-26}
-              pathWidth={2}
-              pathOpacity={0.3}
-              gradientStart={g0}
-              gradientStop={g1}
-              duration={3.6}
-              delay={0.6 + i * 0.45}
-            />
-          );
-        })}
+        {providerRefs.map((ref, i) => (
+          <AnimatedBeam
+            key={`out-${i}`}
+            containerRef={containerRef}
+            fromRef={hub}
+            toRef={ref}
+            curvature={-28}
+            pathColor="rgba(255, 255, 255, 0.45)"
+            pathWidth={2}
+            pathOpacity={0.35}
+            gradientStart={IR_HUE}
+            gradientStop={HERO_PROVIDERS[i]?.hue ?? "#c084fc"}
+            duration={3.6}
+            delay={0.6 + i * 0.45}
+            packet
+          />
+        ))}
       </div>
 
       <div className="docs-core-foot">

@@ -1346,13 +1346,45 @@ select.admin-input option {
 
 .docs-core-body {
   position: relative;
+  isolation: isolate;
   display: grid;
+  /* One full-width column: a wrapping row inside a content-sized column would
+     wrap against its own widest line rather than the panel. Each row centres
+     its own contents. */
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto auto auto;
-  justify-items: center;
+  justify-items: stretch;
   align-items: center;
-  gap: 30px;
+  gap: clamp(1.9rem, 4.5vw, 2.6rem);
   min-height: 300px;
-  padding: 26px 18px 28px;
+  padding: 22px 18px 30px;
+}
+
+/* The stage: a wash under the hub and a dot field, both confined to a column
+   around the diagram and faded out before the section's edges — light and
+   texture rather than a panel, so the figure still stands free on the page. */
+.docs-core-stage {
+  position: absolute;
+  z-index: 0;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: min(660px, 100%);
+  transform: translateX(-50%);
+  pointer-events: none;
+  background:
+    radial-gradient(42% 46% at 50% 50%, rgba(139, 92, 246, 0.14), transparent 72%),
+    radial-gradient(66% 74% at 50% 50%, rgba(59, 130, 246, 0.05), transparent 76%);
+}
+.docs-core-stage::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(rgba(255, 255, 255, 0.2) 1px, transparent 1px);
+  background-size: 24px 24px;
+  -webkit-mask-image: radial-gradient(closest-side at 50% 50%, #000 6%, transparent 64%);
+  mask-image: radial-gradient(closest-side at 50% 50%, #000 6%, transparent 64%);
+  opacity: 0.3;
 }
 
 .docs-core-row {
@@ -1362,7 +1394,7 @@ select.admin-input option {
   flex-wrap: wrap;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 9px;
   max-width: 100%;
 }
 .docs-core-row-out {
@@ -1373,36 +1405,78 @@ select.admin-input option {
   position: relative;
   z-index: 2;
   max-width: 100%;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 9px;
-  background: rgba(10, 10, 10, 0.9);
-  padding: 6px 10px;
-  font-size: 10.5px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 10px;
+  background: rgba(10, 10, 10, 0.92);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  padding: 8px 13px;
+  font-size: 11.5px;
   line-height: 1;
   white-space: nowrap;
 }
 .docs-core-dialect-text {
   letter-spacing: 0.01em;
 }
+/* On a phone the three chips have to share one line: two rows would put the
+   inbound beams through the row above them. */
+@media (max-width: 480px) {
+  .docs-core-row {
+    gap: 6px;
+  }
+  .docs-core-dialect {
+    padding: 7px 10px;
+    font-size: 10.5px;
+  }
+}
 
+/* Each provider is a tile plus its name. The name is text, not a tooltip, so
+   the marks stay identifiable on touch and in a screenshot. */
 .docs-core-provider {
   position: relative;
   z-index: 2;
   display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+  min-width: 58px;
+}
+.docs-core-provider-tile {
+  display: flex;
   align-items: center;
   justify-content: center;
-  width: 38px;
-  height: 38px;
+  width: 50px;
+  height: 50px;
   border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 11px;
-  background: rgba(10, 10, 10, 0.9);
-  padding: 8px;
-  transition: transform 0.25s ease, border-color 0.25s ease, background-color 0.25s ease;
+  border-radius: 13px;
+  background: rgba(10, 10, 10, 0.92);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  padding: 11px;
+  transition:
+    transform 0.25s ease,
+    border-color 0.25s ease,
+    background-color 0.25s ease;
 }
-.docs-core-provider:hover {
-  transform: translateY(-1px) scale(1.04);
-  border-color: rgba(255, 255, 255, 0.22);
-  background: rgba(255, 255, 255, 0.06);
+.docs-core-provider-logo {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.docs-core-provider-name {
+  font-size: 10.5px;
+  line-height: 1;
+  color: var(--admin-text-dim);
+  white-space: nowrap;
+  transition: color 0.25s ease;
+}
+@media (hover: hover) {
+  .docs-core-provider:hover .docs-core-provider-tile {
+    transform: translateY(-2px);
+    border-color: rgba(255, 255, 255, 0.22);
+    background: rgba(255, 255, 255, 0.05);
+  }
+  .docs-core-provider:hover .docs-core-provider-name {
+    color: var(--admin-text-muted);
+  }
 }
 
 .docs-core-hub-wrap {
@@ -1411,33 +1485,40 @@ select.admin-input option {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 16px;
+  gap: 15px;
 }
 .docs-core-hub {
   position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 62px;
-  height: 62px;
-  border: 1px solid rgba(167, 139, 250, 0.32);
+  width: 76px;
+  height: 76px;
+  border: 1px solid rgba(167, 139, 250, 0.34);
   border-radius: 9999px;
-  background: radial-gradient(circle at 50% 30%, rgba(167, 139, 250, 0.16), rgba(10, 10, 10, 0.9));
+  background: radial-gradient(circle at 50% 30%, rgba(167, 139, 250, 0.18), rgba(10, 10, 10, 0.92));
   box-shadow:
-    0 0 40px -10px rgba(139, 92, 246, 0.65),
-    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+    0 0 44px -12px rgba(139, 92, 246, 0.7),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
 .docs-core-hub-logo {
-  width: 32px;
-  height: 32px;
+  width: 38px;
+  height: 38px;
   border-radius: 9999px;
   object-fit: cover;
 }
+/* Two rings, half a cycle apart, so the hub reads as a live junction rather
+   than a static badge. */
 .docs-core-hub-ring {
   position: absolute;
-  inset: -7px;
-  border: 1px solid rgba(167, 139, 250, 0.22);
+  inset: -8px;
+  border: 1px solid rgba(167, 139, 250, 0.24);
   border-radius: 9999px;
+}
+.docs-core-hub-ring-2 {
+  inset: -18px;
+  border-color: rgba(167, 139, 250, 0.13);
+  animation-delay: -1.7s;
 }
 @media (prefers-reduced-motion: no-preference) {
   .docs-core-hub-ring {
@@ -2155,10 +2236,12 @@ select.admin-input option {
 }
 
 /* Reduced motion: the beams are SMIL animations, which CSS cannot pause, so
-   the travelling gradient stroke is hidden and only the static connecting
-   path remains. The diagram still reads; it just stops moving. */
+   the travelling gradient stroke and its packet are hidden and only the
+   static connecting path remains. The diagram still reads; it just stops
+   moving. */
 @media (prefers-reduced-motion: reduce) {
-  .docs-core svg path:nth-of-type(2) {
+  .docs-core svg path:nth-of-type(2),
+  .docs-core svg .beam-packet {
     display: none;
   }
 }

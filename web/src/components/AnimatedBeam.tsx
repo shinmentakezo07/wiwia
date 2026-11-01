@@ -16,6 +16,9 @@ export interface BeamProps {
   pathOpacity?: number;
   gradientStart?: string;
   gradientStop?: string;
+  /** Draw a dot travelling the path, so the direction of flow is explicit. */
+  packet?: boolean;
+  packetRadius?: number;
 }
 
 export function AnimatedBeam({
@@ -30,10 +33,15 @@ export function AnimatedBeam({
   pathOpacity = 0.2,
   gradientStart = "#ffaa40",
   gradientStop = "#9c40ff",
+  packet = false,
+  packetRadius = 2.4,
 }: BeamProps) {
   const id = useId();
   const [pathD, setPathD] = useState("");
   const [dims, setDims] = useState({ width: 0, height: 0 });
+  // The gradient axis follows the beam, so the sweep travels along the wire
+  // instead of across the bounding box.
+  const [axis, setAxis] = useState({ x1: 0, y1: 0, x2: 0, y2: 0 });
 
   useEffect(() => {
     const updatePath = () => {
@@ -54,6 +62,7 @@ export function AnimatedBeam({
       const controlY = startY - curvature;
       const d = `M ${startX},${startY} Q ${(startX + endX) / 2},${controlY} ${endX},${endY}`;
       setPathD(d);
+      setAxis({ x1: startX, y1: startY, x2: endX, y2: endY });
     };
 
     const resizeObserver = new ResizeObserver(() => updatePath());
@@ -91,10 +100,26 @@ export function AnimatedBeam({
         strokeOpacity={1}
         strokeLinecap="round"
       />
+      {/* A packet riding the path: a plain SMIL motion, so it needs no JS and
+          costs one composited circle per edge. */}
+      {packet && pathD ? (
+        <circle r={packetRadius} fill={gradientStop} className="beam-packet">
+          <animateMotion
+            dur={`${duration}s`}
+            begin={`${delay}s`}
+            repeatCount="indefinite"
+            path={pathD}
+          />
+        </circle>
+      ) : null}
       <defs>
         <linearGradient
           id={`beam-${safeId}`}
           gradientUnits="userSpaceOnUse"
+          x1={axis.x1}
+          y1={axis.y1}
+          x2={axis.x2}
+          y2={axis.y2}
         >
           <stop stopColor={gradientStart} stopOpacity="0">
             <animate
