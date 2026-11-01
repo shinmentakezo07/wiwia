@@ -2073,35 +2073,52 @@ select.admin-input option {
   isolation: isolate;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
   min-width: 0;
   min-height: 104px;
   background: var(--admin-surface);
   padding: 16px 10px 13px;
-  transition: background-color 0.25s ease;
+  transition: background-color 0.2s ease;
 }
-.docs-provider-item:hover {
-  background: hsl(var(--f-hue) 22% 8%);
+/* The tile's contents lift a few pixels on hover or press — a quiet pop in
+   place of the old pointer-tracked glow. The lift sits on an inner wrapper so
+   the grid's `overflow: hidden` can never clip it. */
+.docs-provider-inner {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 0;
+  transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.docs-provider-item:active {
+  background: rgba(255, 255, 255, 0.03);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .docs-provider-item:active .docs-provider-inner {
+    transform: translateY(-3px);
+  }
+}
+@media (hover: hover) {
+  .docs-provider-item:hover {
+    background: rgba(255, 255, 255, 0.03);
+  }
+}
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .docs-provider-item:hover .docs-provider-inner {
+    transform: translateY(-3px);
+  }
 }
 /* The mark is a self-contained badge tile (web/public/logos/) that brings its
    own rounded corners, background and brand colours. The slot therefore adds
-   no frame of its own — a border here would read as a chip inside a chip. The
-   family tint survives as the hover glow instead. */
+   no frame of its own — a border here would read as a chip inside a chip. */
 .docs-provider-logo {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 40px;
   height: 40px;
-  transition:
-    transform 0.25s ease,
-    filter 0.25s ease;
-}
-.docs-provider-item:hover .docs-provider-logo {
-  transform: translateY(-1px);
-  filter: drop-shadow(0 0 10px hsl(var(--f-hue) 85% 70% / 0.55));
 }
 .docs-provider-name {
   max-width: 100%;
@@ -2140,14 +2157,16 @@ select.admin-input option {
 
 /* -- docs §08 Features ------------------------------------------------------
    Hairline tiles over one spectrum: each tile receives --f-hue and derives its
-   icon chip, left spine, index, and pointer-tracked spotlight from it. The
-   base state already carries a low-opacity tint, so the tiles read the same on
-   touch devices where there is no hover to intensify them. Tiles marked
-   span="2" break the matrix into a bento rhythm. */
+   icon chip, left spine, index, and dot from it. Interaction is a small,
+   neutral lift of the tile's contents — no pointer-tracked glow, no neon.
+   Tiles marked span="2" break the matrix into a bento rhythm. */
 
 .docs-feature-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
+  /* Every row takes the tallest row's height, so the hairline matrix reads as
+     a grid rather than a ragged stack. */
+  grid-auto-rows: 1fr;
   grid-auto-flow: dense;
   gap: 1px;
   overflow: hidden;
@@ -2172,10 +2191,22 @@ select.admin-input option {
   --f-line: hsl(var(--f-hue) 80% 62% / 0.24);
   position: relative;
   isolation: isolate;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   background: var(--admin-surface);
   padding: 17px 17px 16px;
   transition: background-color 0.25s ease;
+}
+/* The tile's contents, not the tile itself, do the lifting: the grid clips
+   its own overflow, so a transform on the tile would be cut off at the outer
+   hairline. */
+.docs-feature-inner {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .docs-feature[data-span="2"] {
   grid-column: span 2;
@@ -2185,25 +2216,40 @@ select.admin-input option {
     grid-column: span 1;
   }
 }
-/* Pointer-tracked spotlight, shared by the feature and provider tiles.
-   Negative z-index keeps it above the tile's own background (painted first
-   inside this stacking context) but under the text. */
-.docs-spotlight {
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  background: radial-gradient(
-    200px circle at var(--mx, 50%) var(--my, 0%),
-    hsl(var(--f-hue) 80% 62% / 0.14),
-    transparent 70%
-  );
-  opacity: 0;
-  transition: opacity 0.3s ease;
-  pointer-events: none;
-}
-.docs-feature:hover .docs-spotlight,
-.docs-provider-item:hover .docs-spotlight {
-  opacity: 1;
+/* Wide tiles get a two-column interior once they actually have the room: the
+   icon chip and index become a left gutter, and the copy runs beside them
+   instead of stretching into one long line. Below 640px the tile collapses
+   back to the stacked layout. */
+@media (min-width: 640px) {
+  .docs-feature[data-span="2"] .docs-feature-inner {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-rows: auto auto 1fr;
+    column-gap: 16px;
+    align-items: start;
+  }
+  .docs-feature[data-span="2"] .docs-feature-top {
+    grid-column: 1;
+    grid-row: 1 / span 3;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .docs-feature[data-span="2"] .docs-feature-title {
+    grid-column: 2;
+    grid-row: 1;
+    margin-top: 0;
+  }
+  .docs-feature[data-span="2"] .docs-feature-body {
+    grid-column: 2;
+    grid-row: 2;
+    max-width: 62ch;
+  }
+  .docs-feature[data-span="2"] .docs-feature-meta {
+    grid-column: 2;
+    grid-row: 3;
+    align-self: end;
+    margin-top: 12px;
+  }
 }
 /* Left spine, lit in the tile's hue */
 .docs-feature::before {
@@ -2216,11 +2262,46 @@ select.admin-input option {
   transition: opacity 0.25s ease;
   pointer-events: none;
 }
-.docs-feature:hover::before {
-  opacity: 1;
+/* Press (touch or mouse-down) is the tactile feedback: a small lift and a
+   neutral wash. Pointer hover repeats it, but only on devices that actually
+   hover, so a tap on a phone never leaves a tile stuck in its hover state. */
+.docs-feature:active {
+  background: rgba(255, 255, 255, 0.03);
 }
-.docs-feature:hover {
-  background: hsl(var(--f-hue) 22% 8%);
+@media (prefers-reduced-motion: no-preference) {
+  .docs-feature:active .docs-feature-inner {
+    transform: translateY(-3px);
+  }
+}
+@media (hover: hover) {
+  .docs-feature:hover {
+    background: rgba(255, 255, 255, 0.03);
+  }
+  .docs-feature:hover::before {
+    opacity: 1;
+  }
+  .docs-feature:hover .docs-feature-icon {
+    border-color: hsl(var(--f-hue) 85% 70% / 0.45);
+    background: hsl(var(--f-hue) 80% 62% / 0.17);
+  }
+  .docs-feature:hover .docs-feature-index {
+    color: var(--f-ink);
+    opacity: 1;
+  }
+  .docs-feature:hover .docs-feature-title {
+    color: hsl(var(--f-hue) 45% 92%);
+  }
+  .docs-feature:hover .docs-feature-dot {
+    background: var(--f-ink);
+  }
+}
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .docs-feature:hover .docs-feature-inner {
+    transform: translateY(-3px);
+  }
+  .docs-feature:hover .docs-feature-icon {
+    transform: scale(1.06);
+  }
 }
 
 .docs-feature-top {
@@ -2250,26 +2331,16 @@ select.admin-input option {
   width: 15px;
   height: 15px;
 }
-.docs-feature:hover .docs-feature-icon {
-  transform: translateY(-1px);
-  border-color: hsl(var(--f-hue) 85% 70% / 0.45);
-  background: hsl(var(--f-hue) 80% 62% / 0.17);
-  box-shadow:
-    0 0 20px -6px hsl(var(--f-hue) 85% 62% / 0.55),
-    inset 0 1px 0 hsl(var(--f-hue) 90% 85% / 0.12);
-}
 .docs-feature-index {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 10px;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.08em;
-  color: var(--admin-text-dim);
-  opacity: 0.75;
+  /* The ordinal is real content, so it has to clear 4.5:1 — dim at 0.75
+     alpha does not at this size. Muted holds up, and hover still lights it. */
+  color: var(--admin-text-muted);
+  opacity: 0.8;
   transition: color 0.25s ease, opacity 0.25s ease;
-}
-.docs-feature:hover .docs-feature-index {
-  color: var(--f-ink);
-  opacity: 1;
 }
 
 .docs-feature-title {
@@ -2280,10 +2351,8 @@ select.admin-input option {
   color: var(--admin-text);
   transition: color 0.25s ease;
 }
-.docs-feature:hover .docs-feature-title {
-  color: hsl(var(--f-hue) 45% 92%);
-}
 .docs-feature-body {
+  flex: 1 1 auto;
   margin-top: 5px;
   font-size: 12px;
   line-height: 1.65;
@@ -2306,11 +2375,7 @@ select.admin-input option {
   height: 4px;
   border-radius: 999px;
   background: var(--f-line);
-  transition: background-color 0.25s ease, box-shadow 0.25s ease;
-}
-.docs-feature:hover .docs-feature-dot {
-  background: var(--f-ink);
-  box-shadow: 0 0 7px hsl(var(--f-hue) 85% 70% / 0.7);
+  transition: background-color 0.25s ease;
 }
 
 /* Section heading aside: a quiet count chip next to "Section 08". */
@@ -2338,6 +2403,43 @@ select.admin-input option {
   background: var(--admin-border);
 }
 
+/* Section 08's coverage readout: two tabular numbers in one hairline capsule,
+   so the counts sit beside the eyebrow instead of in a sentence. */
+.docs-coverage {
+  display: inline-flex;
+  align-items: stretch;
+  overflow: hidden;
+  border: 1px solid var(--admin-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.docs-coverage-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 5px 10px;
+}
+.docs-coverage-num {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  color: var(--admin-text);
+}
+.docs-coverage-label {
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--admin-text-muted);
+}
+.docs-coverage-sep {
+  align-self: stretch;
+  width: 1px;
+  background: var(--admin-border);
+}
+
 /* Tile entrance: staggered once the grid scrolls into view. Shared by the
    feature grid and the provider grid. */
 @keyframes docs-tile-in {
@@ -2361,10 +2463,6 @@ select.admin-input option {
 @media (hover: none) {
   .docs-feature::before {
     opacity: 1;
-  }
-  .docs-feature .docs-spotlight,
-  .docs-provider-item .docs-spotlight {
-    opacity: 0.5;
   }
 }
 
@@ -2587,10 +2685,10 @@ select.admin-input option {
   .docs-rail-fill,
   .docs-backtop,
   .docs-anchor,
-  .docs-provider-logo,
   .docs-feature-icon,
-  .docs-core-provider,
-  .docs-spotlight {
+  .docs-feature-inner,
+  .docs-provider-inner,
+  .docs-core-provider {
     transition: none;
   }
 }

@@ -14,7 +14,6 @@ import {
   useRef,
   useState,
   type CSSProperties,
-  type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type RefObject,
 } from "react";
@@ -610,20 +609,20 @@ function ProviderGrid() {
               style={
                 { "--f-hue": FAMILY_HUE[provider.family], "--f-i": i } as CSSProperties
               }
-              onPointerMove={trackSpotlight}
             >
-              <span className="docs-spotlight" aria-hidden />
-              <span className="docs-provider-logo">
-                <img src={provider.src} alt="" className="h-full w-full object-contain" />
-              </span>
-              <span className="docs-provider-name">{provider.label}</span>
-              <span className="docs-provider-id">
-                <span className="docs-provider-dot" aria-hidden />
-                <span className="docs-provider-id-text" style={{ fontFamily: MONO }}>
-                  {provider.id}
+              <div className="docs-provider-inner">
+                <span className="docs-provider-logo">
+                  <img src={provider.src} alt="" className="h-full w-full object-contain" />
                 </span>
-                <span className="sr-only"> — {FAMILY_LABEL[provider.family]}</span>
-              </span>
+                <span className="docs-provider-name">{provider.label}</span>
+                <span className="docs-provider-id">
+                  <span className="docs-provider-dot" aria-hidden />
+                  <span className="docs-provider-id-text" style={{ fontFamily: MONO }}>
+                    {provider.id}
+                  </span>
+                  <span className="sr-only"> — {FAMILY_LABEL[provider.family]}</span>
+                </span>
+              </div>
             </div>
           );
         })}
@@ -938,6 +937,7 @@ const FEATURES: {
     title: "Cost tracking",
     body: "Token usage and cost for every call, priced per model and sliced by key, model, and provider.",
     meta: "wiwi/cost/",
+    span: 2,
   },
   {
     icon: HeartPulse,
@@ -945,7 +945,6 @@ const FEATURES: {
     title: "Health healing",
     body: "Keys that start failing cool off, get probed with a one-token completion, and come back on their own — no operator paging, no wasted spend.",
     meta: "wiwi/core/recovery.py",
-    span: 2,
   },
   {
     icon: Database,
@@ -960,6 +959,7 @@ const FEATURES: {
     title: "Logs & metrics",
     body: "Every call is journalled and scraped by Prometheus, with a React admin console sitting over the top.",
     meta: "wiwi/logging_core/",
+    span: 2,
   },
 ];
 
@@ -969,14 +969,28 @@ const FEATURE_MODULE_COUNT = new Set(
   FEATURES.map((f) => f.meta.replace(/^wiwi\//, "").split("/")[0]),
 ).size;
 
-// Pointer position is written straight onto the tile as two custom properties
-// — no React state, so a pointer-tracked spotlight never re-renders the grid.
-// Shared by the feature grid and the provider grid.
-function trackSpotlight(event: ReactPointerEvent<HTMLElement>) {
-  const el = event.currentTarget;
-  const rect = el.getBoundingClientRect();
-  el.style.setProperty("--mx", `${((event.clientX - rect.left) / rect.width) * 100}%`);
-  el.style.setProperty("--my", `${((event.clientY - rect.top) / rect.height) * 100}%`);
+// Section 08's aside: the grid's two totals, set as a pair of readouts rather
+// than a sentence. The numbers are the section's claim (nine capabilities
+// across eight modules), so they get the tabular treatment the rest of the
+// page reserves for counts.
+function CoverageStats(props: { capabilities: number; modules: number }) {
+  return (
+    <div
+      className="docs-coverage"
+      role="group"
+      aria-label={`${props.capabilities} capabilities across ${props.modules} modules`}
+    >
+      <span className="docs-coverage-item">
+        <span className="docs-coverage-num">{String(props.capabilities).padStart(2, "0")}</span>
+        <span className="docs-coverage-label">capabilities</span>
+      </span>
+      <span className="docs-coverage-sep" aria-hidden />
+      <span className="docs-coverage-item">
+        <span className="docs-coverage-num">{String(props.modules).padStart(2, "0")}</span>
+        <span className="docs-coverage-label">modules</span>
+      </span>
+    </div>
+  );
 }
 
 function FeatureGrid() {
@@ -986,34 +1000,34 @@ function FeatureGrid() {
   return (
     <div
       ref={gridRef}
-      className={`docs-feature-grid${revealed ? " is-revealed" : ""}`}
+      className={`docs-feature-grid mt-6${revealed ? " is-revealed" : ""}`}
       role="list"
     >
       {FEATURES.map((feature, i) => {
         const Icon = feature.icon;
         return (
-          <article
+          <div
             key={feature.title}
             role="listitem"
             className="docs-feature"
             data-span={feature.span ?? 1}
             style={{ "--f-hue": feature.hue, "--f-i": i } as CSSProperties}
-            onPointerMove={trackSpotlight}
           >
-            <span className="docs-spotlight" aria-hidden />
-            <div className="docs-feature-top">
-              <span className="docs-feature-icon">
-                <Icon strokeWidth={1.75} aria-hidden />
+            <div className="docs-feature-inner">
+              <div className="docs-feature-top">
+                <span className="docs-feature-icon">
+                  <Icon strokeWidth={1.75} aria-hidden />
+                </span>
+                <span className="docs-feature-index">{String(i + 1).padStart(2, "0")}</span>
+              </div>
+              <h3 className="docs-feature-title">{feature.title}</h3>
+              <p className="docs-feature-body">{feature.body}</p>
+              <span className="docs-feature-meta">
+                <span className="docs-feature-dot" aria-hidden />
+                {feature.meta}
               </span>
-              <span className="docs-feature-index">{String(i + 1).padStart(2, "0")}</span>
             </div>
-            <h3 className="docs-feature-title">{feature.title}</h3>
-            <p className="docs-feature-body">{feature.body}</p>
-            <span className="docs-feature-meta">
-              <span className="docs-feature-dot" aria-hidden />
-              {feature.meta}
-            </span>
-          </article>
+          </div>
         );
       })}
     </div>
@@ -1643,13 +1657,17 @@ router_settings:
               title="Features"
               subtitle="Built-in for every deployment — no plugins"
               aside={
-                <span className="docs-count-chip">
-                  <b>{FEATURES.length}</b> capabilities
-                  <span className="docs-count-sep" aria-hidden />
-                  <b>{FEATURE_MODULE_COUNT}</b> modules
-                </span>
+                <CoverageStats
+                  capabilities={FEATURES.length}
+                  modules={FEATURE_MODULE_COUNT}
+                />
               }
             />
+            <p className="docs-prose">
+              Everything below ships inside the gateway itself. Each tile names the module that
+              owns the capability, so the grid doubles as a map of the codebase — open the module
+              to see the implementation behind the claim.
+            </p>
             <FeatureGrid />
           </section>
 
