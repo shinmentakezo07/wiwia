@@ -143,6 +143,11 @@ router_settings:
   # is unhealthy or above this request's lane ceiling.
   # session_affinity: false
   # session_affinity_ttl_s: 600
+  # Pin a stable leading prefix (system messages + tool definitions) to the
+  # deployment that served it. Unlike session affinity this needs no client
+  # header; it is a preference among healthy candidates, not a hard binding.
+  # prefix_affinity: false
+  # prefix_affinity_ttl_s: 600
   fallbacks:
     claude-sonnet: ["gpt-4o"]
   model_group_alias:
@@ -207,9 +212,11 @@ general_settings:
   # shared_database: false
   # reservation_stale_s: 600
   # Optional Redis. Requires the [redis] extra (uv pip install -e '.[redis]').
-  # When set, the exact-match response cache (see cache_settings) is stored in
-  # Redis: entries survive a restart and are shared across replicas.
-  # Unset (default) keeps the in-memory LRU, which is faster for one process.
+  # When set, it backs both the exact-match response cache (see cache_settings)
+  # and the rate limiter: cache entries survive a restart and are shared across
+  # replicas, and per-key/global rpm/tpm caps are shared instead of per process.
+  # Unset (default) keeps the in-memory LRU and in-memory limiter, which is
+  # faster for one process.
   # redis_url: redis://localhost:6379/0
   # Reverse-proxy peers whose X-Forwarded-* headers wiwi may trust. Set this
   # when TLS terminates in front of wiwi (a load balancer, ingress, or CDN):
@@ -244,9 +251,19 @@ wiwi_settings:
   # spend_flush_interval_ms late; a crash fails closed (the reservation stays).
   # spend_batching_enabled: false
   # spend_flush_interval_ms: 250
+  # spend_flush_max_pending: 1000
+  # spend_flush_max_dollars_per_key: 1.0
   # Concurrent identical non-streaming requests share one upstream call and
-  # one charge (the joiners are served the leader's payload).
+  # one charge (the joiners are served the leader's payload at cost 0).
   # singleflight_enabled: false
+  # singleflight_max_flights: 2048
+  # singleflight_max_waiters: 64
+  # Memoize NIM's sanitized tool schemas; 0 disables.
+  # tool_schema_cache_entries: 256
+  # Outbound httpx pool. The httpx defaults (100/20) queue streams under load.
+  # http_max_connections: 200
+  # http_max_keepalive_connections: 40
+  # http_keepalive_expiry_s: 30.0
   # Emit `x-wiwi-timings` (per-stage ms) so bench.py can attribute latency.
   # perf_timings: false
   response_store_ttl_s: 86400

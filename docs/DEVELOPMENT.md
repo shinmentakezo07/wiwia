@@ -7,16 +7,16 @@ Dev setup, conventions, testing, and the pre-completion gate. The command source
 ## 1. Setup
 
 ```bash
-# Backend — use ambient python3 (3.12 in this checkout). NEVER .venv/bin/python
+# Backend — use ambient python3 (3.13.5 in this checkout). NEVER .venv/bin/python
 # (there is no .venv in this checkout at all).
-python3 --version                  # 3.12
-uv pip install -e ".[dev]"         # + ".[redis]" for the Redis response cache
+python3 --version                  # 3.13.5
+uv pip install -e ".[dev]"         # + ".[redis]" for the Redis response cache and rate limiter
 
 # Frontend — npm is authoritative (web/package-lock.json present). Never mix package managers.
 cd web && npm install
 ```
 
-Tools expected on PATH: `python3` 3.12, `pytest` 9.1.1, `ruff`, `npm` (Node 24).
+Tools expected on PATH: `python3` 3.13.5 (the checkout's ambient interpreter; the Docker image ships 3.12), `pytest` 9.1.1, `ruff`, `npm` (Node 24).
 
 ## 2. Run
 

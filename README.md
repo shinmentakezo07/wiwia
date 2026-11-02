@@ -113,7 +113,7 @@ constraint is enforced by an import-time `assert` in the registry, not by conven
 
 | 😩 Problem | 💡 wiwi's answer |
 |---|---|
-| One client dialect, many models behind it | **Hub-and-spoke translation.** Any of 3 inbound dialects ↔ any of 12 outbound providers. N×M coverage from N+M modules. |
+| One client dialect, many models behind it | **Hub-and-spoke translation.** Any of 3 inbound dialects ↔ any of 13 outbound provider types. N×M coverage from N+M modules. |
 | Rate-limit pain across many keys | **Smooth weighted round-robin** key pools, per-key cooldowns, `failover_mode`, retries. |
 | Reasoning params don't line up | IR collapses `reasoning_effort`, `thinking.budget_tokens`, OpenRouter's `reasoning{}` into one form. Multi-turn survives a mid-conversation model switch. |
 | Want a UI, not just YAML | Built-in dark console at `/console` — keys, providers, pools, live SSE logs, per-request TTFT/TPS/cost. |
@@ -377,7 +377,7 @@ Four things wiwi does that a config-file gateway doesn't.
 
 ### 🔁 Translation, both directions
 
-- **3 inbound dialects × 12 outbound providers**, with `drop_params` and `extra_headers` for the awkward edges.
+- **3 inbound dialects × 13 outbound provider types**, with `drop_params` and `extra_headers` for the awkward edges.
 - **Builtin tool translation** — one canonical `web_search`, rendered natively per surface:
 
   | Canonical | Anthropic | Responses | Gemini | OpenRouter | OpenAI Chat |
@@ -437,6 +437,13 @@ Four things wiwi does that a config-file gateway doesn't.
   ends rather than exporting the single capped page, warns when a 200 000-row ceiling truncates the file, and
   reuses one shared CSV builder so Analytics and Usage cannot drift into two dialects of the same export.
 - `/admin/stats/overview` + `/admin/stats/timeseries?bucket=…&metric=…`; opt-in Prometheus `/metrics`.
+
+### ⚡ Performance
+
+- **Opt-in, because they change semantics:** batched spend settlement (`spend_batching_enabled`), concurrent-request dedupe (`singleflight_enabled`), and prompt-prefix affinity (`prefix_affinity`). `perf_timings` emits `x-wiwi-timings` for `bench.py`.
+- **Always on:** buffered stream-journal appends, sharded rate-limiter locks, the NIM tool-schema memo, configurable outbound HTTP pool limits, a 1024-entry response cache, and SQLite WAL / Postgres pool tuning.
+- **Redis, when configured, backs the rate limiter as well as the response cache**, so rpm/tpm caps are shared across workers.
+- Measured against a mock upstream: streaming at concurrency 32 improved 1.4–3.4x in RPS with p95 down 25–35%; the spend path issues 3x fewer `UPDATE`s; singleflight collapses 40 identical concurrent calls to 2–3 upstream calls. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §6.1 for the caveats.
 - **Durable stream journals** (on by default) — encoded SSE frames persist per-request, so a client reconnecting
   with `x-wiwi-stream-id` + `Last-Event-ID` replays even across a gateway restart.
 
@@ -457,7 +464,7 @@ Four things wiwi does that a config-file gateway doesn't.
   </tr>
 </table>
 
-`server/app.py` is ~7.0k lines and `core/gateway.py` ~2.6k — don't read either top to bottom. Start at
+`server/app.py` is ~7.7k lines and `core/gateway.py` ~3.0k — don't read either top to bottom. Start at
 `run_chat_like` and follow the pipeline it names; `RequestContext` (`core/context.py`, ~120 lines) is the single
 mutable object threaded through every stage, so reading its fields tells you what the pipeline carries.
 
@@ -627,14 +634,19 @@ router_settings:
 general_settings:
   master_key: os.environ/WIWI_MASTER_KEY
   database_url: os.environ/DATABASE_URL   # sqlite+aiosqlite:///wiwi.db (default) or postgres
-  # redis_url: os.environ/REDIS_URL       # response cache; needs the [redis] extra
+  # db_pool_size: 10                     # Postgres only
+  # db_max_overflow: 20
+  # db_pool_recycle_s: 300
+  # shared_database: false               # true when several replicas share this DB
+  # reservation_stale_s: 600             # shared-DB budget-reservation reclaim horizon
+  # redis_url: os.environ/REDIS_URL       # response cache + rate limiter; needs the [redis] extra
   max_keys_per_user: 50
   # trusted_proxies: ["10.0.0.0/8"]       # set when TLS terminates at a reverse proxy
 
 cache_settings:         # opt-in exact-match response cache — off by default
   enabled: false
   ttl_s: 3600           # <= 0 disables the cache entirely (one startup warning)
-  max_entries: 256      # memory backend only
+  max_entries: 1024     # memory backend only
   bypass_header: x-wiwi-no-cache
 
 healer:                 # opt-in background prober — off by default, it spends money
@@ -650,6 +662,13 @@ wiwi_settings:
   log_max_rows: 10000          # keep at most N raw rows; 0 = unlimited
   host: 0.0.0.0
   port: 4000
+  # -- performance and accounting --
+  spend_batching_enabled: false
+  singleflight_enabled: false
+  tool_schema_cache_entries: 256
+  http_max_connections: 200
+  http_max_keepalive_connections: 40
+  perf_timings: false
   # public_url: https://wiwi.example.com   # pin OAuth callbacks; ignores X-Forwarded-*
 ```
 
@@ -661,17 +680,19 @@ wiwi_settings:
 <summary><b>Notes worth knowing before you tune it</b></summary>
 
 - **Postgres needs no extra.** `asyncpg` is a core dependency — point `DATABASE_URL` at Postgres and it works.
-- **Redis is optional and off by default.** It backs the *response cache only*, and needs **both**
-  `cache_settings.enabled: true` and `redis_url`. On a **single instance** Redis is *slower* — `main.py` runs one
-  uvicorn worker, so a dict lookup already beats a network round-trip. It earns its keep at 2+ replicas or across
-  deploys. If it's unreachable, every op degrades to a miss and requests keep succeeding.
+- **Redis is optional and off by default.** It backs the *response cache* **and** the rate limiter, and needs
+  `redis_url` plus the `[redis]` extra (the cache also needs `cache_settings.enabled: true`). On a **single
+  instance** Redis is *slower* for caching — `main.py` runs one uvicorn worker, so a dict lookup already beats a
+  network round-trip. It earns its keep at 2+ replicas or across deploys, where it is also the only way to share
+  per-key rpm/tpm caps. If it's unreachable, cache ops degrade to a miss and requests keep succeeding.
 - **Only non-streaming, deterministic requests are cached** (`temperature` unset or `0`, `n == 1`). Bypass one
-  call with `X-Wiwi-No-Cache: true`. (`wiwi/ratelimit/redis.py` exists but is *not* wired in — rate limiting is
-  always the in-memory limiter.)
+  call with `X-Wiwi-No-Cache: true`. `singleflight_enabled` is a separate path that dedupes *concurrent* identical
+  requests; it does not populate the cache and is off by default because it changes billing (joiners log `cost=0`).
 - **Two different cache-hit flags.** `cache_hit` = the *provider's* prompt cache; `response_cache_hit` = wiwi's
   own cache. Only the first feeds prompt-cache metrics.
 - **Stream journals are on by default** (dir `.wiwi/journals`, 600 s TTL, 1 MiB cap) and are key-scoped: readable
-  only by the virtual key that created them.
+  only by the virtual key that created them. Appends are buffered (64 KiB / 50 ms) and flushed before every replay
+  read, so a reconnect never misses a buffered frame.
 - **`extra_body`** on a deployment merges raw JSON into the upstream body at encode time — for provider-specific
   routing knobs, e.g. OpenRouter's provider filter:
   `extra_body: {provider: {only: ["gmicloud"]}}`.
@@ -712,11 +733,11 @@ wiwi/                      38.7k lines of Python across 80 modules
 
 <table>
   <tr>
-    <td align="center"><b>80</b><br/><sub>Python modules</sub></td>
-    <td align="center"><b>36.4k</b><br/><sub>lines of Python</sub></td>
-    <td align="center"><b>36.8k</b><br/><sub>lines of TS/TSX</sub></td>
-    <td align="center"><b>72</b><br/><sub>SPA routes</sub></td>
-    <td align="center"><b>3569</b><br/><sub>tests, all green</sub></td>
+    <td align="center"><b>94</b><br/><sub>Python modules</sub></td>
+    <td align="center"><b>43.6k</b><br/><sub>lines of Python</sub></td>
+    <td align="center"><b>38.2k</b><br/><sub>lines of TS/TSX</sub></td>
+    <td align="center"><b>63</b><br/><sub>SPA route paths</sub></td>
+    <td align="center"><b>3995</b><br/><sub>tests collected</sub></td>
     <td align="center"><b>0</b><br/><sub>ruff findings</sub></td>
   </tr>
 </table>
@@ -764,8 +785,8 @@ All `/admin/*` requires the master key (`Authorization: Bearer …`) or an admin
 ## 🧪 Development
 
 ```bash
-python3 -m pytest tests/ -q                                 # 3569 collected
-python3 -m pytest tests/test_fix_round164.py -q            # latest regression file
+python3 -m pytest tests/ -q                                 # 3995 collected
+python3 -m pytest tests/test_fix_round192.py -q            # latest regression file
 python3 -m pytest tests/test_router.py -k cooldown -q      # by name
 
 ruff check wiwi/ tests/                                     # line-length 100, target py311

@@ -4,7 +4,7 @@ Self-hosted unified LLM gateway proxy. Three inbound dialects (OpenAI Chat Compl
 
 ## Prerequisites
 
-- Python 3.11+ (3.12 recommended)
+- Python 3.11+ (3.13 in this checkout; the Docker image ships 3.12)
 - A `wiwi.yaml` config (copy `wiwi.yaml.example` and fill in your keys)
 - Provider API keys for the models you want to proxy
 
@@ -13,7 +13,7 @@ Self-hosted unified LLM gateway proxy. Three inbound dialects (OpenAI Chat Compl
 ```bash
 # From the repo root
 pip install -e .            # or: uv pip install -e .
-# Optional: shared Redis response cache
+# Optional: shared Redis response cache and rate limiter
 pip install -e .[redis]
 ```
 
@@ -151,7 +151,7 @@ Schema is created at startup via inline `CREATE TABLE IF NOT EXISTS` — no Alem
 
 ## Stream journals
 
-Enabled by default (`stream_journal_enabled: true`). Encoded SSE frames persist per-request to `.wiwi/journals/` (gitignored). Clients reconnecting with `x-wiwi-stream-id` + `Last-Event-ID` replay even after a restart. Default TTL 600s, 1 MiB/journal cap.
+Enabled by default (`stream_journal_enabled: true`). Encoded SSE frames persist per-request to `.wiwi/journals/` (gitignored). Clients reconnecting with `x-wiwi-stream-id` + `Last-Event-ID` replay even after a restart. Default TTL 600s, 1 MiB/journal cap. Appends are buffered in memory (64 KiB or 50 ms) and flushed before every replay read, so reconnects do not miss frames.
 
 ## Environment knobs
 

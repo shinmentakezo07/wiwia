@@ -49,13 +49,13 @@ The design mirrors LiteLLM's mental model (config-driven `model_list`, model gro
 2. **Wire decode → IR** (`wiwi/wire/<dialect>.py:codec_decode`).
 3. **Authenticate** (`wiwi/auth/service.py:AuthService`) — master key for `/admin/*`; virtual key `sk-wiwi-…` (SHA-256-hashed at rest, constant-time compare) for client traffic; session cookie for `/auth/*` users.
 4. **Resolve group** (`wiwi/router/router.py:Router.resolve_group`) — alias chain + `alias_to_provider`.
-5. **Enforce rate limit** (`wiwi/ratelimit/{memory,redis}.py`) — sliding-window rpm/tpm per key.
+5. **Enforce rate limit** (`wiwi/ratelimit/{memory,redis}.py`) — sliding-window rpm/tpm per key. The in-memory limiter is the default; `RedisRateLimiter` is selected when `general_settings.redis_url` or `REDIS_URL` is set, so caps are shared across workers.
 6. **Build `RequestContext`** (`wiwi/core/context.py`) — the single mutable object threaded through every stage.
 7. **Dispatch**: `ir_req.stream ? gateway.stream(ctx) : gateway.complete(ctx)` — both wrapped by `router.execute_with_retries` for failover over deployments + fallback groups.
 8. **Provider call**: `wiwi/providers/registry.py:fresh_adapter(type)` → `adapter.encode_request` → `_call` → `decode_stream_event`.
-9. **Stream pump** (`wiwi/streaming/` + `wiwi/core/gateway.py`): SSE parse, coalescing, loop detection, partial-JSON tool args, schema validation, StreamTape failover/resume, journal writes.
+9. **Stream pump** (`wiwi/streaming/` + `wiwi/core/gateway.py`): SSE parse, coalescing, loop detection, partial-JSON tool args, schema validation, StreamTape failover/resume, journal writes (buffered 64 KiB / 50 ms; terminal record written directly).
 10. **Outbound encode**: `_encoder_for(surface)` → `ChatStreamEncoder | ResponsesStreamEncoder | AnthropicStreamEncoder` (streaming) or `codec_encode_response` (non-streaming).
-11. **Post** (after the response is on the wire): log the request, record TPM, update spend (budget cap → 402), translate `WiwiError` → per-surface `error_body`.
+11. **Post** (after the response is on the wire): log the request, record TPM, update spend (budget cap → 402), translate `WiwiError` → per-surface `error_body`. With `spend_batching_enabled`, the reservation release and charge are aggregated by `SpendBuffer` and settled in one `UPDATE` per flush instead of two writes per request.
 
 ### Hard invariants
 
@@ -75,20 +75,20 @@ The design mirrors LiteLLM's mental model (config-driven `model_list`, model gro
 | Services | `wiwi/server/services/` | The business rules behind the routes (authorization, invariants), raising `APIError`; no FastAPI imports, so the rules are testable without an HTTP client |
 | Wire codecs | `wiwi/wire/{openai_chat,openai_responses,anthropic_messages}.py` | `decode_request`, `encode_response`, `StreamEncoder`, `error_body` per dialect |
 | IR | `wiwi/ir/types.py`, `ir/builtin_tools.py` | `Part` union (`TextPart`, `ImagePart`, `ToolUsePart`, `ToolResultPart`, `ThinkingPart`, `AudioPart`, `DocumentPart`), `Message`, `Tool`, `ToolChoice*`, `ResponseFormat`, `GenParams`, `Request`, `Usage`, `AssistantTurn`, `Response`; hosted-tool registry |
-| Router | `wiwi/router/router.py` | Groups/deployments/keys, WRR picking, alias chains, `execute_with_retries`, health scoring (EWMA latency + success rate), adaptive cooldowns |
+| Router | `wiwi/router/router.py` | Groups/deployments/keys, WRR picking, alias chains, `execute_with_retries`, health scoring (EWMA latency + success rate), adaptive cooldowns, session and prompt-prefix affinity |
 | Gateway | `wiwi/core/gateway.py` | Executes one IR request router → adapter → httpx; pumps deltas; TTFT/TPS timing; partial billing; stream-failure accounting |
 | Context | `wiwi/core/context.py` | `RequestContext` (surface, ir_req, auth, group, deployment, provider_key, attempts, usage, cost, est_tokens, stop_reason, status, error, metadata, forward_headers, cancel, …) |
 | Recovery | `wiwi/core/recovery.py` | Shared `Backoff`, `CircuitBreaker`, `parse_retry_after`, `build_url`; opt-in `HealthHealer` (1-token probes, graduated probation recovery). Used by router retries, Cline/WorkBuddy refresh services, healer. Imports nothing from router/gateway (cycle safety) |
 | Streaming | `wiwi/streaming/` | `deltas.py` taxonomy, `sse.py` parse/encode, `resume.py` StreamTape, `tape_store.py` JournalStore, `partial_json.py`, `validation.py`, `coalesce.py`, `loopdetect.py` — see [STREAMING.md](STREAMING.md) |
-| Cache | `wiwi/cache/` | Opt-in exact-match response cache (`CacheSettings`, off by default): non-streaming only, keyed on normalized IR + group + surface + key id; bypass via `x-wiwi-no-cache`; memory or Redis backend; `ttl_s <= 0` disables it on both; a hit is rebased onto the serving request's identity (`hit_rebase.py`) |
-| Rate limit | `wiwi/ratelimit/` | Sliding-window rpm/tpm; `memory.py` default, `redis.py` for multi-instance |
-| Auth | `wiwi/auth/` | `service.py` AuthService, `keys.py` virtual keys (hashed), `users.py` user accounts + PBKDF2 passwords + signed cookies |
+| Cache | `wiwi/cache/` | Opt-in exact-match response cache (`CacheSettings`, off by default): non-streaming only, keyed on normalized IR + group + surface + key id; bypass via `x-wiwi-no-cache`; memory or Redis backend; `ttl_s <= 0` disables it on both; a hit is rebased onto the serving request's identity (`hit_rebase.py`). `singleflight.py` dedupes identical concurrent non-streaming requests when enabled. |
+| Rate limit | `wiwi/ratelimit/` | Sliding-window rpm/tpm; sharded in-memory locks by default, `RedisRateLimiter` when `redis_url`/`REDIS_URL` is set so caps are shared across workers |
+| Auth | `wiwi/auth/` | `service.py` AuthService, `spend_buffer.py` batched spend settlement, `keys.py` virtual keys (hashed), `users.py` user accounts + PBKDF2 passwords + signed cookies |
 | Cost | `wiwi/cost/` | Token → USD engine; per-model prices from the DB (`config_store`) with bundled fallback |
 | Logging | `wiwi/logging_core/` | Three-stream logger: request (DB + SSE), proxy (stdout + SSE), audit (sync DB); `LogEvent` ring buffer feeds stats and the windowed metrics, process-lifetime `RequestTotals` carries the monotonic counters; every drop/failure mode is counted and surfaced on `/health` |
 | Config | `wiwi/config.py` | Pydantic v2 models, `load_config`/`load_env`, `PROVIDER_TYPES`, `os.environ/NAME` interpolation |
 | Config store | `wiwi/server/config_store.py` | DB-backed providers/keys/deployments/settings/model_prices (runtime-mutable) |
 | Stats/Metrics | `wiwi/server/stats.py`, `server/metrics.py` | Admin rollups (ring buffer for short ranges, DB aggregates for 7d/30d/all-time) and Prometheus `/metrics` |
-| Frontend | `web/` | React 19 + Vite 6 + Tailwind 4 SPA; admin console + public front; built to `wiwi/server/static/`, served at `/admin/ui` |
+| Frontend | `web/` | React 19 + Vite 6 + Tailwind 4 SPA; admin console (`/console`) + public front; built to `wiwi/server/static/`, mounted at `/` with history fallback |
 
 ## 5. Router & recovery
 
@@ -103,8 +103,24 @@ The design mirrors LiteLLM's mental model (config-driven `model_list`, model gro
 The delta taxonomy and ordering contract, the pump, tape-based mid-stream failover, durable journals with `Last-Event-ID` replay, and the guard subsystems are documented in [STREAMING.md](STREAMING.md). Key properties:
 
 - One `StreamTape` per stream for mid-stream failover (continuation messages synthesized from partial output onto a fallback deployment).
-- `JournalStore` persists encoded SSE frames to `.wiwi/journals/<request_id>.jsonl` (enabled by default, 600 s TTL, 1 MiB cap) so reconnects work across wiwi restarts.
+- `JournalStore` persists encoded SSE frames to `.wiwi/journals/<request_id>.jsonl` (enabled by default, 600 s TTL, 1 MiB cap) so reconnects work across wiwi restarts. Appends are buffered (64 KiB or 50 ms) and the terminal record is written directly; every replay read flushes the active journal first.
 - Backpressure via `asyncio.Queue(maxsize=4096)`; coalescer merges text deltas under pressure; loop detector terminates degenerate repetition with a clean `Finish`.
+
+## 6.1 Performance and accounting
+
+The hot path is intentionally write-light and lock-light. Most changes are on by default; the three that change semantics or billing are opt-in.
+
+- **SQLite** runs in WAL mode with `synchronous=NORMAL`, `busy_timeout=5000`, and foreign keys on every connection. **Postgres** pool size, overflow, and recycle age are configurable (`db_pool_size`, `db_max_overflow`, `db_pool_recycle_s`).
+- **Spend settlement** (`auth/spend_buffer.py`, `spend_batching_enabled`) aggregates the admission reservation release and the real charge into one `UPDATE` per key per flush. The reservation stays in the DB until the flush, so a crash fails closed; near-cap keys flush synchronously. With `shared_database: true`, startup reclaims only reservations older than `reservation_stale_s`, never a live sibling's.
+- **Singleflight** (`cache/singleflight.py`, `singleflight_enabled`) lets identical concurrent non-streaming requests share one upstream call. The key includes `key_id`, so different virtual keys never share a result; joiners are logged with the shared usage at `cost=0`.
+- **Stream journals** buffer appends in memory (64 KiB / 50 ms) instead of one `to_thread` write and `stat` per chunk, and flush before every replay read.
+- **Rate limiting** uses 16 sharded locks so unrelated keys do not serialize. `RedisRateLimiter` is selected when Redis is configured, which is the multi-worker correctness win.
+- **NIM tool schemas** are memoized by a canonical hash of the rendered tools (`tool_schema_cache_entries`, default 256); hits are deep-copied so a caller cannot mutate another request's schema.
+- **Outbound HTTP** uses configurable `httpx` pool limits (`http_max_connections`, `http_max_keepalive_connections`, `http_keepalive_expiry_s`) instead of httpx's 100/20 defaults.
+- **Response cache** default capacity is 1024 entries, up from 256.
+- **Prompt-prefix affinity** (`prefix_affinity`) pins a stable system+tools prefix to the deployment that served it, keeping the provider's own prompt cache warm. It is a preference among healthy candidates, never a hard binding.
+
+Measured on 2026-11-02 against a mock upstream (5 ms JSON, 40 ms streaming) with SQLite, two clean runs: streaming at concurrency 32 improved from 239–405 RPS to 583–810 RPS (1.4–3.4x) with p95 down 25–35%; JSON at concurrency 32 improved 18% by default and 21–56% with batching; the spend path issued 3x fewer `UPDATE`s; singleflight collapsed 40 identical concurrent calls to 2–3 upstream calls; the NIM schema memo was 1.9x faster on the sanitize walk. At concurrency 1 the upstream dominates and the change is within noise. These numbers isolate gateway overhead, so real gains depend on database latency, stream chunk count, and duplicate traffic.
 
 ## 7. Two different cache-hit flags — do not conflate
 
@@ -115,7 +131,7 @@ A response-cache hit must leave `cache_hit=False` (`wiwi/server/app.py` response
 
 ## 8. Persistence
 
-- **SQLite default** (`sqlite+aiosqlite:///wiwi.db`); Postgres auto-normalized to `postgresql+asyncpg://`; `DATABASE_URL` env overrides config.
+- **SQLite default** (`sqlite+aiosqlite:///wiwi.db`) with WAL, `synchronous=NORMAL`, and a 5 s busy timeout; Postgres auto-normalized to `postgresql+asyncpg://` with a configurable pool (`db_pool_size`, `db_max_overflow`, `db_pool_recycle_s`); `DATABASE_URL` env overrides config.
 - Schema created via inline `CREATE TABLE IF NOT EXISTS` at startup — **no Alembic**.
 - Tables: virtual keys (hashed), users/sessions, request logs, provider/key pool state, DB-backed config (providers, deployments, settings, `model_prices`), audit log, DB-backed log aggregates for long-range stats.
 - Runtime scratch: `.wiwi/` (stream journals) — gitignored, never committed.
@@ -131,7 +147,7 @@ A response-cache hit must leave `cache_hit=False` (`wiwi/server/app.py` response
 ## 10. Deployment
 
 - **Docker**: 3-stage Dockerfile (uv builder → npm SPA build → python 3.12-slim runtime), non-root user `wiwi`, healthcheck `GET /health` every 30 s; `WIWI_STATIC_DIR=/app/wiwi/server/static`; data in `/app/data` volume. `docker-compose.yml` runs `postgres:16-alpine` + wiwi with healthcheck-gated `depends_on`.
-- **Process model**: single FastAPI/uvicorn process; Redis extras for multi-instance rate limiting and response caching.
+- **Process model**: single FastAPI/uvicorn process per instance; when `redis_url`/`REDIS_URL` is set, the response cache **and** the rate limiter use Redis, so several instances share entries and rpm/tpm caps. Singleflight, prefix affinity, and the in-memory limiter remain per process.
 - **Observability**: structlog JSON lines, `/metrics` Prometheus endpoint, `/admin/stream` SSE, request/proxy/audit logs.
 
 ## 11. Database tables
@@ -143,7 +159,7 @@ Schema is created with inline `CREATE TABLE IF NOT EXISTS` at startup — there 
 | `request_logs` | `logging_core/db_sink.py` | per-request tokens, TTFT, latency, TPS, cost, cache, retry chain |
 | `request_rollups` | `logging_core/db_sink.py` | hourly aggregates (`key_id`/`model_group`/`provider`) kept permanently for pruned rows, incl. a per-metric percentile histogram (`p95_hist`) |
 | `audit_logs` | `logging_core/db_sink.py` | `actor` / `action` / `target` / `diff` for every admin mutation |
-| `vkeys` | `auth/service.py` | hashed virtual keys + budgets + spend |
+| `vkeys` | `auth/service.py` | hashed virtual keys + budgets + spend + live budget reservations (`budget_reserved`, `reserved_at`, `reservation_owner`) |
 | `users` | `auth/users.py` | user accounts and roles |
 | `providers` · `provider_keys` · `deployments` · `settings` · `model_prices` | `server/config_store.py` | admin-created config that must survive restart |
 

@@ -31,7 +31,12 @@ providers:           [...]     # providers referenced by model_list
 general_settings:
   master_key: sk-wiwi-master-test        # required: admin auth key (WIWI_MASTER_KEY)
   database_url: os.environ/DATABASE_URL  # default: SQLite in repo root
-  redis_url:                             # optional; needs the [redis] extra
+  redis_url:                             # optional; response cache + rate limiter
+  # db_pool_size: 10                     # Postgres only; SQLite ignores these
+  # db_max_overflow: 20
+  # db_pool_recycle_s: 300
+  # shared_database: false               # true when several replicas share this DB
+  # reservation_stale_s: 600             # shared-DB budget-reservation reclaim horizon
   max_keys_per_user: 50                  # live virtual keys per owner (admins included)
   trusted_proxies: os.environ/WIWI_TRUSTED_PROXIES  # CSV of proxy CIDRs
 ```
@@ -39,8 +44,13 @@ general_settings:
 | Field | Default | Notes |
 |---|---|---|
 | `master_key` | — | Admin auth key. **No code reads a `WIWI_MASTER_KEY` environment variable directly** — it takes effect only if your config interpolates it, as `wiwi.yaml.example` does with `master_key: os.environ/WIWI_MASTER_KEY`. A literal `master_key:` ignores the env var. Startup fails closed unless this is set or `WIWI_SESSION_SECRET` is. |
-| `database_url` | `sqlite+aiosqlite:///wiwi.db` | SQLAlchemy URL. Postgres: `postgresql+asyncpg://...`. `DATABASE_URL` env overrides. |
-| `redis_url` | `""` | Redis for the shared response cache; requires the `[redis]` extra. `REDIS_URL` env overrides. |
+| `database_url` | `sqlite+aiosqlite:///wiwi.db` | SQLAlchemy URL. Postgres: `postgresql+asyncpg://...`. `DATABASE_URL` env overrides. SQLite gets `journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout=5000`, and `foreign_keys=ON` on every connection. |
+| `db_pool_size` | `10` | Postgres pool size. Ignored for SQLite. Raise it when the log pump, spend settlement, stats reads, and admission all share the pool under load. |
+| `db_max_overflow` | `20` | Postgres overflow connections above `db_pool_size`. Ignored for SQLite. |
+| `db_pool_recycle_s` | `300.0` | Postgres connection recycle age. Ignored for SQLite. |
+| `shared_database` | `false` | Set `true` when more than one gateway process or replica uses the same database. Startup then reclaims only reservations older than `reservation_stale_s` instead of zeroing every live sibling's in-flight `budget_reserved`. |
+| `reservation_stale_s` | `600.0` | Shared-database horizon for reclaiming a crashed process's budget reservation. A live sibling refreshes `reserved_at` on every reserve/release/settle, so its rows survive another replica's startup. Ignored when `shared_database: false`. |
+| `redis_url` | `""` | Redis for the shared response cache **and** the rate limiter; requires the `[redis]` extra. `REDIS_URL` env overrides. When set, `RedisRateLimiter` replaces the in-process limiter, so per-key and global rpm/tpm caps are shared across workers. If Redis is unreachable, both backends degrade rather than failing requests. |
 | `max_keys_per_user` | `50` | Ceiling on live virtual keys per owner. Applies to real accounts, admins included; only the synthetic master (no `users` row) mints un-owned keys. |
 | `trusted_proxies` | `[]` | CIDRs of reverse-proxy peers whose `X-Forwarded-For` may key the abuse throttles **and** whose `X-Forwarded-Proto: https` may set the session cookie's `Secure` flag and the Cline OAuth callback scheme. Empty means those headers are never trusted. Put your proxy here when TLS terminates in front of wiwi. `WIWI_TRUSTED_PROXIES` env overrides, comma- or whitespace-separated. |
 | `unpriced_model_policy` | `"warn"` | What a virtual key's `max_budget` means when the resolved model has no pricing row. `warn` (default) serves and tags the request `unpriced_model` in the request log; `admit` serves silently (pre-#323 behaviour); `reject` refuses budget-capped keys with **503** `unpriced_model_error` until an admin prices the model. Uncapped keys and the master key are never affected. |
@@ -80,6 +90,19 @@ wiwi_settings:
   log_retention_days: 30          # prune raw request_logs older than this; 0 = keep forever
   log_max_rows: 10000             # keep at most N raw rows; 0 = unlimited
   log_prune_interval_s: 3600      # seconds between prune sweeps; 0 = startup only
+  # -- performance and accounting (defaults preserve strict semantics) --
+  spend_batching_enabled: false   # aggregate reservation release + charge
+  spend_flush_interval_ms: 250
+  spend_flush_max_pending: 1000
+  spend_flush_max_dollars_per_key: 1.0
+  singleflight_enabled: false     # identical concurrent non-streaming calls share one upstream call
+  singleflight_max_flights: 2048
+  singleflight_max_waiters: 64
+  tool_schema_cache_entries: 256  # NIM schema memo; 0 disables
+  http_max_connections: 200       # outbound httpx pool
+  http_max_keepalive_connections: 40
+  http_keepalive_expiry_s: 30.0
+  perf_timings: false             # emit x-wiwi-timings for bench.py
 ```
 
 | Field | Default | Notes |
@@ -95,6 +118,22 @@ wiwi_settings:
 | `log_retention_days` | `30` | Drop raw `request_logs` rows older than this; 0 keeps forever. Rows are rolled into `request_rollups` first. |
 | `log_max_rows` | `10000` | Cap on raw log rows; 0 = unlimited. |
 | `log_prune_interval_s` | `3600` | Seconds between prune sweeps; 0 = startup only. |
+| `spend_batching_enabled` | `false` | Aggregate the admission reservation release and the real charge into one `UPDATE` per key per flush. Off by default: it changes the failure model (an unflushed charge is lost on a process crash, bounded by the interval and caps) and makes spend visible to admission up to one flush interval late. The reservation stays in the DB until the flush, so a crash fails closed. |
+| `spend_flush_interval_ms` | `250` | Flush cadence for the spend buffer. Lower values reduce the cross-replica freshness window at the cost of more writes. |
+| `spend_flush_max_pending` | `1000` | Flush early when this many charges are buffered, bounding memory and the loss window. |
+| `spend_flush_max_dollars_per_key` | `1.0` | Flush early when one key's buffered charges reach this amount. `0` disables the dollar trigger. |
+| `singleflight_enabled` | `false` | Identical concurrent non-streaming requests share one upstream call. Off by default because it changes billing: the leader is charged once and joiners are logged with the shared usage and `cost=0`. Excludes streaming requests and requests with builtin tools. |
+| `singleflight_max_flights` | `2048` | Maximum concurrent in-flight keys before new callers bypass dedupe and run independently. |
+| `singleflight_max_waiters` | `64` | Maximum waiters per key before additional callers bypass and run independently, so a hot key cannot become a head-of-line queue. |
+| `tool_schema_cache_entries` | `256` | Bounded memo for NIM's sanitized tool schemas, keyed by a canonical hash of the rendered tools. `0` disables the memo. |
+| `http_max_connections` | `200` | Outbound `httpx` connection pool ceiling for provider calls. The old httpx default (100) queues streams behind the pool under high fan-out. |
+| `http_max_keepalive_connections` | `40` | Keep-alive connections retained in the outbound pool. |
+| `http_keepalive_expiry_s` | `30.0` | Idle keep-alive expiry for the outbound pool. |
+| `perf_timings` | `false` | Emit `x-wiwi-timings` (per-stage milliseconds: `decode`, `auth`, `admit`, `dispatch`, `upstream`, `encode`) so `bench.py` can attribute latency. Streaming responses carry only the first four. Off by default; the marks cost a few `monotonic()` calls per request. |
+
+**Spend batching and crash safety.** The batched path keeps the admission reservation in the database until the flush. If the process dies before a flush, the reservation remains (headroom shrinks, fail closed) and the buffered charge is lost; the flush interval and the two caps bound that exposure, and a key near its budget is flushed synchronously. With `shared_database: true`, startup reclaims only reservations older than `reservation_stale_s`, so a sibling replica's live reservation is not erased. With `spend_batching_enabled: false`, the original two-write path is used.
+
+**Singleflight billing.** The leader pays for the upstream call and logs the real usage. Joiners are served from the leader's encoded payload, rebased onto their own request id, logged with the shared usage and `cost=0`, and carry `x-wiwi-singleflight: JOINED`. Different virtual keys never share a flight because the key includes `key_id`.
 
 ## `router_settings`
 
@@ -115,6 +154,11 @@ router_settings:
   key_max_consecutive_fails: 5           # permanent retirement threshold (any_error mode)
   prometheus_enabled: false
   prometheus_path: /metrics              # must be a literal path starting with "/"
+  # -- affinity --
+  session_affinity: false
+  session_affinity_ttl_s: 600.0
+  prefix_affinity: false                 # pin a stable system+tools prefix
+  prefix_affinity_ttl_s: 600.0
 ```
 
 Streaming resilience and journal knobs live here too — see the tables below.
@@ -166,6 +210,8 @@ Three admission controls for a gateway fronting a shared upstream pool. All are
 | `default_lane` | `"bulk"` | Lane used by a key with no `priority` set, and the fallback for a lane name not in `priority_lanes`. |
 | `session_affinity` | `false` | Pin a client session to the deployment that served it. |
 | `session_affinity_ttl_s` | `600.0` | How long a session stays pinned before it may be re-pinned. |
+| `prefix_affinity` | `false` | Pin a stable leading prefix (the leading system messages plus the tool definitions) to the deployment that served it, so the provider's own prompt cache keeps hitting. A preference, not a binding: the pin is ignored when the deployment is cooling, excluded, above this request's lane ceiling, or outside the TTL. |
+| `prefix_affinity_ttl_s` | `600.0` | How long a prefix stays pinned. Pins are bounded at 4096 entries; the oldest is evicted when the map is full. |
 
 **503, not 429.** A shed request is refused with `503` and the configured
 `Retry-After`. This is deliberately distinct from an rpm/tpm cap, which is `429`
@@ -205,16 +251,26 @@ router_settings:
   default_lane: bulk
   session_affinity: true
   session_affinity_ttl_s: 900
+  prefix_affinity: true
+  prefix_affinity_ttl_s: 600
 ```
 
 Clients opt into affinity with an `x-wiwi-session-id` header (or a `session_id`
 query parameter, for clients that cannot set headers); the value is truncated to
-128 characters. Affinity state is per process, like the in-memory rate limiter and
-response cache — a multi-instance gateway pins per instance.
+128 characters. Affinity state is per process, like the in-memory rate limiter.
+With Redis configured, cache entries and rate limits are shared, but affinity pins
+are not — a multi-instance gateway pins per instance.
+
+`prefix_affinity` needs no client header: it hashes the leading system messages plus
+the tool definitions and pins that prefix to the deployment that served it, so the
+provider's own prompt cache keeps hitting across turns. It is a preference among
+healthy candidates — ignored when the pinned deployment is cooling, excluded, above
+this request's lane ceiling, or past the TTL — and the pin map is bounded at 4096
+entries, oldest evicted first.
 
 ### Stream journal
 
-Encoded SSE frames are appended to a per-request JSONL file, so a client reconnecting with `x-wiwi-stream-id` + `Last-Event-ID` replays even after a wiwi restart. **On by default.** Journals are key-scoped — readable only by the virtual key that created them.
+Encoded SSE frames are appended to a per-request JSONL file, so a client reconnecting with `x-wiwi-stream-id` + `Last-Event-ID` replays even after a wiwi restart. **On by default.** Journals are key-scoped — readable only by the virtual key that created them. Appends are buffered in memory (64 KiB or 50 ms, whichever comes first) and the terminal record is written directly; every replay read flushes the active journal first, so a reconnect never misses a frame still in the buffer.
 
 | Field | Default | Notes |
 |---|---|---|
@@ -244,7 +300,7 @@ The response cache is exact-match: same normalized IR + group + surface + key id
 
 A hit is replayed under the **serving** request's identity: the response `id` and `created`/`created_at` belong to the request being answered (so on `/v1/responses` the returned `resp_…` id resolves through `GET /v1/responses/{id}` and `previous_response_id`), while the rest of the body is byte-identical to the entry that produced it.
 
-There is no `backend` field. The backend is chosen from `general_settings.redis_url` (or `REDIS_URL`): Redis when set **and** the `[redis]` extra imports, otherwise in-process memory.
+There is no `backend` field. The backend is chosen from `general_settings.redis_url` (or `REDIS_URL`): Redis when set **and** the `[redis]` extra imports, otherwise in-process memory. The same URL also selects `RedisRateLimiter` for rate limiting, so the response cache and the limiter share one Redis configuration.
 
 ## `healer`
 
@@ -509,9 +565,9 @@ DATABASE_URL=postgresql+asyncpg://user:pass@host/db wiwi --config wiwi.yaml
 All config is parsed through Pydantic v2 models in `wiwi/config.py`:
 
 - `WiwiConfig` — top-level aggregate (`providers`, `model_list`, `router_settings`, `general_settings`, `wiwi_settings`, `cache_settings`, `healer`)
-- `GeneralSettings` — `master_key`, `database_url`, `redis_url`, `max_keys_per_user`, `trusted_proxies`
-- `WiwiSettings` — `host`, `port`, `public_url`, `drop_params`, `max_request_body_mb`, `store_prompts_in_spend_logs`, `store_responses`, `response_store_ttl_s`, `log_retention_days`, `log_max_rows`, `log_prune_interval_s`
-- `RouterSettings` — routing strategy, retries, timeouts, cooldowns, fallbacks, streaming + journal knobs, Prometheus, cycle + failover policy
+- `GeneralSettings` — `master_key`, `database_url`, `redis_url`, `max_keys_per_user`, `trusted_proxies`, `db_pool_size`, `db_max_overflow`, `db_pool_recycle_s`, `shared_database`, `reservation_stale_s`
+- `WiwiSettings` — `host`, `port`, `public_url`, `drop_params`, `max_request_body_mb`, `store_prompts_in_spend_logs`, `store_responses`, `response_store_ttl_s`, `log_retention_days`, `log_max_rows`, `log_prune_interval_s`, `spend_batching_enabled`, `spend_flush_interval_ms`, `spend_flush_max_pending`, `spend_flush_max_dollars_per_key`, `singleflight_enabled`, `singleflight_max_flights`, `singleflight_max_waiters`, `tool_schema_cache_entries`, `http_max_connections`, `http_max_keepalive_connections`, `http_keepalive_expiry_s`, `perf_timings`
+- `RouterSettings` — routing strategy, retries, timeouts, cooldowns, fallbacks, streaming + journal knobs, Prometheus, cycle + failover policy, `session_affinity`/`session_affinity_ttl_s`, `prefix_affinity`/`prefix_affinity_ttl_s`
 - `CacheSettings` — enabled, ttl_s, max_entries, bypass_header
 - `HealerSettings` — enabled, tick_s, probe_timeout_s, max_probes_per_sweep, probation_weight, etc.
 - `ProviderDef` — per-provider config (`base_url`, `timeout_s`, `extra_headers`, `round_robin`, `keys`, `alias_id`)

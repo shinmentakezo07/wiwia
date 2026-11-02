@@ -42,11 +42,12 @@ wiwi/
 │   ├── deltas.py · sse.py · resume.py · tape_store.py
 │   ├── coalesce.py · loopdetect.py · partial_json.py · validation.py
 ├── cache/                # exact-match response cache (off by default)
-│   ├── interface.py · response_cache.py · redis_cache.py · keygen.py
+│   ├── interface.py · response_cache.py · redis_cache.py · keygen.py · singleflight.py
 ├── ratelimit/            # sliding-window rpm/tpm
 │   ├── memory.py · redis.py
 ├── auth/
-│   ├── service.py        # AuthService: master key + virtual key auth
+│   ├── service.py        # AuthService: master key + virtual key auth, budget reserve/settle
+│   ├── spend_buffer.py   # batched spend settlement (opt-in)
 │   ├── keys.py           # virtual-key mint/hash/compare (SHA-256, constant-time)
 │   └── users.py          # user accounts, PBKDF2 passwords, signed session cookies
 ├── cost/
@@ -119,11 +120,16 @@ Encoders are one-directional state machines over the IR delta taxonomy; they ass
 ### Auth (`auth/`)
 `AuthService.authenticate(plaintext)` distinguishes master key (admin) from virtual key (client) — it takes a bearer-style plaintext and does **not** handle session cookies; those are verified separately by `verify_session` in `auth/users.py`, wired in `server/app.py`. Virtual keys: SHA-256 at rest, constant-time compare, model allowlists/budgets/rpm-tpm/expiry, owner (user) linkage. Users: PBKDF2 password hashing, HMAC-signed HttpOnly cookies, roles.
 
+Budget admission reserves headroom (`reserve_budget`, tracked in `budget_reserved` with `reserved_at`/`reservation_owner`) and releases or settles it after the call. `settle_spend` performs the release and the charge as one combined `UPDATE`. With `spend_batching_enabled`, `auth/spend_buffer.py:SpendBuffer` aggregates those settlements per key and flushes on an interval (250 ms default) or early near a cap / on pending-count / per-key dollar caps; the admission reservation stays in the DB until the flush, so a crash fails closed. `/health` exposes `spend_flush_failures`. With `shared_database: true`, startup reclaims only reservations older than `reservation_stale_s` instead of zeroing live siblings' rows.
+
 ### Rate limiting (`ratelimit/`)
-Sliding-window counters per key: `memory.py` (default) and `redis.py` (multi-instance). Enforced after auth, before routing.
+Sliding-window counters per key: `memory.py` (default) and `redis.py` (selected when `general_settings.redis_url` or `REDIS_URL` is set). Enforced after auth, before routing. The memory limiter shards locks by key (16 shards) and takes the global-cap lock only when a global cap is configured; the Redis limiter writes reservations into a per-scope hash so a crashed worker's reservation is reconciled instead of leaking, and `release(key_id, request_id)` removes only that request's members.
 
 ### Response cache (`cache/`)
-Exact-match, non-streaming only, no builtin tools. Key = normalized IR + group + surface + key id (`keygen.py`). Backends: `MemoryResponseCache` (LRU + lazy TTL) and Redis. Per-request bypass: `x-wiwi-no-cache`. Hit accounting uses `response_cache_hit`, never `cache_hit` (that's the provider prompt-cache flag). `ttl_s <= 0` disables the cache on both backends (one startup warning). A hit is rebased onto the serving request's identity — `id` and `created`/`created_at` describe the request being answered, so a Responses hit's `resp_…` id stays dereferenceable (`hit_rebase.py`).
+Exact-match, non-streaming only, no builtin tools. Key = normalized IR + group + surface + key id (`keygen.py`). Backends: `MemoryResponseCache` (LRU + lazy TTL, `max_entries` 1024) and Redis. Per-request bypass: `x-wiwi-no-cache`. Hit accounting uses `response_cache_hit`, never `cache_hit` (that's the provider prompt-cache flag). `ttl_s <= 0` disables the cache on both backends (one startup warning). A hit is rebased onto the serving request's identity — `id` and `created`/`created_at` describe the request being answered, so a Responses hit's `resp_…` id stays dereferenceable (`hit_rebase.py`). `singleflight.py` is a separate, opt-in path that dedupes identical **concurrent** requests; it does not populate the response cache.
+
+### Performance and accounting
+The write-light path is documented in [ARCHITECTURE.md](ARCHITECTURE.md) §6.1 and the knobs in [CONFIG.md](CONFIG.md): batched spend settlement, singleflight, buffered stream journals, sharded limiter locks, the NIM schema memo, configurable outbound HTTP pool limits, 1024-entry response cache, and prompt-prefix affinity. Only `spend_batching_enabled`, `singleflight_enabled`, and `prefix_affinity` change semantics, so all three default off; `perf_timings` emits `x-wiwi-timings` for `bench.py`.
 
 ### Cost (`cost/`)
 `CostEngine` resolves tokens → USD from DB-backed `model_prices` (`server/config_store.py`) with a bundled fallback table; `estimate_tokens_async` provides the chars/4-style estimate when usage is missing (`UsageFinal.estimated=True`).

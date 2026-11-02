@@ -343,7 +343,7 @@ All three surfaces route through the same function. The full pipeline:
    └─ Streaming: gateway.stream() → StreamingResponse (text/event-stream)
 9. Log: build_log_event(ctx) → LoggingSubsystem.log_request()
 10. Record TPM usage: RateLimiter.record_tokens()
-11. Update spend: AuthService.update_spend() (virtual keys only)
+11. Update spend: AuthService.update_spend(), or SpendBuffer.charge()/settle_spend() when spend_batching_enabled (virtual keys only)
 ```
 
 ### Streaming first-delta probe
@@ -744,6 +744,8 @@ Admin mutations (disable, delete, update, create) evict the affected cache entry
 
 `update_spend(key_id, add_cost)` increments `spend_to_date` in the DB and also adjusts any cached `AuthInfo` in place, so budget limits are enforced promptly without a re-lookup. Master key spend is not tracked.
 
+With `spend_batching_enabled`, the post-response path goes through `auth/spend_buffer.py:SpendBuffer` instead: `charge()` updates the cached `AuthInfo` immediately (so same-process admission sees the new spend) and buffers the write; a flush settles the reservation release and the charge in one `settle_spend` UPDATE (`spend_to_date += cost`, `budget_reserved = max(budget_reserved - reserved, 0)`). Flushes happen every `spend_flush_interval_ms`, early near a cap, at `spend_flush_max_pending`, or at `spend_flush_max_dollars_per_key` for one key. The reservation remains in the DB until the flush, so a crash fails closed; with `shared_database: true`, startup reclaims only reservations older than `reservation_stale_s`. `/health` reports `spend_flush_failures`.
+
 ### Updatable fields
 
 `max_budget`, `rpm`, `tpm`, `models`, `expires_at`. Absent = unchanged; explicit `null` = clear.
@@ -1050,7 +1052,7 @@ cd web && npm install && npm run build   # → wiwi/server/static/
 npm run dev                              # Vite dev server, proxies to :4000
 ```
 
-The built SPA is served at `/admin/ui` with SPA history fallback (`SPAStaticFiles` — unknown paths get `index.html`).
+The built SPA is served at `/` (console at `/console`) with SPA history fallback (`SPAStaticFiles` — unknown paths get `index.html`).
 
 ---
 

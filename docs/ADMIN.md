@@ -9,7 +9,7 @@ How wiwi is administered: the React SPA (admin console + public front), the mast
 ## 1. One process, one port
 
 ```
-Browser ──► :4000/admin/ui          (SPA — admin console + public front)
+Browser ──► :4000/                  (SPA — admin console at /console + public front)
         ──► :4000/admin/*           (admin JSON API, master-key auth)
         ──► :4000/auth/*            (user signup/login/logout, cookie session)
         ──► :4000/public/*          (secret-free catalog, no auth)
@@ -17,7 +17,7 @@ Browser ──► :4000/admin/ui          (SPA — admin console + public front)
         ──► :4000/v1/*              (client traffic — virtual keys)
 ```
 
-- FastAPI mounts the built SPA from `wiwi/server/static/` (`/admin/ui` → `index.html`, assets under `/admin/ui/assets`) via a `_SPAStaticFiles` subclass.
+- FastAPI mounts the built SPA from `wiwi/server/static/` at **`/`** with history fallback (`SPAStaticFiles` — unknown paths get `index.html`, assets under `/assets`) after all API routes. The console is **`/console`**; `/app/*` is a legacy redirect.
 - SPA source lives in `web/`. Build: `cd web && npm install && npm run build` → `wiwi/server/static/` (gitignored; CI/local builds produce it). Dev: `npm run dev` proxies `/admin /v1 /auth /public /health` → `:4000`.
 - Stack: React 19, TypeScript (strict + `verbatimModuleSyntax` + `noUnusedLocals/Parameters`), Vite 6, Tailwind CSS 4, TanStack Query v5, Recharts, react-router-dom v7, lucide-react. Hand-rolled component set (buttons, cards, tables, dialogs, badges) — no heavyweight UI kit.
 - No CORS work needed — same origin.
@@ -56,12 +56,12 @@ Admin-facing pages (under the guarded area; the sidebar is role-aware):
 | **Alert Rules** | Spend/alert thresholds (`/admin/alert-rules`) |
 | **Users** | Account list, role changes, disable (admin only) |
 
-Public front pages (unauthenticated, `PublicLayout`): Landing, Models catalog (`/public/models`), Docs, Playground, Pricing, Integrations, Enterprise, OpenSource, Apps, Agents, Partners, Referrals, Ship, Migration, Timeline, About, Legal, SSO, and similar — ~30 pages mixed with ~15 console pages in `web/src/pages/`. **Never assume a page is admin-facing from the directory alone.**
+Public front pages (unauthenticated, `PublicLayout`): Landing, Models catalog (`/public/models`), Docs, Playground, Pricing, Integrations, Enterprise, OpenSource, Apps, Agents, Partners, Referrals, Ship, Migration, Timeline, About, Legal, SSO, and similar — ~30 public pages mixed with the console pages across 56 components in `web/src/pages/`. **Never assume a page is admin-facing from the directory alone.**
 
 ## 4. Realtime
 
 - `GET /admin/stream` (SSE) is the single realtime channel: live `stats.tick` events, request/proxy log events, provider health changes.
-- The Dashboard aggregates client-side; no polling beyond TanStack Query refetch intervals for the slower pages.
+- The Dashboard aggregates client-side; SSE carries live data, and TanStack Query refetch intervals are a 30 s fallback for the slower pages, not the primary update path.
 - Refetch behavior: previous render held at reduced opacity — no skeleton flash.
 
 ## 5. Provider & key-pool management flow
@@ -163,7 +163,8 @@ Every admin-UI change must be verified on desktop **and** mobile before it count
 
 - Master-key rotation: set a new `WIWI_MASTER_KEY` and a fixed `WIWI_SESSION_SECRET` to keep existing session cookies valid; otherwise the signing secret is derived from the master key and rotation invalidates them.
 - `GET /admin/providers/{name}/keys/{label}/secret` is the only secret-reveal path and is audit-logged.
-- Budget enforcement: per-key budgets and spend updates are applied post-response; exceeding a cap yields `402` on subsequent requests.
+- Budget enforcement: per-key budgets are reserved at admission and settled post-response; exceeding a cap yields `402` on subsequent requests. With `spend_batching_enabled`, settlement is aggregated per key (250 ms default) and flushed early near a cap; spend visible to admission can lag by up to one flush interval, and `/health` reports `spend_flush_failures` when a flush cycle fails and will be retried.
+- Per-stage latency: set `wiwi_settings.perf_timings: true` to get `x-wiwi-timings` (`decode`, `auth`, `admit`, `dispatch`, `upstream`, `encode`) on non-streaming responses and the first four stages on streaming responses. It is a debugging/benchmark aid, off by default.
 - Prometheus scrape: `GET /metrics` (path configurable) — see [API_REFERENCE.md](API_REFERENCE.md) §2.
 
 ## 9. Design system

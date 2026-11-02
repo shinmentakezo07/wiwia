@@ -73,10 +73,10 @@ wiwi --config wiwi.yaml                    # or: wiwi -c wiwi.yaml --host 0.0.0.
   rest, plaintext shown once at mint).
 - `web/` uses **npm**; `web/package-lock.json` is authoritative and `start.sh` uses npm.
   `web/` is eslint-only, NOT ruff.
-- `web/src/pages/` mixes ~15 admin pages with ~30 marketing pages — directory alone doesn't
-  tell you if a page is admin-facing.
+- `web/src/pages/` mixes ~15 console pages with ~30 marketing pages (56 components total) —
+  directory alone doesn't tell you if a page is admin-facing.
 - `web/tsconfig.json` + `npm run build` output lands in `wiwi/server/static/` (served at
-  `/admin/ui`); rebuild after UI changes or the served bundle is stale.
+  `/`, console at `/console`); rebuild after UI changes or the served bundle is stale.
 
 ## Test conventions
 

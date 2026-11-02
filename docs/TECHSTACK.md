@@ -10,7 +10,7 @@ The stack as shipped (source of truth: `pyproject.toml`, `web/package.json`, `Do
 
 | Layer | Pick | Version | Confidence |
 |---|---|---|---|
-| Language | Python | >= 3.11 (3.12 dev) | high |
+| Language | Python | >= 3.11 (3.13 dev, 3.12 in Docker) | high |
 | Package manager | uv (lockfile: `uv.lock`) · pip works | latest | high |
 | API framework | FastAPI | >= 0.110 | high |
 | ASGI server | uvicorn[standard] | >= 0.29 | high |
@@ -69,7 +69,7 @@ Runtime dependencies: 12. That count is a feature.
 
 **No msgspec; tiktoken is a declared dependency.** orjson covers hot-path serialization. Provider-reported usage is authoritative for billing, but when upstream omits usage the fallback estimator (`cost/estimate_tokens_async`) uses tiktoken for OpenAI-family models and the chars/4 heuristic for everything else. tiktoken was originally *not* declared, which meant a clean `uv sync` silently dropped to chars/4 and degraded cost/budget accounting — the fallback is now a deliberate choice rather than an accident of what happened to be installed.
 
-**In-memory defaults, Redis opt-in.** Sliding-window rate limiting and the exact-match response cache run in-process by default (single-instance self-hosting target); the `[redis]` extra enables multi-instance correctness.
+**In-memory defaults, Redis opt-in.** Sliding-window rate limiting and the exact-match response cache run in-process by default (single-instance self-hosting target). When `general_settings.redis_url` or `REDIS_URL` is set and the `[redis]` extra is installed, **both** use Redis: cache entries and per-key rpm/tpm caps are shared across instances, which is the multi-worker correctness win.
 
 **Tracing is an encoder, not a framework.** Spans are opened at seams the request
 already has (`run_chat_like`, the attempt loop, the Responses store) and carry

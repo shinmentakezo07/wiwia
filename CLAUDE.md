@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **wiwi** is a self-hosted unified LLM gateway proxy (LiteLLM-shaped): three inbound API dialects — OpenAI Chat, OpenAI Responses (Codex CLI), Anthropic Messages — plus the legacy OpenAI Completions shape and a browser-session twin of Chat, all route through one canonical internal representation (IR) to any of thirteen outbound provider types; responses are always re-encoded in the caller's inbound dialect (e.g. Claude Code backed by GPT). Adds virtual keys, budgets, rate limits, key pools with smooth weighted round-robin, retries/cooldowns/fallbacks, a health healer, cost tracking, request logs, and an admin web UI.
 
-**Scale, verified 2026-10-29** (re-measure rather than trust): 90 Python files under `wiwi/`, `__init__.py`s included; `wiwi/server/app.py` ~7.4k lines and `wiwi/core/gateway.py` ~3.0k; `wiwi/wire/` 4 codecs, `wiwi/providers/` 12 types across 25 files; 9 `/v1` routes and 59 `/admin` routes; 227 test files collecting 3,825 tests; 64 components in `web/src/pages/`. Counts drift — the commands below are the source of truth.
+**Scale, verified 2026-11-02** (re-measure rather than trust): 94 Python files under `wiwi/`, `__init__.py`s included; `wiwi/server/app.py` ~7.7k lines and `wiwi/core/gateway.py` ~3.0k; `wiwi/wire/` 4 codecs, `wiwi/providers/` 13 types across 28 files; 9 `/v1` routes and 59 `/admin` routes; 237 test files collecting 3,995 tests; 56 components in `web/src/pages/`. Counts drift — the commands below are the source of truth.
 
 **Use the ambient `python3` (3.13.5 at time of writing — *not* 3.12, as older versions of this file claimed) / `pytest` (9.1.1) / `ruff` (0.17.1) on PATH** — they have the project installed (`import wiwi` resolves to this checkout). There is **no usable `.venv`**: the directory does not exist in this checkout, and the docs that describe it as an empty uv-venv symlink are stale either way. Never invoke `.venv/bin/python`.
 
@@ -16,7 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # setup — only needed on a fresh machine; this checkout is already installed
-uv pip install -e ".[dev]"               # + ".[redis]" for the Redis response-cache backend
+uv pip install -e ".[dev]"               # + ".[redis]" for the Redis response cache and rate limiter
                                          # (asyncpg is a core dep — Postgres needs no extra)
 
 # run server (default 0.0.0.0:4000; needs wiwi.yaml — cp wiwi.yaml.example wiwi.yaml)
@@ -80,21 +80,21 @@ Inbound surfaces: `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/m
 | `providers/` | Outbound adapters: `openai`, `anthropic`, `gemini`, `openrouter`, `nim`, `cline`, `bai`, `workbuddy`, `opencode`, `hermes` (+ `hermes_oauth.py`/`hermes_auto_refresh.py`, `cline_oauth.py`/`cline_auto_refresh.py`/`cline_version.py`, `workbuddy_auth.py`/`workbuddy_auto_refresh.py`/`workbuddy_version.py`, `opencode_version.py`, `nim_tool_schema.py`/`nim_native_tools.py`, `token_expiry.py`), plus `base.py` + `registry.py`. `openai-compatible` and `gmicloud` have no adapter file — both resolve to the `openai` adapter via `_OPENAI_WIRE_TYPES` |
 | `core/` | Engine: `gateway.py` (~3.0k lines), `context.py` (RequestContext, 121 lines), `recovery.py` (Backoff, CircuitBreaker, ProbeVerdict, HealthHealer), `telemetry.py` |
 | `ir/` | Internal representation (`types.py`, `builtin_tools.py`, `translation.py`) |
-| `streaming/` | `IRStreamDelta` taxonomy (151 lines, `deltas.py`) + `sse.py` / `coalesce.py` / `resume.py` / `tape_store.py` (durable journals) / `partial_json.py` / `loopdetect.py` / `validation.py` — the contract between adapters and encoders |
+| `streaming/` | `IRStreamDelta` taxonomy (215 lines, `deltas.py`) + `sse.py` / `coalesce.py` / `resume.py` / `tape_store.py` (durable journals) / `partial_json.py` / `loopdetect.py` / `validation.py` — the contract between adapters and encoders |
 | `router/` | Key pools, weighted round-robin, retries, cooldowns, fallbacks, probation |
-| `auth/` | Virtual keys, budgets, users (`keys.py`, `service.py`, `users.py`) |
+| `auth/` | Virtual keys, budgets, users (`keys.py`, `service.py`, `users.py`), batched spend settlement (`spend_buffer.py`) |
 | `ratelimit/` | Sliding-window rpm/tpm (memory default + redis) |
-| `cache/` | Opt-in exact-match response cache (`CacheSettings`, off by default) |
+| `cache/` | Opt-in exact-match response cache (`CacheSettings`, off by default) + opt-in singleflight dedupe (`singleflight.py`) |
 | `cost/` | Token/cost calculation (`pricing.py`) |
 | `logging_core/` | Three-stream logger: request (DB+SSE), proxy (stdout+SSE), audit (sync DB) — `events.py`, `subsystem.py`, `db_sink.py`, `hist.py`, `retention.py` |
-| `server/` | FastAPI app (`app.py`, ~7.4k lines), admin API, `stats.py` rollups, `metrics.py` (Prometheus), `config_store.py`, `response_store.py` (Responses-API state), `backup.py`, static SPA serving |
+| `server/` | FastAPI app (`app.py`, ~7.7k lines), admin API, `stats.py` rollups, `metrics.py` (Prometheus), `config_store.py`, `response_store.py` (Responses-API state), `backup.py`, static SPA serving |
 | `server/routers/` | HTTP routers, one module per admin surface. A router owns the HTTP shape (path, method, request/response models) and delegates the rules to `server/services/`. The auth guard is a **module-level** dependency — a per-app closure is invisible to FastAPI's annotation resolver, which silently demotes the parameter to a body field (AUDIT #508) |
 | `server/schemas/` | Pydantic v2 request/response models per surface. `extra="ignore"`; a validator raises `ValueError` (a `TypeError` escapes as an unhandled 500) |
 | `server/services/` | The business rules behind the routes (authorization, invariants), raising `APIError`. No FastAPI imports — the rules are testable without an HTTP client |
 | `server/dependencies.py` | The auth guards as importable FastAPI dependencies (`require_user`, `require_admin`), reading the app state via `request.app.state.wiwi` |
 | `server/errors.py` | `APIError` (status + error type + dialect) and the per-dialect renderer. A raised `APIError` becomes the caller's dialect body; a request-validation failure becomes a **400**, never FastAPI's 422 |
-| `web/` | Admin UI + public site (React 19 + TypeScript + Vite 6 + Tailwind 4), 64 page components in `src/pages/` |
-| `tests/` | Pytest suite — 213 files collecting ~3,642 tests: thematic regressions plus numbered `test_fix_roundN.py` |
+| `web/` | Admin UI + public site (React 19 + TypeScript + Vite 6 + Tailwind 4), 56 page components in `src/pages/` |
+| `tests/` | Pytest suite — 237 files collecting ~3,995 tests: thematic regressions plus numbered `test_fix_roundN.py` |
 | `docs/` | Design specs (intentionally run ahead of implementation) + `docs/superpowers/{plans,specs}` |
 
 Two adapters carry provider-specific quirks that live in `providers/` (never in `core/`):
@@ -132,7 +132,7 @@ Note the one asymmetry in that contract: `StreamError` may terminate at **any** 
 
 ## Config
 
-Single `wiwi.yaml` (LiteLLM-shaped): `providers:` (named accounts, each with a pool of keyed entries), `model_list:` (`model_name` clients request → `wiwi_params` with provider account + native model id), `router_settings:` (strategy/retries/cooldowns/fallbacks/aliases), `general_settings:` (master_key, database_url, redis_url, max_keys_per_user, trusted_proxies), `wiwi_settings:` (drop_params, host/port, header allowlist, stream journal, cache), `healer:`. Any string value may be `os.environ/NAME`; missing vars interpolate to `""` and validation drops providers whose resolved keys are empty.
+Single `wiwi.yaml` (LiteLLM-shaped): `providers:` (named accounts, each with a pool of keyed entries), `model_list:` (`model_name` clients request → `wiwi_params` with provider account + native model id), `router_settings:` (strategy/retries/cooldowns/fallbacks/aliases/session and prefix affinity), `general_settings:` (master_key, database_url, redis_url, max_keys_per_user, trusted_proxies, Postgres pool settings, `shared_database`, `reservation_stale_s`), `wiwi_settings:` (drop_params, host/port, header allowlist, stream journal, cache, spend batching, singleflight, outbound HTTP pool, `perf_timings`), `healer:`. Any string value may be `os.environ/NAME`; missing vars interpolate to `""` and validation drops providers whose resolved keys are empty.
 
 Startup **fails closed** unless `WIWI_SESSION_SECRET` or `general_settings.master_key` is set; the session secret otherwise derives from the master key. `DATABASE_URL` > configured database URL > `sqlite+aiosqlite:///wiwi.db`. YAML loads first; DB-stored providers/keys/deployments/aliases/settings layer over it, skipping same-named YAML entries.
 
@@ -145,8 +145,8 @@ Error bodies are dialect-correct per surface (OpenAI `{"error":{…}}` vs Anthro
 - Upstream mocking with `respx`; **use the decorator form** (`@respx.mock`) — the context-manager form is broken in respx 0.23 + httpx 0.28.
 - Property-based round-trip tests use `hypothesis` (persistent cache in `.hypothesis/`) — the right tool for codec/adapter invariants.
 - Default master key for admin-auth'd tests: `sk-wiwi-master-test` via `Authorization: Bearer …`.
-- New bug fixes go into the next unused numbered regression file (`test_fix_roundN.py`) rather than topic files. Find the next number with `ls tests/test_fix_round*.py | sed 's/.*round//;s/\.py//' | sort -n | tail -3` — **never assume one, and never trust a plain `ls`**: it sorts lexicographically, so `round9.py` appears after `round164.py`. As of 2026-10-29 the highest is `round181`, so the next file is `round182`; 179 of these files exist, with gaps at 1 (never created), 5 (`test_bugfix_round5.py` is the legacy filename) and 102, 147.
-- Run full pytest + ruff before claiming work done or committing — both green at commit time. Measured baseline 2026-10-29: `3813 passed, 13 skipped, 2 warnings in 242.15s` (227 files, 3,825 collected). Some of those warnings are `aiosqlite` worker threads outliving their event loop (`AUDIT.md` #475): harmless here, and do **not** try to silence them by escalating that warning class to an error — pytest charges the failure to an unrelated test.
+- New bug fixes go into the next unused numbered regression file (`test_fix_roundN.py`) rather than topic files. Find the next number with `ls tests/test_fix_round*.py | sed 's/.*round//;s/\.py//' | sort -n | tail -3` — **never assume one, and never trust a plain `ls`**: it sorts lexicographically, so `round9.py` appears after `round164.py`. As of 2026-11-02 the highest is `round192`, so the next file is `round193`; 188 of these files exist, with gaps at 1 (never created), 5 (`test_bugfix_round5.py` is the legacy filename), 102, 147, and 188.
+- Run full pytest + ruff before claiming work done or committing — both green at commit time. Measured baseline 2026-11-02: `3983 passed, 13 skipped, 2 warnings in ~247s` (237 files, 3,995 collected). Some of those warnings are `aiosqlite` worker threads outliving their event loop (`AUDIT.md` #475): harmless here, and do **not** try to silence them by escalating that warning class to an error — pytest charges the failure to an unrelated test.
 
 ## Conventions & guardrails
 
@@ -156,8 +156,9 @@ Error bodies are dialect-correct per surface (OpenAI `{"error":{…}}` vs Anthro
 - Database: SQLite default, Postgres via `DATABASE_URL`. Schema is created with inline `CREATE TABLE IF NOT EXISTS` at startup — **no Alembic**; there are no migrations to write.
 - Virtual keys are SHA-256-hashed at rest with constant-time compare; provider keys enter via `os.environ/NAME` interpolation in config.
 - **Two different cache-hit flags — do not conflate.** `cache_hit` = provider prompt-cache hit (feeds `wiwi_prompt_cache_hits_total`); `response_cache_hit` = served from wiwi's own exact-match cache (`wiwi/cache/`, `LogEvent.response_cache_hit`). A response-cache hit must leave `cache_hit=False` or prompt-cache metrics inflate. The response cache never stores streaming requests or requests with builtin tools.
-- **Redis currently backs only the response cache** (`build_response_cache` picks Redis when `general_settings.redis_url`/`REDIS_URL` is set and the `redis` extra imports; otherwise memory). `wiwi/ratelimit/redis.py:RedisRateLimiter` exists but is **not wired into `AppState`** — production rate limiting uses `wiwi/ratelimit/memory.py`.
-- **Stream journals are ON by default** (`stream_journal_enabled: true`, dir `.wiwi/journals`, 600s TTL, 1 MiB/journal cap): encoded SSE frames persist per-request so a client reconnecting with `x-wiwi-stream-id` + `Last-Event-ID` replays even after a wiwi restart. Journals are key-scoped — readable only by the virtual key that created them.
+- **Redis backs both the response cache and the rate limiter.** `build_response_cache` and the limiter pick Redis when `general_settings.redis_url`/`REDIS_URL` is set and the `redis` extra imports; otherwise memory. The limiter's memory backend is the single-instance default, and its sharded locks are per process; Redis is what shares rpm/tpm caps across workers.
+- **Stream journals are ON by default** (`stream_journal_enabled: true`, dir `.wiwi/journals`, 600s TTL, 1 MiB/journal cap): encoded SSE frames persist per-request so a client reconnecting with `x-wiwi-stream-id` + `Last-Event-ID` replays even after a wiwi restart. Appends are buffered (64 KiB / 50 ms; terminal record written directly) and every replay read flushes first. Journals are key-scoped — readable only by the virtual key that created them.
+- **Performance knobs are opt-in when they change semantics.** `spend_batching_enabled` (batched `settle_spend`), `singleflight_enabled` (joiners log `cost=0`), and `prefix_affinity` (prompt-cache pin) default off; `perf_timings` only adds `x-wiwi-timings`. Always-on: buffered journals, sharded limiter locks, the NIM schema memo, configurable outbound HTTP pool, 1024-entry response cache, SQLite WAL / Postgres pool tuning. See `docs/ARCHITECTURE.md` §6.1.
 - **Never commit `wiwi.yaml`, `wiwi.db`, `key.md`, `.env`, `opencode.json(c)`, anything under `.verify/` or `.wiwi/`, or `*.har`** — they hold live provider keys and runtime state (all gitignored). Master key comes from `WIWI_MASTER_KEY`.
 - Never add dialect- or provider-specific branches in `core/`, `router/`, `auth/`, or `streaming/` — dialect logic belongs in `wire/`, provider logic in `providers/`.
 - Admin API endpoints (`/admin/*`) require the master key.
@@ -223,7 +224,7 @@ Senior-frontend-architect standard. When a task touches anything visual, apply t
 
 ## Where to start reading
 
-`server/app.py` is ~7.4k lines and `core/gateway.py` ~3.0k — don't read either top to bottom. `app.py` is a single `create_app` closure holding `AppState`/`lifespan`, the error handlers, and most of the routes (the `/admin/keys` ones now live in `server/routers/admin_keys.py`); to navigate it, grep for the surface you care about (`@app.post("/v1`, `@app.get("/admin`, …) rather than scrolling. For a request's full path, start at `run_chat_like` in `server/app.py` (and `create_app`/`AppState` above it) and follow the pipeline it names; `RequestContext` (`core/context.py`, 121 lines) is the single mutable object threaded through every stage, so reading its fields tells you what the pipeline carries. For streaming, read `streaming/deltas.py` (151 lines, the whole contract) before any adapter. `docs/QUICKSTART.md`, `docs/API_REFERENCE.md`, `docs/CONFIG.md`, `docs/PROVIDERS.md`, and `docs/STREAMING.md` are the practical companion docs; `detailed.md` is a code-derived technical reference.
+`server/app.py` is ~7.7k lines and `core/gateway.py` ~3.0k — don't read either top to bottom. `app.py` is a single `create_app` closure holding `AppState`/`lifespan`, the error handlers, and most of the routes (the `/admin/keys` ones now live in `server/routers/admin_keys.py`); to navigate it, grep for the surface you care about (`@app.post("/v1`, `@app.get("/admin`, …) rather than scrolling. For a request's full path, start at `run_chat_like` in `server/app.py` (and `create_app`/`AppState` above it) and follow the pipeline it names; `RequestContext` (`core/context.py`, 121 lines) is the single mutable object threaded through every stage, so reading its fields tells you what the pipeline carries. For streaming, read `streaming/deltas.py` (215 lines, the whole contract) before any adapter. `docs/QUICKSTART.md`, `docs/API_REFERENCE.md`, `docs/CONFIG.md`, `docs/PROVIDERS.md`, and `docs/STREAMING.md` are the practical companion docs; `detailed.md` is a code-derived technical reference.
 
 ## Docs vs. code
 

@@ -3051,6 +3051,16 @@ request would leak its reservation) and no `record_tokens()` reconciliation. Lef
 deliberately: writing an untested Redis path against a dormant backend trades a
 documented gap for an unverified one. Whoever wires Redis must port both.
 
+**Follow-up (round 192, 2026-11-02): wired, and both gaps closed.** `AppState` now selects
+`RedisRateLimiter` when `general_settings.redis_url` or `REDIS_URL` is set (otherwise the
+memory limiter), and `shutdown()` closes it. `release(key_id, request_id)` removes only
+members still present in the per-scope reservation hash, `record_tokens` reconciles and
+`hdel`s the reservation members, and `check` writes reservations into that hash. The
+pipeline result slice (`results[3 * n:]`) was also corrected so the limiter reads its own
+`zrange` results rather than pruning output. Covered by
+`tests/test_fix_round192.py::test_sharded_limiter_keeps_per_key_isolation` and the fake
+Redis in `tests/test_fix_round17.py`.
+
 ### 32. Memory `record_tokens` misattributes actual usage under concurrent same-key requests
 **File:** `wiwi/ratelimit/memory.py:90-108`
 
@@ -3624,7 +3634,7 @@ The backend is closed in `AppState.shutdown()`.
 **Note on expected gain:** Redis is *not* a latency win for a single process —
 `main.py` runs one uvicorn worker and a dict lookup beats a network round-trip.
 It buys restart survival, a shared cache across replicas, and capacity beyond
-`max_entries: 256`. Not benchmarked: no Redis server in the dev environment,
+`max_entries` (1024 by default). Not benchmarked: no Redis server in the dev environment,
 so correctness is covered by an injected fake client, not a live instance.
 
 **Tests:** `tests/test_fix_round34.py` (22 tests) — determinism predicate,

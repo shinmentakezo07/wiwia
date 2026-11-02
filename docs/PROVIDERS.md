@@ -136,7 +136,7 @@ providers:
 NVIDIA NIM (`integrate.api.nvidia.com`) — OpenAI wire format with three quirks that need a dedicated adapter:
 
 1. **Reasoning via `chat_template_kwargs`** — NIM is vLLM-backed; thinking budget is passed as `chat_template_kwargs` rather than a `reasoning` field.
-2. **Tool-schema rewrite** — NIM rejects JSON Schema boolean subschemas (`true`/`false` as schemas) and object properties named `type`. `nim_tool_schema.py` rewrites IR tool schemas into a NIM-safe form before sending.
+2. **Tool-schema rewrite** — NIM rejects JSON Schema boolean subschemas (`true`/`false` as schemas) and object properties named `type`. `nim_tool_schema.py` rewrites IR tool schemas into a NIM-safe form before sending. The rewrite is memoized by a canonical hash of the rendered tools (`wiwi_settings.tool_schema_cache_entries`, default 256; `0` disables), and cached entries are deep-copied so one request cannot mutate another's schema.
 3. Native tool handling via `nim_native_tools.py`.
 
 ```yaml
