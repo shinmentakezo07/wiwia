@@ -250,20 +250,22 @@ function ChartTooltip(props: {
 export function DashboardPage() {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
+  // Live data arrives over /admin/stream; polling is a slow fallback so an
+  // open console tab does not multiply admin DB reads.
   const overviewQuery = useQuery({
     queryKey: ["overview", 60],
     queryFn: () => getOverview(60),
-    refetchInterval: 10_000,
+    refetchInterval: 30_000,
   });
   const tokensQuery = useQuery({
     queryKey: ["tokens-ts"],
     queryFn: () => getTimeseries("tokens", 60),
-    refetchInterval: 10_000,
+    refetchInterval: 30_000,
   });
   const logsQuery = useQuery({
     queryKey: ["request-logs"],
     queryFn: getRequestLogs,
-    refetchInterval: 10_000,
+    refetchInterval: 30_000,
   });
 
   // Live SSE invalidation: refresh overview/timeseries/logs the moment a

@@ -798,7 +798,7 @@ export function RequestLogsPage() {
   const query = useQuery({
     queryKey: ["request-logs"],
     queryFn: getRequestLogs,
-    refetchInterval: 15_000,
+    refetchInterval: 30_000,
   });
 
   const connected = useAdminStream("log.created", (data) => {

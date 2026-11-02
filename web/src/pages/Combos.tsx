@@ -1247,7 +1247,7 @@ export function CombosPage() {
   const modelsQ = useQuery({
     queryKey: ["model-groups"],
     queryFn: getModels,
-    refetchInterval: 10_000,
+    refetchInterval: 30_000,
   });
   const providersQ = useQuery({ queryKey: ["providers"], queryFn: getProviders });
 

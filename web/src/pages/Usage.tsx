@@ -336,12 +336,12 @@ export function UsagePage() {
   const overviewQuery = useQuery({
     queryKey: ["overview", range],
     queryFn: () => getOverview(range),
-    refetchInterval: 10_000,
+    refetchInterval: 30_000,
   });
   const tpsQuery = useQuery({
     queryKey: ["tps-ts", range],
     queryFn: () => getTimeseries("tps", range),
-    refetchInterval: 10_000,
+    refetchInterval: 30_000,
   });
   const logsQuery = useQuery({
     // Keyed by range: the server applies the window, so a different range is a

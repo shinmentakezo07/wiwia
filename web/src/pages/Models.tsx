@@ -582,7 +582,7 @@ export function ModelsPage() {
   const [provider, setProvider] = useState("");
   const [sort, setSort] = useState("name");
   const [pendingIdent, setPendingIdent] = useState<string | null>(null);
-  const query = useQuery({ queryKey: ["models"], queryFn: getModels, refetchInterval: 10_000 });
+  const query = useQuery({ queryKey: ["models"], queryFn: getModels, refetchInterval: 30_000 });
 
   // Hooks must run unconditionally: declared before the loading/error early
   // returns, reading query.data at call time inside the mutation.

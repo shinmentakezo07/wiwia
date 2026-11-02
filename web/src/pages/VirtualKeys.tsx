@@ -750,7 +750,7 @@ export function VirtualKeysPage() {
   const [filter, setFilter] = useState<KeyFilter>("all");
   const [sortKey, setSortKey] = useState<KeySort>("name");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
-  const query = useQuery({ queryKey: ["keys"], queryFn: listKeys, refetchInterval: 15_000 });
+  const query = useQuery({ queryKey: ["keys"], queryFn: listKeys, refetchInterval: 30_000 });
 
   // -- create dialog ------------------------------------------------------------
   const [createOpen, setCreateOpen] = useState(false);
