@@ -8138,8 +8138,10 @@ the rest of the app.
 `inline-flex items-center justify-center`.
 
 **Partial fix:** `Docs.tsx` `PathCopyBtn` now uses an `h-11 w-11` inline-flex
-target with a visible keyboard focus ring. The other controls in this finding
-remain open.
+target with a visible keyboard focus ring. The Combos inline weight editor
+(`Combos.tsx`, the `:583` row above) is now a `min-h-11 min-w-11` control with
+Enter/blur commit and Escape cancel (AUDIT #567). The other controls in this
+finding remain open.
 
 ### 262. Users page: the self-demotion guard is dead code, and role changes can race
 
@@ -11307,3 +11309,53 @@ own decoder, and `resp.encoding` is honoured so a declared charset still works.
 
 **Note:** the browser client is unaffected — `web/src/api/sse.ts:79` splits on
 `"\n\n"` explicitly.
+
+### 567. The Combos editor reported held-back deployments as ready and buried the active provider
+
+🟠 **Medium (the composition page disagreed with the router about which
+deployments take traffic, and a phone-sized layout hid the selected provider
+and the action feedback)** — `web/src/pages/Combos.tsx` (pre-fix lines
+`782-783` readiness, `930` state badge, `583` weight target, `1049` grid
+template, `1041` dialog rail; the file was rewritten by the fix, so the old
+line numbers are cited for the record)
+
+Four defects in the `/console/combos` composition editor:
+
+1. **Readiness counted `available`, not routable.** `readyCount` and the
+   roster's green/amber dot used `d.available`, so a healer-restored
+   (probation) deployment was reported "ready" even though
+   `Router.pick_deployment` gives it zero traffic while a healthy sibling
+   exists. The summary tile, the readiness bar and the list dots all
+   over-reported capacity.
+2. **The state badge conflated cooling with down.** Every unavailable
+   deployment rendered the word "cooldown", so a deployment with
+   `cooldown_remaining_s = 0` and no path back to service was described as
+   cooling. There was no probation state at all.
+3. **The inline weight editor was a 24×18 px tap target and discarded edits on
+   blur.** It failed the binding 44×44 rule (already recorded as one row of
+   #261) and a typed value was lost silently when focus moved, with no
+   validation feedback for `< 1`.
+4. **Layout and feedback placement.** The desktop two-pane grid used the
+   malformed Tailwind template `lg:grid-cols-[280px,1fr]` (comma, not
+   underscore), so the rail and detail never sat side by side at `lg`. The
+   edit dialog opened with the active provider scrolled out of the rail, a
+   provider with no registered model ids rendered a blank pane instead of an
+   empty state, and a failed weight/detach mutation printed its error at the
+   top of the page — off-screen on a phone, where the detail sits below the
+   roster. The dialog's action bar also lived inside the clipped body instead
+   of the pinned footer.
+
+**Fix:** extracted `web/src/lib/deployment-health.ts` (routable set, state
+classification, readiness counts, provider weight split, duplicate-route
+detection) and made both the Models ledger and the Combos editor use it;
+rewrote the page as a ruled summary line + sticky roster + compact composition
+detail with a provider split bar; moved the dialog actions into `Dialog`'s
+`footer`; made the weight control a 44 px target that commits on Enter/blur,
+validates `>= 1`, and cancels on Escape; scrolled the active provider into
+view; added an empty state for a provider with no model ids; and moved
+detail-mutation errors into the detail card. Added
+`web/src/lib/deployment-health.test.ts` (16 tests) and the shared
+`providerHue` helper.
+
+**Status: fixed** — UI change; verified at 1440×900 and 375×812 with the
+browser (no horizontal overflow, pinned dialog footer, 44 px controls).

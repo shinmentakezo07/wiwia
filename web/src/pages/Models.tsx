@@ -43,8 +43,28 @@ import {
   type ModelGroup,
 } from "@/api/types";
 import { useAuth } from "@/api/auth";
-import { EmptyState, ErrorText, Input, NumberInput, PageHeader, Select, Spinner } from "@/components/ui";
+import {
+  EmptyState,
+  ErrorText,
+  Figure,
+  Input,
+  NumberInput,
+  PageHeader,
+  Select,
+  Spinner,
+} from "@/components/ui";
 import { fmtInt } from "@/lib/format";
+import {
+  comboReadiness,
+  deploymentShare,
+  deploymentState,
+  deploymentWeight,
+  DEPLOYMENT_STATE_COLOR,
+  DEPLOYMENT_STATE_TITLE,
+  DEPLOYMENT_STATE_WORD,
+  routableDeployments,
+} from "@/lib/deployment-health";
+import { providerHue } from "@/lib/provider-hue";
 
 const STRATEGIES = [
   { value: "simple-shuffle", label: "Weighted random (simple-shuffle)" },
@@ -67,92 +87,13 @@ const SORTS = [
   { value: "weight", label: "Sort by weight" },
 ];
 
-// Provider hues. Twelve entries so two providers rarely collide, and every
-// one of them holds contrast on the near-black surface. This is the ONLY
-// colour the page spends: a provider keeps its hue in the split bar, in the
-// legend and in the summary line.
-const HUES = [
-  "#7c9cff",
-  "#c084fc",
-  "#4ade9b",
-  "#fbbf24",
-  "#f472b6",
-  "#22d3ee",
-  "#fb923c",
-  "#a3e635",
-  "#e879f9",
-  "#2dd4bf",
-  "#94a3b8",
-  "#facc15",
-];
+// Provider hue is the ONLY colour the page spends: a provider keeps its hue
+// in the split bar, in the legend and in the summary line. It is shared with
+// the Combos editor through `providerHue`.
 
-/** Stable per-provider hue, so an account looks the same on every page. */
-function hueOf(provider: string): string {
-  let h = 0;
-  for (let i = 0; i < provider.length; i++) h = (h * 31 + provider.charCodeAt(i)) >>> 0;
-  return HUES[h % HUES.length];
-}
-
-/** Router state per deployment, plus the colour every surface paints it in. */
-type DepState = "ok" | "standby" | "cooling" | "down";
-
-const STATE_COLOR: Record<DepState, string> = {
-  ok: "#4ade9b",
-  standby: "#7c9cff",
-  cooling: "#fbbf24",
-  down: "#f87171",
-};
-
-const STATE_WORD: Record<DepState, string> = {
-  ok: "routing",
-  standby: "probation",
-  cooling: "cooling",
-  down: "down",
-};
-
-const STATE_TITLE: Record<DepState, string> = {
-  ok: "available and taking traffic",
-  standby:
-    "on probation after a health-check restore — receives no traffic while a healthy sibling is available",
-  cooling: "in cooldown — excluded from routing until it expires",
-  down: "unavailable — excluded from routing",
-};
-
-/** The router clamps weights to >= 1 and has no "pause" semantic. */
-function weightOf(d: DeploymentInfo): number {
-  return Math.max(1, d.weight);
-}
-
-/**
- * The deployments the router actually picks from, mirroring
- * `Router.pick_deployment`: available ones, and among those only the
- * non-probation ones whenever at least one exists. A healer-restored
- * (probation) deployment gets zero traffic while a healthy sibling is up.
- */
-function routable(group: ModelGroup): DeploymentInfo[] {
-  const avail = group.deployments.filter((x) => x.available);
-  const fresh = avail.filter((x) => !x.probation);
-  return fresh.length > 0 ? fresh : avail;
-}
-
-/**
- * Share of the group's routable weight.
- *
- * The router recomputes weights from the routable candidate set on every
- * pick, and its two-level cross-provider WRR composes back down to exactly
- * this ratio per deployment — so this matches routing, not the config file.
- */
-function sharePct(d: DeploymentInfo, group: ModelGroup): number {
-  const set = routable(group);
-  if (!set.includes(d)) return 0;
-  const total = set.reduce((s, x) => s + weightOf(x), 0);
-  return total > 0 ? weightOf(d) / total : 0;
-}
-
-function depState(d: DeploymentInfo, group: ModelGroup): DepState {
-  if (d.available) return routable(group).includes(d) ? "ok" : "standby";
-  return d.cooldown_remaining_s > 0 ? "cooling" : "down";
-}
+// Router state per deployment is shared with the Combos editor. The ledger
+// only adds the group-level rollup below; `comboReadiness` owns the per-state
+// counts, so the two surfaces cannot disagree.
 
 interface GroupHealth {
   color: string;
@@ -165,24 +106,13 @@ interface GroupHealth {
 
 /** Roll the deployment states up into one status for the group header. */
 function groupHealth(group: ModelGroup): GroupHealth {
-  const routableSet = new Set(routable(group));
-  let down = 0;
-  let cooling = 0;
-  let standby = 0;
-  for (const d of group.deployments) {
-    if (!d.available) {
-      if (d.cooldown_remaining_s > 0) cooling += 1;
-      else down += 1;
-    } else if (d.probation && !routableSet.has(d)) {
-      standby += 1;
-    }
-  }
+  const readiness = comboReadiness(group.deployments);
 
   // A group with no deployments routes nothing. It is not "healthy" — it is
   // empty, and saying otherwise would report an idle group as a working one.
-  if (group.deployments.length === 0) {
+  if (readiness.total === 0) {
     return {
-      color: STATE_COLOR.down,
+      color: DEPLOYMENT_STATE_COLOR.down,
       word: "no routes",
       title: "this group has no deployments — it cannot route any traffic",
       down: 0,
@@ -192,18 +122,18 @@ function groupHealth(group: ModelGroup): GroupHealth {
   }
 
   const color =
-    down > 0
-      ? STATE_COLOR.down
-      : cooling > 0
-        ? STATE_COLOR.cooling
-        : standby > 0
-          ? STATE_COLOR.standby
-          : STATE_COLOR.ok;
+    readiness.down > 0
+      ? DEPLOYMENT_STATE_COLOR.down
+      : readiness.cooling > 0
+        ? DEPLOYMENT_STATE_COLOR.cooling
+        : readiness.probation > 0
+          ? DEPLOYMENT_STATE_COLOR.probation
+          : DEPLOYMENT_STATE_COLOR.routing;
 
   const problems: string[] = [];
-  if (down > 0) problems.push(`${fmtInt(down)} down`);
-  if (cooling > 0) problems.push(`${fmtInt(cooling)} cooling`);
-  if (standby > 0) problems.push(`${fmtInt(standby)} on probation`);
+  if (readiness.down > 0) problems.push(`${fmtInt(readiness.down)} down`);
+  if (readiness.cooling > 0) problems.push(`${fmtInt(readiness.cooling)} cooling`);
+  if (readiness.probation > 0) problems.push(`${fmtInt(readiness.probation)} on probation`);
 
   return {
     color,
@@ -212,9 +142,9 @@ function groupHealth(group: ModelGroup): GroupHealth {
       problems.length > 0
         ? `${problems.join(", ")} — routing excludes the affected deployments`
         : "every deployment is available and in rotation",
-    down,
-    cooling,
-    standby,
+    down: readiness.down,
+    cooling: readiness.cooling,
+    standby: readiness.probation,
   };
 }
 
@@ -345,11 +275,11 @@ function WeightEditor(props: {
  */
 function SplitBar(props: { group: ModelGroup }) {
   const g = props.group;
-  const avail = routable(g);
+  const avail = routableDeployments(g.deployments);
 
   const byProvider = new Map<string, number>();
   for (const d of avail) {
-    byProvider.set(d.provider, (byProvider.get(d.provider) ?? 0) + weightOf(d));
+    byProvider.set(d.provider, (byProvider.get(d.provider) ?? 0) + deploymentWeight(d));
   }
   const total = [...byProvider.values()].reduce((a, b) => a + b, 0);
   if (total <= 0) return null;
@@ -387,7 +317,7 @@ function SplitBar(props: { group: ModelGroup }) {
           <span
             key={p}
             title={`${p} — ${Math.round((w / total) * 100)}% of routable weight`}
-            style={{ width: `${(w / total) * 100}%`, backgroundColor: hueOf(p) }}
+            style={{ width: `${(w / total) * 100}%`, backgroundColor: providerHue(p) }}
           />
         ))}
       </div>
@@ -401,7 +331,7 @@ function SplitBar(props: { group: ModelGroup }) {
             key={p}
             className="flex items-center gap-1.5 text-[11px] text-[var(--admin-text-dim)]"
           >
-            <span className="wl-hue" style={{ backgroundColor: hueOf(p) }} />
+            <span className="wl-hue" style={{ backgroundColor: providerHue(p) }} />
             <span className="font-mono">{p}</span>
           </span>
         ))}
@@ -420,15 +350,15 @@ function DeploymentRow(props: {
 }) {
   const { d, group } = props;
   const ident = `${d.provider}/${d.model_id}`;
-  const state = depState(d, group);
-  const pct = sharePct(d, group);
+  const state = deploymentState(d, routableDeployments(group.deployments));
+  const pct = deploymentShare(d, group.deployments);
 
   const statusTitle =
-    state === "ok"
+    state === "routing"
       ? `available · ${d.inflight} in flight${
           d.p95_latency_ms > 0 ? ` · p95 ${Math.round(d.p95_latency_ms)}ms` : ""
         }`
-      : STATE_TITLE[state];
+      : DEPLOYMENT_STATE_TITLE[state];
 
   return (
     <tr className="wl-dep">
@@ -438,22 +368,22 @@ function DeploymentRow(props: {
             aria-hidden
             className="wl-hue !h-2 !w-2 !rounded-full"
             style={{
-              backgroundColor: hueOf(d.provider),
-              boxShadow: `0 0 6px ${hueOf(d.provider)}55`,
+              backgroundColor: providerHue(d.provider),
+              boxShadow: `0 0 6px ${providerHue(d.provider)}55`,
             }}
           />
           <span className="text-[13px] font-medium text-[var(--admin-text)]">{d.provider}</span>
           <span className="truncate font-mono text-[11.5px] text-[var(--admin-text-dim)]">
             {d.model_id}
           </span>
-          <span className="wl-state" style={{ color: STATE_COLOR[state] }} title={statusTitle}>
-            {state === "ok" ? (
+          <span className="wl-state" style={{ color: DEPLOYMENT_STATE_COLOR[state] }} title={statusTitle}>
+            {state === "routing" ? (
               <>
                 {Math.round(pct * 100)}% share
               </>
             ) : (
               <>
-                {STATE_WORD[state]}
+                {DEPLOYMENT_STATE_WORD[state]}
                 {state === "cooling" && (
                   <span className="ml-1.5 text-[var(--admin-text-dim)]">
                     {Math.ceil(d.cooldown_remaining_s)}s
@@ -467,7 +397,7 @@ function DeploymentRow(props: {
               place: rendering a second copy for the narrow layout gave
               two editors for one weight, and the two fought. */}
           <span className="wl-m-inline">
-            {state === "ok" && d.p95_latency_ms > 0 ? (
+            {state === "routing" && d.p95_latency_ms > 0 ? (
               <span title="p95 latency of recent requests on this deployment">
                 p95 {fmtInt(Math.round(d.p95_latency_ms))}ms
               </span>
@@ -484,7 +414,7 @@ function DeploymentRow(props: {
         data-label="p95"
         title="p95 latency of recent requests on this deployment"
       >
-        {state === "ok" && d.p95_latency_ms > 0 ? `${fmtInt(Math.round(d.p95_latency_ms))}ms` : "—"}
+        {state === "routing" && d.p95_latency_ms > 0 ? `${fmtInt(Math.round(d.p95_latency_ms))}ms` : "—"}
       </td>
 
       <td
@@ -492,7 +422,7 @@ function DeploymentRow(props: {
         data-label="in flight"
         title={`${d.inflight} request(s) in flight`}
       >
-        {state === "ok" ? fmtInt(d.inflight) : "—"}
+        {state === "routing" ? fmtInt(d.inflight) : "—"}
       </td>
 
       <td
@@ -642,23 +572,6 @@ function ModelsSkeleton() {
   );
 }
 
-/** One figure in the summary line: a number with a quiet label under it. */
-function Figure(props: { label: string; value: string; tone?: string }) {
-  return (
-    <span className="flex flex-col">
-      <span
-        className="font-mono text-[19px] font-semibold leading-none tabular-nums tracking-[-0.02em]"
-        style={{ color: props.tone ?? "var(--admin-text)" }}
-      >
-        {props.value}
-      </span>
-      <span className="mt-1.5 text-[11px] leading-none text-[var(--admin-text-dim)]">
-        {props.label}
-      </span>
-    </span>
-  );
-}
-
 export function ModelsPage() {
   const qc = useQueryClient();
   const { user } = useAuth();
@@ -751,7 +664,7 @@ export function ModelsPage() {
         (a, b) => b.deployments.length - a.deployments.length || a.name.localeCompare(b.name),
       );
     } else if (sort === "weight") {
-      const w = (g: ModelGroup) => g.deployments.reduce((s, d) => s + weightOf(d), 0);
+      const w = (g: ModelGroup) => g.deployments.reduce((s, d) => s + deploymentWeight(d), 0);
       sorted.sort((a, b) => w(b) - w(a) || a.name.localeCompare(b.name));
     } else {
       sorted.sort((a, b) => a.name.localeCompare(b.name));
@@ -783,10 +696,7 @@ export function ModelsPage() {
   const healthy = allDeployments.filter((d) => d.available).length;
   const attention = allDeployments.length - healthy;
   // Available but held back by the router while a healthy sibling serves.
-  const standby = data.groups.reduce(
-    (n, g) => n + g.deployments.filter((d) => depState(d, g) === "standby").length,
-    0,
-  );
+  const standby = data.groups.reduce((n, g) => n + comboReadiness(g.deployments).probation, 0);
   const totalGroups = data.groups.length;
   const totalDeployments = allDeployments.length;
   const hasFilters = q !== "" || status !== "all" || provider !== "";
@@ -863,7 +773,7 @@ export function ModelsPage() {
           <span className="ml-auto flex flex-wrap items-center gap-x-4 gap-y-1.5">
             {providerShares.map(([p, n]) => (
               <span key={p} className="flex items-center gap-1.5" title={`${p}: ${n} deployment(s)`}>
-                <span className="wl-hue" style={{ backgroundColor: hueOf(p) }} />
+                <span className="wl-hue" style={{ backgroundColor: providerHue(p) }} />
                 <span className="font-mono text-[11.5px] text-[var(--admin-text-dim)]">{p}</span>
                 <span
                   className="wl-num !text-[11.5px]"

@@ -74,6 +74,23 @@ export function PageHeader(props: { title: ReactNode; subtitle?: ReactNode; righ
   );
 }
 
+/** One figure in a ruled summary line: a number with a quiet label under it. */
+export function Figure(props: { label: string; value: string; tone?: string }) {
+  return (
+    <span className="flex flex-col">
+      <span
+        className="font-mono text-[19px] font-semibold leading-none tabular-nums tracking-[-0.02em]"
+        style={{ color: props.tone ?? "var(--admin-text)" }}
+      >
+        {props.value}
+      </span>
+      <span className="mt-1.5 text-[11px] leading-none text-[var(--admin-text-dim)]">
+        {props.label}
+      </span>
+    </span>
+  );
+}
+
 // -- controls ------------------------------------------------------------------
 
 type ButtonVariant = "primary" | "ghost" | "danger" | "outline";
