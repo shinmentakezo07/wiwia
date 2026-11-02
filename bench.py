@@ -37,6 +37,8 @@ async def one_request(client: httpx.AsyncClient, base: str, key: str,
     ttft = None
     text_chars = 0
     usage = None
+    stages: dict[str, int] = {}
+    t_headers = None
     try:
         async with client.stream(
             "POST", f"{base}/chat/completions",
@@ -45,9 +47,19 @@ async def one_request(client: httpx.AsyncClient, base: str, key: str,
             json={"model": MODEL, "stream": stream, "max_tokens": max_tokens,
                   "messages": [{"role": "user", "content": PROMPT}]},
         ) as r:
+            t_headers = time.perf_counter() - t0
             if r.status_code != 200:
                 body = (await r.aread()).decode(errors="replace")[:150]
                 return {"ok": False, "err": f"HTTP {r.status_code}: {body}"}
+            # Server-side stage split, present when ``perf_timings`` is on.
+            raw_timings = r.headers.get("x-wiwi-timings", "")
+            for part in raw_timings.split(";"):
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    try:
+                        stages[k] = int(v)
+                    except ValueError:
+                        pass
             if stream:
                 async for line in r.aiter_lines():
                     if not line.startswith("data:"):
@@ -83,8 +95,10 @@ async def one_request(client: httpx.AsyncClient, base: str, key: str,
     in_toks = (usage or {}).get("prompt_tokens") or 0
     cached = ((usage or {}).get("prompt_tokens_details") or {}).get("cached_tokens", 0)
     gen_secs = max(total - ttft, 0.001)
-    return {"ok": True, "ttft": ttft, "total": total, "in": in_toks,
-            "out": out_toks, "cached": cached, "tps": out_toks / gen_secs}
+    return {"ok": True, "ttft": ttft, "total": total,
+            "headers": t_headers if t_headers is not None else total,
+            "in": in_toks, "out": out_toks, "cached": cached,
+            "tps": out_toks / gen_secs, "stages": stages}
 
 
 def pct(values: list[float], p: float) -> float:
@@ -114,6 +128,12 @@ async def sweep(name: str, cfg: dict, n: int, concurrencies: list[int],
             row = {
                 "target": name, "conc": c, "reqs": n,
                 "ok": len(oks), "fail": len(errs),
+                "hdr_p50": pct([r["headers"] for r in oks], .50),
+                "stage_p50": {
+                    k: pct([r["stages"][k] for r in oks if k in r["stages"]],
+                           .50)
+                    for k in sorted({k for r in oks for k in r["stages"]})
+                },
                 "ttft_p50": pct([r["ttft"] for r in oks], .50),
                 "ttft_p95": pct([r["ttft"] for r in oks], .95),
                 "lat_p50": pct([r["total"] for r in oks], .50),
@@ -131,16 +151,21 @@ async def sweep(name: str, cfg: dict, n: int, concurrencies: list[int],
 
 
 def print_table(all_rows: list[dict]) -> None:
-    hdr = (f"{'target':<13}{'conc':>5}{'ok/fail':>9}{'TTFT p50':>10}{'TTFT p95':>10}"
+    hdr = (f"{'target':<13}{'conc':>5}{'ok/fail':>9}{'HDR p50':>10}"
+           f"{'TTFT p50':>10}{'TTFT p95':>10}"
            f"{'LAT p50':>10}{'LAT p95':>10}{'TPS avg':>9}{'RPS':>7}{'tok_in':>8}{'cached':>8}")
     print(hdr)
     print("-" * len(hdr))
     for r in all_rows:
         print(f"{r['target']:<13}{r['conc']:>5}{f'{r[chr(111)+chr(107)]}/{r[chr(102)+chr(97)+chr(105)+chr(108)]}':>9}"
+              f"{r['hdr_p50']:>9.3f}s"
               f"{r['ttft_p50']:>9.2f}s{r['ttft_p95']:>9.2f}s"
               f"{r['lat_p50']:>9.2f}s{r['lat_p95']:>9.2f}s"
               f"{r['tps_avg']:>8.1f}{r['rps']:>7.2f}"
               f"{r['tok_in_avg']:>8.0f}{r['cached_avg']:>8.0f}")
+        if r.get("stage_p50"):
+            split = "  ".join(f"{k}={v}ms" for k, v in r["stage_p50"].items())
+            print(f"{'':<18}server stages: {split}")
     fails = [r for r in all_rows if r["fail"]]
     if fails:
         print("\nerrors:")

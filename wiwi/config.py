@@ -357,6 +357,12 @@ class RouterSettings(BaseModel):
     # limiter and response cache.
     session_affinity: bool = False
     session_affinity_ttl_s: float = 600.0
+    # Prompt-prefix affinity: pin a stable (system prompt + tools) prefix to
+    # the deployment that served it, so the provider's own prompt cache keeps
+    # hitting. A preference, never a hard binding — cooldown, saturation and
+    # an empty pool all fall back to normal WRR.
+    prefix_affinity: bool = False
+    prefix_affinity_ttl_s: float = 600.0
 
     @field_validator("priority_lanes")
     @classmethod
@@ -513,10 +519,17 @@ class RealtimeSettings(BaseModel):
 class CacheSettings(BaseModel):
     """Exact-match response cache (docs/CORE.md §6). Non-streaming requests
     only; keyed on normalized IR so dialect differences that decode to the
-    same canonical request share entries. Off by default."""
+    same canonical request share entries. Off by default.
+
+    ``max_entries`` was 256: small enough that a shared gateway evicted live
+    entries almost immediately under any real traffic. 1024 keeps the memory
+    footprint bounded (an entry is the encoded response body) while giving a
+    multi-tenant deployment a usable hit rate; operators with a tighter memory
+    budget can lower it, and a Redis backend ignores the cap entirely.
+    """
     enabled: bool = False
     ttl_s: float = 3600.0
-    max_entries: int = 256
+    max_entries: int = 1024
     # Request header that forces a cache bypass for one call.
     bypass_header: str = "x-wiwi-no-cache"
 
@@ -614,6 +627,20 @@ class GeneralSettings(BaseModel):
     # those controls advisory. Applies to every real account, admins included;
     # only the synthetic master (no ``users`` row) mints un-owned keys.
     max_keys_per_user: int = 50
+    # Postgres connection pool. The defaults used to be hard-coded at 5/10,
+    # which is small once the log pump, spend settlement, stats reads and
+    # request admission all share the pool. Kept configurable so a busy
+    # deployment can raise it without a code change; SQLite ignores these.
+    db_pool_size: int = 10
+    db_max_overflow: int = 20
+    db_pool_recycle_s: float = 300.0
+    # Set when several gateway processes share one database. Startup normally
+    # clears every ``budget_reserved`` row to reclaim a crashed process's
+    # stranded reservation; in a shared database that also erases a *live*
+    # sibling's in-flight reservations, inflating headroom. In shared mode the
+    # reset is limited to rows older than ``reservation_stale_s``.
+    shared_database: bool = False
+    reservation_stale_s: float = 600.0
     # Reverse-proxy peers whose ``X-Forwarded-*`` headers may be trusted: the
     # ``X-Forwarded-For`` used to key rate-limit/abuse throttles *and* the
     # ``X-Forwarded-Proto`` that decides the session cookie's ``Secure`` flag
@@ -665,6 +692,36 @@ class WiwiSettings(BaseModel):
     drop_params: bool = True
     max_request_body_mb: int = 50
     store_prompts_in_spend_logs: bool = False
+    # -- performance knobs ---------------------------------------------------
+    # Batched spend settlement. A virtual-key request used to issue two DB
+    # writes (release the admission reservation, then charge). The buffer
+    # aggregates both per key and flushes on a bounded interval; the
+    # reservation stays in the DB until the flush, so a crash fails closed
+    # (the unflushed charge is lost, bounded by the interval and caps below).
+    # Off by default: it changes the failure model and makes spend visible to
+    # admission up to one flush interval late. Enable when the write path, not
+    # the upstream, is the throughput bottleneck.
+    spend_batching_enabled: bool = False
+    spend_flush_interval_ms: int = 250
+    spend_flush_max_pending: int = 1000
+    spend_flush_max_dollars_per_key: float = 1.0
+    # Concurrent identical non-streaming requests share one upstream call.
+    # Off by default: it changes billing (one charge for N served requests)
+    # and should only be enabled once the operator accepts that trade.
+    singleflight_enabled: bool = False
+    singleflight_max_flights: int = 2048
+    singleflight_max_waiters: int = 64
+    # Encoded tool-schema memoization (CPU on the request path).
+    tool_schema_cache_entries: int = 256
+    # Outbound HTTP pool. httpx's defaults (100 total / 20 keepalive) are low
+    # for a gateway fanning many concurrent streams to one provider.
+    http_max_connections: int = 200
+    http_max_keepalive_connections: int = 40
+    http_keepalive_expiry_s: float = 30.0
+    # Emit ``x-wiwi-timings`` (per-stage milliseconds) on responses so
+    # bench.py can attribute latency instead of guessing. Off by default:
+    # the marks cost a handful of monotonic() calls per request.
+    perf_timings: bool = False
     # Responses-API state. With ``store_responses`` False the surface behaves as
     # it did before persistence existed: the field is accepted, nothing is saved,
     # and ``previous_response_id`` 404s. ttl_s <= 0 keeps rows forever.

@@ -595,12 +595,21 @@ async def usage_fallback(ctx: RequestContext, dep: Deployment,
 
 class Gateway:
     def __init__(self, router: Router, cost_engine: CostEngine,
-                 drop_params: bool = True):
+                 drop_params: bool = True,
+                 http_limits: httpx.Limits | None = None):
         self.router = router
         self.cost = cost_engine
         self.drop_params = drop_params
-        self._client = httpx.AsyncClient(
-            timeout=httpx.Timeout(120.0, connect=10.0), http2=True)
+        # Explicit pool limits matter here: httpx's defaults (100 total / 20
+        # keepalive) queue requests behind the pool once many concurrent
+        # streams target the same provider, and the queueing shows up as
+        # latency that looks upstream-caused. The app supplies configured
+        # limits; ``None`` keeps httpx's defaults for direct/test use.
+        client_kwargs: dict[str, Any] = {
+            "timeout": httpx.Timeout(120.0, connect=10.0), "http2": True}
+        if http_limits is not None:
+            client_kwargs["limits"] = http_limits
+        self._client = httpx.AsyncClient(**client_kwargs)
         # Optional on-demand Cline token refresh hook. Set by the app at
         # startup when a Cline provider is configured. Signature:
         #   hook(provider_name, key_label) -> bool

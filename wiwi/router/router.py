@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import math
 import random
 import time
@@ -12,11 +13,13 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
+import orjson
 import structlog
 
 from wiwi.config import PROVIDER_TYPES, ModelAliasEntry, RouterSettings, WiwiConfig
 from wiwi.core.context import RequestContext
 from wiwi.core.recovery import Backoff
+from wiwi.ir import types as ir
 from wiwi.providers.base import (
     ProviderKeyRef,
     WiwiError,
@@ -738,6 +741,12 @@ class Router:
         # same single-instance-target caveat as the in-memory rate limiter and
         # response cache: a multi-instance gateway pins per instance.
         self._affinity: dict[str, tuple[int, float]] = {}
+        # prefix hash -> (id(deployment), expiry). Prompt-prefix affinity:
+        # the stable system+tools block keeps hitting the same account so the
+        # provider's own prompt cache stays warm. A preference only — the pin
+        # is honoured only while the deployment passes every health/cap/lane
+        # filter, exactly like the session pin above.
+        self._prefix_affinity: dict[str, tuple[int, float]] = {}
         # Consecutive-success counters for ``cycle_every_n``. These MUST live on
         # the router, not in ``ctx.metadata``: the context is per-request, so
         # counters kept there reset to 0 before every pick and the cadence
@@ -880,6 +889,14 @@ class Router:
             return None
         avail = kept or avail
 
+        # Prompt-prefix affinity: prefer the deployment that served this
+        # stable (system prompt + tools) prefix last time. Evaluated after
+        # every health/cap/lane filter, so it can never resurrect a deployment
+        # those filters just rejected.
+        prefix_pinned = self._prefix_pin(ctx, avail, exclude, auth)
+        if prefix_pinned is not None:
+            prefix_pinned.reserve_slot(getattr(ctx, "request_id", ""), est)
+            return prefix_pinned
         # Session affinity: reuse the deployment that served this session last
         # time so upstream prompt caches stay warm. Evaluated after every health
         # and lane filter above, so a pin can never resurrect a deployment that
@@ -943,6 +960,71 @@ class Router:
         self._affinity[session] = (
             id(chosen),
             time.monotonic() + self.settings.session_affinity_ttl_s)
+
+    def _prefix_key(self, ctx: RequestContext) -> str:
+        """Stable hash of the leading system messages + tool definitions.
+
+        Cached on the context: ``pick_deployment`` runs once per attempt, and
+        the prefix does not change across retries. Empty when the request has
+        neither a system prompt nor tools — there is nothing stable to pin.
+        """
+        cached = getattr(ctx, "metadata", {}).get("_prefix_key")
+        if isinstance(cached, str):
+            return cached
+        req = getattr(ctx, "ir_req", None)
+        if req is None:
+            return ""
+        system: list[str] = []
+        for m in req.messages:
+            if m.role != "system":
+                break
+            for p in m.parts:
+                if isinstance(p, ir.TextPart):
+                    system.append(p.text)
+        tools = [{"name": t.name, "description": t.description,
+                  "parameters": t.parameters_json_schema,
+                  "builtin": t.builtin} for t in req.tools]
+        if not system and not tools:
+            return ""
+        payload = {"system": system, "tools": tools, "model": req.model}
+        key = hashlib.sha256(
+            orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)).hexdigest()
+        if isinstance(getattr(ctx, "metadata", None), dict):
+            ctx.metadata["_prefix_key"] = key
+        return key
+
+    def _prefix_pin(self, ctx: RequestContext, avail: list[Deployment],
+                    exclude: set[int], auth: Any | None) -> Deployment | None:
+        if not self.settings.prefix_affinity:
+            return None
+        key = self._prefix_key(ctx)
+        if not key:
+            return None
+        entry = self._prefix_affinity.get(key)
+        if entry is None:
+            return None
+        dep_id, expiry = entry
+        if expiry <= time.monotonic():
+            self._prefix_affinity.pop(key, None)
+            return None
+        for d in avail:
+            if id(d) == dep_id and id(d) not in exclude and d.available:
+                ceiling = _lane_ceiling(d, self.settings, auth)
+                if ceiling is None or d.inflight < ceiling:
+                    return d
+        return None
+
+    def _pin_prefix(self, ctx: RequestContext, chosen: Deployment) -> None:
+        if not self.settings.prefix_affinity:
+            return
+        key = self._prefix_key(ctx)
+        if not key:
+            return
+        if len(self._prefix_affinity) >= 4096:
+            # Bounded: insertion-ordered dict, drop the oldest pin.
+            self._prefix_affinity.pop(next(iter(self._prefix_affinity)), None)
+        self._prefix_affinity[key] = (
+            id(chosen), time.monotonic() + self.settings.prefix_affinity_ttl_s)
 
     def _choose(self, avail: list[Deployment], deps: list[Deployment],
                 strategy: str) -> Deployment:
@@ -1590,6 +1672,10 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                         provider_consec.get(dep.provider.name, 0) + 1)
                     key_consec[(dep.provider.name, key.label)] = (
                         key_consec.get((dep.provider.name, key.label), 0) + 1)
+                # Only a SUCCESSFUL attempt pins the prompt prefix; a failed
+                # one is already excluded/cooldown and must not become the
+                # preferred target for the next turn.
+                router._pin_prefix(ctx, dep)
                 return result
             except WiwiError as e:
                 # The attempt failed before pricing could reconcile the

@@ -18,7 +18,12 @@ Ported from the reference implementation in free-claude-code's
 
 from __future__ import annotations
 
+import copy
+import hashlib
+from collections import OrderedDict
 from typing import Any
+
+import orjson
 
 # JSON Schema keys whose *values* are schemas ( recurse into them ).
 # ``items`` belongs here and was missing: it is the single most common schema
@@ -93,6 +98,55 @@ def declared_prop_names(tools: list[dict[str, Any]]) -> dict[str, set[str]]:
         _declared_prop_names(params, names)
         result[name] = names
     return result
+
+
+_SANITIZE_CACHE: OrderedDict[str, tuple[list[dict[str, Any]],
+                                       dict[str, set[str]]]] = OrderedDict()
+_SANITIZE_CACHE_MAX = 256
+
+
+def configure_schema_cache(max_entries: int) -> None:
+    """Bound the memo to the operator's configured size.
+
+    Called once at app startup from ``wiwi_settings.tool_schema_cache_entries``.
+    ``0`` disables the memo (every call sanitizes); the cache is trimmed
+    immediately when the limit shrinks so a reload cannot keep stale entries.
+    """
+    global _SANITIZE_CACHE_MAX
+    _SANITIZE_CACHE_MAX = max(0, int(max_entries))
+    while len(_SANITIZE_CACHE) > _SANITIZE_CACHE_MAX:
+        _SANITIZE_CACHE.popitem(last=False)
+
+
+def sanitize_and_declare(
+    tools: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, set[str]]]:
+    """Return ``(sanitized_tools, declared_props)`` with a bounded memo.
+
+    NIM's sanitizer walks every schema node twice per request (once for the
+    declared property names, once to strip/alias). A tool catalog is stable
+    across the turns of an agent session, so the result is memoized by a
+    canonical hash of the rendered tools. Hits are deep-copied: the caller
+    writes the result into a request body, and sharing a nested dict across
+    concurrent requests would let one request's mutation leak into another.
+    """
+    if not tools:
+        return [], {}
+    key = hashlib.sha256(
+        orjson.dumps(tools, option=orjson.OPT_SORT_KEYS)).hexdigest()
+    hit = _SANITIZE_CACHE.get(key)
+    if hit is not None:
+        _SANITIZE_CACHE.move_to_end(key)
+        clean, declared = hit
+        return copy.deepcopy(clean), copy.deepcopy(declared)
+    declared = declared_prop_names(tools)
+    clean = sanitize_nim_tool_schemas(tools)
+    if _SANITIZE_CACHE_MAX <= 0:
+        return copy.deepcopy(clean), copy.deepcopy(declared)
+    _SANITIZE_CACHE[key] = (clean, declared)
+    while len(_SANITIZE_CACHE) > _SANITIZE_CACHE_MAX:
+        _SANITIZE_CACHE.popitem(last=False)
+    return copy.deepcopy(clean), copy.deepcopy(declared)
 
 
 def sanitize_nim_tool_schemas(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:

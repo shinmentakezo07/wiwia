@@ -229,7 +229,7 @@ Encoded SSE frames are appended to a per-request JSONL file, so a client reconne
 cache_settings:
   enabled: false                         # default: off
   ttl_s: 3600.0                          # cache TTL in seconds
-  max_entries: 256                       # LRU cap
+  max_entries: 1024                      # LRU cap
   bypass_header: x-wiwi-no-cache         # request header forcing a one-call bypass
 ```
 
@@ -237,7 +237,7 @@ cache_settings:
 |---|---|---|
 | `enabled` | `false` | Response cache is off by default. |
 | `ttl_s` | `3600.0` | Time-to-live for cached responses. `<= 0` disables the cache (never serve, never store) and logs one `response_cache_disabled_by_ttl` warning at startup — identically on both backends. |
-| `max_entries` | `256` | LRU eviction cap (memory backend only). |
+| `max_entries` | `1024` | LRU eviction cap (memory backend only). |
 | `bypass_header` | `x-wiwi-no-cache` | Send this header to skip the cache for one call. |
 
 The response cache is exact-match: same normalized IR + group + surface + key id → same cached response. Not used for streaming requests or requests with builtin tools.

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 # Minimum seconds between full sweep passes of the window map. The sweep only
@@ -45,10 +46,13 @@ class RateLimiter:
         self.global_rpm = global_rpm
         self.global_tpm = global_tpm
         self._windows: dict[str, _Window] = {}
-        # Serializes check() and record_tokens() so concurrent callers cannot
-        # both pass the limit at the same instant, and so a reservation can
-        # be replaced (not appended alongside) when the actual usage arrives.
-        self._lock = asyncio.Lock()
+        # One lock per shard, selected by key id, so unrelated keys do not
+        # serialize on a single admission lock. Global scopes (optional) still
+        # need one lock: they are shared state across every key. Acquisition
+        # order is always key-shard then global, which cannot deadlock.
+        self._locks: list[asyncio.Lock] = [asyncio.Lock() for _ in range(16)]
+        self._global_lock: asyncio.Lock | None = (
+            asyncio.Lock() if (global_rpm or global_tpm) else None)
         # Per-key windows are created on first use and nothing removes them,
         # so a key deleted from the DB would leave its windows behind forever.
         # Sweep periodically instead of paying to detect deletion.
@@ -57,6 +61,24 @@ class RateLimiter:
         # Sweeping on every admission turned the cap into a per-request O(n)
         # scan under the lock (round 66).
         self._last_sweep = 0.0
+
+    def _shard(self, key_id: str) -> int:
+        return hash(key_id) % len(self._locks)
+
+    @asynccontextmanager
+    async def _locked(self, key_id: str):
+        """Serialize one key's window operations, then the global scopes.
+
+        The sweep runs synchronously (no awaits), so it cannot interleave
+        with a window creation that is still empty; deleting empty windows
+        remains safe even though it scans windows from other shards.
+        """
+        async with self._locks[self._shard(key_id)]:
+            if self._global_lock is not None:
+                async with self._global_lock:
+                    yield
+            else:
+                yield
 
     def _sweep_windows(self, now: float) -> None:
         """Reclaim windows that have gone empty, at most once per window period.
@@ -114,7 +136,7 @@ class RateLimiter:
         Atomic against itself and against :meth:`record_tokens` so two
         concurrent callers cannot both pass when only one slot is free.
         """
-        async with self._lock:
+        async with self._locked(key_id):
             now = time.monotonic()
             self._sweep_windows(now)
             checks: list[tuple[_Window, int]] = []
@@ -193,7 +215,7 @@ class RateLimiter:
         Atomic against :meth:`check` so the replacement is exclusive with
         the next admission decision.
         """
-        async with self._lock:
+        async with self._locked(key_id):
             now = time.monotonic()
             actual = max(0, tokens)
             for scope in ("global:tpm", f"{key_id}:tpm"):
@@ -249,7 +271,7 @@ class RateLimiter:
         fallback is kept only for callers that predate request ids, where at
         most one request per key can be in flight.
         """
-        async with self._lock:
+        async with self._locked(key_id):
             now = time.monotonic()
             # Both scopes are refunded with the same strict, identity-matched
             # finder. Admission takes a slot in the key window AND the global

@@ -10,6 +10,7 @@ import hmac
 import time
 import weakref
 from dataclasses import dataclass, field
+from typing import Any
 
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
@@ -155,6 +156,8 @@ CREATE TABLE IF NOT EXISTS vkeys (
   max_budget DOUBLE PRECISION,
   spend_to_date DOUBLE PRECISION NOT NULL DEFAULT 0,
   budget_reserved DOUBLE PRECISION NOT NULL DEFAULT 0,
+  reserved_at DOUBLE PRECISION NOT NULL DEFAULT 0,
+  reservation_owner TEXT,
   rpm INTEGER,
   tpm INTEGER,
   expires_at DOUBLE PRECISION,
@@ -169,9 +172,18 @@ CREATE TABLE IF NOT EXISTS vkeys (
 
 class AuthService:
     def __init__(self, engine: AsyncEngine, master_key_plaintext: str,
-                 max_keys_per_user: int = 50):
+                 max_keys_per_user: int = 50,
+                 shared_database: bool = False,
+                 reservation_stale_s: float = 600.0):
         self.engine = engine
         self.master_hash = hash_key(master_key_plaintext)
+        # Shared-database mode: another live process may hold reservations in
+        # this same table, so startup must not zero them. Single-process mode
+        # keeps the original immediate reclaim (a crash leaves nothing live).
+        self.shared_database = shared_database
+        self.reservation_stale_s = max(1.0, reservation_stale_s)
+        import uuid as _uuid
+        self.boot_id = _uuid.uuid4().hex
         self._cache: dict[str, tuple[AuthInfo | None, float]] = {}
         self._ttl = 60.0
         # Bumped by every cache eviction. authenticate() compares the value it
@@ -179,6 +191,11 @@ class AuthService:
         # landing mid-lookup cannot be undone by the late store (AUDIT #162).
         self._evict_gen = 0
         self._is_pg = engine.dialect.name == "postgresql"
+        # Set by ``AppState`` when spend batching is enabled. Admin reads
+        # flush it first so an operator never sees a stale ``spend_to_date``.
+        # Typed loosely to keep this module free of a spend_buffer import
+        # (the buffer imports AuthInfo/AuthService from here).
+        self.spend_buffer: Any = None
         # Ceiling on live keys per owner. The only un-owned keys are the
         # synthetic master's (it has no ``users`` row, so an owned key could
         # never authenticate); those stay exempt and the check below only fires
@@ -259,6 +276,15 @@ class AuthService:
             # ``default_lane`` — never a silent capacity upgrade.
             if "priority" not in cols:
                 await conn.execute(sa.text("ALTER TABLE vkeys ADD COLUMN priority TEXT"))
+            # Reservation age/owner: lets a shared-database startup reclaim
+            # only genuinely dead reservations instead of a live sibling's.
+            if "reserved_at" not in cols:
+                await conn.execute(sa.text(
+                    "ALTER TABLE vkeys ADD COLUMN"
+                    " reserved_at DOUBLE PRECISION NOT NULL DEFAULT 0"))
+            if "reservation_owner" not in cols:
+                await conn.execute(sa.text(
+                    "ALTER TABLE vkeys ADD COLUMN reservation_owner TEXT"))
             if self._is_pg:
                 # Postgres-only: databases created before CREATE_SQL said
                 # DOUBLE PRECISION store these as 4-byte REAL, which floors
@@ -292,7 +318,27 @@ class AuthService:
             # separate column that only ``update_spend`` writes.
             #
             # Idempotent, so a second ``startup()`` (tests, tools) is a no-op.
-            await conn.execute(sa.text("UPDATE vkeys SET budget_reserved = 0"))
+            #
+            # Shared-database mode (several gateway processes on one DB): a
+            # blanket reset also erases a LIVE sibling's in-flight
+            # reservations, which inflates its headroom and re-opens the
+            # overspend window AUDIT #324 closed. There, only rows whose
+            # ``reserved_at`` is missing (legacy) or older than the stale
+            # horizon are reclaimed. A crashed process's recent rows therefore
+            # shrink headroom until the horizon passes — conservative, never
+            # an overspend.
+            if self.shared_database:
+                await conn.execute(
+                    sa.text(
+                        "UPDATE vkeys SET budget_reserved = 0,"
+                        " reserved_at = 0, reservation_owner = NULL"
+                        " WHERE budget_reserved > 0"
+                        " AND (reserved_at = 0 OR reserved_at < :cutoff)"),
+                    {"cutoff": time.time() - self.reservation_stale_s})
+            else:
+                await conn.execute(sa.text(
+                    "UPDATE vkeys SET budget_reserved = 0, reserved_at = 0,"
+                    " reservation_owner = NULL"))
 
     # -- lookup ----------------------------------------------------------------
     @staticmethod
@@ -707,11 +753,13 @@ class AuthService:
             res = await conn.execute(
                 sa.text(
                     "UPDATE vkeys SET budget_reserved = budget_reserved + :a,"
+                    " reserved_at = :now, reservation_owner = :owner,"
                     " updated_at = :now"
                     " WHERE id = :id AND disabled = 0"
                     " AND (max_budget IS NULL OR spend_to_date + budget_reserved"
                     " + :a <= max_budget)"),
-                {"a": amount, "id": key_id, "now": time.time()},
+                {"a": amount, "id": key_id, "now": time.time(),
+                 "owner": self.boot_id},
             )
         if res.rowcount == 0:
             # Mirror ``update_spend``'s cache hygiene: the conditional write
@@ -742,6 +790,7 @@ class AuthService:
                 sa.text(
                     "UPDATE vkeys SET"
                     " budget_reserved = max(budget_reserved - :a, 0),"
+                    " reserved_at = :now,"
                     " updated_at = :now"
                     " WHERE id = :id"),
                 {"a": amount, "id": key_id, "now": time.time()},
@@ -758,6 +807,46 @@ class AuthService:
             if entry is not None and entry[0] is not None \
                     and entry[0].key_id == key_id:
                 self._cache.pop(h, None)
+
+    async def settle_spend(self, key_id: str, cost: float,
+                           reserved: float) -> None:
+        """Record *cost* and release *reserved* in one unconditional write.
+
+        This is the batched counterpart of ``release_budget_reservation`` +
+        ``update_spend``. It is deliberately unconditional: the upstream
+        already served and billed the request, so a cap must not reject the
+        write (the next admission reads the raised total and refuses). The
+        reservation is decremented in the same statement, so a crash before
+        this call leaves the reservation in place — conservative, never an
+        overspend.
+        """
+        if key_id == "master" or (cost <= 0 and reserved <= 0):
+            return
+        async with self.engine.begin() as conn:
+            await conn.execute(
+                sa.text(
+                    "UPDATE vkeys SET"
+                    " spend_to_date = spend_to_date + :c,"
+                    " budget_reserved = max(budget_reserved - :r, 0),"
+                    " reserved_at = :now,"
+                    " updated_at = :now"
+                    " WHERE id = :id"),
+                {"c": max(0.0, cost), "r": max(0.0, reserved),
+                 "id": key_id, "now": time.time()},
+            )
+        # The caller (``SpendBuffer.charge``) has already applied this delta
+        # to the cached ``AuthInfo``. Updating it here too would double-count
+        # the charge for every request served before the next authenticate()
+        # cache refresh.
+
+    async def _flush_spend_before_read(self) -> None:
+        """Make buffered charges visible before an admin read."""
+        buf = self.spend_buffer
+        if buf is None:
+            return
+        import contextlib
+        with contextlib.suppress(Exception):
+            await buf.flush()
 
     async def apply_spend_trueup(self, key_id: str, add_cost: float) -> None:
         """Retroactive spend correction (pricing true-up).
@@ -780,6 +869,7 @@ class AuthService:
                 info.spend_to_date += add_cost
 
     async def list_keys(self) -> list[dict]:
+        await self._flush_spend_before_read()
         async with self.engine.connect() as conn:
             rows = (await conn.execute(
                 sa.text("SELECT id, key_alias, models, max_budget, spend_to_date, rpm, tpm,"
@@ -795,6 +885,7 @@ class AuthService:
         ]
 
     async def list_keys_for_owner(self, owner_id: str) -> list[dict]:
+        await self._flush_spend_before_read()
         # Same projection as list_keys, minus owner_id (the WHERE clause has
         # already fixed it) — keeping the two in step is deliberate: they used
         # to diverge, and priority/budget_reserved were visible to admins but

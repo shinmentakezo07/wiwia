@@ -151,11 +151,13 @@ class RequestIdMiddleware:
 
 from wiwi.auth.keys import mask_key
 from wiwi.auth.service import AuthService
+from wiwi.auth.spend_buffer import SpendBuffer
 from wiwi.auth.users import SESSION_TTL, UserInfo, UserService, sign_session
 from wiwi.cache import build_response_cache
 from wiwi.cache.hit_rebase import rebase_cached_body
 from wiwi.cache.interface import CacheBackend, CacheEntry
 from wiwi.cache.keygen import is_cacheable_request, response_cache_key
+from wiwi.cache.singleflight import FlightResult, SingleFlight
 from wiwi.config import (
     PROVIDER_TYPES,
     ConfigError,
@@ -182,6 +184,7 @@ from wiwi.logging_core.events import LogEvent
 from wiwi.logging_core.subsystem import LoggingSubsystem, encode_sse, public_dict
 from wiwi.providers import cline_oauth, hermes_oauth, workbuddy_auth
 from wiwi.providers.base import ProviderKeyRef, WiwiError
+from wiwi.providers.nim_tool_schema import configure_schema_cache
 from wiwi.providers.registry import fresh_adapter, get_adapter
 from wiwi.providers.workbuddy_auto_refresh import refresh_key_now
 from wiwi.ratelimit.memory import RateLimiter
@@ -1032,7 +1035,21 @@ class AppState:
         # retries, fallback switches) into the LoggingSubsystem proxy ring.
         self.router.log_proxy = self.logs.log_proxy
         rs = config.router_settings
-        self.limiter = RateLimiter(global_rpm=rs.global_rpm, global_tpm=rs.global_tpm)
+        # Redis-backed limiting when a URL is configured: the in-memory
+        # limiter is per-process, so N workers multiply every rpm/tpm cap by N.
+        # RedisRateLimiter falls back to memory on an import/connection
+        # failure, so a configured-but-unavailable Redis degrades rather than
+        # refusing traffic.
+        limiter_redis = (os.environ.get("REDIS_URL")
+                         or config.general_settings.redis_url)
+        if limiter_redis:
+            from wiwi.ratelimit.redis import RedisRateLimiter
+            self.limiter = RedisRateLimiter(
+                limiter_redis, global_rpm=rs.global_rpm,
+                global_tpm=rs.global_tpm)
+        else:
+            self.limiter = RateLimiter(global_rpm=rs.global_rpm,
+                                       global_tpm=rs.global_tpm)
         # Abuse throttles for unauthenticated endpoints (login/signup). These
         # count failures only, so real users are never locked out by success.
         self.login_throttle = _AttemptThrottle(limit=10, window_s=300.0)
@@ -1044,6 +1061,9 @@ class AppState:
         # unenforced with no counter, no /health field and no metric. This is
         # the process-lifetime counter that makes the loss visible.
         self.spend_charge_failures = 0
+        # Batched spend settlement (constructed in init_db, after the auth
+        # service exists). ``None`` keeps the synchronous two-write path.
+        self.spend: SpendBuffer | None = None
         self.gateways: dict[str, Gateway] = {}
         self.alert_rules: list[dict[str, Any]] = []
         self.config_store: ConfigStore | None = None
@@ -1104,6 +1124,14 @@ class AppState:
         self.response_cache: CacheBackend | None = (
             build_response_cache(cs, redis_url)
             if cs.enabled else None)
+        # Concurrent identical non-streaming requests share one upstream call
+        # when enabled. Off by default: it changes billing (one charge for N
+        # served requests) and should be an explicit operator choice.
+        ws = config.wiwi_settings
+        self.singleflight: SingleFlight | None = (
+            SingleFlight(max_flights=ws.singleflight_max_flights,
+                         max_waiters=ws.singleflight_max_waiters)
+            if ws.singleflight_enabled else None)
         # Set during shutdown so long-lived SSE generators break out of their
         # event loop instead of blocking uvicorn's graceful-shutdown drain
         # (which otherwise hangs at "Waiting for connections to close").
@@ -1151,13 +1179,14 @@ class AppState:
             query.pop("channel_binding", None)
             url = _up.urlunparse(parts._replace(query=_up.urlencode(query)))
         is_pg = url.startswith("postgresql+asyncpg://")
+        gs = self.config.general_settings
         engine_kwargs: dict[str, Any] = {"url": url}
         if is_pg:
             engine_kwargs.update(
-                pool_size=5,
-                max_overflow=10,
+                pool_size=max(1, gs.db_pool_size),
+                max_overflow=max(0, gs.db_max_overflow),
                 pool_pre_ping=True,
-                pool_recycle=300,
+                pool_recycle=gs.db_pool_recycle_s,
             )
         aengine = saa.create_async_engine(**engine_kwargs)
         if not is_pg:
@@ -1169,6 +1198,17 @@ class AppState:
                 cursor = dbapi_conn.cursor()
                 cursor.execute("PRAGMA foreign_keys=ON")
                 cursor.execute("PRAGMA busy_timeout=5000")
+                # WAL lets the log pump, spend settlement and admin reads
+                # proceed concurrently instead of serializing every writer
+                # behind the default rollback journal. ``synchronous=NORMAL``
+                # is the standard WAL pairing: durable across process crashes
+                # (the journal is replayed), trading only an OS-crash window
+                # that the default already cannot protect against without
+                # fsync-per-commit. Skipped for in-memory databases, where
+                # neither setting means anything.
+                if not url.endswith(":///:memory:"):
+                    cursor.execute("PRAGMA journal_mode=WAL")
+                    cursor.execute("PRAGMA synchronous=NORMAL")
                 cursor.close()
         if url.endswith(":///:memory:"):
             # The plain ":memory:" URL collapses the pool to StaticPool, which
@@ -1180,9 +1220,20 @@ class AppState:
             # through one asyncio lock instead.
             aengine = _SerializedAsyncEngine(aengine)
         self._db_engine = aengine
-        self.auth = AuthService(aengine, self.config.general_settings.master_key,
-                                self.config.general_settings.max_keys_per_user)
+        self.auth = AuthService(
+            aengine, gs.master_key, gs.max_keys_per_user,
+            shared_database=gs.shared_database,
+            reservation_stale_s=gs.reservation_stale_s)
         await self.auth.startup()
+        ws = self.config.wiwi_settings
+        if ws.spend_batching_enabled:
+            self.spend = SpendBuffer(
+                self.auth,
+                interval_s=max(0.01, ws.spend_flush_interval_ms / 1000.0),
+                max_pending=ws.spend_flush_max_pending,
+                max_dollars_per_key=ws.spend_flush_max_dollars_per_key)
+            # Admin reads flush first so operators see current spend.
+            self.auth.spend_buffer = self.spend
         # User accounts + signed session cookies. The session signing secret
         # is WIWI_SESSION_SECRET when provided; otherwise it is derived from
         # the master key (or a fixed default if even that is absent).
@@ -1224,9 +1275,17 @@ class AppState:
                 aengine, self.config.wiwi_settings.response_store_ttl_s)
             await self.response_store.startup()
         await self._load_db_config()
+        ws = self.config.wiwi_settings
+        configure_schema_cache(ws.tool_schema_cache_entries)
         self.gateways = {
-            "chat": Gateway(self.router, self.cost,
-                            drop_params=self.config.wiwi_settings.drop_params),
+            "chat": Gateway(
+                self.router, self.cost,
+                drop_params=ws.drop_params,
+                http_limits=httpx.Limits(
+                    max_connections=max(1, ws.http_max_connections),
+                    max_keepalive_connections=max(
+                        0, ws.http_max_keepalive_connections),
+                    keepalive_expiry=max(1.0, ws.http_keepalive_expiry_s))),
         }
         self.shutdown_event = asyncio.Event()
 
@@ -1419,6 +1478,14 @@ class AppState:
     async def shutdown(self) -> None:
         if self.shutdown_event is not None:
             self.shutdown_event.set()
+        # Flush buffered spend before the engine is disposed; a failure here
+        # leaves the reservation in the DB (conservative), never overspend.
+        if self.spend is not None:
+            await self.spend.stop()
+        close_limiter = getattr(self.limiter, "close", None)
+        if close_limiter is not None:
+            with contextlib.suppress(Exception):
+                await close_limiter()
         for g in self.gateways.values():
             await g.aclose()
         if self.response_cache is not None:
@@ -1433,6 +1500,10 @@ async def lifespan(app: FastAPI):
     """Startup/shutdown: init DB, run logging workers."""
     state: AppState = app.state.wiwi
     await state.init_db()
+    # Batched spend settlement: flush on a bounded interval for the life of
+    # the process. ``shutdown()`` performs the final flush.
+    if state.spend is not None:
+        await state.spend.start()
     # Journals left over from a previous process are either still within TTL
     # (replayable — keep) or stale (sweep now). While serving, the background
     # TTL sweeper keeps expiring them so a long-lived server does not
@@ -1862,6 +1933,18 @@ def create_app(config: WiwiConfig) -> FastAPI:
         the AUDIT #24 defect (a 500/402 after a successful completion) wearing
         a different status code.
         """
+        # Batched path: the buffer aggregates the charge and the reservation
+        # release into one flush-time UPDATE. It keeps this process's cached
+        # AuthInfo exact immediately, so admission still sees the real total;
+        # the DB write lags by at most one flush interval. A key close to its
+        # cap is flushed synchronously to bound the cross-replica window.
+        info = getattr(ctx, "auth", None) if ctx is not None else None
+        if (state.spend is not None and info is not None
+                and getattr(info, "key_id", None) == key_id):
+            recorded = state.spend.charge(info, cost, ctx.budget_reserved)
+            ctx.budget_reserved = 0.0
+            await state.spend.maybe_flush_near_cap(info, cost)
+            return recorded
         # An admission-time reservation (AUDIT #324) is admission-scoped: the
         # moment a real charge exists, the reservation is redundant (the cap
         # gate now reads spend directly) and would double-count the same
@@ -2322,6 +2405,26 @@ def create_app(config: WiwiConfig) -> FastAPI:
                          bearer_token: str | None, codec_history,
                          store_response: bool, req_span, handed_off: list[bool]):
         state_ = app.state.wiwi
+        # Optional per-stage timings (``x-wiwi-timings``) for bench.py. The
+        # marks are monotonic timestamps; the header renders deltas between
+        # consecutive stages.
+        _perf = config.wiwi_settings.perf_timings
+        _marks: dict[str, float] = {"start": time.monotonic()} if _perf else {}
+
+        def _timings() -> dict[str, str]:
+            if not _perf or not _marks:
+                return {}
+            order = ("decode", "auth", "admit", "dispatch", "upstream",
+                     "encode")
+            prev = _marks["start"]
+            parts: list[str] = []
+            for name in order:
+                at = _marks.get(name)
+                if at is not None:
+                    parts.append(f"{name}={int((at - prev) * 1000)}")
+                    prev = at
+            return {"x-wiwi-timings": ";".join(parts)} if parts else {}
+
         # Stored Responses state (spec B). A response id is only meaningful to
         # the key that owns it, so identity is established before the transcript
         # is read — an id must never act as a capability token. Auth here is the
@@ -2358,11 +2461,15 @@ def create_app(config: WiwiConfig) -> FastAPI:
         except (oc.DialectError, ValueError) as e:
             return _err(400, "invalid_request_error", str(e), request, surface,
                         span=req_span)
+        if _perf:
+            _marks["decode"] = time.monotonic()
         est = len(orjson.dumps(body)) // 4 if isinstance(body, dict) else 0
         info, err_resp = await authenticate(request, ir_req.model, surface,
                                             bearer_token=bearer_token)
         if err_resp:
             return err_resp
+        if _perf:
+            _marks["auth"] = time.monotonic()
         group, _ = state_.router.resolve_group(ir_req.model)
         if group is None:
             return _err(404, "not_found_error",
@@ -2474,6 +2581,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
         # enough for a sliding-window cap and costs nothing extra; it is
         # reconciled to actual usage at pricing time (AUDIT #101).
         ctx.est_tokens = est
+        if _perf:
+            _marks["admit"] = time.monotonic()
         # -- durable stream replay ------------------------------------------------
         # A client whose stream died (process restart, dropped connection)
         # re-POSTs the same request with `x-wiwi-stream-id: <original
@@ -2703,7 +2812,20 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 return ORJSONResponse(
                     served,
                     headers={**success_headers, "x-wiwi-cache": "HIT"})
+        # Singleflight identity. Reuse the cache key when the cache computed
+        # one; otherwise derive the same digest, which is exactly the
+        # request-equivalence relation (and includes key_id, so different
+        # virtual keys never share a result).
+        flight_key = ""
+        if (state_.singleflight is not None and not ir_req.stream
+                and not any(t.builtin for t in ir_req.tools)
+                and is_cacheable_request(ir_req)):
+            flight_key = cache_key or response_cache_key(
+                ir_req, group, surface, getattr(info, "key_id", ""),
+                request.headers.get("anthropic-beta", ""))
         try:
+            if _perf:
+                _marks["dispatch"] = time.monotonic()
             if ir_req.stream:
                 encoder_pair = _encoder_for(surface, resp_model, ctx.request_id,
                                             include_usage=ir_req.stream_options_include_usage)
@@ -2795,10 +2917,58 @@ def create_app(config: WiwiConfig) -> FastAPI:
                              # are known by the time the headers are built
                              # (AUDIT #498).
                              **_with_warnings({}, ctx),
+                             **_timings(),
                              **success_headers})
-            turn = await gateway.complete(ctx)
+            if flight_key:
+                async def _leader_complete() -> FlightResult:
+                    t = await gateway.complete(ctx)
+                    p = codec_encode_response(ctx, t, resp_model, ctx.request_id)
+                    return FlightResult(payload=p, usage=t.usage,
+                                        cost=ctx.cost, turn=t)
+
+                result, joined = await state_.singleflight.run(
+                    flight_key, _leader_complete)
+                if joined:
+                    # Served from the leader's upstream call: charge nothing,
+                    # refund the admission reservation, and log the request
+                    # with the shared usage. This mirrors a response-cache hit
+                    # (the upstream consumed no tokens for this caller).
+                    await _release_tpm_reservation(info, ctx)
+                    ctx.usage = result.usage
+                    ctx.cost = 0.0
+                    ctx.status = 200
+                    ctx.metadata["singleflight_joined"] = True
+                    served = rebase_cached_body(result.payload, ctx.request_id)
+                    if (store_response and state_.response_store is not None
+                            and body.get("store") is not False):
+                        try:
+                            await state_.response_store.put(
+                                f"resp_{ctx.request_id}",
+                                info.key_id if info is not None else "master",
+                                group or ir_req.model,
+                                _stored_input_items(body), served)
+                        except Exception as e:  # noqa: BLE001
+                            structlog.get_logger().warning(
+                                "response_store_put_on_singleflight_failed",
+                                request_id=ctx.request_id, detail=str(e))
+                    state_.logs.log_request(build_log_event(ctx))
+                    return ORJSONResponse(
+                        served,
+                        headers={**success_headers,
+                                 "x-wiwi-singleflight": "JOINED"})
+                turn = result.turn
+                payload = result.payload
+            else:
+                turn = await gateway.complete(ctx)
+                payload = codec_encode_response(ctx, turn, resp_model,
+                                                ctx.request_id)
+            if _perf:
+                # The leader path folds complete+encode into one call, so the
+                # two marks land together; the upstream still dominates and
+                # the split is exact on the non-flight path below.
+                _marks["upstream"] = time.monotonic()
+                _marks["encode"] = time.monotonic()
             ctx.status = 200
-            payload = codec_encode_response(ctx, turn, resp_model, ctx.request_id)
             if config.wiwi_settings.store_prompts_in_spend_logs:
                 ctx.metadata["response_body"] = _serialize_turn(turn, payload)
             await _record_tpm_usage(info, ctx)
@@ -2848,6 +3018,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             state_.logs.log_request(build_log_event(ctx))
             tracer.close(ctx.span, **{"wiwi.status": ctx.status,
                                       "wiwi.cost": ctx.cost or None})
+            success_headers.update(_timings())
             return ORJSONResponse(payload, headers=_with_warnings(success_headers,
                                                                   ctx))
         except Exception as e:  # noqa: BLE001
@@ -3578,6 +3749,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
             # non-zero value means the budget cap was not enforced for that
             # many requests, which is an accounting incident, not a warning.
             "spend_charge_failures": app.state.wiwi.spend_charge_failures,
+            # Flush-cycle failures from the batched spend buffer (0 when
+            # batching is off). A failed batch stays pending and is retried;
+            # a rising value means the DB write path is unhealthy.
+            "spend_flush_failures": (
+                app.state.wiwi.spend.flush_failures
+                if app.state.wiwi.spend is not None else 0),
             # Realtime sessions that ended without a single usage event
             # (AUDIT #347): a failed handshake, an upstream 401/5xx, or the
             # ``max_session_s`` cap cutting the session before a

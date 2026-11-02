@@ -49,8 +49,7 @@ from wiwi.providers.nim_native_tools import (
 )
 from wiwi.providers.nim_tool_schema import (
     collect_nim_tool_aliases,
-    declared_prop_names,
-    sanitize_nim_tool_schemas,
+    sanitize_and_declare,
     unalias_nim_tool_args,
 )
 from wiwi.providers.openai_adapter import OpenAIAdapter
@@ -198,8 +197,8 @@ class NimAdapter(OpenAIAdapter):
         # `_nim_arg_foo` is not mistaken for a minted alias on the way back
         # (AUDIT #251); `set_tool_context` reads this off the same instance.
         if body.get("tools"):
-            self._declared_props = declared_prop_names(body["tools"])
-            body["tools"] = sanitize_nim_tool_schemas(body["tools"])
+            body["tools"], self._declared_props = sanitize_and_declare(
+                body["tools"])
 
         return body
 

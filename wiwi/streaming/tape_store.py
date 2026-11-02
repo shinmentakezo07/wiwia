@@ -237,6 +237,14 @@ class StreamJournal:
         self._fh = None
         self._lock = asyncio.Lock()
         self._last_seq = 0
+        # Buffered append path: a per-chunk write was the streaming hot path.
+        self._buf = bytearray()
+        self._buf_since = 0.0
+        # Bytes already written by this process; None means "stat the file
+        # on the first write" (the owner line may predate us).
+        self._size: int | None = None
+        self._flush_bytes = 64 * 1024
+        self._flush_ms = 50.0
 
     @staticmethod
     def owner_record(key_id: str) -> bytes:
@@ -267,6 +275,8 @@ class StreamJournal:
             fh.write(self.owner_record(key_id))
             fh.flush()
             os.fsync(fh.fileno())
+        # The cached size no longer describes the file; re-stat on next write.
+        self._size = None
         # The directory entry itself must be durable, or a crash can lose the
         # FILE RENAME/CREATION while keeping the data blocks (POSIX). Windows
         # cannot fsync a directory handle; there the create is already
@@ -311,30 +321,69 @@ class StreamJournal:
         *first_seq* that of its FIRST frame; the two differ when the chunk
         carries several SSE frames (the encoders' terminal frames do). A
         reader that must answer "the frames after this cursor" needs both.
+
+        Writes are buffered: a per-chunk ``to_thread`` plus a ``stat`` and a
+        write syscall was the hot path for every streamed token. Records now
+        accumulate in ``_buf`` and reach disk when the buffer crosses
+        ``_flush_bytes``, when ``_flush_ms`` elapses, or on the terminal
+        record. Replay readers flush the active journal first, so a reconnect
+        never misses a record that is still in memory.
         """
         record = self._encode_record(seq, chunk, done, first_seq)
+        async with self._lock:
+            if done:
+                # Terminal: everything before it must land first, then the
+                # done marker is written directly (it must never sit behind
+                # a full buffer when the reader checks completion).
+                await self._flush_locked()
+                await self._write_locked(record)
+                return
+            self._buf.extend(record)
+            now = time.monotonic()
+            if self._buf_since == 0.0:
+                self._buf_since = now
+            if (len(self._buf) >= self._flush_bytes
+                    or (now - self._buf_since) * 1000.0 >= self._flush_ms):
+                await self._flush_locked()
+            self._last_seq = seq
 
-        def _write(fh, path) -> None:
+    async def flush(self) -> None:
+        """Push buffered records to disk (no-op when empty)."""
+        async with self._lock:
+            await self._flush_locked()
+
+    async def _flush_locked(self) -> None:
+        if not self._buf:
+            self._buf_since = 0.0
+            return
+        payload = bytes(self._buf)
+        self._buf.clear()
+        self._buf_since = 0.0
+        await self._write_locked(payload)
+
+    async def _write_locked(self, payload: bytes) -> None:
+        def _write(fh, path, size) -> int:
             # Per-journal byte cap: once exceeded, stop appending for the rest
             # of the stream. Replay degrades to the first max_bytes of chunks
             # (the done record never lands, so tail-followers expire by TTL).
-            if not self._overflow:
-                try:
-                    if path.stat().st_size + len(record) > self._max_bytes:
-                        self._overflow = True
-                except OSError:
-                    pass
             if self._overflow:
-                return
-            fh.write(record)
+                return size
+            if size is None:
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    size = 0
+            if size + len(payload) > self._max_bytes:
+                self._overflow = True
+                return size
+            fh.write(payload)
             fh.flush()
+            return size + len(payload)
 
-        async with self._lock:
-            if self._fh is None:
-                self._fh = await asyncio.to_thread(self._open_sync)
-            await asyncio.to_thread(_write, self._fh, self.path)
-            if not done:
-                self._last_seq = seq
+        if self._fh is None:
+            self._fh = await asyncio.to_thread(self._open_sync)
+        self._size = await asyncio.to_thread(
+            _write, self._fh, self.path, self._size)
 
     async def finish(self, seq: int) -> None:
         await self.append(seq, b"", done=True)
@@ -342,6 +391,7 @@ class StreamJournal:
 
     async def aclose(self) -> None:
         async with self._lock:
+            await self._flush_locked()
             if self._fh is not None:
                 fh, self._fh = self._fh, None
                 await asyncio.to_thread(fh.close)
@@ -405,6 +455,20 @@ class JournalStore:
         reconnect must tail it, never re-dispatch (double billing).
         """
         return request_id in self._active
+
+    async def _flush_active(self, request_id: str) -> None:
+        """Push an active journal's buffered records before a replay read.
+
+        Appends are buffered (see ``StreamJournal.append``); a reconnect that
+        arrived while the original stream was mid-buffer must still see every
+        emitted frame. A no-op for journals this process does not hold.
+        """
+        j = self._active.get(request_id)
+        if j is None:
+            return
+        import contextlib
+        with contextlib.suppress(Exception):
+            await j.flush()
 
     async def open(self, request_id: str,
                    key_id: str | None = None) -> StreamJournal:
@@ -570,6 +634,8 @@ class JournalStore:
         records are excluded from ``frames``, and ``owner`` falls back to the
         in-process intent when no owner line made it to disk (#317).
         """
+        # Buffered appends must be visible to the gate before it reads.
+        await self._flush_active(request_id)
         # The owner record is ``seq == 0`` and ``_read_records`` drops every
         # record with ``seq <= last_seq``, so the frames pass must not be
         # reused for the owner scan: a cursor of 0 filtered the owner line
@@ -601,6 +667,7 @@ class JournalStore:
 
     async def owner_of_async(self, request_id: str) -> str | None:
         """``owner_of`` off the event loop (AUDIT #237) — see the sync method."""
+        await self._flush_active(request_id)
         records = await asyncio.to_thread(self._read_records, request_id, -1)
         for seq, _chunk, _done, _first, owner in records:
             if seq == 0 and owner is not None:
@@ -611,6 +678,7 @@ class JournalStore:
     async def read_after_async(
             self, request_id: str, last_seq: int) -> list[tuple[int, bytes]]:
         """``read_after`` off the event loop (AUDIT #237) — see the sync method."""
+        await self._flush_active(request_id)
         records = await asyncio.to_thread(
             self._read_records, request_id, last_seq)
         out: list[tuple[int, bytes]] = []
@@ -626,6 +694,7 @@ class JournalStore:
         # frames (``finish(0)`` writes it at seq 0) and the journal read as
         # incomplete forever. ``replay_state``/``owner_of_async`` already use
         # -1 for exactly this reason.
+        await self._flush_active(request_id)
         records = await asyncio.to_thread(self._read_records, request_id, -1)
         return any(done for _, _, done, _first, _owner in records)
     def read_after(self, request_id: str,
@@ -644,23 +713,25 @@ class JournalStore:
         appends: partial trailing lines are ignored.
         """
         out: list[tuple[int, bytes]] = []
-        for seq, chunk, done, first_seq, _owner in self._read_records(
-                request_id, last_seq):
+        records = self._read_records(request_id, last_seq)
+        # A sync reader cannot await the flush that the async replay paths do,
+        # so include records still sitting in the active journal's buffer.
+        # Without this, ``append`` followed by a sync ``read_after`` (the
+        # server's cheap ownership/completion probes) sees a stale file.
+        journal = self._active.get(request_id)
+        if journal is not None and journal._buf:
+            records = records + self._parse_records(
+                bytes(journal._buf), last_seq)
+        for seq, chunk, done, first_seq, _owner in records:
             if not done:
                 out.extend(_frames_after(chunk, first_seq, last_seq))
         return out
 
-    def _read_records(
-        self, request_id: str, last_seq: int
+    @staticmethod
+    def _parse_records(
+        raw: bytes, last_seq: int
     ) -> list[tuple[int, bytes, bool, int, str | None]]:
-        path = self.path_for(request_id)
-        if not path.exists():
-            return []
         out: list[tuple[int, bytes, bool, int, str | None]] = []
-        try:
-            raw = path.read_bytes()
-        except OSError:
-            return []
         for line in raw.split(b"\n"):
             if not line:
                 continue
@@ -682,6 +753,18 @@ class JournalStore:
                         first,
                         owner if isinstance(owner, str) else None))
         return out
+
+    def _read_records(
+        self, request_id: str, last_seq: int
+    ) -> list[tuple[int, bytes, bool, int, str | None]]:
+        path = self.path_for(request_id)
+        if not path.exists():
+            return []
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            return []
+        return self._parse_records(raw, last_seq)
 
 
     def tail_reader(self, request_id: str, last_seq: int) -> JournalTail:

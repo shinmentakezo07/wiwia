@@ -167,7 +167,7 @@ cache_settings:
   #                    # never store) and logs one response_cache_disabled_by_ttl
   #                    # warning at startup, so a zero is visible rather than
   #                    # silently costing full upstream price on every call.
-  # max_entries: 256   # memory backend only; Redis is bounded by Redis itself
+  # max_entries: 1024  # memory backend only; Redis is bounded by Redis itself
   # Exact-match cache: only non-streaming, deterministic requests are stored.
   # A request with temperature > 0 (or n > 1) is never cached — an identical
   # prompt legitimately yields different text when sampling, and caching it
@@ -196,6 +196,16 @@ general_settings:
   # database_url: sqlite+aiosqlite:///wiwi.db          # SQLite (default)
   # database_url: postgresql+asyncpg://user:pass@host:5432/db?sslmode=require  # Postgres
   database_url: os.environ/DATABASE_URL
+  # Postgres pool sizing (ignored for SQLite). The defaults fit a gateway with
+  # hundreds of in-flight streams; lower them only for a tiny Postgres plan.
+  # db_pool_size: 10
+  # db_max_overflow: 20
+  # db_pool_recycle_s: 300
+  # Set true when more than one process or replica shares this database.
+  # Startup then reclaims only reservations older than reservation_stale_s
+  # instead of zeroing every live sibling's in-flight budget reservation.
+  # shared_database: false
+  # reservation_stale_s: 600
   # Optional Redis. Requires the [redis] extra (uv pip install -e '.[redis]').
   # When set, the exact-match response cache (see cache_settings) is stored in
   # Redis: entries survive a restart and are shared across replicas.
@@ -227,6 +237,18 @@ wiwi_settings:
   # GET /v1/responses/{id}). Scoped to the owning virtual key. ttl_s <= 0 keeps
   # rows forever; expiry is enforced on read and by a background sweeper.
   store_responses: true
+  # Performance switches that trade a little freshness for throughput. All are
+  # off by default so a stock deployment keeps the strict accounting semantics.
+  # Batched spend accounting: one combined UPDATE per flush instead of a
+  # release + charge per request. Spend is visible to admission up to
+  # spend_flush_interval_ms late; a crash fails closed (the reservation stays).
+  # spend_batching_enabled: false
+  # spend_flush_interval_ms: 250
+  # Concurrent identical non-streaming requests share one upstream call and
+  # one charge (the joiners are served the leader's payload).
+  # singleflight_enabled: false
+  # Emit `x-wiwi-timings` (per-stage ms) so bench.py can attribute latency.
+  # perf_timings: false
   response_store_ttl_s: 86400
   # Retention and storage cap for request_logs. Both roll the rows they remove
   # into request_rollups first, so the dashboard's totals, token counts, cost

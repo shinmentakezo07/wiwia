@@ -121,6 +121,14 @@ class _FakePipeline:
         self._ops.append(("zrem", key, members))
         return self
 
+    def hset(self, key: str, field: str, value: str) -> _FakePipeline:
+        self._ops.append(("hset", key, field, value))
+        return self
+
+    def hdel(self, key: str, *fields: str) -> _FakePipeline:
+        self._ops.append(("hdel", key, fields))
+        return self
+
     async def execute(self) -> list:
         out = []
         for op in self._ops:
@@ -144,14 +152,25 @@ class _FakePipeline:
                 for m in members:
                     z.pop(m, None)
                 out.append(1)
+            elif op[0] == "hset":
+                _, key, field, value = op
+                self._r.hashes.setdefault(key, {})[field] = value
+                out.append(1)
+            elif op[0] == "hdel":
+                _, key, fields = op
+                h = self._r.hashes.setdefault(key, {})
+                for f in fields:
+                    h.pop(f, None)
+                out.append(1)
         return out
 
 
 class _FakeRedis:
-    """Minimal async sorted-set surface backed by a plain dict."""
+    """Minimal async sorted-set + hash surface backed by plain dicts."""
 
     def __init__(self) -> None:
         self.zsets: dict[str, dict[str, float]] = {}
+        self.hashes: dict[str, dict[str, str]] = {}
 
     def pipeline(self) -> _FakePipeline:
         return _FakePipeline(self)
@@ -173,6 +192,21 @@ class _FakeRedis:
         removed = 0
         for m in members:
             if z.pop(m, None) is not None:
+                removed += 1
+        return removed
+
+    async def hget(self, key: str, field: str) -> str | None:
+        return self.hashes.get(key, {}).get(field)
+
+    async def hset(self, key: str, field: str, value: str) -> int:
+        self.hashes.setdefault(key, {})[field] = value
+        return 1
+
+    async def hdel(self, key: str, *fields: str) -> int:
+        h = self.hashes.setdefault(key, {})
+        removed = 0
+        for f in fields:
+            if h.pop(f, None) is not None:
                 removed += 1
         return removed
 

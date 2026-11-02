@@ -61,6 +61,17 @@ def _member(ts: float, cost: int, uid: str) -> str:
     return f"{ts}:{cost}:{uid}"
 
 
+def _reserved_key(scope: str) -> str:
+    """Hash mapping ``uid -> member`` for still-estimated reservations.
+
+    The sorted set alone cannot tell a reservation from confirmed usage, so a
+    release would otherwise delete tokens the provider really billed. The hash
+    is written by ``check`` and removed by ``record_tokens``; ``release`` only
+    touches members still present in it.
+    """
+    return f"{scope}:reserved"
+
+
 class RedisRateLimiter:
     """Redis-backed rate limiter using sorted sets for sliding windows.
 
@@ -93,23 +104,29 @@ class RedisRateLimiter:
             scopes.append(("global:rpm", self._memory.global_rpm, False))
         if self._memory.global_tpm:
             scopes.append(("global:tpm", self._memory.global_tpm, True))
-        if key_rpm:
+        # ``is not None``, matching the memory backend: a stored ``rpm: 0``
+        # must refuse, not silently mean "unlimited" (AUDIT #163).
+        if key_rpm is not None:
             scopes.append((f"{key_id}:rpm", key_rpm, False))
-        if key_tpm:
+        if key_tpm is not None:
             scopes.append((f"{key_id}:tpm", key_tpm, True))
 
         try:
             members: list[str] = []
+            uids: list[str] = []
             for _scope, _limit, is_token in scopes:
                 cost = est_tokens if is_token else 1
                 uid = request_id or uuid4().hex
+                uids.append(uid)
                 members.append(_member(now, cost, uid))
 
             pipe = self._redis.pipeline()
             for scope, _limit, _is_token in scopes:
                 pipe.zremrangebyscore(scope, 0, now - _WINDOW_S)
-            for (scope, _limit, _is_token), member in zip(scopes, members):
+            for (scope, _limit, _is_token), member, uid in zip(
+                    scopes, members, uids):
                 pipe.zadd(scope, {member: now})
+                pipe.hset(_reserved_key(scope), uid, member)
             # Tokens-per-minute is a token budget, not a request budget: sum
             # the per-member token costs (zrange withscores would only give
             # timestamps; the cost lives in the member string). One fetch
@@ -118,15 +135,18 @@ class RedisRateLimiter:
                 pipe.zrange(scope, 0, -1)
             results = await pipe.execute()
 
-            # results: [pruned x N, added x N, members x N]
+            # results: [prune x N, zadd x N, hset x N, zrange x N]
             n = len(scopes)
-            raw_members = results[2 * n:]
+            raw_members = results[3 * n:]
             for i, (scope, limit, is_token) in enumerate(scopes):
+                if limit is None or limit <= 0:
+                    await self._undo_reservations(scopes, members, uids)
+                    return False, int(_WINDOW_S)
                 live = raw_members[i]
                 total = sum(int(m.split(":")[1]) for m in live)
                 if total > limit:
                     # Undo our reservation and report when the window frees up.
-                    await self._undo_reservations(scopes, members)
+                    await self._undo_reservations(scopes, members, uids)
                     retry_after = await self._compute_retry_after(scope, now)
                     return False, min(retry_after, int(_WINDOW_S))
             return True, 0
@@ -156,16 +176,47 @@ class RedisRateLimiter:
         oldest_ts = float(oldest[0][1])
         return compute_retry_after_seconds(oldest_ts, now)
 
-    async def _undo_reservations(self, scopes: list, members: list[str]) -> None:
+    async def _undo_reservations(self, scopes: list, members: list[str],
+                                 uids: list[str] | None = None) -> None:
         if self._redis is None:
             return
         try:
             pipe = self._redis.pipeline()
-            for (_scope, _limit, _is_token), member in zip(scopes, members):
-                pipe.zrem(_scope, member)
+            for i, ((scope, _limit, _is_token), member) in enumerate(
+                    zip(scopes, members)):
+                pipe.zrem(scope, member)
+                if uids is not None and i < len(uids):
+                    pipe.hdel(_reserved_key(scope), uids[i])
             await pipe.execute()
         except Exception:  # noqa: BLE001, S110
             pass
+
+    async def release(self, key_id: str, request_id: str = "") -> None:
+        """Refund an admission reservation that never consumed tokens.
+
+        Mirrors ``RateLimiter.release``. Only members still present in the
+        per-scope reservation hash are removed, so confirmed usage written by
+        :meth:`record_tokens` is never deleted. An id-less call cannot be
+        matched in Redis (each reservation gets a random uid); it falls
+        through to the in-memory backend, whose id-less fallback is documented
+        for callers that predate request ids.
+        """
+        if self._redis is None or not request_id:
+            await self._memory.release(key_id, request_id)
+            return
+        scopes = (["global:tpm", "global:rpm"] if not key_id else
+                  [f"{key_id}:tpm", f"{key_id}:rpm", "global:tpm", "global:rpm"])
+        try:
+            pipe = self._redis.pipeline()
+            for scope in scopes:
+                member = await self._redis.hget(_reserved_key(scope), request_id)
+                if member:
+                    pipe.zrem(scope, member)
+                    pipe.hdel(_reserved_key(scope), request_id)
+            await pipe.execute()
+        except Exception:  # noqa: BLE001, S110
+            pass
+        await self._memory.release(key_id, request_id)
 
     async def record_tokens(self, key_id: str, tokens: int,
                             request_id: str = "") -> None:
@@ -203,6 +254,8 @@ class RedisRateLimiter:
                 pipe = self._redis.pipeline()
                 pipe.zrem(scope, target)
                 pipe.zadd(scope, {_member(float(ts), actual, uid): float(ts)})
+                # Confirmed usage is no longer refundable.
+                pipe.hdel(_reserved_key(scope), uid)
                 await pipe.execute()
         except Exception:  # noqa: BLE001, S110
             pass

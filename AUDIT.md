@@ -9560,6 +9560,17 @@ needs no schema change.
 **Test:** none — `tests/test_fix_round112.py` covers reserve/refund within one
 process lifetime, which is precisely the case that works.
 
+**Follow-up (round 192):** the unconditional reset is only safe when one
+process owns the database. With `general_settings.shared_database: true` (two
+replicas behind a load balancer), a replica starting while a sibling was
+mid-request zeroed the sibling's live reservation, so admission could
+over-commit the cap until that request settled. Startup is now mode-aware:
+single-process keeps the unconditional zero; shared mode reclaims only rows
+with `reserved_at = 0` (pre-column) or older than `reservation_stale_s`
+(default 600s). `reserve_budget`/`settle_spend` stamp `reserved_at` and
+`reservation_owner`, so a sibling's live reservation is distinguishable from a
+crash orphan. Covered by `tests/test_fix_round192.py`.
+
 ---
 
 ### 347. The 402 budget refusal leaks the rate-limit slot it already reserved, and the leak is global
