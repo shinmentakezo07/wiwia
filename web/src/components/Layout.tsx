@@ -14,7 +14,6 @@ import {
   BarChart3,
   BellRing,
   Boxes,
-  Briefcase,
   ChevronLeft,
   CreditCard,
   Database,
@@ -24,14 +23,12 @@ import {
   LayoutDashboard,
   Layers,
   Link2,
-  LogIn,
   LogOut,
   Menu,
   ScrollText,
   Server,
   ShieldCheck,
   Terminal,
-  UserCheck,
   Users,
   X,
 } from "lucide-react";
@@ -110,11 +107,12 @@ const ADMIN_ONLY_SECTIONS: NavSection[] = [
     title: "Configuration",
     items: [
       { to: "/console/providers", label: "Providers", icon: Server },
+      // Every OAuth-backed account type is added and managed from this one
+      // page (Cline, WorkBuddy, Hermes). The dedicated WorkBuddy / Hermes OAuth
+      // / Account login pages remain reachable by URL for bulk import-export
+      // and deep links, but they no longer each take a sidebar row.
       { to: "/console/oauth", label: "Accounts", icon: Link2 },
-      { to: "/console/login", label: "Account login", icon: UserCheck },
-      { to: "/console/workbuddy", label: "WorkBuddy", icon: Briefcase },
       { to: "/console/hermes", label: "Hermes", icon: Hexagon },
-      { to: "/console/hermes-oauth", label: "Hermes OAuth", icon: LogIn },
       { to: "/console/builtin-providers", label: "Built-in Providers", icon: Boxes },
       { to: "/console/combos", label: "Combos", icon: Layers },
     ],
@@ -129,6 +127,12 @@ const ADMIN_ONLY_SECTIONS: NavSection[] = [
     ],
   },
 ];
+
+const OAUTH_TITLES: Record<string, string> = {
+  cline: "Cline",
+  workbuddy: "WorkBuddy",
+  hermes: "Hermes",
+};
 
 const PAGE_META: Record<string, { title: string; section: string }> = {
   "/console": { title: "Dashboard", section: "Overview" },
@@ -260,7 +264,22 @@ export function AdminLayout() {
     };
   }, [mobileOpen]);
 
-  const meta = PAGE_META[location.pathname] ?? { title: "wiwi", section: "Admin" };
+  const path = location.pathname.length > 1
+    ? location.pathname.replace(/\/+$/, "")
+    : "/";
+  const oauthSegments = path.startsWith("/console/oauth/")
+    ? path.slice("/console/oauth/".length).split("/").filter(Boolean)
+    : [];
+  const oauthMeta =
+    oauthSegments.length === 1
+      ? {
+          title: OAUTH_TITLES[oauthSegments[0]?.toLowerCase() ?? ""] ?? "Connected accounts",
+          section: "Configuration",
+        }
+      : oauthSegments.length >= 2
+        ? { title: "Account", section: "Configuration" }
+        : null;
+  const meta = PAGE_META[path] ?? oauthMeta ?? { title: "wiwi", section: "Admin" };
   const maskedKey = (() => {
     const k = getToken();
     return k.length > 17 ? `${k.slice(0, 13)}…${k.slice(-4)}` : "master key";

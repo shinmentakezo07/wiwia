@@ -19,6 +19,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ExternalLink, Loader2, RefreshCw } from "lucide-react";
+import { Link } from "react-router-dom";
 import { workbuddyLoginPoll, workbuddyLoginStart, workbuddyRefresh } from "@/api/client";
 import type { WorkBuddyAccount, WorkBuddyLoginConnected } from "@/api/types";
 import { Alert, Badge, Button, CopyButton, Field, Input, Table, TD } from "@/components/ui";
@@ -308,7 +309,12 @@ export function WorkBuddyAccountsTable(props: {
       {props.accounts.map((a) => (
         <tr key={`${a.provider}/${a.label}`}>
           <TD>
-            <div className="font-medium">{a.nickname || a.label}</div>
+            <Link
+              to={`/console/oauth/${encodeURIComponent(a.provider)}/${encodeURIComponent(a.label)}`}
+              className="font-medium transition-colors hover:text-blue-400 focus-visible:text-blue-400"
+            >
+              {a.nickname || a.label}
+            </Link>
             <div className="text-[11px] text-[var(--admin-text-muted)]">
               {a.uid || "—"} · {a.label}
             </div>

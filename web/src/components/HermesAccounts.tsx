@@ -10,6 +10,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, RefreshCcw, Unlink } from "lucide-react";
+import { Link } from "react-router-dom";
 import { hermesDisconnect, hermesRefresh, hermesStatus } from "@/api/client";
 import type { HermesAccountStatus } from "@/api/types";
 import { Badge, Button } from "@/components/ui";
@@ -112,6 +113,7 @@ function HermesAccountRow(props: {
   a: HermesAccountStatus;
   actions: HermesAccountActions;
   disconnectVariant: "ghost" | "danger";
+  provider: string;
   onRequestDisconnect?: (keyLabel: string) => void;
 }) {
   const { a, actions } = props;
@@ -126,9 +128,12 @@ function HermesAccountRow(props: {
     <div className="flex flex-col gap-2">
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <span className="min-w-0 break-words text-[13px] font-medium text-[var(--admin-text)]">
+          <Link
+            to={`/console/oauth/${encodeURIComponent(props.provider)}/${encodeURIComponent(a.key_label)}`}
+            className="min-w-0 break-words text-[13px] font-medium text-[var(--admin-text)] transition-colors hover:text-blue-400 focus-visible:text-blue-400"
+          >
             {name}
-          </span>
+          </Link>
           {a.managed ? (
             a.needs_refresh ? (
               <Badge tone="amber" title="Expired or within the 120 s refresh lead — refresh it or wait for the sweeper.">
@@ -217,6 +222,8 @@ function HermesAccountRow(props: {
 export function HermesAccountList(props: {
   accounts: HermesAccountStatus[];
   actions: HermesAccountActions;
+  /** Provider name — each account row links to its OAuth edit page. */
+  provider: string;
   disconnectVariant?: "ghost" | "danger";
   /** Provider detail confirms a disconnect in a dialog; the console acts
    *  immediately, as its card has always done. */
@@ -243,6 +250,7 @@ export function HermesAccountList(props: {
           <HermesAccountRow
             a={a}
             actions={props.actions}
+            provider={props.provider}
             disconnectVariant={props.disconnectVariant ?? "ghost"}
             onRequestDisconnect={props.onRequestDisconnect}
           />

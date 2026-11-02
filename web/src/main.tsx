@@ -51,6 +51,8 @@ const ProvidersPage = lazy(() => import("@/pages/Providers").then((m) => ({ defa
 const ProviderDetailPage = lazy(() => import("@/pages/ProviderDetail").then((m) => ({ default: m.ProviderDetailPage })));
 const BuiltinProvidersPage = lazy(() => import("@/pages/BuiltinProviders").then((m) => ({ default: m.BuiltinProvidersPage })));
 const OAuthProvidersPage = lazy(() => import("@/pages/OAuthProviders").then((m) => ({ default: m.OAuthProvidersPage })));
+const OAuthProviderPage = lazy(() => import("@/pages/OAuthProviders").then((m) => ({ default: m.OAuthProviderPage })));
+const OAuthAccountDetailPage = lazy(() => import("@/pages/OAuthAccountDetail").then((m) => ({ default: m.OAuthAccountDetailPage })));
 const WorkBuddyAccountsPage = lazy(() => import("@/pages/WorkBuddyAccounts").then((m) => ({ default: m.WorkBuddyAccountsPage })));
 const AccountLoginPage = lazy(() => import("@/pages/AccountLogin").then((m) => ({ default: m.AccountLoginPage })));
 const HermesPage = lazy(() => import("@/pages/Hermes").then((m) => ({ default: m.HermesPage })));
@@ -219,6 +221,22 @@ function AppRoutes() {
           element={
             <RequireAdmin>
               <OAuthProvidersPage />
+            </RequireAdmin>
+          }
+        />
+        <Route
+          path="/console/oauth/:provider"
+          element={
+            <RequireAdmin>
+              <OAuthProviderPage />
+            </RequireAdmin>
+          }
+        />
+        <Route
+          path="/console/oauth/:provider/:account"
+          element={
+            <RequireAdmin>
+              <OAuthAccountDetailPage />
             </RequireAdmin>
           }
         />

@@ -227,7 +227,7 @@ function KeyRow(props: { provider: string; k: PoolKey; onError: (m: string) => v
   );
 }
 
-function KeyPoolCard(props: { p: Provider; providerName: string; onError: (m: string) => void }) {
+export function KeyPoolCard(props: { p: Provider; providerName: string; onError: (m: string) => void }) {
   const qc = useQueryClient();
   const [roundRobin, setRoundRobin] = useState(props.p.round_robin);
 
@@ -581,7 +581,7 @@ function ModelPickerCard(props: { p: Provider; onError: (m: string) => void }) {
 
 // -- deployments referencing this account ---------------------------------------------
 
-function DeploymentsCard(props: { provider: string; onError: (m: string) => void }) {
+export function DeploymentsCard(props: { provider: string; onError: (m: string) => void }) {
   const q = useQuery({ queryKey: ["model-groups"], queryFn: getModels });
   const qc = useQueryClient();
   const [pending, setPending] = useState<{ group: string; model_id: string } | null>(null);
@@ -983,7 +983,7 @@ function DeploymentsCard(props: { provider: string; onError: (m: string) => void
 
 // -- account settings (edit metadata) -------------------------------------------
 
-function AccountSettingsCard(props: { p: Provider; onError: (m: string) => void }) {
+export function AccountSettingsCard(props: { p: Provider; onError: (m: string) => void }) {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const [name, setName] = useState(props.p.name);
@@ -1465,6 +1465,7 @@ function HermesOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
             <HermesAccountList
               accounts={accounts}
               actions={actions}
+              provider={props.p.name}
               disconnectVariant="danger"
               onRequestDisconnect={(keyLabel) => setConfirmDisconnect({ keyLabel })}
             />

@@ -24,6 +24,7 @@ import {
   useHermesAccountActions,
   useHermesStatusQuery,
 } from "@/components/HermesAccounts";
+import { SharedModelsCard } from "@/pages/oauth-models";
 import {
   Alert,
   Badge,
@@ -334,7 +335,7 @@ function HermesAccountCard(props: {
       <div className="flex flex-1 flex-col gap-3 px-5 py-4">
         {statusQ.isLoading && <Spinner />}
         {!statusQ.isLoading && !statusQ.isError && accounts.length > 0 && (
-          <HermesAccountList accounts={accounts} actions={actions} />
+          <HermesAccountList accounts={accounts} actions={actions} provider={p.name} />
         )}
         {!statusQ.isLoading && !statusQ.isError && accounts.length === 0 && (
           <p className="text-[12px] text-[var(--admin-text-muted)]">
@@ -396,9 +397,12 @@ function HermesAccountCard(props: {
   );
 }
 
-// -- page -----------------------------------------------------------------------
+// -- panel / page ---------------------------------------------------------------
 
-export function HermesOAuthPage() {
+/** The OAuth surface itself — connect action, account cards, and the
+ *  device-code dialog. Exported so /console/oauth can embed the same flow
+ *  instead of growing a second copy of it. */
+export function HermesOAuthPanel() {
   const q = useQuery({ queryKey: ["providers"], queryFn: getProviders, refetchInterval: 15_000 });
   const [error, setError] = useState<string | null>(null);
   const [newOpen, setNewOpen] = useState(false);
@@ -406,31 +410,9 @@ export function HermesOAuthPage() {
   const accounts = (q.data?.providers ?? []).filter((p) => p.provider_type === "hermes");
 
   return (
-    <div>
-      <PageHeader
-        title="Hermes OAuth"
-        subtitle="Nous Portal accounts connected via device-code sign-in"
-        right={
-          <div className="flex items-center gap-2">
-            <Button onClick={() => setNewOpen(true)}>
-              <LogIn size={14} /> Connect account
-            </Button>
-            <a
-              href="https://hermes-agent.nousresearch.com/docs/"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex"
-            >
-              <Button variant="ghost">
-                <ExternalLink size={14} /> Docs
-              </Button>
-            </a>
-          </div>
-        }
-      />
-
-      <Card className="mb-4 px-4 py-3">
-        <p className="text-[12px] leading-relaxed text-[var(--admin-text-muted)]">
+    <div className="space-y-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <p className="max-w-2xl text-[12px] leading-relaxed text-[var(--admin-text-muted)]">
           Hermes uses the OAuth 2.0 device-authorization flow. Connect an account
           here to sign in with your Nous Portal account instead of pasting an API
           key — the gateway stores the token, refreshes it before expiry, and
@@ -440,10 +422,25 @@ export function HermesOAuthPage() {
           </Link>
           .
         </p>
-      </Card>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button className="min-h-11" onClick={() => setNewOpen(true)}>
+            <LogIn size={14} aria-hidden /> Connect account
+          </Button>
+          <a
+            href="https://hermes-agent.nousresearch.com/docs/"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex"
+          >
+            <Button variant="ghost" className="min-h-11">
+              <ExternalLink size={14} aria-hidden /> Docs
+            </Button>
+          </a>
+        </div>
+      </div>
 
       {error && (
-        <div className="mb-3">
+        <div>
           <ErrorText>{error}</ErrorText>
         </div>
       )}
@@ -473,6 +470,17 @@ export function HermesOAuthPage() {
         </div>
       )}
 
+      {accounts.length > 0 && (
+        <SharedModelsCard
+          providerType="hermes"
+          prefix="hermes"
+          label="Hermes"
+          accountCount={accounts.reduce((n, p) => n + p.keys.length, 0)}
+          providers={accounts}
+          onError={setError}
+        />
+      )}
+
       <HermesConnectDialog
         open={newOpen}
         provider=""
@@ -484,6 +492,18 @@ export function HermesOAuthPage() {
           setNewOpen(false);
         }}
       />
+    </div>
+  );
+}
+
+export function HermesOAuthPage() {
+  return (
+    <div>
+      <PageHeader
+        title="Hermes OAuth"
+        subtitle="Nous Portal accounts connected via device-code sign-in"
+      />
+      <HermesOAuthPanel />
     </div>
   );
 }
