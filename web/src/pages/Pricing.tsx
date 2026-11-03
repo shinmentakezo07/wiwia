@@ -9,6 +9,7 @@ import {
   Check,
   ChevronDown,
   CreditCard,
+  Minus,
   Server,
   ShieldCheck,
   Terminal,
@@ -68,16 +69,84 @@ const PLANS: Plan[] = [
   },
 ];
 
-const COMPARE: { label: string; selfHosted: string; enterprise: string }[] = [
-  { label: "Price", selfHosted: "Free", enterprise: "Custom" },
-  { label: "Licence", selfHosted: "MIT", enterprise: "MIT" },
-  { label: "Platform fee", selfHosted: "None", enterprise: "None" },
-  { label: "Provider cost", selfHosted: "Paid to providers", enterprise: "Paid to providers" },
-  { label: "Self-hosting", selfHosted: "Yes", enterprise: "Yes" },
-  { label: "Community support", selfHosted: "GitHub", enterprise: "Direct" },
-  { label: "Custom adapter work", selfHosted: "Your team", enterprise: "Included" },
-  { label: "Deployment assistance", selfHosted: "Docs", enterprise: "Included" },
+type CompareMark = "yes" | "no" | string;
+type CompareRow = {
+  label: string;
+  note: string;
+  selfHosted: CompareMark;
+  enterprise: CompareMark;
+};
+type CompareGroup = { title: string; rows: CompareRow[] };
+
+const COMPARE_GROUPS: CompareGroup[] = [
+  {
+    title: "Pricing & licence",
+    rows: [
+      { label: "Software price", note: "The gateway, console, and site.", selfHosted: "Free", enterprise: "Free" },
+      { label: "Licence", note: "Use, fork, and ship it.", selfHosted: "MIT", enterprise: "MIT" },
+      { label: "Platform fee", note: "No per-token or seat markup.", selfHosted: "yes", enterprise: "yes" },
+      { label: "Provider bill", note: "Paid to your provider account.", selfHosted: "Your providers", enterprise: "Your providers" },
+    ],
+  },
+  {
+    title: "What you run",
+    rows: [
+      { label: "Self-hosting", note: "Your infrastructure, your data.", selfHosted: "yes", enterprise: "yes" },
+      { label: "Deployment assistance", note: "Setup, migration, and upgrades.", selfHosted: "Docs", enterprise: "Included" },
+      { label: "Architecture review", note: "Multi-tenant and high-volume designs.", selfHosted: "no", enterprise: "Included" },
+    ],
+  },
+  {
+    title: "Support & custom work",
+    rows: [
+      { label: "Support channel", note: "Where help comes from.", selfHosted: "GitHub", enterprise: "Direct" },
+      { label: "Response priority", note: "Blocking issues get triaged first.", selfHosted: "Best effort", enterprise: "Priority" },
+      { label: "Custom adapter work", note: "New providers or wire shapes.", selfHosted: "Your team", enterprise: "Included" },
+    ],
+  },
 ];
+const ALL_COMPARE_ROWS = COMPARE_GROUPS.flatMap((g) => g.rows);
+
+function CellMark({ value }: { value: CompareMark }) {
+  if (value === "yes") {
+    return (
+      <span
+        className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-emerald-400/20 bg-emerald-400/10"
+        title="Included"
+      >
+        <Check size={13} className="text-emerald-400" aria-hidden />
+        <span className="sr-only">Included</span>
+      </span>
+    );
+  }
+  if (value === "no") {
+    return (
+      <span
+        className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-white/[0.06] text-[var(--admin-text-dim)]"
+        title="Not included"
+      >
+        <Minus size={13} aria-hidden />
+        <span className="sr-only">Not included</span>
+      </span>
+    );
+  }
+  // Long strings get a quieter treatment so the cell doesn't scream. A cell
+  // that wraps to three lines breaks the row rhythm; the note column already
+  // carries detail, so truncate here and surface the rest in the tooltip.
+  const long = value.length > 18;
+  return (
+    <span
+      className={`inline-flex max-w-full items-center justify-center rounded-md px-2 py-1 text-center text-[12.5px] leading-snug ${
+        long
+          ? "bg-white/[0.03] text-[var(--admin-text-muted)]"
+          : "font-medium text-[var(--admin-text)]"
+      }`}
+      title={value}
+    >
+      {value}
+    </span>
+  );
+}
 
 const FAQ: { q: string; a: string }[] = [
   {
@@ -186,31 +255,123 @@ export function PricingPage() {
       </section>
 
       <section>
-        <h2 className="mb-4 text-center text-[22px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
-          Side by side
-        </h2>
-        <Card className="overflow-hidden p-0">
-          <div className="admin-scroll overflow-x-auto">
-            <table className="w-full min-w-[32rem] text-left text-[13px]">
-              <thead className="bg-white/[0.02]">
-                <tr>
-                  <th className="px-5 py-3.5 font-semibold text-[var(--admin-text)]">Feature</th>
-                  <th className="px-5 py-3.5 text-center font-semibold text-blue-400">Self-hosted</th>
-                  <th className="px-5 py-3.5 text-center font-semibold text-[var(--admin-text)]">Enterprise</th>
+        <div className="mb-5 text-center">
+          <span className="admin-label">Compare</span>
+          <h2 className="mt-2 text-[22px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
+            Side by side
+          </h2>
+          <p className="mx-auto mt-2 max-w-xl text-[13px] leading-relaxed text-[var(--admin-text-muted)]">
+            Same software, same licence. The difference is who does the work when you
+            need a provider, a translation rule, or a deployment shape that isn't there yet.
+          </p>
+        </div>
+
+        {/* Desktop / tablet: grouped table with the self-hosted column highlighted.
+            On phones the table's column headers have nowhere to live, so the
+            dedicated card list below takes over at `sm`. */}
+        <Card className="hidden overflow-hidden p-0 sm:block">
+          <div
+            tabIndex={0}
+            role="region"
+            aria-label="Self-hosted versus Enterprise comparison, scrollable"
+            className="admin-scroll overflow-x-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/50"
+          >
+            <table className="w-full min-w-[34rem] border-collapse text-left text-[13px]">
+              <caption className="sr-only">
+                Feature comparison between the free self-hosted gateway and Enterprise support
+              </caption>
+              <thead>
+                <tr className="border-b border-[var(--admin-border)] bg-white/[0.02]">
+                  <th scope="col" className="px-5 py-4 admin-label">
+                    Capability
+                  </th>
+                  <th scope="col" className="w-[24%] px-5 py-4 text-center">
+                    <span className="inline-flex items-center gap-1.5 font-semibold text-blue-400">
+                      Self-hosted
+                      <span className="h-1.5 w-1.5 rounded-full bg-blue-400" aria-hidden />
+                    </span>
+                  </th>
+                  <th scope="col" className="w-[24%] px-5 py-4 text-center font-medium text-[var(--admin-text)]">
+                    Enterprise
+                  </th>
                 </tr>
               </thead>
-              <tbody>
-                {COMPARE.map((row) => (
-                  <tr key={row.label} className="border-t border-[var(--admin-border)]">
-                    <td className="px-5 py-3 text-[var(--admin-text-muted)]">{row.label}</td>
-                    <td className="px-5 py-3 text-center text-[var(--admin-text)]">{row.selfHosted}</td>
-                    <td className="px-5 py-3 text-center text-[var(--admin-text)]">{row.enterprise}</td>
+              {COMPARE_GROUPS.map((group) => (
+                <tbody key={group.title}>
+                  <tr className="bg-white/[0.015]">
+                    <th
+                      scope="colgroup"
+                      colSpan={3}
+                      className="px-5 pb-1.5 pt-4 text-left text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--admin-text-dim)]"
+                    >
+                      {group.title}
+                    </th>
                   </tr>
-                ))}
-              </tbody>
+                  {group.rows.map((row) => (
+                    <tr
+                      key={row.label}
+                      className="border-t border-[var(--admin-border)] transition-colors hover:bg-white/[0.015]"
+                    >
+                      <th scope="row" className="px-5 py-3.5 text-left font-normal">
+                        <span className="block font-medium text-[var(--admin-text)]">{row.label}</span>
+                        <span className="mt-0.5 block text-[11.5px] leading-snug text-[var(--admin-text-dim)]">
+                          {row.note}
+                        </span>
+                      </th>
+                      <td className="border-l border-blue-400/10 bg-blue-500/[0.02] px-5 py-3.5 text-center">
+                        <CellMark value={row.selfHosted} />
+                      </td>
+                      <td className="px-5 py-3.5 text-center">
+                        <CellMark value={row.enterprise} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              ))}
             </table>
           </div>
         </Card>
+
+        {/* Phone: a two-column matrix can't survive 375px, so each row becomes
+            a card with both plans labelled. Same data, no horizontal scroll. */}
+        <div className="space-y-2 sm:hidden">
+          {ALL_COMPARE_ROWS.map((row) => (
+            <Card key={row.label} className="p-4">
+              <span className="text-[13.5px] font-medium text-[var(--admin-text)]">{row.label}</span>
+              <p className="mt-0.5 text-[11px] leading-snug text-[var(--admin-text-dim)]">
+                {row.note}
+              </p>
+              <dl className="mt-3 grid grid-cols-2 gap-2">
+                <div className="rounded-lg border border-blue-400/15 bg-blue-500/[0.03] px-3 py-2">
+                  <dt className="text-[10px] font-semibold uppercase tracking-[0.12em] text-blue-400">
+                    Self-hosted
+                  </dt>
+                  <dd className="mt-1">
+                    <CellMark value={row.selfHosted} />
+                  </dd>
+                </div>
+                <div className="rounded-lg border border-[var(--admin-border)] px-3 py-2">
+                  <dt className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--admin-text-dim)]">
+                    Enterprise
+                  </dt>
+                  <dd className="mt-1">
+                    <CellMark value={row.enterprise} />
+                  </dd>
+                </div>
+              </dl>
+            </Card>
+          ))}
+        </div>
+
+        <div className="mt-4 flex flex-col items-center justify-center gap-3 sm:flex-row">
+          <Link to="/docs" className="admin-btn admin-btn-primary min-h-11 px-5">
+            Start self-hosting
+            <ArrowRight size={15} className="ml-2" />
+          </Link>
+          <Link to="/contact" className="admin-btn admin-btn-ghost min-h-11 px-5">
+            Talk about Enterprise
+          </Link>
+        </div>
       </section>
 
       <section className="grid gap-4 sm:grid-cols-3">
