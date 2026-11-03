@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Badge, Card } from "@/components/ui";
+import { ClosingCta } from "@/components/ClosingCta";
 import { HERO_BEAMS_COMPACT, HeroBeamBackdrop } from "@/components/HeroBeamBackdrop";
 
 interface Plan {
@@ -413,23 +414,19 @@ export function PricingPage() {
         </div>
       </section>
 
-      <section className="rounded-2xl border border-[var(--admin-border)] bg-[var(--admin-surface)] p-8 text-center">
-        <h2 className="text-[24px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
-          Start with the quickstart
-        </h2>
-        <p className="mx-auto mt-2 max-w-xl text-[14px] leading-relaxed text-[var(--admin-text-muted)]">
-          Three commands: start the gateway, mint a virtual key, send any dialect.
-        </p>
-        <div className="mt-5 flex flex-col items-center justify-center gap-3 sm:flex-row">
-          <Link to="/docs" className="admin-btn admin-btn-primary">
-            Read the docs
-            <ArrowRight size={15} className="ml-2" />
-          </Link>
-          <Link to="/open-source" className="admin-btn admin-btn-ghost">
-            Self-hosting
-          </Link>
-        </div>
-      </section>
+      <ClosingCta
+        eyebrow=".05 · quickstart"
+        title="Three commands, then every dialect answers."
+        body="Point any OpenAI or Anthropic client at the gateway, mint a virtual key, and watch requests land in the console. No account, no billing screen."
+        primary={{ label: "Read the quickstart", to: "/docs" }}
+        secondary={{ label: "Self-hosting details", to: "/open-source" }}
+        footnote="MIT-licensed · no phone-home · runs in one process"
+        commands={[
+          { title: "Prepare the config", command: "cp wiwi.yaml.example wiwi.yaml" },
+          { title: "Start the gateway", command: "wiwi --config wiwi.yaml" },
+          { title: "Mint a virtual key", command: "curl -X POST localhost:4000/admin/keys/generate \\\n  -H 'Authorization: Bearer $WIWI_MASTER_KEY' \\\n  -d '{\"alias\":\"dev\"}'" },
+        ]}
+      />
     </div>
   );
 }

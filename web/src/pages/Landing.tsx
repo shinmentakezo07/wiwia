@@ -19,6 +19,7 @@ import {
 import { Card } from "@/components/ui";
 import { GraphSection, OpenAIIcon, AnthropicIcon, GeminiIcon, OpenRouterIcon, MoonshotIcon } from "@/components/AnimatedBeam";
 import { EnterpriseShowcase } from "@/components/landing/EnterpriseShowcase";
+import { QuickstartBand } from "@/components/landing/QuickstartBand";
 import { HERO_BEAMS_FULL, HeroBeamBackdrop } from "@/components/HeroBeamBackdrop";
 
 const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
@@ -483,73 +484,25 @@ function CheckIcon({ yes }: { yes: boolean }) {
   );
 }
 
-// Three real invocations from docs/QUICKSTART.md — the "30 seconds" claim is
-// the step count, so every line here must actually work when pasted. Kept
-// short enough to fit the card at 375px without clipping or mid-token breaks.
-const SETUP_STEPS: { title: string; command: string }[] = [
-  { title: "Start the gateway", command: "wiwi --config wiwi.yaml" },
-  { title: "Mint a virtual key", command: "POST /admin/keys/generate" },
-  { title: "Send any dialect", command: "POST /v1/messages" },
+// Steps mirror docs/QUICKSTART.md. The third copyable command mints the key;
+// the send call itself is named in the step detail so the card stays scannable.
+const SETUP_STEPS: { title: string; detail: string; command: string }[] = [
+  {
+    title: "Configure once",
+    detail: "Copy the example config and point it at your provider keys.",
+    command: "cp wiwi.yaml.example wiwi.yaml",
+  },
+  {
+    title: "Start the gateway",
+    detail: "Binds 0.0.0.0:4000 by default.",
+    command: "wiwi --config wiwi.yaml",
+  },
+  {
+    title: "Mint + send",
+    detail: "Create a virtual key, then call any dialect at :4000.",
+    command: 'curl -X POST localhost:4000/admin/keys/generate -H "Authorization: Bearer $WIWI_MASTER_KEY" -d \'{"name":"my-client"}\'',
+  },
 ];
-
-function SetupCard() {
-  const [copied, setCopied] = useState<number | null>(null);
-  return (
-    <div className="relative min-w-0">
-      <div className="hero-grid pointer-events-none absolute -inset-16 opacity-60" aria-hidden />
-      <div
-        className="pointer-events-none absolute left-1/2 top-1/2 h-[300px] w-[420px] -translate-x-1/2 -translate-y-1/2 rounded-full blur-3xl"
-        style={{ background: "radial-gradient(circle, rgba(124,58,237,0.10) 0%, transparent 70%)" }}
-        aria-hidden
-      />
-      <div className="relative overflow-hidden rounded-[var(--admin-radius)] border border-[var(--admin-border)] bg-[var(--admin-surface)]">
-        <div className="relative flex h-12 items-center border-b border-[var(--admin-border)] px-5">
-          <div className="flex items-center gap-1.5" aria-hidden>
-            <span className="size-1.5 rounded-full bg-white/[0.14]" />
-            <span className="size-1.5 rounded-full bg-white/[0.10]" />
-            <span className="size-1.5 rounded-full bg-white/[0.08]" />
-          </div>
-          <span className="admin-label absolute left-1/2 -translate-x-1/2 font-mono">30 seconds</span>
-        </div>
-        {SETUP_STEPS.map((step, i) => (
-          <div
-            key={step.title}
-            className={`px-5 py-5 ${i < SETUP_STEPS.length - 1 ? "border-b border-[var(--admin-border)]" : ""}`}
-          >
-            <div className="flex items-baseline gap-3">
-              <span className="font-mono text-[10px] font-semibold tracking-[0.14em] text-[var(--admin-text-dim)]">
-                {String(i + 1).padStart(2, "0")}
-              </span>
-              <h3 className="text-[13px] font-medium text-[var(--admin-text)]">{step.title}</h3>
-            </div>
-            <div className="mt-3 flex min-h-11 items-center gap-2 rounded-lg bg-white/[0.02] pl-3">
-              <code className="min-w-0 flex-1 overflow-x-auto py-2 pr-1 font-mono text-[12px] whitespace-nowrap text-[var(--admin-text-muted)]">
-                {step.command}
-              </code>
-              <button
-                type="button"
-                aria-label={`Copy ${step.title.toLowerCase()}`}
-                onClick={async () => {
-                  try {
-                    await navigator.clipboard.writeText(step.command);
-                    setCopied(i);
-                    setTimeout(() => setCopied(null), 1500);
-                  } catch {
-                    // Clipboard can be denied in an insecure context; leave the
-                    // command selectable rather than claiming a copy happened.
-                  }
-                }}
-                className="inline-flex size-11 shrink-0 items-center justify-center rounded-[8px] text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)] focus-visible:ring-2 focus-visible:ring-[var(--admin-accent)]/60 focus-visible:outline-none"
-              >
-                {copied === i ? <Check size={14} /> : <Copy size={14} />}
-              </button>
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
 
 // ── page ───────────────────────────────────────────────────────────────────
 
@@ -899,41 +852,30 @@ See pricing and support <ArrowRight size={14} />
       <EnterpriseShowcase />
 
       {/* ══ final CTA ══ */}
-      <section className="relative overflow-hidden py-32 md:py-40">
-        <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[var(--admin-border)] to-transparent" />
-        <div className="relative mx-auto grid max-w-6xl items-center gap-14 px-6 lg:grid-cols-2 lg:gap-20">
-          <div className="min-w-0">
-            <span className="admin-label block">Get started</span>
-            <h2 className="mt-5 text-4xl font-bold leading-[1.06] tracking-tight text-[var(--admin-text)] md:text-5xl lg:text-[54px]">
-              Start routing requests
-              <br />
-              <span className="text-brand-400">in 30 seconds</span>
-            </h2>
-            <p className="mt-6 max-w-xl text-base leading-relaxed text-[var(--admin-text-muted)]">
-              Start the binary, mint a virtual key, and send any dialect. No account,
-              credit card, or control plane required.
-            </p>
-            <div className="mt-10 flex flex-col gap-3 sm:flex-row">
-              <Link
-                to="/signup"
-                className="wiwi-shimmer group inline-flex h-12 w-full items-center justify-center gap-2 rounded-[10px] bg-gradient-to-b from-brand-500 to-brand-700 px-6 text-base font-medium text-white shadow-lg shadow-brand-600/20 transition-[filter] duration-150 hover:brightness-110 focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--admin-bg)] focus-visible:outline-none sm:w-auto"
-              >
-                Create Free Account
-                <ArrowRight size={18} className="transition-transform duration-150 group-hover:translate-x-0.5" />
-              </Link>
-              <a
-                href="https://github.com/shinmentakezo07/wiwia"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-[10px] border border-[var(--admin-border)] bg-transparent px-6 text-base font-medium text-[var(--admin-text)] transition-colors hover:bg-white/[0.04] focus-visible:ring-2 focus-visible:ring-[var(--admin-accent)]/60 focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--admin-bg)] focus-visible:outline-none sm:w-auto"
-              >
-                Self-host WIWI Gateway
-              </a>
-            </div>
-          </div>
-          <SetupCard />
-        </div>
-      </section>
+      <QuickstartBand
+        id="quickstart"
+        index="02"
+        eyebrow="quickstart"
+        title={
+          <>
+            Clone it.
+            <br />
+            <span className="text-[var(--admin-text-muted)]">Run it. </span>
+            <span className="text-brand-400">Route it.</span>
+          </>
+        }
+        body="No signup wall, hosted control plane, or billing flow between you and the binary. The default SQLite build is ready for a local machine in minutes; Postgres is there when you need shared state."
+        primary={{ label: "Read the quickstart", to: "/docs" }}
+        secondary={{ label: "Create hosted account", to: "/signup" }}
+        tertiary={{ label: "GitHub", href: "https://github.com/shinmentakezo07/wiwia" }}
+        steps={SETUP_STEPS}
+        motto={
+          <>
+            Your keys. Your logs. Your infrastructure.{" "}
+            <span className="text-[var(--admin-text-muted)]">MIT throughout.</span>
+          </>
+        }
+      />
     </div>
   );
 }

@@ -2,11 +2,9 @@
 // provider, and record every request it routes. Two sections, both grounded
 // in the implementation in wiwi/ rather than aspirational copy.
 
-import { Link } from "react-router-dom";
 import {
   Activity,
   BarChart3,
-  BookOpen,
   Database,
   Gauge,
   KeyRound,
@@ -15,11 +13,11 @@ import {
   ScrollText,
   Server,
   ShieldCheck,
-  Terminal,
   Waypoints,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Badge, Card } from "@/components/ui";
+import { ClosingCta } from "@/components/ClosingCta";
 
 const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
 
@@ -215,25 +213,19 @@ export function ProductsPage() {
         <FeatureGrid title="What the console records" features={OBSERVABILITY_FEATURES} />
       </section>
 
-      <section className="rounded-2xl border border-[var(--admin-border)] bg-[var(--admin-surface)] p-8 text-center">
-        <h2 className="text-[24px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
-          Run it yourself
-        </h2>
-        <p className="mx-auto mt-2 max-w-xl text-[15px] text-[var(--admin-text-muted)]">
-          The whole platform is MIT-licensed. Start the binary, mint a virtual key, and
-          send your first request in three commands.
-        </p>
-        <div className="mt-5 flex flex-col items-center justify-center gap-3 sm:flex-row">
-          <Link to="/docs" className="admin-btn admin-btn-primary">
-            <BookOpen size={15} className="mr-2" />
-            Read the quickstart
-          </Link>
-          <Link to="/open-source" className="admin-btn admin-btn-ghost">
-            <Terminal size={15} className="mr-2" />
-            Self-hosting details
-          </Link>
-        </div>
-      </section>
+      <ClosingCta
+        eyebrow=".03 · get started"
+        title="One gateway. Every client. Your providers."
+        body="Point any OpenAI, Anthropic, or Codex client at one base URL. The gateway translates the dialect, picks a healthy deployment, and logs the request — you keep the keys."
+        primary={{ label: "Read the quickstart", to: "/docs" }}
+        secondary={{ label: "Self-host it", to: "/open-source" }}
+        footnote="Streaming, tool calls, and prompt-cache accounting work on every surface."
+        commands={[
+          { title: "Prepare the config", command: "cp wiwi.yaml.example wiwi.yaml" },
+          { title: "Start the gateway", command: "wiwi --config wiwi.yaml" },
+          { title: "Swap one base URL", command: "export OPENAI_BASE_URL=http://localhost:4000/v1\nexport OPENAI_API_KEY=<wiwi-key>" },
+        ]}
+      />
     </div>
   );
 }

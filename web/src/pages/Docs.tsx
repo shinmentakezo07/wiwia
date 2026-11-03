@@ -18,6 +18,7 @@ import {
   type RefObject,
 } from "react";
 import { Link } from "react-router-dom";
+import { ClosingCta } from "@/components/ClosingCta";
 import {
   ArrowRight,
   ArrowUp,
@@ -1674,36 +1675,19 @@ router_settings:
             <FeatureGrid />
           </section>
 
-          {/* CTA — borderless, like the landing page's closing section. */}
-          <div className="docs-cta mt-16">
-            <h2 className="docs-cta-title">
-              Start routing requests
-              <br />
-              <span className="text-brand-400">in 30 seconds</span>
-            </h2>
-            <p className="docs-cta-body">
-              Point an OpenAI, Anthropic, or Codex client at the gateway, mint a virtual key, and
-              make the first call — or jump straight into the playground.
-            </p>
-            <div className="docs-cta-actions">
-              <Link
-                to="/playground"
-                className="wiwi-shimmer group inline-flex h-12 items-center justify-center gap-2 rounded-[10px] bg-gradient-to-b from-brand-500 to-brand-700 px-6 text-base font-medium text-white shadow-lg shadow-brand-600/20 transition-[filter] duration-150 hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/70"
-              >
-                Open playground
-                <ArrowRight
-                  size={16}
-                  className="transition-transform duration-150 group-hover:translate-x-0.5"
-                />
-              </Link>
-              <Link
-                to="/signup"
-                className="inline-flex h-12 items-center justify-center gap-2 rounded-[10px] border border-[var(--admin-border)] bg-transparent px-6 text-base font-medium text-[var(--admin-text)] transition-colors hover:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--admin-accent)]/60"
-              >
-                Create an account
-              </Link>
-            </div>
-          </div>
+          <ClosingCta
+            eyebrow=".05 · quickstart"
+            title="Start routing requests in 30 seconds."
+            body="Point an OpenAI, Anthropic, or Codex client at the gateway, mint a virtual key, and make the first call."
+            primary={{ label: "Open playground", to: "/playground" }}
+            secondary={{ label: "Create an account", to: "/signup" }}
+            footnote="Every route in this reference is served by the same process."
+            commands={[
+              { title: "Point a client at the gateway", command: "export OPENAI_BASE_URL=http://localhost:4000/v1" },
+              { title: "Use a virtual key", command: "export OPENAI_API_KEY=<wiwi-key>" },
+              { title: "Make the first call", command: "curl $OPENAI_BASE_URL/models" },
+            ]}
+          />
         </div>
       </div>
     </div>

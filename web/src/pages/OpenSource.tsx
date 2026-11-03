@@ -5,6 +5,7 @@ import { Link } from "react-router-dom";
 import { ArrowRight, Check, GitFork, Lock, ServerCog, ShieldCheck } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Badge, Card } from "@/components/ui";
+import { ClosingCta } from "@/components/ClosingCta";
 
 const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
 
@@ -248,6 +249,20 @@ export function OpenSourcePage() {
           ))}
         </div>
       </section>
+
+      <ClosingCta
+        eyebrow=".04 · get started"
+        title="Own the whole stack, not a seat on someone else's."
+        body="Gateway, console, and public site ship as one process under MIT. Clone it, run it, and keep every request and key inside your own infrastructure."
+        primary={{ label: "Read the quickstart", to: "/docs" }}
+        secondary={{ label: "See pricing", to: "/pricing" }}
+        footnote="No proprietary control plane. No seat licence. Fork it if you outgrow it."
+        commands={[
+          { title: "Clone the repository", command: "git clone https://github.com/shinmentakezo07/wiwia && cd wiwia" },
+          { title: "Prepare the config", command: "cp wiwi.yaml.example wiwi.yaml" },
+          { title: "Start the gateway", command: "wiwi --config wiwi.yaml" },
+        ]}
+      />
     </div>
   );
 }

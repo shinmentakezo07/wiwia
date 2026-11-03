@@ -2985,58 +2985,6 @@ select.admin-input option {
   }
 }
 
-/* CTA: a borderless closing section, like the landing page's. */
-.docs-cta {
-  position: relative;
-  isolation: isolate;
-  overflow: hidden;
-  padding-top: clamp(2rem, 4vw, 3rem);
-  text-align: center;
-}
-.docs-cta::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  right: 0;
-  left: 0;
-  height: 1px;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    var(--admin-border) 20%,
-    var(--admin-border) 80%,
-    transparent
-  );
-}
-.docs-cta-title {
-  font-size: clamp(1.6rem, 3.4vw, 2.4rem);
-  font-weight: 700;
-  line-height: 1.08;
-  letter-spacing: -0.03em;
-  color: var(--admin-text);
-  text-wrap: balance;
-}
-.docs-cta-body {
-  max-width: 44ch;
-  margin: 1rem auto 0;
-  font-size: 15px;
-  line-height: 1.7;
-  color: var(--admin-text-muted);
-}
-.docs-cta-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  margin-top: 2rem;
-}
-@media (max-width: 479px) {
-  .docs-cta-actions > a {
-    width: 100%;
-  }
-}
-
 /* ─── Login page: split-panel beam console ───────────────────────────────── */
 
 /* Single-screen fit. The page must fill exactly one viewport with no
@@ -3490,6 +3438,52 @@ select.admin-input option {
 }
 @media (prefers-reduced-motion: no-preference) {
   .hero-grid { animation: hero-grid-pan 24s linear infinite; }
+}
+
+/* ─── Reliability page: attempt-trace replay and escalation motion ──────────
+   The trace is the page's argument, so it replays once on mount and on
+   request: rows rise in sequence, the connector draws between them, and each
+   status chip pops after its row lands. Everything is gated on
+   prefers-reduced-motion — with reduce, the trace is simply static. */
+
+@keyframes rel-trace-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes rel-trace-line {
+  from { transform: scaleY(0); }
+  to   { transform: scaleY(1); }
+}
+@keyframes rel-trace-status {
+  0%   { opacity: 0; transform: scale(0.84); }
+  65%  { transform: scale(1.06); }
+  100% { opacity: 1; transform: scale(1); }
+}
+@keyframes rel-arrow-nudge {
+  0%, 100% { transform: translateX(0); opacity: 0.4; }
+  50%      { transform: translateX(3px); opacity: 0.9; }
+}
+@keyframes rel-arrow-nudge-y {
+  0%, 100% { transform: translateY(0); opacity: 0.4; }
+  50%      { transform: translateY(3px); opacity: 0.9; }
+}
+@keyframes rel-spine-sweep {
+  0%   { top: -2.5rem; opacity: 0; }
+  12%  { opacity: 1; }
+  85%  { opacity: 1; }
+  100% { top: 100%; opacity: 0; }
+}
+
+/* Hidden above the spine until its animation runs. */
+.rel-spine-dot { top: -2.5rem; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .rel-trace-row { animation: rel-trace-in 0.42s cubic-bezier(0.22, 0.61, 0.36, 1) both; }
+  .rel-trace-line { transform-origin: top; animation: rel-trace-line 0.36s ease-out both; }
+  .rel-trace-status { animation: rel-trace-status 0.4s cubic-bezier(0.22, 0.61, 0.36, 1) both; }
+  .rel-arrow-nudge { animation: rel-arrow-nudge 2.8s ease-in-out infinite; }
+  .rel-arrow-nudge-y { animation: rel-arrow-nudge-y 2.8s ease-in-out infinite; }
+  .rel-spine-dot { animation: rel-spine-sweep 6.5s linear infinite; }
 }
 
 
