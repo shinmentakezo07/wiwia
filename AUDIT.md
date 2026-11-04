@@ -9213,9 +9213,17 @@ conflates a failed fetch with a missing provider, reporting a transient blip as
 
 ### 340. AUDIT.md status markers are unreliable in both directions
 
-**Severity:** 🟡 Medium · **Status: open** — **re-confirmed 2026-10-19; the drift
-is systematic, not random** (two more drifted markers found by the round-162
-delta/chunk sweep, one in each direction)
+**Severity:** 🟡 Medium · **Status: fixed (2026-11-04, round 194)** — re-verified
+against source. Every entry this finding enumerated now sits in a `✅ Fixed`
+section or carries an explicit `**Status: fixed**` (including #332, #349, #356,
+#357 and #420, which were the last live-looking ones); the orphaned `Status:
+fixed` above the medium heading is gone; #324 is fixed (round 112), so the
+`.claude/rules` "fully fixed" claim no longer contradicts it. Duplicate numbers
+remain (#35, #36, #323–#326), but `scripts/audit_lint.py` documents that as
+accepted by design — renumbering would rewrite citations the code relies on.
+The lint now fails any entry lacking a marker, so the "unmarked-but-fixed"
+direction cannot recur; correctness of an individual marker still depends on
+the round that fixes it, which is the standing convention.
 **File:** `AUDIT.md`
 
 Verified this sweep: entries marked fixed that are not (#229, #317 partial,
@@ -11102,6 +11110,11 @@ current claim.
 **Status: fixed** — round 187 (copy only; there is no assertion over prose
 counts, and these files are outside the Python gate).
 
+**Follow-up (round 194):** three live stragglers survived that sweep — the
+README stat table (`12` providers / `36` pairings / `15` modules), the
+`docs/assets/wiwi-hub-spoke.svg` `aria-label`, and
+`deploy/hf-space/README.md`. Corrected to `13` / `39` / `16` and "thirteen".
+
 ### 559. A malformed `top_k` was reported as "no Chat Completions equivalent" even on a provider that carries it
 
 🟡 **Low (a caller-visible diagnostic that named the wrong cause)** —
@@ -11407,3 +11420,49 @@ every surface (Playground SSE, JSON, error envelopes) renews. Only when a
 cookie is present and `verify_session` succeeds — an expired cookie cannot
 be resurrected. Bearer (synthetic-master) and logged-out callers get no
 cookie; the handler-set cookie (login mint, logout clear) is never stacked.
+
+### 569. Anthropic `max_tokens=0` + thinking silently upgraded the cap to `budget + 1024`
+
+**Severity:** 🟡 Medium (pre-warm signal destroyed; up to ~9k output tokens billed on a cache-only call) · **Status: fixed** — round 194 (`tests/test_fix_round194.py`)
+
+**Files:** `wiwi/providers/anthropic_adapter.py:623-628`
+
+**Trigger.** `max_tokens: 0` is Anthropic's documented cache pre-warm signal (AUDIT #156 — preserved by an `is not None` test at `anthropic_adapter.py:541`). But the thinking branch enforcing the API invariant `max_tokens > budget_tokens` then ran `if body["max_tokens"] <= budget` and overwrote `0` with `budget + 1024` (e.g. `max_tokens=0, thinking_budget=8000` → `max_tokens=9024`). The pre-warm generated and billed tokens instead of returning empty.
+
+**Fix:** the clamp only lifts a *positive* cap (`0 < max_tokens <= budget`). A contradictory (0 cap + thinking) request forwards as written, same as it does with thinking off.
+
+---
+
+### 570. Chat codec dropped dict-form `tool_choice` constraints
+
+**Severity:** 🟡 Medium (a "no tools" constraint encoded as an object decoded to unconstrained; the model called a tool the caller forbade) · **Status: fixed** — round 194 (`tests/test_fix_round194.py`)
+
+**Files:** `wiwi/wire/openai_chat.py:381-397`
+
+**Trigger.** `{"type": "none"} / {"type": "auto"} / {"type": "required"}` (the object spelling the Responses/Anthropic surfaces ship) decoded to `None` — unconstrained. A client sharing a tool catalog across surfaces sent the object form, asked for no tools, and got an IR with no constraint.
+
+**Fix:** decode the object constraint spellings to `ToolChoiceAuto/None/Required`, mirroring the string forms. `{"type": "function"}` (named choice) and the absent case are unchanged.
+
+---
+
+### 571. `allow_unframed=True` for every provider (unconditional SSE parser)
+
+**Severity:** 🟡 Medium (a stray unframed JSON line from a strictly-framed SSE provider was fed to `decode_stream_event` where the strict parser would have dropped it) · **Status: fixed** — round 194 (`tests/test_fix_round194.py`; gate test updated in `tests/test_fix_round93.py`)
+
+**Files:** `wiwi/core/gateway.py` (two stream arms), `wiwi/core/recovery.py` (probe)
+
+**Trigger.** Both gateway stream arms and the recovery probe built `LineSSEParser(allow_unframed=True)` unconditionally, citing "envelope providers (Cline/WorkBuddy)" in comments while the code applied the lenient parser to all providers.
+
+**Fix:** gated the flag on provider type via `_allow_unframed_for()` — `cline`, `workbuddy`, and `opencode` (force_stream, bare-JSON answers, round 194 follow-up) opt in; all others parse strictly. The recovery probe gained an `allow_unframed` parameter fed from the same provider check.
+
+---
+
+### 572. Redis limiter minted a fresh `uuid4()` per scope when `request_id` was empty
+
+**Severity:** 🟡 Medium (id-less callers leaked reservations until the 60s prune and the Redis TPM window over-counted) · **Status: fixed** — round 194 (`tests/test_fix_round194.py`)
+
+**Files:** `wiwi/ratelimit/redis.py:115-122`
+
+**Trigger.** `check()` generated the UID *inside* the per-scope loop, so an id-less caller stored a different UID in each window. `release()` / `record_tokens()` — which match by `request_id` — could never find anything.
+
+**Fix:** one UID per `check()` call (generated before the loop). Production paths always pass a `request_id`, so this only affected library/test callers — now they keep a stable identity to reconcile against.

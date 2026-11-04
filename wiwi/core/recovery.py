@@ -109,16 +109,23 @@ class ProbeVerdict(Enum):
     UNREACHABLE = "unreachable"
 
 
-def probe_verdict(status: int | None, body: bytes | str | None = None) -> ProbeVerdict:
+def probe_verdict(status: int | None, body: bytes | str | None = None,
+                  allow_unframed: bool = False) -> ProbeVerdict:
     """Classify a probe HTTP outcome; ``status=None`` means transport failure.
 
     A 200 is only HEALTHY when its body is a real completion. Some providers
     (WorkBuddy) ride business errors on HTTP 200 as a ``{"code": N, "msg": …}``
     envelope — a dead session would otherwise be declared healthy and restored
     into rotation (AUDIT #96).
+
+    ``allow_unframed`` gates the lenient SSE parser used for envelope
+    providers (Cline/WorkBuddy): without it an error envelope in the
+    one-JSON-object-per-line shape is not classified as an error and the
+    key is declared HEALTHY. Every other provider gets the strict parser
+    (round 194), so a stray unframed line is never misread as a completion.
     """
     if status == 200:
-        if _body_is_error_envelope(body):
+        if _body_is_error_envelope(body, allow_unframed=allow_unframed):
             return ProbeVerdict.UNREACHABLE
         return ProbeVerdict.HEALTHY
     if status == 429:
@@ -130,7 +137,8 @@ def probe_verdict(status: int | None, body: bytes | str | None = None) -> ProbeV
     return ProbeVerdict.UNREACHABLE
 
 
-def _body_is_error_envelope(body: bytes | str | None) -> bool:
+def _body_is_error_envelope(body: bytes | str | None,
+                            allow_unframed: bool = False) -> bool:
     """True when a 200 probe body is an error, not a completion.
 
     Two families of shape count, because a provider riding a business error on
@@ -192,10 +200,11 @@ def _body_is_error_envelope(body: bytes | str | None) -> bool:
     # force_stream providers return SSE even for HTTP 200 business errors.
     # Parse complete frames (including multiline data and a final frame without
     # a trailing blank line) before classifying the response as healthy.
-    # `allow_unframed`: the same providers answer with one JSON object per line
-    # rather than framed SSE, and an error envelope in that shape must not be
-    # classified as a healthy probe (AUDIT #285).
-    parser = LineSSEParser(allow_unframed=True)
+    # `allow_unframed`: envelope providers answer with one JSON object per
+    # line rather than framed SSE, and an error envelope in that shape must
+    # not be classified as a healthy probe (AUDIT #285). Gated on the
+    # caller declaring it (round 194) — strict elsewhere.
+    parser = LineSSEParser(allow_unframed=allow_unframed)
     text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else body
     # ``split_sse_lines``, not ``str.splitlines()``: the latter also splits on
     # U+2028/U+2029/U+0085, which are legal unescaped inside a JSON string, so a
@@ -583,7 +592,10 @@ class HealthHealer:
         except httpx.TransportError as e:
             return ProbeVerdict.UNREACHABLE, type(e).__name__, None
         if resp.status_code == 200:
-            verdict = probe_verdict(resp.status_code, resp.content)
+            verdict = probe_verdict(
+                resp.status_code, resp.content,
+                allow_unframed=dep.provider.provider_type in (
+                    "cline", "workbuddy", "opencode"))
             if verdict is ProbeVerdict.HEALTHY:
                 return ProbeVerdict.HEALTHY, "", None
             # A 200 whose body is a business-error envelope (dead session):

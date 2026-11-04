@@ -114,9 +114,17 @@ class RedisRateLimiter:
         try:
             members: list[str] = []
             uids: list[str] = []
+            # One UID per check(), not one per scope (round 194). Minting a
+            # fresh uuid4 inside the loop made an id-less call store four
+            # different identities in the four windows, so release() /
+            # record_tokens() — which match by request_id — could never find
+            # anything: reservations leaked until the 60s prune and the
+            # Redis TPM window over-counted. The fallback still hashes to
+            # memory when the request had no id, but the member string kept
+            # a *stable* identity so a later call can reconcile it.
+            uid = request_id or uuid4().hex
             for _scope, _limit, is_token in scopes:
                 cost = est_tokens if is_token else 1
-                uid = request_id or uuid4().hex
                 uids.append(uid)
                 members.append(_member(now, cost, uid))
 

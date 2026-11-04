@@ -347,8 +347,11 @@ def test_unframed_line_reaches_the_adapter_as_a_finish():
 
 def test_all_envelope_call_sites_opt_in():
     """A missed call site silently drops the whole turn, so pin every one.
-    `LineSSEParser()` with no argument in the gateway or recovery is a
-    regression (AUDIT #284/#285)."""
+
+    Round 194 replaced the literal ``allow_unframed=True`` with the
+    provider-gated ``_allow_unframed_for(...)`` so only envelope providers are
+    parsed leniently. Every envelope call site must still opt in, and the gate
+    must cover exactly the two envelope providers (AUDIT #284/#285)."""
     import inspect
 
     from wiwi.core import gateway as gw
@@ -356,10 +359,21 @@ def test_all_envelope_call_sites_opt_in():
 
     for fn in (gw.Gateway._complete_via_stream, gw.Gateway._pump_once):
         src = inspect.getsource(fn)
-        assert "LineSSEParser(allow_unframed=True)" in src, (
+        assert "allow_unframed=_allow_unframed_for(" in src, (
             f"{fn.__name__} must parse envelope bodies leniently")
-    assert "LineSSEParser(allow_unframed=True)" in inspect.getsource(
+    assert "LineSSEParser(allow_unframed=allow_unframed)" in inspect.getsource(
         rec._body_is_error_envelope)
+
+    # The gate itself is the source of truth: envelope providers in, others out.
+    assert gw._allow_unframed_for("cline") is True
+    assert gw._allow_unframed_for("workbuddy") is True
+    assert gw._allow_unframed_for("openai") is False
+    assert gw._allow_unframed_for("anthropic") is False
+    # opencode (Zen) is force_stream and its chat route can answer a
+    # non-streaming caller with a bare JSON completion body (the round-29
+    # test mocks). The strict parser would drop the whole turn, so the gate
+    # carries it alongside the envelope providers (round 194 follow-up).
+    assert gw._allow_unframed_for("opencode") is True
 
 
 def test_usage_fallback_fills_a_missing_prompt():

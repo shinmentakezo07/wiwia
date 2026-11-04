@@ -622,8 +622,15 @@ class AnthropicAdapter(WarningMixin):
                 else:
                     # Clamp to the API minimum
                     budget = max(budget, MIN_THINKING_BUDGET)
-                    # max_tokens must be strictly greater than budget_tokens
-                    if body["max_tokens"] <= budget:
+                    # max_tokens must be strictly greater than budget_tokens.
+                    # A zero cap is the cache pre-warm signal (AUDIT #156) —
+                    # raising it to budget+1024 silently billed a pre-warm
+                    # as a full thinking completion (round 194), so the
+                    # clamp only lifts a *positive* cap that the invariant
+                    # would otherwise reject. A contradictory (0 cap +
+                    # thinking) request forwards as written, exactly as it
+                    # does with thinking off.
+                    if 0 < body["max_tokens"] <= budget:
                         body["max_tokens"] = budget + 1024
                     body["thinking"] = {"type": "enabled", "budget_tokens": budget}
 

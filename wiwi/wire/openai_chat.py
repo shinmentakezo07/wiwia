@@ -386,6 +386,21 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         tool_choice = ir.ToolChoiceNone()
     elif tc_raw == "required":
         tool_choice = ir.ToolChoiceRequired()
+    elif isinstance(tc_raw, dict) and tc_raw.get("type") in ("auto", "none", "required"):
+        # The object spelling of a constraint (``{"type": "none"}``) — the
+        # Responses and Anthropic surfaces ship this form, so a client that
+        # shares a tool catalog across surfaces sends it here too. An
+        # out-of-spec object spelling that decoded to ``None`` turned "no
+        # tools" into "unconstrained" — the model called a tool the caller
+        # forbade (round 194). The string forms above cover the documented
+        # Chat wire; this keeps the dialect surfaces in step.
+        _typed_tc = tc_raw.get("type")
+        if _typed_tc == "auto":
+            tool_choice = ir.ToolChoiceAuto()
+        elif _typed_tc == "none":
+            tool_choice = ir.ToolChoiceNone()
+        else:
+            tool_choice = ir.ToolChoiceRequired()
     elif isinstance(tc_raw, dict) and tc_raw.get("type") == "function":
         tc_fn = tc_raw.get("function")
         # A non-string (or explicit-null) name reaches ToolChoiceNamed.name,

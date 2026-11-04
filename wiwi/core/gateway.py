@@ -82,6 +82,37 @@ def _error_message_for_log(err: Any) -> str:
     return _scrub_credentials(str(err.message))[:2000]
 
 
+#: Providers whose upstream answers a "streaming" request with one whole
+#: JSON object per line rather than framed SSE (``data:`` / ``event:``
+#: framing). The gateway's SSE parser needs ``allow_unframed`` to see
+#: those lines; every other provider is parsed strictly so a stray
+#: unframed JSON line (relay pretty-print, an error envelope without
+#: ``data:``) is dropped before it can reach ``decode_stream_event``
+#: (round 194). Keep this in step with the ``allow_unframed`` comment at
+#: the two parser construction sites.
+#:
+#: ``opencode`` (Zen) is here too, but for the other reason: it is a
+#: ``force_stream`` provider whose chat route can answer a non-streaming
+#: caller with a *bare JSON completion body* (the respx-mocked 200 in the
+#: round-29 tests is exactly that shape, and the Zen free tier has been
+#: seen to do the same in production). The strict parser would drop the
+#: whole body, and the gateway would report "upstream stream ended
+#: without completion" on a healthy turn (round 194 follow-up).
+_UNFRAMED_STREAM_PROVIDERS = frozenset({"cline", "workbuddy", "opencode"})
+
+
+def _allow_unframed_for(provider_type: str) -> bool:
+    """Whether the SSE parser for *provider_type* must accept unframed lines."""
+    return provider_type in _UNFRAMED_STREAM_PROVIDERS
+
+#: ``force_stream`` providers the recovery probe must parse leniently: the
+#: same envelope/bare-JSON shapes the gateway pump accepts, or a business
+#: error riding on HTTP 200 in that shape is classified HEALTHY and a dead
+#: key is restored into rotation. ``opencode`` joins for the same bare-JSON
+#: reason as above (round 194 follow-up).
+_UNFRAMED_PROBE_PROVIDERS = _UNFRAMED_STREAM_PROVIDERS
+
+
 def _speaks_messages(dep: Deployment) -> bool:
     """True when this deployment's upstream accepts Anthropic Messages headers.
 
@@ -1064,7 +1095,11 @@ class Gateway:
             # `allow_unframed`: envelope providers (Cline/WorkBuddy) answer a
             # "streaming" request with one whole JSON object per line rather
             # than framed SSE, and this arm must see those lines (AUDIT #284).
-            parser = LineSSEParser(allow_unframed=True)
+            # Gated on provider type (round 194): every other provider is
+            # parsed strictly, so a stray unframed JSON line is dropped
+            # before it can reach decode_stream_event.
+            parser = LineSSEParser(
+                allow_unframed=_allow_unframed_for(dep.provider.provider_type))
 
 
             def _apply_event(evt: SSEEvent) -> bool:
@@ -2257,7 +2292,9 @@ class Gateway:
             # one whole JSON object per line rather than framed SSE; without
             # this every content delta vanished and the client saw an empty
             # turn plus a spurious "ended without completion" (AUDIT #285).
-            parser = LineSSEParser(allow_unframed=True)
+            # Gated on provider type (round 194) — see the other stream arm.
+            parser = LineSSEParser(
+                allow_unframed=_allow_unframed_for(dep.provider.provider_type))
             # O(1) per token: tracks repetition runs for short periods only,
             # rather than rescanning the whole window every token.
             loop_detector = LoopDetector(loop_limit)
