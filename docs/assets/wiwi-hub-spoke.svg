@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="660" viewBox="0 0 1280 660" role="img" aria-label="wiwi hub-and-spoke architecture: three inbound dialects decode into one canonical IR, which the router dispatches to twelve outbound providers">
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="660" viewBox="0 0 1280 660" role="img" aria-label="wiwi hub-and-spoke architecture: three inbound dialects decode into one canonical IR, which the router dispatches to thirteen outbound providers">
   <defs>
     <radialGradient id="ha" cx="12%" cy="18%" r="52%"><stop offset="0" stop-color="#6366f1" stop-opacity=".30"/><stop offset="1" stop-color="#6366f1" stop-opacity="0"/></radialGradient>
     <radialGradient id="hb" cx="88%" cy="82%" r="55%"><stop offset="0" stop-color="#a855f7" stop-opacity=".24"/><stop offset="1" stop-color="#a855f7" stop-opacity="0"/></radialGradient>

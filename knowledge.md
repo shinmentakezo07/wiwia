@@ -4,15 +4,16 @@
 
 Self-hosted unified LLM gateway proxy (FastAPI + React admin SPA). Three inbound dialects
 (OpenAI Chat `/v1/chat/completions`, OpenAI Responses `/v1/responses`, Anthropic Messages
-`/v1/messages`) are decoded into one canonical IR (`wiwi/ir/`) and re-encoded to any of 9
-outbound providers (openai, anthropic, gemini, openrouter, nvidia-nim, bai, cline-OAuth,
-gmicloud, openai-compatible) — always answered back in the caller's dialect.
+`/v1/messages`) are decoded into one canonical IR (`wiwi/ir/`) and re-encoded to any of 13
+outbound provider types (openai, anthropic, gemini, openrouter, nvidia-nim, bai, cline-OAuth,
+workbuddy, opencode, hermes, ifm, gmicloud, openai-compatible) — always answered back in the
+caller's dialect.
 
 ## Where key code lives
 
 | Path | Role |
 |---|---|
-| `wiwi/wire/` | Inbound codecs/encoders: `openai_chat.py`, `openai_responses.py`, `anthropic_messages.py` |
+| `wiwi/wire/` | Inbound codecs/encoders: `openai_chat.py`, `openai_responses.py`, `anthropic_messages.py`, `openai_completions.py` (legacy `/v1/completions`) |
 | `wiwi/ir/` | Canonical IR types (tagged parts, messages, tools, params, usage) |
 | `wiwi/providers/` | Outbound adapters + `registry.py` (one branch per provider type; import-time assert catches missing branches) |
 | `wiwi/router/router.py` | Key pools (smooth WRR), cooldowns, retries, fallbacks |
@@ -28,10 +29,10 @@ gmicloud, openai-compatible) — always answered back in the caller's dialect.
 ## Commands (verified in this checkout)
 
 ```bash
-python3 -m pytest tests/ -q                # full suite (~900 tests, ~52s)
+python3 -m pytest tests/ -q                # full suite (~4,000 tests, ~247s)
 python3 -m pytest tests/test_codecs.py -q  # single file
-ruff check wiwi/ tests/                    # lint (line-length 100, py311)
-python3 -m pytest tests/ -q && ruff check wiwi/ tests/   # verify before claiming done
+ruff check wiwi/ tests/ scripts/           # lint (line-length 100, py311)
+python3 -m pytest tests/ -q && ruff check wiwi/ tests/ scripts/   # verify before claiming done
 
 # Admin UI (npm)
 cd web && npm install && npm run dev       # Vite dev, proxies /admin /v1 /auth → :4000
@@ -45,24 +46,28 @@ wiwi --config wiwi.yaml                    # or: wiwi -c wiwi.yaml --host 0.0.0.
 ## Gotchas / constraints (read before touching code)
 
 - **`.venv/bin/python` is broken in this checkout** (symlink to empty Py3.14 venv). Use ambient
-  `python3` / `pytest` / `ruff` (Py 3.12, pytest 9.1.1). Never `.venv/bin/python`.
+  `python3` / `pytest` / `ruff` (Py 3.13.5, pytest 9.1.1). Never `.venv/bin/python`.
 - **Hub-and-spoke is binding**: dialect logic only in `wiwi/wire/`, provider logic only in
   `wiwi/providers/` + one branch in `registry.get_adapter()`. Never branch on dialect/provider
   in `core/`, `router/`, `auth/`. `registry.py` asserts loudly at import if a provider type
   lacks a branch.
 - **Streaming contract** (`wiwi/streaming/deltas.py`): one `StreamStart`; `ToolCallOpen→ArgsDelta*→Close`
-  nested per index; exactly one `UsageFinal`; then `Finish`; then `StreamEnd` xor `StreamError`.
+  nested per index (parallel calls are siblings); `UsageFinal` at least once (may repeat, may
+  precede the last content delta); then `Finish`; then `StreamEnd` xor `StreamError`.
   Adapters guarantee legality; encoders never defend. Exception: `StreamError` may terminate
   anytime with no `Finish`.
-- **Docs run ahead of code** (`docs/ARCHITECTURE.md`, `docs/CORE.md` describe unbuilt handler
-  pipeline, DeltaBus, Postgres/Redis backends). **Trust the code over docs.**
+- **The old "docs run ahead" warning is stale.** Earlier `docs/ARCHITECTURE.md`/`docs/CORE.md`
+  revisions described a handler pipeline, `DeltaBus`, and Postgres/Redis backends that were never
+  built; `docs/CORE.md` now disavows them and both docs match the shipped `Gateway` +
+  `execute_with_retries` design. Postgres and Redis backends *do* exist (`server/config_store.py`,
+  `ratelimit/redis.py`, `cache/redis_cache.py`). **Still trust the code over docs.**
 - Read `UPDATE.md` (translation-fix changelog: reasoning/thinking params, tool_result,
   `content: null`, OpenRouter `reasoning`, `stream_options`) and `AUDIT.md` (known bugs with
   file:line + fix sketches) before bugfix work.
 - Tests: `asyncio_mode = "auto"` (bare `async def test_…`); mock upstream HTTP with `respx`;
   app-level tests via `asgi-lifespan` + `httpx.ASGITransport`; property round-trips via `hypothesis`.
-- **New bugfix regressions go in numbered `tests/test_fix_roundN.py`** (next: round14; the
-  round6/round9 pointers in CLAUDE.md and `.claude/rules/…` are stale).
+- **New bugfix regressions go in numbered `tests/test_fix_roundN.py`** (latest present:
+  `test_fix_round194.py`; next: round195 — confirm numerically, never with a plain `ls`).
 - Ruff only (no black/isort), `line-length = 100`, `target-version = "py311"`. Pydantic v2 for
   config; plain dataclasses for IR/streaming hot paths; `orjson` in hot paths; `structlog`
   never `print`.
@@ -83,5 +88,5 @@ wiwi --config wiwi.yaml                    # or: wiwi -c wiwi.yaml --host 0.0.0.
 - `asyncio_mode = "auto"` — bare `async def test_…`, no `@pytest.mark.asyncio`.
 - Upstream HTTP mocked with `respx`; app-level tests via `asgi-lifespan` + `httpx.ASGITransport`.
 - Property round-trips with `hypothesis` (`tests/test_property_roundtrip.py`).
-- Full suite: ~900 tests, ~52s. Verify before claiming done:
+- Full suite: ~4,000 tests, ~247s. Verify before claiming done:
   `python3 -m pytest tests/ -q && ruff check wiwi/ tests/`

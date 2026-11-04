@@ -24,9 +24,9 @@
 <table>
   <tr>
     <td align="center"><b>3</b><br/><sub>inbound dialects</sub></td>
-    <td align="center"><b>12</b><br/><sub>outbound providers</sub></td>
-    <td align="center"><b>36</b><br/><sub>possible pairings</sub></td>
-    <td align="center"><b>15</b><br/><sub>modules to write</sub></td>
+    <td align="center"><b>13</b><br/><sub>outbound providers</sub></td>
+    <td align="center"><b>39</b><br/><sub>possible pairings</sub></td>
+    <td align="center"><b>16</b><br/><sub>modules to write</sub></td>
   </tr>
 </table>
 
@@ -786,7 +786,7 @@ All `/admin/*` requires the master key (`Authorization: Bearer …`) or an admin
 
 ```bash
 python3 -m pytest tests/ -q                                 # 3995 collected
-python3 -m pytest tests/test_fix_round192.py -q            # latest regression file
+python3 -m pytest tests/test_fix_round194.py -q            # latest regression file
 python3 -m pytest tests/test_router.py -k cooldown -q      # by name
 
 ruff check wiwi/ tests/                                     # line-length 100, target py311

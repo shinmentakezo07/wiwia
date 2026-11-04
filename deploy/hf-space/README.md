@@ -12,7 +12,7 @@ pinned: false
 
 This Space runs the [wiwi](https://github.com/shinmentakezo07/wiwia) gateway —
 a self-hosted unified LLM proxy. Three inbound dialects (OpenAI Chat, OpenAI
-Responses, Anthropic Messages) route through one canonical IR to twelve
+Responses, Anthropic Messages) route through one canonical IR to thirteen
 outbound provider types, and every response is re-encoded in the caller's
 inbound dialect.
 

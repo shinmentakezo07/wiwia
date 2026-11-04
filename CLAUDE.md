@@ -115,13 +115,13 @@ Two adapters carry provider-specific quirks that live in `providers/` (never in 
 ```
 StreamStart  (exactly one, first)
   TextDelta* | ThinkingDelta*
-  ToolCallOpen → ToolCallArgsDelta* → ToolCallClose   (strictly nested per index)
-UsageFinal   (exactly one, after last content delta)
+  ToolCallOpen → ToolCallArgsDelta* → ToolCallClose   (nested per index; parallel calls are siblings)
+UsageFinal   (at least once, after content; may arrive more than once)
 Finish       (exactly one)
 StreamEnd xor StreamError
 ```
 
-Note the one asymmetry in that contract: `StreamError` may terminate at **any** point, replacing everything after the last emitted delta. It is the abnormal-path terminal and needs no preceding `Finish`. Adapters guarantee legality; encoders never defend against malformed sequences. Every delta variant is `@dataclass(frozen=True)` — adapters mutate per-stream state on the adapter instance, never on deltas.
+Note the one asymmetry in that contract: `StreamError` may terminate at **any** point, replacing everything after the last emitted delta. It is the abnormal-path terminal and needs no preceding `Finish`. Two real streams are looser than the diagram and `deltas.py` absorbs both: parallel tool calls are **siblings** (several indices open at once, closed in a batch), and `UsageFinal` may arrive **more than once** or before the last content delta (encoders buffer it last-write-wins). Adapters guarantee legality; encoders never defend against malformed sequences. Every delta variant is `@dataclass(frozen=True)` — adapters mutate per-stream state on the adapter instance, never on deltas.
 
 ## Admin web UI
 
@@ -145,7 +145,7 @@ Error bodies are dialect-correct per surface (OpenAI `{"error":{…}}` vs Anthro
 - Upstream mocking with `respx`; **use the decorator form** (`@respx.mock`) — the context-manager form is broken in respx 0.23 + httpx 0.28.
 - Property-based round-trip tests use `hypothesis` (persistent cache in `.hypothesis/`) — the right tool for codec/adapter invariants.
 - Default master key for admin-auth'd tests: `sk-wiwi-master-test` via `Authorization: Bearer …`.
-- New bug fixes go into the next unused numbered regression file (`test_fix_roundN.py`) rather than topic files. Find the next number with `ls tests/test_fix_round*.py | sed 's/.*round//;s/\.py//' | sort -n | tail -3` — **never assume one, and never trust a plain `ls`**: it sorts lexicographically, so `round9.py` appears after `round164.py`. As of 2026-11-02 the highest is `round192`, so the next file is `round193`; 188 of these files exist, with gaps at 1 (never created), 5 (`test_bugfix_round5.py` is the legacy filename), 102, 147, and 188.
+- New bug fixes go into the next unused numbered regression file (`test_fix_roundN.py`) rather than topic files. Find the next number with `ls tests/test_fix_round*.py | sed 's/.*round//;s/\.py//' | sort -n | tail -3` — **never assume one, and never trust a plain `ls`**: it sorts lexicographically, so `round9.py` appears after `round164.py`. As of 2026-11-04 the highest is `round194`, so the next file is `round195`; 190 of these files exist, with gaps at 1 (never created), 5 (`test_bugfix_round5.py` is the legacy filename), 102, 147, and 188. (`test_fix_round124_e2e.py` is a non-numeric filename that trips a naive `sort -n`.)
 - Run full pytest + ruff before claiming work done or committing — both green at commit time. Measured baseline 2026-11-02: `3983 passed, 13 skipped, 2 warnings in ~247s` (237 files, 3,995 collected). Some of those warnings are `aiosqlite` worker threads outliving their event loop (`AUDIT.md` #475): harmless here, and do **not** try to silence them by escalating that warning class to an error — pytest charges the failure to an unrelated test.
 
 ## Conventions & guardrails
@@ -224,11 +224,11 @@ Senior-frontend-architect standard. When a task touches anything visual, apply t
 
 ## Where to start reading
 
-`server/app.py` is ~7.7k lines and `core/gateway.py` ~3.0k — don't read either top to bottom. `app.py` is a single `create_app` closure holding `AppState`/`lifespan`, the error handlers, and most of the routes (the `/admin/keys` ones now live in `server/routers/admin_keys.py`); to navigate it, grep for the surface you care about (`@app.post("/v1`, `@app.get("/admin`, …) rather than scrolling. For a request's full path, start at `run_chat_like` in `server/app.py` (and `create_app`/`AppState` above it) and follow the pipeline it names; `RequestContext` (`core/context.py`, 121 lines) is the single mutable object threaded through every stage, so reading its fields tells you what the pipeline carries. For streaming, read `streaming/deltas.py` (215 lines, the whole contract) before any adapter. `docs/QUICKSTART.md`, `docs/API_REFERENCE.md`, `docs/CONFIG.md`, `docs/PROVIDERS.md`, and `docs/STREAMING.md` are the practical companion docs; `detailed.md` is a code-derived technical reference.
+`server/app.py` is ~7.7k lines and `core/gateway.py` ~3.0k — don't read either top to bottom. `AppState` and `lifespan` are module-level (not inside `create_app`); `create_app` holds the helpers, the error handlers, and most of the routes (the `/admin/keys` ones now live in `server/routers/admin_keys.py`). To navigate it, grep for the surface you care about (`@app.post("/v1`, `@app.get("/admin`, …) rather than scrolling. For a request's full path, start at `run_chat_like` in `server/app.py` — a thin telemetry wrapper over the `_chat_like` body — and follow the pipeline it names; `RequestContext` (`core/context.py`, 121 lines) is the single mutable object threaded through every stage, so reading its fields tells you what the pipeline carries. For streaming, read `streaming/deltas.py` (215 lines, the whole contract) before any adapter. `docs/QUICKSTART.md`, `docs/API_REFERENCE.md`, `docs/CONFIG.md`, `docs/PROVIDERS.md`, and `docs/STREAMING.md` are the practical companion docs; `detailed.md` is a code-derived technical reference.
 
 ## Docs vs. code
 
-`docs/ARCHITECTURE.md` and `docs/CORE.md` are design specifications that intentionally run ahead of the implementation (handler pipeline, DeltaBus, reasoning subsystems, a deeper DB schema are specified but not yet built; their repo-layout sections show planned directories like `wire/openai_chat/` that are actually flat files). When docs and code disagree, trust the code — or treat the doc section as the spec for work you're about to do. `docs/MVP.md` tracks scope gaps; `docs/PLAN.md` tracks build phases; `docs/ADMIN.md` documents the admin UI/API design.
+`docs/ARCHITECTURE.md` and `docs/CORE.md` describe the shipped design and are current. Earlier revisions described an aspirational handler pipeline (`core/handlers/`), `DeltaBus`, reasoning subsystems, a deeper DB schema, and package directories like `wire/openai_chat/`; **those were never built** and are disavowed in `docs/CORE.md` (see its opening note). The codecs are flat files, the streaming deltas are the contract, and `Gateway` + `execute_with_retries` is the request engine. When docs and code disagree, trust the code. `docs/MVP.md` tracks scope gaps; `docs/PLAN.md` tracks build phases; `docs/ADMIN.md` documents the admin UI/API design.
 
 ## UPDATE.md — changelog for translation work
 

@@ -89,8 +89,9 @@ affinity).
 
 ### Streaming contract (`wiwi/streaming/deltas.py`) — binding
 
-One `StreamStart`; `ToolCallOpen → ArgsDelta* → Close` nested per tool index; exactly one
-`UsageFinal`; then `Finish`; then `StreamEnd` xor `StreamError`. Adapters **guarantee**
+One `StreamStart`; `ToolCallOpen → ArgsDelta* → Close` nested per tool index (parallel calls are
+siblings); `UsageFinal` at least once (may repeat, may precede the last content delta); then
+`Finish`; then `StreamEnd` xor `StreamError`. Adapters **guarantee**
 legality; client encoders **never defend**. Exception: `StreamError` may terminate anytime
 with no `Finish`. All delta variants are `@dataclass(frozen=True)`.
 
@@ -303,9 +304,9 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
 - **Property tests:** `hypothesis` (`test_property_roundtrip.py`) for IR/codec round-trips and
   stream-SSE legality invariants.
 - **Regression convention:** new bugfix regressions go in the next unused
-  `tests/test_fix_roundN.py`. Latest present: `test_fix_round192.py` → next is `round193`
+  `tests/test_fix_roundN.py`. Latest present: `test_fix_round194.py` → next is `round195`
   (confirm numerically, never with a plain `ls` — it sorts lexicographically, so `round9.py`
-  looks newest). 188 such files exist; gaps at 1, 102, 147 and 188 (`test_bugfix_round5.py` is
+  looks newest). 190 such files exist; gaps at 1, 102, 147 and 188 (`test_bugfix_round5.py` is
   the legacy filename for 5).
 - **Subsystem map (rough):** `test_codecs.py` / `test_extra_body.py` — wire unit; `test_router.py`,
   `test_round_robin.py`, `test_fix_cycle_failover.py` — routing; `test_admin_api.py`,
