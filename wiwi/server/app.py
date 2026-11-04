@@ -2424,50 +2424,20 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return [i for i in raw if isinstance(i, dict)]
         return []
 
-    def _streamed_response_payload(ctx, model: str, text: list[str],
-                                   thinking: list[str],
-                                   tools: dict[int, dict[str, Any]]) -> dict[str, Any]:
+    def _streamed_response_payload(ctx, model: str,
+                                   deltas: list[Any]) -> dict[str, Any]:
         """Assemble the dialect response object for a *streamed* turn.
 
-        The stream encoder emits events as they arrive and keeps no final
-        object, so the stored copy is rebuilt here from the same accumulators
-        the spend log uses — same item ordering and ids as ``encode_response``,
-        so the stored response is indistinguishable from a non-streamed one.
+        The stored copy is rebuilt from the IR deltas of the turn itself
+        (round 195), not from flat text/thinking/tool accumulators: those
+        collapsed tool-bracketed text into one message item, minted
+        ``msg_<req>`` ids the stream never used, and dropped the encrypted
+        reasoning blob (AUDIT #355's sibling copy). The codec owns the
+        rebuild so the stored object is byte-identical to the live
+        terminal object the client saw on the wire.
         """
-        req_id = ctx.request_id
-        out: list[dict[str, Any]] = []
-        out_id = 0
-        for i, t in enumerate(thinking):
-            out.append(orp._reasoning_item(t, req_id, i))
-            out_id += 1
-        joined = "".join(text)
-        if joined or not tools:
-            out.append(orp._message_item(joined, req_id))
-            out_id += 1
-        for _, tc in sorted(tools.items()):
-            if tc.get("builtin") is not None:
-                # The accumulator records only the raw argument fragments
-                # (``_args``) and never a parsed query, so ``tc.get("query", "")``
-                # always stored "" — the stored item claimed a hosted search ran
-                # with an empty query. The live SSE frame for the same turn (the
-                # Responses encoder's ``_close_tool``) extracts the real query
-                # from those fragments, so the two copies of one turn disagreed:
-                # a client continuing from ``previous_response_id`` read back a
-                # different turn than the one it saw streamed (AUDIT #480).
-                query = orp._builtin_query("".join(tc.get("_args") or []))
-                out.append(orp._builtin_call_item(tc["id"], query, tc["builtin"]))
-            else:
-                out.append(orp._function_call_item(
-                    f"fc_{req_id}_{out_id}", tc["id"], tc["name"],
-                    "".join(tc["_args"])))
-            out_id += 1
-        u = getattr(ctx, "_stream_usage", None)
-        usage = orp._usage_obj(u.prompt, u.output, u.cached, u.reasoning) if u else \
-            orp._usage_obj(ctx.usage.prompt_tokens if ctx.usage else 0,
-                           ctx.usage.completion_tokens if ctx.usage else 0,
-                           ctx.usage.cached_tokens if ctx.usage else 0,
-                           ctx.usage.reasoning_tokens if ctx.usage else 0)
-        return orp._response_obj(model, req_id, ctx.stop_reason or "stop", out, usage)
+        return orp.ResponsesStreamEncoder.rebuild_stored_payload(
+            model, ctx.request_id, deltas)
 
     def _serialize_turn(turn: ir.AssistantTurn, payload: Any) -> dict[str, Any]:
         """Build a JSON-serializable snapshot of the model's response."""
@@ -3188,6 +3158,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         text_buf: list[str],
         thinking_buf: list[str],
         tools_map: dict[int, dict[str, Any]],
+        deltas: list[Any] | None = None,
     ) -> None:
         """Accumulate streaming deltas into serializable buffers for log capture.
 
@@ -3197,7 +3168,14 @@ def create_app(config: WiwiConfig) -> FastAPI:
         multi-MB argument payload streamed in many fragments stalled the event
         loop here, on every concurrent request, only when prompt capture was
         enabled (so the fix is easy to miss).
+
+        ``deltas`` is the ordering-faithful copy the Responses store needs
+        (round 195): re-derived from flat buffers it collapsed interleaved
+        items and dropped encrypted blobs, so when the caller asks for it
+        the raw deltas are appended verbatim.
         """
+        if deltas is not None:
+            deltas.append(d)
         from wiwi.streaming import deltas as dl
         if isinstance(d, dl.TextDelta):
             text_buf.append(d.text)
@@ -3260,6 +3238,9 @@ def create_app(config: WiwiConfig) -> FastAPI:
         stream_text: list[str] = []
         stream_thinking: list[str] = []
         stream_tools: dict[int, dict[str, Any]] = {}
+        # The ordering-faithful copy for the Responses store (round 195):
+        # allocated unconditionally but only appended when a store is in play.
+        stream_deltas: list[Any] = []
 
         async def _teardown_tail() -> None:
             """Bookkeeping that must complete even when the peer disconnects.
@@ -3311,8 +3292,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         ctx.auth.key_id if ctx.auth else "master",
                         store_group, _stored_input_items(store_body),
                         _streamed_response_payload(
-                            ctx, store_model, stream_text, stream_thinking,
-                            stream_tools))
+                            ctx, store_model, stream_deltas))
             if ctx.usage:
                 if ctx.auth and ctx.auth.key_type != "master":
                     # The response was already streamed, so a budget breach
@@ -3389,7 +3369,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     ctx.error = WiwiError(502, "api_error", first.message)
                 if capture:
                     _capture_delta(first, ctx, stream_text, stream_thinking,
-                                   stream_tools)
+                                   stream_tools,
+                                   stream_deltas if response_store is not None else None)
                 # A raw ``bytes`` item is a pre-framed SSE keep-alive from the
                 # gateway pump, not an IR delta: the encoders' ``feed``
                 # isinstance-checks on delta classes only, so passing it there
@@ -3409,7 +3390,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     ctx.error = WiwiError(502, "api_error", d.message)
                 if capture:
                     _capture_delta(d, ctx, stream_text, stream_thinking,
-                                   stream_tools)
+                                   stream_tools,
+                                   stream_deltas if response_store is not None else None)
                 # Same keep-alive passthrough as the ``first`` block above.
                 chunk = d if isinstance(d, bytes) else encoder.feed(d)
                 if chunk:

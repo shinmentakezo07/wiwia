@@ -1253,6 +1253,52 @@ class ResponsesStreamEncoder:
                                        "message": d.message}}})
         return None
 
+    def _terminal_response(self) -> dict[str, Any]:
+        """The terminal response object (dict form of the completed frame).
+
+        Extracted so the store path can persist exactly what the client
+        saw on the wire without re-deriving it from accumulators (round 195:
+        the old rebuild collapsed interleaved text into one message item,
+        minted ``msg_<req>`` instead of the ``msg_<req>_N`` the stream used,
+        and dropped the encrypted reasoning blob).
+        """
+        u = self._usage or dl.UsageFinal()
+        # Usage convention re-base (the sync twin's rule): OpenAI totals the
+        # prompt INCLUDING cached tokens; an Anthropic-shaped upstream reports
+        # input_tokens EXCLUSIVE of cache reads.
+        prompt_incl = u.prompt + (0 if u.cached_in_prompt else u.cached)
+        resp = _response_obj(self.model, self.req_id, self._stop, self._output,
+                             _usage_obj(prompt_incl, u.output, u.cached, u.reasoning))
+        # The matched stop sequence (AUDIT #497): the terminal object is where
+        # a Responses client reads it (the sync twin sets the same key).
+        if self._stop_seq:
+            resp["stop_sequence"] = self._stop_seq
+        # Streaming logprobs (AUDIT #326): no per-token event exists on this
+        # surface, so the collected tokens ride the terminal object — the
+        # same key the sync path emits.
+        if self._logprobs is not None:
+            resp["logprobs"] = self._logprobs
+        return resp
+
+    @classmethod
+    def rebuild_stored_payload(cls, model: str, req_id: str,
+                               deltas: list[dl.IRStreamDelta]) -> dict[str, Any]:
+        """Rebuild the terminal response object from the IR deltas of one turn.
+
+        Runs the deltas through a fresh encoder, so the stored copy is
+        byte-identical to the live stream's terminal object — same item
+        ids, same interleaving (tool-bracketed text stays split), same
+        encrypted reasoning blob.
+        """
+        enc = cls(model, req_id)
+        for d in deltas:
+            enc.feed(d)
+        # Close any item the delta sequence left open, mirroring _completed.
+        enc._close_item()
+        for idx in sorted(enc._tools):
+            enc._close_tool(idx)
+        return enc._terminal_response()
+
     def _completed(self) -> bytes:
         # A legal stream always closes the currently open output item before
         # the terminal event, even when the last delta left one open.
@@ -1266,7 +1312,6 @@ class ResponsesStreamEncoder:
         # (AUDIT #111).
         for idx in sorted(self._tools):
             closing += b"".join(self._close_tool(idx))
-        u = self._usage or dl.UsageFinal()
         # NB: the Responses surface does NOT publish a `tool_call` stop reason
         # — its turn shape is the output item array plus `status`, and
         # `_response_obj` consults the reason only for the truncation mapping.
@@ -1285,22 +1330,7 @@ class ResponsesStreamEncoder:
         # consults the table — reported it correctly (AUDIT #477).
         incomplete = self._stop in _INCOMPLETE_REASONS
         etype = "response.incomplete" if incomplete else "response.completed"
-        # Usage convention re-base (the sync twin's rule): OpenAI totals the
-        # prompt INCLUDING cached tokens; an Anthropic-shaped upstream reports
-        # input_tokens EXCLUSIVE of cache reads.
-        prompt_incl = u.prompt + (0 if u.cached_in_prompt else u.cached)
-        resp = _response_obj(self.model, self.req_id, self._stop, self._output,
-                             _usage_obj(prompt_incl, u.output, u.cached, u.reasoning))
-        # The matched stop sequence (AUDIT #497): the terminal object is where
-        # a Responses client reads it (the sync twin sets the same key).
-        if self._stop_seq:
-            resp["stop_sequence"] = self._stop_seq
-        # Streaming logprobs (AUDIT #326): no per-token event exists on this
-        # surface, so the collected tokens ride the terminal object — the
-        # same key the sync path emits.
-        if self._logprobs is not None:
-            resp["logprobs"] = self._logprobs
-        return closing + self._evt(etype, {"response": resp})
+        return closing + self._evt(etype, {"response": self._terminal_response()})
 
 
 def error_body(status: int, etype: str, message: str) -> dict[str, Any]:
