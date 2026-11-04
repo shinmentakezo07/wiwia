@@ -41,8 +41,90 @@ class ORJSONResponse(JSONResponse):
         return orjson.dumps(content, option=orjson.OPT_NON_STR_KEYS)
 
 
+def _parse_session_cookie(headers: list[tuple[bytes, bytes]]) -> str:
+    """The raw ``wiwi_session`` cookie value from raw ASGI headers, or ''.
+
+    Kept at module level (not a method on the middleware) so the renewal
+    helper below can use it without dragging the middleware's state along.
+
+    The value is taken in *order*: when a client carries a jar with the
+    freshly-issued cookie alongside an explicit per-request one, the jar's
+    (newer) value may come *after* the stale one. ``verify_session`` and
+    the login path both work off the last value presented, so the renewal
+    must too — otherwise the helper verifies the stale twin, finds it
+    past half-life, and re-signs a cookie the client already considers
+    superseded. The starlette ``Request`` cookie parse used by
+    ``resolve_current_user`` reads the same way (later pairs win), which
+    teams' round-193 tests confirmed with ``httpx``'s cookie jar.
+    """
+    value = ""
+    for k, v in headers:
+        if k != b"cookie":
+            continue
+        for part in v.decode("latin-1").split(";"):
+            part = part.strip()
+            if part.startswith("wiwi_session="):
+                value = part.split("=", 1)[1].strip()
+    return value
+
+
+def _maybe_renew_session_cookie(headers: list[tuple[bytes, bytes]]) -> str:
+    """A renewal ``Set-Cookie`` value for the session cookie, or ''.
+
+    Pure function over raw header bytes so the middleware stays testable
+    without an app: it decides *whether* to renew; the caller renders the
+    header. The secret is read from ``WIWI_SESSION_SECRET`` at call time —
+    the same value ``AppState.init_db`` derives the session secret from
+    (``os.environ.get("WIWI_SESSION_SECRET") or master_key``) — because the
+    middleware is built before the lifespan runs, so no app state is
+    reachable from here.
+
+    Renewal happens only when:
+
+    * a ``wiwi_session`` cookie is present (bearer / logged-out callers get
+      nothing — there is no session row to resurrect);
+    * it verifies (an expired cookie verifies to ``None`` and is therefore
+      never resurrectable — the 401 path is unchanged);
+    * it is past ``SESSION_RENEW_AFTER_S`` (a fresh cookie is left alone —
+      re-signing every response would be a cookie storm).
+    """
+    from wiwi.auth.users import (
+        SESSION_RENEW_AFTER_S,
+        SESSION_TTL,
+        sign_session,
+        verify_session,
+    )
+
+    raw = _parse_session_cookie(headers)
+    if not raw:
+        return ""
+    secret = os.environ.get("WIWI_SESSION_SECRET") or _RENEW_MASTER_KEY[0]
+    if not secret:
+        return ""
+    parsed = verify_session(secret, raw)
+    if parsed is None:
+        return ""
+    uid, role, expires = parsed
+    now = time.time()
+    if expires - now > SESSION_RENEW_AFTER_S:
+        return ""  # still fresh — leave the jar alone
+    renewed = sign_session(secret, uid, role, expires=now + SESSION_TTL)
+    # Match the cookie attributes _set_session_cookie mints with, including
+    # the Secure flag. The middleware cannot see the trusted-proxy gate the
+    # mint path uses (no request scope object carries it), so derive the
+    # flag the same way the app does for the in-process test and the
+    # X-Forwarded-Proto header it receives.
+    return renewed
+
+
+#: Populated by ``create_app`` (module-level mutable so the pure renewal
+#: helper above can reach it without an app instance). Empty until then —
+#: and ``_maybe_renew_session_cookie`` refuses to mint anything while it is.
+_RENEW_MASTER_KEY: list[str] = []
+
+
 class RequestIdMiddleware:
-    """Pure ASGI middleware: request ID, body-size guard, latency header.
+    """Pure ASGI middleware: request ID, body-size guard, latency header,
 
     Replaces the previous ``@app.middleware("http")`` (BaseHTTPMiddleware)
     which wraps every response — including StreamingResponse — in a
@@ -110,6 +192,18 @@ class RequestIdMiddleware:
             return
 
         # --- inject headers into the response.start message ------------------
+        # The session cookie is renewed here (sliding renewal, round 193):
+        # any response — JSON, SSE, or an error envelope — carries a
+        # freshly-signed wiwi_session once the cookie is past half its TTL,
+        # so an active Playground user never hits the 7-day hard expiry
+        # while they are active. See ``_maybe_renew_session_cookie``.
+        req_headers = list(scope.get("headers", []))
+        secure_cookie = (
+            scope.get("scheme") == "https"
+            or any(k == b"x-forwarded-proto" and v.strip().lower() == b"https"
+                   for k, v in req_headers)
+        )
+
         async def send_wrapper(message: Message) -> None:
             if message["type"] == "http.response.start":
                 headers = list(message.get("headers", []))
@@ -120,6 +214,23 @@ class RequestIdMiddleware:
                     headers.append((b"x-wiwi-request-id", rid.encode()))
                 headers.append((b"x-wiwi-latency-ms",
                                 f"{(time.monotonic() - t0) * 1000:.1f}".encode()))
+                # --- sliding session renewal (round 193) ---------------
+                # Don't stack a second cookie on a response the handler
+                # already set one on (logout clears, login mints).
+                has_session_cookie = any(
+                    k == b"set-cookie" and v.startswith(b"wiwi_session=")
+                    for k, v in headers)
+                if not has_session_cookie:
+                    from wiwi.auth.users import SESSION_TTL as _SESSION_TTL
+                    renewed = _maybe_renew_session_cookie(req_headers)
+                    if renewed:
+                        secure_flag = b"; Secure" if secure_cookie else b""
+                        headers.append((
+                            b"set-cookie",
+                            b"wiwi_session=" + renewed.encode("latin-1")
+                            + b"; Max-Age=" + str(int(_SESSION_TTL)).encode()
+                            + b"; Path=/; HttpOnly; SameSite=lax"
+                            + secure_flag))
                 message["headers"] = headers
             await send(message)
 
@@ -1742,6 +1853,13 @@ def create_app(config: WiwiConfig) -> FastAPI:
             "no session secret configured: set WIWI_MASTER_KEY (or "
             "WIWI_SESSION_SECRET). Refusing to start with a default secret, "
             "which would allow forged admin sessions.")
+    # Feed the sliding-renewal helper (module-level so the ASGI middleware
+    # can reach it without an app instance). The middleware runs before the
+    # lifespan, so the secret cannot come from app state.
+    _RENEW_MASTER_KEY.clear()
+    _RENEW_MASTER_KEY.append(
+        os.environ.get("WIWI_SESSION_SECRET")
+        or config.general_settings.master_key or "")
     state = AppState(config)
     app = FastAPI(title="wiwi", version="0.1.0", docs_url=None,
                   lifespan=lifespan)

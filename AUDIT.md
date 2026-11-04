@@ -11380,3 +11380,30 @@ detail-mutation errors into the detail card. Added
 
 **Status: fixed** — UI change; verified at 1440×900 and 375×812 with the
 browser (no horizontal overflow, pinned dialog footer, 44 px controls).
+
+### 568. The Playground session cookie expired with no renewal path — active users hit a hard 401 after 7 days
+
+**Severity:** 🟠 High (an active, logged-in Playground user was locked out after
+the session TTL with no recovery but a manual re-login) · **Status: fixed** —
+round 193 (`tests/test_fix_round193.py`)
+
+**Files:** `wiwi/auth/users.py:20-31` (`SESSION_TTL`, `SESSION_RENEW_AFTER_S`),
+`wiwi/server/app.py` (`_maybe_renew_session_cookie`, `RequestIdMiddleware`
+sliding-renewal header append, `create_app` secret feed).
+
+**Trigger.** `wiwi_session` was signed once at login/signup with a 7-day TTL
+and no code path ever re-signed it. After a week of active Playground use,
+`verify_session` rejected the cookie, `resolve_current_user` returned `None`,
+`/v1/playground/completions` answered `401 authentication required`, and the
+SPA had no refresh endpoint to call — only the error banner's Retry, which
+replayed the same dead-cookie request. The 24h playground virtual key already
+self-healed (round 103: bearer cache re-validates and re-mints); the session
+was the token that never refreshed.
+
+**Fix:** sliding renewal. `SESSION_RENEW_AFTER_S = SESSION_TTL // 2` (3.5 days);
+every response past that point carries a freshly-signed cookie with a full
+TTL, appended centrally in `RequestIdMiddleware` on `http.response.start` so
+every surface (Playground SSE, JSON, error envelopes) renews. Only when a
+cookie is present and `verify_session` succeeds — an expired cookie cannot
+be resurrected. Bearer (synthetic-master) and logged-out callers get no
+cookie; the handler-set cookie (login mint, logout clear) is never stacked.

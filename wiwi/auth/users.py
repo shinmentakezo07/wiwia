@@ -20,6 +20,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 PBKDF2_ITERS = 200_000
 SESSION_TTL = 7 * 24 * 3600  # 7 days, seconds
+# Session lifetime is *sliding*: once a cookie has lived this long, every
+# response re-signs it with a fresh SESSION_TTL (round 193). Without this an
+# active Playground user hit a hard 401 a week after login — there was no
+# refresh endpoint and no renewal path anywhere, so the only recovery was a
+# manual re-login. Half the TTL keeps renewal invisible mid-life while still
+# leaving a full half-TTL grace if the user pauses.
+SESSION_RENEW_AFTER_S = SESSION_TTL // 2
 # Cap password length so PBKDF2 cost stays bounded (see create_user).
 _MAX_PASSWORD_LEN = 1024
 USERNAME_RE = __import__("re").compile(r"^[a-zA-Z0-9_-]+$")
