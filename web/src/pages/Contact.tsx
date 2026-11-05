@@ -126,97 +126,81 @@ export function ContactPage() {
   }
 
   return (
-    <div className="mx-auto max-w-6xl space-y-12 pb-16">
+    <div className="mx-auto max-w-6xl space-y-8 pb-16 sm:space-y-14">
       {/* ── hero: the honest pitch plus a live look at what gets sent ── */}
-      <section className="relative overflow-hidden rounded-[24px] border border-[var(--admin-border)] bg-[var(--admin-surface)]">
-        <div
-          className="pointer-events-none absolute inset-0 bg-gradient-to-b from-white/[0.03] via-transparent to-transparent"
-          aria-hidden
-        />
-        <div className="wiwi-top-highlight pointer-events-none absolute inset-x-0 top-0 h-px opacity-60" aria-hidden />
-
+      <section className="relative isolate overflow-hidden rounded-[28px] border border-white/[0.08] bg-[#08090c] shadow-[0_24px_80px_-48px_rgba(0,0,0,0.9)]">
+        <div className="wiwi-top-highlight pointer-events-none absolute inset-x-0 top-0 z-10 h-px opacity-70" aria-hidden />
         <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden>
-          <div className="hero-grid absolute inset-x-0 top-0 h-[420px] opacity-60" />
-          <div
-            className="absolute -left-28 -top-32 h-[380px] w-[380px] rounded-full"
-            style={{ background: "radial-gradient(circle, rgba(59,130,246,0.14) 0%, transparent 62%)" }}
-          />
-          <div
-            className="absolute -right-32 top-10 h-[340px] w-[340px] rounded-full"
-            style={{ background: "radial-gradient(circle, rgba(139,92,246,0.12) 0%, transparent 62%)" }}
-          />
+          <div className="hero-grid absolute inset-0 opacity-40 [mask-image:linear-gradient(to_bottom,black,transparent_90%)]" />
+          <div className="absolute -left-32 -top-48 h-[420px] w-[420px] rounded-full bg-[radial-gradient(circle,rgba(59,130,246,0.13),transparent_65%)]" />
+          <div className="absolute -right-32 -top-24 h-[400px] w-[400px] rounded-full bg-[radial-gradient(circle,rgba(139,92,246,0.1),transparent_65%)]" />
         </div>
+        <HeroBeamBackdrop beams={HERO_BEAMS_COMPACT} className="opacity-25" />
 
-        <HeroBeamBackdrop beams={HERO_BEAMS_COMPACT} className="absolute inset-0 opacity-40" />
-
-        <div className="relative grid gap-10 px-6 py-12 sm:px-10 sm:py-14 lg:grid-cols-[minmax(0,1.05fr)_minmax(320px,0.95fr)] lg:px-12 lg:py-16">
-          <div className="self-center">
-            <div className="inline-flex items-center gap-2 rounded-full border border-blue-500/20 bg-blue-500/[0.06] px-3.5 py-1.5 text-blue-300">
-              <MessageSquare size={12} aria-hidden />
-              <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.2em]">
-                Contact
-              </span>
+        <div className="relative grid gap-10 px-6 py-10 sm:px-10 sm:py-14 lg:grid-cols-[minmax(0,1fr)_minmax(340px,0.8fr)] lg:items-center lg:gap-16 lg:px-14 lg:py-16">
+          <div>
+            <div className="flex items-center gap-2.5 font-mono text-[11px] font-medium uppercase tracking-[0.18em] text-blue-300">
+              <MessageSquare size={14} aria-hidden />
+              <span>Contact the maintainers</span>
             </div>
-
-            <h1 className="mt-5 text-3xl font-semibold leading-[1.1] tracking-[-0.02em] text-[var(--admin-text)] sm:text-4xl lg:text-5xl">
-              Talk to the team{" "}
-              <span className="hero-gradient-text">behind the gateway.</span>
+            <h1 className="mt-6 max-w-xl text-[38px] font-semibold leading-[1.08] tracking-[-0.04em] text-[var(--admin-text)] sm:text-5xl lg:text-[56px]">
+              Let’s build a better{" "}
+              <span className="hero-gradient-text">gateway.</span>
             </h1>
-            <p className="mt-5 max-w-lg text-[15px] leading-relaxed text-[var(--admin-text-muted)]">
-              Questions about self-hosting, routing, provider quirks, or a deployment that
-              will not come up? The issue tracker is the direct line — this form drafts a
-              clear, prefilled issue you review before anything is sent.
+            <p className="mt-5 max-w-xl text-[15px] leading-7 text-[var(--admin-text-muted)] sm:text-base">
+              Self-hosting, routing, provider quirks, or a deployment that will not come up?
+              Tell us what you’re working on. We’ll turn it into a clear GitHub issue you
+              review before anything is posted.
             </p>
-
-            <ul className="mt-6 flex flex-wrap items-center gap-x-5 gap-y-2.5 text-[13px] text-[var(--admin-text-muted)]">
-              {["No hidden inbox", "You review before it posts", "Keys stay redacted"].map((item) => (
-                <li key={item} className="flex items-center gap-1.5">
-                  <Check size={13} className="text-emerald-400" aria-hidden />
+            <div className="mt-7 flex flex-wrap items-center gap-x-5 gap-y-3 text-[12px] text-[var(--admin-text-muted)]">
+              {["No hidden inbox", "Review before posting", "Keys stay redacted"].map((item) => (
+                <span key={item} className="flex items-center gap-2">
+                  <Check size={14} className="text-emerald-400" aria-hidden />
                   {item}
-                </li>
+                </span>
               ))}
-            </ul>
+            </div>
           </div>
 
-          {/* Live draft — mirrors type-to-send, no surprises later */}
-          <div
-            role="img"
-            aria-label="Live preview of the GitHub issue this form will create"
-            className="self-center overflow-hidden rounded-2xl border border-white/[0.07] bg-[#0d1117]/90 shadow-[0_28px_80px_-24px_rgba(0,0,0,0.8)] ring-1 ring-white/[0.04]"
-          >
-            <div className="flex items-center justify-between gap-3 border-b border-white/[0.06] px-4 py-3">
-              <div className="flex min-w-0 items-center gap-2">
-                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-white/[0.06] bg-white/[0.03]">
-                  <Github size={14} className="text-[var(--admin-text-muted)]" />
-                </span>
-                <span className="truncate font-mono text-[11px] text-[var(--admin-text-dim)]">
-                  wiwia · new issue
+          <div className="relative self-center lg:pl-4">
+            <div className="pointer-events-none absolute -inset-8 rounded-full bg-blue-500/[0.06] blur-3xl" aria-hidden />
+            <div
+              role="img"
+              aria-label="Live preview of the GitHub issue this form will create"
+              className="relative overflow-hidden rounded-2xl border border-white/[0.1] bg-[#0d1117]/95 shadow-[0_24px_70px_-32px_rgba(0,0,0,0.9)]"
+            >
+              <div className="flex items-center justify-between gap-3 border-b border-white/[0.08] bg-white/[0.02] px-4 py-3.5">
+                <div className="flex min-w-0 items-center gap-2.5">
+                  <Github size={15} className="shrink-0 text-[var(--admin-text-muted)]" aria-hidden />
+                  <span className="truncate font-mono text-[11px] text-[var(--admin-text-muted)]">
+                    wiwia / new issue
+                  </span>
+                </div>
+                <span className="flex shrink-0 items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-emerald-300">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                  Draft
                 </span>
               </div>
-              <span className="flex shrink-0 items-center gap-1.5 rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-emerald-300">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                Draft
-              </span>
-            </div>
-            <div className="space-y-3 px-4 py-4 sm:px-5 sm:py-5">
-              <p className="truncate text-[14px] font-semibold text-[var(--admin-text)]">
-                {draftTitle}
-              </p>
-              <p className="max-h-32 overflow-y-auto whitespace-pre-wrap text-[12.5px] leading-relaxed text-[var(--admin-text-muted)] sm:max-h-40">
-                {message.trim()
-                  ? message
-                  : "Your message appears here as you type. Until you open it on GitHub and hit Submit, nothing is sent anywhere."}
-              </p>
-              <div className="flex flex-wrap items-center gap-2 border-t border-white/[0.06] pt-3">
-                <span className="rounded-full border border-blue-400/15 bg-blue-500/[0.08] px-2 py-0.5 text-[10px] font-medium text-blue-300">
-                  contact
-                </span>
-                <span className="rounded-full border border-white/[0.06] bg-white/[0.03] px-2 py-0.5 text-[10px] font-medium text-[var(--admin-text-dim)]">
-                  awaiting review
-                </span>
-                <span className="ml-auto font-mono text-[10px] text-[var(--admin-text-dim)]">
-                  {messageCount} chars
-                </span>
+              <div className="space-y-4 px-5 py-5">
+                <p className="truncate text-[14px] font-semibold text-[var(--admin-text)]">
+                  {draftTitle}
+                </p>
+                <p className="max-h-32 overflow-y-auto whitespace-pre-wrap text-[13px] leading-relaxed text-[var(--admin-text-muted)] sm:max-h-40">
+                  {message.trim()
+                    ? message
+                    : "Your message appears here as you type. Nothing is sent until you review it on GitHub and hit Submit."}
+                </p>
+                <div className="flex flex-wrap items-center gap-2 border-t border-white/[0.07] pt-3">
+                  <span className="rounded-md border border-blue-400/15 bg-blue-500/[0.08] px-2 py-1 text-[10px] font-medium text-blue-300">
+                    contact
+                  </span>
+                  <span className="rounded-md border border-white/[0.07] px-2 py-0.5 text-[10px] text-[var(--admin-text-dim)]">
+                    awaiting review
+                  </span>
+                  <span className="ml-auto font-mono text-[10px] tabular-nums text-[var(--admin-text-dim)]">
+                    {messageCount} chars
+                  </span>
+                </div>
               </div>
             </div>
           </div>
@@ -224,21 +208,23 @@ export function ContactPage() {
       </section>
 
       {/* ── form + sidebar ── */}
-      <section className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.45fr)_minmax(280px,1fr)]">
-        {/* form */}
-        <Card className="p-6 sm:p-7">
-          <div className="flex flex-wrap items-start justify-between gap-3">
+      <section className="grid grid-cols-1 overflow-hidden rounded-2xl border border-white/[0.08] bg-[var(--admin-surface)] shadow-[0_20px_60px_-48px_rgba(0,0,0,0.9)] lg:grid-cols-[minmax(0,1.5fr)_minmax(280px,0.85fr)]">
+        <Card className="rounded-none border-0 bg-transparent p-6 shadow-none sm:p-8 lg:p-9">
+          <div className="flex flex-wrap items-start justify-between gap-4 border-b border-white/[0.07] pb-6">
             <div>
-              <h2 className="text-[17px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
+              <div className="flex items-center gap-2 font-mono text-[10px] font-medium uppercase tracking-[0.16em] text-blue-300">
+                <span className="h-1.5 w-1.5 rounded-full bg-blue-400" />
+                Start a conversation
+              </div>
+              <h2 className="mt-2.5 text-2xl font-semibold tracking-[-0.025em] text-[var(--admin-text)]">
                 Send a message
               </h2>
-              <p className="mt-1 text-[12px] text-[var(--admin-text-dim)]">
-                Opens a prefilled GitHub issue.{" "}
-                <span className="text-blue-400">*</span> required.
+              <p className="mt-2 text-[13px] text-[var(--admin-text-muted)]">
+                A few details are all we need to get started.
               </p>
             </div>
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-white/[0.06] bg-white/[0.02] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--admin-text-dim)]">
-              <Github size={11} aria-hidden />
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-white/[0.08] bg-white/[0.02] px-2.5 py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--admin-text-muted)]">
+              <Github size={12} aria-hidden />
               Draft only
             </span>
           </div>
@@ -270,7 +256,7 @@ export function ContactPage() {
               </div>
             </div>
           ) : (
-            <form onSubmit={handleSubmit} className="mt-6 space-y-5">
+            <form onSubmit={handleSubmit} className="mt-7 space-y-6">
               <div className="grid gap-4 sm:grid-cols-2">
                 <label className="block">
                   <span className="admin-label mb-1.5 block">
@@ -282,7 +268,7 @@ export function ContactPage() {
                     value={name}
                     onChange={(e) => setName(e.target.value)}
                     placeholder="Ada Lovelace"
-                    className="min-h-11"
+                    className="min-h-12 rounded-[10px] border-white/[0.09] bg-white/[0.025] px-3.5 text-[14px] placeholder:text-[var(--admin-text-dim)] focus:border-blue-400/60 focus:bg-blue-500/[0.025] focus:ring-2 focus:ring-blue-400/20"
                   />
                 </label>
                 <label className="block">
@@ -296,23 +282,23 @@ export function ContactPage() {
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="you@example.com"
-                    className="min-h-11"
+                    className="min-h-12 rounded-[10px] border-white/[0.09] bg-white/[0.025] px-3.5 text-[14px] placeholder:text-[var(--admin-text-dim)] focus:border-blue-400/60 focus:bg-blue-500/[0.025] focus:ring-2 focus:ring-blue-400/20"
                   />
                 </label>
               </div>
 
-              <fieldset className="space-y-2">
-                <legend className="admin-label">Quick templates</legend>
-                <p className="text-[11.5px] text-[var(--admin-text-dim)]">
-                  Insert a structured prompt for what you are working on.
+              <fieldset className="rounded-xl border border-white/[0.06] bg-white/[0.015] p-4">
+                <legend className="admin-label px-1">Quick templates</legend>
+                <p className="mt-1 text-[12px] leading-relaxed text-[var(--admin-text-dim)]">
+                  Start with a structured prompt, then make it yours.
                 </p>
-                <div className="flex flex-wrap gap-2 pt-1">
+                <div className="flex flex-wrap gap-2 pt-2">
                   {TEMPLATES.map((t) => (
                     <button
                       key={t.label}
                       type="button"
                       onClick={() => setMessage(t.body)}
-                      className="min-h-11 rounded-full border border-white/[0.07] bg-white/[0.02] px-3.5 text-[12.5px] font-medium text-[var(--admin-text-muted)] transition-colors hover:border-blue-500/30 hover:bg-blue-500/[0.06] hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50 active:scale-[0.98]"
+                      className="min-h-11 rounded-lg border border-white/[0.09] bg-white/[0.025] px-3.5 text-[12px] font-medium text-[var(--admin-text-muted)] transition-colors hover:border-blue-500/30 hover:bg-blue-500/[0.06] hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50 active:scale-[0.98]"
                     >
                       {t.label}
                     </button>
@@ -335,15 +321,16 @@ export function ContactPage() {
                   onChange={(e) => setMessage(e.target.value)}
                   rows={7}
                   placeholder="Tell us what you are running, what you expected, and what happened…"
-                  className="admin-input min-h-[132px] w-full resize-y"
+                  className="admin-input min-h-[160px] w-full resize-y rounded-[10px] border-white/[0.09] bg-white/[0.025] px-3.5 py-3 text-[14px] leading-6 placeholder:text-[var(--admin-text-dim)] focus:border-blue-400/60 focus:bg-blue-500/[0.025] focus:ring-2 focus:ring-blue-400/20"
                 />
               </label>
 
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <p className="order-2 text-[11.5px] leading-snug text-[var(--admin-text-dim)] sm:order-1 sm:max-w-xs">
-                  Nothing is posted until you review and submit the issue on GitHub.
+              <div className="flex flex-col gap-4 border-t border-white/[0.07] pt-5 sm:flex-row sm:items-center sm:justify-between">
+                <p className="order-2 flex items-start gap-2 text-[12px] leading-relaxed text-[var(--admin-text-dim)] sm:order-1 sm:max-w-xs">
+                  <Check size={14} className="mt-0.5 shrink-0 text-emerald-400" aria-hidden />
+                  Nothing is posted until you review it on GitHub.
                 </p>
-                <Button type="submit" className="wiwi-shimmer min-h-12 px-6 text-[14px] sm:order-2">
+                <Button type="submit" className="wiwi-shimmer min-h-12 w-full px-6 text-[14px] sm:order-2 sm:w-auto">
                   Draft issue
                   <Send size={15} aria-hidden />
                 </Button>
@@ -353,19 +340,24 @@ export function ContactPage() {
         </Card>
 
         {/* sidebar */}
-        <div className="space-y-4">
-          <Card className="p-5">
-            <span className="admin-label mb-3 block">Fastest channels</span>
+        <aside className="border-t border-white/[0.08] bg-white/[0.015] lg:border-l lg:border-t-0">
+          <Card className="rounded-none border-0 bg-transparent p-6 shadow-none sm:p-7">
+            <div className="mb-4 flex items-center gap-2.5">
+              <span className="flex h-8 w-8 items-center justify-center rounded-lg border border-blue-400/15 bg-blue-500/[0.08] text-blue-300">
+                <MessageSquare size={14} aria-hidden />
+              </span>
+              <h2 className="text-[14px] font-semibold text-[var(--admin-text)]">Other ways to connect</h2>
+            </div>
             <ul className="space-y-2">
               {CHANNELS.map((c) => {
                 const Icon = c.icon;
                 const inner = (
                   <>
-                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-white/[0.06] bg-gradient-to-br from-blue-500/15 to-violet-500/10 text-blue-300 transition-colors group-hover:border-blue-500/25 group-hover:text-blue-200">
-                      <Icon size={17} aria-hidden />
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.025] text-[var(--admin-text-muted)] transition-colors group-hover:border-blue-500/25 group-hover:text-blue-300">
+                      <Icon size={16} aria-hidden />
                     </span>
                     <span className="min-w-0 flex-1">
-                      <span className="block text-[12px] text-[var(--admin-text-dim)]">
+                      <span className="block text-[11px] text-[var(--admin-text-dim)]">
                         {c.label}
                       </span>
                       <span className="mt-0.5 block truncate text-[13px] font-medium text-[var(--admin-text)] transition-colors group-hover:text-blue-300">
@@ -406,11 +398,14 @@ export function ContactPage() {
             </ul>
           </Card>
 
-          <Card className="p-5">
-            <span className="admin-label mb-3 block">What to include</span>
-            <ul className="space-y-2.5">
+          <Card className="rounded-none border-0 border-t border-white/[0.08] bg-transparent p-6 shadow-none sm:p-7">
+            <h2 className="text-[14px] font-semibold text-[var(--admin-text)]">A useful first message</h2>
+            <p className="mt-1.5 text-[12px] leading-relaxed text-[var(--admin-text-dim)]">
+              Include these details to help us reproduce the issue.
+            </p>
+            <ul className="mt-4 space-y-3">
               {INCLUDE.map((item) => (
-                <li key={item} className="flex items-start gap-2 text-[12.5px] leading-snug text-[var(--admin-text-muted)]">
+                <li key={item} className="flex items-start gap-2.5 text-[12px] leading-relaxed text-[var(--admin-text-muted)]">
                   <Check size={14} className="mt-0.5 shrink-0 text-emerald-400" aria-hidden />
                   {item}
                 </li>
@@ -418,7 +413,7 @@ export function ContactPage() {
             </ul>
           </Card>
 
-          <Card className="p-5">
+          <Card className="rounded-none border-0 border-t border-white/[0.08] bg-transparent p-6 shadow-none sm:p-7">
             <span className="admin-label mb-2 block">How this reaches us</span>
             <p className="text-[12.5px] leading-relaxed text-[var(--admin-text-muted)]">
               There is no support inbox behind this site. The form opens a prefilled issue on{" "}
@@ -426,12 +421,12 @@ export function ContactPage() {
                 href={REPO_ISSUES}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex min-h-11 items-center font-medium text-blue-400 transition-colors hover:text-blue-300"
+                className="inline-flex min-h-11 items-center px-1 font-medium text-blue-400 transition-colors hover:text-blue-300"
               >
                 GitHub
               </a>
               . Public issues are picked up best-effort;{" "}
-              <Link to="/enterprise" className="inline-flex min-h-11 items-center font-medium text-blue-400 transition-colors hover:text-blue-300">
+              <Link to="/enterprise" className="inline-flex min-h-11 items-center px-1 font-medium text-blue-400 transition-colors hover:text-blue-300">
                 Enterprise
               </Link>{" "}
               gets a direct line and priority triage.
@@ -449,7 +444,7 @@ export function ContactPage() {
               {copied ? "Draft copied" : copyFailed ? "Copy blocked — select the text" : "Copy draft"}
             </button>
           </Card>
-        </div>
+        </aside>
       </section>
     </div>
   );
