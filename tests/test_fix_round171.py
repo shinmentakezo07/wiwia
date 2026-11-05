@@ -94,16 +94,13 @@ async def test_spa_fallback_for_a_client_side_route_is_no_cache(client):
 # ---------------------------------------------------------------------------
 
 
-async def test_hashed_assets_are_not_forced_to_revalidate(client):
-    """A content-hashed asset may be cached forever; forcing revalidation
-    on it would waste a round trip per asset per visit."""
+async def test_missing_asset_is_a_real_404_not_the_html_fallback(client):
+    """A missing build asset is not a client-side route (AUDIT #581)."""
     r = await client.get("/assets/does-not-exist-123456.js")
-    # The file does not exist — the fallback serves index.html (no-cache).
-    # Assert on that behaviour explicitly so this test documents the mount
-    # semantics rather than silently passing on a 200 asset body.
-    assert r.status_code == 200, r.text
-    assert "text/html" in r.headers.get("content-type", ""), r.headers
-    assert "no-cache" in _cc(r), _cc(r)
+    assert r.status_code == 404, r.text
+    assert "text/plain" in r.headers.get("content-type", ""), r.headers
+    assert "no-store" in _cc(r), _cc(r)
+    assert "<html" not in r.text.lower()
 
 
 async def test_real_asset_keeps_default_cache_control(client, tmp_path):

@@ -7768,16 +7768,27 @@ def create_app(config: WiwiConfig) -> FastAPI:
         /assets/ may be cached forever, but a heuristically cached index
         pins the previous build's hashed filenames, so users keep getting
         the old SPA after a redeploy until the heuristic expires.
+
+        Missing assets never use the history fallback. Returning index.html
+        for a removed JavaScript chunk produces a misleading import error.
         """
 
         async def get_response(self, path: str, scope):
             try:
                 resp = await super().get_response(path, scope)
             except HTTPException as exc:
-                if exc.status_code == 404:
-                    return await self._spa_fallback(scope)
-                raise
+                if exc.status_code != 404:
+                    raise
+                if path == "assets" or path.startswith("assets/"):
+                    return PlainTextResponse(
+                        "Static asset not found", status_code=404,
+                        headers={"Cache-Control": "no-store"})
+                return await self._spa_fallback(scope)
             if resp.status_code == 404:
+                if path.startswith("assets/"):
+                    return PlainTextResponse(
+                        "Static asset not found", status_code=404,
+                        headers={"Cache-Control": "no-store"})
                 return await self._spa_fallback(scope)
             if path in ("", ".", "index.html") or path.endswith(".html"):
                 resp.headers["Cache-Control"] = "no-cache"

@@ -1819,6 +1819,31 @@ warning and are dropped.
 
 ---
 
+### 581. Stale Vite chunks fail instead of recovering after a redeploy
+
+**Severity:** 🟡 Medium (an open tab or cached HTML can request a removed
+hashed chunk and leave the SPA on a dynamic-import error) · **Status: fixed** —
+round 197 (`tests/test_fix_round197.py`, `web/src/lib/chunk-recovery.test.ts`)
+
+**Where:** `wiwi/server/app.py` `SPAStaticFiles.get_response` returned the HTML
+history fallback with HTTP 200 for missing `/assets/*`; `web/src/main.tsx`
+lazy-loaded routes had no recovery for the old build's removed content hashes.
+
+**Trigger.** An open tab or stale HTML document references a previous Vite
+content hash after a redeploy removes it. The old server returned `index.html`
+with status 200 for the missing JavaScript URL, producing `Failed to fetch
+dynamically imported module`; a manual reload fixed it by loading the current
+asset manifest.
+
+**Fix:** missing `/assets/*` paths now return a plain-text 404 with `no-store`,
+while client-side routes retain the `no-cache` HTML fallback. All lazy routes
+use `lazyRoute`: a recognized chunk-load failure reloads once to obtain the
+current HTML, with session-scoped retry protection and an offline/storage
+guard against reload loops. Covered by `tests/test_fix_round197.py`, updated
+`tests/test_fix_round171.py`, and `web/src/lib/chunk-recovery.test.ts`.
+
+---
+
 ## 🟡 Low — round 90 (new)
 
 ### 270. Three adapters still keep their own finish-reason map, narrower than the shared one
