@@ -76,20 +76,17 @@ def _decode_image(url: Any) -> ir.ImagePart | None:
 
 def _decode_document(c: dict[str, Any]) -> ir.DocumentPart | None:
     """Parse an ``input_file`` content block into a DocumentPart."""
-    # ``file_id`` (the Files API reference) has no IR document carrier, but
-    # dropping the whole block silently meant a spec-legal attachment simply
-    # vanished. There is no URL/b64 to fetch from, so the honest options are
-    # drop-with-nothing or drop-with-a-warning; the IR has no warning channel
-    # at decode, so at least keep the file_data/file_url paths working and
-    # leave file_id to the message-path image handling (which does carry it).
+    raw_name = c.get("filename")
+    name = raw_name if isinstance(raw_name, str) else None
+    file_id = c.get("file_id")
+    if isinstance(file_id, str) and file_id:
+        return ir.DocumentPart(file_id=file_id, name=name)
     raw = c.get("file_data") or c.get("file_url") or ""
     if not isinstance(raw, str) or not raw:
         return None  # non-string file ref: skip rather than 500
     # `name` is typed `str | None` and the fallback estimator appends it to a
     # " ".join: a non-string filename (5, a list) was a 500 there (AUDIT
     # #184). The field is optional, so junk becomes absent rather than "".
-    raw_name = c.get("filename")
-    name = raw_name if isinstance(raw_name, str) else None
     if raw.startswith("data:"):
         header, _, b64 = raw.partition(",")
         return ir.DocumentPart(b64=b64,

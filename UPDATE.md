@@ -10,6 +10,31 @@ Each entry below records the before→after state, the exact files and lines cha
 
 ---
 
+## Round 198 — document file ids, Completions suffix refusal, zero token caps (AUDIT #583–#585) (2026-11-05)
+
+Three request-translation fixes from the wire review:
+
+- **Responses document references survive.** `input_file.file_id` now decodes to
+  `DocumentPart(file_id=..., name=...)` instead of disappearing. The existing
+  Anthropic adapter emits it as a native `document` block with
+  `source.type=file` and preserves `filename` as `title`.
+- **Completions rejects unsupported infill.** A non-empty `suffix` now raises
+  `DialectError` rather than being concatenated after the prompt. Infill means
+  generation *before* the suffix; concatenation silently requested a different
+  completion. The old behavior-pinning codec test was replaced.
+- **Explicit zero token caps survive provider encoding.** OpenAI, Gemini and
+  OpenCode now distinguish an absent cap (`None`, allowing the deployment
+  default) from an explicit zero, which is emitted unchanged. This matches the
+  existing Anthropic precedence and prevents a zero-cap request from becoming
+  default-sized or uncapped.
+
+**Files:** `wiwi/wire/openai_responses.py`, `wiwi/wire/openai_completions.py`,
+`wiwi/providers/openai_adapter.py`, `wiwi/providers/gemini_adapter.py`,
+`wiwi/providers/opencode_adapter.py`, `tests/test_codecs.py`,
+`tests/test_fix_round198.py`.
+
+---
+
 ## Round 196 — hosted-call replay decodes, not drops; streamed store failures are loud (AUDIT #573–#575) (2026-11-04)
 
 The `previous_response_id` continuation path is where a turn's search trace

@@ -256,9 +256,9 @@ def test_completions_missing_model_is_rejected():
         ocmpl.decode_request({"prompt": "x"})
 
 
-def test_completions_suffix_is_appended_to_the_prompt():
-    req = ocmpl.decode_request({"model": "m", "prompt": "def f():", "suffix": "return 1"})
-    assert req.messages[0].parts[0].text == "def f():return 1"
+def test_completions_suffix_is_rejected_when_infill_is_unsupported():
+    with pytest.raises(ocmpl.DialectError, match="suffix"):
+        ocmpl.decode_request({"model": "m", "prompt": "def f():", "suffix": "return 1"})
 
 
 def test_completions_encode_response_shape():

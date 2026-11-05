@@ -96,10 +96,9 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
     text = _prompt_text(body)
     suffix = body.get("suffix")
     if isinstance(suffix, str) and suffix:
-        # ``suffix`` is code infill: the model continues the prompt *before* this
-        # text. The IR has one text channel, so concatenate — the upstream sees
-        # the same bytes either way.
-        text = f"{text}{suffix}"
+        # Infill inserts generated text BEFORE the suffix. Concatenating it to
+        # the prompt instead asks for a continuation AFTER the suffix.
+        raise DialectError("'suffix' is not supported on this surface")
 
     g = ir.GenParams(
         temperature=tr.coerce_float(body.get("temperature")),

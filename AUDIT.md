@@ -1819,6 +1819,55 @@ warning and are dropped.
 
 ---
 
+## Wire codec review — confirmed findings (2026-11-05)
+
+### 583. Responses `input_file.file_id` is silently discarded
+
+**Severity:** 🟠 High (a valid PDF/document attachment never reaches the model;
+the request succeeds and can be billed for an answer to incomplete input) ·
+**Status: fixed — round 198** (`tests/test_fix_round198.py`)
+
+**Where:** `wiwi/wire/openai_responses.py` `_decode_document` read only
+`file_data`/`file_url`, ignoring the existing `DocumentPart.file_id` carrier.
+
+**Trigger:** a Responses `input_file` with `file_id` decoded to no document;
+the upstream received only the surrounding text.
+
+**Fix:** decode a non-empty string `file_id` and preserve `filename` as the
+document name. Covered by a Responses→Anthropic regression.
+
+---
+
+### 584. Completions `suffix` is concatenated into the ordinary prompt
+
+**Severity:** 🟡 Medium (fill-in-the-middle requests are answered as ordinary
+continuations, with no warning) · **Status: fixed — round 198**
+
+**Where:** `wiwi/wire/openai_completions.py` `decode_request`.
+
+**Trigger:** `suffix` was appended to the prompt, requesting a continuation
+after the suffix instead of an insertion before it.
+
+**Fix:** reject non-empty `suffix` as unsupported, matching the codec's other
+explicit unsupported-parameter refusals. The old behavior-pinning test was
+replaced in `tests/test_codecs.py`.
+
+---
+
+### 585. An explicit zero output-token cap is replaced by deployment defaults
+
+**Severity:** 🟡 Medium (the caller's explicit cap is discarded; without a
+configured default the request becomes uncapped) · **Status: fixed — round 198**
+(`tests/test_fix_round198.py`)
+
+**Where:** `wiwi/providers/openai_adapter.py`, `gemini_adapter.py`, and
+`opencode_adapter.py` used falsy fallback for the request/deployment cap.
+
+**Fix:** distinguish `None` (absent, so the deployment default applies) from
+zero (explicit, emitted unchanged). Covered for all three providers.
+
+---
+
 ### 581. Stale Vite chunks fail instead of recovering after a redeploy
 
 **Severity:** 🟡 Medium (an open tab or cached HTML can request a removed

@@ -318,8 +318,9 @@ class OpenAIAdapter(WarningMixin):
             ),
             "stream": req.stream,
         }
-        mt = g.max_tokens or deployment_params.get("max_tokens")
-        if mt:
+        mt = (g.max_tokens if g.max_tokens is not None
+              else deployment_params.get("max_tokens"))
+        if mt is not None:
             body["max_tokens"] = mt
         if g.temperature is not None:
             body["temperature"] = g.temperature
