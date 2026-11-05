@@ -3,6 +3,7 @@
 // Pricing.tsx so every public hero uses the same motion language.
 
 import { useId } from "react";
+import { useReducedMotion } from "@/components/animated";
 
 export interface HeroBeam {
   d: string;
@@ -37,6 +38,7 @@ export function HeroBeamBackdrop(props: {
 }) {
   const id = useId().replace(/[:]/g, "");
   const beams = props.beams ?? HERO_BEAMS_FULL;
+  const reducedMotion = useReducedMotion();
   return (
     <svg
       className={`pointer-events-none absolute inset-0 h-full w-full ${props.className ?? "opacity-70"}`}
@@ -47,14 +49,28 @@ export function HeroBeamBackdrop(props: {
       <defs>
         {beams.map((b, i) => (
           <linearGradient key={i} id={`hb-${id}-${i}`} gradientUnits="userSpaceOnUse">
-            <stop stopColor={b.c0} stopOpacity="0">
-              <animate attributeName="offset" values="-0.3;1" dur={`${b.dur}s`} begin={`${b.delay}s`} repeatCount="indefinite" />
+            <stop offset="0.3" stopColor={b.c0} stopOpacity="0" />
+            <stop offset="0.4" stopColor={b.c0} stopOpacity={reducedMotion ? 0.65 : 1}>
+              {!reducedMotion && (
+                <animate
+                  attributeName="offset"
+                  values="-0.3;0.4"
+                  dur={`${b.dur}s`}
+                  begin={`${b.delay}s`}
+                  repeatCount="indefinite"
+                />
+              )}
             </stop>
-            <stop stopColor={b.c0}>
-              <animate attributeName="offset" values="-0.1;1.1" dur={`${b.dur}s`} begin={`${b.delay}s`} repeatCount="indefinite" />
-            </stop>
-            <stop offset="0.3" stopColor={b.c1}>
-              <animate attributeName="offset" values="0;1.3" dur={`${b.dur}s`} begin={`${b.delay}s`} repeatCount="indefinite" />
+            <stop offset="0.6" stopColor={b.c1}>
+              {!reducedMotion && (
+                <animate
+                  attributeName="offset"
+                  values="0.1;1.6"
+                  dur={`${b.dur}s`}
+                  begin={`${b.delay}s`}
+                  repeatCount="indefinite"
+                />
+              )}
             </stop>
             <stop offset="1" stopColor={b.c1} stopOpacity="0">
               <animate attributeName="offset" values="0.3;1.6" dur={`${b.dur}s`} begin={`${b.delay}s`} repeatCount="indefinite" />
@@ -65,7 +81,14 @@ export function HeroBeamBackdrop(props: {
       {beams.map((b, i) => (
         <g key={i}>
           <path d={b.d} fill="none" stroke="rgba(255,255,255,0.03)" strokeWidth={b.w} />
-          <path d={b.d} fill="none" stroke={`url(#hb-${id}-${i})`} strokeWidth={b.w} strokeLinecap="round" />
+          <path
+            d={b.d}
+            fill="none"
+            stroke={`url(#hb-${id}-${i})`}
+            strokeWidth={b.w}
+            strokeLinecap="round"
+            strokeDasharray={reducedMotion ? "110 2000" : undefined}
+          />
         </g>
       ))}
     </svg>

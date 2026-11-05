@@ -8,6 +8,7 @@ import {
   Building2,
   Check,
   ChevronDown,
+  CircleDollarSign,
   CreditCard,
   Minus,
   Server,
@@ -175,32 +176,92 @@ const FAQ: { q: string; a: string }[] = [
 export function PricingPage() {
   return (
     <div className="mx-auto max-w-4xl space-y-12 pb-16">
-      <section className="relative overflow-hidden rounded-2xl border border-[var(--admin-border)] px-6 py-12 text-center sm:px-10">
-        <HeroBeamBackdrop beams={HERO_BEAMS_COMPACT} />
-        <div className="relative">
-          <Badge tone="green">Free and open source</Badge>
-          <h1 className="mt-4 text-3xl font-semibold tracking-[-0.02em] text-[var(--admin-text)] sm:text-4xl">
-            Pay your providers.{" "}
-            <span className="bg-gradient-to-r from-blue-400 to-fuchsia-400 bg-clip-text text-transparent">
-              Not a gateway tax.
-            </span>
-          </h1>
-          <p className="mx-auto mt-4 max-w-2xl text-[15px] leading-relaxed text-[var(--admin-text-muted)]">
-            The gateway is MIT-licensed and runs on your infrastructure. There is no
-            platform fee, no credit balance, and no per-token markup — just the provider
-            bill you already pay.
-          </p>
-          <div className="mt-6 flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-[13px] text-[var(--admin-text-muted)]">
-            <span className="flex items-center gap-1.5">
-              <Check size={14} className="text-emerald-400" /> No platform fee
-            </span>
-            <span className="flex items-center gap-1.5">
-              <Check size={14} className="text-emerald-400" /> No credit card
-            </span>
-            <span className="flex items-center gap-1.5">
-              <Check size={14} className="text-emerald-400" /> No seat licence
-            </span>
+      <section
+        aria-labelledby="pricing-heading"
+        className="relative isolate overflow-hidden rounded-2xl border border-white/[0.08] bg-[#080808]"
+      >
+        <HeroBeamBackdrop beams={HERO_BEAMS_COMPACT} className="opacity-35" />
+        <div
+          aria-hidden
+          className="hero-grid pointer-events-none absolute inset-0 opacity-25"
+        />
+        <div
+          className="wiwi-top-highlight pointer-events-none absolute inset-x-0 top-0 h-px opacity-60"
+          aria-hidden
+        />
+
+        <div className="relative px-5 pb-7 pt-8 sm:px-8 sm:pb-8 sm:pt-9 lg:px-10">
+          <div className="grid items-center gap-10 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.75fr)] lg:gap-10">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                <Badge tone="green">
+                  <span className="mr-1 size-1.5 rounded-full bg-emerald-400" aria-hidden />
+                  Free and open source
+                </Badge>
+                <span className="font-mono text-[11px] tracking-[0.04em] text-[var(--admin-text-dim)]">
+                  MIT · self-hosted
+                </span>
+              </div>
+              <h1
+                id="pricing-heading"
+                className="mt-5 max-w-[17ch] text-[clamp(2.1rem,5vw,3.35rem)] font-semibold leading-[1.06] tracking-[-0.04em] text-[var(--admin-text)]"
+              >
+                Pay your providers.{" "}
+                <span className="text-[var(--admin-text-muted)]">
+                  Not a{" "}
+                  <span className="text-[var(--admin-text)]">gateway tax.</span>
+                </span>
+              </h1>
+              <p className="mt-5 max-w-[49ch] text-[14.5px] leading-[1.75] text-[var(--admin-text-muted)] sm:text-[15px]">
+                The gateway is MIT-licensed and runs on your infrastructure. There is no
+                platform fee, no credit balance, and no per-token markup — just the provider
+                bill you already pay.
+              </p>
+            </div>
+
+            <figure className="relative min-w-0 sm:mx-auto sm:w-full sm:max-w-sm lg:max-w-none">
+              <figcaption className="mb-4 flex items-center justify-between gap-3 font-mono text-[10px] uppercase tracking-[0.13em] text-[var(--admin-text-dim)]">
+                <span>One request. Your provider.</span>
+                <span className="text-emerald-300">0% markup</span>
+              </figcaption>
+              <div className="relative rounded-xl border border-white/[0.07] bg-black/25 px-4 py-5 sm:px-5">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-center gap-2.5">
+                    <CircleDollarSign size={18} className="text-blue-300" aria-hidden />
+                    <span className="text-[12.5px] font-medium text-[var(--admin-text)]">Your provider</span>
+                  </div>
+                  <span className="inline-flex items-center gap-1.5 text-[11px] text-emerald-300/90">
+                    <ShieldCheck size={13} aria-hidden />
+                    Direct billing
+                  </span>
+                </div>
+                <div className="mt-4 flex items-center gap-3 border-t border-white/[0.06] pt-4" aria-hidden>
+                  <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-[var(--admin-text-dim)]">Gateway fee</span>
+                  <span className="h-px flex-1 bg-white/[0.08]" />
+                  <span className="font-mono text-2xl font-medium tracking-[-0.04em] text-[var(--admin-text)]">$0</span>
+                </div>
+                <div className="sr-only">Requests go through your gateway to your provider. The gateway adds zero fees.</div>
+              </div>
+              <div className="mt-3 flex items-center gap-1.5 text-[11px] text-[var(--admin-text-dim)]">
+                <ShieldCheck size={13} className="text-blue-400/80" aria-hidden />
+                Your infrastructure, your provider account
+              </div>
+            </figure>
           </div>
+
+          <ul className="relative mt-8 grid list-none border-t border-white/[0.07] pt-6 sm:grid-cols-3">
+            {["No platform fee", "No credit card", "No seat licence"].map((item) => (
+              <li
+                key={item}
+                className="flex min-h-11 items-center gap-3 border-b border-white/[0.05] px-1 py-3 text-[13px] text-[var(--admin-text-muted)] last:border-0 sm:justify-center sm:border-l sm:border-white/[0.07] sm:px-3 sm:first:border-l-0"
+              >
+                <span className="flex size-6 shrink-0 items-center justify-center rounded-full border border-emerald-400/15 bg-emerald-400/[0.06]">
+                  <Check size={12} className="text-emerald-400" aria-hidden />
+                </span>
+                {item}
+              </li>
+            ))}
+          </ul>
         </div>
       </section>
 
