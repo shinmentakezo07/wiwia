@@ -442,6 +442,37 @@ def decode_request(body: dict[str, Any],
                 ir.ToolResultPart(tool_use_id=raw_call_id,
                                   content=_item_text(item),
                                   images=_item_images(item))]))
+        elif itype in ("web_search_call", "tool_search_call"):
+            # A hosted (provider-executed) tool call — the item the Responses
+            # surface itself emits on the way out. Decode it so a stored turn
+            # continued with previous_response_id round-trips: the upstream
+            # sees that a search ran (AUDIT #575). Re-encoding renders it as
+            # a hosted tool on the Responses surface; other surfaces gate it
+            # on pairing (a call with no paired result is dropped there).
+            if itype == "web_search_call":
+                action = item.get("action")
+                query = action.get("query") if isinstance(action, dict) else ""
+                canonical = "web_search"
+                hosted_id = item.get("id")
+            else:
+                arguments = item.get("arguments")
+                query = arguments.get("query") if isinstance(arguments, dict) else ""
+                # bm25 owns the shared "tool_search" wire type (registration
+                # order in builtin_tools.py), so the round trip lands back on
+                # tool_search_call.
+                canonical = "tool_search_bm25"
+                hosted_id = item.get("call_id") or item.get("id")
+            call_id = hosted_id if isinstance(hosted_id, str) else ""
+            if not call_id:
+                # An id-less hosted call pairs with nothing and is useless on
+                # replay; drop it rather than mint a fake id.
+                log.warning("responses_unsupported_input_item", item_type=itype)
+                continue
+            messages.append(ir.Message(role="assistant", parts=[
+                ir.ToolUsePart(id=call_id, name=canonical,
+                               args={"query": _str_or_empty(query)},
+                               builtin=canonical,
+                               block_type="server_tool_use")]))
         elif itype == "reasoning":
             summary = item.get("summary") or []
             if not isinstance(summary, list):

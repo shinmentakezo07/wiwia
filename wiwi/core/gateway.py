@@ -1134,7 +1134,9 @@ class Gateway:
                             loop_tripped = True
                     elif isinstance(d, dl.ToolCallOpen):
                         open_calls[d.index] = ir.ToolUsePart(
-                            id=d.id, name=d.name, args={}, raw_args="")
+                            id=d.id, name=d.name, args={}, raw_args="",
+                            builtin=d.builtin,
+                            block_type=d.block_type)
                         arg_bufs[d.index] = []
                         content = True
                     elif isinstance(d, dl.ToolCallArgsDelta):

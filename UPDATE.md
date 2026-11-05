@@ -10,6 +10,83 @@ Each entry below records the before→after state, the exact files and lines cha
 
 ---
 
+## Round 196 — hosted-call replay decodes, not drops; streamed store failures are loud (AUDIT #573–#575) (2026-11-04)
+
+The `previous_response_id` continuation path is where a turn's search trace
+used to vanish. The Responses surface itself *emits* `web_search_call` and
+`tool_search_call` items, and the store persists the streamed turn verbatim
+(round 195). But the replay decoder (`decode_request`) skipped both item
+types with only a `log.warning("responses_unsupported_input_item")` — so the
+next turn's upstream saw the follow-up user message and the assistant's text,
+but no record that a search had run. Codex users hit this every time a
+hosted-search turn was continued by id.
+
+- **I1 (decoding):** `web_search_call` → `ToolUsePart(id=<item.id>,
+  name="web_search", builtin="web_search", block_type="server_tool_use",
+  args={"query": action.query})`. `tool_search_call` →
+  `builtin="tool_search_bm25"` (bm25 owns the shared `tool_search` wire type
+  by registration order, so re-encoding lands back on `tool_search_call`).
+  The `call_id` on a `tool_search_call` is preferred over the `id` for the
+  IR `id` when present; `web_search_call` has only `id`. An item with no
+  readable id is dropped (it pairs with nothing).
+- **I1b (Anthropic pairing gate):** the Anthropic adapter's request path
+  previously re-emitted a hosted `ToolUsePart` verbatim with no pairing
+  check, so a stored Responses continuation replayed to Anthropic would
+  carry an unpaired `server_tool_use` and the API would reject the history
+  with a 400. `encode_request` now computes the hosted ids and their paired
+  results in the history and: replays a paired call verbatim as the same
+  block type (the Anthropic→Anthropic round trip, unchanged), drops an
+  unpaired hosted call with a caller-visible warning, and folds an
+  unpaired hosted result's payload to text (images and `tool_reference`
+  blocks keep their form). Because the Responses dialect carries no result
+  item at all, a Responses→Anthropic continuation ships no hosted block;
+  paired history is the only shape that goes to Anthropic. Prior revisions
+  of this entry claimed the suppression existed — it did not, on the
+  request path; round 196 implements it.
+- **I2 (round trip):** the Responses sync encoder re-emits the same hosted
+  item keyed off `builtin` (`_builtin_call_item`, unchanged), so an
+  Anthropic→Responses or Chat→Responses continuation carries the search the
+  turn performed. The Chat surface drops it with a warning — neither
+  invents a `tool_calls` frame the client cannot dispatch, and neither
+  sends an unpaired `server_tool_use` to Anthropic.
+- **I3 (force_stream arm):** `gateway.py` previously discarded
+  `ToolCallOpen.builtin` when building the IR `ToolUsePart` — so even a
+  correctly decoded/streamed hosted turn lost its identity on a
+  non-streaming path. The carrier fields are now forwarded like the pump
+  does (plus `block_type`).
+- **I4 (store failure is loud):** the streamed store write inside
+  `_teardown_tail` was wrapped in `contextlib.suppress(Exception)` — a DB
+  downtime silently lost every streamed continuation id with no signal. It
+  now catches the exception and logs a warning + `log_proxy("error", …)`,
+  matching the cache-hit and singleflight twins. The turn still completes;
+  the store stays best-effort.
+- **I5 (#573 declined):** a `tool_call` stop with no tool item remains
+  `completed` on the Responses surface. AUDIT #272/#358 already ruled this
+  non-actionable; round 196 re-verified against source and did not invent a
+  wire `incomplete_details.reason` the spec does not define.
+
+**Invariants.**
+1. Hosted calls are *evidence*, not instructions: no dialect emits them as
+   client-dispatched calls.
+2. A hosted call without a paired result is never re-emitted to a surface
+   that would reject the unpaired shape; paired history replays verbatim
+   and unpaired history is dropped or folded to text. Responses is the one
+   surface whose protocol models the call as self-contained.
+3. Unknown hosted items (`computer_call`, `mcp_call`, `file_search_call`, …)
+   are still skipped with the warning.
+4. Search *results* are never fabricated — the gateway stores what the
+   provider produced, nothing more.
+
+**Files:** `wiwi/wire/openai_responses.py` (decode), `wiwi/core/gateway.py`
+(force_stream carrier), `wiwi/server/app.py` (streamed store failure log),
+`wiwi/providers/anthropic_adapter.py` (request-side pairing gate + image-block
+helper), `tests/test_web_search_translation.py` (pinned test flipped to the
+new behaviour), `tests/test_fix_round196.py`.
+
+**Tests:** `tests/test_fix_round196.py`.
+
+---
+
 ## IFM (MBZUAI) adapter — reasoning_content replay and `chat_template_kwargs` effort (2026-10-30)
 
 New provider type `ifm` (`wiwi/providers/ifm.py`, `wiwi/providers/ifm_adapter.py`).

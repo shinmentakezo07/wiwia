@@ -1678,6 +1678,147 @@ page-level horizontal overflow across 6 `/console/*` pages × 2 widths.
 
 ---
 
+## Round 196 — hosted-call replay decodes, not drops (AUDIT #573–#575) (2026-11-04)
+
+Three defects on the `previous_response_id` continuation path, all in the
+Responses ↔ IR hand-off for provider-hosted (`web_search_call`/`tool_search_call`)
+and streamed persistence.
+
+### 573. `tool_call` with no tool item is reported `completed`
+
+**Severity:** 🟡 Medium (a Responses client cannot tell a tool turn from a clean
+answer) · **Status: resolved — declined, not fixed** (see note below)
+
+**Where:** `wiwi/wire/openai_responses.py` `_INCOMPLETE_REASONS` /
+`_response_obj` / `_completed`; `wiwi/ir/translation.py:123`
+`tool_call_finish_is_valid`.
+
+**What:** a `Finish("tool_call")` with zero tool deltas produced
+`status: "completed"` with an empty `tool_calls` / no `function_call` items.
+The Chat and Anthropic surfaces consult `tool_call_finish_is_valid` and
+downgrade the stop to `stop`/`end_turn`; the Responses encoder deliberately
+does not, because the surface has no `tool_call` stop reason of its own and
+`_response_obj` only keys the `incomplete` mapping off `_INCOMPLETE_REASONS`.
+
+**Ruling (2026-11-04):** recorded and closed as **declined, not fixed**.
+AUDIT #272 already determined this shape non-actionable ("the Responses
+surface publishes no `tool_call` stop reason, so the shape cannot arise");
+AUDIT #358 then mapped the other reasons it shares the table row with. The
+surface does not invent an `incomplete_details.reason` for it and does not
+downgrade a `tool_call` stop that the provider itself reported — the IR
+carries the turn as a tool turn precisely so a client can react, and the
+Responses API has no spec spelling for "tool stop with no tool item". Any
+mapping we minted would be a wire value no client expects.
+
+**Trigger (for the record, unreachable end-to-end today):** an upstream that
+reports `tool_use`/`tool_calls` but streams no tool deltas; the gateway folds
+it to IR `tool_call` with empty `tool_calls`.
+
+**Disposition:** no code change. The round-90 ledger and #272 already carried
+this; round 196 re-verified it against source and left the behaviour as-is.
+If a provider that can produce the shape is ever wired in, revisit with a spec
+value or a documented collapse rather than inventing one.
+
+---
+
+### 574. Streamed store-persistence failure is swallowed silently
+
+**Severity:** ⚪ Low (a dropped store write is invisible; the caller's next
+turn gets a bare 404 with no explanation and no operator signal) ·
+**Status: fixed — round 196** (`tests/test_fix_round196.py`)
+
+**Where:** `wiwi/server/app.py` `_teardown_tail` — the
+`response_store.put` call inside `contextlib.suppress(Exception)`, vs the
+cache-hit twin at `:2883` and the singleflight twin at `:3033`, which both
+catch and log (`response_store_put_on_cache_hit_failed` /
+`response_store_put_on_singleflight_failed`).
+
+**What:** a streamed Responses turn whose store write fails (DB down, disk
+full, replica lag) was logged nowhere. The id the caller will reference later
+simply did not exist, and the next `previous_response_id` request answered
+404 with no signal in the proxy log or on the operator's surfaces.
+
+**Fix:** catch the exception, emit a `response_store_put_on_stream_failed`
+warning (request_id + flattened error) and a `log_proxy("error", …)` entry —
+same shape as the two non-streaming twins. The turn still completes; the
+store stays best-effort.
+
+---
+
+### 575. Hosted (provider-executed) calls are unreplayable on `previous_response_id` continuation
+
+**Severity:** 🟡 Medium (the Responses continuation silently drops the
+assistant turn's search trace; the upstream sees an unanswerable
+assistant turn and the client sees a generic continuation instead of its own
+history) · **Status: fixed — round 196** (`tests/test_fix_round196.py`; also
+reverses the A2 deferral documented in `UPDATE.md` §8.6 / Round 8)
+
+**Where:** `wiwi/wire/openai_responses.py` `decode_request` — the
+`web_search_call`/`tool_search_call` items in a stored turn's `output` were
+skipped with only a `log.warning("responses_unsupported_input_item")`; and
+`wiwi/core/gateway.py` `_apply_event` built the non-streaming
+`ToolUsePart` from `ToolCallOpen` **without** the provider-executed `builtin`
+marker, so even a correctly decoded hosted call lost its identity on the way
+to a non-streaming upstream. A third defect, found while correcting this
+entry, lived on the **request path** of the Anthropic adapter:
+`encode_request` re-emitted a hosted `ToolUsePart` verbatim, with no pairing
+check — the pairing rule the encoders already applied never reached the
+code path where a stored turn is replayed.
+
+**Trigger.** Codex (or any Responses client) does a hosted `web_search`,
+then sends turn N+1 with `previous_response_id`. `with_history` prepends the
+stored turn's output verbatim — including the `web_search_call` and
+`tool_search_call` items — and `decode_request` dropped them with a warning.
+The upstream (OpenAI Responses, Anthropic, or an OpenAI-compatible Chat
+deployment) saw the user's follow-up and the assistant's *text* but no
+record that a search ran or what it returned; the model either re-searched
+blindly or answered from nowhere. If a hosted call reached Anthropic as a
+replayed `server_tool_use` with no paired result, that provider rejected the
+history with a 400. The earlier A2 rule dropped rather than forwarded; this
+round decodes it and lets each outbound surface gate it on pairing.
+
+**Fix (A2 revisited).**
+- `decode_request` now decodes `web_search_call` → `IR ToolUsePart(builtin="web_search",
+  block_type="server_tool_use", args={"query": …})` and `tool_search_call` →
+  `builtin="tool_search_bm25"` (bm25 owns the shared `tool_search` wire
+  type, so the round trip lands back on `tool_search_call`).
+- `gateway.py` carries `ToolCallOpen.builtin`/`block_type` onto the
+  non-streaming `ToolUsePart`, so a provider-hosted turn survives the
+  force_stream arm too.
+- The Responses **sync encoder** re-emits the same hosted item on the way
+  out (`_builtin_call_item`), keyed off `builtin`, so a streamed-then-continued
+  turn round-trips byte-for-byte where the provider supports hosted tools.
+- **Chat** drops the hosted call with a warning (the client cannot dispatch
+  it). **Anthropic** now applies the pairing gate at `encode_request` —
+  a hosted call whose paired result is present in the history replays
+  verbatim as the same block type (the Anthropic→Anthropic round trip the
+  API itself produces); an unpaired hosted call is dropped with a
+  caller-visible warning, and an unpaired hosted result's payload rides as
+  text (its images and `tool_reference` blocks keep their own form). Earlier
+  revisions of this entry claimed "Anthropic suppresses it unless its paired
+  result is present" — the request path did neither at the time, it
+  re-emitted the block with no pairing check, which would have 400'd turn 2
+  of every cross-provider continuation; round 196 implements the gate. Both
+  unpaired cases surface through the caller-warning channel
+  (`WarningMixin.warn`, drained into `ctx.metadata["translation_warnings"]`),
+  the operator log, or both.
+- The stored copy needs no change: round 195 already stores the streamed
+  turn verbatim. The Responses surface has no result item to pair a hosted
+  call with, so a Responses→Anthropic continuation replays **no hosted
+  block** — the search trace reaches neither provider. Paired Anthropic
+  history round-trips byte-for-byte.
+
+**Deliberate non-goals.** No attempt to re-create search *results* on replay
+(they were never persisted). No re-enablement of unconditional Anthropic
+hosted-call replay: a hosted call with no paired result in the history is
+never sent. Unknown hosted `*_call` items (`computer_call`, `mcp_call`,
+`file_search_call`, …) still hit the `responses_unsupported_input_item`
+warning and are dropped.
+
+**Docs**: `UPDATE.md` Round 196.
+
+---
+
 ## 🟡 Low — round 90 (new)
 
 ### 270. Three adapters still keep their own finish-reason map, narrower than the shared one

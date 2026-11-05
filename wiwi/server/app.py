@@ -3283,16 +3283,29 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     and store_body is not None and store_body.get("store") is not False):
                 # Streamed turns are stored too: the accumulated text/tool calls
                 # are the same content the non-streaming path serializes, so a
-                # streamed response can be continued by id like any other.
-                with contextlib.suppress(Exception), tracer.span(
+                # streamed response can be continued by id like any other. A
+                # store failure must not abort the teardown or surface as an
+                # error to the caller — but it must not pass silently either:
+                # the id the caller will reference later simply won't exist.
+                with tracer.span(
                         "wiwi.persist", context=context_of(ctx.span),
                         **{"wiwi.store_id": f"resp_{ctx.request_id}"}):
-                    await response_store.put(
-                        f"resp_{ctx.request_id}",
-                        ctx.auth.key_id if ctx.auth else "master",
-                        store_group, _stored_input_items(store_body),
-                        _streamed_response_payload(
-                            ctx, store_model, stream_deltas))
+                    try:
+                        await response_store.put(
+                            f"resp_{ctx.request_id}",
+                            ctx.auth.key_id if ctx.auth else "master",
+                            store_group, _stored_input_items(store_body),
+                            _streamed_response_payload(
+                                ctx, store_model, stream_deltas))
+                    except Exception as e:  # noqa: BLE001 — the turn served; the store is best-effort
+                        state_.logs.log_proxy(
+                            "error",
+                            f"response store persist failed: {type(e).__name__}: {e}",
+                            ctx.request_id)
+                        structlog.get_logger().warning(
+                            "response_store_put_on_stream_failed",
+                            request_id=ctx.request_id,
+                            detail=f"{type(e).__name__}: {e}")
             if ctx.usage:
                 if ctx.auth and ctx.auth.key_type != "master":
                     # The response was already streamed, so a budget breach

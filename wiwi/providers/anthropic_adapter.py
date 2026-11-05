@@ -201,6 +201,20 @@ def _count_breakpoints(req: ir.Request) -> int:
     return n
 
 
+def _image_block(img: ir.ImagePart) -> dict[str, Any]:
+    """A Messages-API ``image`` content block, keeping any cache marker."""
+    if img.file_id:
+        src: dict[str, Any] = {"type": "file", "file_id": img.file_id}
+    elif img.url:
+        src = {"type": "url", "url": img.url}
+    else:
+        src = {"type": "base64", "media_type": img.mime, "data": img.b64}
+    blk: dict[str, Any] = {"type": "image", "source": src}
+    # The decode captured the marker on the image; dropping it on replay
+    # re-billed the prefix it marked.
+    if img.cache_control:
+        blk["cache_control"] = img.cache_control
+    return blk
 
 
 def _flatten_extra_blocks(p: ir.ToolResultPart) -> str:
@@ -336,6 +350,42 @@ class AnthropicAdapter(WarningMixin):
         # prefix would stop being stable.
         if isinstance(system, str) and self._should_inject(req, deployment_params):
             system = [{"type": "text", "text": system}]
+        # Pairing gate. A hosted call is legal on the wire only with a result
+        # naming the same id, or Anthropic rejects the replayed history:
+        #   - server tools (web_search, tool_search, ...): the call and its
+        #     result travel inside ONE assistant message, so a result outside
+        #     that message pairs with nothing;
+        #   - MCP (mcp_tool_use): the exchange is two-message by design — the
+        #     assistant carries the call and the user message carries
+        #     mcp_tool_result; an adjacent pair is legal.
+        # An Anthropic-shaped client replays its own history verbatim: paired
+        # history round-trips byte-for-byte, an unpaired call is dropped with
+        # a caller-visible warning, and an unpaired result's payload rides as
+        # text. The Responses dialect — which produces hosted calls on
+        # previous_response_id continuation — has no result item at all, so a
+        # Responses continuation replayed to Anthropic ships no hosted block.
+        def _hosted_calls(m: ir.Message) -> set[str]:
+            return {p.id for p in m.parts
+                    if isinstance(p, ir.ToolUsePart) and p.builtin is not None}
+        _paired_hosted: set[str] = set()
+        for m in req.messages:
+            _hosted = _hosted_calls(m)
+            _paired_hosted.update(
+                p.tool_use_id for p in m.parts
+                if (isinstance(p, ir.ToolResultPart)
+                    and p.block_type != "tool_result"
+                    and p.tool_use_id in _hosted))
+        for i, m in enumerate(req.messages[:-1]):
+            _mcp_calls = {p.id for p in m.parts
+                          if isinstance(p, ir.ToolUsePart) and p.builtin is not None
+                          and p.block_type == "mcp_tool_use"}
+            if not _mcp_calls:
+                continue
+            _paired_hosted.update(
+                p.tool_use_id for p in req.messages[i + 1].parts
+                if (isinstance(p, ir.ToolResultPart)
+                    and p.block_type == "mcp_tool_result"
+                    and p.tool_use_id in _mcp_calls))
         msgs: list[dict[str, Any]] = []
         # ``_system_blocks_or_text`` hoists EVERY system message into the
         # top-level ``system`` field, which is wrong for a mid-conversation
@@ -362,16 +412,7 @@ class AnthropicAdapter(WarningMixin):
                         b["cache_control"] = p.cache_control
                     blocks.append(b)
                 elif isinstance(p, ir.ImagePart):
-                    if p.file_id:
-                        src = {"type": "file", "file_id": p.file_id}
-                    elif p.url:
-                        src = {"type": "url", "url": p.url}
-                    else:
-                        src = {"type": "base64", "media_type": p.mime, "data": p.b64}
-                    img: dict[str, Any] = {"type": "image", "source": src}
-                    if p.cache_control:
-                        img["cache_control"] = p.cache_control
-                    blocks.append(img)
+                    blocks.append(_image_block(p))
                 elif isinstance(p, ir.DocumentPart):
                     doc: dict[str, Any]
                     if p.file_id:
@@ -406,11 +447,24 @@ class AnthropicAdapter(WarningMixin):
                 elif isinstance(p, ir.ToolUsePart):
                     # Replay the block type the client actually sent. A
                     # provider-hosted call (server_tool_use) or an MCP call
-                    # (mcp_tool_use) must come back as that same type, or its
-                    # paired result block is unpaired and Anthropic rejects the
-                    # history. ``block_type`` carries the original spelling;
-                    # the name check is only a fallback for IR built without it
-                    # (AUDIT #156).
+                    # whose result names the same id comes back as the same
+                    # type — the pair is the shape the API itself produces.
+                    # ``block_type`` carries the original spelling; the name
+                    # check is only a fallback for IR built without it
+                    # (AUDIT #156). An unpaired hosted call is dropped:
+                    # Anthropic rejects it in replayed history, and the
+                    # Responses dialect — which produces these on
+                    # previous_response_id continuation — has no result item
+                    # to pair with.
+                    if p.builtin is not None and p.id not in _paired_hosted:
+                        log.warning("dropping_unpaired_server_tool_use",
+                                    provider=self.provider_type,
+                                    builtin=p.builtin)
+                        self.warn(
+                            "an unpaired provider-hosted call was dropped: "
+                            "Anthropic rejects an unpaired server_tool_use "
+                            "in replayed history")
+                        continue
                     utype = p.block_type or ("server_tool_use"
                                              if bt.is_builtin_name(p.name)
                                              else "tool_use")
@@ -423,6 +477,32 @@ class AnthropicAdapter(WarningMixin):
                         ub["cache_control"] = p.cache_control
                     blocks.append(ub)
                 elif isinstance(p, ir.ToolResultPart):
+                    # A provider-executed result is legal on the wire only
+                    # when it pairs with a hosted call that is itself going
+                    # out: Anthropic rejects a result with no call, and an
+                    # unpaired call was already dropped above. The Responses
+                    # dialect carries no result item, so its hosted turns
+                    # arrive with neither — the content rides as text
+                    # instead. Images and tool_reference blocks keep their
+                    # own form.
+                    if (p.block_type != "tool_result"
+                            and p.tool_use_id not in _paired_hosted):
+                        if p.content:
+                            blocks.append({"type": "text", "text": p.content})
+                        blocks.extend(_image_block(img) for img in p.images)
+                        if p.extra_blocks:
+                            blocks.append({"type": "text", "text":
+                                           json.dumps(p.extra_blocks,
+                                                      ensure_ascii=False)})
+                        if p.content or p.extra_blocks or p.images:
+                            log.warning("dropping_orphaned_server_tool_result",
+                                        provider=self.provider_type,
+                                        block_type=p.block_type)
+                            self.warn(
+                                "an unpaired provider-hosted tool result was "
+                                "kept as text: Anthropic rejects it without a "
+                                "call in the history")
+                        continue
                     # block_type preserves the inbound result-block type
                     # (web_search_tool_result, ...) so replayed server-tool
                     # history keeps its original shape.
@@ -445,22 +525,7 @@ class AnthropicAdapter(WarningMixin):
                             content_blocks.append({"type": "text",
                                                    "text": p.content})
                         for img in p.images:
-                            if img.file_id:
-                                src = {"type": "file", "file_id": img.file_id}
-                            elif img.url:
-                                src = {"type": "url", "url": img.url}
-                            else:
-                                src = {"type": "base64", "media_type": img.mime,
-                                       "data": img.b64}
-                            img_block: dict[str, Any] = {"type": "image",
-                                                         "source": src}
-                            # The decode captured a cache breakpoint on the
-                            # image; dropping it on replay re-billed the
-                            # prefix it marked (the defect ImagePart's own
-                            # field docstring describes).
-                            if img.cache_control:
-                                img_block["cache_control"] = img.cache_control
-                            content_blocks.append(img_block)
+                            content_blocks.append(_image_block(img))
                         content_blocks.extend(p.extra_blocks)
                         tr["content"] = content_blocks
                     blocks.append(tr)

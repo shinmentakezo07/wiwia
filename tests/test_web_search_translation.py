@@ -9,8 +9,13 @@ Scope notes (see the plan):
 - Citations/annotations are round 2 — response-side search traces are
   suppressed on Anthropic/Chat surfaces (A1) and only the Responses surface
   emits web_search_call items (self-contained, replay-safe).
-- Responses input history keeps skipping web_search_call items (A2): decoding
-  them would replay as an unpaired server_tool_use on an Anthropic upstream.
+- Responses input history decodes web_search_call / tool_search_call items
+  back into hosted ToolUseParts (A2 revisited, AUDIT #575): the Responses
+  surface re-emits them as the same hosted items, and non-Responses surfaces
+  gate them on pairing — Chat drops the unpaired call, Anthropic drops the
+  unpaired call and folds the unpaired result to text (a result may only
+  accompany its paired call). Paired Anthropic history round-trips
+  byte-for-byte.
 """
 
 from __future__ import annotations
@@ -248,10 +253,14 @@ def test_responses_malformed_tools_do_not_crash():
     assert all(t.builtin == "web_search" for t in req.tools)
 
 
-def test_responses_web_search_call_history_stays_dropped():
-    # A2: web_search_call items in input history are NOT decoded into
-    # ToolUseParts — they would replay as unpaired server_tool_use on an
-    # Anthropic upstream once re-encoded.
+def test_responses_web_search_call_history_decodes_as_hosted_call():
+    # A2 (revisited): web_search_call items in input history now decode as
+    # hosted ToolUseParts (builtin="web_search"), so the Responses surface
+    # re-emits them as web_search_call and the upstream sees that a search
+    # ran. Non-Responses surfaces gate the unpaired call on pairing (Chat
+    # drops it, Anthropic drops it and folds the unpaired result to text)
+    # instead of forwarding it as a client-dispatched call or crashing on an
+    # unpaired server_tool_use.
     req = resp.decode_request({
         "model": "gpt-5",
         "input": [
@@ -263,9 +272,12 @@ def test_responses_web_search_call_history_stays_dropped():
              "content": [{"type": "output_text", "text": "Found things."}]},
         ],
     })
-    tools_uses = [p for m in req.messages for p in m.parts
-                  if isinstance(p, ir.ToolUsePart)]
-    assert tools_uses == []
+    tool_uses = [p for m in req.messages for p in m.parts
+                 if isinstance(p, ir.ToolUsePart)]
+    assert [t.name for t in tool_uses] == ["web_search"]
+    assert tool_uses[0].builtin == "web_search"
+    assert tool_uses[0].args == {"query": "wiwi proxy"}
+    assert tool_uses[0].id == "ws_1"
     # ...and the text turns survive.
     texts = [p.text for m in req.messages for p in m.parts
              if isinstance(p, ir.TextPart)]
@@ -274,8 +286,9 @@ def test_responses_web_search_call_history_stays_dropped():
 
 # -- provider encode -------------------------------------------------------------
 
-def _req(tools: list[ir.Tool], messages: list[ir.Message] | None = None) -> ir.Request:
-    return ir.Request(model="m", messages=messages or [], tools=tools)
+def _req(tools: list[ir.Tool] | None = None,
+         messages: list[ir.Message] | None = None) -> ir.Request:
+    return ir.Request(model="m", messages=messages or [], tools=tools or [])
 
 
 WEB_SEARCH_TOOL = ir.Tool(
