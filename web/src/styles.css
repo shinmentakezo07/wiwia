@@ -3256,6 +3256,121 @@ select.admin-input option {
   overflow-y: auto;
   max-height: 100%;
 }
+
+/* Monochrome sign-in card: a white beam traces the black card's border. */
+.lg-login-card {
+  border-color: #333;
+  background: #000;
+  position: relative;
+  isolation: isolate;
+}
+.lg-login-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  border-radius: inherit;
+  padding: 1px;
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg,
+    transparent 300deg,
+    #fff 322deg,
+    transparent 345deg
+  );
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: lg-border-beam 6s linear infinite;
+}
+.lg-login-mark {
+  display: flex;
+  height: 42px;
+  width: 42px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #444;
+  border-radius: 12px;
+  background: #111;
+  color: #fff;
+}
+.lg-eyebrow {
+  color: #fff;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+.lg-login-card .lg-seg {
+  border-color: #383838;
+  background: #090909;
+}
+.lg-login-card .lg-seg-indicator {
+  border-color: #666;
+  background: #292929;
+  box-shadow: none;
+}
+.lg-login-card [role="tab"] { color: #aaa; }
+.lg-login-card [role="tab"][aria-selected="true"] { color: #fff; }
+.lg-login-card .admin-input {
+  border-color: #444 !important;
+  background: #080808 !important;
+  color: #fff !important;
+}
+.lg-login-card .admin-input::placeholder { color: #969696; }
+.lg-login-card .admin-input:focus {
+  border-color: #fff !important;
+  box-shadow: 0 0 0 3px rgba(255,255,255,0.16);
+}
+.lg-login-card .text-zinc-300 { color: #d0d0d0; }
+.lg-login-card .text-zinc-400 { color: #b5b5b5; }
+.lg-login-card .text-zinc-500 { color: #aaa; }
+.lg-login-card .text-zinc-200 { color: #fff; }
+.lg-login-card button[type="submit"] { background: #fff; color: #000; }
+.lg-login-card button[type="submit"]:hover:not(:disabled) { background: #fff; }
+.lg-login-card button:focus-visible,
+.lg-login-card a:focus-visible { outline-color: #fff; }
+.lg-login-card .border-white\/\[0\.05\] { border-color: #333; }
+.lg-login-card .border-white\/\[0\.06\] { border-color: #333; }
+.lg-login-card .bg-white\/\[0\.015\] { background: #080808; }
+@keyframes lg-border-beam {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lg-login-card::before { animation: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lg-seg-indicator { transition: none; }
+}
+
+/* Compact the surrounding chrome, not the controls, on narrow or short
+   screens. Both sign-in modes keep their full-size inputs and targets. */
+@media (max-width: 1023px) {
+  .lg-root > .relative { padding-top: 12px; padding-bottom: 12px; }
+  .lg-root main { padding-top: 16px; padding-bottom: 16px; }
+  .lg-root footer { padding-top: 8px; }
+  .lg-root .lg-rise > .mb-8 { display: none; }
+  .lg-root .lg-rise > div > div:first-child { padding: 22px; }
+  .lg-root .lg-rise > .mt-5 { margin-top: 12px; }
+}
+@media (min-width: 1024px) and (max-height: 820px) {
+  .lg-root > .relative { padding-top: 10px; padding-bottom: 10px; }
+  .lg-root main { padding-top: 8px; padding-bottom: 8px; }
+  .lg-root footer { padding-top: 8px; }
+  .lg-root .lg-rise .p-6,
+  .lg-root .lg-rise .sm\:p-8 { padding: 20px; }
+  .lg-root .lg-rise .mb-5 { margin-bottom: 16px; }
+  .lg-root .lg-rise .sm\:mt-6 { margin-top: 16px; }
+  .lg-root .lg-rise .space-y-5 > :not([hidden]) ~ :not([hidden]) { margin-top: 14px; }
+}
+@media (max-width: 639px) {
+  .lg-root .lg-login-card { border-radius: 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lg-seg-indicator { transition: none; }
+}
 .lg-card-footer {
   flex-shrink: 0;
 }

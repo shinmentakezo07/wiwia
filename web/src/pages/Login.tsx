@@ -1,12 +1,7 @@
-// Login — the console's front door.
-//
-// Split-panel composition: the left half is a *live* hub-and-spoke schematic
-// drawn with real AnimatedBeam paths between DOM nodes (your app → wiwi →
-// providers), the right half is the credential form. The beams are the same
-// primitive the marketing site uses, so the diagram is honest about what the
-// gateway actually does instead of being decorative wallpaper.
+// Login — the console's front door. The routing schematic uses the same
+// AnimatedBeam primitive as the marketing site: one gateway, many providers.
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   ArrowRight,
@@ -27,22 +22,13 @@ import {
   OpenAIIcon,
 } from "@/components/AnimatedBeam";
 
-// ── showcase: live beam graph ────────────────────────────────────────────────
-
-const INBOUND = [
-  { name: "chat", note: "OpenAI Chat" },
-  { name: "responses", note: "Codex CLI" },
-  { name: "messages", note: "Claude Code" },
-];
-
 const PROVIDERS = [
-  { label: "OpenAI", Icon: OpenAIIcon, from: "#3b82f6", to: "#10b981" },
-  { label: "Anthropic", Icon: AnthropicIcon, from: "#f59e0b", to: "#ef4444" },
-  { label: "Gemini", Icon: GeminiIcon, from: "#22c55e", to: "#3b82f6" },
-  { label: "Moonshot", Icon: MoonshotIcon, from: "#ec4899", to: "#f59e0b" },
+  { label: "OpenAI", Icon: OpenAIIcon, from: "#60a5fa", to: "#a5b4fc" },
+  { label: "Anthropic", Icon: AnthropicIcon, from: "#a5b4fc", to: "#c4b5fd" },
+  { label: "Gemini", Icon: GeminiIcon, from: "#8b5cf6", to: "#60a5fa" },
+  { label: "Moonshot", Icon: MoonshotIcon, from: "#a5b4fc", to: "#818cf8" },
 ];
 
-/** One end node of the diagram — a glass puck that holds an icon. */
 function Node({
   ref,
   children,
@@ -54,24 +40,19 @@ function Node({
   size?: "md" | "lg";
   active?: boolean;
 }) {
-  const dim = size === "lg" ? "h-[var(--lg-hub)] w-[var(--lg-hub)]" : "h-[var(--lg-node)] w-[var(--lg-node)]";
   return (
     <div
       ref={ref}
-      className={`relative z-10 flex ${dim} shrink-0 items-center justify-center rounded-full border bg-white/[0.02] backdrop-blur-sm transition-all duration-300 ${
-        active
-          ? "border-blue-400/30 shadow-[0_0_36px_-6px_rgba(59,130,246,0.55)]"
-          : "border-white/[0.07] shadow-[0_0_24px_-10px_rgba(0,0,0,0.8)] hover:border-white/[0.16]"
-      }`}
+      className={`relative z-10 flex shrink-0 items-center justify-center rounded-xl border bg-[#111114] ${
+        size === "lg" ? "h-16 w-16 rounded-2xl" : "h-11 w-11"
+      } ${active ? "border-indigo-400/40 bg-[#141323]" : "border-white/10"}`}
     >
       {children}
     </div>
   );
 }
 
-/** Live hub-and-spoke graph. `minH` lets the call site floor the diagram so
- *  the in-card variant still reads on short-but-wide screens. */
-function Showcase({ minH = 0 }: { minH?: number }) {
+function Showcase() {
   const containerRef = useRef<HTMLDivElement>(null);
   const clientRef = useRef<HTMLDivElement>(null);
   const hubRef = useRef<HTMLDivElement>(null);
@@ -83,20 +64,11 @@ function Showcase({ minH = 0 }: { minH?: number }) {
   ];
 
   return (
-    <div
-      ref={containerRef}
-      className="relative w-full flex-1"
-      style={{ minHeight: minH || undefined }}
-    >
-      {/* rotating conic bloom behind the hub */}
+    <div ref={containerRef} className="relative h-[264px] w-full" aria-hidden="true">
       <div className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
-        <div
-          className="lg-bloom h-[clamp(210px,30vh,300px)] w-[clamp(210px,30vh,300px)] rounded-full blur-2xl"
-          aria-hidden="true"
-        />
+        <div className="lg-bloom h-64 w-64 rounded-full opacity-70 blur-2xl" />
       </div>
 
-      {/* client node */}
       <div className="absolute left-0 top-1/2 z-10 -translate-y-1/2">
         <Node ref={clientRef}>
           <svg
@@ -105,70 +77,55 @@ function Showcase({ minH = 0 }: { minH?: number }) {
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
-            strokeWidth="1.6"
+            strokeWidth="1.5"
             strokeLinecap="round"
             strokeLinejoin="round"
-            className="text-blue-200"
+            className="text-zinc-300"
             aria-hidden="true"
           >
             <rect width="20" height="14" x="2" y="3" rx="2" />
-            <line x1="8" x2="16" y1="21" y2="21" />
-            <line x1="12" x2="12" y1="17" y2="21" />
+            <path d="M8 21h8M12 17v4" />
           </svg>
         </Node>
-        <div className="mt-2.5 text-center">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--admin-text-muted)]">
-            Your app
-          </div>
-        </div>
+        <p className="mt-3 text-center font-mono text-[11px] text-zinc-500">Your app</p>
       </div>
 
-      {/* hub node */}
       <div className="absolute left-1/2 top-1/2 z-10 -translate-x-1/2 -translate-y-1/2">
         <div className="relative">
           <span
-            className="lg-hub-ring pointer-events-none absolute inset-0 rounded-full border border-blue-400/30"
-            aria-hidden="true"
-          />
-          <span
-            className="lg-node-breathe pointer-events-none absolute -inset-3 rounded-full bg-[radial-gradient(circle,rgba(59,130,246,0.22),transparent_70%)] blur-md"
+            className="lg-hub-ring pointer-events-none absolute -inset-2 rounded-2xl border border-indigo-400/20"
             aria-hidden="true"
           />
           <Node ref={hubRef} size="lg" active>
-            <img src="/wiwi-logo.png" alt="wiwi" className="h-10 w-10 rounded-[10px] object-cover" />
+            <img src="/wiwi-logo.png" alt="" className="h-11 w-11 rounded-xl object-cover" />
           </Node>
         </div>
-        <div className="mt-3 text-center">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-blue-300/80">
-            wiwi gateway
-          </div>
-        </div>
+        <p className="mt-3 text-center text-[11px] font-medium tracking-wide text-indigo-300">
+          wiwi gateway
+        </p>
       </div>
 
-      {/* provider nodes */}
-      <div className="absolute right-0 top-1/2 z-10 flex -translate-y-1/2 flex-col gap-4">
-        {PROVIDERS.map((p, i) => (
-          <div key={p.label} className="flex items-center justify-end gap-3">
-            <span className="font-mono text-[10px] text-[var(--admin-text-dim)]">{p.label}</span>
+      <div className="absolute right-0 top-1/2 z-10 flex -translate-y-1/2 flex-col gap-3.5">
+        {PROVIDERS.map((provider, i) => (
+          <div key={provider.label} className="flex items-center justify-end gap-3">
+            <span className="text-xs text-zinc-400">{provider.label}</span>
             <Node ref={providerRefs[i]}>
-              <p.Icon className="h-6 w-6 object-contain" />
+              <provider.Icon className="h-6 w-6 object-contain" />
             </Node>
           </div>
         ))}
       </div>
 
-      {/* client → hub */}
       <AnimatedBeam
         containerRef={containerRef}
         fromRef={clientRef}
         toRef={hubRef}
-        pathWidth={2}
-        pathOpacity={0.35}
-        gradientStart="#3b82f6"
-        gradientStop="#8b5cf6"
-        duration={3}
+        pathWidth={1.5}
+        pathOpacity={0.22}
+        gradientStart="#818cf8"
+        gradientStop="#a78bfa"
+        duration={4}
       />
-      {/* hub → each provider, on staggered delays so packets leave in sequence */}
       {providerRefs.map((ref, i) => (
         <AnimatedBeam
           key={PROVIDERS[i].label}
@@ -177,18 +134,16 @@ function Showcase({ minH = 0 }: { minH?: number }) {
           toRef={ref}
           curvature={(i - 1.5) * 18}
           delay={i * 0.45}
-          pathWidth={2}
-          pathOpacity={0.35}
+          pathWidth={1.5}
+          pathOpacity={0.24}
           gradientStart={PROVIDERS[i].from}
           gradientStop={PROVIDERS[i].to}
-          duration={3.2 + i * 0.35}
+          duration={4 + i * 0.35}
         />
       ))}
     </div>
   );
 }
-
-// ── page ─────────────────────────────────────────────────────────────────────
 
 export function LoginPage() {
   const { login, loginWithMaster } = useAuth();
@@ -200,25 +155,12 @@ export function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showKey, setShowKey] = useState(false);
-  const formRef = useRef<HTMLFormElement>(null);
+  const [showPassword, setShowPassword] = useState(false);
 
-  const masterReady = !!key.trim();
-  const usernameReady = username.trim().length >= 3 && password.length >= 8;
-  const canSubmit = (mode === "master" ? masterReady : usernameReady) && !busy;
-
-  // Report the cursor position into CSS custom props so the form panel can
-  // carry a soft light that follows the pointer.
-  useEffect(() => {
-    const el = formRef.current;
-    if (!el) return;
-    const onMove = (e: MouseEvent) => {
-      const r = el.getBoundingClientRect();
-      el.style.setProperty("--mx", `${e.clientX - r.left}px`);
-      el.style.setProperty("--my", `${e.clientY - r.top}px`);
-    };
-    el.addEventListener("mousemove", onMove);
-    return () => el.removeEventListener("mousemove", onMove);
-  }, []);
+  const canSubmit =
+    (mode === "master"
+      ? !!key.trim()
+      : username.trim().length >= 3 && password.length >= 8) && !busy;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -226,351 +168,263 @@ export function LoginPage() {
     setBusy(true);
     setError(null);
     try {
-      if (mode === "master") {
-        await loginWithMaster(key.trim());
-      } else {
-        await login(username.trim(), password);
-      }
+      if (mode === "master") await loginWithMaster(key.trim());
+      else await login(username.trim(), password);
       navigate("/console");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "login failed");
+      setError(err instanceof Error ? err.message : "Unable to sign in. Please try again.");
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <div
-      data-admin
-      className="lg-root relative flex h-[100dvh] items-stretch overflow-hidden bg-black"
-    >
-      {/* ═══ ambient backdrop: hero-style lighting over pure black ═══ */}
-      <div className="pointer-events-none fixed inset-0" style={{ zIndex: 0 }}>
-        {/* rotated white light streaks, screened over the black base */}
-        <div
-          aria-hidden="true"
-          className="lg-streaks absolute inset-0 hidden lg:block"
-        >
-          <div className="lg-streak-1" />
-          <div className="lg-streak-2" />
-        </div>
-
-        {/* grid wash — keeps the beam graph feeling like it sits on a surface */}
-        <div className="lg-beam-grid absolute inset-0 opacity-40" />
-
-        {/* color wash, kept faint so black stays black */}
-        <div
-          className="wiwi-aurora absolute -left-40 top-0 h-[520px] w-[520px] rounded-full"
-          style={{
-            background: "radial-gradient(circle, rgba(59,130,246,0.07) 0%, transparent 65%)",
-            animationDelay: "0s",
-          }}
-        />
-        <div
-          className="wiwi-aurora absolute -bottom-40 -right-32 h-[460px] w-[460px] rounded-full"
-          style={{
-            background: "radial-gradient(circle, rgba(168,85,247,0.06) 0%, transparent 65%)",
-            animationDelay: "-8s",
-          }}
-        />
-
-        {/* bottom vignette: edges fall off to pure black */}
-        <div className="lg-vignette absolute inset-0" />
-      </div>
-
-      {/* ═══ two-panel shell ═══ */}
-      <div
-        className="relative z-10 mx-auto flex w-full max-w-6xl items-stretch px-4 sm:px-6"
-        style={{ paddingTop: "var(--lg-pad-y)", paddingBottom: "var(--lg-pad-y)" }}
-      >
-        {/* ── left: showcase ── */}
-        <aside className="lg-slide-left relative hidden min-h-0 flex-1 flex-col lg:flex">
-          <span className="lg-corner lg-corner-tl" aria-hidden="true" />
-          <span className="lg-corner lg-corner-br" aria-hidden="true" />
-
-          <div className="mb-[var(--lg-block)]">
-            <span className="admin-live-badge">
-              <span className="admin-pulse-dot" aria-hidden="true" />
-              routing live
-            </span>
-          </div>
-
-          <h2
-            className="max-w-md font-semibold leading-[1.12] tracking-[-0.02em] text-[var(--admin-text)]"
-            style={{ fontSize: "var(--lg-title)" }}
+    <div data-admin className="lg-root min-h-[100dvh] bg-black text-white">
+      <div className="lg-backdrop" aria-hidden="true" />
+      <div className="relative z-10 mx-auto flex min-h-[100dvh] w-full max-w-[1440px] flex-col px-5 py-5 sm:px-8 lg:px-12">
+        <header className="flex shrink-0 items-center justify-between gap-4">
+          <Link
+            to="/"
+            className="inline-flex min-h-11 items-center gap-3 rounded-lg pr-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+            aria-label="wiwi home"
           >
-            One gateway.
-            <br />
-            <span className="bg-gradient-to-r from-blue-400 via-violet-400 to-fuchsia-400 bg-clip-text text-transparent">
-              Every dialect, every provider.
-            </span>
-          </h2>
-          <p
-            className="mt-[var(--lg-gap)] max-w-[26rem] leading-relaxed text-[var(--admin-text-muted)]"
-            style={{ fontSize: "var(--lg-body)" }}
+            <img src="/wiwi-logo.png" alt="" className="h-9 w-9 rounded-[10px]" />
+            <span className="text-[19px] font-semibold tracking-[-0.03em] text-white">wiwi</span>
+            <span className="hidden h-4 w-px bg-white/15 sm:block" aria-hidden="true" />
+            <span className="hidden text-xs text-zinc-400 sm:block">AI gateway, simplified</span>
+          </Link>
+          <Link
+            to="/"
+            className="inline-flex min-h-11 items-center gap-2 rounded-lg px-2 text-sm text-zinc-400 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
           >
-            Three inbound dialects decode into one canonical form, then re-encode for whichever
-            upstream serves the request. No pairwise converters, no per-provider branching in the
-            core.
-          </p>
+            Back to website
+            <ArrowRight size={15} aria-hidden="true" />
+          </Link>
+        </header>
 
-          {/* inbound dialect chips */}
-          <div className="mt-[var(--lg-gap)] flex flex-wrap gap-2">
-            {INBOUND.map((d) => (
-              <span
-                key={d.name}
-                className="inline-flex items-center gap-2 rounded-full border border-white/[0.06] bg-white/[0.015] py-1.5 pl-3 pr-2.5"
-              >
-                <code className="font-mono text-[11.5px] text-blue-300">{d.name}</code>
-                <span className="text-[10.5px] text-[var(--admin-text-dim)]">{d.note}</span>
-              </span>
-            ))}
-          </div>
-
-          {/* absorbs whatever vertical space the block above leaves over */}
-          <div className="mt-[var(--lg-block)] flex min-h-0 flex-1 flex-col">
-            <Showcase />
-          </div>
-        </aside>
-
-        {/* divider */}
-        <div className="mx-10 hidden w-px self-stretch lg:block">
-          <div className="lg-divider h-full w-px" />
-        </div>
-
-        {/* ── right: credential form ── */}
-        <div className="flex min-h-0 w-full max-w-[400px] flex-col items-center justify-center lg:mx-0 lg:ml-auto">
-          <div className="wiwi-conic-border relative flex max-h-full w-full flex-col rounded-2xl">
-            <div className="wiwi-glass-card relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl">
-              <span className="wiwi-top-highlight pointer-events-none absolute inset-x-0 top-0 h-px" />
-
-              {/* brand header */}
-              <div
-                className="flex shrink-0 items-center gap-3.5 border-b border-[var(--admin-border)] px-7"
-                style={{ paddingTop: "var(--lg-card-y)", paddingBottom: "var(--lg-card-y)" }}
-              >
-                <img
-                  src="/wiwi-logo.png"
-                  alt="wiwi"
-                  className="h-10 w-10 shrink-0 rounded-[12px] object-cover shadow-lg shadow-brand-600/20 ring-1 ring-white/[0.06] ring-inset"
-                />
-                <div className="min-w-0">
-                  <div className="flex items-baseline gap-2">
-                    <h1 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
-                      wiwi
-                    </h1>
-                    <span className="admin-badge admin-badge-blue !px-1.5 !py-0 !text-[8px]">
-                      admin
-                    </span>
-                  </div>
-                  <span
-                    className="font-mono text-[9px] font-semibold uppercase tracking-[0.18em]"
-                    style={{ color: "rgba(59, 130, 246, 0.5)" }}
-                  >
-                    Unified WIWI Gateway
-                  </span>
-                </div>
-              </div>
-
-              {/* Below lg the left panel is hidden, so the diagram moves into the
-                  card. Hidden entirely on short viewports (see .lg-showcase-sm). */}
-              <div className="lg-showcase-sm flex shrink-0 flex-col border-b border-[var(--admin-border)] px-6 py-5">
-                <p className="admin-label mb-3 text-center">hub-and-spoke translation</p>
-                <Showcase minH={300} />
-              </div>
-
-              {/* segmented mode toggle */}
-              <div
-                className="shrink-0 px-7"
-                style={{ paddingTop: "var(--lg-card-y)" }}
-              >
-                <div className="lg-seg" role="tablist" aria-label="Sign-in method">
-                  <span
-                    className="lg-seg-indicator"
-                    style={{
-                      transform:
-                        mode === "master"
-                          ? "translateX(0)"
-                          : "translateX(calc(100% + 2px))",
-                    }}
-                    aria-hidden="true"
-                  />
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={mode === "master"}
-                    onClick={() => {
-                      setMode("master");
-                      setError(null);
-                    }}
-                    className={`relative z-10 flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-[13px] font-medium transition-colors ${
-                      mode === "master"
-                        ? "text-blue-200"
-                        : "text-[var(--admin-text-muted)] hover:text-[var(--admin-text)]"
-                    }`}
-                  >
-                    <KeyRound size={13} aria-hidden="true" />
-                    Master key
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={mode === "username"}
-                    onClick={() => {
-                      setMode("username");
-                      setError(null);
-                    }}
-                    className={`relative z-10 flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-[13px] font-medium transition-colors ${
-                      mode === "username"
-                        ? "text-blue-200"
-                        : "text-[var(--admin-text-muted)] hover:text-[var(--admin-text)]"
-                    }`}
-                  >
-                    <UserRound size={13} aria-hidden="true" />
-                    Username
-                  </button>
-                </div>
-              </div>
-
-              {/* form — only region allowed to scroll, and only when the
-                  viewport is too short to hold the whole card */}
-              <form
-                ref={formRef}
-                onSubmit={submit}
-                className="lg-spotlight lg-card-body relative flex min-h-0 flex-1 flex-col gap-[var(--lg-gap)] px-7"
-                style={{ paddingTop: "var(--lg-card-y)", paddingBottom: "var(--lg-card-y)" }}
-              >
-                {mode === "master" ? (
-                  <label htmlFor="master-key" className="block">
-                    <span className="admin-label mb-2 block">Master Key</span>
-                    <span className="lg-field block">
-                      <KeyRound
-                        size={14}
-                        className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--admin-text-dim)]"
-                        aria-hidden="true"
-                      />
-                      <input
-                        id="master-key"
-                        type={showKey ? "text" : "password"}
-                        value={key}
-                        autoFocus
-                        autoComplete="off"
-                        spellCheck={false}
-                        disabled={busy}
-                        placeholder="sk-wiwi-master-…"
-                        onChange={(e) => setKey(e.target.value)}
-                        className="admin-input h-[var(--lg-control-h)] pl-9 pr-10 font-mono text-sm disabled:opacity-60"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowKey((v) => !v)}
-                        aria-label={showKey ? "Hide key" : "Show key"}
-                        className="absolute right-1.5 top-1/2 grid h-7 w-7 -translate-y-1/2 place-items-center rounded-md text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.03] hover:text-[var(--admin-text-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
-                      >
-                        {showKey ? <EyeOff size={13} /> : <Eye size={13} />}
-                      </button>
-                    </span>
-                    <span className="mt-1.5 block text-[11px] text-[var(--admin-text-dim)]">
-                      The <code className="font-mono">master_key</code> from your wiwi.yaml.
-                    </span>
-                  </label>
-                ) : (
-                  <>
-                    <label htmlFor="li-username" className="block">
-                      <span className="admin-label mb-2 block">Username</span>
-                      <span className="lg-field block">
-                        <UserRound
-                          size={14}
-                          className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--admin-text-dim)]"
-                          aria-hidden="true"
-                        />
-                        <input
-                          id="li-username"
-                          type="text"
-                          value={username}
-                          autoFocus
-                          autoComplete="username"
-                          spellCheck={false}
-                          disabled={busy}
-                          placeholder="your username"
-                          onChange={(e) => setUsername(e.target.value)}
-                          className="admin-input h-[var(--lg-control-h)] pl-9 pr-3 text-sm disabled:opacity-60"
-                        />
-                      </span>
-                    </label>
-                    <label htmlFor="li-password" className="block">
-                      <span className="admin-label mb-2 block">Password</span>
-                      <span className="lg-field block">
-                        <input
-                          id="li-password"
-                          type="password"
-                          value={password}
-                          autoComplete="current-password"
-                          disabled={busy}
-                          placeholder="••••••••"
-                          onChange={(e) => setPassword(e.target.value)}
-                          className="admin-input h-[var(--lg-control-h)] px-3 text-sm disabled:opacity-60"
-                        />
-                      </span>
-                    </label>
-                  </>
-                )}
-
-                {error && (
-                  <p
-                    key={error}
-                    role="alert"
-                    className="wiwi-shake flex items-start gap-2 rounded-lg border border-red-500/20 bg-red-500/[0.08] px-3 py-2 text-xs leading-relaxed text-red-400"
-                  >
-                    <TriangleAlert size={13} className="mt-px shrink-0" aria-hidden="true" />
-                    {error}
-                  </p>
-                )}
-
-                <button
-                  type="submit"
-                  disabled={!canSubmit}
-                  className="wiwi-shimmer group inline-flex w-full shrink-0 items-center justify-center gap-2 rounded-[8px] bg-gradient-to-b from-brand-500 to-brand-700 text-sm font-medium text-white shadow-lg shadow-brand-600/20 transition-[transform,filter,box-shadow] duration-150 hover:brightness-110 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/70 disabled:pointer-events-none disabled:opacity-50 disabled:saturate-50"
-                  style={{ height: "var(--lg-control-h)" }}
-                >
-                  {busy ? (
-                    <>
-                      <Loader2 size={15} className="animate-spin" aria-hidden="true" />
-                      Verifying…
-                    </>
-                  ) : (
-                    <>
-                      Sign in
-                      <ArrowRight
-                        size={15}
-                        className="transition-transform duration-150 group-hover:translate-x-0.5"
-                        aria-hidden="true"
-                      />
-                    </>
-                  )}
-                </button>
-
-                <p className="shrink-0 text-center text-[12px] text-[var(--admin-text-dim)]">
-                  No account?{" "}
-                  <Link to="/signup" className="text-blue-300 hover:text-blue-200">
-                    Sign up
-                  </Link>
-                </p>
-              </form>
-
-              {/* trust footer — pinned, never scrolls away */}
-              <div
-                className="lg-card-footer flex shrink-0 items-center gap-2 border-t border-[var(--admin-border)] px-7 text-[11px] text-[var(--admin-text-dim)]"
-                style={{ paddingTop: "var(--lg-card-y)", paddingBottom: "var(--lg-card-y)" }}
-              >
-                <ShieldCheck size={12} className="shrink-0" aria-hidden="true" />
-                {mode === "master"
-                  ? "Key stays in this browser — checked once against your gateway."
-                  : "Session held in a server-side cookie. We never see your password."}
-              </div>
+        <main className="grid flex-1 items-center gap-16 py-10 lg:grid-cols-[1.15fr_0.85fr] lg:gap-20 lg:py-12">
+          <section className="hidden lg:block" aria-labelledby="login-showcase-title">
+            <div className="mb-7 inline-flex w-fit items-center gap-2 rounded-full border border-white/[0.08] bg-white/[0.025] px-3 py-1.5 text-xs text-zinc-400">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden="true" />
+              One gateway. Every model.
             </div>
+            <h2 id="login-showcase-title" className="max-w-xl text-[clamp(2.75rem,4vw,4rem)] font-medium leading-[1.08] tracking-[-0.045em] text-white">
+              Your AI stack,
+              <br />
+              <span className="text-zinc-500">finally in sync.</span>
+            </h2>
+            <p className="mt-6 max-w-md text-[15px] leading-7 text-zinc-400">
+              One API for every model. Connect your favorite tools to any provider,
+              without changing a line of code.
+            </p>
+
+            <div className="relative mt-10 max-w-[560px]">
+              <Showcase />
+            </div>
+
+            <div className="mt-8 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-zinc-400">
+              <span className="flex items-center gap-2">
+                <ShieldCheck size={14} aria-hidden="true" />
+                Self-hosted
+              </span>
+              <span className="h-1 w-1 rounded-full bg-zinc-700" aria-hidden="true" />
+              <span>Your keys stay yours</span>
+              <span className="text-zinc-700" aria-hidden="true">/</span>
+              <span className="font-mono text-xs">13 providers</span>
+            </div>
+          </section>
+
+          <section className="w-full lg:justify-self-end" aria-labelledby="login-title">
+            <div className="lg-rise mx-auto w-full max-w-[440px]">
+              <div className="mb-8 lg:hidden">
+                <p className="text-xs leading-relaxed text-zinc-400">
+                  One gateway for every model, with your keys under your control.
+                </p>
+              </div>
+
+              <div className="lg-login-card overflow-hidden rounded-2xl border border-[#302820] shadow-[0_24px_80px_-20px_rgba(0,0,0,0.6)]">
+                <div className="p-5 sm:p-8">
+                  <div className="mb-6 flex items-start gap-4">
+                    <div className="lg-login-mark" aria-hidden="true">
+                      <ShieldCheck size={20} />
+                    </div>
+                    <div className="min-w-0">
+                      <p className="lg-eyebrow">Console access</p>
+                      <h1 id="login-title" className="mt-2 text-[26px] font-semibold tracking-[-0.035em] text-white sm:text-[28px]">
+                        Welcome back
+                      </h1>
+                      <p className="mt-2 text-sm leading-relaxed text-zinc-400">
+                        Sign in to manage your AI gateway.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="lg-seg" role="tablist" aria-label="Sign-in method">
+                    <span
+                      className="lg-seg-indicator"
+                      style={{ transform: mode === "master" ? "translateX(0)" : "translateX(calc(100% + 4px))" }}
+                      aria-hidden="true"
+                    />
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={mode === "master"}
+                      aria-controls={mode === "master" ? "master-panel" : undefined}
+                      onClick={() => { setMode("master"); setError(null); }}
+                      className={`relative z-10 flex min-h-11 items-center justify-center gap-2 rounded-lg px-3 text-[13px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 ${
+                        mode === "master" ? "text-white" : "text-zinc-400 hover:text-zinc-200"
+                      }`}
+                    >
+                      <KeyRound size={15} aria-hidden="true" />
+                      Master key
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={mode === "username"}
+                      aria-controls={mode === "username" ? "username-panel" : undefined}
+                      onClick={() => { setMode("username"); setError(null); }}
+                      className={`flex min-h-11 items-center justify-center gap-2 rounded-lg px-3 text-[13px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 ${
+                        mode === "username" ? "text-white" : "text-zinc-400 hover:text-zinc-200"
+                      }`}
+                    >
+                      <UserRound size={15} aria-hidden="true" />
+                      Account
+                    </button>
+                  </div>
+
+                  <form onSubmit={submit} className="mt-5 space-y-4 sm:mt-6 sm:space-y-5">
+                    {mode === "master" ? (
+                      <div id="master-panel" role="tabpanel" aria-label="Master key">
+                        <label htmlFor="master-key" className="mb-2 block text-[13px] font-medium text-zinc-300">
+                          Master key
+                        </label>
+                        <div className="relative">
+                          <KeyRound size={16} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-500" aria-hidden="true" />
+                          <input
+                            id="master-key"
+                            type={showKey ? "text" : "password"}
+                            value={key}
+                            autoFocus
+                            autoComplete="off"
+                            spellCheck={false}
+                            disabled={busy}
+                            placeholder="sk-wiwi-master-…"
+                            onChange={(e) => setKey(e.target.value)}
+                            className="admin-input !h-12 !rounded-[10px] !border-white/[0.08] !bg-white/[0.03] pl-10 pr-12 font-mono text-[13px]"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowKey((v) => !v)}
+                            aria-label={showKey ? "Hide master key" : "Show master key"}
+                            className="absolute right-1 top-1/2 grid h-11 w-11 -translate-y-1/2 place-items-center rounded-lg text-zinc-500 transition-colors hover:bg-white/[0.04] hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                          >
+                            {showKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                          </button>
+                        </div>
+                        <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+                          The <code className="font-mono text-zinc-400">master_key</code> from your wiwi.yaml
+                        </p>
+                      </div>
+                    ) : (
+                      <div id="username-panel" role="tabpanel" aria-label="Account" className="space-y-4">
+                        <div>
+                          <label htmlFor="li-username" className="mb-2 block text-[13px] font-medium text-zinc-300">Username</label>
+                          <div className="relative">
+                            <UserRound size={16} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-500" aria-hidden="true" />
+                            <input
+                              id="li-username"
+                              type="text"
+                              value={username}
+                              autoFocus
+                              autoComplete="username"
+                              spellCheck={false}
+                              disabled={busy}
+                              placeholder="Enter your username"
+                              onChange={(e) => setUsername(e.target.value)}
+                              className="admin-input !h-12 !rounded-[10px] !border-white/[0.08] !bg-white/[0.03] pl-10 pr-4 text-[14px]"
+                            />
+                          </div>
+                        </div>
+                        <div>
+                          <label htmlFor="li-password" className="mb-2 block text-[13px] font-medium text-zinc-300">Password</label>
+                          <div className="relative">
+                            <input
+                              id="li-password"
+                              type={showPassword ? "text" : "password"}
+                              value={password}
+                              autoComplete="current-password"
+                              disabled={busy}
+                              placeholder="Enter your password"
+                              onChange={(e) => setPassword(e.target.value)}
+                              className="admin-input !h-12 !rounded-[10px] !border-white/[0.08] !bg-white/[0.03] pl-4 pr-12 text-sm"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setShowPassword((v) => !v)}
+                              aria-label={showPassword ? "Hide password" : "Show password"}
+                              className="absolute right-1 top-1/2 grid h-11 w-11 -translate-y-1/2 place-items-center rounded-lg text-zinc-500 transition-colors hover:bg-white/[0.05] hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                            >
+                              {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {error && (
+                      <p role="alert" className="flex items-start gap-2.5 rounded-lg border border-red-500/20 bg-red-500/[0.06] px-3.5 py-3 text-[13px] leading-relaxed text-red-300">
+                        <TriangleAlert size={15} className="mt-0.5 shrink-0" aria-hidden="true" />
+                        {error}
+                      </p>
+                    )}
+
+                    <button
+                      type="submit"
+                      disabled={!canSubmit}
+                      className="group inline-flex h-12 w-full items-center justify-center gap-2 rounded-[10px] bg-white text-sm font-semibold text-zinc-950 transition-all duration-200 hover:bg-zinc-100 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      {busy ? (
+                        <>
+                          <Loader2 size={16} className="animate-spin" aria-hidden="true" />
+                          Signing in…
+                        </>
+                      ) : (
+                        <>
+                          Sign in to console
+                          <ArrowRight size={16} className="transition-transform duration-200 group-hover:translate-x-0.5" aria-hidden="true" />
+                        </>
+                      )}
+                    </button>
+                  </form>
+
+                  <div className="mt-5 border-t border-white/[0.06] pt-4">
+                    <p className="text-center text-[13px] text-zinc-400">
+                      New to wiwi?{" "}
+                      <Link to="/signup" className="inline-flex min-h-11 items-center font-medium text-zinc-200 underline decoration-zinc-600 underline-offset-4 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400">
+                        Create an account
+                      </Link>
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-center gap-2 border-t border-white/[0.05] bg-white/[0.015] px-6 py-3 text-[11px] text-[var(--admin-text-dim)]">
+                  <ShieldCheck size={14} className="shrink-0 text-zinc-500" aria-hidden="true" />
+                  <span>Secured by your gateway. Credentials stay private.</span>
+                </div>
+              </div>
+
+            </div>
+          </section>
+        </main>
+
+        <footer className="mt-auto flex items-center justify-between border-t border-white/[0.05] pt-4 text-xs text-zinc-400">
+          <p>© {new Date().getFullYear()} wiwi</p>
+          <div className="flex items-center gap-5">
+            <Link to="/docs" className="inline-flex min-h-11 items-center rounded-md px-1 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400">Documentation</Link>
+            <Link to="/contact" className="inline-flex min-h-11 items-center rounded-md px-1 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400">Support</Link>
           </div>
-        </div>
+        </footer>
       </div>
     </div>
   );
