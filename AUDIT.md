@@ -11632,3 +11632,15 @@ cookie; the handler-set cookie (login mint, logout clear) is never stacked.
 **Trigger.** `check()` generated the UID *inside* the per-scope loop, so an id-less caller stored a different UID in each window. `release()` / `record_tokens()` — which match by `request_id` — could never find anything.
 
 **Fix:** one UID per `check()` call (generated before the loop). Production paths always pass a `request_id`, so this only affected library/test callers — now they keep a stable identity to reconcile against.
+
+---
+
+### 582. Playground history rows nested rename/delete buttons inside a `role="button"` container
+
+**Severity:** 🟠 High (invalid nested interactive controls made screen-reader and keyboard operation ambiguous; axe reported four serious violations on mobile) · **Status: fixed** — verified with axe WCAG 2A/2AA audit at 375px
+
+**Files:** `web/src/pages/Playground.tsx:786-834`
+
+**Trigger.** Each conversation row was a `div role="button"` containing its own rename and delete `<button>` elements. Activating either action also matched the parent button role, and assistive technology had no unambiguous control boundary.
+
+**Fix:** render the conversation selection as a native `<button>` and move rename/delete into a sibling action group. The row keeps its active state and 44px touch targets, while the controls are no longer nested. The axe audit now reports zero violations.

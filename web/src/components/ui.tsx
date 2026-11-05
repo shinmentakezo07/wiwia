@@ -834,7 +834,7 @@ export function Dialog(props: {
   );
 }
 
-// -- drawer (right-side slide-in panel) ----------------------------------------
+// -- drawer (side-specific slide-in panel) -----------------------------------
 
 export function Drawer(props: {
   open: boolean;
@@ -842,35 +842,66 @@ export function Drawer(props: {
   children: ReactNode;
   /** Pixel width of the panel (default 560). */
   width?: number;
+  /** Surface-specific layout classes; behavior stays shared. */
+  className?: string;
+  /** Navigation/history drawers enter from the leading edge. */
+  side?: "left" | "right";
+  /** ID of the visible heading that names the dialog. */
+  ariaLabelledBy?: string;
 }) {
-  // Destructured so the Escape-key effect depends on the two values it reads
-  // rather than on the whole props object (react-hooks/exhaustive-deps).
-  const { open, onClose, children, width } = props;
+  const { open, onClose, children, width, className, side = "right", ariaLabelledBy } = props;
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const closeRef = useRef(onClose);
+  useEffect(() => {
+    closeRef.current = onClose;
+  });
   useEffect(() => {
     if (!open) return;
+    const panel = panelRef.current;
+    const restoreTo = document.activeElement as HTMLElement | null;
+    const selector =
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    (panel?.querySelector<HTMLElement>(selector) ?? panel)?.focus();
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeRef.current();
+        return;
+      }
+      if (e.key !== "Tab" || !panel) return;
+      const nodes = Array.from(panel.querySelectorAll<HTMLElement>(selector)).filter(
+        (node) => node.offsetParent !== null || node === document.activeElement,
+      );
+      const first = nodes[0];
+      const last = nodes[nodes.length - 1];
+      if (!first || !last) return;
+      if (e.shiftKey && (document.activeElement === first || !panel.contains(document.activeElement))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && (document.activeElement === last || !panel.contains(document.activeElement))) {
+        e.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
-
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      restoreTo?.focus();
+    };
+  }, [open]);
   if (!open) return null;
-  const w = width ?? 560;
   return createPortal(
     <div className="admin-overlay-enter fixed inset-0 z-50 overflow-hidden">
-      {/* scrim */}
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-[2px]" onClick={onClose} aria-hidden />
       <div
-        className="absolute inset-0 bg-black/60 backdrop-blur-[2px]"
-        onClick={onClose}
-        aria-hidden
-      />
-      {/* panel */}
-      <div
+        ref={panelRef}
         role="dialog"
         aria-modal="true"
-        className="admin-drawer-enter absolute right-0 top-0 flex h-full flex-col border-l border-white/[0.06] bg-[var(--admin-surface-elevated)] shadow-2xl shadow-black/60"
-        style={{ width: `min(${w}px, 100vw)` }}
+        aria-label={ariaLabelledBy ? undefined : "Details"}
+        aria-labelledby={ariaLabelledBy}
+        tabIndex={-1}
+        className={`${side === "left" ? "admin-drawer-enter-left left-0 border-r" : "admin-drawer-enter right-0 border-l"} absolute top-0 flex h-dvh flex-col border-white/[0.06] bg-[var(--admin-surface-elevated)] shadow-2xl shadow-black/60 ${className ?? ""}`}
+        style={{ width: `min(${width ?? 560}px, 100vw)` }}
       >
         {children}
       </div>
@@ -878,6 +909,7 @@ export function Drawer(props: {
     overlayHost(),
   );
 }
+
 
 export function CopyButton(props: { text: string; className?: string }) {
   const [copied, setCopied] = useState(false);

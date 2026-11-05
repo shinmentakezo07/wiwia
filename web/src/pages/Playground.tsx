@@ -7,23 +7,22 @@
 // markdown-rendered replies, per-message actions, hero empty state, latency /
 // throughput stats, and localStorage-backed conversation history.
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
   AlertCircle,
   ArrowDown,
-  ArrowUpRight,
+  ArrowUp,
+  Eraser,
   Bot,
   Check,
   ChevronDown,
   CircleDot,
   Clock,
-  Code,
-  Compass,
   Copy,
-  Eraser,
   Gauge,
+  History,
   Layers3,
   MessageSquare,
   MessageSquarePlus,
@@ -39,13 +38,12 @@ import {
   Terminal,
   Trash2,
   User,
-  WandSparkles,
   X,
 } from "lucide-react";
 import { ApiError, getModels, getPlaygroundMetrics } from "@/api/client";
 import type { ModelGroup, PlaygroundMetrics } from "@/api/types";
 import { Link } from "react-router-dom";
-import { Spinner } from "@/components/ui";
+import { Button, Drawer, Spinner } from "@/components/ui";
 import { Markdown } from "@/components/Markdown";
 import { HERO_BEAMS_COMPACT, HeroBeamBackdrop } from "@/components/HeroBeamBackdrop";
 import {
@@ -229,9 +227,9 @@ async function streamSSE(
 
 function buildHeroSuggestions(): Record<HeroSuggestionGroup, readonly string[]> {
   return {
-    Create: sampleSuggestions(heroSuggestionGroups.Create, 5),
+    Create: sampleSuggestions(heroSuggestionGroups.Create, 4),
     Explore: sampleSuggestions(heroSuggestionGroups.Explore, 5),
-    Code: sampleSuggestions(heroSuggestionGroups.Code, 5),
+    Code: sampleSuggestions(heroSuggestionGroups.Code, 4),
   };
 }
 
@@ -246,33 +244,12 @@ function toChatMsgs(msgs: Msg[]): ChatMsg[] {
   }));
 }
 
-/**
- * Per-group visual identity for the hero launcher. Each category gets its own
- * icon and accent hue so the empty state reads as a deliberate editorial grid
- * rather than a uniform run of identical cards — the accent is reused for the
- * tab, the card icon and the hover glow of that group's suggestions. The
- * accent classes are literal Tailwind utility strings so they tree-shake
- * correctly under strict TS.
- */
-const GROUP_META: Record<
-  HeroSuggestionGroup,
-  { icon: typeof Sparkles; acc: string; accSoft: string }
-> = {
-  Create: {
-    icon: WandSparkles,
-    acc: "text-violet-300",
-    accSoft: "bg-violet-400/10 text-violet-300",
-  },
-  Explore: {
-    icon: Compass,
-    acc: "text-sky-300",
-    accSoft: "bg-sky-400/10 text-sky-300",
-  },
-  Code: {
-    icon: Code,
-    acc: "text-emerald-300",
-    accSoft: "bg-emerald-400/10 text-emerald-300",
-  },
+/** Quiet color cues distinguish prompt categories without competing with the
+ * prompt text or the composer. */
+const GROUP_META: Record<HeroSuggestionGroup, { acc: string }> = {
+  Create: { acc: "text-violet-300" },
+  Explore: { acc: "text-sky-300" },
+  Code: { acc: "text-emerald-300" },
 };
 
 /** Stored conversation → live message state. The inverse of `toChatMsgs`; a
@@ -415,7 +392,7 @@ function ModelSelector(props: {
         }}
         aria-haspopup="listbox"
         aria-expanded={open}
-        aria-controls="pg-model-listbox"
+        aria-controls={open ? "pg-model-listbox" : undefined}
         aria-label={`Choose model${selected ? `, currently ${selected.name}` : ""}`}
         className="pg-model-trigger group flex min-h-11 max-w-full items-center gap-2 rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] px-3 py-2 text-[13px] transition-[border-color,background-color,box-shadow] duration-200 hover:border-[var(--admin-border-hover)] hover:bg-white/[0.035] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50 disabled:opacity-50"
       >
@@ -577,14 +554,9 @@ function ChatSidebar(props: {
   onDelete: (id: string) => void;
   onRename: (id: string, title: string) => void;
   onClearAll: () => void;
-  /** Which physical form the sidebar takes: the 52px icon rail, the desktop
-   *  column, or the mobile overlay drawer. The parent derives this from a
-   *  live matchMedia query. Deriving it here from `collapsed &&
-   *  window.innerWidth < 768` inverted the two states — the "expand" tap
-   *  rendered the desktop column (display:none below md) while attaching the
-   *  overlay's dismiss handlers to it, so the drawer never appeared and could
-   *  never be closed (AUDIT #519). */
+  /** Desktop column/rail or the content of the shared mobile Drawer. */
   variant: "rail" | "column" | "overlay";
+  titleId?: string;
   onToggle: () => void;
 }) {
   const { chats, activeId, onSelect, onNew, onDelete, onRename, onClearAll, variant, onToggle } = props;
@@ -592,23 +564,32 @@ function ChatSidebar(props: {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [confirmingClear, setConfirmingClear] = useState(false);
+  const pendingFocusId = useRef<string | null>(null);
+  const renameCommitRef = useRef<string | null>(null);
   // Two-step confirm auto-resets so a stale armed state can't linger.
   const clearTimer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(clearTimer.current), []);
 
-  // The drawer form covers the arena, so it needs its own dismiss
-  // affordances: Escape, and a tap-outside scrim rendered below the panel.
-  // While the drawer is open, Escape belongs to it — the page-level
-  // "Escape stops the stream" handler explicitly yields (see PlaygroundPage).
-  const isOverlay = variant === "overlay";
+  // The rename input unmounts when editing ends. Restore focus only after the
+  // updated row has committed, otherwise focus falls back to document.body.
   useEffect(() => {
-    if (!isOverlay) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onToggle();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [isOverlay, onToggle]);
+    if (renamingId !== null || !pendingFocusId.current) return;
+    const id = pendingFocusId.current;
+    pendingFocusId.current = null;
+    window.setTimeout(() => {
+      const rows = document.querySelectorAll<HTMLElement>(
+        `[data-chat-select="${CSS.escape(id)}"]`,
+      );
+      // Desktop and mobile histories are both mounted; focus the visible one.
+      Array.from(rows)
+        .find((row) => row.offsetParent !== null)
+        ?.focus();
+    }, 0);
+  }, [renamingId, chats]);
+
+  // The shared Drawer owns Escape and focus trapping; the page-level stream
+  // Escape handler yields while this content is open.
+  const isOverlay = variant === "overlay";
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -668,28 +649,36 @@ function ChatSidebar(props: {
     );
   }
 
-  const commitRename = () => {
-    if (renamingId) onRename(renamingId, renameDraft);
+  const commitRename = (restoreFocus = false) => {
+    const id = renamingId;
+    if (!id || renameCommitRef.current === id) return;
+    renameCommitRef.current = id;
+    if (restoreFocus) pendingFocusId.current = id;
+    onRename(id, renameDraft);
     setRenamingId(null);
+    window.setTimeout(() => {
+      if (renameCommitRef.current === id) renameCommitRef.current = null;
+    }, 0);
+  };
+
+  const cancelRename = () => {
+    const id = renamingId;
+    if (!id) return;
+    renameCommitRef.current = id;
+    pendingFocusId.current = id;
+    setRenamingId(null);
+    window.setTimeout(() => {
+      if (renameCommitRef.current === id) renameCommitRef.current = null;
+    }, 0);
   };
 
   return (
     <>
-      {/* Tap-outside scrim. aria-hidden: it is a pointer affordance, not a control. */}
-      {isOverlay && (
-        <div
-          className="pg-scrim fixed inset-0 z-[60] bg-black/60 backdrop-blur-[2px]"
-          onClick={onToggle}
-          aria-hidden
-        />
-      )}
+      {/* A drawer portal keeps focus and stack order outside the chat arena. */}
       <aside
         className={
           isOverlay
-            ? // z-[70]: the drawer lives inside .pg-body (relative z-10),
-              // so the top bar (z-30, outside that context) would otherwise
-              // paint above the drawer and swallow its header controls.
-              "pg-sidebar pg-sidebar-enter fixed inset-y-0 left-0 z-[70] flex flex-col border-r border-[var(--admin-border)] bg-[var(--admin-surface)] shadow-2xl shadow-black/70"
+            ? "pg-sidebar pg-sidebar-in-drawer flex w-full flex-1 flex-col overflow-hidden bg-[var(--admin-surface)]"
             : "pg-sidebar flex flex-col border-r border-[var(--admin-border)] bg-[var(--admin-surface)]"
         }
         aria-label="Conversation history"
@@ -699,7 +688,7 @@ function ChatSidebar(props: {
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <Layers3 size={14} className="text-[var(--admin-text-dim)]" aria-hidden />
-              <span className="text-[12px] font-semibold uppercase tracking-wider text-[var(--admin-text)]">
+              <span id={props.titleId} className="pg-sidebar-title text-[14px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
                 Workspace
               </span>
             </div>
@@ -709,8 +698,8 @@ function ChatSidebar(props: {
             type="button"
             onClick={onToggle}
             className="pg-icon-button flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.05] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50"
-            aria-label="Collapse sidebar"
-            title="Collapse sidebar"
+            aria-label={isOverlay ? "Close conversation history" : "Collapse sidebar"}
+            title={isOverlay ? "Close conversation history" : "Collapse sidebar"}
           >
             <PanelLeftClose size={16} />
           </button>
@@ -740,6 +729,7 @@ function ChatSidebar(props: {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search chats…"
+              style={{ minHeight: 44 }}
               className="w-full bg-transparent text-[12px] text-[var(--admin-text)] outline-none placeholder:text-[var(--admin-text-dim)]"
             />
             {query && (
@@ -778,13 +768,13 @@ function ChatSidebar(props: {
                           onKeyDown={(e) => {
                             if (e.key === "Enter" && !e.nativeEvent.isComposing) {
                               e.preventDefault();
-                              commitRename();
+                              commitRename(true);
                             } else if (e.key === "Escape") {
                               e.stopPropagation();
-                              setRenamingId(null);
+                              cancelRename();
                             }
                           }}
-                          onBlur={commitRename}
+                          onBlur={() => commitRename(false)}
                           className="w-full bg-transparent text-[13px] text-[var(--admin-text)] outline-none"
                           aria-label="Chat name"
                         />
@@ -793,60 +783,52 @@ function ChatSidebar(props: {
                       <div
                         key={c.id}
                         data-active={c.id === activeId}
-                        role="button"
-                        tabIndex={0}
-                        aria-current={c.id === activeId ? "page" : undefined}
-                        onClick={() => pickChat(c.id)}
-                        onKeyDown={(e) => {
-                          if (e.target !== e.currentTarget) return;
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            pickChat(c.id);
-                          }
-                        }}
-                        className="pg-chat-item group flex cursor-pointer items-start gap-3 rounded-lg border border-transparent px-3 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50"
+                        className="pg-chat-item group flex items-start gap-1 rounded-lg border border-transparent py-1 pl-1 pr-1"
                       >
-                        <span className="pg-chat-item-icon mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--admin-text-dim)]" aria-hidden>
-                          <MessageSquare size={12} />
-                        </span>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1.5">
-                            <span className={`truncate text-[13px] ${c.id === activeId ? "text-[var(--admin-text)] font-medium" : "text-[var(--admin-text-muted)]"}`}>
-                              {c.title || "New chat"}
-                            </span>
-                          </div>
-                          <span className="text-[10px] text-[var(--admin-text-dim)]">
-                            {relativeTime(c.updated)} · {c.messages.length} msgs
+                        <button
+                          type="button"
+                          data-chat-select={c.id}
+                          onClick={() => pickChat(c.id)}
+                          aria-current={c.id === activeId ? "page" : undefined}
+                          className="flex min-w-0 flex-1 items-start gap-3 rounded-md px-2 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50"
+                        >
+                          <span className="pg-chat-item-icon mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--admin-text-dim)]" aria-hidden>
+                            <MessageSquare size={12} />
                           </span>
-                        </div>
+                          <span className="min-w-0 flex-1">
+                            <span className="flex items-center gap-1.5">
+                              <span className={`truncate text-[13px] ${c.id === activeId ? "font-medium text-[var(--admin-text)]" : "text-[var(--admin-text-muted)]"}`}>
+                                {c.title || "New chat"}
+                              </span>
+                            </span>
+                            <span className="block text-[10px] text-[var(--admin-text-dim)]">
+                              {relativeTime(c.updated)} · {c.messages.length} msgs
+                            </span>
+                          </span>
+                        </button>
                         {/* Revealed on hover, keyboard focus, and any coarse
                             pointer — a hover-only reveal is invisible on touch
-                            (AUDIT #210). The buttons carry the binding 44px
-                            minimum; the negative vertical margin keeps that box
-                            inside the row's own padding so the row does not
-                            grow, and nothing overlaps the neighbouring rows. */}
-                        <div className="-my-1.5 flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100">
+                            (AUDIT #210). Actions are siblings of the selection
+                            button so interactive controls are never nested. */}
+                        <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100">
                           <button
                             type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
+                            onClick={() => {
+                              renameCommitRef.current = null;
                               setRenamingId(c.id);
                               setRenameDraft(c.title || "");
                             }}
                             className="flex h-11 w-11 items-center justify-center rounded text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50"
-                            aria-label="Rename chat"
+                            aria-label={`Rename ${c.title || "chat"}`}
                             title="Rename chat"
                           >
                             <Pencil size={12} />
                           </button>
                           <button
                             type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              onDelete(c.id);
-                            }}
+                            onClick={() => onDelete(c.id)}
                             className="flex h-11 w-11 items-center justify-center rounded text-[var(--admin-text-dim)] transition-colors hover:bg-red-500/10 hover:text-red-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50"
-                            aria-label="Delete chat"
+                            aria-label={`Delete ${c.title || "chat"}`}
                             title="Delete chat"
                           >
                             <Trash2 size={13} />
@@ -988,13 +970,6 @@ export function PlaygroundPage() {
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);
   }, []);
-  const sidebarVariant = isNarrow
-    ? drawerOpen
-      ? "overlay"
-      : "rail"
-    : sidebarCollapsed
-      ? "rail"
-      : "column";
   // Unsent composer text, kept per chat so switching conversations doesn't
   // lose a half-written message. Cleared entries are fine to keep around —
   // they're tiny strings, and the ref dies with the component.
@@ -1521,6 +1496,7 @@ export function PlaygroundPage() {
 
   const isEmpty = messages.length === 0;
   const activeConversation = chats.find((chat) => chat.id === activeChatId);
+  const drawerTitleId = useId();
   const activeChatTitle = activeConversation?.title || "New conversation";
   const sessionStatus: SessionStatusKind = streaming ? "live" : "ready";
   const sessionStatusLabel = streaming ? "Streaming" : "Ready";
@@ -1536,72 +1512,64 @@ export function PlaygroundPage() {
         <HeroBeamBackdrop beams={HERO_BEAMS_COMPACT} className="pg-workbench-beams" />
       </div>
 
-      {/* ══ Top bar ══ */}
+      {/* Top bar: one compact row on phones; dedicated workspace navigation
+          replaces the mobile icon rail, giving the conversation full width. */}
       <header className="admin-topbar pg-topbar relative z-30 shrink-0">
-        <div className="flex min-h-[60px] flex-wrap items-center gap-x-4 gap-y-2 px-3 py-2 sm:px-5">
-          <Link to="/" className="pg-brand flex min-w-0 items-center gap-2.5 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50">
-            <span className="pg-brand-mark flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px]">
-              <img src="/wiwi-logo.png" alt="wiwi" className="h-7 w-7 rounded-[8px] object-cover ring-1 ring-white/[0.08] ring-inset" />
-            </span>
-            <span className="min-w-0">
-              <span className="block truncate text-[14px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">wiwi</span>
-              <span className="hidden font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-[var(--admin-text-dim)] min-[420px]:block">Playground</span>
-            </span>
-          </Link>
-
-          {/* Model selector gets the full second row on small screens. */}
-          <div className="order-3 w-full min-w-0 sm:order-none sm:mx-auto sm:w-auto sm:max-w-[420px] sm:flex-1">
-            <ModelSelector
-              groups={groups}
-              value={effectiveModel}
-              onChange={setModel}
-              loadError={modelsQ.isError}
-              onRetryLoad={() => void modelsQ.refetch()}
-            />
-          </div>
-
-          <div className="ml-auto flex min-w-0 flex-wrap items-center gap-1 sm:gap-2">
-            <SessionStatus status={sessionStatus} label={sessionStatusLabel} compact />
-            <Link
-              to="/console"
-              className="pg-dashboard-link flex min-h-11 items-center rounded-[10px] px-2.5 text-[12px] text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)] sm:px-3 sm:text-[13px]"
+        <div className="pg-header-inner flex items-center gap-2 px-3 sm:gap-4 sm:px-5">
+          <div className="pg-topbar-identity flex min-w-0 items-center gap-1">
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setDrawerOpen(true)}
+              aria-label="Open conversation history"
+              title="Conversation history"
+              className="pg-history-trigger h-11 w-11 shrink-0 justify-center px-0 md:hidden"
             >
-              <Activity size={14} aria-hidden />
-              <span className="ml-2 hidden sm:inline">Dashboard</span>
-              <span className="ml-2 sm:hidden">Console</span>
+              <History size={18} aria-hidden />
+            </Button>
+            <Link to="/" className="pg-brand flex min-w-0 items-center gap-2 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50" aria-label="wiwi home">
+              <img src="/wiwi-logo.png" alt="wiwi" className="h-7 w-7 shrink-0 rounded-lg object-cover" />
+              <span className="pg-wordmark text-[15px] font-semibold tracking-[-0.02em]">wiwi</span>
+            </Link>
+            <span className="pg-product-label hidden border-l border-[var(--admin-border)] pl-3 text-[12px] text-[var(--admin-text-dim)] sm:block">Playground</span>
+          </div>
+          <div className="pg-model-picker min-w-0 flex-1 sm:mx-auto sm:max-w-[360px]">
+            <ModelSelector groups={groups} value={effectiveModel} onChange={setModel} loadError={modelsQ.isError} onRetryLoad={() => void modelsQ.refetch()} />
+          </div>
+          <div className="ml-auto flex shrink-0 items-center gap-1">
+            <SessionStatus status={sessionStatus} label={sessionStatusLabel} compact />
+            <Link to="/console" className="pg-dashboard-link flex min-h-11 min-w-11 items-center justify-center rounded-lg px-2.5 text-[12px] text-[var(--admin-text-muted)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)] sm:px-3 sm:text-[13px]" aria-label="Open console">
+              <Activity size={15} aria-hidden />
+              <span className="ml-2 hidden sm:inline">Console</span>
             </Link>
           </div>
         </div>
         <div className="admin-topbar-border h-px" />
       </header>
-
-      {/* ══ Body: sidebar + chat arena ══
-          z-[40] while the mobile drawer is open: the root wrapper is itself a
-          stacking context (relative z-0), so the drawer's own z-index is
-          capped by this element's z-10 — the top bar (z-30, outside) would
-          otherwise paint above the drawer and swallow its controls. */}
-      <div
-        className={`pg-body relative flex min-h-0 flex-1 ${isNarrow && drawerOpen ? "z-[40]" : "z-10"}`}
-      >
-        {/* Sidebar */}
-        <ChatSidebar
-          chats={chats}
-          activeId={activeChatId}
-          onSelect={handleSelectChat}
-          onNew={() => {
-            // On mobile, picking anything from the drawer also closes it.
-            if (isNarrow) setDrawerOpen(false);
-            handleNewChat();
-          }}
-          onDelete={handleDeleteChat}
-          onRename={handleRenameChat}
-          onClearAll={handleClearAllChats}
-          variant={sidebarVariant}
-          onToggle={() => {
-            if (isNarrow) setDrawerOpen((v) => !v);
-            else setSidebarCollapsed((v) => !v);
-          }}
-        />
+      <div className="pg-body relative z-10 flex min-h-0 flex-1">
+        <div className="hidden md:flex">
+          <ChatSidebar chats={chats} activeId={activeChatId} onSelect={handleSelectChat} onNew={handleNewChat} onDelete={handleDeleteChat} onRename={handleRenameChat} onClearAll={handleClearAllChats} variant={sidebarCollapsed ? "rail" : "column"} onToggle={() => setSidebarCollapsed((value) => !value)} />
+        </div>
+        <Drawer open={isNarrow && drawerOpen} onClose={() => setDrawerOpen(false)} width={320} side="left" ariaLabelledBy={drawerTitleId} className="pg-history-drawer">
+          <ChatSidebar
+            chats={chats}
+            activeId={activeChatId}
+            onSelect={handleSelectChat}
+            onNew={() => {
+              setDrawerOpen(false);
+              handleNewChat();
+            }}
+            onDelete={handleDeleteChat}
+            onRename={handleRenameChat}
+            onClearAll={() => {
+              setDrawerOpen(false);
+              handleClearAllChats();
+            }}
+            variant="overlay"
+            onToggle={() => setDrawerOpen(false)}
+            titleId={drawerTitleId}
+          />
+        </Drawer>
 
         {/* Chat arena */}
         <main className="pg-arena relative flex min-h-0 flex-1 flex-col" aria-label="Model workbench">
@@ -1830,7 +1798,6 @@ function HeroEmptyState(props: {
   const { activeGroup, onGroupChange, suggestions, onPick, model } = props;
   const visible = heroSuggestionGroupNames;
   const current = suggestions?.[activeGroup] ?? [];
-  const meta = GROUP_META[activeGroup];
   const tabsRef = useRef<HTMLDivElement>(null);
 
   // Tabs pattern: arrows move between tabs and activate on move (the row is
@@ -1862,102 +1829,70 @@ function HeroEmptyState(props: {
   };
 
   return (
-    <div className="pg-hero-shell relative flex min-h-full items-center justify-center overflow-hidden px-4 py-6 sm:px-6 sm:py-10">
-      <div className="animate-hero-enter relative w-full max-w-[760px] text-center">
-        <div className="mb-3 flex justify-center sm:mb-5">
-          <div className="pg-hero-badge relative flex h-12 w-12 items-center justify-center rounded-2xl border border-white/[0.08] shadow-xl shadow-brand-900/30 sm:h-14 sm:w-14">
-            <Sparkles className="relative h-5 w-5 text-white sm:h-6 sm:w-6" />
-            <span className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full border border-white/10 bg-brand-500 shadow-sm">
-              <CircleDot size={9} className="text-white" />
-            </span>
+    <div className="pg-hero-shell relative flex min-h-full items-center justify-center px-4 py-7 sm:px-6 sm:py-10">
+      <div className="pg-hero-content relative w-full max-w-[680px] text-center sm:text-left">
+        <div className="pg-hero-heading">
+          <div className="pg-eyebrow mb-3 flex items-center justify-center gap-2 text-[10px] font-medium uppercase tracking-[0.16em] text-[var(--admin-text-dim)]">
+            <span className="h-1.5 w-1.5 rounded-full bg-brand-400" aria-hidden />
+            Your private model workspace
           </div>
+          <h2 className="pg-hero-title text-[30px] font-medium leading-[1.15] tracking-[-0.04em] sm:text-[36px]">
+            What will you explore?
+          </h2>
+          <p className="mx-auto mt-2 max-w-md text-[14px] leading-relaxed text-[var(--admin-text-muted)] sm:text-[15px]">
+            Ask a question, build something, or think through an idea.
+          </p>
         </div>
-
-        <h2 className="pg-hero-title text-[26px] font-semibold tracking-[-0.025em] sm:text-[30px]">
-          Start a model session
-        </h2>
-        <p className="mx-auto mt-1.5 max-w-md text-[13px] leading-relaxed text-[var(--admin-text-muted)] sm:mt-2 sm:text-[14px]">
-          Choose a prompt below or write directly into the workbench. Responses stream here in real time.
-        </p>
-
-        {model && (
-          <div className="pg-model-card mx-auto mt-4 flex max-w-[440px] items-center gap-3 rounded-2xl px-4 py-3 text-left sm:mt-6">
-            <div className="pg-model-card-icon flex h-9 w-9 shrink-0 items-center justify-center rounded-xl">
-              <Terminal size={17} />
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-[13px] font-medium text-[var(--admin-text)]">{model}</div>
-              <div className="mt-0.5 text-[11px] text-[var(--admin-text-dim)]">Streaming · local session</div>
-            </div>
-            <span className="pg-ready-pill hidden shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-medium sm:inline-flex">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-              Ready
-            </span>
-          </div>
-        )}
 
         {model && (
           <>
-            <div
-              ref={tabsRef}
-              className="pg-hero-tabs pg-hero-tabs-scroll mt-5 inline-flex max-w-full items-center gap-1 overflow-x-auto rounded-xl p-1 sm:mt-7"
-              role="tablist"
-              aria-label="Prompt categories"
-              onKeyDown={onTabKeyDown}
-            >
-              {visible.map((g) => {
-                const gmeta = GROUP_META[g];
-                const Icon = gmeta.icon;
-                const active = g === activeGroup;
-                return (
-                  <button
-                    key={g}
-                    type="button"
-                    role="tab"
-                    data-tab={g}
-                    aria-selected={active}
-                    tabIndex={active ? 0 : -1}
-                    onClick={() => onGroupChange(g)}
-                    className={`group/tab flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg px-3.5 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50 ${
-                      active
-                        ? "bg-white/[0.09] text-[var(--admin-text)] shadow-sm"
-                        : "text-[var(--admin-text-muted)] hover:text-[var(--admin-text)]"
-                    }`}
-                  >
-                    <Icon size={13} className={active ? gmeta.acc : "text-[var(--admin-text-dim)]"} />
-                    {g}
-                  </button>
-                );
-              })}
+            <div className="mt-7 border-b border-[var(--admin-border)] pb-3 text-left sm:mt-8">
+              <span className="pg-section-label block mb-2">Try a starting point</span>
+              <div ref={tabsRef} className="pg-hero-tabs pg-hero-tabs-scroll flex max-w-full items-center gap-1 overflow-x-auto" role="tablist" aria-label="Prompt categories" onKeyDown={onTabKeyDown}>
+                {visible.map((g) => {
+                  const active = g === activeGroup;
+                  return (
+                    <button
+                      key={g}
+                      type="button"
+                      role="tab"
+                      data-tab={g}
+                      aria-selected={active}
+                      tabIndex={active ? 0 : -1}
+                      onClick={() => onGroupChange(g)}
+                      className={`pg-prompt-tab min-h-11 shrink-0 rounded-md px-3 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50 ${active ? `bg-white/[0.06] ${GROUP_META[g].acc}` : "text-[var(--admin-text-dim)] hover:text-[var(--admin-text)]"}`}
+                    >
+                      {g}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
-            <div className="pg-suggestion-grid mt-3 grid gap-2 text-left sm:grid-cols-2" role="tabpanel" aria-label={`${activeGroup} prompt suggestions`}>
+            <div className="pg-suggestion-grid text-left" role="tabpanel" aria-label={`${activeGroup} prompt suggestions`}>
               {current.length === 0 && (
-                <div className="col-span-full flex min-h-[58px] items-center justify-center rounded-xl border border-dashed border-[var(--admin-border)] px-3.5 text-[12px] text-[var(--admin-text-dim)]">
+                <div className="flex min-h-14 items-center justify-center border-b border-[var(--admin-border)] px-3 text-[13px] text-[var(--admin-text-dim)]">
                   No suggestions in this group
                 </div>
               )}
-              {current.map((s, i) => {
-                const Icon = meta.icon;
-                return (
-                  <button
-                    key={s}
-                    type="button"
-                    onClick={() => onPick(s)}
-                    className="pg-sugg-enter pg-suggestion-card group flex min-h-[58px] items-start gap-3 rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] px-3.5 py-2.5 text-left text-[13px] leading-snug text-[var(--admin-text-muted)] transition-[border-color,background-color,color,transform,box-shadow] duration-200 hover:-translate-y-0.5 hover:border-[var(--admin-border-hover)] hover:bg-white/[0.03] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50"
-                    style={{ animationDelay: `${i * 0.04}s` }}
-                  >
-                    <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors ${meta.accSoft} group-hover:bg-white/[0.07]`}>
-                      <Icon className="h-4 w-4" />
-                    </span>
-                    <span className="min-w-0 flex-1">{s}</span>
-                    <ArrowUpRight className="h-4 w-4 shrink-0 text-[var(--admin-text-dim)] opacity-0 transition-opacity group-hover:opacity-100" aria-hidden />
-                  </button>
-                );
-              })}
+              {current.map((s, i) => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => onPick(s)}
+                  className="pg-sugg-enter pg-suggestion-card group flex min-h-14 w-full items-center justify-between gap-3 border-b border-[var(--admin-border)] px-1 py-3 text-left text-[13px] leading-relaxed text-[var(--admin-text-muted)] transition-colors duration-200 hover:bg-white/[0.025] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50 sm:text-[14px]"
+                  style={{ animationDelay: `${i * 0.04}s` }}
+                >
+                  <span className="min-w-0 flex-1 leading-relaxed">{s}</span>
+                  <ArrowUp size={16} className="mt-0.5 shrink-0 text-[var(--admin-text-dim)] transition-[transform,color] group-hover:-translate-y-0.5 group-hover:text-brand-300" aria-hidden />
+                </button>
+              ))}
             </div>
           </>
         )}
+        <p className="pg-local-note mt-5 text-[11px] leading-relaxed text-[var(--admin-text-dim)]">
+          Conversations stay in this browser.
+        </p>
       </div>
     </div>
   );
