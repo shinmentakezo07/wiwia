@@ -8,6 +8,19 @@
 
 Each entry below records the before→after state, the exact files and lines changed, and the tests that cover it. When extending or modifying any of those areas, check this file for existing invariants before writing new code. When a new fix lands in one of these areas, add an entry to this file so a later agent does not rediscover and re-fix the same thing.
 
+## Round 201 — cancelled streams do not mint completed Responses (AUDIT #590) (2026-11-05)
+
+A streamed Responses turn is now persisted only after its `StreamEnd` delta.
+Previously, teardown checked only for an error frame; a client disconnect or an
+abandoned generator could therefore persist partial content as a `completed`
+response, leaving a valid-looking `previous_response_id` handle for an unfinished
+turn. The store gate now requires a clean terminal delta, while preserving the
+existing streamed payload rebuild and error handling.
+
+**Files:** `wiwi/server/app.py`, `tests/test_fix_round201.py`.
+
+---
+
 ## Round 200 — SSE event order and parallel-tool group boundaries (AUDIT #588–#589) (2026-11-05)
 
 Two streaming fixes, reproduced through the real parser and wire encoders:

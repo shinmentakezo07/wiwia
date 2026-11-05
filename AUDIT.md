@@ -1958,6 +1958,30 @@ guard against reload loops. Covered by `tests/test_fix_round197.py`, updated
 
 ## 🟡 Low — round 90 (new)
 
+## Round 201 — cancelled streams must not mint completed Responses (2026-11-05)
+
+### 590. A cancelled streamed Responses turn was persisted as `completed`
+
+**Severity:** 🟡 Medium (a client can continue a response id whose upstream
+turn was abandoned, receiving a fabricated successful history) · **Status: fixed** —
+round 201 (`tests/test_fix_round201.py`)
+
+**Where:** `wiwi/server/app.py` `_stream_response` / `_teardown_tail` (the
+streamed `response_store.put` gate).
+
+**Trigger:** a Responses request with `stream: true` emits content, then the
+client disconnects or the stream generator is abandoned before `StreamEnd`.
+The teardown checked only `not errored`, so it rebuilt the partial deltas and
+stored a payload whose status was `completed`; the response id could then be
+used by `previous_response_id` as though the turn had completed.
+
+**Fix:** track receipt of `StreamEnd` and require it before the streamed store
+write. Error frames still skip persistence, and normal completed streams retain
+their existing behavior. Regression: `tests/test_fix_round201.py`.
+
+---
+
+
 ### 270. Three adapters still keep their own finish-reason map, narrower than the shared one
 
 **Severity:** 🟡 Low · **Status: fixed** — round 95 (`tests/test_fix_round95.py`).

@@ -3202,6 +3202,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         from wiwi.streaming import deltas as dl
         encoder, style = encoder_pair
         errored = False
+        completed = False
         # The client's ``Last-Event-ID`` names a single FRAME, so the sequence
         # counter counts frames; the chunk counter is separate and is what the
         # ``wiwi.chunks`` attribute reports (AUDIT #493).
@@ -3279,9 +3280,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 }
             state_.logs.log_request(build_log_event(ctx))
             await _record_tpm_usage(ctx.auth, ctx)
-            if (response_store is not None and not errored
+            if (response_store is not None and completed and not errored
                     and store_body is not None and store_body.get("store") is not False):
-                # Streamed turns are stored too: the accumulated text/tool calls
+                # Only a clean StreamEnd makes a response continuable. A client
+                # disconnect or an abandoned generator can still have deltas and
+                # no error frame; rebuilding those would mint a completed object
+                # for a turn that never finished.
                 # are the same content the non-streaming path serializes, so a
                 # streamed response can be continued by id like any other. A
                 # store failure must not abort the teardown or surface as an
@@ -3397,6 +3401,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     async for t in _emit(chunk):
                         yield t
             async for d in stream:
+                if isinstance(d, dl.StreamEnd):
+                    completed = True
                 if isinstance(d, dl.StreamError) and not errored:
                     errored = True
                     ctx.status = 502
