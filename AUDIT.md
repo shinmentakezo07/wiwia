@@ -11644,3 +11644,33 @@ cookie; the handler-set cookie (login mint, logout clear) is never stacked.
 **Trigger.** Each conversation row was a `div role="button"` containing its own rename and delete `<button>` elements. Activating either action also matched the parent button role, and assistive technology had no unambiguous control boundary.
 
 **Fix:** render the conversation selection as a native `<button>` and move rename/delete into a sibling action group. The row keeps its active state and 44px touch targets, while the controls are no longer nested. The axe audit now reports zero violations.
+
+---
+
+### 586. Hero beam gradients cross their stops and animate under reduced motion
+
+**Severity:** 🟡 Medium (the hero's beam sweep visibly collapses and jumps;
+reduced-motion preference is not fully honored) · **Status: fixed** —
+`web/src/components/HeroBeamBackdrop.test.tsx`; verified in Chromium at desktop
+and mobile sizes. Beams 4 and 5 use 2px strokes with lighter violet/cyan and
+pink/lavender stops so their traveling highlights remain prominent.
+
+**Where:** `web/src/components/HeroBeamBackdrop.tsx`'s shared
+`linearGradient`/`animate offset` gradient definitions, used by the Landing
+hero and the other public/Playground hero surfaces.
+
+**Trigger:** the original fixed 0.3 stop stayed in place while the following
+stop animated from -0.3 to 0.4, crossing behind it and producing a collapsing,
+jumping highlight. The gradient also relied on the default vertical axis,
+although the paths run horizontally. The last stop's `<animate>` was not gated
+by reduced motion.
+
+**Fix:** give each gradient an explicit horizontal axis and translate the
+entire gradient with one `animateTransform`, preserving its stop order until
+the entire sweep exits the path before repeating. Individual animated stop
+offsets are avoided because SVG clamps them when they become equal.
+Reduced motion renders only the existing static, dashed beam. Verified in
+Chromium at 1440×900 and 375×812; the desktop/mobile screenshots are in the
+untracked `.verify/hero-beam-*.png` captures.
+
+---
