@@ -8,6 +8,26 @@
 
 Each entry below records the before→after state, the exact files and lines changed, and the tests that cover it. When extending or modifying any of those areas, check this file for existing invariants before writing new code. When a new fix lands in one of these areas, add an entry to this file so a later agent does not rediscover and re-fix the same thing.
 
+## Round 200 — SSE event order and parallel-tool group boundaries (AUDIT #588–#589) (2026-11-05)
+
+Two streaming fixes, reproduced through the real parser and wire encoders:
+
+- **Mixed framing preserves arrival order.** `LineSSEParser(allow_unframed=True)`
+  previously returned a bare JSON event immediately while an earlier `data:`
+  frame was still buffered. The later event now waits in a one-slot pending
+  queue, so `feed_line` returns the older frame first and the next line or
+  `flush()` returns the queued event. No events are dropped and the existing
+  one-event-per-call API is unchanged.
+- **Text and thinking wait for every sibling tool.** Closing the most recently
+  opened tool no longer clears the shared open-tool state when another sibling
+  remains. Anthropic therefore does not open a text block inside a tool group,
+  and Responses does not open a message before the remaining function call's
+  done event. `_open_tool` follows a remaining sibling so `StreamEnd` closes it
+  before the deferred message.
+
+**Files:** `wiwi/streaming/sse.py`, `wiwi/wire/anthropic_messages.py`,
+`wiwi/wire/openai_responses.py`, `tests/test_fix_round200.py`.
+
 ---
 
 ## Round 198 — document file ids, Completions suffix refusal, zero token caps (AUDIT #583–#585) (2026-11-05)

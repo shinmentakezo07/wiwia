@@ -1821,7 +1821,52 @@ warning and are dropped.
 
 ## Wire codec review — confirmed findings (2026-11-05)
 
-### 587. Non-finite numeric parameters bypass IR validation
+### 588. An unframed JSON line overtakes a pending framed SSE event
+
+**Severity:** 🟡 Medium (a mixed-framing upstream's events are decoded out of
+order; a bare JSON error can be followed by stale content) · **Status: fixed** —
+round 200 (`tests/test_fix_round200.py`)
+
+**Where:** `wiwi/streaming/sse.py:173-181` (`LineSSEParser.feed_line`), consumed
+by both stream arms in `wiwi/core/gateway.py` and `wiwi/core/recovery.py`.
+
+**Trigger:** with `allow_unframed=True` (Cline, WorkBuddy, OpenCode), feed
+`data: {"seq":1}` followed by `{"type":"seq2"}` before a blank line. The
+second line returns immediately while the first remains buffered until a blank
+line or `flush()`. The gateway therefore decodes the later event first; the
+probe classifier has the same ordering inversion.
+
+**Fix sketch:** drain the pending framed event before returning an unframed
+event, without dropping either; preserve the one-event-per-`feed_line` API.
+
+---
+
+### 589. Closing the current sibling lets text interleave with a still-open tool
+
+**Severity:** 🟠 High (Anthropic emits a text block inside an open tool block;
+Responses opens a message before the remaining function call completes) ·
+**Status: fixed** — round 200 (`tests/test_fix_round200.py`)
+
+**Where:** `wiwi/wire/anthropic_messages.py:792-802` (`_close_block`) and
+`wiwi/wire/openai_responses.py:876-882` (`_close_tool`), consumed by the
+text/thinking arms of each `feed`.
+
+**Trigger:** `Open(0) → Open(1) → Close(1) → TextDelta` while tool 0 remains
+open. Both `_close_*` helpers clear the shared `_open_block`/`_item_open` state
+when closing the current tool, even though the other sibling is still open.
+The next text/thinking delta is therefore emitted inline instead of deferred.
+On Anthropic, a later tool close can then stop the text block out of order;
+on Responses, `StreamEnd` closes the sibling before the message's done events.
+The existing tests close the non-current sibling first or close the current
+one last, so they miss this ordering.
+
+**Fix sketch:** derive the open-tool state from the remaining tool map after a
+close (and keep it set while any sibling remains), so text/thinking stays
+buffered until the last tool closes.
+
+---
+
+### 583. Responses `input_file.file_id` is silently discarded
 
 **Severity:** 🟡 Medium (invalid sampling values reach upstream serialization;
 NaN/+Infinity thinking budgets silently enable maximum reasoning) ·

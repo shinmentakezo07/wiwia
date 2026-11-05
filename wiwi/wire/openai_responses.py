@@ -876,8 +876,11 @@ class ResponsesStreamEncoder:
     def _close_tool(self, index: int) -> list[bytes]:
         """Close a specific tool item by IR index (parallel-safe)."""
         if self._item_open == "tool" and self._open_tool == index:
-            self._item_open = None
-            self._open_tool = None
+            # Keep text/thinking deferred while another sibling is open.
+            # _open_tool must name that sibling: StreamEnd calls _close_item
+            # before the final sweep, and None would leave the item unfinished.
+            self._item_open = "tool" if len(self._tools) > 1 else None
+            self._open_tool = next((i for i in self._tools if i != index), None)
         t = self._tools.pop(index, None)
         if t is None:
             return []

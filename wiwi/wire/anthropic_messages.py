@@ -797,8 +797,12 @@ class AnthropicStreamEncoder:
             if idx is None:
                 return []
             if self._open_tool == tool_index:
-                self._open_block = None
-                self._open_tool = None
+                # A sibling may still be open. Keep the shared state in tool
+                # mode so text/thinking defers until the LAST tool closes
+                # (AUDIT #589). The remaining index identifies the tool whose
+                # block the no-argument close must close next.
+                self._open_block = "tool" if self._tool_blocks else None
+                self._open_tool = next(iter(self._tool_blocks), None)
             return [self._evt("content_block_stop",
                               {"type": "content_block_stop", "index": idx})]
         if self._open_block is None:

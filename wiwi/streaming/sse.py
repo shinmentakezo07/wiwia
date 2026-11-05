@@ -133,16 +133,28 @@ class LineSSEParser:
     the strict parser silently discards it; with ``allow_unframed`` it is
     emitted as an immediate data event instead. Off by default, because a strict
     caller (one that would rather drop a malformed line than misread it) must
-    keep the old behaviour.
+    keep the old behaviour. If a bare line arrives while a framed event is
+    buffered, the older frame is returned first and the bare event is queued
+    for the next call (or ``flush``); that call still consumes its input line.
     """
 
     def __init__(self, allow_unframed: bool = False) -> None:
         self._event = ""
         self._data: list[str] = []
         self._allow_unframed = allow_unframed
+        # A bare JSON line terminates itself, but a pending framed event must
+        # still be delivered first. Hold that later event until the next call
+        # so feed_line keeps its one-event-per-call API.
+        self._pending: SSEEvent | None = None
 
     def feed_line(self, line: str) -> SSEEvent | None:
-        line = line.removeprefix("\ufeff").removesuffix("\r")
+        if self._pending is not None:
+            pending, self._pending = self._pending, None
+            # The queued event is the result of THIS call, but the line that
+            # triggered it still needs parsing into the next frame's buffer.
+            self.feed_line(line)
+            return pending
+        line = line.removeprefix("\ufeff")
         if line == "":
             if self._data:
                 evt = SSEEvent(self._event, "\n".join(self._data))
@@ -178,6 +190,9 @@ class LineSSEParser:
             # The shape test is what keeps this from swallowing an unknown
             # SSE FIELD line: only a line that actually looks like a payload
             # qualifies (AUDIT #502).
+            if self._data:
+                self._pending = SSEEvent("", line)
+                return self.flush()
             return SSEEvent("", line)
         return None
 
@@ -196,7 +211,8 @@ class LineSSEParser:
             self._event, self._data = "", []
             return evt
         self._event = ""
-        return None
+        pending, self._pending = self._pending, None
+        return pending
 
 
 def split_frames(chunk: bytes) -> list[bytes]:
