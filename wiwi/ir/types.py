@@ -7,6 +7,7 @@ docs/ARCHITECTURE.md §4.2.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -458,6 +459,8 @@ def thinking_budget_to_effort(budget: int) -> str:
     keeps its original boundaries for those collisions.
     """
     if isinstance(budget, bool) or not isinstance(budget, (int, float)):
+        return "none"
+    if not math.isfinite(budget):
         return "none"
     if budget <= 0:
         return "none"

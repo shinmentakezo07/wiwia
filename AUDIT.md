@@ -1821,6 +1821,24 @@ warning and are dropped.
 
 ## Wire codec review — confirmed findings (2026-11-05)
 
+### 587. Non-finite numeric parameters bypass IR validation
+
+**Severity:** 🟡 Medium (invalid sampling values reach upstream serialization;
+NaN/+Infinity thinking budgets silently enable maximum reasoning) ·
+**Status: fixed — round 199** (`tests/test_fix_round199.py`)
+
+**Where:** `wiwi/ir/translation.py:189` (`coerce_float`) and
+`wiwi/ir/types.py:435` (`thinking_budget_to_effort`).
+
+**Trigger:** `coerce_float` accepted NaN and infinities, allowing them into
+outbound provider JSON. The budget ladder mapped NaN and positive infinity to
+`xhigh`, silently enabling maximum reasoning for an invalid budget.
+
+**Fix:** reject non-finite floats in both helpers, preserving finite-number
+behavior and the existing safe degradation of an unusable budget to `none`.
+
+---
+
 ### 583. Responses `input_file.file_id` is silently discarded
 
 **Severity:** 🟠 High (a valid PDF/document attachment never reaches the model;

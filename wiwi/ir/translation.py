@@ -19,6 +19,7 @@ Two families of helper:
   codec a denylist), and both used bare ``{**a, **b}`` merges that raise when a
   layer is ``None``. These helpers make both operations total.
 """
+import math
 from typing import Any
 
 import structlog
@@ -200,7 +201,8 @@ def coerce_float(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        result = float(value)
+        return result if math.isfinite(result) else None
     return None
 
 
