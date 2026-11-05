@@ -320,8 +320,10 @@ export interface BuiltinProvider {
 
 // -- Cline OAuth -------------------------------------------------------------
 
-export interface ClineLoginUrlResponse {
+export interface ClineAutoConnectResponse {
   auth_url: string;
+  state: string;
+  provider: string;
 }
 
 export interface ClineConnectResponse {

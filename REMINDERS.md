@@ -100,11 +100,15 @@ All four were deliberately **kept** this round, so these test files need no edit
       It is implemented and tested (5 tests in `tests/test_admin_cline_oauth.py`), and the
       route is correct; it simply cannot complete end-to-end today because Cline's Google
       OAuth ignores the `callback_url` parameter, so the redirect never carries the `?code=`
-      back. Both Cline UIs therefore drive the paste-code flow deliberately
-      (`web/src/api/client.ts:432-435` documents this at the call site). Kept rather than
-      deleted because it needs no maintenance and becomes live the moment Cline honours
-      `callback_url` — at which point it is the better UX (no copy-paste). No UI is wired to
-      it. If Cline never fixes it, deleting is a one-commit change.
+      back. Kept rather than deleted because it needs no maintenance and becomes live the
+      moment Cline honours `callback_url` — at which point it is the better UX (no
+      copy-paste). **Wired 2026-11-05:** both Cline UIs now mint the login URL through it
+      (`clineAutoConnect` in `web/src/api/client.ts`; the provider-detail card and the
+      connect dialog open its `auth_url` in a new tab), so the day Cline honours
+      `callback_url` the existing button goes one-click with no further UI change. The
+      paste-code fallback remains the working path. `login-url` lost its last SPA caller;
+      its TS binding was removed. If Cline never fixes it, deleting the route is a
+      one-commit change.
 - [x] **31 unimported `web/src` modules** — **RESOLVED (verified round 85).** An import
       sweep over all 74 `web/src` `.ts`/`.tsx` files finds **0** modules whose basename is
       referenced by no other file: the abandoned `llmgateway.io` port has already been

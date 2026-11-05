@@ -236,9 +236,9 @@ Four things a backup deliberately does not do:
 | `/admin/cline/models` | GET | Models available to the connected Cline account. |
 | `/admin/cline/settings` | GET / PUT | Cline account settings. |
 | `/admin/cline/settings/default-models/{model_id}` | DELETE | Remove a default-model mapping. |
-| `/admin/cline/oauth/login-url` | POST | Get OAuth login URL. |
+| `/admin/cline/oauth/login-url` | POST | Get OAuth login URL. (No SPA caller — the console mints its URL via `auto-connect`; kept for external callers.) |
 | `/admin/cline/oauth/connect` | POST | Complete OAuth connect. |
-| `/admin/cline/oauth/auto-connect` | POST | Initiate the redirect-based connect. **Dormant:** Cline's Google OAuth ignores `callback_url`, so the redirect never returns a `?code=`; both Cline UIs use the paste-code flow (`login-url` + `connect`) instead. The route works and is tested; it becomes usable if Cline honours `callback_url`. |
+| `/admin/cline/oauth/auto-connect` | POST | Initiate the redirect-based connect; both Cline UIs open the returned `auth_url` in a new tab (the pending session's `callback_url` is wiwi's own `/cline/oauth/callback`). **Still dormant end-to-end:** Cline's Google OAuth ignores `callback_url`, so the redirect never returns a `?code=`; the paste-code flow (`connect`) is the working path until Cline honours it. The route works and is tested; it becomes usable if Cline honours `callback_url`. |
 | `/admin/cline/oauth/status` | GET | Connection/refresh state. |
 | `/admin/cline/oauth/refresh` | POST | Force token refresh. |
 | `/admin/cline/oauth/disconnect` | DELETE | Disconnect account. |

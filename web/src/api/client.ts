@@ -133,9 +133,9 @@ import type {
   AlertRule,
   AuditLogEntry,
   BuiltinProvider,
+  ClineAutoConnectResponse,
   ClineConnectResponse,
   ClineDisconnectResponse,
-  ClineLoginUrlResponse,
   ClineRefreshResponse,
   ClineStatusResponse,
   DeploymentInfo,
@@ -525,15 +525,21 @@ export const getPublicModels = () =>
   api<{ groups: PublicModelGroup[]; aliases: Record<string, string> }>(
     "/public/models",
   );
-// -- Cline OAuth (paste-code flow) -------------------------------------------
-// The backend also exposes POST /admin/cline/oauth/auto-connect, but Cline's
-// Google OAuth ignores callback_url (see pages/OAuthProviders.tsx), so every
-// UI drives the paste-code flow below and that route has no SPA caller.
-
-export const clineLoginUrl = (callbackUrl: string) =>
-  api<ClineLoginUrlResponse>("/admin/cline/oauth/login-url", {
+// -- Cline OAuth --------------------------------------------------------------
+// The connect UIs open the login page through the redirect pipeline:
+// POST /admin/cline/oauth/auto-connect mints an auth_url whose callback_url is
+// wiwi's own /cline/oauth/callback, guarded by a single-use state token. If
+// Cline honours callback_url, the browser returns to `returnPath` with
+// ?cline_connected=1 (banner hooks on the accounts and provider-detail pages
+// read it). Cline's Google OAuth currently ignores callback_url and lands on
+// app.cline.bot/auth/callback?code=… instead — the paste-code fallback in the
+// same dialogs still completes the connect, which is why it is always shown.
+// POST /admin/cline/oauth/login-url (plain link, no pending session) remains
+// backend-side but has no SPA caller.
+export const clineAutoConnect = (provider: string, returnPath: string) =>
+  api<ClineAutoConnectResponse>("/admin/cline/oauth/auto-connect", {
     method: "POST",
-    body: JSON.stringify({ callback_url: callbackUrl }),
+    body: JSON.stringify({ provider, return_path: returnPath }),
   });
 
 export const clineConnect = (provider: string, code: string) =>

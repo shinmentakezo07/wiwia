@@ -1,25 +1,23 @@
 // Cline OAuth — the connect flow, status display, and callback banner shared by
 // the console accounts page and the provider-detail page.
 //
-// WHY THE CONNECT FLOW IS A GUIDED MANUAL DIALOG
-// ---------------------------------------------
-// This file deliberately does NOT offer a one-click "connect and done" path,
-// because none exists. `cline_oauth.build_auth_url()`
-// (wiwi/providers/cline_oauth.py:43) sends `callback_url` / `redirect_uri` to
-// Cline, but Cline's Google OAuth ignores both and lands the browser on its own
-// origin at `https://app.cline.bot/auth/callback?code=…`. The gateway's
-// `GET /cline/oauth/callback` handler (wiwi/server/app.py:5610) therefore never
-// fires in practice. The whole redirect pipeline — `POST
-// /admin/cline/oauth/auto-connect`, its single-use state token, that handler,
-// and the banner hook below — is correct but dormant, kept alive on purpose so
-// it starts working the day Cline honours the parameter (REMINDERS.md).
+// HOW THE CONNECT FLOW WORKS
+// --------------------------
+// The login URL is minted by POST /admin/cline/oauth/auto-connect: it builds an
+// auth_url whose callback_url is wiwi's own /cline/oauth/callback, guarded by a
+// single-use state token. If Cline honours callback_url, the browser returns to
+// this console on its own and the account connects by itself — the banner hook
+// at the bottom of this file surfaces ?cline_connected / ?cline_error. Cline's
+// Google OAuth currently ignores both callback_url and redirect_uri and lands
+// the browser on its own origin at `https://app.cline.bot/auth/callback?code=…`,
+// so the return leg is dormant in practice until Cline honours the parameter
+// (REMINDERS.md).
 //
-// So connecting genuinely means: open Cline's login, sign in, copy the callback
-// URL out of the address bar, paste it back. The old UI described this honestly
-// in body copy while presenting a button labelled "Connect with Cline" that read
-// as one click, opened a popup with no fallback if the popup was blocked, and
-// offered no way to copy the URL. This dialog makes the manual step the
-// explicit, guided thing it actually is.
+// Connecting genuinely means: open Cline's login, sign in, copy the callback
+// URL out of the address bar, paste it back. This dialog makes that manual step
+// the explicit, guided thing it actually is, while still routing the login link
+// through the redirect pipeline — the day Cline honours callback_url, the same
+// button goes one-click with no UI change.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
@@ -33,9 +31,9 @@ import {
   Unlink,
 } from "lucide-react";
 import {
+  clineAutoConnect,
   clineConnect,
   clineDisconnect,
-  clineLoginUrl,
   clineRefresh,
   clineStatus,
 } from "@/api/client";
@@ -213,6 +211,14 @@ function PasteReadout(props: { raw: string }) {
   );
 }
 
+// return_path must live under /console/ (the backend rejects anything else)
+// and land on a page that renders the callback banner — the accounts page and
+// the provider-detail page both do.
+function consoleReturnPath(): string {
+  const p = window.location.pathname;
+  return p.startsWith("/console/") ? p : "/console/oauth";
+}
+
 // -- connect dialog -------------------------------------------------------------
 
 const STEP_TITLES = ["Open Cline login", "Copy the callback URL", "Paste to connect"] as const;
@@ -234,16 +240,15 @@ export function ClineConnectDialog(props: {
   const [confirmedCopy, setConfirmedCopy] = useState(false);
   const [paste, setPaste] = useState("");
   const [connectError, setConnectError] = useState<string | null>(null);
+  // A mutation, not a query: each call mints a fresh pending session and URL,
+  // so it must not be served from cache across dialog openings.
+  const loginUrl = useMutation({
+    mutationFn: () => clineAutoConnect(props.provider, consoleReturnPath()),
+  });
+  const { mutate: requestLoginUrl } = loginUrl;
 
   const bodyRefs = useRef<(HTMLDivElement | null)[]>([]);
   const openedRef = useRef(false);
-
-  // A mutation, not a query: each call mints a fresh login URL, so it must not
-  // be served from cache across dialog openings.
-  const loginUrl = useMutation({
-    mutationFn: (callbackUrl: string) => clineLoginUrl(callbackUrl),
-  });
-  const { mutate: requestLoginUrl } = loginUrl;
 
   useEffect(() => {
     if (!props.open) {
@@ -258,7 +263,7 @@ export function ClineConnectDialog(props: {
     setConfirmedCopy(false);
     setPaste("");
     setConnectError(null);
-    requestLoginUrl(`${window.location.origin}/console/oauth`, {
+    requestLoginUrl(undefined, {
       onSuccess: (d) => {
         setAuthUrl(d.auth_url);
         setExpanded(2);
@@ -310,7 +315,7 @@ export function ClineConnectDialog(props: {
       size="3xl"
       contained
       title={`Connect ${props.provider}`}
-      subtitle="Cline's login does not return to this console, so the callback has to come back by hand."
+      subtitle="If Cline returns to this console, the account connects itself — otherwise paste the callback URL back by hand."
       footer={
         <>
           <Button variant="ghost" className="min-h-11" onClick={props.onClose} disabled={busy}>
@@ -446,7 +451,7 @@ export function ClineConnectDialog(props: {
                             variant="ghost"
                             className="min-h-11"
                             onClick={() =>
-                              requestLoginUrl(`${window.location.origin}/console/oauth`, {
+                              requestLoginUrl(undefined, {
                                 onSuccess: (d) => setAuthUrl(d.auth_url),
                                 onError: (e) => setFetchError(e.message),
                               })

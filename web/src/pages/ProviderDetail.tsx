@@ -9,9 +9,9 @@ import { ArrowLeft, Boxes, Briefcase, CheckCircle2, ChevronDown, ChevronUp, Clou
 import type { LucideIcon } from "lucide-react";
 import {
   addDeployment,
+  clineAutoConnect,
   clineConnect,
   clineDisconnect,
-  clineLoginUrl,
   clineRefresh,
   clineStatus,
   deleteProvider,
@@ -1132,13 +1132,16 @@ function ClineOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
 
   const returnPath = `/console/providers/${encodeURIComponent(props.p.name)}`;
 
-  // Connect: open Cline's login page. After login, Cline shows a callback
-  // page with ?code=… — the user copies that URL and pastes it below.
-  // (Cline's Google OAuth ignores our callback_url and lands on its own
-  // /auth/callback page, so we can't auto-redirect; the paste-code flow
-  // accepts the full callback URL and handles truncated Google OAuth codes.)
+  // Connect: open Cline's login page in a new tab through the redirect
+  // pipeline — wiwi's own /cline/oauth/callback is the callback_url (guarded by
+  // a single-use state token minted by /admin/cline/oauth/auto-connect). If
+  // Cline honours callback_url, the new tab returns here with
+  // ?cline_connected=1 and the banner above connects the account by itself.
+  // Cline's Google OAuth currently ignores callback_url and lands on its own
+  // /auth/callback page, so the paste-code fallback below remains the reliable
+  // path (it accepts the full callback URL and handles truncated codes).
   const autoConnect = useMutation({
-    mutationFn: () => clineLoginUrl(`${window.location.origin}${returnPath}`),
+    mutationFn: () => clineAutoConnect(props.p.name, returnPath),
     onSuccess: (d) => {
       setLocalError(null);
       setShowManual(true);
