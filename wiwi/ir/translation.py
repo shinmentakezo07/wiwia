@@ -159,16 +159,25 @@ def carry_extras(source: Any, known: frozenset[str]) -> dict[str, Any]:
     with mixed key types (a hand-built ``Request.extras``, an internal caller)
     raised ``TypeError`` before the log call even ran, violating the totality
     contract above (AUDIT #564). The sort key makes the debug line safe without
-    changing the returned mapping.
+    changing the returned mapping. ``known`` is guarded the same way (#593).
     """
     if not isinstance(source, dict):
         return {}
-    extras = {k: v for k, v in source.items() if k not in known}
+    # ``known`` is typed ``frozenset[str]`` but this helper is exported and
+    # accepts what a caller has: a non-container (None, an int) raised
+    # ``TypeError`` from ``k not in known``, breaking the totality contract
+    # above exactly as the unsorted keys did (AUDIT #593). Both live callers
+    # pass a module-level literal set, so this closes the class for the next
+    # one. An unusable denylist drops nothing — carrying every key is the
+    # conservative reading, since losing an unmodelled body key is the defect
+    # this helper exists to prevent.
+    usable = known if isinstance(known, (frozenset, set, dict, list, tuple)) else ()
+    extras = {k: v for k, v in source.items() if k not in usable}
     if extras:
         log.debug(
             "extras_carried",
             carried=sorted(extras, key=str),
-            known_count=len(known),
+            known_count=len(usable),
         )
     return extras
 

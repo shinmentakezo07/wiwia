@@ -315,12 +315,24 @@ class GenParams:
         effort-before-mode while the code checked ``disabled`` first; the two
         are reconciled here in favour of the code, because "off" must not be
         re-enabled by a separate effort knob (round 178).
+
+        Total by construction, like ``effort_to_thinking_budget`` below (AUDIT
+        #591): both effort fields are typed ``str | None`` but ``GenParams`` is a
+        plain dataclass, and this accessor returned them verbatim. A list/dict
+        then reached ``_NIM_EFFORT_BUDGETS.get(effort, ...)`` inside
+        ``nim_adapter.encode_request`` and raised ``TypeError: unhashable type``
+        — a 500 blaming a healthy upstream, the same class #351/#387 closed for
+        the sibling helpers. Every live codec guards effort at the boundary
+        today, so the crash was latent; the guard belongs here, which closes the
+        class for every present and future caller. A non-``str`` is treated as
+        absent, so the next knob in the precedence above still resolves rather
+        than the whole reasoning intent being discarded.
         """
-        if self.reasoning_effort:
+        if isinstance(self.reasoning_effort, str) and self.reasoning_effort:
             return self.reasoning_effort
         if self.thinking_type == "disabled":
             return "none"
-        if self.effort:
+        if isinstance(self.effort, str) and self.effort:
             return self.effort
         if self.thinking_budget is not None:
             return thinking_budget_to_effort(self.thinking_budget)
@@ -353,8 +365,18 @@ class GenParams:
         raw non-numeric raised ``TypeError`` out of ``encode_request`` (AUDIT
         #388). None is the value the callers already handle as "no resolvable
         budget — leave thinking OFF", so a malformed budget degrades the same
-        way an unknown effort does, instead of 500ing. A float is preserved:
-        the callers only compare and add, so ``8000.0`` has always been usable.
+        way an unknown effort does, instead of 500ing.
+
+        An INTEGRAL float passes (``coerce_int`` widens ``8000.0`` to ``8000``);
+        a FRACTIONAL one does not. This docstring previously claimed any float
+        was preserved, which stopped being true when #389 routed the field
+        through ``coerce_int`` — corrected rather than re-widened, because a
+        token budget is an integer on every wire and round 124 pins the
+        integral case (AUDIT #592). Note the consequence: a fractional budget
+        resolves to None, and a caller that also set ``thinking_type=enabled``
+        then falls back to the default level's budget rather than to no
+        thinking. No live codec can produce one (the Anthropic decoder
+        ``coerce_int``s ``budget_tokens`` first).
         """
         # Explicit off-switches outrank a direct budget (see docstring).
         if self.thinking_type == "disabled" or self.reasoning_effort == "none":
@@ -362,9 +384,12 @@ class GenParams:
         budget = coerce_int(self.thinking_budget)
         if budget is not None:
             return budget
-        if self.reasoning_effort:
+        # str-guarded like the sibling accessor (#591). The map below is itself
+        # total, so this is about precedence, not a crash: a junk effort is
+        # absent, and the next knob resolves instead of returning None early.
+        if isinstance(self.reasoning_effort, str) and self.reasoning_effort:
             return effort_to_thinking_budget(self.reasoning_effort)
-        if self.effort:
+        if isinstance(self.effort, str) and self.effort:
             return effort_to_thinking_budget(self.effort)
         # thinking_type "enabled" with no other knob: the caller asked for
         # thinking but gave no budget. The default level's budget, not None —
