@@ -21,6 +21,7 @@ from wiwi.ir import builtin_tools as bt
 from wiwi.ir import translation as tr
 from wiwi.ir import types as ir
 from wiwi.streaming import deltas as dl
+from wiwi.streaming.machine import explain_encoder
 from wiwi.streaming.partial_json import _repair_truncated_json
 from wiwi.streaming.sse import sse_frame
 from wiwi.wire.openai_chat import DialectError, _stop_list, _str_or_empty
@@ -1094,6 +1095,13 @@ class ResponsesStreamEncoder:
         # output_item.done at the same output_index — Codex CLI then counts a
         # phantom tool call.
         return self._close_tool(self._open_tool)
+
+    def explain(self) -> str:
+        """Stable one-line state summary (see streaming.machine.explain_encoder)."""
+        return explain_encoder(
+            self._item_open, set(self._tools), len(self._deferred),
+            self._deferred_chars, len(self._tools),
+            self._usage is not None)
 
     def feed(self, d: dl.IRStreamDelta) -> bytes | None:
         if isinstance(d, dl.StreamStart):

@@ -51,6 +51,41 @@ help from the gateway and the encoders' buffering:
 
 All delta variants are `@dataclass(frozen=True)` — adapters hold mutable per-stream decode state on the adapter instance, never on deltas.
 
+### 1.1 The contract is executable
+
+Because "adapters guarantee, encoders never defend" means a violation is
+invisible rather than loud, the contract is also implemented as a state machine
+in `wiwi/streaming/machine.py`:
+
+- **`DeltaStreamState`** — a pure observer. `observe(delta)` advances the phase
+  (`START → BODY → FINISHED → DONE`, with `FAILED` reachable from anywhere) and
+  returns the **first** problem or `None`. It never raises, so it is safe on a
+  live path.
+- **`validate_stream(deltas)`** — the test-facing form; returns the first
+  violation or `None`. Both terminal outcomes are accepted (`DONE` from
+  `Finish`+`StreamEnd`, `FAILED` from `StreamError` with no `StreamEnd`).
+
+The live stream loop in `server/app.py` feeds every delta through a
+`DeltaStreamState` and logs `stream_contract_violation` on a violation. That is
+strictly diagnostic — it cannot change, drop or fail a response.
+
+When writing an adapter test from a recorded upstream body, assert
+`validate_stream(...) is None` rather than hand-checking ordering: the machine
+knows the sibling and repeated-usage cases above, which a hand-written assertion
+usually forgets.
+
+### 1.2 Reading an encoder's state
+
+All four stream encoders expose `explain()`. They hold the same conceptual state
+under different private names, so this is the stable way to see it from a log or
+a test:
+
+```python
+>>> ChatStreamEncoder("m", "r").explain()
+open=none tool_calls=2 open_tools=[0, 1] deferred=1item/4ch usage=none
+```
+
+
 ---
 
 ## 2. The pump (`wiwi/core/gateway.py`)

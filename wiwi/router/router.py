@@ -30,6 +30,24 @@ from wiwi.server.stats import percentile
 log = structlog.get_logger("wiwi.router")
 
 
+# The key lifecycle, declared once so every transition is visible in one place
+# instead of inferred from six call sites. A key is either serving traffic
+# (ACTIVE/PROBATION), waiting out a window (COOLING), retired until an operator
+# or the healer acts (INVALID with no window), or switched off by config.
+#
+#   active           --mark_cooling-->      cooling
+#   active           --mark_invalid(t)-->   invalid  (timed: revives itself)
+#   active           --mark_invalid(None)--> invalid (terminal: operator/healer)
+#   cooling/invalid  --recover-->           active   (timed only)
+#   any              --recover(force)-->    active   (admin reset)
+#   cooling/invalid  --mark_recovered-->    probation --success--> active
+#
+# Every transition goes through these methods; a direct ".status =" write
+# bypasses the streak and WRR bookkeeping that makes the transition stick -
+# which is exactly how AUDIT #199 happened (see recover()).
+KEY_STATUSES = frozenset({"active", "cooling", "invalid", "disabled", "probation"})
+
+
 @dataclass
 class ProviderKey:
     label: str
@@ -127,6 +145,27 @@ class ProviderKey:
         self.cooldown_until = 0.0
         self.err_count = 0
         self.current_weight = 0.0
+    def explain(self) -> str:
+        """One-line human/agent-readable state, for logs and /admin responses.
+
+        The key machine used to be legible only by reading four fields and
+        knowing how they interact (a terminal INVALID and a timed INVALID are
+        both status="invalid"; only cooldown_until tells them apart). This
+        states the derived meaning so a log line or an operator does not have
+        to re-derive it.
+        """
+        if not self.enabled:
+            return f"{self.label}: disabled (switch off, not a failure)"
+        if self.status == "cooling":
+            return f"{self.label}: cooling for {self.cooldown_until - time.monotonic():.0f}s more"
+        if self.status == "invalid":
+            if self.cooldown_until > 0.0:
+                return (f"{self.label}: retired, revives in "
+                        f"{self.cooldown_until - time.monotonic():.0f}s")
+            return f"{self.label}: retired until an operator or the healer resets it"
+        if self.status == "probation":
+            return f"{self.label}: probation (reduced weight until it graduates)"
+        return f"{self.label}: active"
 
 @dataclass
 class ProviderAccount:

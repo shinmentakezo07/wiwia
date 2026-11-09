@@ -218,8 +218,9 @@ class WorkBuddyAutoRefresh:
             return
         secret = auth.to_secret()
         key.secret = secret
-        key.status = "active"
-        key.cooldown_until = 0.0
+        # A refreshed token is a reset: reuse the transition that also clears
+        # the failure streak and WRR deficit (AUDIT #199).
+        key.recover(force=True)
         if self._state.config_store is not None:
             try:
                 await self._state.config_store.update_key_secret(

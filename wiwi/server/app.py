@@ -312,6 +312,7 @@ from wiwi.server.errors import render as render_error
 from wiwi.server.errors import validation_message as _validation_message
 from wiwi.server.routers import admin_keys as admin_keys_router
 from wiwi.server.services.key_admin import KeyAdminService
+from wiwi.streaming.machine import DeltaStreamState
 from wiwi.streaming.sse import split_frames
 
 
@@ -3242,6 +3243,24 @@ def create_app(config: WiwiConfig) -> FastAPI:
         # The ordering-faithful copy for the Responses store (round 195):
         # allocated unconditionally but only appended when a store is in play.
         stream_deltas: list[Any] = []
+        # The delta-stream contract (streaming/machine.py), observed on the
+        # live path. Purely diagnostic: observe() never raises and the result
+        # only ever becomes a log line, so a contract violation can no longer be
+        # invisible without also being able to break a response.
+        stream_state = DeltaStreamState()
+        _contract_log = structlog.get_logger("wiwi.stream")
+        watched_deltas = 0
+
+        def _watch_delta(delta: Any) -> None:
+            nonlocal watched_deltas
+            problem = stream_state.observe(delta)
+            if problem is not None:
+                _contract_log.warning(
+                    "stream_contract_violation",
+                    request_id=ctx.request_id,
+                    detail=problem, after=watched_deltas,
+                    state=stream_state.explain())
+            watched_deltas += 1
 
         async def _teardown_tail() -> None:
             """Bookkeeping that must complete even when the peer disconnects.
@@ -3388,6 +3407,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     _capture_delta(first, ctx, stream_text, stream_thinking,
                                    stream_tools,
                                    stream_deltas if response_store is not None else None)
+                if not isinstance(first, bytes):
+                    _watch_delta(first)
                 # A raw ``bytes`` item is a pre-framed SSE keep-alive from the
                 # gateway pump, not an IR delta: the encoders' ``feed``
                 # isinstance-checks on delta classes only, so passing it there
@@ -3411,6 +3432,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     _capture_delta(d, ctx, stream_text, stream_thinking,
                                    stream_tools,
                                    stream_deltas if response_store is not None else None)
+                if not isinstance(d, bytes):
+                    _watch_delta(d)
                 # Same keep-alive passthrough as the ``first`` block above.
                 chunk = d if isinstance(d, bytes) else encoder.feed(d)
                 if chunk:
@@ -7112,8 +7135,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
             # stay dead until a human re-authenticated it.
             label = existing.label
             existing.secret = secret
-            existing.status = "active"
-            existing.cooldown_until = 0.0
+            # Route the reset through ProviderKey.recover(force=True) rather than
+            # hand-setting the two fields: the hand-rolled form left err_count at
+            # its retirement value, so the next non-200 re-retired the key through
+            # on_result (AUDIT #199). A fresh OAuth grant is exactly an operator
+            # reset, so it earns the same streak and WRR reset.
+            existing.recover(force=True)
             try:
                 if state.config_store:
                     await state.config_store.update_key_secret(
@@ -7722,8 +7749,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 keys=[ProviderKey(label=label, secret=secret)])
         elif existing_key is not None:
             existing_key.secret = secret
-            existing_key.status = "active"
-            existing_key.cooldown_until = 0.0
+            # See the Hermes path above: a fresh grant is an operator reset.
+            existing_key.recover(force=True)
         else:
             acct.keys.append(ProviderKey(label=label, secret=secret))
         await state.logs.log_audit(

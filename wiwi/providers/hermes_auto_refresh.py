@@ -262,8 +262,8 @@ class HermesAutoRefresh:
             if k.label != label:
                 continue
             k.secret = secret
-            k.status = "active"
-            k.cooldown_until = 0.0
+            # See workbuddy_auto_refresh: a refreshed token is a reset.
+            k.recover(force=True)
             try:
                 await self._state.config_store.update_key_secret(
                     provider, label, secret,

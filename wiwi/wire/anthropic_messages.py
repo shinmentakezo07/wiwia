@@ -14,6 +14,7 @@ from wiwi.ir import builtin_tools as bt
 from wiwi.ir import translation as tr
 from wiwi.ir import types as ir
 from wiwi.streaming import deltas as dl
+from wiwi.streaming.machine import explain_encoder
 from wiwi.streaming.sse import sse_frame
 from wiwi.wire.openai_chat import DialectError
 
@@ -1283,6 +1284,13 @@ class AnthropicStreamEncoder:
                           "message": d.message}}))
             return b"".join(out)
         return None
+
+    def explain(self) -> str:
+        """Stable one-line state summary (see streaming.machine.explain_encoder)."""
+        return explain_encoder(
+            self._open_block, set(self._tool_blocks), len(self._deferred),
+            self._deferred_chars, len(self._tool_blocks),
+            self._usage is not None)
 
     def final_frame(self) -> bytes:
         # A legal stream always closes the currently open content block before

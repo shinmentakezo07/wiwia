@@ -21,6 +21,7 @@ from wiwi.core.context import RequestContext
 from wiwi.ir import translation as tr
 from wiwi.ir import types as ir
 from wiwi.streaming import deltas as dl
+from wiwi.streaming.machine import explain_encoder
 from wiwi.streaming.sse import sse_frame
 from wiwi.wire.openai_chat import DialectError, _stop_list
 
@@ -207,6 +208,14 @@ class CompletionStreamEncoder:
             err = {"error": {"message": d.message, "type": etype, "code": etype}}
             return sse_frame("", orjson.dumps(err).decode())
         return None  # ThinkingDelta, ServerToolResultDelta, StreamEnd: nothing to send
+
+    def explain(self) -> str:
+        """Stable one-line state summary.
+
+        This surface has no tool protocol, so the summary is correspondingly
+        empty - the shape is shared so a caller can log any encoder uniformly.
+        """
+        return explain_encoder(None, (), 0, 0, 0, self._usage is not None)
 
     def final_frame(self, usage: dl.UsageFinal | None = None,
                     stop: str | None = None) -> bytes:
