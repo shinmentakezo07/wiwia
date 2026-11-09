@@ -12,7 +12,14 @@ from wiwi.core.context import RequestContext
 from wiwi.ir import translation as tr
 from wiwi.ir import types as ir
 from wiwi.streaming import deltas as dl
+from wiwi.streaming.machine import explain_encoder
 from wiwi.streaming.sse import sse_frame
+
+# Cap on prose buffered while a tool call is open (AUDIT #594). Same bound and
+# same overflow policy as the sibling encoders: a model that narrates around a
+# call must not grow this without limit, and the newest content is the one
+# worth keeping.
+MAX_DEFERRED_CHARS = 256 * 1024
 
 
 class DialectError(ValueError):
@@ -580,6 +587,19 @@ class ChatStreamEncoder:
         # incidental fact that no Open registered the index (they are the same
         # condition as a contract-illegal ArgsDelta today; see the feed arm).
         self._suppressed_indices: set[int] = set()
+        # Real (client-visible) calls that are OPEN. Parallel siblings open
+        # together and may close out of order, so one "current tool" field is
+        # not enough: the set is what decides whether prose may be emitted
+        # (AUDIT #594). Builtins never enter it — their Open was suppressed, so
+        # no client-side call exists to hold text back.
+        self._open_calls: set[int] = set()
+        # Prose (text/thinking) that arrived while a sibling call was still
+        # open, held as (kind, text) and emitted once the LAST one closes. Both
+        # sibling encoders do this (Anthropic since #156, Responses since #367);
+        # this surface was the one that emitted text between two tool_calls
+        # fragments, which a client reads as a call that already returned.
+        self._deferred: list[tuple[str, str]] = []
+        self._deferred_chars = 0
         # Chunk skeleton built once: id/object/created/model never change for
         # the life of the stream, so only `choices[0]` is mutated per delta
         # instead of re-allocating the whole chunk dict on every token.
@@ -601,6 +621,44 @@ class ChatStreamEncoder:
         self._choice.pop("logprobs", None)
         return sse_frame("", orjson.dumps(self._chunk).decode())
 
+    def _defer(self, kind: str, text: str) -> None:
+        """Buffer prose that arrived while a tool call was open.
+
+        Capped like the sibling encoders' buffers: evict from the front so the
+        newest content survives, trimming the boundary entry from its head. A
+        provider that streams a very long preamble around a tool call must not
+        be able to grow this without limit (the #219 class).
+        """
+        self._deferred.append((kind, text))
+        total = self._deferred_chars + len(text)
+        while total > MAX_DEFERRED_CHARS and self._deferred:
+            k, t = self._deferred.pop(0)
+            total -= len(t)
+            if total < MAX_DEFERRED_CHARS:
+                keep = MAX_DEFERRED_CHARS - total
+                if keep > 0 and t:
+                    self._deferred.insert(0, (k, t[-keep:]))
+                    total += keep
+                break
+        self._deferred_chars = total
+
+    def _flush_deferred(self) -> bytes:
+        """Emit the buffered prose, oldest first, in its original order.
+
+        One frame per entry keeps the chunk granularity the client would have
+        seen without a concurrent tool call, and pairs each kind with the delta
+        key that carries it.
+        """
+        if not self._deferred:
+            return b""
+        out = []
+        for kind, text in self._deferred:
+            key = "reasoning_content" if kind == "thinking" else "content"
+            out.append(self._shell({key: text}))
+        self._deferred.clear()
+        self._deferred_chars = 0
+        return b"".join(out)
+
     def feed(self, d: dl.IRStreamDelta) -> bytes | None:
         if isinstance(d, dl.StreamStart):
             return self._shell({"role": "assistant", "content": ""})
@@ -617,10 +675,16 @@ class ChatStreamEncoder:
             self._chunk.pop("usage", None)
             return sse_frame("", orjson.dumps(self._chunk).decode())
         if isinstance(d, dl.TextDelta):
+            if self._open_calls:
+                self._defer("text", d.text)
+                return None
             return self._shell({"content": d.text})
         if isinstance(d, dl.ThinkingDelta):
             if not d.text:
                 return None  # signature-only delta: no content to emit
+            if self._open_calls:
+                self._defer("thinking", d.text)
+                return None
             return self._shell({"reasoning_content": d.text})
         if isinstance(d, dl.ToolCallOpen):
             # A1: provider-hosted builtin calls (web_search) are suppressed —
@@ -640,6 +704,7 @@ class ChatStreamEncoder:
                 self._suppressed_indices.add(d.index)
                 return None
             self._tool_indices.add(d.index)
+            self._open_calls.add(d.index)
             # `id` must be a string; some providers return integer ids.
             tool_id = d.id if isinstance(d.id, str) else str(d.id)
             self._saw_tool_calls = True
@@ -657,6 +722,12 @@ class ChatStreamEncoder:
                 "index": d.index, "function": {"arguments": d.args_fragment}}]})
         if isinstance(d, dl.ToolCallClose):
             self._suppressed_indices.discard(d.index)
+            if d.index in self._open_calls:
+                self._open_calls.discard(d.index)
+                # Deferred prose is safe only once NO sibling is still open:
+                # emitting it between two calls leaves one call half-delivered.
+                if not self._open_calls:
+                    return self._flush_deferred()
             return None
         if isinstance(d, dl.UsageFinal):
             self._usage = d
@@ -705,9 +776,28 @@ class ChatStreamEncoder:
             return sse_frame("", orjson.dumps(err).decode())
         return None
 
+    def explain(self) -> str:
+        """Stable one-line state summary (see streaming.machine.explain_encoder).
+
+        Tests and logs can read this instead of the private attributes, so a
+        rename of _open_calls/_deferred cannot break an unrelated assertion.
+        """
+        return explain_encoder(
+            None, self._open_calls, len(self._deferred),
+            self._deferred_chars, len(self._tool_indices),
+            self._usage is not None)
+
     def final_frame(self, usage: dl.UsageFinal | None = None,
                     stop: str | None = None) -> bytes:
         u = usage or getattr(self, "_usage", None) or dl.UsageFinal()
+        # Prose still buffered here means the stream ended while a tool call was
+        # open (an adapter may finish the turn without ever sending the last
+        # Close). `final_frame` is the guaranteed drain point — the Anthropic
+        # encoder flushes its deferred buffer here too — so emit the buffer
+        # BEFORE the finish chunk rather than losing the model's own words.
+        # Open calls are closed implicitly by the turn ending, so the buffer is
+        # safe to emit now (AUDIT #594).
+        pending = self._flush_deferred()
         stop = stop or getattr(self, "_stop", "stop")
         # Authoritative tool-turn guard. `stop` may be supplied by the caller
         # (a failover/resume path rebuilds the frame from state that never
@@ -726,10 +816,12 @@ class ChatStreamEncoder:
         # The matched stop sequence (sync twin: AUDIT #497). Meaningful only
         # alongside the stop finish it describes.
         stop_seq = self._stop_seq if fr == "stop" else None
-        out = self._shell({}, finish=fr)
+        out = pending + self._shell({}, finish=fr)
         if stop_seq:
+            # Re-base onto `out`: a plain reassignment silently dropped the
+            # buffered prose emitted just above.
             self._choice["stop_sequence"] = stop_seq
-            out = sse_frame("", orjson.dumps(self._chunk).decode())
+            out += sse_frame("", orjson.dumps(self._chunk).decode())
         if self._include_usage:
             # OpenAI semantics: usage arrives in a final chunk carrying an
             # EMPTY choices array (after the finish_reason chunk), not in the
