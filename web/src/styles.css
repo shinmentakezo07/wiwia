@@ -352,6 +352,105 @@ body {
   background: var(--admin-surface);
 }
 
+/* Chart cards: an inner scroll container must not be clipped by the card
+   itself, because a Recharts hover popout is positioned outside the plot. */
+.admin-card-clip-x {
+  overflow: visible;
+}
+
+/* Density-inverted data table — the leaderboard. A service ranking has no
+   grid: rows are separated by hairlines, the rank is a fixed rail, and the
+   magnitude lives in a bar behind the name rather than in a column, so the
+   eye reads ordering in one pass. Rows are links, so they keep a 44px floor
+   on touch and a visible focus ring. */
+.admin-lb {
+  width: 100%;
+  border-collapse: collapse;
+}
+.admin-lb th {
+  padding: 9px 16px;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--admin-text-dim);
+  text-align: right;
+  white-space: nowrap;
+}
+.admin-lb th:first-child {
+  padding-left: 12px;
+  text-align: left;
+}
+.admin-lb td {
+  padding: 10px 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.035);
+  font-size: 12.5px;
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.admin-lb td:first-child {
+  padding-left: 12px;
+  padding-right: 4px;
+  text-align: left;
+}
+.admin-lb-body tr {
+  transition: background-color 0.15s ease;
+}
+.admin-lb-body tr:hover {
+  background: rgba(255, 255, 255, 0.018);
+}
+.admin-lb-body tr:focus-within {
+  background: rgba(59, 130, 246, 0.04);
+}
+.admin-lb-link {
+  display: flex;
+  min-height: 44px;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+}
+.admin-lb-link:focus-visible {
+  outline: none;
+  border-radius: 6px;
+  box-shadow:
+    0 0 0 2px var(--admin-surface),
+    0 0 0 4px rgba(59, 130, 246, 0.55);
+}
+/* Magnitude bar: a hairline track with a gradient fill, sized by share. */
+.admin-lb-bar {
+  position: relative;
+  height: 3px;
+  width: 100%;
+  min-width: 48px;
+  max-width: 160px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+}
+.admin-lb-bar > span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(59, 130, 246, 0.85), rgba(168, 85, 247, 0.75));
+  transition: width 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  .admin-lb-bar > span {
+    transition: none;
+  }
+}
+
+/* Shared press feedback: 1px of give on pointer-down. `translate` (not
+   `transform`) so it cannot overwrite a caller's transform, and only for a
+   mouse/pen pointer — on touch the press state reads as the scroll-start. */
+@media (prefers-reduced-motion: no-preference) and (pointer: fine) {
+  .admin-btn:active:not(:disabled) {
+    translate: 0 0.5px;
+  }
+}
+
 /* Log tables (request + proxy logs). Their rows carry far more columns than a
    phone can show, so the page hides the low-priority ones below a breakpoint
    and the cells give their gutters back: 15 columns × 40px of default padding
@@ -1188,63 +1287,118 @@ select.admin-input option {
 }
 }
 
-/* -- docs page: reference manual in the site's hero language ---------------
-   A public documentation page, not a console screen. The masthead is a
-   full-bleed band on the page background — the same beam backdrop, gradient
-   headline and CTA treatment the landing page uses — and the body is a
-   reference manual: a sticky rail that tracks the reader, hairline-separated
-   sections, tabbed code samples, and a searchable endpoint list. All tokens
-   come from the shared admin design system (--admin-*). */
+/* ── docs page: the wire reference ───────────────────────────────────────
+   A public reference manual, not a console screen and not a marketing page.
+   The composition is typographic: a masthead that states the thesis as a wire
+   strip (inbound surfaces → IR → provider types), a rail that tracks the
+   reader on desktop and becomes a sticky chip bar on narrow viewports, and
+   eight numbered sections separated by hairlines. Every colour comes from the
+   shared admin design system (--admin-*), so the page belongs to the site
+   rather than importing a second look. */
 
-.docs-grid {
-  display: grid;
-  grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
-  gap: clamp(1.5rem, 4vw, 3.5rem);
-  align-items: start;
-}
-.docs-grid > * {
-  min-width: 0;
-}
-
-.docs-mobile-jump {
+.docs-page {
+  --docs-hair: rgba(255, 255, 255, 0.07);
+  --docs-hair-2: rgba(255, 255, 255, 0.13);
+  --docs-sky: #93c5fd;
+  --docs-violet: #a78bfa;
+  --docs-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
   position: relative;
-  z-index: 5;
 }
 
-.docs-section-select {
-  font-family: inherit;
+/* Reading-progress hairline, pinned to the very top of the viewport. */
+.docs-progress {
+  position: fixed;
+  top: 0;
+  right: 0;
+  left: 0;
+  z-index: 60;
+  height: 2px;
+  pointer-events: none;
+}
+.docs-progress-fill {
+  height: 100%;
+  width: 100%;
+  transform-origin: left;
+  background: linear-gradient(90deg, #3b82f6, #8b5cf6 55%, #d946ef);
+  transition: transform 0.12s linear;
 }
 
-/* ── masthead ────────────────────────────────────────────────────────────
-   Full-bleed and borderless, standing on the page background rather than
-   floating in a card. The ambient effects are the site's own: the animated
-   beam backdrop and the panning grid from the landing hero. */
+/* ── masthead ────────────────────────────────────────────────────────────── */
 
 .docs-masthead {
   position: relative;
   isolation: isolate;
   overflow: hidden;
-  background: var(--admin-bg);
+  /* Full-bleed: escape the layout's centred, padded wrapper. */
+  width: 100vw;
+  max-width: 100vw;
+  margin-inline: calc(50% - 50vw);
+  padding: clamp(2.25rem, 6vw, 4.5rem) 0 clamp(1.75rem, 3.5vw, 2.75rem);
+  border-bottom: 1px solid var(--docs-hair);
+  background:
+    radial-gradient(48rem 20rem at 12% -12%, rgba(59, 130, 246, 0.1), transparent 72%),
+    radial-gradient(42rem 18rem at 92% -6%, rgba(124, 58, 237, 0.11), transparent 72%),
+    var(--admin-bg);
+}
+.docs-masthead-inner {
+  max-width: 1180px;
+  margin-inline: auto;
+  padding-inline: clamp(1rem, 4vw, 2rem);
 }
 
-/* Display heading — the accent word carries the site's animated gradient,
-   the rest is solid white, and the two never orphan each other. */
-.docs-display {
-  font-size: clamp(2.25rem, 6.5vw, 4.25rem);
+.docs-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
   font-weight: 600;
-  line-height: 1.02;
-  letter-spacing: -0.032em;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--admin-text-muted);
+}
+.docs-kicker-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--docs-sky);
+  box-shadow: 0 0 0 3px rgba(147, 197, 253, 0.14);
+}
+.docs-kicker-sep {
+  width: 1px;
+  height: 9px;
+  background: var(--docs-hair-2);
+}
+.docs-kicker-mono {
+  font-family: var(--docs-mono);
+  letter-spacing: 0.06em;
+  color: var(--admin-text-dim);
+}
+
+.docs-display {
+  margin-top: 1rem;
+  font-size: clamp(2rem, 6.6vw, 3.5rem);
+  font-weight: 600;
+  line-height: 1.03;
+  letter-spacing: -0.035em;
   color: var(--admin-text);
   text-wrap: balance;
 }
+/* The accent line carries the same blue → violet axis as the rail spine and
+   the progress bar, so the page has one accent idea rather than three. */
+.docs-display-accent {
+  background: linear-gradient(92deg, #bfdbfe 0%, #a5b4fc 46%, #c4b5fd 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
 
 .docs-lead {
-  max-width: 44rem;
-  margin: 1.25rem auto 0;
+  max-width: 46rem;
+  margin-top: 1.15rem;
   font-size: 15px;
   line-height: 1.75;
   color: var(--admin-text-muted);
-  /* Keeps the last line from collapsing to a single orphan word. */
   text-wrap: pretty;
 }
 @media (min-width: 640px) {
@@ -1253,389 +1407,331 @@ select.admin-input option {
   }
 }
 
-/* ── how it works ───────────────────────────────────────────────────────
-   The hub-and-spoke diagram, free-standing on the page — the landing page
-   renders the same idea the same way, as a section rather than a card. */
-
-.docs-graph {
-  position: relative;
-  overflow: hidden;
-  padding: clamp(2.5rem, 6vw, 4.5rem) 0;
-}
-.docs-graph-inner {
-  position: relative;
-  z-index: 1;
-  margin: 0 auto;
-  max-width: 56rem;
-  padding: 0 1.5rem;
-  text-align: center;
-}
-.docs-graph-title {
-  margin-top: 0.75rem;
-  font-size: clamp(1.6rem, 3.4vw, 2.4rem);
-  font-weight: 700;
-  line-height: 1.08;
-  letter-spacing: -0.03em;
-  color: var(--admin-text);
-  text-wrap: balance;
-}
-.docs-graph-sub {
-  max-width: 58ch;
-  margin: 0.9rem auto 0;
-  font-size: 15px;
-  line-height: 1.7;
-  color: var(--admin-text-muted);
-}
-
-/* The shared blue badge is tuned for the console, where it sits on a lighter
-   surface. On the near-black hero its 80%-alpha blue falls under 4.5:1 at
-   10px, so the docs hero lifts it to the 300-weight step. */
-.docs-masthead .admin-badge-blue {
-  color: #93c5fd;
-  background: rgba(59, 130, 246, 0.1);
-  border-color: rgba(59, 130, 246, 0.22);
-}
-
-/* "Live" chip — a soft status pill that says the gateway is running. */
-.docs-chip-live {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  border: 1px solid rgba(52, 211, 153, 0.22);
-  border-radius: 999px;
-  background: rgba(52, 211, 153, 0.08);
-  padding: 3px 10px;
-  font-size: 10.5px;
-  font-weight: 500;
-  letter-spacing: 0.02em;
-  color: #6ee7b7;
-}
-.docs-chip-live-dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 999px;
-  background: #34d399;
-  box-shadow: 0 0 8px rgba(52, 211, 153, 0.9);
-}
-@media (prefers-reduced-motion: no-preference) {
-  .docs-chip-live-dot {
-    animation: docs-blink 2.6s ease-in-out infinite;
-  }
-}
-@keyframes docs-blink {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.25;
-  }
-}
-
-/* ── live translation diagram ───────────────────────────────────────────
-   The how-it-works visual: three inbound dialects, the wiwi IR hub, four
-   upstream providers, and a beam travelling along every edge. It stands free
-   on the page — no card, no border — the way the landing page renders its
-   own graph section. The hub sits above the beam layer, and every node is
-   positioned so the beams connect real elements. */
-
-.docs-core {
-  position: relative;
-  margin-top: clamp(2rem, 4vw, 3rem);
-}
-
-.docs-core-body {
-  position: relative;
-  isolation: isolate;
-  display: grid;
-  /* One full-width column: a wrapping row inside a content-sized column would
-     wrap against its own widest line rather than the panel. Each row centres
-     its own contents. */
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: auto auto auto;
-  justify-items: stretch;
-  align-items: center;
-  gap: clamp(1.9rem, 4.5vw, 2.6rem);
-  min-height: 300px;
-  padding: 22px 18px 30px;
-}
-
-/* The stage: a wash under the hub and a dot field, both confined to a column
-   around the diagram and faded out before the section's edges — light and
-   texture rather than a panel, so the figure still stands free on the page. */
-.docs-core-stage {
-  position: absolute;
-  z-index: 0;
-  top: 0;
-  bottom: 0;
-  left: 50%;
-  width: min(660px, 100%);
-  transform: translateX(-50%);
-  pointer-events: none;
-  background:
-    radial-gradient(42% 46% at 50% 50%, rgba(139, 92, 246, 0.14), transparent 72%),
-    radial-gradient(66% 74% at 50% 50%, rgba(59, 130, 246, 0.05), transparent 76%);
-}
-.docs-core-stage::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background-image: radial-gradient(rgba(255, 255, 255, 0.2) 1px, transparent 1px);
-  background-size: 24px 24px;
-  -webkit-mask-image: radial-gradient(closest-side at 50% 50%, #000 6%, transparent 64%);
-  mask-image: radial-gradient(closest-side at 50% 50%, #000 6%, transparent 64%);
-  opacity: 0.3;
-}
-
-.docs-core-row {
-  position: relative;
-  z-index: 2;
+.docs-hero-actions {
   display: flex;
   flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 1.6rem;
+}
+.docs-btn {
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 9px;
-  max-width: 100%;
-}
-.docs-core-row-out {
-  gap: 10px;
-}
-
-.docs-core-dialect {
-  position: relative;
-  z-index: 2;
-  max-width: 100%;
-  border: 1px solid rgba(255, 255, 255, 0.11);
+  min-height: 44px;
+  padding: 0 1.15rem;
+  border: 1px solid transparent;
   border-radius: 10px;
-  background: rgba(10, 10, 10, 0.92);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
-  padding: 8px 13px;
-  font-size: 11.5px;
-  line-height: 1;
-  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+  transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
 }
-.docs-core-dialect-text {
-  letter-spacing: 0.01em;
-}
-/* On a phone the three chips have to share one line: two rows would put the
-   inbound beams through the row above them. */
-@media (max-width: 480px) {
-  .docs-core-row {
-    gap: 6px;
-  }
-  .docs-core-dialect {
-    padding: 7px 10px;
-    font-size: 10.5px;
-  }
-}
-
-/* Each provider is a tile plus its name. The name is text, not a tooltip, so
-   the marks stay identifiable on touch and in a screenshot. */
-.docs-core-provider {
-  position: relative;
-  z-index: 2;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 9px;
-  min-width: 58px;
-}
-.docs-core-provider-tile {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 50px;
-  height: 50px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 13px;
-  background: rgba(10, 10, 10, 0.92);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
-  padding: 11px;
-  transition:
-    transform 0.25s ease,
-    border-color 0.25s ease,
-    background-color 0.25s ease;
-}
-.docs-core-provider-logo {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
-.docs-core-provider-name {
-  font-size: 10.5px;
-  line-height: 1;
-  color: var(--admin-text-dim);
-  white-space: nowrap;
-  transition: color 0.25s ease;
+.docs-btn-primary {
+  background: #f8fafc;
+  color: #0a0a0a;
 }
 @media (hover: hover) {
-  .docs-core-provider:hover .docs-core-provider-tile {
-    transform: translateY(-2px);
-    border-color: rgba(255, 255, 255, 0.22);
-    background: rgba(255, 255, 255, 0.05);
-  }
-  .docs-core-provider:hover .docs-core-provider-name {
-    color: var(--admin-text-muted);
+  .docs-btn-primary:hover {
+    background: #ffffff;
   }
 }
+.docs-btn-ghost {
+  border-color: var(--docs-hair-2);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--admin-text-muted);
+}
+@media (hover: hover) {
+  .docs-btn-ghost:hover {
+    border-color: rgba(255, 255, 255, 0.22);
+    color: var(--admin-text);
+  }
+}
+.docs-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.4);
+}
 
-.docs-core-hub-wrap {
-  position: relative;
-  z-index: 2;
+/* ── wire strip ───────────────────────────────────────────────────────────
+   The product's thesis drawn as a ledger rather than a diagram: what comes in,
+   what it becomes, what it can leave as. Each cell is a small table of real
+   routes, so the strip is also the page's table of contents for /v1. */
+
+.docs-wire {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+  margin-top: clamp(2rem, 5vw, 3rem);
+  padding-top: 1.4rem;
+  border-top: 1px solid var(--docs-hair);
+}
+@media (min-width: 900px) {
+  .docs-wire {
+    grid-template-columns:
+      minmax(0, 1.7fr) auto minmax(0, 0.9fr) auto minmax(0, 1fr);
+    align-items: start;
+    gap: 1.25rem;
+  }
+}
+.docs-wire-cell {
+  min-width: 0;
+}
+.docs-wire-label {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--admin-text-dim);
+}
+.docs-wire-list {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 15px;
+  gap: 5px;
+  margin: 0.6rem 0 0;
+  padding: 0;
+  list-style: none;
 }
-.docs-core-hub {
-  position: relative;
+.docs-wire-chip {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 76px;
-  height: 76px;
-  border: 1px solid rgba(167, 139, 250, 0.34);
-  border-radius: 9999px;
-  background: radial-gradient(circle at 50% 30%, rgba(167, 139, 250, 0.18), rgba(10, 10, 10, 0.92));
-  box-shadow:
-    0 0 44px -12px rgba(139, 92, 246, 0.7),
-    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  font-family: var(--docs-mono);
+  font-size: 11px;
+  line-height: 1.4;
 }
-.docs-core-hub-logo {
-  width: 38px;
-  height: 38px;
-  border-radius: 9999px;
-  object-fit: cover;
-}
-/* Two rings, half a cycle apart, so the hub reads as a live junction rather
-   than a static badge. */
-.docs-core-hub-ring {
-  position: absolute;
-  inset: -8px;
-  border: 1px solid rgba(167, 139, 250, 0.24);
-  border-radius: 9999px;
-}
-.docs-core-hub-ring-2 {
-  inset: -18px;
-  border-color: rgba(167, 139, 250, 0.13);
-  animation-delay: -1.7s;
-}
-@media (prefers-reduced-motion: no-preference) {
-  .docs-core-hub-ring {
-    animation: docs-hub-pulse 3.4s ease-in-out infinite;
-  }
-}
-@keyframes docs-hub-pulse {
-  0%,
-  100% {
-    transform: scale(1);
-    opacity: 0.55;
-  }
-  50% {
-    transform: scale(1.13);
-    opacity: 0.12;
-  }
-}
-.docs-core-hub-label {
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  border-radius: 999px;
-  background: rgba(10, 10, 10, 0.85);
-  padding: 2px 9px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+.docs-wire-method {
+  flex: none;
+  border: 1px solid var(--docs-hair);
+  border-radius: 4px;
+  padding: 0 4px;
+  /* 9.5px is the smallest step that stays legible at this weight; the label is
+     decorative (every chip is also a path) so it never carries meaning alone. */
   font-size: 9.5px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--admin-text-muted);
+  letter-spacing: 0.08em;
+  color: var(--admin-text-dim);
+}
+.docs-wire-path {
+  color: #dbeafe;
+  word-break: break-all;
+}
+.docs-wire-body {
+  font-size: 9.5px;
+  color: var(--admin-text-dim);
+}
+.docs-wire-note {
+  margin-top: 0.6rem;
+  max-width: 32ch;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--admin-text-dim);
+}
+.docs-wire-arrow {
+  display: none;
+  font-size: 13px;
+  color: var(--admin-text-dim);
+  align-self: center;
+}
+@media (min-width: 900px) {
+  .docs-wire-arrow {
+    display: block;
+  }
 }
 
-.docs-core-foot {
+.docs-wire-node {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  justify-content: center;
-  gap: 6px 20px;
-  margin-top: 1.75rem;
+  gap: 8px;
+  margin-top: 0.6rem;
 }
-.docs-core-foot-item {
+.docs-wire-node-logo {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: 999px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+.docs-wire-node-text {
+  font-family: var(--docs-mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: #ddd6fe;
+}
+.docs-wire-out {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 0.55rem;
+}
+.docs-wire-count {
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+  color: var(--admin-text);
+}
+.docs-wire-out-text {
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--admin-text-muted);
+}
+.docs-wire-out-sub {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--docs-mono);
+  font-size: 9.5px;
+  color: var(--admin-text-dim);
+}
+
+/* ── chip nav (narrow viewports) ──────────────────────────────────────────
+   The rail is desktop furniture; below 1024px the same order becomes a
+   horizontal strip that stays under the site header. The active chip is
+   scrolled into view by the page, not by the browser's anchor behaviour. */
+
+/* 74px clears the site header, which measures 74px at this width and is
+   sticky at z-40 — a bar at top:0 would slide under it and disappear. */
+.docs-chips {
+  position: sticky;
+  top: 74px;
+  z-index: 30;
+  display: flex;
+  gap: 3px;
+  margin-inline: -0.25rem;
+  padding: 0.45rem 0.25rem;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  border-bottom: 1px solid var(--docs-hair);
+  background: rgba(5, 5, 5, 0.92);
+  backdrop-filter: blur(14px);
+}
+.docs-chips::-webkit-scrollbar {
+  display: none;
+}
+.docs-chip {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 6px;
-  font-size: 11px;
-  color: var(--admin-text-muted);
+  min-height: 44px;
+  padding: 0 0.7rem;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: var(--admin-text-dim);
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color 0.16s ease, background-color 0.16s ease, border-color 0.16s ease;
 }
-.docs-core-foot-dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 999px;
+.docs-chip-num {
+  font-family: var(--docs-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  opacity: 0.75;
 }
-
-/* ── left rail ──────────────────────────────────────────────────────────
-   A hairline spine with a progress fill, so the reader's position in the
-   document is always visible without reading a number. Rows are quiet
-   targets: the one you are in carries a neutral wash and a dot on the spine,
-   the ones behind you carry a tick. The accent stays in the spine and the
-   dot — no glow, no tinted hover wash. */
-
-.docs-sidebar {
-  position: sticky;
-  top: 96px;
-  align-self: start;
-  max-height: calc(100vh - 116px);
-  overflow-y: auto;
-  padding-left: 18px;
-  /* The rail only scrolls on a short viewport; when it does, keep the
-     scrollbar as thin as the spine it sits beside. */
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+.docs-chip[data-active="true"] {
+  color: var(--admin-text);
+  border-color: var(--docs-hair-2);
+  background: rgba(255, 255, 255, 0.06);
 }
-.docs-sidebar::-webkit-scrollbar {
-  width: 4px;
+.docs-chip:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.45);
 }
-.docs-sidebar::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.14);
-}
-@media (max-width: 1023px) {
-  .docs-grid {
-    grid-template-columns: 1fr;
-  }
-  .docs-sidebar {
+@media (min-width: 1024px) {
+  .docs-chips {
     display: none;
   }
 }
 
-/* Header: eyebrow and position readout on one baseline, closed by a hairline
-   that spans the rail. Both align with the section numbers below. */
+/* ── shell + rail ─────────────────────────────────────────────────────────── */
+
+.docs-shell {
+  max-width: 1180px;
+  margin-inline: auto;
+  padding: 0 clamp(1rem, 4vw, 2rem) 4rem;
+}
+.docs-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2rem;
+  padding-top: 1.75rem;
+}
+.docs-grid > * {
+  min-width: 0;
+}
+@media (min-width: 1024px) {
+  .docs-grid {
+    grid-template-columns: 196px minmax(0, 1fr);
+    gap: clamp(2rem, 4vw, 3.5rem);
+    padding-top: 2.5rem;
+  }
+}
+
+.docs-rail {
+  display: none;
+}
+@media (min-width: 1024px) {
+  .docs-rail {
+    display: block;
+  }
+  .docs-rail-inner {
+    position: sticky;
+    top: 96px;
+    padding-top: 0.25rem;
+  }
+}
+
 .docs-rail-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 10px;
-  padding: 0 6px 10px 22px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  gap: 0.5rem;
+  padding: 0 8px 0.7rem;
+}
+.docs-rail-title {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--admin-text-dim);
 }
 .docs-rail-count {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 3px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--docs-mono);
   font-size: 9.5px;
   font-variant-numeric: tabular-nums;
-  letter-spacing: 0.02em;
   color: var(--admin-text-dim);
 }
 .docs-rail-count b {
-  color: var(--admin-text-muted);
   font-weight: 600;
+  color: var(--admin-text-muted);
 }
 .docs-rail-count-sep {
   opacity: 0.45;
+  padding: 0 1px;
 }
 
-.docs-rail {
+.docs-rail-body {
   position: relative;
   padding-left: 14px;
+}
+.docs-rail-spine {
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 0;
+  width: 1px;
+  background: var(--docs-hair);
+}
+.docs-rail-fill {
+  position: absolute;
+  inset: 0;
+  border-radius: 1px;
+  background: linear-gradient(180deg, #60a5fa, #a78bfa);
+  /* scaleY keeps the fill on the compositor, so scrolling never lays out. */
+  transform-origin: top;
+  transition: transform 0.18s ease;
 }
 .docs-rail-list {
   display: flex;
@@ -1645,139 +1741,61 @@ select.admin-input option {
   padding: 0;
   list-style: none;
 }
-.docs-rail-line {
-  position: absolute;
-  top: 6px;
-  bottom: 6px;
-  left: 0;
-  width: 1px;
-  background: rgba(255, 255, 255, 0.07);
-}
-.docs-rail-line-fill {
-  position: absolute;
-  top: 6px;
-  bottom: 6px;
-  left: 0;
-  width: 1px;
-  border-radius: 1px;
-  background: linear-gradient(180deg, #60a5fa, #a78bfa);
-  /* scaleY (not height) keeps the fill on the compositor, so scrolling never
-     triggers a layout on the spine. */
-  transform: scaleY(var(--docs-rail-progress, 0));
-  transform-origin: top;
-  transition: transform 0.15s linear;
-}
-
-/* Sections are separated by hairlines, not cards. */
-.docs-section {
-  position: relative;
-  scroll-margin-top: 96px;
-  padding-top: clamp(2rem, 4.5vw, 3rem);
-  border-top: 1px solid rgba(255, 255, 255, 0.07);
-}
-.docs-section:first-child {
-  padding-top: 0;
-  border-top: 0;
-}
-
-/* Section navigation. Each row is a full-width target so the whole line is
-   clickable, and the active row is a quiet filled pill rather than coloured
-   text — the accent is spent on the dot on the spine. */
-.docs-nav-item {
+.docs-rail-item {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 9px;
-  width: 100%;
-  min-height: 38px;
-  padding: 7px 8px;
-  border-radius: 8px;
-  color: var(--admin-text-dim);
+  gap: 8px;
+  min-height: 36px;
+  padding: 6px 8px;
+  border-radius: 7px;
   font-size: 12.5px;
   line-height: 1.25;
-  text-align: left;
-  transition:
-    color 0.18s ease,
-    background-color 0.18s ease;
+  color: var(--admin-text-dim);
+  text-decoration: none;
+  transition: color 0.16s ease, background-color 0.16s ease;
 }
-/* Hover only for devices that actually hover, so a tap never leaves a row
-   stuck highlighted. */
 @media (hover: hover) {
-  .docs-nav-item:hover {
+  .docs-rail-item:hover {
     color: var(--admin-text);
     background: rgba(255, 255, 255, 0.035);
   }
 }
-.docs-nav-item:focus-visible {
+.docs-rail-item:focus-visible {
   outline: none;
-  color: var(--admin-text);
   box-shadow: inset 0 0 0 1px rgba(96, 165, 250, 0.45);
 }
-.docs-nav-item[data-active="true"] {
+.docs-rail-item[data-active="true"] {
   color: var(--admin-text);
   background: rgba(255, 255, 255, 0.05);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
 }
-/* "You are here" is a dot on the spine itself, so position and progress are
-   the same line. The ring is the page colour, which breaks the spine cleanly
-   around the dot instead of faking a glow. */
-.docs-nav-item[data-active="true"]::before {
+/* "You are here" is a dot on the spine, so position and progress are the same
+   line; the ring is the page colour, which breaks the spine cleanly. */
+.docs-rail-item[data-active="true"]::before {
   content: "";
   position: absolute;
   top: 50%;
-  left: -17.5px; /* rail padding (14px) + half the dot */
+  left: -17.5px;
   width: 7px;
   height: 7px;
   margin-top: -3.5px;
   border-radius: 999px;
-  background: #93c5fd;
+  background: var(--docs-sky);
   box-shadow: 0 0 0 3px var(--admin-bg);
 }
-.docs-nav-item[data-active="true"] .docs-nav-label {
-  font-weight: 500;
-}
-
-/* Ordinal column: fixed width so every label starts on the same x, whether
-   the row is numbered or ticked. */
-.docs-nav-num {
-  display: inline-flex;
+.docs-rail-num {
   flex: none;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 10px;
+  width: 14px;
+  font-family: var(--docs-mono);
+  font-size: 9.5px;
   font-variant-numeric: tabular-nums;
-  /* 0.9 keeps the ordinal above 4.5:1 on the page background; dimmer than the
-     label, still legible at 10px. */
-  opacity: 0.9;
-  transition:
-    color 0.18s ease,
-    opacity 0.18s ease;
+  opacity: 0.8;
 }
-/* Completed-section marker: a tick tinted like the spine so "done" reads as a
-   lighter form of "here". */
-.docs-nav-item[data-done="true"] .docs-nav-num {
-  color: #4ade80;
-  opacity: 0.9;
-}
-.docs-nav-item[data-active="true"] .docs-nav-num {
+.docs-rail-item[data-active="true"] .docs-rail-num {
   color: #bfdbfe;
   opacity: 1;
 }
-.docs-nav-icon {
-  display: inline-flex;
-  flex: none;
-  opacity: 0.85;
-  transition:
-    color 0.18s ease,
-    opacity 0.18s ease;
-}
-.docs-nav-item[data-active="true"] .docs-nav-icon {
-  color: #93c5fd;
-  opacity: 1;
-}
-.docs-nav-label {
+.docs-rail-label {
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -1785,13 +1803,10 @@ select.admin-input option {
   white-space: nowrap;
 }
 
-/* Rail footer: one tick per section. Filled ticks are the sections already
-   behind the reader, so the meter answers "how much is left" in the document's
-   own units rather than as a bare percentage. */
 .docs-rail-foot {
-  margin-top: 16px;
-  padding: 14px 6px 0 22px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  margin-top: 14px;
+  padding: 12px 8px 0 22px;
+  border-top: 1px solid var(--docs-hair);
 }
 .docs-rail-meter {
   display: grid;
@@ -1809,1116 +1824,932 @@ select.admin-input option {
   background: linear-gradient(90deg, #3b82f6, #8b5cf6);
 }
 .docs-rail-tick[data-state="current"] {
-  background: #93c5fd;
+  background: var(--docs-sky);
 }
 .docs-rail-read {
   margin-top: 8px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--docs-mono);
   font-size: 9.5px;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
+  /* --admin-text-dim fails 4.5:1 at this size on the page background. */
   color: var(--admin-text-muted);
 }
 .docs-rail-read-num {
   color: var(--admin-text);
 }
-
-/* Playground link — the rail's one affordance that leaves the page, so it is
-   framed as a button rather than as another section row. */
 .docs-rail-cta {
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-height: 38px;
-  margin: 12px 0 0 14px;
-  padding: 7px 10px;
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  min-height: 44px;
+  margin-top: 10px;
+  padding: 0 10px;
+  border: 1px solid var(--docs-hair);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.02);
-  color: var(--admin-text-muted);
   font-size: 12px;
   font-weight: 500;
-  transition:
-    color 0.18s ease,
-    border-color 0.18s ease,
-    background-color 0.18s ease,
-    transform 0.18s ease;
+  color: var(--admin-text-muted);
+  text-decoration: none;
+  transition: color 0.16s ease, border-color 0.16s ease, background-color 0.16s ease;
 }
 @media (hover: hover) {
   .docs-rail-cta:hover {
     color: var(--admin-text);
-    border-color: rgba(255, 255, 255, 0.14);
-    background: rgba(255, 255, 255, 0.04);
-  }
-}
-@media (prefers-reduced-motion: no-preference) {
-  .docs-rail-cta:active {
-    transform: translateY(1px);
+    border-color: var(--docs-hair-2);
+    background: rgba(255, 255, 255, 0.045);
   }
 }
 .docs-rail-cta:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.45);
 }
-.docs-rail-cta-icon {
-  flex: none;
-  color: #93c5fd;
-  opacity: 0.9;
+
+/* ── sections ─────────────────────────────────────────────────────────────── */
+
+.docs-section {
+  position: relative;
+  /* Clears the sticky chip bar on narrow viewports, the site header above it
+     on desktop. Without this an anchored section lands under the chrome. */
+  scroll-margin-top: 148px;
+  padding-top: clamp(2.25rem, 5vw, 3.25rem);
+  border-top: 1px solid var(--docs-hair);
 }
-.docs-rail-cta-label {
-  flex: 1;
-  min-width: 0;
+.docs-section:first-child {
+  padding-top: 0;
+  border-top: 0;
 }
-.docs-rail-cta-arrow {
-  flex: none;
-  opacity: 0;
-  transform: translateX(-3px);
-  transition:
-    opacity 0.18s ease,
-    transform 0.18s ease;
-}
-@media (hover: hover) {
-  .docs-rail-cta:hover .docs-rail-cta-arrow {
-    opacity: 1;
-    transform: none;
+@media (min-width: 1024px) {
+  .docs-section {
+    scroll-margin-top: 104px;
   }
 }
-.docs-rail-cta:focus-visible .docs-rail-cta-arrow {
-  opacity: 1;
-  transform: none;
-}
 
-/* ── section headings ───────────────────────────────────────────────────
-   A numbered eyebrow, then the title in gradient ink. The rule under the
-   eyebrow is the same accent as the rail spine, tying the two together. */
-
-.docs-eyebrow {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 10px;
-  font-weight: 500;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--admin-text-dim);
-}
-.docs-eyebrow-num {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  color: #a78bfa;
-}
-.docs-eyebrow-rule {
-  width: 28px;
-  height: 1px;
-  background: linear-gradient(90deg, rgba(167, 139, 250, 0.75), rgba(167, 139, 250, 0));
-}
-
-.docs-h2 {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin-top: 0.7rem;
-  font-size: clamp(1.3rem, 2.4vw, 1.6rem);
-  font-weight: 600;
-  line-height: 1.2;
-  letter-spacing: -0.022em;
-}
-.docs-h2-text {
-  background: linear-gradient(180deg, #ffffff 20%, #cbd5e1 120%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-.docs-subtitle {
-  margin-top: 0.35rem;
-  font-size: 13px;
-  color: var(--admin-text-dim);
-}
-
-/* Body prose: a comfortable 72ch measure and an open leading. */
-.docs-prose {
-  max-width: 72ch;
-  font-size: 14.5px;
-  line-height: 1.78;
-  color: var(--admin-text-muted);
-}
-
-/* A hairline panel for the inline pipeline strip. */
-.docs-panel {
-  border: 1px solid var(--admin-border);
-  border-radius: 14px;
-  background: var(--admin-surface);
-  padding: 15px 16px;
-}
-
-/* Inline pipeline: dialect -> IR -> provider, as mono chips. */
-.docs-pipeline {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.5rem;
-}
-.docs-pipe-chip {
-  display: inline-flex;
-  align-items: center;
-  min-height: 30px;
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.02);
-  padding: 0.2rem 0.7rem;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 10.5px;
-  line-height: 1;
-}
-.docs-pipe-arrow {
-  color: var(--admin-text-dim);
-  font-size: 11px;
-}
-
-/* ── callouts ───────────────────────────────────────────────────────────
-   A left rule in the section accent with a wash fading to the right. */
-
-.docs-callout {
-  border-left: 2px solid rgba(139, 92, 246, 0.65);
-  border-radius: 0 12px 12px 0;
-  background: linear-gradient(90deg, rgba(139, 92, 246, 0.1), rgba(139, 92, 246, 0) 72%);
-  padding: 13px 16px;
-}
-.docs-callout-label {
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: #c4b5fd;
-}
-.docs-callout-body {
-  margin-top: 6px;
-  max-width: 72ch;
-  font-size: 13px;
-  line-height: 1.7;
-  color: var(--admin-text-muted);
-}
-
-/* ── auth chips + triad ───────────────────────────────────────────────── */
-
-.docs-keychip {
-  display: inline-flex;
-  align-items: center;
-  min-height: 44px;
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.02);
-  padding: 0 0.9rem;
-  font-size: 12px;
-  color: var(--admin-text-muted);
-}
-.docs-keychip-plain {
-  color: var(--admin-text-dim);
-}
-
-.docs-triad {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 1px;
-  overflow: hidden;
-  border: 1px solid var(--admin-border);
-  border-radius: 14px;
-  background: var(--admin-border);
-}
-@media (min-width: 640px) {
-  .docs-triad {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-}
-.docs-triad-cell {
-  min-width: 0;
-  background: var(--admin-surface);
-  padding: 15px 16px;
-}
-
-/* ── endpoint filter ──────────────────────────────────────────────────── */
-
-.docs-filter {
+.docs-head-meta {
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 44px;
-  border: 1px solid var(--admin-border);
-  border-radius: 12px;
-  background: var(--admin-surface);
-  padding: 0 12px;
-  transition: border-color 0.16s ease, box-shadow 0.16s ease;
 }
-.docs-filter:focus-within {
-  border-color: rgba(96, 165, 250, 0.45);
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+.docs-head-num {
+  font-family: var(--docs-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--docs-violet);
 }
-.docs-filter-icon {
+.docs-head-rule {
+  width: 34px;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(167, 139, 250, 0.7), rgba(167, 139, 250, 0));
+}
+.docs-head-title {
   display: flex;
-  color: var(--admin-text-dim);
-}
-.docs-filter-input {
-  min-width: 0;
-  flex: 1 1 auto;
-  border: 0;
-  background: transparent;
-  font-family: inherit;
-  font-size: 13px;
+  align-items: baseline;
+  gap: 0.4rem;
+  margin-top: 0.55rem;
+  font-size: clamp(1.45rem, 3vw, 1.9rem);
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.025em;
   color: var(--admin-text);
-  outline: none;
 }
-.docs-filter-input::placeholder {
+.docs-head-anchor {
+  flex: none;
+  padding: 0 4px;
+  font-size: 0.72em;
+  color: var(--docs-sky);
+  text-decoration: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.docs-head-title:hover .docs-head-anchor,
+.docs-head-anchor:focus-visible {
+  opacity: 1;
+}
+/* A hover-only affordance is no affordance on touch, and the glyph alone is a
+   ~17px target — well under the 44px floor. */
+@media (hover: none) {
+  .docs-head-anchor {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    min-height: 44px;
+    margin-block: -12px;
+    opacity: 0.55;
+  }
+}
+.docs-head-lede {
+  max-width: 62ch;
+  margin-top: 0.6rem;
+  font-size: 13.5px;
+  line-height: 1.65;
   color: var(--admin-text-dim);
 }
-.docs-filter-input::-webkit-search-cancel-button {
-  filter: invert(0.6);
+
+.docs-prose {
+  max-width: 72ch;
+  margin-top: 1.15rem;
+  font-size: 14.5px;
+  line-height: 1.8;
+  color: var(--admin-text-muted);
 }
-.docs-filter-kbd {
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.03);
-  padding: 1px 6px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+.docs-prose + .docs-prose {
+  margin-top: 0.9rem;
+}
+.docs-prose-tight {
+  margin-top: 1rem;
+  font-size: 13px;
+}
+
+.docs-sub {
+  margin-top: clamp(1.75rem, 3.5vw, 2.5rem);
+}
+.docs-h3 {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--admin-text-muted);
+}
+.docs-h3::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--docs-hair);
+}
+
+/* Inline code chips in prose (never inside a <pre>). */
+.docs-doc :not(pre) > code {
+  padding: 0.1em 0.36em;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.045);
+  font-family: var(--docs-mono);
+  font-size: 0.86em;
+  color: #bfdbfe;
+  word-break: break-word;
+}
+
+/* ── request path ─────────────────────────────────────────────────────────── */
+
+.docs-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--docs-hair);
+}
+.docs-step {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.9rem;
+  padding: 0.95rem 0;
+  border-bottom: 1px solid var(--docs-hair);
+}
+.docs-step-num {
+  padding-top: 3px;
+  font-family: var(--docs-mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.06em;
+  color: var(--admin-text-dim);
+}
+.docs-step-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--admin-text);
+}
+.docs-step-name {
+  padding: 1px 5px;
+  border: 1px solid rgba(147, 197, 253, 0.2);
+  border-radius: 4px;
+  background: rgba(147, 197, 253, 0.08);
+  font-family: var(--docs-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--docs-sky);
+}
+.docs-step-desc {
+  max-width: 68ch;
+  margin-top: 0.35rem;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--admin-text-muted);
+}
+.docs-step-mod {
+  margin-top: 0.35rem;
+  font-family: var(--docs-mono);
   font-size: 10px;
   color: var(--admin-text-dim);
 }
-.docs-filter-count {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 10.5px;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  color: var(--admin-text-muted);
+
+/* ── definition lists (capabilities, translation, liveness, limits) ───────── */
+
+.docs-defs {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  margin: 0;
+  border-top: 1px solid var(--docs-hair);
 }
-
-.docs-empty {
-  color: var(--admin-text-muted);
+@media (min-width: 768px) {
+  .docs-defs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 2.5rem;
+  }
 }
-
-/* ── code blocks ────────────────────────────────────────────────────────
-   Flat, with a left accent spine and a lit header rule. */
-
-.docs-codeblock {
+.docs-def {
   min-width: 0;
-  max-width: 100%;
+  padding: 0.8rem 0;
+  border-bottom: 1px solid var(--docs-hair);
+}
+.docs-def-term {
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  color: var(--admin-text);
+}
+.docs-def-term code {
+  font-family: var(--docs-mono);
+  font-size: 11.5px;
+  color: #dbeafe;
+}
+.docs-def-desc {
+  max-width: 62ch;
+  margin-top: 0.25rem;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--admin-text-muted);
+}
+
+/* ── quickstart ───────────────────────────────────────────────────────────── */
+
+.docs-qs {
+  display: grid;
+  gap: 1.6rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: docs-qs;
+}
+.docs-qs-step {
+  position: relative;
+  padding-left: 2.1rem;
+}
+.docs-qs-step::before {
+  counter-increment: docs-qs;
+  content: counter(docs-qs, decimal-leading-zero);
+  position: absolute;
+  top: 1px;
+  left: 0;
+  font-family: var(--docs-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--admin-text-dim);
+}
+.docs-qs-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--admin-text);
+}
+.docs-qs-body {
+  max-width: 66ch;
+  margin: 0.35rem 0 0.75rem;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--admin-text-muted);
+}
+
+/* ── code ─────────────────────────────────────────────────────────────────── */
+
+.docs-code {
+  margin-top: 0.75rem;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 12px;
-  background: #08090b;
-  box-shadow: inset 3px 0 0 rgba(96, 165, 250, 0.16);
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  border: 1px solid var(--docs-hair);
+  border-radius: 10px;
+  background: #08080a;
 }
-.docs-codeblock:hover {
-  border-color: rgba(96, 165, 250, 0.26);
-  box-shadow: inset 3px 0 0 rgba(96, 165, 250, 0.32);
-}
-.docs-codehead {
+.docs-code-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  border-bottom: 1px solid var(--admin-border);
+  gap: 0.5rem;
+  padding: 0.3rem 0.45rem 0.3rem 0.8rem;
+  border-bottom: 1px solid var(--docs-hair);
   background: rgba(255, 255, 255, 0.015);
-  padding: 4px 10px 4px 12px;
 }
-.docs-copybtn {
+.docs-code-lang {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  gap: 6px;
-  min-width: 72px;
-  min-height: 30px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.03);
-  padding: 0 9px;
+  gap: 7px;
+  min-width: 0;
+  font-family: var(--docs-mono);
   font-size: 10px;
-  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--admin-text-dim);
+}
+.docs-dot {
+  width: 5px;
+  height: 5px;
+  flex: none;
+  border-radius: 999px;
+}
+.docs-code-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 32px;
+  padding: 0 0.55rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-size: 11px;
   color: var(--admin-text-dim);
   transition: color 0.16s ease, border-color 0.16s ease, background-color 0.16s ease;
 }
-.docs-copybtn:hover {
-  border-color: rgba(255, 255, 255, 0.14);
-  color: var(--admin-text);
+@media (hover: hover) {
+  .docs-code-copy:hover {
+    color: var(--admin-text);
+    border-color: var(--docs-hair);
+    background: rgba(255, 255, 255, 0.04);
+  }
 }
-.docs-copybtn:focus-visible {
+.docs-code-copy:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.45);
 }
-.docs-codeblock pre {
-  max-width: 100%;
-  scrollbar-width: thin;
+/* On a phone the label costs more room than it earns; the icon keeps its
+   44px target and the aria-label still says what it does. */
+@media (max-width: 639px) {
+  .docs-code-copy {
+    justify-content: center;
+    min-width: 44px;
+  }
+  .docs-code-copy span {
+    display: none;
+  }
 }
-
-/* Code body: a line-number gutter beside the scrollable pre. The gutter is a
-   flex sibling (not absolutely positioned) so the pre's own horizontal
-   scrollbar never overlaps the numbers, and the gutter itself stays fixed
-   while only the code scrolls. Tabular numerals keep the column aligned. */
-.docs-codebody {
+/* Touch at any width: the binding floor is 44px, so a copy control on a
+   touchscreen laptop must meet it even where the label still fits. */
+@media (hover: none) {
+  .docs-code-copy {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .docs-rail-item {
+    min-height: 44px;
+  }
+  .docs-tab {
+    min-height: 44px;
+  }
+}
+.docs-code-body {
   display: flex;
   align-items: stretch;
-  min-width: 0;
 }
-.docs-codegutter {
-  display: flex;
-  flex: 0 0 auto;
+.docs-code-gutter {
+  display: none;
+  flex: none;
   flex-direction: column;
-  padding: 12px 8px 12px 10px;
-  border-right: 1px solid rgba(255, 255, 255, 0.05);
-  background: rgba(255, 255, 255, 0.012);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 0.85rem 0.5rem 0.85rem 0.85rem;
+  border-right: 1px solid var(--docs-hair);
+  font-family: var(--docs-mono);
   font-size: 12px;
-  line-height: 1.625;
-  user-select: none;
+  line-height: 1.65;
+  font-variant-numeric: tabular-nums;
   text-align: right;
-  /* Line numbers are real content, not decoration — 0.18 alpha failed the 4.5:1
-     contrast floor on the #08090b block background. */
-  color: rgba(255, 255, 255, 0.42);
+  color: rgba(255, 255, 255, 0.18);
+  user-select: none;
 }
-.docs-codebody > pre {
-  flex: 1 1 auto;
-  min-width: 0;
+@media (min-width: 640px) {
+  .docs-code-gutter {
+    display: flex;
+  }
 }
 .docs-pre {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: 0.85rem 1rem;
   overflow-x: auto;
-  padding: 12px 14px;
+  font-family: var(--docs-mono);
   font-size: 12px;
-  line-height: 1.625;
-  scrollbar-width: thin;
+  line-height: 1.65;
+  color: #cbd5e1;
+  tab-size: 2;
 }
 .docs-pre:focus-visible {
   outline: none;
-  box-shadow: inset 0 0 0 2px rgba(96, 165, 250, 0.45);
+  box-shadow: inset 0 0 0 2px rgba(96, 165, 250, 0.4);
 }
 
-/* ── code tabs ────────────────────────────────────────────────────────── */
+/* Syntax tokens (dependency-free, from lib/code-highlight). Scoped to the two
+   surfaces that tokenize — this page's code blocks and the shared detail-page
+   block — so both read as one code convention. The palette lived inside the
+   old /docs block; it is shared, so it stays here even though only half of it
+   is this page's. */
+.docs-code .tok-com,
+.detail-code-text .tok-com {
+  color: rgba(139, 148, 158, 0.8);
+  font-style: italic;
+}
+.docs-code .tok-str,
+.detail-code-text .tok-str {
+  color: #6ee7b7;
+  opacity: 0.9;
+}
+.docs-code .tok-kw,
+.detail-code-text .tok-kw {
+  color: #c4b5fd;
+}
+.docs-code .tok-key,
+.detail-code-text .tok-key {
+  color: #7dd3fc;
+}
+.docs-code .tok-var,
+.detail-code-text .tok-var {
+  color: #fcd34d;
+}
+.docs-code .tok-flag,
+.detail-code-text .tok-flag {
+  color: #93c5fd;
+  opacity: 0.85;
+}
+.docs-code .tok-num,
+.detail-code-text .tok-num {
+  color: #fde68a;
+}
+.docs-code .tok-bool,
+.detail-code-text .tok-bool {
+  color: #f9a8d4;
+}
+.docs-code .tok-url,
+.detail-code-text .tok-url {
+  color: #67e8f9;
+}
 
+.docs-tabbed {
+  margin-top: 0.75rem;
+}
 .docs-tabs {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px;
+  gap: 2px;
+  margin-bottom: 0.6rem;
+  overflow-x: auto;
+  scrollbar-width: none;
+  border-bottom: 1px solid var(--docs-hair);
+}
+.docs-tabs::-webkit-scrollbar {
+  display: none;
 }
 .docs-tab {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-height: 30px;
-  border-radius: 8px;
-  padding: 0 10px;
-  font-size: 11px;
-  font-weight: 500;
+  min-height: 44px;
+  padding: 0 0.75rem;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 8px 8px 0 0;
+  font-size: 12px;
   color: var(--admin-text-dim);
-  transition: color 0.16s ease, background-color 0.16s ease, box-shadow 0.16s ease;
+  white-space: nowrap;
+  transition: color 0.16s ease, background-color 0.16s ease, border-color 0.16s ease;
 }
-.docs-tab:hover {
+@media (hover: hover) {
+  .docs-tab:hover {
+    color: var(--admin-text-muted);
+  }
+}
+.docs-tab[data-active="true"] {
   color: var(--admin-text);
-  background: rgba(255, 255, 255, 0.03);
-}
-.docs-tab.is-active {
-  color: #bfdbfe;
-  background: rgba(96, 165, 250, 0.12);
-  box-shadow: inset 0 0 0 1px rgba(96, 165, 250, 0.22);
+  border-color: var(--docs-hair);
+  background: #08080a;
 }
 .docs-tab:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.45);
+  box-shadow: inset 0 0 0 2px rgba(96, 165, 250, 0.45);
 }
 
-/* Touch devices get a 44px target on every control. */
-@media (hover: none) {
-  .docs-copybtn,
-  .docs-tab,
-  .docs-pathcopy {
-    min-height: 44px;
-  }
-}
+/* ── tables ───────────────────────────────────────────────────────────────── */
 
-/* Reduced motion: the beams are SMIL animations, which CSS cannot pause, so
-   the travelling gradient stroke and its packet are hidden and only the
-   static connecting path remains. The diagram still reads; it just stops
-   moving. */
-@media (prefers-reduced-motion: reduce) {
-  .docs-core svg path:nth-of-type(2),
-  .docs-core svg .beam-packet {
-    display: none;
-  }
+.docs-table-wrap {
+  margin-top: 1.25rem;
+  overflow-x: auto;
+  border: 1px solid var(--docs-hair);
+  border-radius: 10px;
 }
-
-/* ── provider ecosystem ─────────────────────────────────────────────────
-   Hairline-separated tiles (gap-px over a border fill), each carrying the hue
-   of the wire family it belongs to. The legend above the grid states the same
-   mapping in words, so the hue is decoration and the dot is never the only
-   way to read a tile. */
-.docs-provider-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 10px;
+.docs-table {
+  width: 100%;
+  min-width: 34rem;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  text-align: left;
 }
-.docs-provider-sub {
-  margin-top: 3px;
-  font-size: 11.5px;
-  color: var(--admin-text-muted);
+.docs-table th,
+.docs-table td {
+  padding: 0.7rem 0.9rem;
+  border-bottom: 1px solid var(--docs-hair);
+  vertical-align: top;
 }
-/* The header reuses the section-aside chip, but its text sits on the muted
-   token — the default dim (#6b7280) fails 4.5:1 at this size. */
-.docs-provider-head .docs-count-chip {
-  color: var(--admin-text-muted);
+.docs-table tbody tr:last-child > * {
+  border-bottom: 0;
 }
-
-.docs-provider-legend {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 1px;
-  margin-bottom: 10px;
-  overflow: hidden;
-  border: 1px solid var(--admin-border);
-  border-radius: 12px;
-  background: var(--admin-border);
-  list-style: none;
-}
-@media (min-width: 768px) {
-  .docs-provider-legend {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-}
-.docs-provider-legend-item {
-  min-width: 0;
-  background: var(--admin-surface);
-  padding: 10px 12px 11px;
-}
-.docs-provider-legend-top {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-}
-.docs-provider-legend-label {
-  min-width: 0;
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--admin-text);
-}
-/* Count chip: the one saturated element in the legend, so the eye pairs it
-   with the dots in the grid below. */
-.docs-provider-legend-count {
-  margin-left: auto;
-  border: 1px solid hsl(var(--f-hue) 80% 62% / 0.24);
-  border-radius: 999px;
-  background: hsl(var(--f-hue) 80% 62% / 0.1);
-  padding: 1px 7px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+.docs-table thead th {
   font-size: 9.5px;
-  font-variant-numeric: tabular-nums;
-  color: hsl(var(--f-hue) 55% 84%);
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--admin-text-dim);
+  background: rgba(255, 255, 255, 0.015);
 }
-.docs-provider-legend-note {
+.docs-table code {
+  font-family: var(--docs-mono);
+  font-size: 11.5px;
+  color: #dbeafe;
+  word-break: break-word;
+}
+.docs-table-id {
+  font-weight: 500;
+  white-space: nowrap;
+}
+.docs-table-logo {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  margin-right: 7px;
+  vertical-align: -3px;
+  opacity: 0.9;
+}
+.docs-table-sub {
   display: block;
-  margin-top: 4px;
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--admin-text-muted);
-}
-.docs-provider-dot {
-  flex: 0 0 auto;
-  width: 5px;
-  height: 5px;
-  border-radius: 999px;
-  background: hsl(var(--f-hue) 80% 62%);
-  box-shadow: 0 0 7px hsl(var(--f-hue) 85% 62% / 0.6);
-}
-
-.docs-provider-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 1px;
-  overflow: hidden;
-  border: 1px solid var(--admin-border);
-  border-radius: 12px;
-  background: var(--admin-border);
-}
-@media (min-width: 640px) {
-  .docs-provider-grid {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-}
-.docs-provider-item {
-  position: relative;
-  isolation: isolate;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 104px;
-  background: var(--admin-surface);
-  padding: 16px 10px 13px;
-  transition: background-color 0.2s ease;
-}
-/* The tile's contents lift a few pixels on hover or press — a quiet pop in
-   place of the old pointer-tracked glow. The lift sits on an inner wrapper so
-   the grid's `overflow: hidden` can never clip it. */
-.docs-provider-inner {
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  min-height: 0;
-  transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1);
-}
-.docs-provider-item:active {
-  background: rgba(255, 255, 255, 0.03);
-}
-@media (prefers-reduced-motion: no-preference) {
-  .docs-provider-item:active .docs-provider-inner {
-    transform: translateY(-3px);
-  }
-}
-@media (hover: hover) {
-  .docs-provider-item:hover {
-    background: rgba(255, 255, 255, 0.03);
-  }
-}
-@media (hover: hover) and (prefers-reduced-motion: no-preference) {
-  .docs-provider-item:hover .docs-provider-inner {
-    transform: translateY(-3px);
-  }
-}
-/* The mark is a self-contained badge tile (web/public/logos/) that brings its
-   own rounded corners, background and brand colours. The slot therefore adds
-   no frame of its own — a border here would read as a chip inside a chip. */
-.docs-provider-logo {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 40px;
-  height: 40px;
-}
-.docs-provider-name {
-  max-width: 100%;
-  overflow: hidden;
-  font-size: 11.5px;
-  font-weight: 500;
-  color: var(--admin-text);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-/* The provider type as it is written in `wiwi.yaml`. Dim (#6b7280) fails at
-   this size, so the mono line uses the muted token. */
-.docs-provider-id {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  max-width: 100%;
-}
-.docs-provider-id-text {
-  overflow: hidden;
-  font-size: 9.5px;
-  letter-spacing: 0.04em;
-  color: var(--admin-text-muted);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Tile entrance: the same stagger the feature grid uses, compressed — this
-   grid is read as a map, so thirteen tiles should not take a second to arrive. */
-@media (prefers-reduced-motion: no-preference) {
-  .docs-provider-grid.is-revealed .docs-provider-item {
-    animation: docs-tile-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
-    animation-delay: calc(var(--f-i, 0) * 28ms);
-  }
-}
-
-/* -- docs §08 Features ------------------------------------------------------
-   Hairline tiles over one spectrum: each tile receives --f-hue and derives its
-   icon chip, left spine, index, and dot from it. Interaction is a small,
-   neutral lift of the tile's contents — no pointer-tracked glow, no neon.
-   Tiles marked span="2" break the matrix into a bento rhythm. */
-
-.docs-feature-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  /* Every row takes the tallest row's height, so the hairline matrix reads as
-     a grid rather than a ragged stack. */
-  grid-auto-rows: 1fr;
-  grid-auto-flow: dense;
-  gap: 1px;
-  overflow: hidden;
-  border: 1px solid var(--admin-border);
-  border-radius: 14px;
-  background: var(--admin-border);
-}
-@media (min-width: 640px) {
-  .docs-feature-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-@media (min-width: 1180px) {
-  .docs-feature-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-}
-
-.docs-feature {
-  --f-ink: hsl(var(--f-hue) 85% 78%);
-  --f-soft: hsl(var(--f-hue) 80% 62% / 0.1);
-  --f-line: hsl(var(--f-hue) 80% 62% / 0.24);
-  position: relative;
-  isolation: isolate;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  background: var(--admin-surface);
-  padding: 17px 17px 16px;
-  transition: background-color 0.25s ease;
-}
-/* The tile's contents, not the tile itself, do the lifting: the grid clips
-   its own overflow, so a transform on the tile would be cut off at the outer
-   hairline. */
-.docs-feature-inner {
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  min-height: 0;
-  transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1);
-}
-.docs-feature[data-span="2"] {
-  grid-column: span 2;
-}
-@media (max-width: 639px) {
-  .docs-feature[data-span="2"] {
-    grid-column: span 1;
-  }
-}
-/* Wide tiles get a two-column interior once they actually have the room: the
-   icon chip and index become a left gutter, and the copy runs beside them
-   instead of stretching into one long line. Below 640px the tile collapses
-   back to the stacked layout. */
-@media (min-width: 640px) {
-  .docs-feature[data-span="2"] .docs-feature-inner {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    grid-template-rows: auto auto 1fr;
-    column-gap: 16px;
-    align-items: start;
-  }
-  .docs-feature[data-span="2"] .docs-feature-top {
-    grid-column: 1;
-    grid-row: 1 / span 3;
-    flex-direction: column;
-    gap: 10px;
-  }
-  .docs-feature[data-span="2"] .docs-feature-title {
-    grid-column: 2;
-    grid-row: 1;
-    margin-top: 0;
-  }
-  .docs-feature[data-span="2"] .docs-feature-body {
-    grid-column: 2;
-    grid-row: 2;
-    max-width: 62ch;
-  }
-  .docs-feature[data-span="2"] .docs-feature-meta {
-    grid-column: 2;
-    grid-row: 3;
-    align-self: end;
-    margin-top: 12px;
-  }
-}
-/* Left spine, lit in the tile's hue */
-.docs-feature::before {
-  content: "";
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 2px;
-  background: linear-gradient(180deg, transparent, var(--f-line), transparent);
-  opacity: 0.6;
-  transition: opacity 0.25s ease;
-  pointer-events: none;
-}
-/* Press (touch or mouse-down) is the tactile feedback: a small lift and a
-   neutral wash. Pointer hover repeats it, but only on devices that actually
-   hover, so a tap on a phone never leaves a tile stuck in its hover state. */
-.docs-feature:active {
-  background: rgba(255, 255, 255, 0.03);
-}
-@media (prefers-reduced-motion: no-preference) {
-  .docs-feature:active .docs-feature-inner {
-    transform: translateY(-3px);
-  }
-}
-@media (hover: hover) {
-  .docs-feature:hover {
-    background: rgba(255, 255, 255, 0.03);
-  }
-  .docs-feature:hover::before {
-    opacity: 1;
-  }
-  .docs-feature:hover .docs-feature-icon {
-    border-color: hsl(var(--f-hue) 85% 70% / 0.45);
-    background: hsl(var(--f-hue) 80% 62% / 0.17);
-  }
-  .docs-feature:hover .docs-feature-index {
-    color: var(--f-ink);
-    opacity: 1;
-  }
-  .docs-feature:hover .docs-feature-title {
-    color: hsl(var(--f-hue) 45% 92%);
-  }
-  .docs-feature:hover .docs-feature-dot {
-    background: var(--f-ink);
-  }
-}
-@media (hover: hover) and (prefers-reduced-motion: no-preference) {
-  .docs-feature:hover .docs-feature-inner {
-    transform: translateY(-3px);
-  }
-  .docs-feature:hover .docs-feature-icon {
-    transform: scale(1.06);
-  }
-}
-
-.docs-feature-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-.docs-feature-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border: 1px solid var(--f-line);
-  border-radius: 10px;
-  background: var(--f-soft);
-  color: var(--f-ink);
-  box-shadow: inset 0 1px 0 hsl(var(--f-hue) 90% 82% / 0.07);
-  transition:
-    transform 0.25s ease,
-    border-color 0.25s ease,
-    background-color 0.25s ease,
-    box-shadow 0.25s ease;
-}
-.docs-feature-icon svg {
-  width: 15px;
-  height: 15px;
-}
-.docs-feature-index {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  margin-top: 2px;
   font-size: 10px;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.08em;
-  /* The ordinal is real content, so it has to clear 4.5:1 — dim at 0.75
-     alpha does not at this size. Muted holds up, and hover still lights it. */
-  color: var(--admin-text-muted);
-  opacity: 0.8;
-  transition: color 0.25s ease, opacity 0.25s ease;
+  font-weight: 400;
+  color: var(--admin-text-dim);
 }
-
-.docs-feature-title {
-  margin-top: 12px;
-  font-size: 13.5px;
-  font-weight: 600;
-  letter-spacing: -0.012em;
-  color: var(--admin-text);
-  transition: color 0.25s ease;
-}
-.docs-feature-body {
-  flex: 1 1 auto;
-  margin-top: 5px;
-  font-size: 12px;
-  line-height: 1.65;
+.docs-table-note {
+  line-height: 1.6;
   color: var(--admin-text-muted);
 }
-
-/* Owning module: the tile doubles as a map of the codebase. */
-.docs-feature-meta {
+.docs-wire-tag {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  margin-top: 12px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 2px 7px;
+  border: 1px solid;
+  border-radius: 999px;
+  font-family: var(--docs-mono);
   font-size: 9.5px;
   letter-spacing: 0.04em;
-  color: var(--admin-text-dim);
+  white-space: nowrap;
 }
-.docs-feature-dot {
-  width: 4px;
-  height: 4px;
-  border-radius: 999px;
-  background: var(--f-line);
-  transition: background-color 0.25s ease;
+.docs-wire-tag[data-wire="chat"] {
+  color: #93c5fd;
+  border-color: rgba(96, 165, 250, 0.28);
+  background: rgba(59, 130, 246, 0.1);
 }
-
-/* Section heading aside: a quiet count chip next to "Section 08". */
-.docs-count-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  border: 1px solid var(--admin-border);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.02);
-  padding: 3px 10px;
-  font-size: 10.5px;
-  letter-spacing: 0.02em;
-  color: var(--admin-text-dim);
+.docs-wire-tag[data-wire="native"] {
+  color: #6ee7b7;
+  border-color: rgba(52, 211, 153, 0.28);
+  background: rgba(52, 211, 153, 0.09);
 }
-.docs-count-chip b {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-  color: var(--admin-text-muted);
-}
-.docs-count-sep {
-  width: 1px;
-  height: 9px;
-  background: var(--admin-border);
+.docs-wire-tag[data-wire="sse"] {
+  color: #fdba74;
+  border-color: rgba(251, 146, 60, 0.28);
+  background: rgba(251, 146, 60, 0.09);
 }
 
-/* Section 08's coverage readout: two tabular numbers in one hairline capsule,
-   so the counts sit beside the eyebrow instead of in a sentence. */
-.docs-coverage {
-  display: inline-flex;
-  align-items: stretch;
-  overflow: hidden;
-  border: 1px solid var(--admin-border);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.02);
-}
-.docs-coverage-item {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 6px;
-  padding: 5px 10px;
-}
-.docs-coverage-num {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 13px;
+.docs-table-status .docs-status-code code {
+  font-size: 12px;
   font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  line-height: 1;
   color: var(--admin-text);
 }
-.docs-coverage-label {
+.docs-table-status .docs-status-type code {
+  font-size: 11px;
+  color: var(--admin-text-muted);
+}
+.docs-status-retry {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border: 1px solid;
+  border-radius: 999px;
+  font-family: var(--docs-mono);
   font-size: 9.5px;
-  font-weight: 500;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.docs-status-retry[data-retried="true"] {
+  color: #86efac;
+  border-color: rgba(52, 211, 153, 0.25);
+  background: rgba(52, 211, 153, 0.08);
+}
+.docs-status-retry[data-retried="false"] {
+  color: #d1d5db;
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.docs-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── endpoint reference ───────────────────────────────────────────────────── */
+
+.docs-endpoints {
+  margin-top: 1.25rem;
+}
+.docs-filter {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 44px;
+  padding: 0 0.7rem;
+  border: 1px solid var(--docs-hair);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.02);
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+.docs-filter:focus-within {
+  border-color: rgba(96, 165, 250, 0.4);
+  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.12);
+}
+.docs-filter-icon {
+  flex: none;
+  color: var(--admin-text-dim);
+}
+.docs-filter-input {
+  flex: 1;
+  min-width: 0;
+  height: 44px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  font-size: 13px;
+  color: var(--admin-text);
+}
+.docs-filter-input::placeholder {
+  color: var(--admin-text-dim);
+}
+.docs-filter-input::-webkit-search-cancel-button {
+  display: none;
+}
+.docs-filter-kbd {
+  display: none;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--docs-hair);
+  border-radius: 4px;
+  font-family: var(--docs-mono);
+  font-size: 10px;
+  color: var(--admin-text-dim);
+}
+@media (min-width: 640px) {
+  .docs-filter-kbd {
+    display: inline-flex;
+  }
+}
+.docs-filter-count {
+  flex: none;
+  font-family: var(--docs-mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--admin-text-dim);
+}
+
+.docs-ep-group {
+  margin-top: 1.75rem;
+}
+.docs-ep-group-head {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--admin-text-muted);
 }
-.docs-coverage-sep {
-  align-self: stretch;
-  width: 1px;
-  background: var(--admin-border);
+.docs-ep-group-rule {
+  flex: 1;
+  height: 1px;
+  background: var(--docs-hair);
 }
-
-/* Tile entrance: staggered once the grid scrolls into view. Shared by the
-   feature grid and the provider grid. */
-@keyframes docs-tile-in {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-@media (prefers-reduced-motion: no-preference) {
-  .docs-feature-grid.is-revealed .docs-feature {
-    animation: docs-tile-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
-    animation-delay: calc(var(--f-i, 0) * 45ms);
-  }
-}
-/* No hover pointer: keep the tints and spine at full strength so the grid
-   still reads as colored rather than grey. */
-@media (hover: none) {
-  .docs-feature::before {
-    opacity: 1;
-  }
-}
-
-/* Inline code chips in docs prose (not inside <pre>) */
-.docs-content :not(pre) > code {
-  padding: 0.12em 0.38em;
-  border: 1px solid rgba(255, 255, 255, 0.075);
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.045);
-  font-size: 0.85em;
-  color: #bfdbfe;
-}
-
-/* Syntax highlighting tokens (dependency-free). Scoped to the two code
-   surfaces that tokenize: the /docs reference block and the shared detail-page
-   block. Token classes are the same in both — only the base text color differs. */
-.docs-codeblock .tok-com,
-.detail-code-text .tok-com {
-  color: rgba(139, 148, 158, 0.8);
-  font-style: italic;
-}
-.docs-codeblock .tok-str,
-.detail-code-text .tok-str {
-  color: #6ee7b7;
-  opacity: 0.9;
-}
-.docs-codeblock .tok-kw,
-.detail-code-text .tok-kw {
-  color: #c4b5fd;
-}
-.docs-codeblock .tok-key,
-.detail-code-text .tok-key {
-  color: #7dd3fc;
-}
-.docs-codeblock .tok-var,
-.detail-code-text .tok-var {
-  color: #fcd34d;
-}
-.docs-codeblock .tok-flag,
-.detail-code-text .tok-flag {
-  color: #93c5fd;
-  opacity: 0.85;
-}
-.docs-codeblock .tok-num,
-.detail-code-text .tok-num {
-  color: #fde68a;
-}
-.docs-codeblock .tok-bool,
-.detail-code-text .tok-bool {
-  color: #f9a8d4;
-}
-.docs-codeblock .tok-url,
-.detail-code-text .tok-url {
-  color: #67e8f9;
-}
-
-/* Next-section control: a quiet reading affordance under each heading. */
-.docs-next {
-  transition:
-    border-color 0.2s ease,
-    color 0.2s ease,
-    background-color 0.2s ease;
-}
-.docs-next:hover,
-.docs-next:focus-visible {
-  background: rgba(96, 165, 250, 0.06);
-}
-
-/* Endpoint path: the identifier readers copy, so it gets a surface of its own
-   rather than sitting bare next to the method badge. */
-.docs-endpoint-path {
-  border-radius: 5px;
-  transition: background-color 0.2s ease;
-}
-.group\/endpoint:hover .docs-endpoint-path {
-  background: rgba(255, 255, 255, 0.03);
-}
-
-/* Method badge + endpoint chips */
-.docs-method-badge {
-  box-shadow: 0 0 16px -7px currentColor;
-}
-.docs-client-chip {
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.02);
-  padding: 2px 8px;
-  font-size: 9.5px;
-  font-weight: 500;
-  letter-spacing: 0.02em;
+.docs-ep-group-count {
+  font-family: var(--docs-mono);
+  font-size: 10px;
+  letter-spacing: 0;
   color: var(--admin-text-dim);
-  transition: color 0.2s ease, border-color 0.2s ease;
 }
-.group\/endpoint:hover .docs-client-chip {
-  border-color: rgba(255, 255, 255, 0.1);
-  color: var(--admin-text-muted);
+.docs-ep-list {
+  margin: 0.35rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+.docs-ep {
+  padding: 0.85rem 0;
+  border-bottom: 1px solid var(--docs-hair);
+}
+.docs-ep:last-child {
+  border-bottom: 0;
+}
+.docs-ep-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
+}
+.docs-method {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  min-width: 46px;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid;
+  border-radius: 5px;
+  font-family: var(--docs-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+.docs-method[data-tone="post"] {
+  color: #fcd34d;
+  border-color: rgba(251, 191, 36, 0.25);
+  background: rgba(251, 191, 36, 0.09);
+}
+.docs-method[data-tone="get"] {
+  color: #6ee7b7;
+  border-color: rgba(52, 211, 153, 0.25);
+  background: rgba(52, 211, 153, 0.09);
+}
+.docs-method[data-tone="delete"] {
+  color: #fca5a5;
+  border-color: rgba(248, 113, 113, 0.25);
+  background: rgba(248, 113, 113, 0.09);
+}
+.docs-method[data-tone="ws"] {
+  color: #c4b5fd;
+  border-color: rgba(167, 139, 250, 0.28);
+  background: rgba(167, 139, 250, 0.1);
+}
+.docs-path {
+  font-family: var(--docs-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--admin-text);
+  word-break: break-word;
 }
 .docs-pathcopy {
   display: inline-flex;
+  flex: none;
   align-items: center;
   justify-content: center;
   width: 30px;
   height: 30px;
-  flex: 0 0 auto;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 8px;
+  border: 1px solid var(--docs-hair);
+  border-radius: 7px;
   background: rgba(255, 255, 255, 0.02);
   color: var(--admin-text-dim);
-  transition: color 0.16s ease, border-color 0.16s ease, background-color 0.16s ease;
+  transition: color 0.16s ease, border-color 0.16s ease;
 }
-.docs-pathcopy:hover {
-  border-color: rgba(255, 255, 255, 0.14);
-  color: #93c5fd;
+@media (hover: hover) {
+  .docs-pathcopy:hover {
+    color: var(--docs-sky);
+    border-color: rgba(147, 197, 253, 0.32);
+  }
 }
 .docs-pathcopy:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.45);
 }
-@media (min-width: 640px) {
-  /* Client chips sit at the end of the row instead of drifting to the far
-     right edge of a wide content column. */
-  .docs-endpoint-clients {
-    margin-left: 8px;
-  }
-}
-
-/* Reading-progress hairline, pinned to the very top of the viewport */
-.docs-progress {
-  position: fixed;
-  top: 0;
-  right: 0;
-  left: 0;
-  z-index: 60;
-  height: 2px;
-  pointer-events: none;
-}
-.docs-progress-fill {
-  height: 100%;
-  width: 100%;
-  transform: scaleX(var(--docs-progress, 0));
-  transform-origin: left;
-  background: linear-gradient(90deg, #3b82f6, #8b5cf6 55%, #d946ef);
-  transition: transform 0.12s linear;
-}
-
-/* Heading deep-link anchors: hover/focus-revealed, always visible to touch */
-.docs-anchor {
-  opacity: 0;
-  transform: translateX(-2px);
-  transition: opacity 0.15s ease, transform 0.15s ease, color 0.15s ease;
-}
-.docs-heading:hover .docs-anchor,
-.docs-anchor:focus-visible {
-  opacity: 1;
-  transform: none;
-}
 @media (hover: none) {
-  .docs-anchor {
-    opacity: 0.6;
-    /* The # glyph alone is a ~17px target, well under the 44px touch floor.
-       Grow the hit area to 44x44 and pull the vertical bleed back with a
-       negative margin so the heading keeps its current height. */
-    display: inline-flex;
-    min-height: 44px;
-    min-width: 44px;
-    margin-block: -10px;
-    align-items: center;
-    justify-content: center;
+  .docs-pathcopy {
+    width: 44px;
+    height: 44px;
   }
 }
-
-/* Selection themed to the docs world */
-.docs-content ::selection,
-.docs-masthead ::selection {
-  background: rgba(96, 165, 250, 0.28);
-  color: #fff;
+.docs-ep-desc {
+  max-width: 76ch;
+  margin-top: 0.45rem;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--admin-text-muted);
+}
+.docs-ep-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.9rem;
+  margin-top: 0.5rem;
+}
+.docs-ep-auth {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+.docs-ep-auth-label {
+  flex: none;
+  font-family: var(--docs-mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--admin-text-dim);
+}
+.docs-ep-auth code {
+  font-family: var(--docs-mono);
+  font-size: 10.5px;
+  color: #cbd5e1;
+  word-break: break-all;
+}
+.docs-ep-clients {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.docs-client-chip {
+  padding: 1px 7px;
+  border: 1px solid var(--docs-hair);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.02);
+  font-size: 9.5px;
+  color: var(--admin-text-dim);
 }
 
-/* Back-to-top control */
+.docs-empty {
+  margin-top: 1.25rem;
+  padding: 2rem 1rem;
+  border: 1px dashed var(--docs-hair-2);
+  border-radius: 10px;
+  text-align: center;
+}
+.docs-empty-title {
+  font-size: 13px;
+  color: var(--admin-text-muted);
+  word-break: break-word;
+}
+.docs-empty-reset {
+  min-height: 44px;
+  margin-top: 0.75rem;
+  padding: 0 1rem;
+  border: 1px solid var(--docs-hair-2);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 12.5px;
+  color: var(--admin-text);
+}
+.docs-empty-reset:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.45);
+}
+
+/* ── callout ──────────────────────────────────────────────────────────────── */
+
+.docs-note {
+  margin-top: 1.5rem;
+  padding: 0.9rem 1rem;
+  border-left: 2px solid rgba(167, 139, 250, 0.55);
+  border-radius: 0 10px 10px 0;
+  background: linear-gradient(90deg, rgba(139, 92, 246, 0.09), rgba(139, 92, 246, 0) 76%);
+}
+.docs-note-label {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #c4b5fd;
+}
+.docs-note-body {
+  margin-top: 0.45rem;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--admin-text-muted);
+}
+
+/* ── back to top ──────────────────────────────────────────────────────────── */
+
 .docs-backtop {
   position: fixed;
   right: 18px;
@@ -2930,7 +2761,7 @@ select.admin-input option {
   width: 44px;
   height: 44px;
   border: 1px solid rgba(255, 255, 255, 0.09);
-  border-radius: 9999px;
+  border-radius: 999px;
   background: rgba(10, 10, 10, 0.82);
   backdrop-filter: blur(10px);
   color: var(--admin-text-muted);
@@ -2945,45 +2776,37 @@ select.admin-input option {
   transform: none;
   pointer-events: auto;
 }
-.docs-backtop:hover {
-  color: #bfdbfe;
-  border-color: rgba(96, 165, 250, 0.35);
+@media (hover: hover) {
+  .docs-backtop:hover {
+    color: #bfdbfe;
+    border-color: rgba(96, 165, 250, 0.35);
+  }
 }
 .docs-backtop:focus-visible {
   outline: none;
   box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.3);
 }
 
-/* Reduced motion: the progress meters, the back-to-top lift, and the tile
-   hover nudges are decorative, so they snap instead of sliding. */
+/* Selection themed to the page's accent. */
+.docs-page ::selection {
+  background: rgba(96, 165, 250, 0.28);
+  color: #fff;
+}
+
+/* Motion is decorative here — the meters and the rail fill snap instead. */
 @media (prefers-reduced-motion: reduce) {
   .docs-progress-fill,
-  .docs-rail-line-fill,
+  .docs-rail-fill,
   .docs-rail-tick,
-  .docs-nav-item,
-  .docs-nav-num,
-  .docs-nav-icon,
+  .docs-rail-item,
   .docs-rail-cta,
-  .docs-rail-cta-arrow,
-  .docs-backtop,
-  .docs-anchor,
-  .docs-feature-icon,
-  .docs-feature-inner,
-  .docs-provider-inner,
-  .docs-core-provider {
+  .docs-chip,
+  .docs-tab,
+  .docs-backtop {
     transition: none;
   }
 }
 
-/* Hero action buttons stretch to the full measure on phones */
-@media (max-width: 479px) {
-  .docs-hero-actions > a,
-  .docs-hero-actions > button,
-  .docs-hero-actions > div {
-    flex: 1 1 auto;
-    justify-content: center;
-  }
-}
 
 /* ─── Login page: split-panel beam console ───────────────────────────────── */
 
@@ -5479,7 +5302,8 @@ select.admin-input option {
    split); this is the reader's copy, so the two share a hairline grid and
    nothing else — no editor, no bar, no state.
 
-   Colour is spent in exactly one place: the provider dot and its label.
+   Colour is spent on one register — provider identity: the dot and its
+   label, the row's spine, the card's hairline. Everything else is ink.
 
    Naming: `mc-` = models catalog. */
 
@@ -5491,12 +5315,73 @@ select.admin-input option {
 }
 
 .mc-title {
-  font-size: clamp(2rem, 5vw, 3.25rem);
+  font-size: clamp(2rem, 4.6vw, 3.1rem);
   font-weight: 600;
-  line-height: 1.02;
-  letter-spacing: -0.032em;
+  line-height: 1.03;
+  letter-spacing: -0.036em;
   color: var(--admin-text);
   text-wrap: balance;
+}
+/* The headline states the fact and then rests: the second clause is set in
+   the muted tone and in a tighter optical size, so the sentence reads as one
+   thought with a settled end rather than two gradient fragments. */
+.mc-title-accent {
+  display: block;
+  margin-top: 0.12em;
+  color: var(--admin-text-muted);
+  font-weight: 500;
+  letter-spacing: -0.028em;
+}
+
+/* Liveness: the catalogue is a read of the live router, so this is a status
+   stamp, not a marketing pill — hairline, micro-type, one breathing dot. */
+.mc-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+  padding: 0 8px;
+  border: 1px solid rgba(52, 211, 153, 0.22);
+  border-radius: 999px;
+  background: rgba(16, 185, 129, 0.06);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #6ee7b7;
+}
+.mc-live-dot {
+  width: 5px;
+  height: 5px;
+  flex: none;
+  border-radius: 999px;
+  background: #34d399;
+}
+/* The claim expired: same stamp, drained of green, dot at rest. A stale
+   "serving now" is worse than no chip at all. */
+.mc-live-stale {
+  border-color: var(--admin-border-hover);
+  background: transparent;
+  color: var(--admin-text-dim);
+}
+.mc-live-stale .mc-live-dot {
+  background: var(--admin-text-dim);
+  animation: none;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .mc-live-dot {
+    animation: mc-live-pulse 2.4s ease-in-out infinite;
+  }
+}
+@keyframes mc-live-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
 }
 
 /* The size of the catalog, stated once, as figures rather than a sentence. */
@@ -5585,6 +5470,13 @@ select.admin-input option {
     background: rgba(5, 5, 5, 0.84);
     backdrop-filter: blur(14px);
     -webkit-backdrop-filter: blur(14px);
+  }
+  /* Stuck over scrolled ledger rows the blur alone reads as fog; a shadow
+     lifts the bar off the text passing under it. Sticky has no selector of
+     its own, so a sentinel in the page toggles the state. On a phone the
+     toolbar scrolls away, so the state exists only from here up. */
+  .mc-toolbar.is-stuck {
+    box-shadow: 0 16px 24px -20px rgba(0, 0, 0, 0.95);
   }
 }
 
@@ -5795,8 +5687,8 @@ select.admin-input option {
   border-top: 1px solid rgba(255, 255, 255, 0.045);
   transition: background-color 0.18s ease;
 }
-/* The row's provider, as a spine: colour marks the row you are on without
-   tinting the text of eighty-one rows. */
+/* The row's provider, as a spine: faint at rest, so the ledger scans by hue
+   before any pointer arrives, and full-strength on the row you are on. */
 .mc-row::before {
   content: "";
   position: absolute;
@@ -5804,12 +5696,12 @@ select.admin-input option {
   top: 0;
   bottom: 0;
   width: 2px;
-  background: hsl(var(--p-hue, 217) 80% 62% / 0);
+  background: hsl(var(--p-hue, 217) 80% 62% / 0.34);
   transition: background-color 0.18s ease;
 }
 .mc-row:hover::before,
 .mc-row:focus-within::before {
-  background: hsl(var(--p-hue, 217) 80% 62% / 0.55);
+  background: hsl(var(--p-hue, 217) 80% 62% / 0.7);
 }
 .mc-row:first-child {
   border-top: 0;
@@ -5853,6 +5745,14 @@ select.admin-input option {
   font-size: 10px;
   color: var(--admin-text-muted);
   white-space: nowrap;
+}
+/* Search hits inside a matched string: neutral ink, lifted one step — hue
+   stays reserved for provider identity. */
+mark.mc-hit {
+  background: rgba(255, 255, 255, 0.09);
+  border-radius: 3px;
+  padding: 0 1px;
+  color: inherit;
 }
 .mc-copy {
   margin-left: auto;
@@ -5940,7 +5840,7 @@ select.admin-input option {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 42px;
+  width: 44px;
   min-height: 44px;
   color: var(--admin-text-dim);
   transition: color 0.15s ease, background-color 0.15s ease;
@@ -6020,23 +5920,34 @@ select.admin-input option {
   background: rgba(255, 255, 255, 0.014);
 }
 
+/* The card's primary provider, as a hairline along its top edge — the grid
+   reads by hue at rest, the same way the ledger's spine does, instead of
+   revealing identity only under the cursor. */
+.mc-card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    hsl(var(--p-hue, 217) 80% 62% / 0.6),
+    hsl(var(--p-hue, 217) 80% 62% / 0.12)
+  );
+}
+
 /* Provider badges: the brand tile from web/public/logos/, or a letter tile in
    the account's hue when the type has no badge. */
-.mc-marks {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  min-width: 0;
-}
 .mc-mark {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: 22px;
+  height: 22px;
   flex: none;
   overflow: hidden;
-  border-radius: 7px;
+  border-radius: 6px;
 }
 .mc-mark-img {
   width: 100%;
@@ -6056,20 +5967,15 @@ select.admin-input option {
   font-weight: 600;
   color: hsl(var(--p-hue, 217) 70% 84%);
 }
-.mc-mark-more {
-  flex: none;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 10px;
-  color: var(--admin-text-dim);
-}
 .mc-card-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
   min-width: 0;
 }
 .mc-card-name {
   min-width: 0;
+  flex: 1 1 auto;
   margin: 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 13.5px;
@@ -6079,27 +5985,112 @@ select.admin-input option {
   color: var(--admin-text);
   overflow-wrap: anywhere;
 }
+/* Alias chips and the route/account count share one meta line: both are
+   secondary facts about the card, not part of its identity. */
+.mc-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  min-width: 0;
+}
 .mc-card-aliases {
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
 }
-/* The routes sit at the foot of the card, so a short card in a tall row does
-   not open a hole in the middle of it. */
+.mc-card-count {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--admin-text-dim);
+}
+
+/* Routes, as routes: account avatar, then "account → upstream id" on one
+   line. The arrow carries the gateway's whole value proposition, so it is
+   drawn, not implied by proximity. */
 .mc-card-routes {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 6px;
   margin: auto 0 0;
-  padding: 8px 0 0;
+  padding: 10px 0 0;
   border-top: 1px solid rgba(255, 255, 255, 0.045);
   list-style: none;
 }
-.mc-card-route {
+.mc-routechip {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 9px;
   min-width: 0;
+  padding: 5px 8px 5px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  background: hsl(var(--p-hue, 217) 60% 50% / 0.045);
+  transition: border-color 0.16s ease, background-color 0.16s ease;
+}
+.mc-card:hover .mc-routechip {
+  border-color: hsl(var(--p-hue, 217) 70% 60% / 0.18);
+}
+.mc-routechip-flow {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.mc-routechip-prov {
+  flex: none;
+  max-width: 8rem;
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: hsl(var(--p-hue, 217) 62% 82%);
+}
+.mc-routechip-arrow {
+  flex: none;
+  font-size: 11px;
+  line-height: 1;
+  color: hsl(var(--p-hue, 217) 60% 70% / 0.55);
+}
+.mc-routechip-id {
+  min-width: 0;
+  overflow: hidden;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--admin-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A finger cannot read a truncation, so on a phone the id wraps. */
+@media (max-width: 767px) {
+  .mc-routechip-flow {
+    flex-wrap: wrap;
+  }
+  .mc-routechip-id {
+    flex-basis: 100%;
+    overflow: visible;
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+}
+
+/* Entrance: rows and cards rise once, staggered by their list index (capped
+   after two dozen, so an 88-row ledger never waits on its own tail). Declared
+   under no-preference only — reduced-motion users get the list at rest. */
+@keyframes mc-enter {
+  from {
+    opacity: 0;
+    transform: translateY(7px);
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .mc-enter {
+    animation: mc-enter 0.4s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+    animation-delay: calc(var(--i, 0) * 14ms);
+  }
 }
 
 /* ── Touch number stepper (unlayered on purpose) ─────────────────────────────

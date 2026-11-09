@@ -28,22 +28,47 @@ import type { Delta } from "@/lib/dashboard-metrics";
 
 // -- layout ------------------------------------------------------------------
 
-export function Card(props: { children: ReactNode; className?: string }) {
+export function Card(props: {
+  children: ReactNode;
+  className?: string;
+  /** Set false for an inner scroll container: a chart hover popout would
+   *  otherwise be clipped by the card's own `overflow: hidden`. */
+  clip?: boolean;
+}) {
   return (
-    <div className={`admin-card ${props.className ?? ""}`}>{props.children}</div>
+    <div
+      className={`admin-card ${props.clip === false ? "admin-card-clip-x" : ""} ${props.className ?? ""}`}
+    >
+      {props.children}
+    </div>
   );
 }
 
-export function CardHeader(props: { title: ReactNode; subtitle?: ReactNode; right?: ReactNode }) {
+export function CardHeader(props: {
+  title: ReactNode;
+  subtitle?: ReactNode;
+  right?: ReactNode;
+  /** Optional accent glyph before the title — one visual anchor per card. */
+  icon?: LucideIcon;
+  className?: string;
+}) {
+  const Icon = props.icon;
   return (
-    <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-2 border-b border-[var(--admin-border)] px-5 py-3.5">
-      <div className="min-w-0">
-        <h3 className="text-[14px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
-          {props.title}
-        </h3>
-        {props.subtitle && (
-          <p className="mt-0.5 text-[11px] text-[var(--admin-text-muted)]">{props.subtitle}</p>
+    <div
+      className={`flex flex-wrap items-center justify-between gap-x-2 gap-y-2 border-b border-[var(--admin-border)] px-5 py-3.5 ${props.className ?? ""}`}
+    >
+      <div className="flex min-w-0 items-center gap-2.5">
+        {Icon && (
+          <Icon size={14} className="shrink-0 text-[var(--admin-accent)]" aria-hidden />
         )}
+        <div className="min-w-0">
+          <h3 className="text-[14px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
+            {props.title}
+          </h3>
+          {props.subtitle && (
+            <p className="mt-0.5 text-[11px] text-[var(--admin-text-muted)]">{props.subtitle}</p>
+          )}
+        </div>
       </div>
       {/* Wraps below the title on narrow viewports. Without it a wide set of
           controls squeezes the min-w-0 title box below its own text width and
@@ -125,9 +150,11 @@ export function Button(
     const { variant: _v, className: _c, href, ...rest } = props;
     return <a href={href} className={cls} {...rest} />;
   }
-  const { variant: _v, className: _c, ...rest } = props as ButtonOwn &
-    ButtonHTMLAttributes<HTMLButtonElement>;
-  return <button className={cls} {...rest} />;
+  const { variant: _v, className: _c, type, ...rest } = props as ButtonOwn &
+    ButtonHTMLAttributes<HTMLButtonElement> & { type?: "button" | "submit" | "reset" };
+  // An unqualified <button> inside any form submits it. Every shared action
+  // button is a command, not a submit; callers can still opt in with `type`.
+  return <button type={type ?? "button"} className={cls} {...rest} />;
 }
 
 /** Text input. `ref` is accepted as a plain prop (React 19 semantics onward) so
@@ -373,6 +400,10 @@ export function StatCard(props: {
   strip?: { label: string; value: number; color: string }[];
   /** Text shown right-aligned inside the progress/strip track row. */
   progressRight?: string;
+  /** Secondary rank: a quieter rule of figures below the headline tiles.
+   *  Drops the accent wash and shrinks the value — the visual dowry of a
+   *  metric that supports the story rather than being it. */
+  compact?: boolean;
 }) {
   const accent = STAT_ACCENT[props.tone ?? "default"];
   const Icon = props.icon;
@@ -381,16 +412,20 @@ export function StatCard(props: {
     Number.isFinite(props.numeric) &&
     props.format != null;
   return (
-    <Card className={`group relative p-5 ${props.featured ? "admin-stat-highlight" : ""}`}>
+    <Card
+      className={`group relative ${props.compact ? "p-4" : "p-5"} ${
+        props.featured ? "admin-stat-highlight" : ""
+      }`}
+    >
       {/* Accent wash — a corner glow that warms on hover, matching the tile's
           tone, so featured tiles read as "live surfaces" not just cards. */}
       <span
         aria-hidden
-        className="admin-stat-wash pointer-events-none absolute inset-0"
+        className={`admin-stat-wash pointer-events-none absolute inset-0${props.compact ? " hidden" : ""}`}
         style={{ background: `radial-gradient(120% 90% at 100% 0%, ${accent}0F 0%, transparent 60%)` }}
       />
       <div className="relative z-10">
-        <div className="mb-3 flex items-center gap-2">
+        <div className={`flex items-center gap-2 ${props.compact ? "mb-2" : "mb-3"}`}>
           {Icon && (
             <Icon className="h-3.5 w-3.5 shrink-0" style={{ color: accent, opacity: 0.6 }} />
           )}
@@ -398,7 +433,7 @@ export function StatCard(props: {
         </div>
         <div className="flex items-end justify-between gap-3">
           <p
-            className={`admin-stat-value font-mono ${props.featured ? "text-[28px]" : "text-[22px]"} ${
+            className={`admin-stat-value font-mono ${props.featured ? "text-[28px]" : props.compact ? "text-[18px]" : "text-[22px]"} ${
               props.waiting ? "admin-waiting-pulse" : ""
             }`}
           >

@@ -260,6 +260,118 @@ export function ShareBars(props: {
   );
 }
 
+// -- leaderboard -------------------------------------------------------------
+
+export interface LeaderboardRow {
+  /** Stable key — the model group / provider / key name. */
+  name: string;
+  /** Ranked magnitude (share of requests or cost in the window). */
+  value: number;
+  /** Secondary figures rendered beside the name, already formatted. */
+  meta: string;
+  /** Trailing figures, one per column header, already formatted. */
+  cells: string[];
+  /** Optional href: the row becomes a link into that entity's page. */
+  href?: string;
+}
+
+/**
+ * Ranked data table with the magnitude drawn as a bar behind each name, so a
+ * service ranking reads its own ordering without scanning numbers. Column
+ * headers mirror the console's table vocabulary; the caller formats every
+ * cell, because the console has one formatter and this does not guess at one.
+ *
+ * The empty state names the window rather than saying "no data": a sparse
+ * personal gateway is idle most of the time and that is not an error.
+ */
+export function Leaderboard(props: {
+  caption: string;
+  /** Trailing column headers, in the order the caller returns `cells`. */
+  columns: string[];
+  /** Header for the name column, e.g. "Model" or "Provider". */
+  nameLabel: string;
+  rows: LeaderboardRow[];
+  emptyLabel?: string;
+}) {
+  const max = Math.max(1, ...props.rows.map((r) => r.value));
+  if (props.rows.length === 0) {
+    return (
+      <div className="px-5 py-10">
+        <EmptyState>{props.emptyLabel ?? "No traffic in this window yet."}</EmptyState>
+      </div>
+    );
+  }
+  return (
+    <div className="overflow-x-auto">
+      <table className="admin-lb">
+        <caption className="sr-only">{props.caption}</caption>
+        <thead>
+          <tr>
+            <th scope="col">#</th>
+            <th scope="col" className="text-left">
+              {props.nameLabel}
+            </th>
+            {props.columns.map((c) => (
+              <th key={c} scope="col">
+                {c}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody className="admin-lb-body">
+          {props.rows.map((row, i) => (
+            <tr key={row.name}>
+              <td className="font-mono text-[11px] text-[var(--admin-text-dim)]">
+                {String(i + 1).padStart(2, "0")}
+              </td>
+              <td>
+                {row.href ? (
+                  <a href={row.href} className="admin-lb-link">
+                    <NamePlate row={row} max={max} />
+                  </a>
+                ) : (
+                  <div className="admin-lb-link">
+                    <NamePlate row={row} max={max} />
+                  </div>
+                )}
+              </td>
+              {row.cells.map((cell, j) => (
+                <td
+                  key={j}
+                  className={`font-mono text-[12px] $                    j === 0 ? "text-[var(--admin-text)]" : "text-[var(--admin-text-muted)]"                  }`}
+                >
+                  {cell}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function NamePlate(props: { row: LeaderboardRow; max: number }) {
+  const pct = (props.row.value / props.max) * 100;
+  return (
+    <>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[12.5px] text-[var(--admin-text)]">
+          {props.row.name}
+        </span>
+        <span className="mt-1.5 flex items-center gap-2.5">
+          <span className="admin-lb-bar" aria-hidden>
+            <span style={{ width: `${Math.max(pct, 2)}%` }} />
+          </span>
+          <span className="truncate font-mono text-[10px] text-[var(--admin-text-dim)]">
+            {props.row.meta}
+          </span>
+        </span>
+      </span>
+    </>
+  );
+}
+
 // -- token mix ribbon --------------------------------------------------------
 
 export interface RibbonPart {

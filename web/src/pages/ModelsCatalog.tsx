@@ -1,21 +1,29 @@
 // ModelsCatalog — public, secret-free model catalog from /public/models.
 // No auth required.
 //
-// The default reading is an index, not a gallery: eighty-one groups do not fit
-// in cards, and a card per group buries the only thing a reader comes here for
-// — the group name and the provider account behind it. So each group is one
-// ruled row of a single ledger, and its routes read left-to-right on that row.
-// A second, card-shaped reading of the same rows is one toggle away, for when
-// a single group is what you are looking at rather than the whole list.
+// Two readings of one catalogue, because they answer different questions.
 //
-// The masthead keeps the Landing/Pricing vocabulary (beam backdrop, live
-// chip); everything below it is the hairline grid the console's Models ledger
-// already uses, minus the operator's weights, health and split.
+// The ledger (default) answers "is this model here, and where does it go?" —
+// one ruled row per group, its routes read left-to-right, spine-hued by
+// provider so the list scans by identity before any pointer arrives.
+//
+// The cards answer "what is this group?" — one route per chip, drawn as the
+// actual path it takes (account avatar, account name, arrow, upstream id),
+// because the arrow *is* the product: the client names the group and the
+// gateway picks the account.
+//
+// The masthead is the site's language (beam backdrop, hairline status
+// stamp), not a template hero: no gradient CTA pair, no stat wall. The
+// figures exist because the catalogue's size is the page's whole premise.
+//
+// Honesty rules that shaped the states: "Serving now" expires into "Not
+// refreshing" after three missed polls and into "Checking" when the request
+// fails, rather than the stamp claiming liveness it does not have.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { ArrowRight, ArrowUpDown, Boxes, Check, ChevronDown, Copy, LayoutGrid, Rows3, Search, X } from "lucide-react";
+import { ArrowRight, ArrowUpDown, Boxes, Braces, Check, ChevronDown, Copy, LayoutGrid, Rows3, Search, X } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { getPublicModels } from "@/api/client";
 import { aliasDisplayName, aliasTarget, type PublicModelGroup } from "@/api/types";
@@ -45,6 +53,16 @@ function providerHue(provider: string): number {
 
 function hueVar(provider: string): CSSProperties {
   return { ["--p-hue" as string]: String(providerHue(provider)) } as CSSProperties;
+}
+
+/** Style for a list item that enters with the page's staggered rise: the
+ *  delay steps 14ms per row and caps after two dozen, so an 88-row ledger
+ *  never waits on its own tail. */
+function enterStyle(provider: string, i: number): CSSProperties {
+  return {
+    ...hueVar(provider),
+    ["--i" as string]: String(Math.min(i, 24)),
+  } as CSSProperties;
 }
 
 // -- derived bits -------------------------------------------------------------
@@ -111,11 +129,38 @@ function CopyIdButton(props: { text: string; label: string }) {
   );
 }
 
-function Route(props: { provider: string; type?: string; modelId: string }) {
+/** Paints the query's hits inside a matched string: the reader sees *why* a
+ *  row answered instead of trusting the filter. Hue-neutral on purpose —
+ *  provider colour already has a job on this page. */
+function Hi(props: { text: string; tokens: string[] }) {
+  if (props.tokens.length === 0) return <>{props.text}</>;
+  const re = new RegExp(
+    props.tokens.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"),
+    "ig",
+  );
+  const parts = props.text.split(re);
+  return (
+    <>
+      {parts.map((part, i) =>
+        i % 2 === 1 ? (
+          <mark key={i} className="mc-hit">
+            {part}
+          </mark>
+        ) : (
+          <span key={i}>{part}</span>
+        ),
+      )}
+    </>
+  );
+}
+
+function Route(props: { provider: string; type?: string; modelId: string; tokens: string[] }) {
   return (
     <span className="mc-route" style={hueVar(props.provider)}>
       <span className="mc-dot" aria-hidden />
-      <span className="mc-prov">{props.provider}</span>
+      <span className="mc-prov">
+        <Hi text={props.provider} tokens={props.tokens} />
+      </span>
       <span
         className="mc-mid"
         title={
@@ -124,7 +169,7 @@ function Route(props: { provider: string; type?: string; modelId: string }) {
             : `${props.provider}/${props.modelId}`
         }
       >
-        {props.modelId}
+        <Hi text={props.modelId} tokens={props.tokens} />
       </span>
     </span>
   );
@@ -144,7 +189,7 @@ function ProviderMark(props: { name: string; type?: string }) {
         // Not lazy: there are only thirteen distinct badges, so the browser
         // fetches each once — and a badge that pops in after the card has
         // painted reads as a broken tile.
-        <img src={src} alt="" className="mc-mark-img" width={24} height={24} />
+        <img src={src} alt="" className="mc-mark-img" width={22} height={22} />
       ) : (
         <span className="mc-mark-letter" aria-hidden>
           {props.name.slice(0, 1).toUpperCase()}
@@ -154,13 +199,18 @@ function ProviderMark(props: { name: string; type?: string }) {
   );
 }
 
-function CatalogRow(props: { g: PublicModelGroup; aliases: AliasChip[] }) {
+function CatalogRow(props: {
+  g: PublicModelGroup;
+  aliases: AliasChip[];
+  tokens: string[];
+  index: number;
+}) {
   const g = props.g;
   return (
-    <li className="mc-row" style={hueVar(g.deployments[0]?.provider ?? "")}>
+    <li className="mc-row mc-enter" style={enterStyle(g.deployments[0]?.provider ?? "", props.index)}>
       <div className="mc-idcell">
         <span className="mc-name" title={g.name}>
-          {g.name}
+          <Hi text={g.name} tokens={props.tokens} />
         </span>
         {props.aliases.map((a) => (
           <span
@@ -168,7 +218,7 @@ function CatalogRow(props: { g: PublicModelGroup; aliases: AliasChip[] }) {
             className="mc-alias"
             title={a.dn ? `${a.dn} (alias → ${g.name})` : `alias → ${g.name}`}
           >
-            {a.alias}
+            <Hi text={a.alias} tokens={props.tokens} />
           </span>
         ))}
         <CopyIdButton text={g.name} label={`Copy model id ${g.name}`} />
@@ -180,6 +230,7 @@ function CatalogRow(props: { g: PublicModelGroup; aliases: AliasChip[] }) {
             provider={d.provider}
             type={d.type}
             modelId={d.model_id}
+            tokens={props.tokens}
           />
         ))}
       </div>
@@ -187,59 +238,83 @@ function CatalogRow(props: { g: PublicModelGroup; aliases: AliasChip[] }) {
   );
 }
 
-function CatalogCard(props: { g: PublicModelGroup; aliases: AliasChip[] }) {
+/** One route, read as a route rather than a row: client id → account → the
+ *  upstream id that account actually names. The arrow is the whole point of
+ *  the gateway, so the card shows it explicitly instead of stacking two
+ *  unconnected strings. */
+function RouteChip(props: {
+  provider: string;
+  type?: string;
+  modelId: string;
+  tokens: string[];
+}) {
+  return (
+    <li className="mc-routechip" style={hueVar(props.provider)}>
+      <ProviderMark name={props.provider} type={props.type} />
+      <div className="mc-routechip-flow">
+        <span className="mc-routechip-prov" title={props.type ? `${props.provider} · ${props.type}` : props.provider}>
+          <Hi text={props.provider} tokens={props.tokens} />
+        </span>
+        <span className="mc-routechip-arrow" aria-hidden>
+          →
+        </span>
+        <span
+          className="mc-routechip-id"
+          title={`${props.provider}${props.type ? ` (${props.type})` : ""} → ${props.modelId}`}
+        >
+          <Hi text={props.modelId} tokens={props.tokens} />
+        </span>
+      </div>
+    </li>
+  );
+}
+
+function CatalogCard(props: {
+  g: PublicModelGroup;
+  aliases: AliasChip[];
+  tokens: string[];
+  index: number;
+}) {
   const g = props.g;
   // One badge per account, not per route: two routes on the same account are
-  // the same identity.
-  const accounts = new Map<string, string | undefined>();
-  for (const d of g.deployments) if (!accounts.has(d.provider)) accounts.set(d.provider, d.type);
-  const shown = [...accounts.entries()].slice(0, 4);
-  const hidden = accounts.size - shown.length;
+  // the same identity — but every route still shows its account by name.
+  const accounts = new Set(g.deployments.map((d) => d.provider));
   return (
-    <li className="mc-card" style={hueVar(g.deployments[0]?.provider ?? "")}>
+    <li className="mc-card mc-enter" style={enterStyle(g.deployments[0]?.provider ?? "", props.index)}>
       <div className="mc-card-head">
-        <span className="mc-marks">
-          {shown.map(([name, type]) => (
-            <ProviderMark key={name} name={name} type={type} />
-          ))}
-          {hidden > 0 && <span className="mc-mark-more">+{hidden}</span>}
+        <span className="mc-card-name" title={g.name}>
+          <Hi text={g.name} tokens={props.tokens} />
         </span>
         <CopyIdButton text={g.name} label={`Copy model id ${g.name}`} />
       </div>
-      <span className="mc-card-name" title={g.name}>
-        {g.name}
-      </span>
-      {props.aliases.length > 0 && (
-        <div className="mc-card-aliases">
-          {props.aliases.map((a) => (
-            <span
-              key={a.alias}
-              className="mc-alias"
-              title={a.dn ? `${a.dn} (alias → ${g.name})` : `alias → ${g.name}`}
-            >
-              {a.alias}
-            </span>
-          ))}
-        </div>
-      )}
+      <div className="mc-card-meta">
+        {props.aliases.length > 0 && (
+          <div className="mc-card-aliases">
+            {props.aliases.map((a) => (
+              <span
+                key={a.alias}
+                className="mc-alias"
+                title={a.dn ? `${a.dn} (alias → ${g.name})` : `alias → ${g.name}`}
+              >
+                <Hi text={a.alias} tokens={props.tokens} />
+              </span>
+            ))}
+          </div>
+        )}
+        <span className="mc-card-count">
+          {g.deployments.length} {g.deployments.length === 1 ? "route" : "routes"} ·{" "}
+          {accounts.size} {accounts.size === 1 ? "account" : "accounts"}
+        </span>
+      </div>
       <ul className="mc-card-routes">
         {g.deployments.map((d) => (
-          <li
+          <RouteChip
             key={`${d.provider}/${d.model_id}`}
-            className="mc-card-route"
-            style={hueVar(d.provider)}
-          >
-            <span className="mc-dot" aria-hidden />
-            <span className="mc-prov">{d.provider}</span>
-            <span
-              className="mc-mid"
-              title={
-                d.type ? `${d.provider} (${d.type}) / ${d.model_id}` : `${d.provider}/${d.model_id}`
-              }
-            >
-              {d.model_id}
-            </span>
-          </li>
+            provider={d.provider}
+            type={d.type}
+            modelId={d.model_id}
+            tokens={props.tokens}
+          />
         ))}
       </ul>
     </li>
@@ -324,7 +399,13 @@ function Figure(props: { label: string; value: number }) {
 // -- page ---------------------------------------------------------------------
 
 export function ModelsCatalogPage() {
-  const query = useQuery({ queryKey: ["public-models"], queryFn: getPublicModels });
+  const query = useQuery({
+    queryKey: ["public-models"],
+    queryFn: getPublicModels,
+    refetchInterval: 30_000,
+  });
+  const [stale, setStale] = useState(false);
+  const [announce, setAnnounce] = useState("");
   const [q, setQ] = useState("");
   const [provider, setProvider] = useState<string | null>(null);
   const [sort, setSort] = useState<SortKey>("name");
@@ -333,6 +414,28 @@ export function ModelsCatalogPage() {
   const searchRef = useRef<HTMLInputElement>(null);
   const filterRef = useRef<HTMLDivElement>(null);
   const filterBtnRef = useRef<HTMLButtonElement>(null);
+  const [toolbarStuck, setToolbarStuck] = useState(false);
+  const toolbarSentinelRef = useRef<HTMLDivElement>(null);
+  // Since when the catalog has been unchanged. Past 90s — three missed
+  // polls — the masthead stamp stops claiming freshness instead of lying.
+  const [quietSince, setQuietSince] = useState(() => Date.now());
+
+  const announcedRef = useRef(false);
+  useEffect(() => {
+    if (!query.isSuccess) return;
+    setQuietSince(Date.now());
+    setStale(false);
+    // Only a *re*-fetch is worth announcing; the first load is the page.
+    if (announcedRef.current) setAnnounce("Model catalog refreshed");
+    announcedRef.current = true;
+  }, [query.dataUpdatedAt, query.isSuccess]);
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      if (Date.now() - quietSince > 90_000) setStale(true);
+    }, 15_000);
+    return () => window.clearInterval(id);
+  }, [quietSince]);
 
   // Closing the panel returns focus to the control that opened it — the
   // focused chip is about to leave the document.
@@ -386,6 +489,12 @@ export function ModelsCatalogPage() {
   const aliases = useMemo(() => query.data?.aliases ?? {}, [query.data]);
   const aliasChips = useMemo(() => aliasChipsByGroup(aliases), [aliases]);
 
+  // The search query, lowercased and split once — the same tokens drive the
+  // filter and the hit highlighting, so a row can never match one and miss
+  // the other.
+  const tokens = useMemo(() => q.toLowerCase().split(/\s+/).filter(Boolean), [q]);
+  const tokenCount = tokens.length;
+
   // Providers by how many groups they carry: the account that serves eighteen
   // groups is the one a reader is most likely to be filtering for. A group is
   // counted once per account even when two of its routes share that account,
@@ -401,7 +510,6 @@ export function ModelsCatalogPage() {
   }, [groups]);
 
   const filtered = useMemo(() => {
-    const tokens = q.toLowerCase().split(/\s+/).filter(Boolean);
     const rows = groups.filter((g) => {
       if (provider && !g.deployments.some((d) => d.provider === provider)) return false;
       if (tokens.length === 0) return true;
@@ -420,7 +528,7 @@ export function ModelsCatalogPage() {
         : (a, b) => a.name.localeCompare(b.name),
     );
     return rows;
-  }, [groups, provider, q, sort, aliasChips]);
+  }, [groups, provider, tokens, sort, aliasChips]);
 
   const deployments = useMemo(
     () => groups.reduce((n, g) => n + g.deployments.length, 0),
@@ -429,6 +537,20 @@ export function ModelsCatalogPage() {
   const aliasCount = Object.keys(aliases).length;
   const filtering = q.trim() !== "" || provider !== null;
   const loaded = !query.isLoading && !query.error && groups.length > 0;
+
+  // Sticky has no selector of its own: a sentinel immediately above the
+  // toolbar scrolls under the navbar exactly when the toolbar sticks, and
+  // that is when the toolbar earns its shadow.
+  useEffect(() => {
+    if (!loaded) return;
+    const el = toolbarSentinelRef.current;
+    if (!el || typeof IntersectionObserver === "undefined") return;
+    const io = new IntersectionObserver(([entry]) => setToolbarStuck(!entry.isIntersecting), {
+      rootMargin: "-72px 0px 0px 0px",
+    });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [loaded]);
 
   let body: ReactNode;
   if (query.isLoading) {
@@ -501,8 +623,14 @@ export function ModelsCatalogPage() {
   } else if (view === "grid") {
     body = (
       <ul className="mc-grid m-0 list-none p-0">
-        {filtered.map((g) => (
-          <CatalogCard key={g.name} g={g} aliases={aliasChips[g.name] ?? []} />
+        {filtered.map((g, i) => (
+          <CatalogCard
+            key={g.name}
+            g={g}
+            aliases={aliasChips[g.name] ?? []}
+            tokens={tokens}
+            index={i}
+          />
         ))}
       </ul>
     );
@@ -514,8 +642,14 @@ export function ModelsCatalogPage() {
           <span>Routed through</span>
         </div>
         <ul className="m-0 list-none p-0">
-          {filtered.map((g) => (
-            <CatalogRow key={g.name} g={g} aliases={aliasChips[g.name] ?? []} />
+          {filtered.map((g, i) => (
+            <CatalogRow
+              key={g.name}
+              g={g}
+              aliases={aliasChips[g.name] ?? []}
+              tokens={tokens}
+              index={i}
+            />
           ))}
         </ul>
       </div>
@@ -532,22 +666,30 @@ export function ModelsCatalogPage() {
           <div className="animate-hero-enter lg:grid lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end lg:gap-12">
             <div className="max-w-xl">
               <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-                <span className="docs-chip-live">
-                  <span className="docs-chip-live-dot" aria-hidden />
-                  Live from the router
+                {/* "Live" is a claim, so it expires: the payload carries no
+                    timestamp of its own, which means a failure in the gateway's
+                    own model store still answers 200. Past a minute of
+                    silence the stamp stops asserting freshness. */}
+                <span
+                  className={`mc-live${!loaded || stale ? " mc-live-stale" : ""}`}
+                  role="status"
+                >
+                  <span className="mc-live-dot" aria-hidden />
+                  {!loaded ? "Checking" : stale ? "Not refreshing" : "Serving now"}
                 </span>
-                <span className="font-mono text-[10.5px] uppercase tracking-[0.14em] text-[var(--admin-text-dim)]">
-                  /public/models
+                <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--admin-text-dim)]">
+                  {!loaded ? "waiting on the router" : stale ? "refresh failed" : "auto-refresh 30s"}
                 </span>
               </div>
 
               <h1 className="mc-title mt-5">
-                Model <span className="hero-gradient-text">catalog</span>
+                Every model the router{" "}
+                <span className="mc-title-accent">serves today.</span>
               </h1>
 
               <p className="mt-4 text-[15px] leading-relaxed text-[var(--admin-text-muted)]">
-                Every model group this gateway routes, the provider account behind each route, and
-                the id to send.
+                The id your client sends, and the account each route actually lands on. No
+                key needed for this page — it is the same list `/v1/models` returns.
               </p>
 
               <div className="mt-7 flex flex-wrap items-center gap-2.5">
@@ -559,10 +701,11 @@ export function ModelsCatalogPage() {
                   <ArrowRight size={14} />
                 </Link>
                 <Link
-                  to="/docs"
-                  className={`inline-flex h-11 items-center justify-center rounded-[10px] border border-white/[0.08] bg-white/[0.02] px-5 text-[13px] font-medium text-[var(--admin-text)] transition-colors duration-150 hover:border-white/[0.14] hover:bg-white/[0.04] ${FOCUS_RING}`}
+                  to="/v1/models"
+                  className={`inline-flex h-11 items-center justify-center gap-2 rounded-[10px] border border-white/[0.08] bg-white/[0.02] px-5 text-[13px] font-medium text-[var(--admin-text)] transition-colors duration-150 hover:border-white/[0.14] hover:bg-white/[0.04] ${FOCUS_RING}`}
                 >
-                  API reference
+                  <Braces size={14} aria-hidden />
+                  Raw JSON
                 </Link>
               </div>
             </div>
@@ -575,14 +718,20 @@ export function ModelsCatalogPage() {
                 <Figure label="Aliases" value={aliasCount} />
               </dl>
             )}
+            {!loaded && !query.isLoading && (
+              <p className="mt-9 font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--admin-text-dim)] lg:mt-0">
+                catalog unavailable
+              </p>
+            )}
           </div>
         </div>
       </header>
 
       {/* ════════ toolbar + ledger ════════ */}
       <div className="mx-auto max-w-5xl px-6">
+        <div ref={toolbarSentinelRef} aria-hidden className="h-px" />
         {loaded && (
-          <div className="mc-toolbar">
+          <div className={`mc-toolbar${toolbarStuck ? " is-stuck" : ""}`}>
             <div className="relative w-full min-w-0 sm:w-auto sm:flex-1">
               <Search
                 size={15}
@@ -599,7 +748,11 @@ export function ModelsCatalogPage() {
                   if (q !== "") setQ("");
                   else e.currentTarget.blur();
                 }}
-                placeholder="Search groups, providers or ids"
+                placeholder={
+                  tokenCount > 0
+                    ? `${tokenCount} ${tokenCount === 1 ? "group" : "groups"} match`
+                    : `Search ${groups.length} groups by id, alias or account`
+                }
                 aria-label="Search the model catalog"
                 className="admin-input h-11 pl-10 pr-14 text-[13px]"
               />
@@ -691,6 +844,7 @@ export function ModelsCatalogPage() {
                 visible copies (toolbar and status line) never double up. */}
             <span className="sr-only" aria-live="polite">
               {filtering ? `${filtered.length} of ${groups.length}` : `${groups.length}`} groups
+              {announce ? ` — ${announce}` : ""}
             </span>
 
             {filterOpen && (

@@ -17,14 +17,12 @@ import {
   PieChart,
   Server,
   Timer,
+  Trophy,
   Zap,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Area,
-  AreaChart,
   CartesianGrid,
-  Legend,
   Line,
   LineChart,
   ResponsiveContainer,
@@ -32,10 +30,10 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { getOverview, getProviders, getRequestLogs, getTimeseries } from "@/api/client";
+import { getOverview, getProviders, getRequestLogs } from "@/api/client";
 import { useAuth } from "@/api/auth";
 import { useAdminStream, useLiveInvalidation } from "@/api/stream";
-import type { RequestLogEntry, TokenBucket } from "@/api/types";
+import type { RequestLogEntry } from "@/api/types";
 import { Card, CardHeader, ErrorText, LiveBadge, PageHeader, Spinner, StatCard } from "@/components/ui";
 import {
   GaugeRing,
@@ -45,11 +43,17 @@ import {
   StatusMix,
   TokenRibbon,
   LatencyRibbon,
+  Leaderboard,
   VisualCard,
   latencyProfile,
   statusSlices,
 } from "@/components/console-visuals";
-import type { HealthItem, PulseEvent, ShareRow } from "@/components/console-visuals";
+import type {
+  HealthItem,
+  LeaderboardRow,
+  PulseEvent,
+  ShareRow,
+} from "@/components/console-visuals";
 import { fmtInt, fmtPct, fmtTime, fmtTokens, fmtUsd, groupBy, mean } from "@/lib/format";
 import { deltaVsPrevHour, hourlySeries } from "@/lib/dashboard-metrics";
 
@@ -224,6 +228,17 @@ function groupOf(
   return rows.sort((a, b) => b.value - a.value);
 }
 
+/** Inline legend swatch — the chart cards carry their legend in the header
+ *  instead of a recharts <Legend>, so it never steals plot height. */
+function LegendDot(props: { color: string; label: string }) {
+  return (
+    <span className="flex items-center gap-1.5">
+      <span className="h-0.5 w-3.5 rounded" style={{ backgroundColor: props.color }} />
+      {props.label}
+    </span>
+  );
+}
+
 function ChartTooltip(props: {
   active?: boolean;
   label?: string | number;
@@ -257,11 +272,6 @@ export function DashboardPage() {
     queryFn: () => getOverview(60),
     refetchInterval: 30_000,
   });
-  const tokensQuery = useQuery({
-    queryKey: ["tokens-ts"],
-    queryFn: () => getTimeseries("tokens", 60),
-    refetchInterval: 30_000,
-  });
   const logsQuery = useQuery({
     queryKey: ["request-logs"],
     queryFn: getRequestLogs,
@@ -270,7 +280,7 @@ export function DashboardPage() {
 
   // Live SSE invalidation: refresh overview/timeseries/logs the moment a
   // request lands, instead of waiting up to 10s for the next poll.
-  useLiveInvalidation(["overview", "tokens-ts", "request-logs"]);
+  useLiveInvalidation(["overview", "request-logs"]);
 
   // Rolling per-minute counts, seeded once from the request-log poll and then
   // kept live by SSE "log.created" events. A counter state forces re-renders.
@@ -324,11 +334,6 @@ export function DashboardPage() {
   });
 
   const live = liveSeries(liveRef.current);
-
-  const tokenBuckets = useMemo<TokenBucket[]>(
-    () => (tokensQuery.data?.buckets ?? []) as TokenBucket[],
-    [tokensQuery.data],
-  );
 
   const reqSeries = useMemo<MinuteCounts[]>(() => {
     const nowMin = Math.floor(Date.now() / 60_000);
@@ -414,15 +419,6 @@ export function DashboardPage() {
     [logs],
   );
 
-  const modelRows = useMemo<ShareRow[]>(
-    () =>
-      groupOf(logs, (l) => l.model_group, (rs) => ({
-        display: `${fmtInt(rs.length)} req`,
-        sub: fmtUsd(rs.reduce((a, r) => a + r.cost, 0)),
-      })),
-    [logs],
-  );
-
   const keyRows = useMemo<ShareRow[]>(
     () =>
       groupOf(logs, (l) => l.key_alias || "(none)", (rs) => ({
@@ -432,6 +428,44 @@ export function DashboardPage() {
     [logs],
   );
 
+  // Leaderboard rows: every figure is derived from the same request window as
+  // the headline tiles, so a model's row and the global totals can never
+  // tell different stories. Blank cells are em dashes, not zeros — a model
+  // that never streamed has no TTFT, and printing "0 ms" would read as
+  // instant rather than unmeasured.
+  const modelBoard = useMemo<LeaderboardRow[]>(() => {
+    const nameOf = (l: RequestLogEntry) => l.model_group || l.provider || "unknown";
+    return [...groupBy(logs, nameOf)]
+      .sort((a, b) => b[1].length - a[1].length)
+      .slice(0, 8)
+      .map(([name, rs]) => {
+        const errs = rs.filter((r) => r.status >= 400).length;
+        // p95 is nearest-rank over the latency samples that exist. A model
+        // that never reported a TTFT shows a dash rather than a fast-looking
+        // zero.
+        const ttfts = rs
+          .map((r) => r.ttft_ms)
+          .filter((v) => v > 0)
+          .sort((a, b) => a - b);
+        const p95 = ttfts.length
+          ? ttfts[Math.min(ttfts.length - 1, Math.ceil(ttfts.length * 0.95) - 1)]
+          : 0;
+        const tokens = rs.reduce((n, r) => n + r.tok_in + r.tok_out, 0);
+        const spend = rs.reduce((n, r) => n + (r.cost || 0), 0);
+        return {
+          name,
+          value: rs.length,
+          meta: `${rs[0]?.provider ?? "—"}${errs ? "" : " · clean"}`,
+          cells: [
+            fmtInt(rs.length),
+            errs ? fmtInt(errs) : "—",
+            p95 ? `${fmtInt(p95)} ms` : "—",
+            fmtTokens(tokens),
+            spend > 0 ? fmtUsd(spend) : "—",
+          ],
+        };
+      });
+  }, [logs]);
   const providerRows = useMemo<ShareRow[]>(
     () =>
       groupOf(logs, (l) => l.provider, (rs) => ({
@@ -572,8 +606,11 @@ export function DashboardPage() {
         />
       </div>
 
+      {/* Secondary tokens sit one rank below the headline: same component,
+          no icon rails, no sparklines — a quieter rule of figures. */}
       <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
         <StatCard
+          compact
           icon={ArrowDownToLine}
           label="tokens in"
           value={o ? fmtTokens(o.tok_in) : "—"}
@@ -581,6 +618,7 @@ export function DashboardPage() {
           format={fmtTokens}
         />
         <StatCard
+          compact
           icon={Zap}
           label="cached"
           value={o ? fmtTokens(o.tok_cached) : "—"}
@@ -589,6 +627,7 @@ export function DashboardPage() {
           sub={o ? `${fmtInt(o.cache_hits)} hits` : undefined}
         />
         <StatCard
+          compact
           icon={Brain}
           label="reasoning"
           value={o ? fmtTokens(o.tok_reasoning) : "—"}
@@ -596,6 +635,7 @@ export function DashboardPage() {
           format={fmtTokens}
         />
         <StatCard
+          compact
           icon={ArrowUpFromLine}
           label="out"
           value={o ? fmtTokens(o.tok_out) : "—"}
@@ -603,6 +643,7 @@ export function DashboardPage() {
           format={fmtTokens}
         />
         <StatCard
+          compact
           icon={Percent}
           label="cache-hit %"
           value={o ? fmtPct(o.cache_hit_rate) : "—"}
@@ -610,6 +651,7 @@ export function DashboardPage() {
           format={fmtPct}
         />
         <StatCard
+          compact
           icon={Gauge}
           label="avg gen tps"
           value={o ? o.tps_avg.toFixed(1) : "—"}
@@ -694,59 +736,7 @@ export function DashboardPage() {
         </VisualCard>
       </div>
 
-      <div className="mt-4 grid gap-4 xl:grid-cols-3">
-        <VisualCard
-          title="top models"
-          subtitle="requests · spend"
-          icon={Server}
-          right={
-            <span className="font-mono text-[11px] text-[var(--admin-text-dim)]">
-              {fmtInt(modelRows.length)} groups
-            </span>
-          }
-        >
-          <ShareBars
-            rows={modelRows}
-            limit={6}
-            showRank
-            emptyLabel="No requests in this window."
-          />
-        </VisualCard>
-
-        <VisualCard
-          title="spend by key"
-          subtitle="cost per virtual key"
-          icon={KeyRound}
-        >
-          <ShareBars
-            rows={keyRows}
-            limit={6}
-            barColor="rgba(168,85,247,0.55)"
-            emptyLabel="No spend in this window."
-          />
-        </VisualCard>
-
-      </div>
-
-      <div className="mt-4 grid gap-4 xl:grid-cols-2">
-        <VisualCard
-          title="provider traffic"
-          subtitle="requests · error share"
-          icon={Server}
-          right={
-            <span className="font-mono text-[11px] text-[var(--admin-text-dim)]">
-              {fmtInt(providerRows.length)} upstreams
-            </span>
-          }
-        >
-          <ShareBars
-            rows={providerRows}
-            limit={6}
-            barColor="rgba(52,211,153,0.5)"
-            emptyLabel="No requests in this window."
-          />
-        </VisualCard>
-
+      <div className="mt-4">
         <VisualCard
           title="provider health"
           subtitle="configured upstreams"
@@ -768,128 +758,135 @@ export function DashboardPage() {
         <LiveSparkline series={live} connected={connected} />
       </div>
 
-      <div className="mt-4 grid gap-4 xl:grid-cols-2">
+      {/* ── Leaderboard ───────────────────────────────────────────────────
+          The one panel that answers "who is actually serving this traffic".
+          It replaces a pair of stacked charts that, on a personal gateway,
+          flatline at zero: a stacked-area chart with no area, and a line
+          chart with one point, both presenting an empty window as if it were
+          a failure. A ranking degrades gracefully instead — three requests
+          still order three models, and the rank is the reading, not the
+          height. Every figure here comes from the same request window as the
+          tiles above, so the headcount and the list cannot disagree. */}
+      <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
         <Card>
-          <CardHeader title="Tokens / min" />
-          <div className="h-[260px] p-3">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={tokenBuckets} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-                <defs>
-                  {(
-                    [
-                      ["grad-tok-in", COLORS.tokIn],
-                      ["grad-tok-cached", COLORS.tokCached],
-                      ["grad-tok-reasoning", COLORS.tokReasoning],
-                      ["grad-tok-out", COLORS.tokOut],
-                    ] as const
-                  ).map(([id, color]) => (
-                    <linearGradient key={id} id={id} x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor={color} stopOpacity={0.10} />
-                      <stop offset="100%" stopColor={color} stopOpacity={0.02} />
-                    </linearGradient>
-                  ))}
-                </defs>
-                <CartesianGrid stroke="#ffffff" strokeOpacity={0.06} vertical={false} />
-                <XAxis
-                  dataKey="t"
-                  tickFormatter={(t: number) => fmtTime(t)}
-                  minTickGap={48}
-                  tick={{ fontSize: 11, fill: "#6b7280" }}
-                  tickLine={false}
-                />
-                <YAxis
-                  width={44}
-                  tickFormatter={(v: number) => fmtTokens(v)}
-                  tick={{ fontSize: 11, fill: "#6b7280" }}
-                  tickLine={false}
-                />
-                <Tooltip
-                  content={<ChartTooltip fmt={(v) => fmtInt(v)} />}
-                  cursor={{ stroke: "#3b82f6", strokeOpacity: 0.3 }}
-                />
-                <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12, color: "#9ca3af" }} />
-                <Area
-                  type="monotone"
-                  dataKey="tok_in"
-                  name="input"
-                  stackId="1"
-                  stroke={COLORS.tokIn}
-                  fill="url(#grad-tok-in)"
-                  fillOpacity={1}
-                  strokeWidth={2}
-                />
-                <Area
-                  type="monotone"
-                  dataKey="tok_out"
-                  name="output"
-                  stackId="1"
-                  stroke={COLORS.tokOut}
-                  fill="url(#grad-tok-out)"
-                  fillOpacity={1}
-                  strokeWidth={2}
-                />
-                <Area
-                  type="monotone"
-                  dataKey="tok_cached"
-                  name="cached"
-                  stackId="1"
-                  stroke={COLORS.tokCached}
-                  fill="url(#grad-tok-cached)"
-                  fillOpacity={1}
-                  strokeWidth={2}
-                />
-                <Area
-                  type="monotone"
-                  dataKey="tok_reasoning"
-                  name="reasoning"
-                  stackId="1"
-                  stroke={COLORS.tokReasoning}
-                  fill="url(#grad-tok-reasoning)"
-                  fillOpacity={1}
-                  strokeWidth={2}
-                />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
+          <CardHeader
+            icon={Trophy}
+            title="Model leaderboard"
+            subtitle={
+              o ? `ranked by requests · last ${o.window_minutes} min` : "ranked by requests"
+            }
+            right={
+              <span className="font-mono text-[11px] text-[var(--admin-text-dim)]">
+                {fmtInt(modelBoard.length)} model{modelBoard.length === 1 ? "" : "s"}
+              </span>
+            }
+          />
+          <Leaderboard
+            nameLabel="Model"
+            caption="Models ranked by request volume in the current window"
+            columns={["REQ", "ERR", "P95 TTFT", "TOKENS", "SPEND"]}
+            rows={modelBoard}
+            emptyLabel={
+              isAdmin
+                ? "No requests in this window yet. Send one to /v1/chat/completions and it lands here."
+                : "No requests on your keys in this window yet."
+            }
+          />
         </Card>
 
-        <Card>
-          <CardHeader title="Requests & errors / min" />
-          <div className="h-[260px] p-3">
+        <div className="grid gap-4">
+          <VisualCard
+            title="who is spending"
+            subtitle="virtual keys, by request volume"
+            icon={KeyRound}
+            right={
+              <span className="font-mono text-[11px] text-[var(--admin-text-dim)]">
+                {fmtInt(keyRows.length)} keys
+              </span>
+            }
+          >
+            <ShareBars
+              rows={keyRows}
+              limit={5}
+              barColor="rgba(168,85,247,0.55)"
+              emptyLabel="No key traffic in this window."
+            />
+          </VisualCard>
+
+          <VisualCard
+            title="provider traffic"
+            subtitle="requests · error share"
+            icon={Server}
+            right={
+              <span className="font-mono text-[11px] text-[var(--admin-text-dim)]">
+                {fmtInt(providerRows.length)} upstreams
+              </span>
+            }
+          >
+            <ShareBars
+              rows={providerRows}
+              limit={4}
+              barColor="rgba(52,211,153,0.5)"
+              emptyLabel="No requests in this window."
+            />
+          </VisualCard>
+        </div>
+      </div>
+
+      {/* One throughput chart, not two: requests and errors share a y-axis
+          (both are counts of the same thing), so they belong on one frame.
+          Token volume lives in the token-mix ribbon. */}
+      <div className="mt-4">
+        <Card clip={false}>
+          <CardHeader
+            icon={Activity}
+            title="Requests & errors / min"
+            subtitle="trailing window, minute buckets"
+            right={
+              <span className="flex items-center gap-4 font-mono text-[11px] text-[var(--admin-text-dim)]">
+                <LegendDot color={COLORS.requests} label="requests" />
+                <LegendDot color={COLORS.errors} label="errors" />
+              </span>
+            }
+          />
+          <div className="h-[240px] p-3 pr-5">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={reqSeries} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-                <CartesianGrid stroke="#ffffff" strokeOpacity={0.06} vertical={false} />
+                <CartesianGrid stroke="#ffffff" strokeOpacity={0.05} vertical={false} />
                 <XAxis
                   dataKey="t"
                   tickFormatter={(t: number) => fmtTime(t)}
-                  minTickGap={48}
-                  tick={{ fontSize: 11, fill: "#6b7280" }}
+                  minTickGap={56}
+                  tick={{ fontSize: 10.5, fill: "#6b7280" }}
                   tickLine={false}
+                  axisLine={false}
                 />
                 <YAxis
-                  width={28}
+                  width={30}
                   allowDecimals={false}
-                  tick={{ fontSize: 11, fill: "#6b7280" }}
+                  tick={{ fontSize: 10.5, fill: "#6b7280" }}
                   tickLine={false}
+                  axisLine={false}
                 />
                 <Tooltip
                   content={<ChartTooltip fmt={(v) => fmtInt(v)} />}
-                  cursor={{ stroke: "#3b82f6", strokeOpacity: 0.3 }}
+                  cursor={{ stroke: "#3b82f6", strokeOpacity: 0.25 }}
                 />
-                <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12, color: "#9ca3af" }} />
                 <Line
                   type="monotone"
                   dataKey="requests"
+                  name="requests"
                   stroke={COLORS.requests}
-                  strokeWidth={2.5}
+                  strokeWidth={2}
                   dot={false}
                   activeDot={{ r: 4, strokeWidth: 0 }}
                 />
                 <Line
                   type="monotone"
                   dataKey="errors"
+                  name="errors"
                   stroke={COLORS.errors}
-                  strokeWidth={2}
+                  strokeWidth={1.75}
                   dot={false}
                   activeDot={{ r: 4, strokeWidth: 0 }}
                 />
@@ -897,7 +894,6 @@ export function DashboardPage() {
             </ResponsiveContainer>
           </div>
         </Card>
-      </div>
-    </div>
+      </div>    </div>
   );
 }
