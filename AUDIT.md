@@ -13,8 +13,15 @@ Each finding verified against source by reading the cited lines. Severities: �
 **Live entries only.** Every closed *round* lives in
 [`docs/audit-archive/fixed.md`](docs/audit-archive/fixed.md) — 73 sections,
 preserved verbatim with the round and regression test that closed each one.
-Entries fixed in place by the most recent rounds (182-185) stay here, carrying
-their own `**Status: fixed**`.
+The most recent rounds stay here instead of moving, carrying their own
+`**Status: fixed**` under a section header marked ✅ — a section's badge states
+what its *entries* say; the last round to close a section is named in the
+`**Section status:**` line under the header, not in a rewritten history.
+
+**Oops-proofing the header rule.** A section header is prose and drifts; the
+badges inside it do not. So the grid below is the authority, and the text
+under each header restates it. After any fix that empties a section, update the
+header line and the `**Section status:**` line in the same edit.
 
 **Status markers are binding** (`scripts/audit_lint.py`, run in CI). Every
 `###` entry must carry its own `**Status:**` line, or sit under a section that
@@ -22,6 +29,14 @@ declares a `**Section status:**`. That rule exists because #340 found the
 register had drifted in both directions: entries marked open that were fixed,
 and entries fixed with no marker at all. An entry with no status is now a
 build failure, not a judgment call.
+
+**Header badges obey the same rule, checked** (`scripts/audit_lint.py`, 2026-11-09).
+A section header may no longer claim `🔴/🟠/🟡/⚪ Open` while every entry under it
+is fixed — that is #596, the drift that left eight "Open" headers over closed
+sections. Headers now use ✅ Fixed (code done, nothing live) or 🟢 Partial
+(something under it is still open); any entry that is not fixed must carry a
+`**Status: open` or `**Status: partial` line, so a badge can never lie again.
+Old `(new)` / `Addendum` sections predate the rule and are exempt.
 
 **"Unverified" is not "open".** Sections headed `🟠/🟡/🔴 … (new)` or
 `Addendum — …` are historical audit records from 2026-08/09. Their entries were
@@ -37,7 +52,66 @@ is not fixed in the same change.
 
 ## Archive index (fixed, newest first)
 
-## 🟡 Open — implicit state machines: three were real but unenforced (2026-11-09)
+## ✅ Fixed — the retry loop gave up on a deployment after one credential hit its quota (2026-11-09)
+
+**Section status:** fixed — #597 (round 205).
+
+### 597. A per-key 429 ended the deployment for the whole request, so `num_retries: 0` returned a 429 for a key the pool still had
+
+**Severity:** 🟠 High.
+**Status: fixed** — round 205. Test: `tests/test_fix_round205.py`.
+
+`wiwi/router/router.py:1724` (pre-fix) treated **every** `WiwiError` the same
+way: the first thing the `except` arm did was
+
+```python
+tried_dep_ids.add(id(dep))
+```
+
+which excludes the deployment from the rest of this request. That is right for a
+`5xx` and for an auth refusal, and it was right for every `429` before AUDIT
+#469. #469 changed the accounting so that a `429` **with** a `Retry-After`
+cools only the *key* (`ProviderAccount.on_result`, `router.py:289`) and leaves
+the deployment healthy — but the retry loop still blacklisted the deployment.
+The two fixes therefore cancelled each other out for the most common shape of a
+rate limit: an upstream that names a window per credential.
+
+**Trigger** (reproduced end-to-end, two-key pool, one deployment, `m` → `gpt`):
+
+1. `k1` answers `429` with `Retry-After: 5` (quota). The key is cooled, the
+   deployment stays `available`.
+2. The loop's `fresh` test (`router.py:1796`) asks for a deployment that is
+   available **and** not in `tried_dep_ids`. The only one is excluded, so
+   `fresh` is `False`.
+3. With `num_retries: 0` the range holds exactly one attempt and the loop ends;
+   `first_error` is the `429`.
+
+Measured: `429` to the caller, **one** upstream hit, `k2` — which works — never
+contacted, and no fallback group configured anywhere can see it. The same request
+against a pool whose first pick is `k2` succeeds, so the failure is pure
+retry-loop bookkeeping: one spent credential is reported as a spent model.
+
+**Fix:** a `429` that carries a positive `Retry-After` no longer adds the
+deployment to `tried_dep_ids` (`router.py:1740-1741`). The key is already cooling,
+so the next `pick_key` cannot choose it again — the retry lands on a sibling
+credential of the same deployment, which is what the cooldown was for. A `429`
+with **no** window stays deployment-scoped (it is #469's availability signal),
+and a `5xx` or auth refusal still excludes the deployment, so the existing
+fallback and cooldown behaviour is untouched.
+
+**Second half — the attempt count.** Excluding a deployment was also the only
+thing making `num_retries: 0` mean "never retry". With the backlist removed, a
+second attempt of the *same* deployment on a *different* key is not an extra
+try, it is the failover the setting is advertised to provide, so the loop now
+always takes at least two attempts (`router.py:1562-1569`,
+`max(num_retries + 1, 2)`). The documented meaning of `0` — "try once, never
+retry" (`wiwi/config.py`, `_resilience_knobs_must_not_be_negative`) — still
+holds for the deployment: no deployment is contacted twice on the same key, and
+no sibling *group* is entered. The clamp is about credentials, not deployments.
+
+## ✅ Fixed — implicit state machines: three were real but unenforced (2026-11-09)
+
+**Section status:** fixed — #595 (round 204).
 
 ### 595. The delta-stream contract, the key lifecycle and the encoder turn state were implicit — now declared and checkable
 
@@ -173,13 +247,15 @@ fact already ended.
 
 ---
 
-## 🟠 Live — the Playground beam backdrop invalidates its composite every frame during scroll (2026-10-24)
+## 🟠 Awaiting visual confirmation — the Playground beam backdrop invalidated its composite every frame during scroll (2026-10-24)
+
+**Section status:** fixed on the code side (scroll-gesture freeze + dropped `mix-blend-mode`/`mask-image` from `.pg-workbench-beams` as the #518 escalation); the only open item is the visual confirmation on the reporting display.
 
 ### 518. Scrolling a Playground chat flickers/glitches because the fixed animated SVG is blend-composited over the scroll
 
 **Severity:** 🟠 High on software-rendered displays (the flicker is visible; the
 empty-chat snap of #517 is related but separate) · **Status: fixed (scroll-
-gesture freeze), pending visual confirmation on the reporting display**
+gesture freeze + #518 escalation applied), pending visual confirmation on the reporting display**
 
 **Where:** `web/src/components/HeroBeamBackdrop.tsx` (SMIL `<animate
 attributeName="offset">` gradients on every beam stroke) rendered by
@@ -220,7 +296,9 @@ time.
 
 ---
 
-## ⚪ Open — aiosqlite workers outlive their event loop, and pytest blames an innocent test (2026-10-17)
+## ✅ Fixed — aiosqlite workers outlived their event loop, and pytest blamed an innocent test (2026-10-17)
+
+**Section status:** fixed — #475 (round 173).
 
 ### 475. Undisposed test-side `aiosqlite` connections raise `RuntimeError: Event loop is closed` on a worker thread, mis-attributed to the *next* test
 
@@ -234,7 +312,9 @@ time.
 
 ---
 
-## 🟡 Open — a shared anonymous Zen key turns one model's 429 into a whole-tier 503 (2026-10-15)
+## ✅ Fixed — a shared anonymous Zen key turned one model's 429 into a whole-tier 503 (2026-10-15)
+
+**Section status:** fixed — #469 (round 180).
 
 ### 469. One upstream 429 cools the `anonymous` key and retires every free Zen deployment
 
@@ -246,7 +326,9 @@ time.
 
 ---
 
-## 🟡 Open — full-suite flakes unrelated to any pending change (2026-10-14)
+## ✅ Fixed — full-suite flakes unrelated to any pending change (2026-10-14)
+
+**Section status:** fixed — #463 (anchored bucket), #464 (round 156, with #414).
 
 Both were observed failing during one full-suite run and confirmed to pass in
 isolation and on the pristine committed baseline (3108 passed). Neither is
@@ -303,7 +385,9 @@ time in isolation.
 
 ---
 
-## 🔴 Open — Hermes integration sweep (2026-10-12)
+## ✅ Fixed — Hermes integration sweep (2026-10-12)
+
+**Section status:** fixed — #424 (round 180), #425/#426 (round 134 follow-up).
 
 Found by reading the whole Hermes surface end to end (`hermes_adapter.py`,
 `hermes_oauth.py`, the `/admin/hermes/oauth/*` routes, the connect/refresh/
@@ -377,7 +461,9 @@ tests, which now exercise the threaded path.
 
 ---
 
-## 🟠 Open — sweep 2026-10-11 (upstream SSE reading path)
+## ✅ Fixed — sweep 2026-10-11 (upstream SSE reading path)
+
+**Section status:** fixed — #419 (float case 2026-10-19, typed-wrong half round 186), #420 (round 162).
 
 Found by executing the real `LineSSEParser` + `Gateway.stream` pump against
 malformed-but-plausible upstream wire data (Anthropic inbound `/v1/messages`,
@@ -527,7 +613,9 @@ misconfigured relay produces a self-sustaining outage rather than one bad turn.
 
 ---
 
-## 🟠 Open — sweep 2026-10-09 (config, adapters)
+## ✅ Fixed — sweep 2026-10-09 (config, adapters)
+
+**Section status:** fixed — #382-#386 (rounds 128, 162, 180; #385 re-verified 2026-10-13).
 
 New findings from a fresh eight-subsystem sweep. Every one below was confirmed by
 **executing code** against the real adapters/`load_config_from_string`, not by reading
@@ -752,7 +840,9 @@ covered usage counters, not this container gate.
 
 ---
 
-## 🟠 Open — sweep 2026-10-10 (ir)
+## ✅ Fixed — sweep 2026-10-10 (ir)
+
+**Section status:** fixed — #387, #388 (round 124).
 
 Two findings from a sweep of `wiwi/ir/` (`types.py`, `translation.py`, `builtin_tools.py`),
 both confirmed by **executing code** against the real adapters rather than reading alone.

@@ -786,7 +786,7 @@ All `/admin/*` requires the master key (`Authorization: Bearer …`) or an admin
 
 ```bash
 python3 -m pytest tests/ -q                                 # 3995 collected
-python3 -m pytest tests/test_fix_round194.py -q            # latest regression file
+python3 -m pytest tests/test_fix_round205.py -q            # latest regression file
 python3 -m pytest tests/test_router.py -k cooldown -q      # by name
 
 ruff check wiwi/ tests/                                     # line-length 100, target py311

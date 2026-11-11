@@ -20,6 +20,13 @@ Rules
 3. Headings that are not numbered entries (``### Verification method``,
    ``### Cleared seams …``) are sub-headings of the entry above them and are
    not checked.
+4. **Section headers cannot contradict their entries** (AUDIT #596). A header
+   claiming ``🔴/🟠/🟡/⚪ Open` (or the bare word ``Live``) must have at least
+   one entry that is not fixed; if every entry says fixed, the header must be
+   ✅ Fixed or 🟢 Partial. Conversely, a 🟢 Partial header must have an entry
+   marked ``**Status: open`` or ``**Status: partial``. Historical
+   ``(new)`` / ``Addendum`` sections (pre-2026-10 audit records) are exempt:
+   their entries were triaged without markers by design.
 
 Entry numbers are **not** required to be unique: the register reused numbers
 across sweeps before #340, and renumbering 600 historical entries would rewrite
@@ -79,6 +86,47 @@ def parse(path: Path) -> list[Section]:
     return sections
 
 
+OPEN_BADGE = re.compile(r"^##\s+.*(🔴|🟠|🟡|⚪).*\bOpen\b|^##\s+.*\bLive\b")
+PARTIAL_BADGE = re.compile(r"^##\s+.*🟢")
+FIXED_BADGE = re.compile(r"^##\s+.*(✅|Fixed)")
+EXEMPT = re.compile(r"\(new\)|^##\s+Addendum")
+
+
+def _entry_text(header: str, body: list[str]) -> str:
+    return header + "\n" + "\n".join(body)
+
+
+def _is_live(text: str) -> bool:
+    """True when an entry explicitly says it is open or partial."""
+    return bool(re.search(r"\*\*Status:?\s*(?:\*\*)?:?\s*(open|partial)\b", text, re.IGNORECASE))
+
+
+def _is_fixed(text: str) -> bool:
+    """True when an entry says it is fixed."""
+    return bool(re.search(r"\*\*Status:?\s*(?:\*\*)?:?\s*fixed\b", text, re.IGNORECASE))
+
+
+def header_problem(sec: Section) -> str | None:
+    """Rule 4: a header badge must match the entries underneath it."""
+    if EXEMPT.search(sec.header):
+        return None
+    numbered = [(h, b) for _, h, b in sec.entries if ENTRY_NUM.match(h)]
+    texts = [_entry_text(h, b) for h, b in numbered]
+    if not texts:
+        return None  # index sections (the archive index) carry no entries
+    fixed = [t for t in texts if _is_fixed(t)]
+    live = [t for t in texts if _is_live(t)]
+    claims_open = bool(OPEN_BADGE.search(sec.header))
+    claims_partial = bool(PARTIAL_BADGE.search(sec.header))
+    claims_fixed = bool(FIXED_BADGE.search(sec.header))
+    if claims_open and fixed and not live:
+        return "header claims Open but its entries are fixed — mark it ✅ Fixed"
+    if claims_partial and not live:
+        return "header claims 🟢 Partial but no entry under it is marked open/partial"
+    if claims_fixed and live:
+        return "header claims Fixed but an entry under it is still open"
+    return None
+
 def main() -> int:
     problems: list[str] = []
     checked = 0
@@ -98,6 +146,11 @@ def main() -> int:
                         f"line and its section ({sec.header.lstrip('# ').strip()!r}) "
                         f"declares no `**Section status:**`"
                     )
+
+        for sec in parse(path):
+            problem = header_problem(sec)
+            if problem is not None:
+                problems.append(f"{path.name}:{sec.line}: {sec.header.lstrip('# ').strip()!r}: {problem}")
 
     if LIVE.exists() and "docs/audit-archive/fixed.md" not in LIVE.read_text():
         problems.append("AUDIT.md: does not link docs/audit-archive/fixed.md")

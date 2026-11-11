@@ -166,7 +166,7 @@ Streaming resilience and journal knobs live here too — see the tables below.
 | Field | Default | Notes |
 |---|---|---|
 | `routing_strategy` | `simple-shuffle` | `simple-shuffle`, `least-busy`, or `latency-based`. |
-| `num_retries` | `2` | Attempts per deployment before moving on. |
+| `num_retries` | `2` | Attempts per deployment before moving on. `0` still allows one failover *within* a deployment's key pool when a `429` names its own `Retry-After` (that cools the key, not the deployment — AUDIT #597); it never enters a fallback group. |
 | `timeout` | `120.0` | Gateway-wide per-request timeout, used for any provider that does not set its own `timeout_s`. A deployment's `wiwi_params.timeout` overrides both. |
 | `allowed_fails` | `3` | Consecutive failures before a key enters cooldown. |
 | `cooldown_time` | `30.0` | Key cooldown, in seconds. |

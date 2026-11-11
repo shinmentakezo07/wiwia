@@ -420,9 +420,15 @@ class RouterSettings(BaseModel):
         **Zero is NOT rejected**, because zero is a legitimate setting for
         every one of them and is used as such:
 
-        * ``num_retries: 0`` means "try once, never retry" — the retry
-          loop's ``range(0 + 1)`` is exactly one attempt. This is the
-          common test configuration and a sane production choice.
+        * ``num_retries: 0`` means "spend no deployment twice" — the
+          retry loop still runs ``max(num_retries + 1, 2)`` attempts
+          (AUDIT #597), but the second one is only reachable when the
+          first deployment's own pool still has a usable key: a ``429`
+          with a ``Retry-After`` cools the credential, not the
+          deployment, so failing over to a sibling key is part of the
+          first try, not a retry. No fallback group is entered and no
+          deployment is hit twice. This is the common test
+          configuration and a sane production choice.
         * ``allowed_fails: 0`` / ``key_max_consecutive_fails: 0`` retire on
           the first failure, which is a coherent (if strict) policy.
         * ``stream_loop_limit: 0`` DISABLES loop detection — the

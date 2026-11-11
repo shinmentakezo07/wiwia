@@ -1553,7 +1553,13 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
         group_first_err: WiwiError | None = None
         tried_dep_ids: set[int] = set()
         tried_key_labels: set[tuple[str, str]] = set()
-        for attempt in range(router.settings.num_retries + 1):
+        # ``num_retries`` buys attempts beyond the first, but a retry of the SAME
+        # deployment on a DIFFERENT key is not an extra try — it is the failover
+        # the setting is advertised to provide. A 429 from one credential now
+        # leaves the pool untouched (AUDIT #469), so without the second attempt
+        # ``num_retries: 0`` would report a 429 for a key the pool still had
+        # while a sibling served fine (AUDIT #597).
+        for attempt in range(max(router.settings.num_retries + 1, 2)):
             # cycle-3: if the chosen provider has served N consecutive
             # requests already, prefer a different one this round.
             prefer_exclude: set[int] = set(tried_dep_ids)
@@ -1721,11 +1727,21 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                 # deployment's admission estimate: refund the rpm/tpm slot so
                 # one 5xx does not throttle this deployment for the window.
                 _refund_deployment_slot(dep, ctx)
-                tried_dep_ids.add(id(dep))
+                status = _status_of(e)
+                # A 429 carrying an explicit Retry-After is the upstream naming
+                # a window: it is a statement about the *credential's quota*,
+                # and the pool cools the key for it (AUDIT #469). The deployment
+                # is not spent, so excluding it for the rest of this request
+                # would fail a healthy key pool over needlessly — and with
+                # ``num_retries: 0`` the caller got a 429 for a key it still
+                # had. The key is already out of the next pick (cooling), so
+                # the retry lands on a sibling. A 429 with no window, a 5xx and
+                # an auth refusal all stay deployment-scoped (AUDIT #597).
+                if not (status == 429 and e.retry_after and e.retry_after > 0):
+                    tried_dep_ids.add(id(dep))
                 if group_first_err is None:
                     group_first_err = e
                 last_err = e
-                status = _status_of(e)
                 # any error: clear this key/provider's cycle credit so the
                 # rotation cadence doesn't shield a flapping key from being
                 # re-picked.
