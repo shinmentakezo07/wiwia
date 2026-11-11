@@ -3974,10 +3974,7 @@ select.admin-input option {
   opacity: 0.16;
   transform: none;
   transform-origin: center;
-  mix-blend-mode: screen;
   filter: saturate(0.8);
-  mask-image: linear-gradient(to bottom, #000 0%, rgba(0, 0, 0, 0.82) 54%, transparent 100%);
-  -webkit-mask-image: linear-gradient(to bottom, #000 0%, rgba(0, 0, 0, 0.82) 54%, transparent 100%);
 }
 
 .pg-topbar {
@@ -4425,8 +4422,6 @@ select.admin-input option {
   .pg-workbench-beams {
     height: 48%;
     opacity: 0.1;
-    mask-image: linear-gradient(to bottom, #000 0%, rgba(0, 0, 0, 0.72) 52%, transparent 100%);
-    -webkit-mask-image: linear-gradient(to bottom, #000 0%, rgba(0, 0, 0, 0.72) 52%, transparent 100%);
   }
   .pg-metrics {
     align-items: flex-start;
@@ -4689,8 +4684,6 @@ select.admin-input option {
 .pg-workbench-beams {
   opacity: 0.10;
   height: 42%;
-  mask-image: linear-gradient(to bottom, #000, transparent 85%);
-  -webkit-mask-image: linear-gradient(to bottom, #000 0%, rgba(0, 0, 0, 0.5) 60%, transparent 100%);
 }
 .pg-model-trigger {
   border-color: transparent;
