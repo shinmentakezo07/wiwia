@@ -16,7 +16,7 @@ from wiwi.ir import types as ir
 from wiwi.streaming import deltas as dl
 from wiwi.streaming.machine import explain_encoder
 from wiwi.streaming.sse import sse_frame
-from wiwi.wire.openai_chat import DialectError
+from wiwi.wire.openai_chat import DialectError, _str_or_empty
 
 log = structlog.get_logger("wiwi.wire.anthropic_messages")
 
@@ -397,7 +397,7 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
             # Provider-hosted builtin (web_search family): keep the canonical
             # name + config subset; never emit it as a function tool.
             config = {k: t[k] for k in bt.BUILTIN_CONFIG_KEYS if k in t}
-            tools.append(ir.Tool(name=t.get("name") or canonical,
+            tools.append(ir.Tool(name=_str_or_empty(t.get("name")) or canonical,
                                  builtin=canonical,
                                  builtin_config=config,
                                  cache_control=t.get("cache_control")))
@@ -409,7 +409,7 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
             # re-emit it verbatim (round 178) while a provider that cannot host
             # it still drops it with a warning.
             tools.append(ir.Tool(
-                name=t.get("name") or ttype,
+                name=_str_or_empty(t.get("name")) or ttype,
                 builtin=ttype,
                 builtin_config={bt.WIRE_TYPE_KEY: ttype,
                                 bt.WIRE_SURFACE_KEY: "anthropic"},

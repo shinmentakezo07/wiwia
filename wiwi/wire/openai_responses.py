@@ -392,9 +392,14 @@ def decode_request(body: dict[str, Any],
                         ia = c.get("input_audio") or {}
                         data = ia.get("data") if isinstance(ia, dict) else None
                         if isinstance(data, str) and data:
+                            # A non-string format (5, a list) became
+                            # audio/5 on the IR and rode upstream -- the
+                            # Chat twin of this arm guards the identical
+                            # field, so mirror it rather than forward junk.
+                            fmt = ia.get("format")
                             parts.append(ir.AudioPart(
                                 b64=data,
-                                mime=f"audio/{ia.get('format') or 'wav'}"))
+                                mime=f"audio/{fmt if isinstance(fmt, str) and fmt else 'wav'}"))
                         else:
                             log.debug("responses_unsupported_content_block",
                                       block_type=ctype)

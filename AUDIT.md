@@ -52,6 +52,54 @@ is not fixed in the same change.
 
 ## Archive index (fixed, newest first)
 
+## ✅ Fixed — two typed-wrong values rode the wire codecs past their guards (2026-11-12)
+
+**Section status:** fixed — #598, #599 (round 206).
+
+### 598. The Anthropic codec's builtin-tool paths forwarded a truthy non-string name into Tool.name
+
+**Severity:** 🟠 High · **Status: fixed** — round 206
+(`tests/test_fix_round206.py`)
+**Files:** `wiwi/wire/anthropic_messages.py` (the two builtin arms of
+decode_request's tool loop), consumer `wiwi/providers/anthropic_adapter.py`
+(_prefix_token_estimate, the tools render).
+
+The function-tool arm of the same loop coerces its name with an isinstance
+guard, and the Responses codec guards the identical builtin hazard with
+_str_or_empty — but the two builtin arms read `t.get("name") or <fallback>`,
+which defaults only a MISSING or falsy key. A truthy non-string name rode into
+Tool.name (typed str, no __post_init__):
+
+```
+{"type": "web_search_20250305", "name": ["evil"]}  -> Tool.name == ["evil"]
+{"type": "web_search_20250305", "name": 5}         -> Tool.name == 5
+```
+
+**Trigger (reproduced):** _prefix_token_estimate raised
+`TypeError: object of type 'int' has no len()` inside encode_request — a
+500 blaming a healthy upstream — and for a list/dict name the adapter re-emitted
+the junk verbatim as `{"type": "web_search_20250305", "name": ["evil"]}`, an
+upstream 400 naming no field the caller sent (the #186 class).
+
+**Fix:** both builtin arms route the name through the existing
+wire.openai_chat._str_or_empty before the or-fallback, exactly as the Responses
+codec's unknown-builtin path already does. Junk degrades to the canonical name /
+raw wire type; well-formed names round-trip unchanged.
+
+### 599. The Responses codec's input_audio arm built a mime from an unguarded format
+
+**Severity:** 🟡 Medium · **Status: fixed** — round 206
+(`tests/test_fix_round206.py`)
+**Files:** `wiwi/wire/openai_responses.py` (decode_request, input_audio arm).
+
+`f"audio/{ia.get('format') or 'wav'}"` forwarded a truthy non-string format
+(5, a list) as `audio/5` on AudioPart.mime and rode it upstream. The Chat
+twin of the same arm (openai_chat.py, input_audio) guards the field with
+isinstance(fmt, str); the Responses twin did not.
+
+**Fix:** mirror the Chat arm — coerce to wav unless the format is a non-empty
+string.
+
 ## ✅ Fixed — the retry loop gave up on a deployment after one credential hit its quota (2026-11-09)
 
 **Section status:** fixed — #597 (round 205).
@@ -171,6 +219,7 @@ terminal (reporting every errored stream as truncated), and a repeated
 `StreamStart` was reported as "after the stream began" when the stream had in
 fact already ended.
 
+- ✅ Fixed — round 206: two typed-wrong values rode the wire codecs (2026-11-12)
 - ✅ Fixed — `wiwi/core/` sweep (2026-10-29)
 - ✅ Fixed — round 180: the all-time timeseries bucketing (2026-10-29)
 - ✅ Fixed — round 179: three latent IR defects found by reading the module against its consumers (2026-10-29)
