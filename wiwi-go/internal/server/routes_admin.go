@@ -406,7 +406,18 @@ func (a *App) adminStream(c *gin.Context) {
 	defer cancel()
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
 	flusher, _ := c.Writer.(http.Flusher)
+	// Flush headers (and an initial SSE comment) immediately. The console's
+	// fetch-based client marks the stream connected as soon as the response
+	// resolves; without an early write gin buffers the headers until the first
+	// event, which may be minutes away, leaving the badge stuck on "OFFLINE".
+	if flusher != nil {
+		c.Writer.Write([]byte(":ok\n\n"))
+		flusher.Flush()
+	}
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
 	timeout := time.After(30 * time.Minute)
 	for {
 		select {
@@ -418,6 +429,15 @@ func (a *App) adminStream(c *gin.Context) {
 			c.Writer.Write([]byte("id: " + strconv.FormatInt(ev.ID, 10) + "\n"))
 			c.Writer.Write([]byte("event: " + ev.Type + "\n"))
 			c.Writer.Write([]byte("data: " + string(b) + "\n\n"))
+			if flusher != nil {
+				flusher.Flush()
+			}
+		case <-ticker.C:
+			// SSE comment keep-alive: stops idle proxies from reaping the
+			// connection and confirms liveness to the client.
+			if _, err := c.Writer.Write([]byte(":ping\n\n")); err != nil {
+				return
+			}
 			if flusher != nil {
 				flusher.Flush()
 			}
