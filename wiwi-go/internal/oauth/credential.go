@@ -57,5 +57,23 @@ func ExpiresWithinLead(expiresAt int64, leadS int64) bool {
 	return time.Now().Unix()+leadS >= expiresAt
 }
 
+// ResolveExpiresAt turns a wire `expires_in` value into an absolute unix
+// expiry. A missing, non-numeric, boolean, zero, or <=lead value is unusable:
+// recording it would leave the token inside its own refresh window (or in the
+// past), so the single-use refresh grant would be burned on every sweep until
+// the upstream answers invalid_grant (AUDIT #425). Such values fall back to
+// 2*lead, strictly beyond the lead so the next due-check returns false. A
+// usable value is honoured verbatim.
+func ResolveExpiresAt(expiresIn any, leadS int64, now int64) int64 {
+	if b, ok := expiresIn.(bool); ok && b {
+		return now + 2*leadS
+	}
+	secs, ok := toInt64(expiresIn)
+	if !ok || secs <= leadS {
+		return now + 2*leadS
+	}
+	return now + secs
+}
+
 // Bearer returns the access token for an Authorization header.
 func (c Credential) Bearer() string { return "Bearer " + c.AccessToken }

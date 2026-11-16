@@ -2,6 +2,7 @@ package core
 
 import (
 	"log"
+	"sync"
 	"time"
 
 	"wiwi-go/internal/ir"
@@ -17,8 +18,16 @@ type Healer struct {
 	Tick          time.Duration
 	ProbeTimeoutS float64
 	MaxProbes     int
-	stop          chan struct{}
-	done          chan struct{}
+	// ProbeBackoffBase/Cap scale the per-key probe interval after repeated
+	// failures so a permanently dead key is not re-probed on every sweep.
+	ProbeBackoffBase time.Duration
+	ProbeBackoffCap  time.Duration
+	stop             chan struct{}
+	done             chan struct{}
+
+	mu        sync.Mutex
+	failures  map[string]int
+	nextProbe map[string]time.Time
 }
 
 func NewHealer(rt *router.Router, tickS, probeTimeoutS float64, maxProbes int) *Healer {
@@ -34,7 +43,12 @@ func NewHealer(rt *router.Router, tickS, probeTimeoutS float64, maxProbes int) *
 	return &Healer{
 		Router: rt, Tick: time.Duration(tickS * float64(time.Second)),
 		ProbeTimeoutS: probeTimeoutS, MaxProbes: maxProbes,
-		stop: make(chan struct{}), done: make(chan struct{}),
+		ProbeBackoffBase: 30 * time.Second,
+		ProbeBackoffCap:  30 * time.Minute,
+		stop:             make(chan struct{}),
+		done:             make(chan struct{}),
+		failures:         map[string]int{},
+		nextProbe:        map[string]time.Time{},
 	}
 }
 
@@ -63,8 +77,9 @@ func (h *Healer) Stop() {
 	<-h.done
 }
 
-// Sweep probes up to MaxProbes sick keys.
+// Sweep probes up to MaxProbes sick keys, honouring per-key backoff.
 func (h *Healer) Sweep() {
+	now := time.Now()
 	probes := 0
 	for name, acct := range h.Router.Providers() {
 		if probes >= h.MaxProbes {
@@ -96,16 +111,57 @@ func (h *Healer) Sweep() {
 			if probes >= h.MaxProbes {
 				return
 			}
-			if key.Available(time.Now()) {
+			if key.Available(now) {
+				continue
+			}
+			id := name + "/" + key.Label
+			if !h.due(id, now) {
 				continue
 			}
 			probes++
 			if h.probe(dep, key) {
+				h.onSuccess(id)
 				key.MarkActive()
 				log.Printf("wiwi: healer restored key %s/%s", name, key.Label)
+			} else {
+				h.onFailure(id, now)
 			}
 		}
 	}
+}
+
+func (h *Healer) due(id string, now time.Time) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	next, ok := h.nextProbe[id]
+	return !ok || !now.Before(next)
+}
+
+func (h *Healer) onSuccess(id string) {
+	h.mu.Lock()
+	delete(h.failures, id)
+	delete(h.nextProbe, id)
+	h.mu.Unlock()
+}
+
+func (h *Healer) onFailure(id string, now time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.failures[id]++
+	backoff := h.ProbeBackoffBase
+	for i := 1; i < h.failures[id]; i++ {
+		if backoff >= h.ProbeBackoffCap {
+			break
+		}
+		backoff *= 2
+	}
+	if h.ProbeBackoffCap > 0 && backoff > h.ProbeBackoffCap {
+		backoff = h.ProbeBackoffCap
+	}
+	if backoff <= 0 {
+		backoff = 30 * time.Second
+	}
+	h.nextProbe[id] = now.Add(backoff)
 }
 
 func (h *Healer) probe(dep *router.Deployment, key *router.ProviderKey) bool {

@@ -150,11 +150,7 @@ func WorkBuddyPollLogin(state, realm string) (*Credential, error) {
 		Domain:       domain,
 		Realm:        realm,
 	}
-	if exp, ok := toInt64(data["expiresIn"]); ok && exp > 0 {
-		c.ExpiresAt = time.Now().Unix() + exp
-	} else {
-		c.ExpiresAt = time.Now().Unix() + 2*WorkBuddyRefreshLeadS
-	}
+	c.ExpiresAt = ResolveExpiresAt(data["expiresIn"], WorkBuddyRefreshLeadS, time.Now().Unix())
 	// best-effort identity fill
 	fillWorkBuddyAccount(base, origin, state, c)
 	return c, nil
@@ -241,11 +237,7 @@ func WorkBuddyRefresh(c Credential) (*Credential, error) {
 	if d := str(data["domain"]); d != "" {
 		nc.Domain = d
 	}
-	if exp, ok := toInt64(data["expiresIn"]); ok && exp > 0 {
-		nc.ExpiresAt = time.Now().Unix() + exp
-	} else {
-		nc.ExpiresAt = time.Now().Unix() + 2*WorkBuddyRefreshLeadS
-	}
+	nc.ExpiresAt = ResolveExpiresAt(data["expiresIn"], WorkBuddyRefreshLeadS, time.Now().Unix())
 	return &nc, nil
 }
 

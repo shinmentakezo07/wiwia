@@ -139,9 +139,7 @@ func HermesCredentialFromToken(payload map[string]any) Credential {
 	c := Credential{}
 	c.AccessToken, _ = payload["access_token"].(string)
 	c.RefreshToken, _ = payload["refresh_token"].(string)
-	if exp, ok := toInt64(payload["expires_in"]); ok && exp > 0 {
-		c.ExpiresAt = time.Now().Unix() + exp
-	}
+	c.ExpiresAt = ResolveExpiresAt(payload["expires_in"], HermesRefreshLeadS, time.Now().Unix())
 	return c
 }
 

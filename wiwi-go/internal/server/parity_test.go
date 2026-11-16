@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"wiwi-go/internal/config"
+	"wiwi-go/internal/core"
+	"wiwi-go/internal/ir"
 )
 
 func newCountingApp(t *testing.T, mutate func(*config.Config)) (*App, *int32) {
@@ -175,5 +177,30 @@ func TestRetentionRollup(t *testing.T) {
 	_ = app.State.Store.QueryRow(`SELECT COUNT(*) FROM request_rollups`).Scan(&count)
 	if count == 0 {
 		t.Fatal("expected rollup rows")
+	}
+}
+
+func TestCacheKeyIncludesAnthropicBeta(t *testing.T) {
+	ctx := &core.RequestContext{
+		Group: "g",
+		IRReq: ir.Request{Model: "claude-x"},
+		Auth:  &core.AuthInfo{KeyID: "k"},
+	}
+	k1 := cacheKeyFor(core.SurfaceMessages, ctx, "interleaved-thinking-2025")
+	k2 := cacheKeyFor(core.SurfaceMessages, ctx, "")
+	if k1 == k2 {
+		t.Fatal("anthropic-beta must be part of the cache key (AUDIT #329)")
+	}
+	if cacheKeyFor(core.SurfaceMessages, ctx, "interleaved-thinking-2025") != k1 {
+		t.Fatal("cache key must be deterministic")
+	}
+}
+
+func TestHealerStartsWhenEnabled(t *testing.T) {
+	app, _ := newCountingApp(t, func(c *config.Config) {
+		c.Healer.Enabled = true
+	})
+	if app.State.Healer == nil {
+		t.Fatal("healer.enabled: true must start the healer")
 	}
 }

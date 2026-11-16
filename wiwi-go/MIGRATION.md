@@ -45,6 +45,13 @@ See `PARITY.md` for the per-subsystem coverage matrix and the explicit gaps.
 - SSE pump, coalescing, loop detection, validation, stream tape, journal replay,
   mid-stream failover substrate.
 
+### Phase 9 — Parity gap closure ✅
+- DeepSeek thinking-mode `reasoning_content` round-trip (pad/strip by model rule).
+- IR-normalized response-cache key that includes `anthropic-beta` (AUDIT #329).
+- Shared OAuth expiry resolver with a `2*lead` fallback (AUDIT #425).
+- Health healer wired on `healer.enabled` with per-key exponential probe backoff.
+- Regression tests for every item above.
+
 ## Verification gate
 ```bash
 cd wiwi-go

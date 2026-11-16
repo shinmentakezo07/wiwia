@@ -54,3 +54,29 @@ func TestWorkBuddyAuthURLAllowlist(t *testing.T) {
 		t.Fatal("expected host rejection")
 	}
 }
+
+func TestResolveExpiresAt(t *testing.T) {
+	now := int64(1_000_000)
+	lead := int64(120)
+	// A usable value is honoured verbatim.
+	if got := ResolveExpiresAt(float64(3600), lead, now); got != now+3600 {
+		t.Fatalf("usable: %d", got)
+	}
+	// Missing, zero, boolean, <=lead and non-numeric values all fall back to
+	// 2*lead so the token is not due on the very next sweep.
+	for _, v := range []any{nil, float64(0), true, float64(60), "nope"} {
+		if got := ResolveExpiresAt(v, lead, now); got != now+2*lead {
+			t.Fatalf("unusable %v: %d", v, got)
+		}
+	}
+}
+
+func TestHermesMissingExpiryNoStorm(t *testing.T) {
+	c := HermesCredentialFromToken(map[string]any{"access_token": "a", "refresh_token": "r"})
+	if c.ExpiresAt == 0 {
+		t.Fatal("missing expires_in left ExpiresAt zero; the refresh grant would be burned every sweep")
+	}
+	if ExpiresWithinLead(c.ExpiresAt, HermesRefreshLeadS) {
+		t.Fatalf("fallback expiry %d is already due", c.ExpiresAt)
+	}
+}

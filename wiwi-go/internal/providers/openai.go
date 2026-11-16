@@ -74,9 +74,14 @@ func (a *OpenAIAdapter) Reset() {
 
 func (a *OpenAIAdapter) EncodeRequest(req ir.Request, modelID string, params map[string]any) (map[string]any, error) {
 	g := req.GenParams
+	// DeepSeek's round-trip rule decides whether history reasoning is kept:
+	// emit it on the turns that have it, then pad (or strip) after tools are
+	// known. OpenRouter and NIM carry reasoning on a different wire shape.
+	deepseek := isDeepSeekModel(modelID) && a.providerType != "openrouter" && a.providerType != "nvidia-nim"
+	perMsg := emitPerMessageReasoning(a.providerType) || deepseek
 	body := map[string]any{
 		"model":    modelID,
-		"messages": encodeOpenAIMessages(req.Messages, emitPerMessageReasoning(a.providerType)),
+		"messages": encodeOpenAIMessages(req.Messages, perMsg),
 		"stream":   req.Stream,
 	}
 
@@ -159,6 +164,22 @@ func (a *OpenAIAdapter) EncodeRequest(req ir.Request, modelID string, params map
 	case "opencode":
 		if isOpencodeFreeModel(modelID) {
 			applyOpencodeCloak(body)
+		}
+	}
+
+	if deepseek {
+		// Tools on the wire decide the rule (the OpenCode free-tier cloak adds
+		// its own tools, so read the body, not the caller's tool list).
+		hasTools := false
+		if t, ok := body["tools"].([]any); ok && len(t) > 0 {
+			hasTools = true
+		}
+		if hasTools && deepseekThinkingEnabled(g) {
+			applyDeepSeekReasoningRoundtrip(body, g, modelID, true)
+		} else {
+			// No tools upstream: DeepSeek ignores history reasoning, so send
+			// none (older deployments 400 on it).
+			stripHistoryReasoning(body)
 		}
 	}
 

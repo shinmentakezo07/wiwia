@@ -38,6 +38,25 @@ Ported provider logic:
 - **IFM**: `chat_template_kwargs` effort, `X-Session-ID` affinity, `reasoning_content`
   replay, platform-param drops.
 - **Live version helpers**: npm-registry version cache for OpenCode/Cline/WorkBuddy.
+- **DeepSeek**: thinking-mode `reasoning_content` round-trip — every history
+  assistant turn is padded when the model is DeepSeek, thinking is on and tools
+  are present (stripped when no tools), shared by every OpenAI-wire adapter that
+  fronts a DeepSeek model.
+
+## Recently closed gaps
+- **DeepSeek reasoning round-trip** — padded/stripped per the model rule
+  (`providers/deepseek.go`), with regression tests.
+- **Response cache key** now hashes the normalized IR (not the raw body) and
+  includes `anthropic-beta`, so two Anthropic requests differing only in that
+  header no longer share an entry (AUDIT #329).
+- **OAuth expiry fallback** (`oauth.ResolveExpiresAt`) — a missing / zero /
+  boolean / `<=lead` `expires_in` on Cline/Hermes/WorkBuddy resolves to `2*lead`
+  instead of landing in the past, so a single-use refresh grant can't be burned
+  on every sweep (AUDIT #425).
+- **Health healer** — now wired on `healer.enabled` and backs off per key
+  (`probe_backoff_base_s` / `probe_backoff_cap_s`) instead of re-probing a dead
+  key every tick.
+
 
 ## Core pipeline — Full
 | Subsystem | Status |

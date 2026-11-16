@@ -329,7 +329,7 @@ func (a *App) serveComplete(c *gin.Context, ctx *core.RequestContext, surface co
 	// response cache (non-streaming, deterministic only)
 	cacheKey := ""
 	if a.cacheable(ctx, c) {
-		cacheKey = cacheKeyFor(surface, ctx, body)
+		cacheKey = cacheKeyFor(surface, ctx, c.GetHeader("anthropic-beta"))
 		if b, ok := a.State.Cache.Get(cacheKey); ok {
 			ctx.ResponseCacheHit = true
 			a.finish(ctx, 200, nil)
@@ -340,7 +340,7 @@ func (a *App) serveComplete(c *gin.Context, ctx *core.RequestContext, surface co
 	// Singleflight: identical concurrent non-streaming requests share one
 	// upstream call. Joiners are logged with the shared usage at cost=0.
 	if a.State.Cfg.Wiwi.SingleflightEnabled {
-		sfKey := cacheKeyFor(surface, ctx, body)
+		sfKey := cacheKeyFor(surface, ctx, c.GetHeader("anthropic-beta"))
 		b, err := a.State.Flight.Do(sfKey, func() ([]byte, error) {
 			turn, we := a.State.Gateway.Complete(ctx)
 			if we != nil {
@@ -412,17 +412,28 @@ func (a *App) cacheable(ctx *core.RequestContext, c *gin.Context) bool {
 	return true
 }
 
-func cacheKeyFor(surface core.Surface, ctx *core.RequestContext, body map[string]any) string {
-	norm, _ := json.Marshal(body)
-	h := sha256.New()
-	h.Write([]byte(string(surface)))
-	h.Write([]byte("|"))
-	h.Write([]byte(ctx.Group))
-	h.Write([]byte("|"))
-	h.Write([]byte(keyID(ctx.Auth)))
-	h.Write([]byte("|"))
-	h.Write(norm)
-	return hex.EncodeToString(h.Sum(nil))
+func cacheKeyFor(surface core.Surface, ctx *core.RequestContext, anthropicBeta string) string {
+	// Hash the normalized IR, not the raw body, so two requests that decode to
+	// the same canonical request share an entry. The `anthropic-beta` header is
+	// part of the key because the Anthropic wire is header-and-body coupled:
+	// two requests differing only in that header are two upstream requests and
+	// must not share a cached answer (AUDIT #329).
+	payload := map[string]any{
+		"group":          ctx.Group,
+		"surface":        string(surface),
+		"key_id":         keyID(ctx.Auth),
+		"model":          ctx.IRReq.Model,
+		"messages":       ctx.IRReq.Messages,
+		"tools":          ctx.IRReq.Tools,
+		"tool_choice":    ctx.IRReq.ToolChoice,
+		"gen_params":     ctx.IRReq.GenParams,
+		"extras":         ctx.IRReq.Extras,
+		"anthropic_beta": anthropicBeta,
+		"stream":         false,
+	}
+	blob, _ := json.Marshal(payload)
+	sum := sha256.Sum256(blob)
+	return hex.EncodeToString(sum[:])
 }
 
 func (a *App) serveStream(c *gin.Context, ctx *core.RequestContext, surface core.Surface, body map[string]any) {

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -50,6 +51,7 @@ type AppState struct {
 	SpendBuffer *auth.SpendBuffer
 	Healer      *core.Healer
 	stop        chan struct{}
+	stopOnce    sync.Once
 }
 
 // App bundles state and the Gin engine.
@@ -111,6 +113,7 @@ func New(cfg *config.Config) (*App, error) {
 		Responses:     NewResponseStore(st, cfg.Wiwi.StoreResponses, cfg.Wiwi.ResponseStoreTTLS),
 		SessionSecret: deriveSessionSecret(cfg),
 		StaticDir:     staticDir(), StartTime: time.Now(),
+		stop: make(chan struct{}),
 	}
 	state.Journal.Sweep()
 	providers.ConfigureToolSchemaCache(cfg.Wiwi.ToolSchemaCacheEntries)
@@ -125,6 +128,19 @@ func New(cfg *config.Config) (*App, error) {
 	state.Gateway.ResumeMaxRetries = cfg.Router.StreamResumeMaxRetries
 	if cfg.Router.StreamLoopLimit > 0 {
 		state.Gateway.LoopLimit = cfg.Router.StreamLoopLimit
+	}
+
+	if cfg.Healer.Enabled {
+		h := core.NewHealer(rt, cfg.Healer.TickS, cfg.Healer.ProbeTimeoutS, cfg.Healer.MaxProbesPerSweep)
+		if cfg.Healer.ProbeBackoffBaseS > 0 {
+			h.ProbeBackoffBase = time.Duration(cfg.Healer.ProbeBackoffBaseS * float64(time.Second))
+		}
+		if cfg.Healer.ProbeBackoffCapS > 0 {
+			h.ProbeBackoffCap = time.Duration(cfg.Healer.ProbeBackoffCapS * float64(time.Second))
+		}
+		h.Start()
+		state.Healer = h
+		log.Printf("wiwi: health healer started")
 	}
 
 	if missing := providers.MissingProviders(config.ProviderTypes()); len(missing) > 0 {
@@ -331,9 +347,11 @@ func (a *App) registerRoutes() {
 
 // Close stops background services and closes the store.
 func (a *App) Close() {
-	if a.State.stop != nil {
-		close(a.State.stop)
-	}
+	a.State.stopOnce.Do(func() {
+		if a.State.stop != nil {
+			close(a.State.stop)
+		}
+	})
 	if a.State.Healer != nil {
 		a.State.Healer.Stop()
 	}
