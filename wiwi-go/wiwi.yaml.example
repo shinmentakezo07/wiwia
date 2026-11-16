@@ -1,0 +1,14 @@
+# Minimal runnable config. Copy to wiwi.yaml and fill in keys.
+general_settings:
+  master_key: os.environ/WIWI_MASTER_KEY
+  database_url: sqlite+aiosqlite:///wiwi.db
+
+providers:
+  - name: openai-main
+    provider: openai
+    keys:
+      - {label: main, key: os.environ/OPENAI_API_KEY}
+
+model_list:
+  - model_name: gpt-4o
+    wiwi_params: {provider: openai-main, model: gpt-4o}
