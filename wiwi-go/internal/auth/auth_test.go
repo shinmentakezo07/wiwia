@@ -84,3 +84,32 @@ func TestUsersAndSessions(t *testing.T) {
 }
 
 func floatPtr(f float64) *float64 { return &f }
+
+func TestMasterSession(t *testing.T) {
+	svc := newSvc(t)
+	sess, err := svc.NewMasterSession("secret", 3600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := svc.ValidateSession("secret", sess)
+	if err != nil {
+		t.Fatalf("master session: %v", err)
+	}
+	if u.ID != MasterUserID || u.Username != MasterUserID || u.Role != "admin" {
+		t.Fatalf("master user: %+v", u)
+	}
+	// A wrong secret must not validate the session.
+	if _, err := svc.ValidateSession("wrong", sess); err == nil {
+		t.Fatal("master session validated with the wrong secret")
+	}
+	// The synthetic master must not appear in the user list.
+	users, err := svc.ListUsers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range users {
+		if x.ID == MasterUserID {
+			t.Fatalf("synthetic master leaked into users list: %+v", x)
+		}
+	}
+}

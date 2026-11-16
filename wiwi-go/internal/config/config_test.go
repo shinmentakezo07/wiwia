@@ -284,7 +284,7 @@ func TestApplyDefaults(t *testing.T) {
 	cfg := &Config{}
 	cfg.ApplyDefaults()
 
-	if cfg.General.DatabaseURL != "sqlite+aiosqlite:///wiwi.db" {
+	if cfg.General.DatabaseURL != "sqlite+aiosqlite:///wiwi-go.db" {
 		t.Errorf("database_url = %q", cfg.General.DatabaseURL)
 	}
 	if cfg.General.MaxKeysPerUser != 50 || cfg.General.UnpricedModelPolicy != "warn" {

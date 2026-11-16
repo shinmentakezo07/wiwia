@@ -105,7 +105,9 @@ model_list entries referencing removed providers. Fail closed if master_key empt
 
 Thin `database/sql` wrapper supporting SQLite and Postgres. Normalize URLs:
 `sqlite+aiosqlite:///path` / `sqlite:///path` => sqlite driver (file path after ///).
-`postgresql+asyncpg://` => `postgres://`. `postgres://` as-is. Default sqlite: `wiwi.db`.
+`postgresql+asyncpg://` => `postgres://`. `postgres://` as-is. Default sqlite: `wiwi-go.db`
+(its own file: the Go schema differs from the Python backend's, so the two never
+share `wiwi.db`).
 
 ```go
 type Store struct { /* unexported */ }

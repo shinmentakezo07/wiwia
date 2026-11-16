@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 
 	"wiwi-go/internal/config"
 	"wiwi-go/internal/server"
@@ -35,6 +36,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "wiwi: config error: %v\n", err)
 		os.Exit(1)
 	}
+	dbLog := cfg.General.DatabaseURL
+	if strings.HasPrefix(dbLog, "postgres") {
+		dbLog = "postgres (url redacted)"
+	}
+	log.Printf("wiwi: database %s", dbLog)
 	app, err := server.New(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "wiwi: startup error: %v\n", err)

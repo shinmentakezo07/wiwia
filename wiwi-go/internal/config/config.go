@@ -868,7 +868,12 @@ func (r *RouterSettings) applyDefaults() {
 
 func (g *GeneralSettings) applyDefaults() {
 	if g.DatabaseURL == "" {
-		g.DatabaseURL = "sqlite+aiosqlite:///wiwi.db"
+		// The Go port keeps its own SQLite file. Its schema is not the same as
+		// the Python backend's, so sharing wiwi.db would make every query fail
+		// ("no such column"). Keeping them separate lets `start.sh go` and
+		// `start.sh py` each work without touching the other's data. Set
+		// DATABASE_URL explicitly to point both at one (compatible) database.
+		g.DatabaseURL = "sqlite+aiosqlite:///wiwi-go.db"
 	}
 	if g.MaxKeysPerUser < 1 {
 		g.MaxKeysPerUser = 50

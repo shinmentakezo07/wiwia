@@ -25,6 +25,22 @@ var (
 	ErrBadSession = errors.New("invalid session")
 )
 
+// MasterUserID is the reserved id of the synthetic master admin. It has no row
+// in the users table (Python's SYNTHETIC_MASTER_ID); ValidateSession recognises
+// it by this id instead of joining, so the master never appears in user lists.
+const MasterUserID = "master"
+
+// MasterUser is the synthetic admin actor minted by a master-key login.
+func MasterUser() *User {
+	return &User{ID: MasterUserID, Username: MasterUserID, Role: "admin"}
+}
+
+// NewMasterSession issues a signed session cookie for the synthetic master
+// admin. It must only be called after the caller has verified the master key.
+func (s *Service) NewMasterSession(secret string, ttlSeconds int64) (string, error) {
+	return s.NewSession(secret, MasterUserID, ttlSeconds)
+}
+
 // pbkdf2SHA256 implements PBKDF2-HMAC-SHA256 with a single 32-byte block.
 func pbkdf2SHA256(password, salt []byte, iter, keyLen int) []byte {
 	h := hmac.New(sha256.New, password)
@@ -179,15 +195,26 @@ func (s *Service) ValidateSession(secret, cookie string) (*User, error) {
 	if !ok {
 		return nil, ErrBadSession
 	}
-	row := s.store.QueryRow(s.store.Rebind(
-		`SELECT u.id,u.username,u.role,u.created_at,s.expires_at
-		 FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=?`), id)
-	var u User
+	// A session can name the synthetic master admin, which has no users row, so
+	// read the session's user_id first and special-case the reserved id before
+	// joining users (Python's resolve_current_user does the same).
+	var userID string
 	var expires int64
-	if err := row.Scan(&u.ID, &u.Username, &u.Role, &u.CreatedAt, &expires); err != nil {
+	if err := s.store.QueryRow(s.store.Rebind(
+		`SELECT user_id, expires_at FROM sessions WHERE id=?`), id).
+		Scan(&userID, &expires); err != nil {
 		return nil, ErrBadSession
 	}
 	if expires > 0 && time.Now().Unix() > expires {
+		return nil, ErrBadSession
+	}
+	if userID == MasterUserID {
+		return MasterUser(), nil
+	}
+	row := s.store.QueryRow(s.store.Rebind(
+		`SELECT id,username,role,created_at FROM users WHERE id=?`), userID)
+	var u User
+	if err := row.Scan(&u.ID, &u.Username, &u.Role, &u.CreatedAt); err != nil {
 		return nil, ErrBadSession
 	}
 	return &u, nil

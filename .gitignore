@@ -28,6 +28,11 @@ wiwi.db
 # the live DB's WAL while a backend holds it open, silently dropping writes.
 wiwi.db-shm
 wiwi.db-wal
+# The Go backend keeps its own database (its schema differs from the Python
+# backend's), so the two implementations never collide on wiwi.db.
+wiwi-go.db
+wiwi-go.db-shm
+wiwi-go.db-wal
 
 # Local opencode agent config (holds live provider keys, e.g. ptcider-alt)
 opencode.json
