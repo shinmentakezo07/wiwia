@@ -2,7 +2,9 @@ package server
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
@@ -200,13 +202,44 @@ func (a *App) adminProviderCatalog(c *gin.Context) {
 }
 
 func (a *App) adminListProviders(c *gin.Context) {
+	now := time.Now()
 	out := []map[string]any{}
 	for name, p := range a.State.Router.Providers() {
+		keys := make([]map[string]any, 0, len(p.Keys))
+		healthy := len(p.Keys) == 0
+		for _, k := range p.Keys {
+			if k.Available(now) {
+				healthy = true
+			}
+			cool := 0.0
+			if k.State == "cooling" && now.Before(k.Until) {
+				cool = k.Until.Sub(now).Seconds()
+			}
+			status := k.State
+			if status == "" {
+				status = "active"
+			}
+			masked := ""
+			if k.Secret != "" {
+				masked = "••••"
+			}
+			keys = append(keys, map[string]any{
+				"label": k.Label, "masked": masked, "weight": k.Weight,
+				"enabled": k.Enabled, "status": status, "cooldown_remaining_s": cool,
+				"req_count": 0, "err_count": k.ErrCount, "last_used_ts": nil,
+			})
+		}
+		var aliasID any
+		if p.AliasID != "" {
+			aliasID = p.AliasID
+		}
 		out = append(out, map[string]any{
-			"name": name, "provider": p.Type, "base_url": p.BaseURL, "keys": len(p.Keys),
+			"name": name, "provider_type": p.Type, "base_url": p.BaseURL,
+			"round_robin": p.RoundRobin, "alias_id": aliasID, "healthy": healthy,
+			"keys": keys,
 		})
 	}
-	c.JSON(http.StatusOK, gin.H{"data": out})
+	c.JSON(http.StatusOK, gin.H{"providers": out, "alias_to_provider": gin.H{}})
 }
 
 func (a *App) adminModels(c *gin.Context) {
@@ -296,13 +329,22 @@ func (a *App) adminLogsRequests(c *gin.Context) {
 			continue
 		}
 		out = append(out, map[string]any{
-			"id": id, "request_id": rid, "ts": ts, "key_id": keyID, "model_group": group,
-			"provider": prov, "model_id": model, "status": status, "prompt_tokens": pt,
-			"completion_tokens": ct, "cached_tokens": cached, "reasoning_tokens": reasoning,
-			"cost": costv, "latency_ms": lat, "ttft_ms": ttft, "error": errText,
+			"stream": "request", "id": id, "request_id": rid, "ts": ts,
+			"key_id": keyID, "key_alias": "", "surface": "",
+			"model_group": group, "provider": prov, "model_id": model,
+			"provider_key_label": "", "status": status,
+			"error_code": "", "error_message": errText,
+			"tok_in": pt, "tok_cached": cached, "tok_cache_creation": 0,
+			"tok_reasoning": reasoning, "tok_out": ct,
+			"usage_estimated": false, "tps": 0.0,
+			"ttft_ms": ttft, "latency_ms": lat, "cost": costv,
+			"was_stream": false, "cache_hit": cached > 0, "cache_savings": 0.0,
+			"response_cache_hit":   false,
+			"translation_warnings": []string{}, "attempts": []any{},
+			"request_body": nil,
 		})
 	}
-	c.JSON(http.StatusOK, gin.H{"data": out})
+	c.JSON(http.StatusOK, gin.H{"logs": out})
 }
 
 func (a *App) adminLogsAudit(c *gin.Context) {
@@ -388,67 +430,251 @@ func (a *App) adminStream(c *gin.Context) {
 }
 
 func (a *App) adminStatsOverview(c *gin.Context) {
-	snap := a.State.Totals.Snapshot()
-	rows, err := a.State.Store.Query(a.State.Store.Rebind(
-		`SELECT COUNT(*), COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), COALESCE(SUM(cost),0) FROM request_logs`))
-	var count, pt, ct int64
-	var totalCost float64
-	if err == nil {
-		defer rows.Close()
-		if rows.Next() {
-			_ = rows.Scan(&count, &pt, &ct, &totalCost)
-		}
+	minutes := queryInt(c, "minutes", 60)
+	if minutes < 0 {
+		minutes = 0
 	}
-	var rRows, rPrompt, rCompletion int64
-	var rCost float64
-	if rr, err := a.State.Store.Query(`SELECT COALESCE(SUM(requests),0), COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), COALESCE(SUM(cost),0) FROM request_rollups`); err == nil {
-		defer rr.Close()
-		if rr.Next() {
-			_ = rr.Scan(&rRows, &rPrompt, &rCompletion, &rCost)
-		}
+	if minutes > 43200 {
+		minutes = 43200
 	}
+	now := time.Now().Unix()
+	hasWindow := minutes > 0
+	cutoff := int64(0)
+	where := ""
+	var args []any
+	if hasWindow {
+		cutoff = now - int64(minutes)*60
+		where = " WHERE ts >= ?"
+		args = append(args, cutoff)
+	}
+	var requests, errors, cacheHits, tokIn, tokCached, tokReasoning, tokOut int64
+	var cost float64
+	_ = a.State.Store.QueryRow(a.State.Store.Rebind(
+		`SELECT COUNT(*),
+		        COALESCE(SUM(CASE WHEN status >= 400 OR (error IS NOT NULL AND error != '') THEN 1 ELSE 0 END),0),
+		        COALESCE(SUM(prompt_tokens),0),
+		        COALESCE(SUM(cached_tokens),0),
+		        COALESCE(SUM(reasoning_tokens),0),
+		        COALESCE(SUM(completion_tokens),0),
+		        COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END),0),
+		        COALESCE(SUM(cost),0)
+		 FROM request_logs`+where), args...).
+		Scan(&requests, &errors, &tokIn, &tokCached, &tokReasoning, &tokOut, &cacheHits, &cost)
+
+	rpm := 0.0
+	if hasWindow {
+		rpm = roundTo(float64(requests)/float64(minutes), 2)
+	}
+	// The frontend's OverviewStats shape. tps_* and cache_savings stay 0: the Go
+	// request_logs schema has no tps / cache_savings columns, and returning 0
+	// (not omitting the keys) is what keeps the console from reading undefined.
 	c.JSON(http.StatusOK, gin.H{
-		"requests": snap["requests"], "errors": snap["errors"],
-		"prompt_tokens": snap["prompt_tokens"], "completion_tokens": snap["completion_tokens"],
-		"cost": snap["cost"], "db_rows": count + rRows, "db_prompt_tokens": pt + rPrompt,
-		"db_completion_tokens": ct + rCompletion, "db_cost": totalCost + rCost,
-		"rollup_rows": rRows,
+		"window_minutes":      minutes,
+		"generated_at":        float64(now),
+		"requests":            requests,
+		"errors":              errors,
+		"error_rate":          roundTo(safeDiv(float64(errors), float64(requests)), 4),
+		"requests_per_minute": rpm,
+		"tok_in":              tokIn,
+		"tok_cached":          tokCached,
+		"tok_cache_creation":  0,
+		"tok_reasoning":       tokReasoning,
+		"tok_out":             tokOut,
+		"estimated_requests":  0,
+		"cache_hits":          cacheHits,
+		"cache_hit_rate":      roundTo(safeDiv(float64(cacheHits), float64(requests)), 4),
+		"tps_avg":             0.0,
+		"tps_p95":             0.0,
+		"tps_sample_ratio":    0.0,
+		"ttft_p95_ms":         roundTo(percentile95(a.sampleColumn("ttft_ms", hasWindow, cutoff)), 1),
+		"latency_p95_ms":      roundTo(percentile95(a.sampleColumn("latency_ms", hasWindow, cutoff)), 1),
+		"cost":                roundTo(cost, 6),
+		"cache_savings":       0.0,
 	})
 }
 
+// sampleColumn loads up to 5000 positive values of col in the window (newest
+// first), the same bounded sample the Python DB sink reads for its percentiles.
+func (a *App) sampleColumn(col string, hasWindow bool, cutoff int64) []float64 {
+	q := "SELECT " + col + " FROM request_logs WHERE " + col + " > 0"
+	var args []any
+	if hasWindow {
+		q += " AND ts >= ?"
+		args = append(args, cutoff)
+	}
+	q += " ORDER BY ts DESC LIMIT 5000"
+	rows, err := a.State.Store.Query(a.State.Store.Rebind(q), args...)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []float64
+	for rows.Next() {
+		var v float64
+		if rows.Scan(&v) == nil {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// bucketSizeFor mirrors stats.bucket_size_for: the concrete bucket width for a
+// window length, so the Go grid matches the Python one.
+func bucketSizeFor(minutes int) int64 {
+	switch {
+	case minutes == 0:
+		return 86400
+	case minutes <= 1440:
+		return 60
+	case minutes <= 10080:
+		return 3600
+	case minutes <= 43200:
+		return 21600
+	default:
+		return 86400
+	}
+}
+
+// percentile95 is the nearest-rank p95 (0.0 when empty), matching
+// wiwi/server/stats.py percentile().
+func percentile95(vals []float64) float64 {
+	if len(vals) == 0 {
+		return 0
+	}
+	sort.Float64s(vals)
+	idx := int(math.Ceil(float64(len(vals))*0.95)) - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(vals) {
+		idx = len(vals) - 1
+	}
+	return vals[idx]
+}
+
+func safeDiv(a, b float64) float64 {
+	if b == 0 {
+		return 0
+	}
+	return a / b
+}
+
+func roundTo(v float64, places int) float64 {
+	p := math.Pow(10, float64(places))
+	return math.Round(v*p) / p
+}
+
 func (a *App) adminStatsTimeseries(c *gin.Context) {
-	bucket := queryInt64(c, "bucket", 3600)
-	if bucket <= 0 {
-		bucket = 3600
+	minutes := queryInt(c, "minutes", 60)
+	if minutes < 0 {
+		minutes = 0
+	}
+	if minutes > 43200 {
+		minutes = 43200
 	}
 	metric := c.Query("metric")
-	col := "COUNT(*)"
-	switch metric {
-	case "prompt_tokens":
-		col = "COALESCE(SUM(prompt_tokens),0)"
-	case "completion_tokens":
-		col = "COALESCE(SUM(completion_tokens),0)"
-	case "cost":
-		col = "COALESCE(SUM(cost),0)"
+	if metric == "" {
+		metric = "tokens"
 	}
-	rows, err := a.State.Store.Query(a.State.Store.Rebind(
-		`SELECT (ts/?) AS bucket, `+col+` AS value
-		 FROM request_logs GROUP BY bucket ORDER BY bucket DESC LIMIT ?`), bucket, queryInt(c, "limit", 168))
+	if metric != "tokens" && metric != "tps" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported metric"})
+		return
+	}
+	size := bucketSizeFor(minutes)
+	now := time.Now().Unix()
+	hasWindow := minutes > 0
+	cutoff := int64(0)
+	q := `SELECT (ts/?) AS bucket,
+	             COALESCE(SUM(prompt_tokens),0),
+	             COALESCE(SUM(cached_tokens),0),
+	             COALESCE(SUM(reasoning_tokens),0),
+	             COALESCE(SUM(completion_tokens),0)
+	      FROM request_logs`
+	args := []any{size}
+	if hasWindow {
+		cutoff = now - int64(minutes)*60
+		q += " WHERE ts >= ?"
+		args = append(args, cutoff)
+	}
+	q += " GROUP BY bucket ORDER BY bucket"
+	rows, err := a.State.Store.Query(a.State.Store.Rebind(q), args...)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	defer rows.Close()
-	out := []map[string]any{}
+	type row struct{ bucket, tokIn, tokCached, tokReasoning, tokOut int64 }
+	var data []row
+	var minB, maxB int64
+	first := true
 	for rows.Next() {
-		var b int64
-		var value float64
-		if rows.Scan(&b, &value) != nil {
+		var r row
+		if rows.Scan(&r.bucket, &r.tokIn, &r.tokCached, &r.tokReasoning, &r.tokOut) != nil {
 			continue
 		}
-		out = append(out, map[string]any{"bucket": b, "value": value})
+		data = append(data, r)
+		if first || r.bucket < minB {
+			minB = r.bucket
+		}
+		if first || r.bucket > maxB {
+			maxB = r.bucket
+		}
+		first = false
 	}
-	c.JSON(http.StatusOK, gin.H{"data": out})
+	rows.Close()
+
+	var firstT int64
+	var nBuckets int
+	if hasWindow {
+		nBuckets = int(int64(minutes) * 60 / size)
+		if nBuckets < 1 {
+			nBuckets = 1
+		}
+		firstT = (now/size)*size - int64(nBuckets-1)*size
+	} else if len(data) == 0 {
+		nBuckets = 0
+		firstT = (now / size) * size
+	} else {
+		nBuckets = int((maxB-minB)/size) + 1
+		firstT = minB
+	}
+
+	tokIn := make([]int64, nBuckets)
+	tokCached := make([]int64, nBuckets)
+	tokReasoning := make([]int64, nBuckets)
+	tokOut := make([]int64, nBuckets)
+	for _, r := range data {
+		if nBuckets == 0 {
+			break
+		}
+		idx := int((r.bucket - firstT) / size)
+		if idx < 0 {
+			idx = 0
+		} else if idx >= nBuckets {
+			idx = nBuckets - 1
+		}
+		tokIn[idx] += r.tokIn
+		tokCached[idx] += r.tokCached
+		tokReasoning[idx] += r.tokReasoning
+		tokOut[idx] += r.tokOut
+	}
+
+	buckets := make([]map[string]any, 0, nBuckets)
+	for i := 0; i < nBuckets; i++ {
+		t := firstT + int64(i)*size
+		if metric == "tokens" {
+			buckets = append(buckets, map[string]any{
+				"t": t, "tok_in": tokIn[i], "tok_cached": tokCached[i],
+				"tok_cache_creation": 0, "tok_reasoning": tokReasoning[i], "tok_out": tokOut[i],
+			})
+		} else {
+			// No tps column in the Go schema; emit the shape with zeros so the
+			// chart renders an empty series instead of crashing on undefined.
+			buckets = append(buckets, map[string]any{
+				"t": t, "tps_avg": 0.0, "tps_p95": 0.0, "tps_sample_ratio": 0.0,
+			})
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"bucket_seconds": size, "metric": metric, "buckets": buckets})
 }
 
 func (a *App) adminBackup(c *gin.Context) {
