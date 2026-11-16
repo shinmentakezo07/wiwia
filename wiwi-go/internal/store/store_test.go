@@ -16,8 +16,13 @@ func TestNormalize(t *testing.T) {
 	}{
 		{"", DriverSQLite, "wiwi.db", false},
 		{"wiwi.db", DriverSQLite, "wiwi.db", false},
-		{"sqlite+aiosqlite:///tmp/a.db", DriverSQLite, "/tmp/a.db", false},
-		{"sqlite:///tmp/a.db", DriverSQLite, "/tmp/a.db", false},
+		// Three slashes = relative (SQLAlchemy semantics), four = absolute.
+		// Getting this wrong made the default resolve to the unwritable
+		// "/wiwi.db" and the server refused to start.
+		{"sqlite+aiosqlite:///wiwi.db", DriverSQLite, "wiwi.db", false},
+		{"sqlite+aiosqlite:///tmp/a.db", DriverSQLite, "tmp/a.db", false},
+		{"sqlite:///tmp/a.db", DriverSQLite, "tmp/a.db", false},
+		{"sqlite:////tmp/a.db", DriverSQLite, "/tmp/a.db", false},
 		{"sqlite://rel/a.db", DriverSQLite, "rel/a.db", false},
 		{":memory:", DriverSQLite, "file::memory:?cache=shared", true},
 		{"sqlite:///", DriverSQLite, "file::memory:?cache=shared", true},
@@ -45,7 +50,7 @@ func TestSQLiteDSNAddsPragmas(t *testing.T) {
 
 func TestOpenMigrateSQLiteFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wiwi.db")
-	s, err := Open("sqlite://" + path)
+	s, err := Open("sqlite:///" + path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -131,7 +136,7 @@ func TestOpenMigrateSQLiteFile(t *testing.T) {
 
 func TestSettingsRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.db")
-	s, err := Open("sqlite://" + path)
+	s, err := Open("sqlite:///" + path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -179,7 +184,7 @@ func TestSettingsRoundTrip(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	s2, err := Open("sqlite://" + path)
+	s2, err := Open("sqlite:///" + path)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -275,7 +280,7 @@ func TestExecQueryQueryRow(t *testing.T) {
 
 func TestOpenMissingDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "no-such-dir", "wiwi.db")
-	s, err := Open("sqlite://" + path)
+	s, err := Open("sqlite:///" + path)
 	if err == nil {
 		s.Close()
 		t.Fatal("Open on a missing directory returned no error")

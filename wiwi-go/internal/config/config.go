@@ -587,6 +587,15 @@ func buildConfig(raw []byte, source string) (*Config, error) {
 		}
 		cfg.filterEmptyProviders(keyEnvs)
 	}
+	// Env overrides the file, mirroring the Python server: DATABASE_URL and
+	// REDIS_URL let a container or start.sh point the backend at a different
+	// store/cache without rewriting wiwi.yaml.
+	if v := os.Getenv("DATABASE_URL"); v != "" {
+		cfg.General.DatabaseURL = v
+	}
+	if v := os.Getenv("REDIS_URL"); v != "" {
+		cfg.General.RedisURL = v
+	}
 	cfg.ApplyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config in %s: %w", source, err)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 
 	"wiwi-go/internal/config"
 	"wiwi-go/internal/server"
@@ -12,11 +13,19 @@ import (
 func main() {
 	config.LoadEnv()
 	var cfgPath string
+	portOverride := 0
 	for i := 1; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "--config", "-c":
 			if i+1 < len(os.Args) {
 				cfgPath = os.Args[i+1]
+				i++
+			}
+		case "--port", "-p":
+			if i+1 < len(os.Args) {
+				if n, err := strconv.Atoi(os.Args[i+1]); err == nil {
+					portOverride = n
+				}
 				i++
 			}
 		}
@@ -35,6 +44,9 @@ func main() {
 	port := cfg.Wiwi.Port
 	if host == "" {
 		host = "0.0.0.0"
+	}
+	if portOverride > 0 {
+		port = portOverride
 	}
 	if port == 0 {
 		port = 4000

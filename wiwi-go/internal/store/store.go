@@ -96,11 +96,11 @@ func normalize(raw string) (driver, dsn string, memory bool) {
 
 	switch {
 	case strings.HasPrefix(url, "sqlite+aiosqlite://"):
-		url = strings.TrimPrefix(url, "sqlite+aiosqlite://")
+		url = sqlitePathFromURL(strings.TrimPrefix(url, "sqlite+aiosqlite://"))
 	case strings.HasPrefix(url, "sqlite3://"):
-		url = strings.TrimPrefix(url, "sqlite3://")
+		url = sqlitePathFromURL(strings.TrimPrefix(url, "sqlite3://"))
 	case strings.HasPrefix(url, "sqlite://"):
-		url = strings.TrimPrefix(url, "sqlite://")
+		url = sqlitePathFromURL(strings.TrimPrefix(url, "sqlite://"))
 	case strings.HasPrefix(url, "postgresql+asyncpg://"):
 		return DriverPostgres, "postgres://" + strings.TrimPrefix(url, "postgresql+asyncpg://"), false
 	case strings.HasPrefix(url, "postgres://"), strings.HasPrefix(url, "postgresql://"):
@@ -113,6 +113,27 @@ func normalize(raw string) (driver, dsn string, memory bool) {
 		return DriverSQLite, "file::memory:?cache=shared", true
 	}
 	return DriverSQLite, url, false
+}
+
+// sqlitePathFromURL turns the portion after the scheme's "://" into a file
+// path with SQLAlchemy semantics, so a DSN written for the Python backend
+// opens the same file here. A *single* leading slash is the empty-host
+// separator, not an absolute root:
+//
+//	sqlite+aiosqlite:///wiwi.db  -> relative "wiwi.db"   (the documented default)
+//	sqlite:////var/db/wiwi.db    -> absolute "/var/db/wiwi.db"
+//	sqlite:///                  -> ""  (in-memory)
+//
+// The old code kept the leading slash, so the default resolved to the
+// unwritable "/wiwi.db" and the server refused to start.
+func sqlitePathFromURL(rest string) string {
+	if strings.HasPrefix(rest, "//") {
+		return rest[1:] // absolute path: drop one of the two slashes
+	}
+	if strings.HasPrefix(rest, "/") {
+		return rest[1:] // relative path: drop the empty-host slash
+	}
+	return rest
 }
 
 // sqliteDSN adds per-connection pragmas to a go-sqlite3 DSN. DSN parameters

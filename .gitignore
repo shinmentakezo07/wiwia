@@ -69,6 +69,9 @@ wiwi2/target/
 # Go implementation (wiwi3) build artifacts
 wiwi3/bin/
 
+# Go implementation (wiwi-go) build artifacts
+wiwi-go/bin/
+
 # Agent harness scratch
 .omp/
 
