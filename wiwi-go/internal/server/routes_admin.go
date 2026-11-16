@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -830,42 +831,129 @@ func (a *App) findProvider(name string) *config.Provider {
 	return nil
 }
 
+// providerDefaultBaseURL mirrors Python's _default_base_url: the catalog's
+// default base URL for a provider type ("" when the type has none, e.g.
+// openai-compatible, which requires an explicit URL).
+func providerDefaultBaseURL(ptype string) string {
+	switch ptype {
+	case "openai":
+		return "https://api.openai.com/v1"
+	case "anthropic":
+		return "https://api.anthropic.com/v1"
+	case "gemini":
+		return "https://generativelanguage.googleapis.com/v1beta"
+	case "openrouter":
+		return "https://openrouter.ai/api/v1"
+	case "cline":
+		return "https://api.cline.bot/api/v1"
+	case "gmicloud":
+		return "https://api.gmi-serving.com/v1"
+	case "bai":
+		return "https://api.b.ai/v1"
+	case "workbuddy":
+		return "https://copilot.tencent.com"
+	case "nvidia-nim":
+		return "https://integrate.api.nvidia.com/v1"
+	case "opencode":
+		return "https://opencode.ai/inference/v1"
+	case "hermes":
+		return "https://inference-api.nousresearch.com/v1"
+	case "ifm":
+		return "https://api.ifm.ai/v1"
+	}
+	return ""
+}
+
+func isProviderType(ptype string) bool {
+	for _, t := range config.ProviderTypes() {
+		if t == ptype {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *App) adminCreateProvider(c *gin.Context) {
+	// The console's Add-provider form posts {name, provider_type, base_url?,
+	// label, key} (single key). Older clients used {provider, keys:[...]}; accept
+	// both so the form works and nothing else regresses.
 	var body struct {
 		Name         string            `json:"name"`
+		ProviderType string            `json:"provider_type"`
 		Provider     string            `json:"provider"`
 		BaseURL      string            `json:"base_url"`
+		Label        string            `json:"label"`
+		Key          string            `json:"key"`
+		AliasID      string            `json:"alias_id"`
 		TimeoutS     float64           `json:"timeout_s"`
 		ExtraHeaders map[string]string `json:"extra_headers"`
 		Keys         []config.KeyDef   `json:"keys"`
 	}
-	if err := c.ShouldBindJSON(&body); err != nil || body.Name == "" || body.Provider == "" || len(body.Keys) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "name, provider and at least one key are required"})
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	if a.findProvider(body.Name) != nil {
-		c.JSON(http.StatusConflict, gin.H{"error": "provider already exists"})
+	name := strings.TrimSpace(body.Name)
+	ptype := strings.TrimSpace(body.ProviderType)
+	if ptype == "" {
+		ptype = strings.TrimSpace(body.Provider)
+	}
+	if ptype == "" {
+		ptype = "openai-compatible"
+	}
+	baseURL := strings.TrimSpace(body.BaseURL)
+	if baseURL == "" {
+		baseURL = providerDefaultBaseURL(ptype)
+	}
+	keys := body.Keys
+	if len(keys) == 0 && body.Key != "" {
+		label := strings.TrimSpace(body.Label)
+		if label == "" {
+			label = "default"
+		}
+		keys = []config.KeyDef{{Label: label, Key: body.Key}}
+	}
+	if name == "" || len(keys) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name and key are required"})
 		return
 	}
-	for i := range body.Keys {
-		if body.Keys[i].Label == "" {
-			body.Keys[i].Label = "default"
+	if !isProviderType(ptype) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported provider type '" + ptype + "'"})
+		return
+	}
+	if baseURL == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "base_url is required for provider type '" + ptype + "'"})
+		return
+	}
+	if a.findProvider(name) != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "provider '" + name + "' already exists"})
+		return
+	}
+	for i := range keys {
+		if keys[i].Label == "" {
+			keys[i].Label = "default"
 		}
-		if body.Keys[i].Weight < 1 {
-			body.Keys[i].Weight = 1
+		if keys[i].Weight < 1 {
+			keys[i].Weight = 1
 		}
-		body.Keys[i].Enabled = true
+		keys[i].Enabled = true
 	}
 	p := config.Provider{
-		Name: body.Name, ProviderType: body.Provider, BaseURL: body.BaseURL,
-		TimeoutS: body.TimeoutS, ExtraHeaders: body.ExtraHeaders, Keys: body.Keys,
-		RoundRobin: true,
+		Name: name, ProviderType: ptype, BaseURL: baseURL,
+		TimeoutS: body.TimeoutS, ExtraHeaders: body.ExtraHeaders, Keys: keys,
+		RoundRobin: true, AliasID: body.AliasID,
 	}
 	a.State.Cfg.Providers = append(a.State.Cfg.Providers, p)
 	_ = saveProvider(a.State.Store, p)
-	a.State.Auth.Audit(a.actor(c), "provider.create", body.Name, "")
+	a.State.Auth.Audit(a.actor(c), "provider.create", name, "")
 	a.rebuild()
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	var alias any
+	if body.AliasID != "" {
+		alias = body.AliasID
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"name": name, "provider_type": ptype, "base_url": baseURL, "alias_id": alias,
+	})
 }
 
 func (a *App) adminPatchProvider(c *gin.Context) {

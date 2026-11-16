@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -118,5 +119,39 @@ func TestAdminLogsShape(t *testing.T) {
 		if _, ok := resp.Logs[0][k]; !ok {
 			t.Fatalf("log row missing %q: %v", k, resp.Logs[0])
 		}
+	}
+}
+
+// TestCreateProviderConsolePayload reproduces the console's Add-provider form,
+// which posts {name, provider_type, base_url, label, key} (a single key, not a
+// keys[] array). The old Go handler required {provider, keys[]} and rejected it
+// with "name, provider and at least one key are required".
+func TestCreateProviderConsolePayload(t *testing.T) {
+	app, _ := newTestApp(t)
+	body := `{"name":"acme","provider_type":"openai","base_url":"https://example.test/v1","label":"default","key":"sk-secret"}`
+	w := do(t, app, "POST", "/admin/providers", body)
+	if w.Code != 200 {
+		t.Fatalf("create provider: %d %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"name":"acme"`) {
+		t.Fatalf("create response: %s", w.Body.String())
+	}
+	w = do(t, app, "GET", "/admin/providers", "")
+	if !strings.Contains(w.Body.String(), `"name":"acme"`) || !strings.Contains(w.Body.String(), `"provider_type":"openai"`) {
+		t.Fatalf("provider missing after create: %s", w.Body.String())
+	}
+}
+
+// TestCreateProviderDefaultsBaseURL: omitting base_url for a catalog type uses
+// that type's default (Python's _default_base_url), so the form can leave it
+// blank.
+func TestCreateProviderDefaultsBaseURL(t *testing.T) {
+	app, _ := newTestApp(t)
+	w := do(t, app, "POST", "/admin/providers", `{"name":"oai","provider_type":"openai","key":"sk-x"}`)
+	if w.Code != 200 {
+		t.Fatalf("create: %d %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "https://api.openai.com/v1") {
+		t.Fatalf("default base_url not applied: %s", w.Body.String())
 	}
 }
