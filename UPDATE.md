@@ -8,6 +8,48 @@
 
 Each entry below records the before→after state, the exact files and lines changed, and the tests that cover it. When extending or modifying any of those areas, check this file for existing invariants before writing new code. When a new fix lands in one of these areas, add an entry to this file so a later agent does not rediscover and re-fix the same thing.
 
+## Round 207 — a spent free allowance wraps to a fallback instead of erroring (AUDIT #600) (2026-11-16)
+
+Two changes on the *upstream error extraction* path — one in the classifier,
+one in the router that consumes what it classifies. Round 183 already taught
+the classifier that OpenCode Zen's `429 FreeUsageLimitError` is an entitlement
+refusal (`402 permission_error`, key pool untouched). What the refusal did to
+the request *afterwards* was still wrong.
+
+- **The reset window is read from the body** (`wiwi/providers/base.py`).
+  `error_from_provider_status` now extracts `retryAfterMs` (milliseconds) and
+  `retryAfter`/`retry_after` (seconds) out of the error body — at the top level
+  or inside the `error` object — and puts the result on `WiwiError.retry_after`
+  for a `402`/`429`. Zen states the window ONLY in the body
+  (`retryAfterMs: 32217000`, ~9 h) and sends no `Retry-After` header, so
+  `core/gateway._parse_retry_after` (header-only) read none: the caller was told
+  its allowance was spent with no idea when to come back. The header still wins
+  when both are present — the gateway sets it after the classifier runs.
+  A body-borne window on a *plain* 429 now cools the **key** for that window
+  rather than the deployment, which is the AUDIT #597 rule applied to a window
+  the upstream chose to state in the body rather than in the header.
+- **An entitlement refusal ends the retry loop for the group**
+  (`wiwi/router/router.py`). New predicate `entitlement_refusal(e)`: the
+  upstream refused on account/allowance/policy grounds (`permission_error` —
+  the credential was accepted; the allowance, the model or the egress was
+  refused), so the same deployment answers the same way. The loop used to spend
+  the whole `num_retries` budget re-asking it (`pick_deployment`'s relaxed
+  pass re-picks an excluded deployment when nothing fresh is left) and paid two
+  backoff sleeps before the fallback group was entered; it now leaves the group
+  at once, so the fallback group serves the request. A *credential* refusal
+  (`authentication_error`) is deliberately NOT included: that one still fails
+  over to the next **key** of the same deployment (AUDIT #597), because a key
+  can be bad while the account is fine. The proxy log line for an entitlement
+  refusal now names the reset window when the upstream stated one.
+
+Coverage: `tests/test_fix_round207.py` (13 tests) — the wrap to a fallback
+group, the wrap to a sibling provider inside the group, the shared
+`anonymous` sentinel staying in rotation, the window reaching the caller as a
+`Retry-After` header, the body's window in ms/s, and the platform `PORT` the
+CLI listens on (Railway).
+
+---
+
 ## Round 204 — implicit state machines declared and made checkable (AUDIT #595) (2026-11-09)
 
 Three state machines were implemented to the streaming contract but none was

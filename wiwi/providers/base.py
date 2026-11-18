@@ -199,6 +199,51 @@ def _extract_error_type(body_text: str) -> str:
     return ""
 
 
+# Reset windows that ride in the error BODY rather than in a header. The
+# AI-SDK family (OpenCode Zen among them) states "come back in N" as a JSON
+# field: ``retryAfterMs`` in milliseconds, ``retryAfter``/``retry_after`` in
+# seconds. Measured on Zen: ``retryAfterMs: 32217000`` (~9 h) on the
+# ``429 FreeUsageLimitError`` that a spent free allowance produces.
+_RETRY_WINDOW_MS_KEYS = frozenset({"retryafterms", "retry_after_ms"})
+_RETRY_WINDOW_S_KEYS = frozenset({"retryafter", "retry_after", "retryafterseconds"})
+
+
+def _extract_retry_window(body_text: str) -> float | None:
+    """The reset window an error body states, in seconds, or ``None``.
+
+    Looks for the AI-SDK shape at the top level of the body and inside its
+    ``error`` object, which is where OpenCode Zen puts it::
+
+        {"type": "error",
+         "error": {"type": "FreeUsageLimitError", "message": "...",
+                   "retryAfterMs": 32217000}}
+
+    Only numeric fields count, and a boolean is not a number here (it would
+    read as 0/1 seconds). A non-JSON body — a proxy's HTML error page — has no
+    window, which is the same answer as a body without one.
+    """
+    try:
+        data = orjson.loads(body_text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    scopes: list[dict[str, Any]] = [data]
+    inner = data.get("error")
+    if isinstance(inner, dict):
+        scopes.append(inner)
+    for scope in scopes:
+        for key, value in scope.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            name = key.lower()
+            if name in _RETRY_WINDOW_MS_KEYS:
+                return max(0.0, float(value) / 1000.0)
+            if name in _RETRY_WINDOW_S_KEYS:
+                return max(0.0, float(value))
+    return None
+
+
 # Account/entitlement error markers: the upstream accepted the credential but
 # refused the *request* on a policy or billing ground. These apply to every
 # key on the account, so they must never be charged to key health. Billing
@@ -338,6 +383,18 @@ def error_from_provider_status(status: int, body_text: str, provider: str) -> Wi
     # "" for a body with no type (a proxy-level 403 page, say), and an empty
     # string in a log field reads as a type that was found but unnamed.
     err.upstream_type = _extract_error_type(body_text) or None
+    if status in (402, 429):
+        # A body-borne reset window. The HTTP ``Retry-After`` header has always
+        # been read (``core/gateway._parse_retry_after``), but the AI-SDK family
+        # states the window in the JSON instead — and OpenCode Zen states it
+        # ONLY there: a spent free allowance arrives as
+        # ``429 FreeUsageLimitError`` with ``retryAfterMs`` in the body and no
+        # header at all (measured: 32217000 ms, ~9 h). Without it the client
+        # was told its allowance was spent with no idea when it resets, and
+        # the proxy log could not name the window either.
+        window = _extract_retry_window(body_text)
+        if window is not None:
+            err.retry_after = window
     return err
 
 

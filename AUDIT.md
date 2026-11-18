@@ -52,6 +52,60 @@ is not fixed in the same change.
 
 ## Archive index (fixed, newest first)
 
+## ✅ Fixed — a spent free allowance errored the caller instead of wrapping (2026-11-16)
+
+**Section status:** fixed — #600 (round 207).
+
+### 600. An entitlement refusal spent the retry budget re-asking the same exhausted upstream, and the reset window was never read
+
+**Severity:** 🟠 High · **Status: fixed** — round 207
+(`tests/test_fix_round207.py`)
+**Files:** `wiwi/router/router.py` (`execute_with_retries`,
+`entitlement_refusal`), `wiwi/providers/base.py`
+(`error_from_provider_status`, `_extract_retry_window`).
+
+Two defects on the path a caller walks into when OpenCode's free allowance
+runs out — the `429 FreeUsageLimitError` that round 183 already *classified*
+correctly (AUDIT #556). The classification was never the problem; what the
+refusal did to the request afterwards was.
+
+**1. The refusal was treated as a transient fault.** The refusal is an
+entitlement refusal: 402 `permission_error`, `status_for_key_pool` reports
+`None`, so neither the credential nor the deployment is cooled — the
+allowance resets on its own schedule, not by our cooldown. But the retry loop
+does not distinguish "this will fail again in a second" from "this account has
+no allowance left": `pick_deployment`'s relaxed pass
+(`router.py:894-897`) re-picks the excluded deployment when nothing fresh is
+left, so the exhausted upstream was asked **three** times (the whole
+`num_retries` budget) and two backoff sleeps were paid before the fallback
+group was even entered. With no fallback group configured the caller got the
+upstream's billing state as its answer.
+
+**Trigger** (reproduced end-to-end, one Zen deployment + one fallback group,
+`num_retries: 2`): the exhausted deployment is hit **3** times, the fallback
+group serves the request **1.9 s** later, and the client's own answer
+depends on a YAML table the admin API cannot set.
+
+**2. The reset window was never read.** The upstream states it in the BODY —
+`{"type":"error","error":{"type":"FreeUsageLimitError","message":"…",
+"retryAfterMs":32217000}}` (~9 h, measured) — and sends **no** `Retry-After`
+header. `core/gateway._parse_retry_after` only ever read the header, so
+`WiwiError.retry_after` stayed `None`: the caller was told its allowance was
+spent with no idea when to come back, and the proxy log could not name the
+window either.
+
+**Fix:** an entitlement refusal (`permission_error` — the credential was
+accepted; the *allowance*, the *model* or the *address* was refused) now ends
+the retry loop for the group instead of re-asking the same upstream: the
+request leaves the group and the fallback queue takes over, which is where
+the operator's backup provider lives. A *credential* refusal
+(`authentication_error`) is deliberately untouched — that one still fails over
+to the next **key** of the same deployment (AUDIT #597), because a key can be
+bad while the account is fine. The window is read out of the body
+(`retryAfterMs` in ms, `retryAfter`/`retry_after` in s) by
+`error_from_provider_status`, so the client gets a `Retry-After` header and
+the proxy log names the window.
+
 ## ✅ Fixed — two typed-wrong values rode the wire codecs past their guards (2026-11-12)
 
 **Section status:** fixed — #598, #599 (round 206).

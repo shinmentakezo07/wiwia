@@ -2943,8 +2943,18 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     await stream.aclose()  # release pump resources, if any
                     await _abandon_journal(state_, journal, journal_id)
                     await _release_tpm_reservation(info, ctx)
-                    return _err(e.status, e.etype, e.message, request, surface,
-                                span=ctx.span)
+                    resp = _err(e.status, e.etype, e.message, request, surface,
+                               span=ctx.span)
+                    # The window the upstream stated rides along, exactly as on
+                    # the non-streaming path: a refusal that arrives BEFORE the
+                    # stream starts is still a normal error response, so the
+                    # client can be told when to come back (a spent OpenCode
+                    # free allowance states its reset window in the body and
+                    # in no header at all — AUDIT #600).
+                    if e.retry_after:
+                        resp.headers["Retry-After"] = str(
+                            int(max(1.0, e.retry_after)))
+                    return resp
                 except BaseException:
                     # Non-WiwiError failure: release the pump's upstream
                     # connection before letting the outer handler deal with it.

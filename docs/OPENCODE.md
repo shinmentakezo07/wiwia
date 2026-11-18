@@ -268,6 +268,29 @@ arrives inside a 200 event stream gets the same classification from
 `opencode_adapter._stream_error`. A plain 429 — a rate limit with no quota
 wording — keeps the old path (`429` → cool the key for its `Retry-After`).
 
+**The refusal wraps instead of erroring.** An entitlement refusal is not a
+transient fault: the same deployment answers the same way for as long as the
+allowance is spent, so the retry loop must not spend its budget re-asking it
+(`wiwi/router/router.py:entitlement_refusal`, AUDIT #600). The request leaves
+the group at once and the **fallback group takes over** — declare one with
+`router_settings.fallbacks`, or put a second provider in the same model group,
+and the caller gets an answer in its own dialect instead of the upstream's
+billing state. Measured through the gateway: before the wrap the exhausted
+deployment was asked three times (and two backoff sleeps were paid) before the
+fallback was even entered; now it is asked once and the fallback serves the
+request. A credential failure is untouched — that one still fails over to the
+*next key* of the same deployment (AUDIT #597), because a key can be bad
+while the account is fine.
+
+**The reset window is read from the body.** The upstream states it as
+`retryAfterMs` inside the error object and sends **no** `Retry-After` header,
+so the window used to be invisible: the caller was told its allowance was
+spent with no idea when to come back, and the proxy log could not name it
+either. `error_from_provider_status` now reads `retryAfterMs` (ms) and
+`retryAfter`/`retry_after` (s) out of the body, so the client gets a
+`Retry-After` header and the proxy log says "account entitlement (402): … ;
+resets in 32217s".
+
 **A single upstream 429 can read as a whole-tier outage.** Every free
 deployment shares the `anonymous` marker, and an ordinary 429 is a key-health
 signal (`base.status_for_key_pool`): the router cools *that key* for its
@@ -400,10 +423,14 @@ A **`402 io quota exhausted (429): io rate limited: Free usage limit reached …
 is the free allowance, not a key: `FreeUsageLimitError` on a 429 is classified as
 an entitlement refusal, so the key is left in rotation and the tier keeps
 serving (see [The free allowance is a quota](#the-free-allowance-is-a-quota-not-a-rate-limit)).
-The vendor's own advice in the message is the remedy — paid Console credit, a Go
-subscription, or another provider. Do **not** answer it by rotating the session
-id or the egress IP: both are the vendor's abuse controls, and the flagged-IP
-refusal above is what that buys.
+The refusal **wraps**: the request leaves the group at once and the fallback
+group serves it, so the caller does not see the upstream's billing state — and
+when there is nowhere to fail over to, the response carries the upstream's
+own reset window as a `Retry-After` header (measured: `retryAfterMs:
+32217000`, ~9 h). The vendor's own advice in the message is the remedy — paid
+Console credit, a Go subscription, or another provider. Do **not** answer it by
+rotating the session id or the egress IP: both are the vendor's abuse
+controls, and the flagged-IP refusal above is what that buys.
 
 A **`403 io blocked this network (403): … abusive traffic from this IP address`**
 is the flagged-egress refusal, classified as `permission_error` rather than as a

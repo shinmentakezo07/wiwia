@@ -1770,10 +1770,17 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                 if e.etype == "permission_error" and e.status in (401, 402, 403):
                     # Account-level refusal (billing/policy): the pool was not
                     # charged, so say so and give the operator the real cause.
+                    # The reset window rides along when the upstream stated
+                    # one — OpenCode Zen puts it in the BODY of a spent-free
+                    # allowance and never in a header — because "your
+                    # allowance is spent" without "and it resets in …" is the
+                    # question every operator asks next.
+                    reset = (f"; resets in {int(e.retry_after)}s"
+                             if e.retry_after and e.retry_after > 0 else "")
                     _proxy("warn",
                            f"{dep.provider.name} refused {dep.group}/{dep.model_id} "
                            f"[{key.label}] — {cause}account entitlement "
-                           f"({e.status}): {e.message}")
+                           f"({e.status}): {e.message}{reset}")
                 elif status is not None:
                     _proxy("warn",
                            f"upstream {status} on {dep.group}/{dep.model_id} "
@@ -1794,8 +1801,24 @@ async def execute_with_retries(router: Router, ctx: RequestContext,
                         break  # let the while-loop process the fallback queue
                     raise
                 fresh = any(d.available and id(d) not in tried_dep_ids for d in deps)
-                if not fresh and attempt < router.settings.num_retries:
-                    await asyncio.sleep(_RETRY_BACKOFF.delay(attempt, e.retry_after))
+                if not fresh:
+                    if entitlement_refusal(e):
+                        # Wrap: the upstream refused on account/allowance
+                        # grounds (a spent free allowance, no credit, a model
+                        # the workspace may not use), so the same deployment
+                        # answers the same way. Re-asking it spends the retry
+                        # budget and the backoff sleeps to learn nothing, and
+                        # the client's request dies of an upstream's billing
+                        # state. Leave the group instead: the fallback queue
+                        # below is where the operator's backup provider lives,
+                        # and a request that lands there is served in the
+                        # caller's own dialect (AUDIT #600).
+                        _proxy("info",
+                               f"'{group_name}' has no other deployment to try "
+                               f"after an entitlement refusal — not retrying")
+                        break
+                    if attempt < router.settings.num_retries:
+                        await asyncio.sleep(_RETRY_BACKOFF.delay(attempt, e.retry_after))
             except BaseException:
                 # Cancellation (client gone) or an unexpected non-WiwiError
                 # failure: refund the admission reservation so an aborted
@@ -1847,6 +1870,26 @@ def deployment_scoped_failure(status: int | None,
     if status in (408, 500, 502, 503, 504, 529):
         return True
     return status == 429 and not (retry_after and retry_after > 0)
+
+
+def entitlement_refusal(e: WiwiError) -> bool:
+    """True when the upstream refused on account/allowance/policy grounds.
+
+    wiwi renders these as ``permission_error`` and never as
+    ``authentication_error``: the credential was accepted, and what was
+    refused is the *allowance* (a spent OpenCode free allowance, no credit on
+    the account), the *model* the workspace may not use, or the *address* the
+    request left from. None of those changes on a retry of the same
+    deployment, so the retry loop must not spend its budget re-asking it
+    (AUDIT #600).
+
+    A ``401 authentication_error`` is deliberately NOT one of these: the pool
+    has just retired that key, and a sibling key of the same deployment may
+    serve the request (AUDIT #597). So a credential failure still fails over
+    to the next key, while an entitlement failure fails over to the next
+    *group*.
+    """
+    return e.etype == "permission_error"
 
 
 def _refund_deployment_slot(dep: Deployment, ctx: RequestContext) -> None:
