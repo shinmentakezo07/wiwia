@@ -85,6 +85,7 @@ func New(cfg *config.Config) (*App, error) {
 		_ = st.Exec(`UPDATE vkeys SET budget_reserved=0, reserved_at=NULL`)
 	}
 	loadOverlay(cfg, st)
+	loadRuntimeSettings(cfg, st)
 	costEngine := cost.NewEngine()
 	loadPrices(st, costEngine)
 	rt := router.New(cfg)

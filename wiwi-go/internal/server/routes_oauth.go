@@ -206,37 +206,20 @@ func (a *App) adminClineDisconnect(c *gin.Context) {
 func (a *App) adminClineModels(c *gin.Context) {
 	p := a.findProvider("cline")
 	if p == nil {
-		c.JSON(http.StatusOK, gin.H{"data": []any{}})
+		c.JSON(http.StatusOK, gin.H{"models": []any{}})
 		return
 	}
 	models, err := a.listProviderModels(p)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error(), "data": []any{}})
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error(), "models": []any{}})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": models})
+	c.JSON(http.StatusOK, gin.H{"models": models})
 }
 
-func (a *App) adminClineGetSettings(c *gin.Context) {
-	raw, ok, _ := a.State.Store.GetSetting("cline_settings")
-	if !ok || strings.TrimSpace(raw) == "" {
-		raw = "{}"
-	}
-	c.Data(http.StatusOK, "application/json", []byte(raw))
-}
-
-func (a *App) adminClinePutSettings(c *gin.Context) {
-	raw, err := c.GetRawData()
-	if err != nil || !json.Valid(raw) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid JSON"})
-		return
-	}
-	_ = a.State.Store.SetSetting("cline_settings", string(raw))
-	c.JSON(http.StatusOK, gin.H{"ok": true})
-}
-
-func (a *App) adminClineDeleteDefaultModel(c *gin.Context) {
-	modelID := c.Param("model_id")
+// clineDefaultModels reads the persisted default-model list from the
+// cline_settings row, accepting either spelling the console has used.
+func (a *App) clineDefaultModels() []any {
 	raw, ok, _ := a.State.Store.GetSetting("cline_settings")
 	settings := map[string]any{}
 	if ok && strings.TrimSpace(raw) != "" {
@@ -244,19 +227,46 @@ func (a *App) adminClineDeleteDefaultModel(c *gin.Context) {
 	}
 	for _, key := range []string{"default_models", "defaultModels"} {
 		if list, ok := settings[key].([]any); ok {
-			kept := make([]any, 0, len(list))
-			for _, m := range list {
-				if s, _ := m.(string); s == modelID {
-					continue
-				}
-				kept = append(kept, m)
-			}
-			settings[key] = kept
+			return list
 		}
 	}
-	b, _ := json.Marshal(settings)
+	return []any{}
+}
+
+func (a *App) adminClineGetSettings(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"default_models": a.clineDefaultModels()})
+}
+
+func (a *App) adminClinePutSettings(c *gin.Context) {
+	var body struct {
+		DefaultModels []string `json:"default_models"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid JSON"})
+		return
+	}
+	if body.DefaultModels == nil {
+		body.DefaultModels = []string{}
+	}
+	b, _ := json.Marshal(map[string]any{"default_models": body.DefaultModels})
 	_ = a.State.Store.SetSetting("cline_settings", string(b))
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	c.JSON(http.StatusOK, gin.H{"default_models": body.DefaultModels})
+}
+
+func (a *App) adminClineDeleteDefaultModel(c *gin.Context) {
+	modelID := c.Param("model_id")
+	kept := []string{}
+	for _, m := range a.clineDefaultModels() {
+		if s, _ := m.(string); s == modelID {
+			continue
+		}
+		if s, ok := m.(string); ok {
+			kept = append(kept, s)
+		}
+	}
+	b, _ := json.Marshal(map[string]any{"default_models": kept})
+	_ = a.State.Store.SetSetting("cline_settings", string(b))
+	c.JSON(http.StatusOK, gin.H{"default_models": kept})
 }
 
 // -- Hermes -----------------------------------------------------------------
@@ -348,19 +358,36 @@ func (a *App) workbuddyAccounts() []gin.H {
 			if !ok {
 				continue
 			}
+			region := cred.Realm
+			if region != "global" {
+				region = "cn"
+			}
 			out = append(out, gin.H{
-				"label": k.Label, "uid": cred.UID, "nickname": cred.Nickname,
-				"domain": cred.Domain, "realm": cred.Realm,
+				"provider": "workbuddy", "label": k.Label,
+				"status": "active", "enabled": k.Enabled, "valid_auth": true,
+				"uid": cred.UID, "nickname": cred.Nickname,
+				"domain": cred.Domain, "region": region,
 				"expires_at":          cred.ExpiresAt,
-				"expires_within_lead": oauth.ExpiresWithinLead(cred.ExpiresAt, oauth.WorkBuddyRefreshLeadS),
+				"needs_refresh":       oauth.ExpiresWithinLead(cred.ExpiresAt, oauth.WorkBuddyRefreshLeadS),
+				"has_refresh_token":   cred.RefreshToken != "",
+				"access_token_masked": maskSecret(cred.AccessToken),
 			})
 		}
 	}
 	return out
 }
 
+// maskSecret keeps a short prefix/suffix so an account row can be told apart
+// without exposing the credential.
+func maskSecret(secret string) string {
+	if len(secret) <= 10 {
+		return "••••"
+	}
+	return secret[:6] + "…" + secret[len(secret)-4:]
+}
+
 func (a *App) adminWorkBuddyAccounts(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"data": a.workbuddyAccounts()})
+	c.JSON(http.StatusOK, gin.H{"accounts": a.workbuddyAccounts()})
 }
 
 func (a *App) adminWorkBuddyImport(c *gin.Context) {
@@ -496,10 +523,10 @@ func (a *App) adminProviderModels(c *gin.Context) {
 	}
 	models, err := a.listProviderModels(p)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error(), "data": []any{}})
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error(), "models": []any{}})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": models})
+	c.JSON(http.StatusOK, gin.H{"models": models})
 }
 
 func (a *App) listProviderModels(p *config.Provider) ([]any, error) {

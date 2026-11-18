@@ -14,6 +14,7 @@ import (
 	"wiwi-go/internal/auth"
 	"wiwi-go/internal/config"
 	"wiwi-go/internal/cost"
+	"wiwi-go/internal/router"
 )
 
 func (a *App) registerAdminRoutes(g *gin.RouterGroup) {
@@ -45,14 +46,15 @@ func (a *App) registerAdminRoutes(g *gin.RouterGroup) {
 	g.DELETE("/providers/:name/keys/:label", a.adminDeleteProviderKey)
 	g.GET("/providers/:name/keys/:label/secret", a.adminRevealProviderKey)
 	g.POST("/model-groups/:name/deployments", a.adminAddDeployment)
+	g.DELETE("/model-groups/:name/deployments", a.adminDeleteDeployment)
 	g.POST("/model-groups/:name/deployments/delete", a.adminDeleteDeployment)
 	g.GET("/providers/export", a.adminExportProviders)
 	g.POST("/providers/import", a.adminImportProviders)
 
 	// pricing
 	g.GET("/pricing", a.adminListPricing)
-	g.PUT("/pricing/:id", a.adminUpsertPricing)
-	g.DELETE("/pricing/:id", a.adminDeletePricing)
+	g.PUT("/pricing/*id", a.adminUpsertPricing)
+	g.DELETE("/pricing/*id", a.adminDeletePricing)
 
 	// logs & stats
 	g.GET("/logs/requests", a.adminLogsRequests)
@@ -116,19 +118,24 @@ func (a *App) adminGenerateKey(c *gin.Context) {
 		TPM       *int     `json:"tpm"`
 		Models    []string `json:"models"`
 		TTL       int64    `json:"ttl_s"`
+		TTLWeb    int64    `json:"ttl_seconds"`
 	}
 	_ = c.ShouldBindJSON(&body)
+	ttl := body.TTL
+	if ttl == 0 {
+		ttl = body.TTLWeb
+	}
 	owner := ""
 	if ai := authOf(c); ai != nil && !ai.IsMaster {
 		owner = ai.UserID
 	}
-	plain, v, err := a.State.Auth.GenerateOwned(owner, body.Name, body.MaxBudget, body.RPM, body.TPM, body.Models, body.TTL, a.State.Cfg.General.MaxKeysPerUser)
+	plain, v, err := a.State.Auth.GenerateOwned(owner, body.Name, body.MaxBudget, body.RPM, body.TPM, body.Models, ttl, a.State.Cfg.General.MaxKeysPerUser)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	a.State.Auth.Audit(a.actor(c), "key.generate", v.ID, "")
-	c.JSON(http.StatusOK, gin.H{"key": plain, "id": v.ID, "name": v.Name})
+	c.JSON(http.StatusOK, gin.H{"key": plain, "id": v.ID, "note": ""})
 }
 
 func (a *App) adminListKeys(c *gin.Context) {
@@ -137,24 +144,36 @@ func (a *App) adminListKeys(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": keys})
+	out := make([]map[string]any, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, consoleKey(k))
+	}
+	c.JSON(http.StatusOK, gin.H{"keys": out})
 }
 
 func (a *App) adminPatchKey(c *gin.Context) {
-	var body struct {
-		Name      *string  `json:"name"`
-		MaxBudget *float64 `json:"max_budget"`
-		RPM       *int     `json:"rpm"`
-		TPM       *int     `json:"tpm"`
-		Models    []string `json:"models"`
+	id := c.Param("id")
+	raw, err := c.GetRawData()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
-	_ = c.ShouldBindJSON(&body)
-	if err := a.State.Auth.Patch(c.Param("id"), body.MaxBudget, body.RPM, body.TPM, body.Models, body.Name); err != nil {
+	fields := map[string]json.RawMessage{}
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	if err := a.State.Auth.PatchConsole(id, fields); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	a.State.Auth.Audit(a.actor(c), "key.patch", c.Param("id"), "")
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	a.State.Auth.Audit(a.actor(c), "key.patch", id, "")
+	updated, err := a.State.Auth.Get(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"key": consoleKey(updated)})
 }
 
 func (a *App) adminDeleteKey(c *gin.Context) {
@@ -163,16 +182,24 @@ func (a *App) adminDeleteKey(c *gin.Context) {
 		return
 	}
 	a.State.Auth.Audit(a.actor(c), "key.delete", c.Param("id"), "")
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	c.JSON(http.StatusOK, gin.H{"deleted": true})
 }
 
 func (a *App) adminDisableKey(c *gin.Context) {
-	if err := a.State.Auth.SetEnabled(c.Param("id"), false); err != nil {
+	var body struct {
+		Disabled *bool `json:"disabled"`
+	}
+	_ = c.ShouldBindJSON(&body)
+	disabled := true
+	if body.Disabled != nil {
+		disabled = *body.Disabled
+	}
+	if err := a.State.Auth.SetEnabled(c.Param("id"), !disabled); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	a.State.Auth.Audit(a.actor(c), "key.disable", c.Param("id"), "")
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	c.JSON(http.StatusOK, gin.H{"key_id": c.Param("id"), "disabled": disabled})
 }
 
 func (a *App) adminListUsers(c *gin.Context) {
@@ -181,31 +208,56 @@ func (a *App) adminListUsers(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": users})
+	out := make([]map[string]any, 0, len(users))
+	for _, u := range users {
+		out = append(out, consoleUser(u))
+	}
+	c.JSON(http.StatusOK, gin.H{"users": out})
 }
 
 func (a *App) adminPatchUser(c *gin.Context) {
 	var body struct {
-		Role string `json:"role"`
+		Role     *string `json:"role"`
+		Disabled *bool   `json:"disabled"`
 	}
 	_ = c.ShouldBindJSON(&body)
-	if err := a.State.Auth.SetUserRole(c.Param("uid"), body.Role); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	id := c.Param("uid")
+	if body.Role != nil {
+		if err := a.State.Auth.SetUserRole(id, *body.Role); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.Disabled != nil {
+		if err := a.State.Auth.SetUserDisabled(id, *body.Disabled); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	a.State.Auth.Audit(a.actor(c), "user.patch", id, "")
+	u, err := a.State.Auth.GetUser(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
 		return
 	}
-	a.State.Auth.Audit(a.actor(c), "user.patch", c.Param("uid"), body.Role)
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	c.JSON(http.StatusOK, consoleUser(u))
 }
 
 func (a *App) adminProviderCatalog(c *gin.Context) {
-	types := config.ProviderTypes()
-	c.JSON(http.StatusOK, gin.H{"data": types})
+	c.JSON(http.StatusOK, a.providerCatalog())
 }
 
 func (a *App) adminListProviders(c *gin.Context) {
 	now := time.Now()
+	providers := a.State.Router.Providers()
+	names := make([]string, 0, len(providers))
+	for name := range providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
 	out := []map[string]any{}
-	for name, p := range a.State.Router.Providers() {
+	for _, name := range names {
+		p := providers[name]
 		keys := make([]map[string]any, 0, len(p.Keys))
 		healthy := len(p.Keys) == 0
 		for _, k := range p.Keys {
@@ -219,6 +271,9 @@ func (a *App) adminListProviders(c *gin.Context) {
 			status := k.State
 			if status == "" {
 				status = "active"
+			}
+			if !k.Enabled {
+				status = "disabled"
 			}
 			masked := ""
 			if k.Secret != "" {
@@ -240,72 +295,145 @@ func (a *App) adminListProviders(c *gin.Context) {
 			"keys": keys,
 		})
 	}
-	c.JSON(http.StatusOK, gin.H{"providers": out, "alias_to_provider": gin.H{}})
+	c.JSON(http.StatusOK, gin.H{"providers": out, "alias_to_provider": a.consoleProviderAliases()})
 }
 
 func (a *App) adminModels(c *gin.Context) {
-	out := []map[string]any{}
-	for _, g := range a.State.Router.Groups() {
-		deps := a.State.Router.Deployments(g)
-		ds := []map[string]any{}
-		for _, d := range deps {
-			ds = append(ds, map[string]any{
-				"provider": d.Provider.Name, "model": d.Model, "weight": d.Weight,
-			})
-		}
-		out = append(out, map[string]any{"model_name": g, "deployments": ds})
-	}
-	c.JSON(http.StatusOK, gin.H{"data": out})
+	c.JSON(http.StatusOK, gin.H{
+		"groups":           a.consoleModelGroups(),
+		"aliases":          a.consoleAliases(),
+		"provider_aliases": a.consoleProviderAliases(),
+		"strategy":         a.State.Router.Strategy(),
+	})
 }
 
 func (a *App) adminPatchModelGroup(c *gin.Context) {
-	// Runtime group mutation is not persisted to YAML; acknowledge and audit.
-	a.State.Auth.Audit(a.actor(c), "model_group.patch", c.Param("name"), "")
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	group := a.State.Router.ResolveGroup(c.Param("name"))
+	deps := a.State.Router.Deployments(group)
+	if len(deps) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "unknown model group"})
+		return
+	}
+	var body struct {
+		Weights  map[string]int `json:"weights"`
+		Strategy *string        `json:"strategy"`
+	}
+	_ = c.ShouldBindJSON(&body)
+	byIdent := map[string]*router.Deployment{}
+	for _, d := range deps {
+		byIdent[d.Provider.Name+"/"+d.Model] = d
+	}
+	for ident, w := range body.Weights {
+		d, ok := byIdent[ident]
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "unknown deployment: " + ident})
+			return
+		}
+		if w < 1 {
+			w = 1
+		}
+		d.Weight = w
+		for i := range a.State.Cfg.ModelList {
+			m := &a.State.Cfg.ModelList[i]
+			if m.ModelName == group && m.Params.Provider == d.Provider.Name && m.Params.Model == d.Model {
+				m.Params.Weight = w
+				_ = saveDeployment(a.State.Store, group+"|"+d.Provider.Name+"|"+d.Model, group, m.Params)
+			}
+		}
+	}
+	if body.Strategy != nil {
+		s := *body.Strategy
+		if s != "simple-shuffle" && s != "least-busy" && s != "latency-based" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid strategy '" + s + "'"})
+			return
+		}
+		a.State.Router.SetStrategy(s)
+		_ = a.State.Store.SetSetting("routing_strategy", s)
+	}
+	a.State.Auth.Audit(a.actor(c), "model_group.update", group, "")
+	c.JSON(http.StatusOK, gin.H{"group": group})
 }
 
 func (a *App) adminListAliases(c *gin.Context) {
-	out := []map[string]any{}
-	for name, al := range a.State.Cfg.Router.ModelGroupAlias {
-		out = append(out, map[string]any{"name": name, "target": al.Target, "force_mapping": al.ForceMapping})
+	c.JSON(http.StatusOK, gin.H{"aliases": a.consoleAliases()})
+}
+
+// dbPrices reads the admin-owned price table (not the bundled defaults), which
+// is what the console lists and what a backup carries — matching Python's
+// config_store-backed /admin/pricing.
+func (a *App) dbPrices() []map[string]any {
+	rows := a.exportTable(`SELECT model,prompt,completion,cached FROM model_prices ORDER BY model`,
+		[]string{"model", "prompt", "completion", "cached"})
+	out := make([]map[string]any, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, consolePrice(mapStr(r, "model"),
+			numOr(r["prompt"], 0), numOr(r["completion"], 0), numOr(r["cached"], 0)))
 	}
-	c.JSON(http.StatusOK, gin.H{"data": out})
+	return out
 }
 
 func (a *App) adminListPricing(c *gin.Context) {
-	all := a.State.Cost.All()
-	out := []map[string]any{}
-	for model, p := range all {
-		out = append(out, map[string]any{
-			"model": model, "input": p.Prompt, "output": p.Completion, "cached": p.Cached,
-		})
+	c.JSON(http.StatusOK, gin.H{"models": a.dbPrices()})
+}
+
+// pricingModelID returns the model id from the wildcard route segment. The
+// console percent-encodes ids that contain slashes, so the raw segment may
+// arrive escaped; gin unescapes it before we see it.
+func pricingModelID(c *gin.Context) string {
+	id := strings.TrimPrefix(c.Param("id"), "/")
+	if id == "" {
+		id = c.Param("id")
 	}
-	c.JSON(http.StatusOK, gin.H{"data": out})
+	return id
 }
 
 func (a *App) adminUpsertPricing(c *gin.Context) {
 	var body struct {
-		Input  float64 `json:"input"`
-		Output float64 `json:"output"`
-		Cached float64 `json:"cached"`
+		InputPer1M         *float64 `json:"input_per_1m"`
+		OutputPer1M        *float64 `json:"output_per_1m"`
+		CacheReadPer1M     *float64 `json:"cache_read_per_1m"`
+		CacheCreationPer1M *float64 `json:"cache_creation_per_1m"`
+		// Legacy per-token spellings (the pre-console Go API).
+		Input  *float64 `json:"input"`
+		Output *float64 `json:"output"`
+		Cached *float64 `json:"cached"`
 	}
 	_ = c.ShouldBindJSON(&body)
-	model := c.Param("id")
-	a.State.Cost.Upsert(model, cost.ModelPrice{Prompt: body.Input, Completion: body.Output, Cached: body.Cached})
+	model := pricingModelID(c)
+	price := cost.ModelPrice{}
+	if body.Input != nil {
+		price.Prompt = *body.Input
+	}
+	if body.Output != nil {
+		price.Completion = *body.Output
+	}
+	if body.Cached != nil {
+		price.Cached = *body.Cached
+	}
+	if body.InputPer1M != nil {
+		price.Prompt = *body.InputPer1M / 1e6
+	}
+	if body.OutputPer1M != nil {
+		price.Completion = *body.OutputPer1M / 1e6
+	}
+	if body.CacheReadPer1M != nil {
+		price.Cached = *body.CacheReadPer1M / 1e6
+	}
+	a.State.Cost.Upsert(model, price)
 	_, _ = a.State.Store.DB().Exec(a.State.Store.Rebind(
 		`INSERT INTO model_prices(model,prompt,completion,cached) VALUES(?,?,?,?)
 		 ON CONFLICT(model) DO UPDATE SET prompt=excluded.prompt,completion=excluded.completion,cached=excluded.cached`),
-		model, body.Input, body.Output, body.Cached)
+		model, price.Prompt, price.Completion, price.Cached)
 	a.State.Auth.Audit(a.actor(c), "pricing.upsert", model, "")
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	c.JSON(http.StatusOK, consolePrice(model, price.Prompt, price.Completion, price.Cached))
 }
 
 func (a *App) adminDeletePricing(c *gin.Context) {
-	model := c.Param("id")
+	model := pricingModelID(c)
 	a.State.Cost.Delete(model)
 	_, _ = a.State.Store.DB().Exec(a.State.Store.Rebind(`DELETE FROM model_prices WHERE model=?`), model)
 	a.State.Auth.Audit(a.actor(c), "pricing.delete", model, "")
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	c.JSON(http.StatusOK, gin.H{"deleted": true, "model_id": model})
 }
 
 func (a *App) adminLogsRequests(c *gin.Context) {
@@ -363,18 +491,22 @@ func (a *App) adminLogsAudit(c *gin.Context) {
 		if rows.Scan(&id, &ts, &actor, &action, &target, &diff) != nil {
 			continue
 		}
-		out = append(out, map[string]any{"id": id, "ts": ts, "actor": actor, "action": action, "target": target, "diff": diff})
+		out = append(out, map[string]any{
+			"stream": "audit", "ts": ts, "actor": actor,
+			"action": action, "target": target, "diff": decodeJSONObject(diff),
+		})
 	}
-	c.JSON(http.StatusOK, gin.H{"data": out})
+	c.JSON(http.StatusOK, gin.H{"logs": out})
 }
 
 func (a *App) adminLogsProxy(c *gin.Context) {
 	events := a.State.Bus.EventsSince(queryInt64(c, "since", 0))
-	out := []map[string]any{}
-	for _, e := range events {
-		out = append(out, map[string]any{"id": e.ID, "ts": e.Ts, "type": e.Type, "data": e.Data})
+	out := make([]map[string]any, 0, len(events))
+	// Newest-first: the console renders the ring in the order it arrives.
+	for i := len(events) - 1; i >= 0; i-- {
+		out = append(out, consoleProxyEntry(events[i]))
 	}
-	c.JSON(http.StatusOK, gin.H{"data": out})
+	c.JSON(http.StatusOK, gin.H{"logs": out})
 }
 
 func (a *App) adminRequestMetrics(c *gin.Context) {
@@ -426,10 +558,26 @@ func (a *App) adminStream(c *gin.Context) {
 			if !ok {
 				return
 			}
-			b, _ := json.Marshal(ev)
-			c.Writer.Write([]byte("id: " + strconv.FormatInt(ev.ID, 10) + "\n"))
-			c.Writer.Write([]byte("event: " + ev.Type + "\n"))
-			c.Writer.Write([]byte("data: " + string(b) + "\n\n"))
+			// Map the Go bus types onto the SSE event names the console
+			// subscribes to. The payload is the entry itself (not the bus
+			// envelope), matching Python's public_dict shape. A request event
+			// feeds both the request-log tail and the proxy-log tail, exactly
+			// as Python's proxy pipeline emits both.
+			emit := func(name string, payload any) {
+				b, _ := json.Marshal(payload)
+				c.Writer.Write([]byte("id: " + strconv.FormatInt(ev.ID, 10) + "\n"))
+				c.Writer.Write([]byte("event: " + name + "\n"))
+				c.Writer.Write([]byte("data: " + string(b) + "\n\n"))
+			}
+			switch ev.Type {
+			case "request":
+				emit("log.created", ev.Data)
+				emit("proxy.log", consoleProxyEntry(ev))
+			case "alert", "unpriced":
+				emit("proxy.log", consoleProxyEntry(ev))
+			default:
+				emit(ev.Type, ev.Data)
+			}
 			if flusher != nil {
 				flusher.Flush()
 			}
@@ -698,96 +846,22 @@ func (a *App) adminStatsTimeseries(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"bucket_seconds": size, "metric": metric, "buckets": buckets})
 }
 
-func (a *App) adminBackup(c *gin.Context) {
-	keys := a.exportTable(`SELECT id,name,owner,key_hash,max_budget,spend,rpm,tpm,models,enabled,expires_at,created_at,budget_reserved FROM vkeys`,
-		[]string{"id", "name", "owner", "key_hash", "max_budget", "spend", "rpm", "tpm", "models", "enabled", "expires_at", "created_at", "budget_reserved"})
-	users := a.exportTable(`SELECT id,username,pw_hash,role,created_at FROM users`,
-		[]string{"id", "username", "pw_hash", "role", "created_at"})
-	settings, _ := a.State.Store.ListSettings()
-	cfgRaw, _ := json.Marshal(a.State.Cfg)
-	c.JSON(http.StatusOK, gin.H{
-		"version": 1, "config": json.RawMessage(cfgRaw), "keys": keys, "users": users,
-		"prices": a.State.Cost.All(), "providers": a.State.Cfg.Providers,
-		"model_list": a.State.Cfg.ModelList, "settings": settings,
-	})
-}
-
-func (a *App) adminBackupImport(c *gin.Context) {
-	var body struct {
-		Prices    map[string]cost.ModelPrice `json:"prices"`
-		Providers []config.Provider          `json:"providers"`
-		ModelList []config.ModelEntry        `json:"model_list"`
-		Settings  map[string]string          `json:"settings"`
-		Keys      []map[string]any           `json:"keys"`
-		Users     []map[string]any           `json:"users"`
-	}
-	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	if body.Prices != nil {
-		a.State.Cost.Load(body.Prices)
-		for model, p := range body.Prices {
-			_, _ = a.State.Store.DB().Exec(a.State.Store.Rebind(
-				`INSERT INTO model_prices(model,prompt,completion,cached) VALUES(?,?,?,?)
-				 ON CONFLICT(model) DO UPDATE SET prompt=excluded.prompt,completion=excluded.completion,cached=excluded.cached`),
-				model, p.Prompt, p.Completion, p.Cached)
-		}
-	}
-	if body.Settings != nil {
-		for k, v := range body.Settings {
-			_ = a.State.Store.SetSetting(k, v)
-		}
-	}
-	for _, p := range body.Providers {
-		if a.findProvider(p.Name) == nil {
-			a.State.Cfg.Providers = append(a.State.Cfg.Providers, p)
-		}
-		_ = saveProvider(a.State.Store, p)
-	}
-	for _, m := range body.ModelList {
-		a.State.Cfg.ModelList = append(a.State.Cfg.ModelList, m)
-		_ = saveDeployment(a.State.Store, m.ModelName+"|"+m.Params.Provider+"|"+m.Params.Model, m.ModelName, m.Params)
-	}
-	for _, k := range body.Keys {
-		id := mapStr(k, "id")
-		if id == "" {
-			continue
-		}
-		_, _ = a.State.Store.DB().Exec(a.State.Store.Rebind(
-			`INSERT INTO vkeys(id,name,owner,key_hash,max_budget,spend,rpm,tpm,models,enabled,expires_at,created_at,budget_reserved)
-			 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-			 ON CONFLICT(id) DO UPDATE SET name=excluded.name,owner=excluded.owner,key_hash=excluded.key_hash,
-			 max_budget=excluded.max_budget,spend=excluded.spend,rpm=excluded.rpm,tpm=excluded.tpm,
-			 models=excluded.models,enabled=excluded.enabled,expires_at=excluded.expires_at,
-			 created_at=excluded.created_at,budget_reserved=excluded.budget_reserved`),
-			id, mapStr(k, "name"), mapStr(k, "owner"), mapStr(k, "key_hash"),
-			mapVal(k, "max_budget"), mapVal(k, "spend"), mapVal(k, "rpm"), mapVal(k, "tpm"),
-			mapStr(k, "models"), mapVal(k, "enabled"), mapVal(k, "expires_at"),
-			mapVal(k, "created_at"), mapVal(k, "budget_reserved"))
-	}
-	for _, u := range body.Users {
-		id := mapStr(u, "id")
-		if id == "" {
-			continue
-		}
-		_, _ = a.State.Store.DB().Exec(a.State.Store.Rebind(
-			`INSERT INTO users(id,username,pw_hash,role,created_at) VALUES(?,?,?,?,?)
-			 ON CONFLICT(id) DO UPDATE SET username=excluded.username,pw_hash=excluded.pw_hash,
-			 role=excluded.role,created_at=excluded.created_at`),
-			id, mapStr(u, "username"), mapStr(u, "pw_hash"), mapStr(u, "role"), mapVal(u, "created_at"))
-	}
-	a.State.Auth.Audit(a.actor(c), "backup.import", "backup", "")
-	a.rebuild()
-	c.JSON(http.StatusOK, gin.H{"ok": true})
-}
-
 func (a *App) adminGetAlertRules(c *gin.Context) {
 	v, ok, _ := a.State.Store.GetSetting("alert_rules")
-	if !ok {
+	if !ok || strings.TrimSpace(v) == "" {
 		v = "[]"
 	}
-	c.Data(http.StatusOK, "application/json", []byte(v))
+	var rules []any
+	if err := json.Unmarshal([]byte(v), &rules); err != nil {
+		// The stored value may already be the console envelope {rules:[...]}.
+		obj := decodeJSONObject(v)
+		if raw, ok := obj["rules"].([]any); ok {
+			rules = raw
+		} else {
+			rules = []any{}
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"rules": rules})
 }
 
 func (a *App) adminPutAlertRules(c *gin.Context) {
@@ -980,7 +1054,7 @@ func (a *App) adminPatchProvider(c *gin.Context) {
 	_ = saveProvider(a.State.Store, *p)
 	a.State.Auth.Audit(a.actor(c), "provider.patch", p.Name, "")
 	a.rebuild()
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	c.JSON(http.StatusOK, a.consoleProviderFromConfig(*p))
 }
 
 func (a *App) adminDeleteProvider(c *gin.Context) {
@@ -1010,7 +1084,7 @@ func (a *App) adminDeleteProvider(c *gin.Context) {
 	_ = deleteProvider(a.State.Store, name)
 	a.State.Auth.Audit(a.actor(c), "provider.delete", name, "")
 	a.rebuild()
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	c.JSON(http.StatusOK, gin.H{"deleted": true, "name": name})
 }
 
 func (a *App) adminAddProviderKey(c *gin.Context) {
@@ -1035,7 +1109,7 @@ func (a *App) adminAddProviderKey(c *gin.Context) {
 	_ = saveProvider(a.State.Store, *p)
 	a.State.Auth.Audit(a.actor(c), "provider.key.add", p.Name+"/"+k.Label, "")
 	a.rebuild()
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	c.JSON(http.StatusOK, gin.H{"key": consolePoolKey(k)})
 }
 
 func (a *App) adminPatchProviderKey(c *gin.Context) {
@@ -1069,7 +1143,13 @@ func (a *App) adminPatchProviderKey(c *gin.Context) {
 	_ = saveProvider(a.State.Store, *p)
 	a.State.Auth.Audit(a.actor(c), "provider.key.patch", p.Name+"/"+c.Param("label"), "")
 	a.rebuild()
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	for _, k := range p.Keys {
+		if k.Label == c.Param("label") {
+			c.JSON(http.StatusOK, gin.H{"key": consolePoolKey(k)})
+			return
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"key": nil})
 }
 
 func (a *App) adminDeleteProviderKey(c *gin.Context) {
@@ -1095,7 +1175,7 @@ func (a *App) adminDeleteProviderKey(c *gin.Context) {
 	_ = saveProvider(a.State.Store, *p)
 	a.State.Auth.Audit(a.actor(c), "provider.key.delete", p.Name+"/"+c.Param("label"), "")
 	a.rebuild()
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	c.JSON(http.StatusOK, gin.H{"deleted": true, "label": c.Param("label")})
 }
 
 func (a *App) adminRevealProviderKey(c *gin.Context) {
@@ -1107,7 +1187,7 @@ func (a *App) adminRevealProviderKey(c *gin.Context) {
 	for _, k := range p.Keys {
 		if k.Label == c.Param("label") {
 			a.State.Auth.Audit(a.actor(c), "provider.key.reveal", p.Name+"/"+k.Label, "")
-			c.JSON(http.StatusOK, gin.H{"key": k.Key, "label": k.Label})
+			c.JSON(http.StatusOK, gin.H{"secret": k.Key, "label": k.Label})
 			return
 		}
 	}
@@ -1116,37 +1196,65 @@ func (a *App) adminRevealProviderKey(c *gin.Context) {
 
 func (a *App) adminAddDeployment(c *gin.Context) {
 	group := c.Param("name")
-	var p config.DeploymentParams
-	if err := c.ShouldBindJSON(&p); err != nil || p.Provider == "" || p.Model == "" {
+	var body struct {
+		Provider string `json:"provider"`
+		ModelID  string `json:"model_id"`
+		Model    string `json:"model"`
+		Weight   int    `json:"weight"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Provider == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "provider and model are required"})
 		return
 	}
-	if p.Weight < 1 {
-		p.Weight = 1
+	modelID := body.ModelID
+	if modelID == "" {
+		modelID = body.Model
 	}
-	if a.findProvider(p.Provider) == nil {
+	if modelID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provider and model are required"})
+		return
+	}
+	weight := body.Weight
+	if weight < 1 {
+		weight = 1
+	}
+	if a.findProvider(body.Provider) == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown provider"})
 		return
 	}
+	p := config.DeploymentParams{Provider: body.Provider, Model: modelID, Weight: weight}
 	a.State.Cfg.ModelList = append(a.State.Cfg.ModelList, config.ModelEntry{ModelName: group, Params: p})
 	id := group + "|" + p.Provider + "|" + p.Model
 	_ = saveDeployment(a.State.Store, id, group, p)
 	a.State.Auth.Audit(a.actor(c), "deployment.add", id, "")
 	a.rebuild()
-	c.JSON(http.StatusOK, gin.H{"ok": true, "id": id})
+	c.JSON(http.StatusOK, gin.H{"deployment": map[string]any{
+		"provider": body.Provider, "model_id": modelID, "weight": weight,
+		"available": true, "inflight": 0, "p95_latency_ms": 0.0,
+		"cooldown_remaining_s": 0.0,
+	}})
 }
 
 func (a *App) adminDeleteDeployment(c *gin.Context) {
-	group := c.Param("name")
-	var body struct {
-		Provider string `json:"provider"`
-		Model    string `json:"model"`
+	group := a.State.Router.ResolveGroup(c.Param("name"))
+	provider := c.Query("provider")
+	model := c.Query("model_id")
+	if provider == "" && model == "" {
+		var body struct {
+			Provider string `json:"provider"`
+			Model    string `json:"model"`
+			ModelID  string `json:"model_id"`
+		}
+		_ = c.ShouldBindJSON(&body)
+		provider, model = body.Provider, body.Model
+		if model == "" {
+			model = body.ModelID
+		}
 	}
-	_ = c.ShouldBindJSON(&body)
 	kept := a.State.Cfg.ModelList[:0]
 	found := false
 	for _, m := range a.State.Cfg.ModelList {
-		if m.ModelName == group && m.Params.Provider == body.Provider && m.Params.Model == body.Model {
+		if m.ModelName == group && m.Params.Provider == provider && m.Params.Model == model {
 			found = true
 			continue
 		}
@@ -1157,33 +1265,77 @@ func (a *App) adminDeleteDeployment(c *gin.Context) {
 		return
 	}
 	a.State.Cfg.ModelList = kept
-	_ = deleteDeployment(a.State.Store, group+"|"+body.Provider+"|"+body.Model)
+	_ = deleteDeployment(a.State.Store, group+"|"+provider+"|"+model)
 	a.State.Auth.Audit(a.actor(c), "deployment.delete", group, "")
 	a.rebuild()
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	c.JSON(http.StatusOK, gin.H{
+		"deleted": true, "group": group, "provider": provider, "model_id": model,
+		"group_emptied": len(a.State.Router.Deployments(group)) == 0,
+	})
 }
 
 func (a *App) adminAddAlias(c *gin.Context) {
+	// The console posts the batch shape {set: {name: value|entry}, unset: []};
+	// older clients post a single {name, target, force_mapping}. Accept both.
 	var body struct {
-		Name         string `json:"name"`
-		Target       string `json:"target"`
-		ForceMapping *bool  `json:"force_mapping"`
+		Name         string                     `json:"name"`
+		Target       string                     `json:"target"`
+		ForceMapping *bool                      `json:"force_mapping"`
+		Set          map[string]json.RawMessage `json:"set"`
+		Unset        []string                   `json:"unset"`
 	}
-	if err := c.ShouldBindJSON(&body); err != nil || body.Name == "" || body.Target == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "name and target are required"})
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
-	}
-	fm := true
-	if body.ForceMapping != nil {
-		fm = *body.ForceMapping
 	}
 	if a.State.Cfg.Router.ModelGroupAlias == nil {
 		a.State.Cfg.Router.ModelGroupAlias = map[string]config.AliasEntry{}
 	}
-	a.State.Cfg.Router.ModelGroupAlias[body.Name] = config.AliasEntry{Target: body.Target, ForceMapping: fm}
-	a.State.Auth.Audit(a.actor(c), "alias.add", body.Name, body.Target)
+	apply := func(name string, raw json.RawMessage) {
+		var target string
+		if json.Unmarshal(raw, &target) == nil && target != "" {
+			a.State.Cfg.Router.ModelGroupAlias[name] = config.AliasEntry{Target: target, ForceMapping: true}
+			return
+		}
+		var entry struct {
+			Target       string `json:"target"`
+			ForceMapping *bool  `json:"force_mapping"`
+			DisplayName  string `json:"display_name"`
+		}
+		if json.Unmarshal(raw, &entry) == nil && entry.Target != "" {
+			fm := true
+			if entry.ForceMapping != nil {
+				fm = *entry.ForceMapping
+			}
+			a.State.Cfg.Router.ModelGroupAlias[name] = config.AliasEntry{
+				Target: entry.Target, ForceMapping: fm, DisplayName: entry.DisplayName,
+			}
+		}
+	}
+	if body.Set != nil || body.Unset != nil {
+		for name, raw := range body.Set {
+			apply(name, raw)
+		}
+		for _, name := range body.Unset {
+			delete(a.State.Cfg.Router.ModelGroupAlias, name)
+		}
+	} else {
+		if body.Name == "" || body.Target == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "name and target are required"})
+			return
+		}
+		fm := true
+		if body.ForceMapping != nil {
+			fm = *body.ForceMapping
+		}
+		a.State.Cfg.Router.ModelGroupAlias[body.Name] = config.AliasEntry{Target: body.Target, ForceMapping: fm}
+	}
+	if raw, err := json.Marshal(a.State.Cfg.Router.ModelGroupAlias); err == nil {
+		_ = a.State.Store.SetSetting("model_group_alias", string(raw))
+	}
+	a.State.Auth.Audit(a.actor(c), "alias.update", "", "")
 	a.rebuild()
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	c.JSON(http.StatusOK, gin.H{"aliases": a.consoleAliases()})
 }
 
 func (a *App) adminExportProviders(c *gin.Context) {

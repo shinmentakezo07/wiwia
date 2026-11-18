@@ -201,7 +201,7 @@ func (g *Gateway) completeGroups(ctx *RequestContext, groups []string, prefix st
 				if we == nil {
 					dep.OnKeyResult(key, 200, nil)
 					dep.OnDeploymentResult(200, nil)
-					ctx.NoteAttempt(dep.Name(), dep.Provider.Type, key.Label, "ok", int(time.Since(start).Milliseconds()), "", dep.Model)
+					ctx.NoteAttempt(dep.Name(), dep.Provider.Name, key.Label, "ok", int(time.Since(start).Milliseconds()), "", dep.Model)
 					g.price(ctx, dep, turn.Usage)
 					g.Router.RecordAffinity(ctx.SessionID, prefix, dep.Name())
 					g.Router.ReleaseSlot(dep, ctx.Lane)
@@ -210,7 +210,7 @@ func (g *Gateway) completeGroups(ctx *RequestContext, groups []string, prefix st
 				lastErr = we
 				dep.OnKeyResult(key, we.Status, we)
 				dep.OnDeploymentResult(we.Status, we)
-				ctx.NoteAttempt(dep.Name(), dep.Provider.Type, key.Label, we.EType, int(time.Since(start).Milliseconds()), we.Message, dep.Model)
+				ctx.NoteAttempt(dep.Name(), dep.Provider.Name, key.Label, we.EType, int(time.Since(start).Milliseconds()), we.Message, dep.Model)
 				if !we.Retryable || (g.Router.FailoverStandard() && !standardRetryable(we.Status)) {
 					g.Router.ReleaseSlot(dep, ctx.Lane)
 					return nil, we

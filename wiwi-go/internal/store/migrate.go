@@ -17,9 +17,18 @@ func (s *Store) Migrate() error {
 			return fmt.Errorf("store: migrate: %w", err)
 		}
 	}
+	// Columns added after the initial schema. Postgres supports ADD COLUMN IF
+	// NOT EXISTS; SQLite does not, so there the statement is best-effort and a
+	// "duplicate column" error on an existing database is expected. Run after
+	// the transaction commits: a failed ALTER would poison a Postgres tx.
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("store: migrate: commit: %w", err)
 	}
+	alter := `ALTER TABLE users ADD COLUMN disabled INTEGER DEFAULT 0`
+	if s.driver == DriverPostgres {
+		alter = `ALTER TABLE users ADD COLUMN IF NOT EXISTS disabled INTEGER DEFAULT 0`
+	}
+	_, _ = s.db.Exec(alter)
 	return nil
 }
 

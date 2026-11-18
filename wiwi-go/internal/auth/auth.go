@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -129,14 +130,25 @@ func scanKey(r rowScanner) (*VKey, error) {
 	var rpm, tpm *int
 	var models string
 	var enabled int
-	if err := r.Scan(&v.ID, &v.Name, &v.KeyHash, &maxBudget, &v.Spend, &rpm, &tpm,
-		&models, &enabled, &v.ExpiresAt, &v.CreatedAt, &v.BudgetReserved); err != nil {
+	var spend, reserved *float64
+	var expires *int64
+	if err := r.Scan(&v.ID, &v.Name, &v.KeyHash, &maxBudget, &spend, &rpm, &tpm,
+		&models, &enabled, &expires, &v.CreatedAt, &reserved); err != nil {
 		return nil, err
 	}
 	v.MaxBudget = maxBudget
 	v.RPM = rpm
 	v.TPM = tpm
 	v.Enabled = enabled != 0
+	if spend != nil {
+		v.Spend = *spend
+	}
+	if reserved != nil {
+		v.BudgetReserved = *reserved
+	}
+	if expires != nil {
+		v.ExpiresAt = *expires
+	}
 	if models != "" {
 		v.Models = strings.Split(models, ",")
 	}
@@ -207,6 +219,73 @@ func (s *Service) Patch(id string, maxBudget *float64, rpm, tpm *int, models []s
 		}
 	}
 	return nil
+}
+
+// PatchConsole applies the console's PATCH body. Unlike Patch, it distinguishes
+// an absent key (leave unchanged) from an explicit JSON null (clear the
+// column), which is how the console's "tick to clear" controls work.
+func (s *Service) PatchConsole(id string, fields map[string]json.RawMessage) error {
+	exec := func(col string, v any) error {
+		_, err := s.store.DB().Exec(s.store.Rebind(`UPDATE vkeys SET `+col+`=? WHERE id=?`), v, id)
+		return err
+	}
+	if raw, ok := fields["name"]; ok && !isJSONNull(raw) {
+		var v string
+		if json.Unmarshal(raw, &v) == nil {
+			if err := exec("name", v); err != nil {
+				return err
+			}
+		}
+	}
+	if raw, ok := fields["max_budget"]; ok {
+		if isJSONNull(raw) {
+			if err := exec("max_budget", nil); err != nil {
+				return err
+			}
+		} else {
+			var v float64
+			if json.Unmarshal(raw, &v) == nil {
+				if err := exec("max_budget", v); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	for _, f := range []struct {
+		key string
+		col string
+	}{{"rpm", "rpm"}, {"tpm", "tpm"}, {"expires_at", "expires_at"}} {
+		raw, ok := fields[f.key]
+		if !ok {
+			continue
+		}
+		if isJSONNull(raw) {
+			if err := exec(f.col, nil); err != nil {
+				return err
+			}
+			continue
+		}
+		var v int64
+		if json.Unmarshal(raw, &v) == nil {
+			if err := exec(f.col, v); err != nil {
+				return err
+			}
+		}
+	}
+	if raw, ok := fields["models"]; ok {
+		if isJSONNull(raw) {
+			return exec("models", "")
+		}
+		var models []string
+		if json.Unmarshal(raw, &models) == nil {
+			return exec("models", strings.Join(models, ","))
+		}
+	}
+	return nil
+}
+
+func isJSONNull(raw json.RawMessage) bool {
+	return strings.TrimSpace(string(raw)) == "null"
 }
 
 // ReserveBudget atomically reserves dollars against a key's max_budget.

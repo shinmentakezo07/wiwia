@@ -33,6 +33,29 @@ type dbDeployment struct {
 }
 
 // loadOverlay merges DB-managed providers/deployments into cfg.
+// loadRuntimeSettings applies the console-owned settings that affect routing
+// (strategy and model-group aliases) on top of the YAML config, so a change
+// made through /admin survives a restart.
+func loadRuntimeSettings(cfg *config.Config, st *store.Store) {
+	if v, ok, _ := st.GetSetting("routing_strategy"); ok && v != "" {
+		cfg.Router.Strategy = v
+	}
+	raw, ok, _ := st.GetSetting("model_group_alias")
+	if !ok || raw == "" {
+		return
+	}
+	var aliases map[string]config.AliasEntry
+	if json.Unmarshal([]byte(raw), &aliases) != nil {
+		return
+	}
+	if cfg.Router.ModelGroupAlias == nil {
+		cfg.Router.ModelGroupAlias = map[string]config.AliasEntry{}
+	}
+	for name, entry := range aliases {
+		cfg.Router.ModelGroupAlias[name] = entry
+	}
+}
+
 func loadOverlay(cfg *config.Config, st *store.Store) {
 	rows, err := st.Query(st.Rebind(`SELECT name,provider_type,base_url,config FROM providers`))
 	if err != nil {

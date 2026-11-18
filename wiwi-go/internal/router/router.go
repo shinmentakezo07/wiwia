@@ -129,6 +129,30 @@ func (d *Deployment) MarkCooling(seconds float64) {
 	d.CooldownUntil = time.Now().Add(time.Duration(seconds * float64(time.Second)))
 }
 
+// Inflight reports the deployment's current in-flight request count.
+func (d *Deployment) Inflight() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.inflight
+}
+
+// P95LatencyMs reports the deployment's recent latency (EWMA, ms). The console
+// renders it in the model-group table; 0 means "not measured yet".
+func (d *Deployment) P95LatencyMs() float64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.ewma
+}
+
+// CooldownRemaining reports the seconds left before the deployment may be
+// picked again (0 when it is not cooling).
+func (d *Deployment) CooldownRemaining(now time.Time) float64 {
+	if d.CooldownUntil.IsZero() || !now.Before(d.CooldownUntil) {
+		return 0
+	}
+	return d.CooldownUntil.Sub(now).Seconds()
+}
+
 // Router holds model groups and drives smooth weighted round-robin + failover.
 type Router struct {
 	cfg       *config.Config
@@ -558,6 +582,7 @@ func (d *Deployment) adaptiveCooldown() float64 {
 
 func (r *Router) NumRetries() int                        { return r.numRetries }
 func (r *Router) Strategy() string                       { return r.strategy }
+func (r *Router) SetStrategy(s string)                   { r.strategy = s }
 func (r *Router) Providers() map[string]*ProviderAccount { return r.providers }
 
 // ApplyThresholds copies router-level thresholds onto every deployment.

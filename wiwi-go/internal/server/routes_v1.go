@@ -153,10 +153,27 @@ func (a *App) finish(ctx *core.RequestContext, status int, e *providers.WiwiErro
 	}
 	a.logRequest(ctx)
 	a.evaluateAlerts(ctx)
+	providerName, modelID, keyLabel := "", "", ""
+	if n := len(ctx.Attempts); n > 0 {
+		last := ctx.Attempts[n-1]
+		providerName, modelID, keyLabel = last.Provider, last.ModelID, last.ProviderKeyLabel
+	}
+	keyID, keyAlias := "", ""
+	if ctx.Auth != nil {
+		keyID, keyAlias = ctx.Auth.KeyID, ctx.Auth.KeyName
+	}
 	a.State.Bus.Publish("request", map[string]any{
-		"request_id": ctx.RequestID, "surface": string(ctx.Surface), "group": ctx.Group,
-		"status": status, "cost": cost, "prompt_tokens": prompt, "completion_tokens": completion,
-		"latency_ms": ctx.LatencyMs(),
+		"stream": "request", "ts": time.Now().Unix(),
+		"request_id": ctx.RequestID, "surface": string(ctx.Surface),
+		"group": ctx.Group, "model_group": ctx.Group,
+		"provider": providerName, "model_id": modelID,
+		"key_id": keyID, "key_alias": keyAlias,
+		"provider_key_label": keyLabel,
+		"status":             status, "cost": cost,
+		"prompt_tokens": prompt, "completion_tokens": completion,
+		"tok_in": prompt, "tok_out": completion,
+		"ttft_ms": ctx.TTFTMs(), "latency_ms": ctx.LatencyMs(),
+		"was_stream": false,
 	})
 }
 

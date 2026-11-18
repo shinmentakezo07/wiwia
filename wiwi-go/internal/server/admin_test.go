@@ -77,7 +77,7 @@ func TestAlertRulesFire(t *testing.T) {
 	}
 	do(t, app, "POST", "/v1/chat/completions", `{"model":"gpt-test","messages":[{"role":"user","content":"hi"}]}`)
 	w = do(t, app, "GET", "/admin/logs/proxy?since=0", "")
-	if !strings.Contains(w.Body.String(), `"alert"`) {
+	if !strings.Contains(w.Body.String(), "alert fired") {
 		t.Fatalf("expected alert event, got %s", w.Body.String())
 	}
 }

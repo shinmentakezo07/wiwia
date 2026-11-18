@@ -17,6 +17,7 @@ type User struct {
 	Username  string `json:"username"`
 	Role      string `json:"role"`
 	CreatedAt int64  `json:"created_at"`
+	Disabled  bool   `json:"disabled"`
 }
 
 var (
@@ -131,10 +132,14 @@ func (s *Service) CreateUser(username, password, role string) (*User, error) {
 // AuthenticateUser verifies a username/password pair.
 func (s *Service) AuthenticateUser(username, password string) (*User, error) {
 	row := s.store.QueryRow(s.store.Rebind(
-		`SELECT id,username,pw_hash,role,created_at FROM users WHERE username=?`), username)
+		`SELECT id,username,pw_hash,role,created_at,COALESCE(disabled,0) FROM users WHERE username=?`), username)
 	var u User
 	var pwHash string
-	if err := row.Scan(&u.ID, &u.Username, &pwHash, &u.Role, &u.CreatedAt); err != nil {
+	var disabled int
+	if err := row.Scan(&u.ID, &u.Username, &pwHash, &u.Role, &u.CreatedAt, &disabled); err != nil {
+		return nil, ErrBadLogin
+	}
+	if disabled != 0 {
 		return nil, ErrBadLogin
 	}
 	if !verifyPassword(password, pwHash) {
@@ -144,7 +149,8 @@ func (s *Service) AuthenticateUser(username, password string) (*User, error) {
 }
 
 func (s *Service) ListUsers() ([]*User, error) {
-	rows, err := s.store.Query(s.store.Rebind(`SELECT id,username,role,created_at FROM users ORDER BY created_at`))
+	rows, err := s.store.Query(s.store.Rebind(
+		`SELECT id,username,role,created_at,COALESCE(disabled,0) FROM users ORDER BY created_at`))
 	if err != nil {
 		return nil, err
 	}
@@ -152,25 +158,39 @@ func (s *Service) ListUsers() ([]*User, error) {
 	var out []*User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Username, &u.Role, &u.CreatedAt); err != nil {
+		var disabled int
+		if err := rows.Scan(&u.ID, &u.Username, &u.Role, &u.CreatedAt, &disabled); err != nil {
 			return nil, err
 		}
+		u.Disabled = disabled != 0
 		out = append(out, &u)
 	}
 	return out, rows.Err()
 }
 
 func (s *Service) GetUser(id string) (*User, error) {
-	row := s.store.QueryRow(s.store.Rebind(`SELECT id,username,role,created_at FROM users WHERE id=?`), id)
+	row := s.store.QueryRow(s.store.Rebind(
+		`SELECT id,username,role,created_at,COALESCE(disabled,0) FROM users WHERE id=?`), id)
 	var u User
-	if err := row.Scan(&u.ID, &u.Username, &u.Role, &u.CreatedAt); err != nil {
+	var disabled int
+	if err := row.Scan(&u.ID, &u.Username, &u.Role, &u.CreatedAt, &disabled); err != nil {
 		return nil, err
 	}
+	u.Disabled = disabled != 0
 	return &u, nil
 }
 
 func (s *Service) SetUserRole(id, role string) error {
 	_, err := s.store.DB().Exec(s.store.Rebind(`UPDATE users SET role=? WHERE id=?`), role, id)
+	return err
+}
+
+func (s *Service) SetUserDisabled(id string, disabled bool) error {
+	v := 0
+	if disabled {
+		v = 1
+	}
+	_, err := s.store.DB().Exec(s.store.Rebind(`UPDATE users SET disabled=? WHERE id=?`), v, id)
 	return err
 }
 
@@ -212,9 +232,13 @@ func (s *Service) ValidateSession(secret, cookie string) (*User, error) {
 		return MasterUser(), nil
 	}
 	row := s.store.QueryRow(s.store.Rebind(
-		`SELECT id,username,role,created_at FROM users WHERE id=?`), userID)
+		`SELECT id,username,role,created_at,COALESCE(disabled,0) FROM users WHERE id=?`), userID)
 	var u User
-	if err := row.Scan(&u.ID, &u.Username, &u.Role, &u.CreatedAt); err != nil {
+	var disabled int
+	if err := row.Scan(&u.ID, &u.Username, &u.Role, &u.CreatedAt, &disabled); err != nil {
+		return nil, ErrBadSession
+	}
+	if disabled != 0 {
 		return nil, ErrBadSession
 	}
 	return &u, nil

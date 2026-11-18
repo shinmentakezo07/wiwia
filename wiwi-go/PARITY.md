@@ -44,6 +44,15 @@ Ported provider logic:
   fronts a DeepSeek model.
 
 ## Recently closed gaps
+- **Console API shape parity** — the SPA now runs unchanged against this port:
+  `/admin/models`, `/admin/keys`, `/admin/users`, `/admin/pricing` (USD per 1M),
+  `/admin/provider-catalog` (a bare array), `/admin/logs/proxy`,
+  `/admin/logs/audit`, `/admin/alert-rules`, `/public/models`, the Cline/WorkBuddy
+  account surfaces and `/admin/backup` all return the payloads Python returns.
+  Key CRUD accepts the console's bodies (`ttl_seconds`, `expires_at`, `disabled`),
+  deployments delete via query params (`DELETE /admin/model-groups/{g}/deployments`),
+  aliases take the batch `{set, unset}` shape, and `/admin/stream` maps bus events
+  to the `log.created` / `proxy.log` names the console subscribes to.
 - **DeepSeek reasoning round-trip** — padded/stripped per the model rule
   (`providers/deepseek.go`), with regression tests.
 - **Response cache key** now hashes the normalized IR (not the raw body) and

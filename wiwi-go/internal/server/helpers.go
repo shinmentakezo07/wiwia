@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -78,11 +80,7 @@ func (a *App) handleModels(c *gin.Context) {
 }
 
 func (a *App) handlePublicModels(c *gin.Context) {
-	data := []map[string]any{}
-	for _, g := range a.State.Router.Groups() {
-		data = append(data, map[string]any{"id": g, "object": "model", "owned_by": "wiwi"})
-	}
-	c.JSON(http.StatusOK, gin.H{"object": "list", "data": data})
+	c.JSON(http.StatusOK, a.consolePublicModels())
 }
 
 func (a *App) handleMetrics(c *gin.Context) {
@@ -113,12 +111,16 @@ func estimatePromptTokens(body map[string]any) int {
 
 // registerStatic mounts the built SPA with history fallback.
 func (a *App) registerStatic() {
-	dir := a.State.StaticDir
-	if dir == "" {
+	if a.State.StaticDir == "" {
 		return
 	}
 	r := a.Router
 	r.NoRoute(func(c *gin.Context) {
+		dir := a.State.StaticDir
+		if dir == "" {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
 		p := c.Request.URL.Path
 		if strings.HasPrefix(p, "/v1/") || strings.HasPrefix(p, "/admin/") ||
 			strings.HasPrefix(p, "/auth/") || strings.HasPrefix(p, "/public/") ||
@@ -126,7 +128,18 @@ func (a *App) registerStatic() {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
 		}
-		// Serve a real asset if it exists, else fall back to index.html (SPA).
-		c.File(dir + p)
+		// Serve a real asset if it exists, else fall back to index.html so the
+		// SPA's client-side routes (/login, /app, /docs, …) deep-link. A
+		// missing path with a file extension is a genuine 404, not a route.
+		full := filepath.Join(dir, filepath.Clean("/"+p))
+		if info, err := os.Stat(full); err == nil && !info.IsDir() {
+			c.File(full)
+			return
+		}
+		if filepath.Ext(p) != "" {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
+		c.File(filepath.Join(dir, "index.html"))
 	})
 }

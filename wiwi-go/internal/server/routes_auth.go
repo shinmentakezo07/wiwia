@@ -101,12 +101,12 @@ func (a *App) handleMe(c *gin.Context) {
 	}
 	cookie, err := c.Cookie("wiwi_session")
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "not logged in"})
+		c.JSON(http.StatusOK, gin.H{"user": nil})
 		return
 	}
 	u, err := a.State.Auth.ValidateSession(a.State.SessionSecret, cookie)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "not logged in"})
+		c.JSON(http.StatusOK, gin.H{"user": nil})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"user": u})
