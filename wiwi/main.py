@@ -58,6 +58,33 @@ def _reload_app_factory() -> FastAPI:
     return create_app(config)
 
 
+def _platform_port() -> int | None:
+    """The listen port a hosting platform injected, when it is usable.
+
+    Railway (and the PaaS convention it follows) injects ``PORT`` and expects
+    the process to listen on it — the platform's healthcheck and its edge
+    proxy both talk to that port, so a gateway that answers on 4000 is a
+    gateway Railway reports as unhealthy. The shipped image exposes 4000 and
+    ``wiwi.yaml`` sets the same, so without this the container never answers
+    on the port it was given.
+
+    ``None`` when the variable is unset, empty (Railway and Render inject
+    empty values for variables that are not set, and an empty value must not
+    shadow the configured port) or not a number in the TCP range. The
+    ``--port`` flag stays authoritative over both this and the config, and a
+    HuggingFace Space — which injects no ``PORT`` and answers on the port
+    its manifest names (``app_port``) — is unaffected.
+    """
+    raw = os.environ.get("PORT")
+    if not raw:
+        return None
+    try:
+        port = int(raw.strip())
+    except (TypeError, ValueError):
+        return None
+    return port if 0 < port < 65536 else None
+
+
 def cli() -> None:
     parser = argparse.ArgumentParser(prog="wiwi",
                                      description="wiwi — unified LLM gateway proxy")
@@ -83,7 +110,11 @@ def cli() -> None:
         sys.exit(1)
 
     host = args.host or config.wiwi_settings.host
-    port = args.port or config.wiwi_settings.port
+    # Precedence: the explicit flag, then the platform-injected ``PORT``, then
+    # the configured port. The flag stays first so a developer can override a
+    # platform's value; ``PORT`` is second so a Railway (or Render, or Fly)
+    # deployment answers where the platform expects it.
+    port = args.port or _platform_port() or config.wiwi_settings.port
 
     if args.reload:
         # Uvicorn reload requires the app as a string import path, not an object,

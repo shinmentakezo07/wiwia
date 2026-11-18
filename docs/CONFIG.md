@@ -555,6 +555,7 @@ DATABASE_URL=postgresql+asyncpg://user:pass@host/db wiwi --config wiwi.yaml
 | `WIWI_SESSION_SECRET` | Session signing key (32-byte hex). Defaults to the master key (the process refuses to start with neither). |
 | `WIWI_STATIC_DIR` | Directory holding the built SPA (default: `wiwi/server/static`). |
 | `WIWI_PORT` | Backend port used by `start.sh` (default 4000). The CLI's own `--port` flag is authoritative when given. |
+| `PORT` | The listen port a hosting platform injected. Railway (and the PaaS convention it follows) sets `PORT` and expects the process to answer on it — its edge proxy and its healthcheck both talk to that port, so a gateway on 4000 is reported unhealthy. Read by the CLI, below `--port` and above `wiwi_settings.port`; an empty or non-numeric value is ignored (platforms inject empty values for variables that are not set), so a HuggingFace Space — which injects no `PORT` and answers on the port its manifest names — is unaffected. The shipped image's `HEALTHCHECK` follows the same variable. |
 | `WIWI_RELOAD` | `0` disables `--reload` in `start.sh` (reload is on by default there; the CLI flag is `--reload`). |
 | `WIWI_RELOAD_DIRS` | Comma-separated dirs to watch in reload mode. |
 | `WIWI_BIN` | Path to the wiwi binary (for `start.sh`). |

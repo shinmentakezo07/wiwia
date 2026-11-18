@@ -66,7 +66,12 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 USER wiwi
 EXPOSE 4000
+# Port-aware healthcheck. A hosting platform that injects PORT (Railway,
+# Render, Fly) expects the process to answer there — that is where its edge
+# proxy and its own healthcheck talk — so the container probe follows the
+# same variable instead of assuming 4000. With PORT unset the shipped default
+# (and the HuggingFace Space's app_port) still applies.
 HEALTHCHECK --interval=30s --timeout=3s \
-    CMD python -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:4000/health')" || exit 1
+    CMD python -c "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','4000')+'/health')" || exit 1
 ENTRYPOINT ["wiwi"]
 CMD ["--config", "/app/wiwi.yaml"]

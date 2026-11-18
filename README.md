@@ -195,6 +195,59 @@ Postgres 16 + Redis + wiwi together, a `wiwi_data` volume, `DATABASE_URL` defaul
 Override with `DATABASE_URL=sqlite+aiosqlite:///…` to stay on SQLite. Three-stage build: `uv` installs Python
 deps → `npm` builds the SPA → the runtime image runs as non-root `wiwi` (uid 10001).
 
+### 🚂 Or deploy to Railway
+
+Railway builds the `Dockerfile` at the repo root as-is. The gateway answers on the port Railway injects
+(`PORT`), and `/health` is the path to point the platform healthcheck at.
+
+Railway gives you a URL you can't hardcode, so use **variables** rather than a baked-in `wiwi.yaml`.
+
+**1. Add the services you want.** *New → Database → Postgres* and *New → Database → Redis*. Railway exposes
+their URLs to any service in the same project as `DATABASE_URL` / `REDIS_URL`.
+
+**2. Set variables on the wiwi service:**
+
+| Variable | Value |
+|---|---|
+| `WIWI_MASTER_KEY` | a long random secret (`openssl rand -hex 32`) |
+| `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` — **set it**: the container filesystem is ephemeral, so a SQLite file is lost on every redeploy |
+| `REDIS_URL` | `${{Redis.REDIS_URL}}` — optional; without it the response cache and the rate limiter stay in-process |
+| `WIWI_TRUSTED_PROXIES` | proxy CIDRs, e.g. `10.0.0.0/8` — set when TLS terminates at Railway's edge so the session cookie gets `Secure` and OAuth callbacks use `https` |
+| `WIWI_CONFIG` | the YAML below |
+| `PORT` | injected by Railway — **do not set it yourself**; wiwi listens on whatever it is given |
+
+**3. Use `WIWI_CONFIG`** — raw YAML in one env var:
+
+```yaml
+general_settings:
+  master_key: os.environ/WIWI_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+  redis_url: os.environ/REDIS_URL
+  trusted_proxies: os.environ/WIWI_TRUSTED_PROXIES
+providers:
+  - name: openai-main
+    provider: openai
+    keys: [{label: main, key: os.environ/OPENAI_API_KEY}]
+model_list:
+  - model_name: gpt-4o
+    wiwi_params: {provider: openai-main, model: gpt-4o}
+```
+
+**4. Verify.** `GET /health` answers on the Railway domain; mint a virtual key from the console and point a
+client at `https://<your-domain>/v1`.
+
+> 🧭 **Free tiers that run out.** OpenCode's free allowance is spent per account, and when it is the upstream
+> says so — wiwi then *wraps* the request to a fallback group instead of failing the caller (see
+> [`docs/OPENCODE.md`](docs/OPENCODE.md#the-free-allowance-is-a-quota-not-a-rate-limit)). Declare the
+> backup in the config you paste above:
+>
+> ```yaml
+> # the fallback group must exist as a model group of its own
+> router_settings:
+>   fallbacks:
+>     gpt-4o: [claude-sonnet]
+> ```
+
 ### 🔌 Connect a client
 
 | Client | Set this | Then run |
