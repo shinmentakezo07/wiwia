@@ -6,8 +6,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **wiwi** is a self-hosted unified LLM gateway proxy (LiteLLM-shaped): three inbound API dialects — OpenAI Chat, OpenAI Responses (Codex CLI), Anthropic Messages — plus the legacy OpenAI Completions shape and a browser-session twin of Chat, all route through one canonical internal representation (IR) to any of thirteen outbound provider types; responses are always re-encoded in the caller's inbound dialect (e.g. Claude Code backed by GPT). Adds virtual keys, budgets, rate limits, key pools with smooth weighted round-robin, retries/cooldowns/fallbacks, a health healer, cost tracking, request logs, and an admin web UI.
 
-**Scale, verified 2026-11-02** (re-measure rather than trust): 94 Python files under `wiwi/`, `__init__.py`s included; `wiwi/server/app.py` ~7.7k lines and `wiwi/core/gateway.py` ~3.0k; `wiwi/wire/` 4 codecs, `wiwi/providers/` 13 types across 28 files; 9 `/v1` routes and 59 `/admin` routes; 250 test files collecting ~4,300 tests; 56 components in `web/src/pages/`. Counts drift — the commands below are the source of truth.
-
 **Use the ambient `python3` (3.13.5 at time of writing — *not* 3.12, as older versions of this file claimed) / `pytest` (9.1.1) / `ruff` (0.17.1) on PATH** — they have the project installed (`import wiwi` resolves to this checkout). There is **no usable `.venv`**: the directory does not exist in this checkout, and the docs that describe it as an empty uv-venv symlink are stale either way. Never invoke `.venv/bin/python`.
 
 `AGENTS.md` is the OpenCode-facing guide and claims canonical status for OpenCode work; it is accurate and slightly more current than this file in places. Where the two disagree with the code, trust the code.
@@ -182,45 +180,9 @@ Error bodies are dialect-correct per surface (OpenAI `{"error":{…}}` vs Anthro
 6. **Imports in `web/` follow TypeScript module resolution.** Do not mix relative paths arbitrarily — prefer the `@/*` alias configured in `tsconfig.json` / Vite config, consistent with the existing pattern in `web/src/`. Do not add bare `../../../../` chains; if the depth feels wrong, the module boundary probably is.
 7. **Never import `wiwi.server.app` at module level in a library module.** `app.py` is the FastAPI application factory and its import can trigger lifespan / startup side effects. Library code (`core/`, `router/`, `auth/`, etc.) must not import it; only the CLI (`wiwi/main.py`) and test fixtures do.
 
-## UI/UX Universal Compatibility Rule (binding)
+## UI/UX (binding)
 
-Every UI or UX change — in `web/` or in any admin-facing HTML/template surface — MUST be verified as usable on both **desktop (mouse/keyboard)** and **mobile (touch, narrow viewport)** before being marked done. Specifically:
-
-1. **Layout must not break below ~375 px viewport width.** Test at 375×812 (iPhone SE class) and at a wide desktop viewport. Sidebars, tables, and cards that assume a minimum width must reflow, stack, or collapse — not clip or overflow.
-2. **All interactive controls must be operable by touch.** Tap targets must be at least 44×44 px (Apple HIG) or 48×48 dp (Material). Controls that only respond to hover (CSS `:hover`-only reveals, hover-dependent dropdowns) must also respond to focus and touch. No information or action may be hover-only.
-3. **Keyboard and focus navigation must work.** Every focusable element must be reachable via Tab/Shift-Tab in a sensible order. Focus styles must be visible (do not suppress `outline` without providing an equivalent). Modal/dialog focus trapping and Escape-to-close must work on desktop.
-4. **Text must be legible and not rely on fixed sizes.** Use relative units (`rem`, `em`, `%`, `vw`) over fixed `px` for typography and spacing where appropriate. Text in containers must not truncate silently in a way that hides information on narrow screens.
-5. **Responsive is not optional for admin pages.** Admin pages in `web/src/pages/` are used on desktop but may be opened on a phone (e.g., a quick key rotation or budget check). Assume a mobile viewport is possible for every page; do not gate responsiveness behind a "this is an admin page" assumption.
-6. **Verify before claiming done.** For any UI/UX change, open the page in a mobile-sized viewport (browser devtools device mode or a real device) and a desktop viewport, and confirm the change works in both. Screenshots or a short description of the verification belong in the commit message or PR description.
-
-## UI Design Standards (binding for ALL UI/design work, in any codebase)
-
-**Scope: every UI/UX/design task, in this repo or any other** — admin panels, marketing sites, apps, playgrounds, docs, error pages, emails, any HTML/CSS/JSX/TSX anywhere. Nothing UI-related is exempt.
-
-Senior-frontend-architect standard. When a task touches anything visual, apply these rules in addition to the compatibility rule above:
-
-**Mode of operation**
-
-1. **Execute first.** Build the requested UI immediately; no philosophical lectures, no unsolicited advice, no wandering. Code and visual solutions over prose.
-2. **Reason deeply before writing.** For non-trivial UI work, think through the design along four axes — psychological (user sentiment, cognitive load), technical (rendering performance, repaint/reflow cost, state complexity), accessibility (aim WCAG AA at minimum, AAA where feasible), and scalability (maintenance, modularity). If the reasoning feels easy, it is surface-level: dig until the logic is irrefutable. Surface the reasoning chain briefly in the report when it shaped the design.
-3. **Cover edge cases.** Empty states, loading states, overflow, long strings, zero data, reduced motion — name them and handle them.
-
-**Design philosophy — intentional minimalism**
-
-4. **Anti-generic.** Reject bootstrapped/template-looking layouts — on every surface. If a page looks like a stock template, it is wrong. Strive for bespoke composition: asymmetry where it carries meaning, distinctive but restrained typography, purposeful whitespace.
-5. **Every element must earn its place.** Before adding any element, state its purpose; if it has none, delete it. Reduction is the ultimate sophistication — remove until nothing left can be removed without loss.
-6. **No neon/glow/generic "AI dashboard" flourishes by default — anywhere.** Effects stay within the design system of the surface being edited. Stronger effects only when the user explicitly asks for them.
-
-**Coding standards**
-
-7. **Library discipline (critical).** If the project uses a UI library or component kit (Shadcn, Radix, MUI, or the project's own shared components), you MUST use it. Before building any primitive (modal, dropdown, button, table, badge, tooltip, chart), search the codebase for an existing one; never rebuild what already exists — wrap or style the shared/library primitive instead, to keep stability and accessibility. Do not add redundant one-off CSS when a token, utility class, or library component exists.
-8. **Follow the design system of the surface you are editing.** Discover the surrounding pages' tokens, spacing, typography, and component vocabulary first, and match them — never invent a parallel look or import one surface's style into another.
-9. **Micro-interactions and invisible UX.** Where motion is used, keep it subtle, fast (150–600 ms), and gated on the user's reduced-motion preference.
-10. **Semantic HTML5.** Landmarks, headings in order, `<button>` for actions, `<a>` for navigation — matching the markup conventions of neighboring pages.
-
-**Never ship generic output**
-
-11. If a produced UI — any surface — looks interchangeable with any template, iterate before presenting it. "Fine" is not the bar; coherent, intentional, and specific to that product's design language is the bar — unless the user explicitly asks for a plain/generic treatment.
+**Read `.claude/skills/ui-design-standards` before any UI change** — `web/`, admin pages, marketing pages, playground, docs styling, error pages, any HTML/CSS/JSX/TSX. It holds the mobile+desktop compatibility rule (375 px floor, 44 px tap targets, keyboard/focus, relative units) and the design standards (anti-generic composition, library discipline, semantic HTML). A UI change is not done until verified at both a 375×812 and a desktop viewport.
 
 ## Where to start reading
 
@@ -252,30 +214,9 @@ When an agent discovers a bug, error, or suspicious behavior in this codebase:
 
 5. **Read `AUDIT.md` at the start of every bugfix session.** If a previous session already discovered and reported the issue you are about to investigate, you should see it there. Starting from `AUDIT.md` avoids duplicate work and makes it obvious which fixes are still pending.
 
-## Deployment — HuggingFace Space (`shimen/yapapa`)
+## Deployment
 
-[`shimen/yapapa`](https://huggingface.co/spaces/shimen/yapapa) — live at <https://shimen-yapapa.hf.space> — is a Docker Space that runs this gateway. It is a **deploy target, not a source of truth**: never edit it by hand, it is built from this repo.
-
-```bash
-./deploy/hf_space.sh --dry-run    # list the exact file set that would ship
-./deploy/hf_space.sh              # export committed HEAD into the Space and push
-```
-
-`git archive HEAD` exports the committed tree into a scratch clone of the Space, `deploy/hf-space/README.md` is written over the Space's `README.md` (the Space manifest — `sdk: docker`, `app_port: 4000`), and a single `Deploy wiwi <sha>` commit is pushed. Nothing is force-pushed and the gateway's own git history is untouched.
-
-**`git-lfs` is a hard prerequisite of the deploy.** The tracked tree carries PNGs, HF rejects a push containing binaries that are not in LFS/xet, and the Space's own `.gitattributes` covers only model weights — so the script tracks `*.png` and pushes those objects through LFS. Without git-lfs the failure lands *after* the clone and the commit, so the Space is left untouched and the error reads as a bare `git: 'lfs' is not a git command`. The script now preflights it and prints install instructions (including the no-root path: drop the official binary in `~/.local/bin`, which is already on the default PATH on this box).
-
-Three things to know before touching the deploy path:
-
-- **The Space is public, so the export must stay secret-free.** `git archive` exports *tracked* files only — that is exactly why the script uses it instead of `hf upload`, which walks the working tree and would ship `.env`, `wiwi.yaml` and `wiwi.db` whenever they sit in the checkout. Do not "simplify" it back to a working-tree copy.
-- **The repo README and the Space README are different documents.** The repo root `README.md` is the project front page; the Space's `README.md` is its YAML manifest. GitHub renders YAML front matter as a nested table, so the manifest cannot live at the repo root — it lives in `deploy/hf-space/README.md` and is copied in at deploy time.
-- **Only committed work deploys.** Local edits are silently left behind (the script warns). Commit first, then deploy.
-
-Auth is `HF_TOKEN` — a write token with `repo.write` on `shimen` — taken from the environment, else from the gitignored `.env`. It reaches git through a transient credential helper, so it never lands in the scratch clone's `.git/config` or in argv.
-
-Runtime configuration lives in the Space's **Settings → Variables and secrets**, injected as environment variables — which is precisely how `wiwi.yaml.example` resolves provider keys (`os.environ/NAME`). `WIWI_MASTER_KEY` is **required and already set**: the gateway fails closed without a session secret, so a Space whose secret is missing builds fine and then dies at `RUNTIME_ERROR`. `DATABASE_URL` is pre-set to SQLite under `/data`, the only writable path in a Space container and ephemeral across rebuilds; durable state means pointing it at an external Postgres. Both are live at <https://shimen-yapapa.hf.space>; the master key is mirrored into the gitignored `.env` as `WIWI_MASTER_KEY_SPACE`.
-
-One deploy-path detail worth keeping: HF rejects a push containing binaries that are not in LFS, and the tracked UI carries PNG logos, so the script runs `git lfs track "*.png"` in the scratch clone. Removing that turns a successful deploy into `Your push was rejected because it contains binary files`.
+The live deploy target is the HuggingFace Docker Space `shimen/yapapa` (`./deploy/hf_space.sh`). **Read `.claude/skills/hf-deploy` before touching the deploy path** — it covers the git-lfs prerequisite, the secret-free `git archive` export rule, and the Space's runtime configuration.
 
 ## Project rules & skills
 
