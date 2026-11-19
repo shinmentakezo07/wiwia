@@ -127,6 +127,7 @@ func New(cfg *config.Config) (*App, error) {
 	state.Gateway.StreamFirstChunkTimeoutS = cfg.Router.StreamFirstChunkTimeoutS
 	state.Gateway.StreamResumeMode = cfg.Router.StreamResume
 	state.Gateway.ResumeMaxRetries = cfg.Router.StreamResumeMaxRetries
+	state.Gateway.DropParams = cfg.Wiwi.DropParams
 	if cfg.Router.StreamLoopLimit > 0 {
 		state.Gateway.LoopLimit = cfg.Router.StreamLoopLimit
 	}

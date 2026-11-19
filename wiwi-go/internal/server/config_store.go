@@ -189,5 +189,6 @@ func deleteDeployment(st *store.Store, id string) error {
 func (a *App) rebuild() {
 	a.State.Router = router.New(a.State.Cfg)
 	a.State.Gateway = core.New(a.State.Router, a.State.Cost)
+	a.State.Gateway.DropParams = a.State.Cfg.Wiwi.DropParams
 	log.Printf("wiwi: config reloaded (%d providers, %d deployments)", len(a.State.Cfg.Providers), len(a.State.Cfg.ModelList))
 }

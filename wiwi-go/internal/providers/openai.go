@@ -193,9 +193,31 @@ func (a *OpenAIAdapter) EncodeRequest(req ir.Request, modelID string, params map
 		}
 		setDefault(body, k, v)
 	}
-	// Caller extras ride through when the body does not model them already.
-	mergeDefaults(body, req.Extras)
+	// Caller extras: the Chat wire forwards the standard params it does not
+	// model above; anything else rides through only when drop_params is off
+	// (mirrors the Python adapter's _STANDARD policy).
+	dropParams := true
+	if v, ok := params["drop_params"].(bool); ok {
+		dropParams = v
+	}
+	for k, v := range req.Extras {
+		if !dropParams || openAIStandardExtras[k] {
+			if _, exists := body[k]; !exists {
+				body[k] = v
+			}
+		}
+	}
 	return body, nil
+}
+
+// openAIStandardExtras are Chat/Responses params the IR does not model but an
+// OpenAI-shaped upstream accepts verbatim (from the Python adapter).
+var openAIStandardExtras = map[string]bool{
+	"frequency_penalty": true, "presence_penalty": true, "logprobs": true,
+	"top_logprobs": true, "user": true, "verbosity": true,
+	"web_search_options": true, "prediction": true, "store": true,
+	"metadata": true, "prompt_cache_key": true, "safety_identifier": true,
+	"modalities": true, "audio": true, "logit_bias": true, "service_tier": true,
 }
 
 var validReasoningEffort = map[string]bool{

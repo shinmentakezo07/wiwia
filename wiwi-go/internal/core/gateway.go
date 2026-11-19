@@ -30,6 +30,10 @@ type Gateway struct {
 	StreamResume bool
 	// LoopLimit aborts degenerate repetition (0 disables).
 	LoopLimit int
+	// DropParams governs unmodelled caller extras: when true (the default)
+	// adapters forward only the keys their wire documents; when false they
+	// forward every extra raw. Mirrors wiwi_settings.drop_params.
+	DropParams bool
 	// Tracer records request spans when telemetry is enabled.
 	Tracer *telemetry.Tracer
 	// StreamCoalesce merges TextDeltas under backpressure (opt-in).
@@ -44,7 +48,7 @@ type Gateway struct {
 }
 
 func New(rt *router.Router, ce *cost.Engine) *Gateway {
-	g := &Gateway{Router: rt, Cost: ce, NumRetries: rt.NumRetries(), LoopLimit: 100}
+	g := &Gateway{Router: rt, Cost: ce, NumRetries: rt.NumRetries(), LoopLimit: 100, DropParams: true}
 	rt.ApplyThresholds()
 	rt.InitLaneCaps()
 	return g
@@ -79,8 +83,8 @@ func mergeHeaders(base map[string]string, extra map[string]string) map[string]st
 	return out
 }
 
-func deploymentParams(d *router.Deployment) map[string]any {
-	out := map[string]any{}
+func deploymentParams(d *router.Deployment, dropParams bool) map[string]any {
+	out := map[string]any{"drop_params": dropParams}
 	if d.MaxTokens != nil {
 		out["max_tokens"] = *d.MaxTokens
 	}
@@ -123,7 +127,7 @@ func (g *Gateway) callOnce(ctx *RequestContext, dep *router.Deployment, key *rou
 	}
 	req := ctx.IRReq
 	req.Model = dep.Model
-	body, err := adapter.EncodeRequest(req, dep.Model, deploymentParams(dep))
+	body, err := adapter.EncodeRequest(req, dep.Model, deploymentParams(dep, g.DropParams))
 	if err != nil {
 		return nil, &providers.WiwiError{Status: 500, EType: "api_error", Message: err.Error()}
 	}
@@ -336,7 +340,7 @@ func (g *Gateway) pump(ctx *RequestContext, dep *router.Deployment, key *router.
 	}
 	req := ctx.IRReq
 	req.Model = dep.Model
-	body, err := adapter.EncodeRequest(req, dep.Model, deploymentParams(dep))
+	body, err := adapter.EncodeRequest(req, dep.Model, deploymentParams(dep, g.DropParams))
 	if err != nil {
 		return false, &providers.WiwiError{Status: 500, EType: "api_error", Message: err.Error()}, false, tapeIn
 	}

@@ -230,7 +230,11 @@ func (a *GeminiAdapter) EncodeRequest(req ir.Request, modelID string, params map
 		}
 	}
 
-	mergeDefaults(body, req.Extras)
+	// Gemini has no field for the caller's platform extras; they are forwarded
+	// only when drop_params is explicitly disabled.
+	if dp, ok := params["drop_params"].(bool); ok && !dp {
+		mergeDefaults(body, req.Extras)
+	}
 	return body, nil
 }
 
