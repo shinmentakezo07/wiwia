@@ -3,11 +3,19 @@ package server
 import (
 	"crypto/subtle"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
 	"wiwi-go/internal/auth"
 )
+
+// rateLimited writes the 429 + Retry-After shape the Python auth handlers use.
+func rateLimited(c *gin.Context, message string, retryAfter int) {
+	c.Header("Retry-After", strconv.Itoa(retryAfter))
+	c.JSON(http.StatusTooManyRequests, gin.H{"error": message, "type": "rate_limit_error"})
+}
 
 func (a *App) handleSignup(c *gin.Context) {
 	var body struct {
@@ -16,6 +24,13 @@ func (a *App) handleSignup(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || body.Username == "" || body.Password == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "username and password required"})
+		return
+	}
+	// Registration is unauthenticated, so it needs its own per-IP throttle:
+	// otherwise one host can create unlimited accounts.
+	scope := clientIP(c, a.State.Cfg.General.TrustedProxies)
+	if ok, retry := a.State.SignupThrottle.TryConsume(scope); !ok {
+		rateLimited(c, "too many signups from this address", retry)
 		return
 	}
 	role := "user"
@@ -32,7 +47,8 @@ func (a *App) handleSignup(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.SetCookie("wiwi_session", sess, 86400, "/", "", false, true)
+	secure := requestIsHTTPS(c, a.State.Cfg.General.TrustedProxies)
+	c.SetCookie("wiwi_session", sess, 86400, "/", "", secure, true)
 	c.JSON(http.StatusOK, gin.H{"user": u})
 }
 
@@ -44,6 +60,21 @@ func (a *App) handleLogin(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	// Throttle by client IP *and* normalized account, so neither one account
+	// nor one host can be brute-forced without limit. The master-key branch is
+	// keyed on the IP alone: the username is not consulted there, so including
+	// it would hand an attacker a fresh budget per arbitrary string against a
+	// full-admin credential. The attempt is reserved before verification and
+	// cleared on success, so only genuine failures consume the window.
+	ip := clientIP(c, a.State.Cfg.General.TrustedProxies)
+	loginScope := ip + ":master"
+	if body.MasterKey == "" {
+		loginScope = ip + ":" + strings.ToLower(strings.TrimSpace(body.Username))
+	}
+	if ok, retry := a.State.LoginThrottle.TryConsume(loginScope); !ok {
+		rateLimited(c, "too many failed login attempts", retry)
 		return
 	}
 	// Master-key login (the console's "Master key" tab posts {master_key}).
@@ -61,7 +92,10 @@ func (a *App) handleLogin(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		c.SetCookie("wiwi_session", sess, 86400, "/", "", false, true)
+		// A successful login is not a failure: hand the reserved slot back.
+		a.State.LoginThrottle.Reset(loginScope)
+		secure := requestIsHTTPS(c, a.State.Cfg.General.TrustedProxies)
+		c.SetCookie("wiwi_session", sess, 86400, "/", "", secure, true)
 		c.JSON(http.StatusOK, gin.H{"user": auth.MasterUser()})
 		return
 	}
@@ -75,7 +109,9 @@ func (a *App) handleLogin(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.SetCookie("wiwi_session", sess, 86400, "/", "", false, true)
+	a.State.LoginThrottle.Reset(loginScope)
+	secure := requestIsHTTPS(c, a.State.Cfg.General.TrustedProxies)
+	c.SetCookie("wiwi_session", sess, 86400, "/", "", secure, true)
 	c.JSON(http.StatusOK, gin.H{"user": u})
 }
 

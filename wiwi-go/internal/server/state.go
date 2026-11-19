@@ -50,8 +50,12 @@ type AppState struct {
 
 	SpendBuffer *auth.SpendBuffer
 	Healer      *core.Healer
-	stop        chan struct{}
-	stopOnce    sync.Once
+	// Abuse throttles for the unauthenticated auth surface (Python parity:
+	// 10 failed logins / 5 min per IP+account, 5 signups / hour per IP).
+	LoginThrottle  *attemptThrottle
+	SignupThrottle *attemptThrottle
+	stop           chan struct{}
+	stopOnce       sync.Once
 }
 
 // App bundles state and the Gin engine.
@@ -110,10 +114,12 @@ func New(cfg *config.Config) (*App, error) {
 		Cache:  respCache,
 		Flight: cache.NewFlight(),
 		Bus:    logging.NewBus(4096), Totals: logging.NewTotals(), Metrics: metrics.NewCollector(),
-		Journal:       streaming.NewJournal(cfg.Router.StreamJournalEnabled, cfg.Router.StreamJournalDir, cfg.Router.StreamJournalTTLS, int64(cfg.Router.StreamJournalMaxBytes)),
-		Responses:     NewResponseStore(st, cfg.Wiwi.StoreResponses, cfg.Wiwi.ResponseStoreTTLS),
-		SessionSecret: deriveSessionSecret(cfg),
-		StaticDir:     staticDir(), StartTime: time.Now(),
+		Journal:        streaming.NewJournal(cfg.Router.StreamJournalEnabled, cfg.Router.StreamJournalDir, cfg.Router.StreamJournalTTLS, int64(cfg.Router.StreamJournalMaxBytes)),
+		Responses:      NewResponseStore(st, cfg.Wiwi.StoreResponses, cfg.Wiwi.ResponseStoreTTLS),
+		SessionSecret:  deriveSessionSecret(cfg),
+		LoginThrottle:  newAttemptThrottle(10, 5*time.Minute),
+		SignupThrottle: newAttemptThrottle(5, time.Hour),
+		StaticDir:      staticDir(), StartTime: time.Now(),
 		stop: make(chan struct{}),
 	}
 	state.Journal.Sweep()
