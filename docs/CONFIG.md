@@ -87,6 +87,7 @@ wiwi_settings:
   # may be continued with previous_response_id. ttl_s <= 0 keeps rows forever.
   store_responses: true
   response_store_ttl_s: 86400
+  response_store_sweep_interval_s: 300  # TTL sweep cadence; 0 = no background sweeper
   log_retention_days: 30          # prune raw request_logs older than this; 0 = keep forever
   log_max_rows: 10000             # keep at most N raw rows; 0 = unlimited
   log_prune_interval_s: 3600      # seconds between prune sweeps; 0 = startup only
@@ -114,10 +115,11 @@ wiwi_settings:
 | `max_request_body_mb` | `50` | Max request body size in MB. |
 | `store_prompts_in_spend_logs` | `false` | Persist full prompt/response content in spend logs. |
 | `store_responses` | `true` | Persist `/v1/responses` state so `previous_response_id` and `GET/DELETE /v1/responses/{id}` work. `false` = stateless like before. |
-| `response_store_ttl_s` | `86400` | TTL for stored responses; enforced on read and by a 300 s sweeper. `0` keeps them forever. |
+| `response_store_ttl_s` | `86400` | TTL for stored responses; enforced on read and by a background sweeper. `0` keeps them forever. |
+| `response_store_sweep_interval_s` | `300` | Seconds between stored-responses TTL sweeps. `0` disables the background sweeper (expiry stays enforced on read). An idle store issues no SQL between puts, so a scale-to-zero Postgres (Neon) can suspend; the cadence only costs compute while rows are actually expiring. |
 | `log_retention_days` | `30` | Drop raw `request_logs` rows older than this; 0 keeps forever. Rows are rolled into `request_rollups` first. |
 | `log_max_rows` | `10000` | Cap on raw log rows; 0 = unlimited. |
-| `log_prune_interval_s` | `3600` | Seconds between prune sweeps; 0 = startup only. |
+| `log_prune_interval_s` | `3600` | Seconds between prune sweeps; 0 = startup only. Sweeps are skipped entirely (lock included) when nothing was written since the last pass; every 24th tick sweeps anyway for out-of-band writers on a shared database. |
 | `spend_batching_enabled` | `false` | Aggregate the admission reservation release and the real charge into one `UPDATE` per key per flush. Off by default: it changes the failure model (an unflushed charge is lost on a process crash, bounded by the interval and caps) and makes spend visible to admission up to one flush interval late. The reservation stays in the DB until the flush, so a crash fails closed. |
 | `spend_flush_interval_ms` | `250` | Flush cadence for the spend buffer. Lower values reduce the cross-replica freshness window at the cost of more writes. |
 | `spend_flush_max_pending` | `1000` | Flush early when this many charges are buffered, bounding memory and the loss window. |
@@ -567,7 +569,7 @@ All config is parsed through Pydantic v2 models in `wiwi/config.py`:
 
 - `WiwiConfig` — top-level aggregate (`providers`, `model_list`, `router_settings`, `general_settings`, `wiwi_settings`, `cache_settings`, `healer`)
 - `GeneralSettings` — `master_key`, `database_url`, `redis_url`, `max_keys_per_user`, `trusted_proxies`, `db_pool_size`, `db_max_overflow`, `db_pool_recycle_s`, `shared_database`, `reservation_stale_s`
-- `WiwiSettings` — `host`, `port`, `public_url`, `drop_params`, `max_request_body_mb`, `store_prompts_in_spend_logs`, `store_responses`, `response_store_ttl_s`, `log_retention_days`, `log_max_rows`, `log_prune_interval_s`, `spend_batching_enabled`, `spend_flush_interval_ms`, `spend_flush_max_pending`, `spend_flush_max_dollars_per_key`, `singleflight_enabled`, `singleflight_max_flights`, `singleflight_max_waiters`, `tool_schema_cache_entries`, `http_max_connections`, `http_max_keepalive_connections`, `http_keepalive_expiry_s`, `perf_timings`
+- `WiwiSettings` — `host`, `port`, `public_url`, `drop_params`, `max_request_body_mb`, `store_prompts_in_spend_logs`, `store_responses`, `response_store_ttl_s`, `response_store_sweep_interval_s`, `log_retention_days`, `log_max_rows`, `log_prune_interval_s`, `spend_batching_enabled`, `spend_flush_interval_ms`, `spend_flush_max_pending`, `spend_flush_max_dollars_per_key`, `singleflight_enabled`, `singleflight_max_flights`, `singleflight_max_waiters`, `tool_schema_cache_entries`, `http_max_connections`, `http_max_keepalive_connections`, `http_keepalive_expiry_s`, `perf_timings`
 - `RouterSettings` — routing strategy, retries, timeouts, cooldowns, fallbacks, streaming + journal knobs, Prometheus, cycle + failover policy, `session_affinity`/`session_affinity_ttl_s`, `prefix_affinity`/`prefix_affinity_ttl_s`
 - `CacheSettings` — enabled, ttl_s, max_entries, bypass_header
 - `HealerSettings` — enabled, tick_s, probe_timeout_s, max_probes_per_sweep, probation_weight, etc.

@@ -1730,8 +1730,11 @@ async def lifespan(app: FastAPI):
                                 log_proxy=state.router.log_proxy)
     state.healer.start()
     # Persisted Responses state (spec B): TTL sweeper for stored_responses.
+    # Interval 0 disables the background loop; expiry stays enforced on read.
     if state.response_store is not None:
-        state.response_store.start()
+        sweep_interval = state.config.wiwi_settings.response_store_sweep_interval_s
+        if sweep_interval > 0:
+            state.response_store.start(interval_s=sweep_interval)
     # OTLP tracing: no-op unless ``telemetry.enabled`` and the ``[otel]`` extra
     # is installed, so this is safe to call unconditionally.
     tracer.configure(state.config.telemetry)

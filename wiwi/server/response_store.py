@@ -59,6 +59,13 @@ class ResponseStore:
         self.engine = engine
         self.ttl_s = ttl_s
         self._sweeper: asyncio.Task[None] | None = None
+        # True until the first sweep, and re-armed by every put. An idle store
+        # (no writes since the last sweep) skips the DELETE entirely: on a
+        # scale-to-zero Postgres (Neon) an unconditional 300 s query kept the
+        # endpoint from ever suspending — 24/7 compute for zero traffic
+        # (AUDIT #604). The first pass always runs: a restart may inherit
+        # expired rows from the previous process.
+        self._dirty = True
 
     async def startup(self) -> None:
         async with self.engine.begin() as conn:
@@ -80,6 +87,7 @@ class ResponseStore:
                 {"id": resp_id, "ts": time.time(), "key": key_id, "grp": model_group,
                  "inp": orjson.dumps(input_items).decode(),
                  "out": orjson.dumps(output).decode()})
+        self._dirty = True
 
     async def get(self, resp_id: str, key_id: str) -> StoredResponse | None:
         async with self.engine.begin() as conn:
@@ -110,13 +118,17 @@ class ResponseStore:
         return (res.rowcount or 0) > 0
 
     async def sweep(self, now: float | None = None) -> int:
-        if self.ttl_s <= 0:
+        if self.ttl_s <= 0 or not self._dirty:
             return 0
         cutoff = (now if now is not None else time.time()) - self.ttl_s
         async with self.engine.begin() as conn:
             res = await conn.execute(sa.text(
                 "DELETE FROM stored_responses WHERE created_at < :cutoff"),
                 {"cutoff": cutoff})
+        # Cleared only on success: a failed sweep stays dirty and is retried
+        # on the next tick. A put racing the DELETE re-arms the flag, costing
+        # one extra pass — never a missed expiry (reads enforce TTL anyway).
+        self._dirty = False
         return res.rowcount or 0
 
     async def sweep_forever(self, interval_s: float = 300.0) -> None:

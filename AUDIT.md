@@ -52,6 +52,42 @@ is not fixed in the same change.
 
 ## Archive index (fixed, newest first)
 
+## ✅ Fixed — idle background sweepers kept a serverless database awake (2026-11-19)
+
+**Section status:** fixed — #604 (round 209).
+
+### 604. Unconditional periodic SQL from the Responses sweeper and the retention sweep prevented Neon scale-to-zero — an idle gateway billed 24/7 compute
+
+**Severity:** 🟡 Medium · **Status: fixed** — round 209
+(`tests/test_fix_round209.py`)
+**Files:** `wiwi/server/response_store.py` (`sweep`, `put`),
+`wiwi/logging_core/retention.py` (`_run`, `sweep`, `_sweep_lock`),
+`wiwi/logging_core/db_sink.py` (`dirty` flag),
+`wiwi/config.py` + `wiwi/server/app.py`
+(`response_store_sweep_interval_s`).
+
+**Trigger:** point `DATABASE_URL` at a scale-to-zero Postgres (Neon) and serve
+no traffic. Neon suspends compute only after ~5 min with zero connections and
+zero queries; `ResponseStore.sweep_forever` issued
+`DELETE FROM stored_responses` every 300 s **even on an empty table**, so the
+suspend timer reset before it ever elapsed (~720 compute-hours/month for an
+idle gateway). `LogRetention` added an hourly lock INSERT/DELETE plus four
+prune/cap queries even when nothing had been written since the last pass.
+
+**Fix:** both sweepers are activity-gated. `ResponseStore` tracks a dirty flag
+(set by `put`, cleared only by a successful sweep; true at startup so a
+restart still drains inherited rows) and an idle tick issues no SQL at all.
+`DBSink` carries the same flag for the log tables (set by
+`write_requests`/`write_audit`), and `LogRetention.sweep` skips the whole pass
+— lock included — when the sink is clean; every 24th tick is forced anyway so
+a sibling's out-of-band writes on a shared database are still pruned. The
+responses cadence is now `response_store_sweep_interval_s` (default 300,
+`0` disables the loop; expiry stays enforced on read). Also fixed en route:
+`_sweep_lock` ignored `acquire_sweep_lock()`'s boolean, so a process that
+LOST the lock still ran the prune (the #354 double-count it exists to stop)
+and released the winner's row; it now yields False without touching the
+sibling's lock.
+
 ## ✅ Fixed — a spent free allowance errored the caller instead of wrapping (2026-11-16)
 
 **Section status:** fixed — #600 (round 207).

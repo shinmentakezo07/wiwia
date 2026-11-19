@@ -39,6 +39,7 @@ class LogRetention:
         self._state = state
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
+        self._ticks = 0
 
     def start(self) -> None:
         if self._task is not None and not self._task.done():
@@ -65,8 +66,13 @@ class LogRetention:
         except TimeoutError:
             pass
         while not self._stop.is_set():
+            # Every 24th pass is forced even when this process wrote nothing:
+            # a sibling on a shared database never touches our sink's dirty
+            # flag, and its rows must still be pruned eventually (AUDIT #604).
+            force = self._ticks % 24 == 0
+            self._ticks += 1
             try:
-                await self.sweep()
+                await self.sweep(force=force)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 — a sweep must never kill the task
@@ -79,7 +85,7 @@ class LogRetention:
             except TimeoutError:
                 continue
 
-    async def sweep(self) -> None:
+    async def sweep(self, *, force: bool = False) -> None:
         """Run one retention pass: age prune, then the row cap.
 
         Order matters. Age first removes rows that are old regardless of
@@ -103,14 +109,25 @@ class LogRetention:
         sink = self._state.logs.db_sink
         if sink is None:
             return
+        if not force and not sink.dirty:
+            # No writes since the last successful pass: skip the whole sweep,
+            # lock included. On a scale-to-zero Postgres (Neon) even the lock
+            # INSERT/DELETE is a query that resets the suspend timer, so an
+            # idle gateway must issue nothing at all (AUDIT #604). ``force``
+            # (startup pass, every 24th tick, manual call) still sweeps for
+            # out-of-band writers on a shared database.
+            return
         ws = self._state.config.wiwi_settings
 
         t0 = time.monotonic()
-        async with self._sweep_lock(sink):
+        async with self._sweep_lock(sink) as held:
+            if not held:
+                return  # a sibling holds the lock; keep dirty and retry next tick
             by_age = await sink.prune_old_requests(ws.log_retention_days)
             by_cap = await sink.enforce_log_cap(ws.log_max_rows)
             audit_age = await sink.prune_old_audit(ws.log_retention_days)
             audit_cap = await sink.enforce_audit_cap(ws.log_max_rows)
+            sink.dirty = False
         if by_age or by_cap or audit_age or audit_cap:
             log.info("request_logs_pruned", by_age=by_age, by_cap=by_cap,
                      audit_by_age=audit_age, audit_by_cap=audit_cap,
@@ -130,9 +147,14 @@ class LogRetention:
         reclaimed by its age (see ``db_sink._STALE_LOCK_S``).
         """
         try:
-            await sink.acquire_sweep_lock()
+            taken = await sink.acquire_sweep_lock()
         except Exception as e:  # noqa: BLE001 — a lock failure must not kill the task
             log.warning("log_retention_lock_failed", error=str(e)[:200])
+            yield False
+            return
+        if not taken:
+            # A live sibling holds the row (AUDIT #354). Yield False WITHOUT
+            # releasing: releasing would delete the sibling's lock.
             yield False
             return
         try:

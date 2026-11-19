@@ -267,6 +267,10 @@ wiwi_settings:
   # Emit `x-wiwi-timings` (per-stage ms) so bench.py can attribute latency.
   # perf_timings: false
   response_store_ttl_s: 86400
+  # Seconds between stored-responses TTL sweeps; 0 disables the background
+  # sweeper (expiry stays enforced on read). An idle store issues no SQL, so
+  # a scale-to-zero Postgres (Neon) can suspend between bursts of traffic.
+  response_store_sweep_interval_s: 300
   # Retention and storage cap for request_logs. Both roll the rows they remove
   # into request_rollups first, so the dashboard's totals, token counts, cost
   # and percentiles stay complete — only per-request detail is dropped.
@@ -274,7 +278,8 @@ wiwi_settings:
   # correctly when a window spans both fresh and rolled-up rows.
   log_retention_days: 30                 # drop raw rows older than this (0 = keep forever)
   log_max_rows: 10000                    # keep at most N raw rows (0 = unlimited)
-  log_prune_interval_s: 3600             # seconds between sweeps (0 = startup only)
+  log_prune_interval_s: 3600             # seconds between sweeps (0 = startup only);
+                                         # idle sweeps are skipped, every 24th tick forces one
 
 # Realtime WebSocket surface (WS /v1/realtime). Off by default; the route does
 # not exist until this is on, and a provider must also declare a realtime_url

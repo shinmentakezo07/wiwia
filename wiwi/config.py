@@ -733,6 +733,11 @@ class WiwiSettings(BaseModel):
     # and ``previous_response_id`` 404s. ttl_s <= 0 keeps rows forever.
     store_responses: bool = True
     response_store_ttl_s: float = 86400.0
+    """Seconds between stored-responses TTL sweeps. 0 disables the background
+    sweeper entirely (expiry stays enforced on read). An idle store issues no
+    SQL between puts, so on a scale-to-zero Postgres (Neon) this cadence only
+    costs compute while rows are actually expiring (AUDIT #604)."""
+    response_store_sweep_interval_s: float = 300.0
     """Prune request_logs older than this many days. 0 = keep forever.
 
     Pruning rolls the doomed rows into ``request_rollups`` first, so totals,
@@ -758,6 +763,17 @@ class WiwiSettings(BaseModel):
     # Host header (never X-Forwarded-Host) so an attacker cannot point an
     # OAuth callback at their own origin.
     public_url: str = ""
+
+    @field_validator("response_store_sweep_interval_s")
+    @classmethod
+    def _response_sweep_interval_must_not_be_negative(cls, v: float) -> float:
+        """0 is the documented "no background sweeper" switch; a negative
+        interval would make ``asyncio.sleep`` raise inside the loop."""
+        if v < 0:
+            raise ValueError(
+                f"response_store_sweep_interval_s must not be negative (got {v}); "
+                "0 disables the background sweeper")
+        return v
 
 
 class TelemetrySettings(BaseModel):

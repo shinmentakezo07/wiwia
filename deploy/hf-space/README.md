@@ -62,6 +62,12 @@ restart of the *same* container, but **not** across a Space rebuild — the
 filesystem is ephemeral. For durable state, set `DATABASE_URL` to an external
 Postgres (Neon, Supabase, …) in the Space secrets and it takes precedence.
 
+On Neon, also set the endpoint's **scale-to-zero timeout to 60 s** (Neon
+console → endpoint settings). wiwi's background sweepers are idle-aware and
+issue no SQL without traffic, but any held pool connection or admin-UI poll
+resets Neon's suspend timer; the shorter timeout bounds what an idle gateway
+can cost.
+
 The admin SPA is baked into the image at build time by the repo's `Dockerfile`
 (React 19 + Vite), so no separate frontend step is needed.
 

@@ -431,6 +431,12 @@ class DBSink:
         self.engine = engine
         self._is_pg = engine.dialect.name == "postgresql"
         self._query_cache: dict[tuple, tuple] = {}
+        # Re-armed by every write to the log tables, cleared by a successful
+        # retention pass. An idle sink lets LogRetention skip the whole sweep
+        # (lock included): on a scale-to-zero Postgres (Neon) an unconditional
+        # hourly query kept the endpoint from ever suspending (AUDIT #604).
+        # True at startup: a restart may inherit prunable rows.
+        self.dirty = True
 
     def _cache_get(self, key: tuple):
         hit = self._query_cache.get(key)
@@ -759,6 +765,7 @@ class DBSink:
                 doomed_params)
             deleted = result.rowcount or 0
         self.invalidate_cache()
+        self.dirty = False
         return deleted
 
 
@@ -918,6 +925,7 @@ class DBSink:
         # The rows just written must be visible to the very next read; the
         # 5 s TTL would otherwise hide a fresh request from the dashboard.
         self.invalidate_cache()
+        self.dirty = True
 
     async def _write_requests_rowwise(self, stmt, rows: list[dict]) -> int:
         """Insert *rows* one at a time, skipping any the DB rejects.
@@ -1353,6 +1361,7 @@ class DBSink:
                  "target": evt.target, "diff": orjson.dumps(evt.diff).decode()},
             )
         self.invalidate_cache()
+        self.dirty = True
 
     async def read_audit(self, limit: int = 200) -> list[dict]:
         """Newest-first ``audit_logs`` rows shaped like ``public_dict(LogEvent)``.
