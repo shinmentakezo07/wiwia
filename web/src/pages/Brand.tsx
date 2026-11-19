@@ -21,7 +21,7 @@ interface BrandAsset {
 const BRAND_ASSETS: BrandAsset[] = [
   {
     name: "Logo",
-    description: "The black-hole mark used by the gateway, console, and favicons.",
+    description: "The grumpy-cat mark used by the gateway, console, and favicons.",
     path: "/wiwi-logo.png",
     filename: "wiwi-logo.png",
     previewBg: "bg-[var(--admin-bg)]",
