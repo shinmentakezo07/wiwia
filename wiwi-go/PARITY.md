@@ -65,6 +65,27 @@ Ported provider logic:
 - **Health healer** — now wired on `healer.enabled` and backs off per key
   (`probe_backoff_base_s` / `probe_backoff_cap_s`) instead of re-probing a dead
   key every tick.
+- **Per-IP abuse throttling** — `general_settings.trusted_proxies` now gates
+  `X-Forwarded-For`/`X-Forwarded-Proto` exactly as Python does, and the auth
+  surface carries the same fixed-window attempt throttles (10 failed logins /
+  5 min per IP+account, 5 signups / hour per IP) with `Retry-After`.
+- **Percentile histograms** — `request_logs` records `tps`; `request_rollups`
+  keeps the `tps`/`ttft_ms`/`latency_ms` distributions in `p95_hist` (log-scale
+  bins) plus the legacy scalar p95 columns. `/admin/stats/overview` unions raw
+  samples with the rolled-up histogram, so pruning no longer makes percentiles
+  vanish (a weighted mean of two p95s is not a quantile).
+- **Admin log filters/pagination** — `/admin/logs/requests` accepts
+  `limit` (≤50k), `minutes`, and `offset` with the Python ordering contract;
+  `/admin/logs/audit` defaults to 200 and caps at 5k; `/admin/logs/proxy`
+  serves the newest 500; all three are `Cache-Control: no-store`.
+- **`drop_params` allowlist** — the OpenAI and Anthropic adapters forward only
+  the extras their wire documents unless `wiwi_settings.drop_params` is false;
+  Gemini forwards extras only in that mode, and the Responses wire no longer
+  leaks the control key into the upstream body.
+- **Anthropic MCP / context-management** — `mcp_servers`, `container`, and
+  `context_management` are modelled fields on the IR (and part of the response
+  cache key) instead of opaque `extras`; only the Anthropic adapter forwards
+  them.
 
 
 ## Core pipeline — Full
@@ -106,14 +127,5 @@ Ported provider logic:
 | OAuth auto-refresh loop (token rotation before expiry) | Full |
 
 ## Remaining gaps (minor / documented)
-- **Per-IP abuse throttling** (`trusted_proxies` + `X-Forwarded-For`) is not modelled;
-  rate limits are per virtual key and gateway-wide, not per client IP.
-- **Anthropic MCP servers / context-management** ride `Request.extras` rather than a
-  modelled field (they are forwarded verbatim).
-- **Stats percentile histograms** (`p95_hist`) are not kept; retention rolls up counts,
-  tokens and cost, and stats read fresh rows + rollups, but not a merged histogram.
-- **Admin log filters/pagination** are basic (`limit`/`since`), not the full query set.
-- **`drop_params`** is implicit: adapters emit only fields the target wire documents,
-  rather than applying the Python per-provider allowlist table.
 - **OpenCode `jev-*`** System One models remain unroutable (the Python adapter documents
   the same limitation; they are not a completion API).

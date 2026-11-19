@@ -61,9 +61,14 @@ CGO_ENABLED=1 go test -race ./internal/server/... ./internal/core/... ./internal
 go vet ./...
 ```
 
-## Remaining minor gaps (see PARITY.md)
-- Per-IP abuse throttling (`trusted_proxies` + X-Forwarded-For); limits are per key / global.
-- Anthropic MCP servers / context-management as modelled fields (they ride extras).
-- Stats percentile histograms (p95) — rollups keep counts/tokens/cost, not a histogram.
-- Admin log filters/pagination beyond limit/since.
-- `drop_params` is implicit (adapters emit only documented fields).
+## Parity gaps closed (see PARITY.md)
+- Per-IP abuse throttling (`trusted_proxies` + X-Forwarded-For/X-Forwarded-Proto),
+  with the Python auth throttles (login 10/5 min, signup 5/h) and `Retry-After`.
+- Anthropic MCP servers / container / context-management as modelled IR fields.
+- Stats percentile histograms (`p95_hist`) merged with raw samples in the overview.
+- Admin log filters/pagination (`limit`/`minutes`/`offset`, capped audit limit, 500-entry
+  proxy tail, `no-store`).
+- Explicit `drop_params` allowlists for the OpenAI/Anthropic/Gemini/Responses wires.
+
+The only remaining documented gap is OpenCode's `jev-*` System One models, which are not
+a completion API (Python has the same limitation).
