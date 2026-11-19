@@ -10,6 +10,8 @@ pinned: false
 
 # wiwi on HuggingFace Spaces
 
+<img alt="wiwi" src="docs/assets/wiwi-mark.svg" width="88">
+
 This Space runs the [wiwi](https://github.com/shinmentakezo07/wiwia) gateway —
 a self-hosted unified LLM proxy. Three inbound dialects (OpenAI Chat, OpenAI
 Responses, Anthropic Messages) route through one canonical IR to thirteen

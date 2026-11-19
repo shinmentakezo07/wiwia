@@ -282,7 +282,7 @@ function WireStrip() {
       <div className="docs-wire-cell docs-wire-cell-core">
         <p className="docs-wire-label">Canonical</p>
         <div className="docs-wire-node">
-          <img src="/wiwi-logo.png" alt="" className="docs-wire-node-logo" />
+          <img src="/wiwi-mark.svg" alt="" className="docs-wire-node-logo" />
           <span className="docs-wire-node-text">wiwi IR</span>
         </div>
         <p className="docs-wire-note">

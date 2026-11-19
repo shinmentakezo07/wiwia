@@ -93,7 +93,7 @@ export function PublicFooter() {
           <div className="lg:col-span-4">
             <Link to="/" className="group inline-flex min-h-11 items-center gap-2.5 no-underline outline-none">
               <span className="relative rounded-xl ring-1 ring-white/[0.10] ring-inset transition-shadow duration-300 group-hover:shadow-[0_0_20px_rgba(116,66,237,0.4)] group-focus-visible:shadow-[0_0_20px_rgba(116,66,237,0.4)]">
-                <img src="/wiwi-logo.png" alt="" className="block size-11 rounded-xl object-cover" />
+                <img src="/wiwi-mark.svg" alt="" className="block size-11 rounded-xl object-cover" />
               </span>
               <span className="flex items-baseline gap-2">
                 <span className="text-[15px] font-semibold tracking-tight text-[var(--admin-text)]">wiwi</span>

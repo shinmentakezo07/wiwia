@@ -14,6 +14,8 @@ interface BrandAsset {
   filename: string;
   /** Dark preview needs a light tile and vice versa. */
   previewBg: string;
+  /** Square mark vs. wide lockup need different preview sizing. */
+  previewClass: string;
 }
 
 const BRAND_ASSETS: BrandAsset[] = [
@@ -23,13 +25,15 @@ const BRAND_ASSETS: BrandAsset[] = [
     path: "/wiwi-mark.svg",
     filename: "wiwi-mark.svg",
     previewBg: "bg-zinc-100",
+    previewClass: "h-20 w-20",
   },
   {
     name: "Full logo",
     description: "The mark plus the wordmark, on the dark surface it was drawn for.",
-    path: "/wiwi-logo.png",
-    filename: "wiwi-logo.png",
+    path: "/wiwi-logo.svg",
+    filename: "wiwi-logo.svg",
     previewBg: "bg-[var(--admin-bg)]",
+    previewClass: "h-16 w-auto max-w-full",
   },
 ];
 
@@ -64,7 +68,7 @@ export function BrandPage() {
               <img
                 src={asset.path}
                 alt={`${asset.name} preview`}
-                className={asset.path.endsWith(".svg") ? "h-20 w-20" : "h-20 w-auto rounded-xl"}
+                className={asset.previewClass}
               />
             </div>
             <div className="p-5">
