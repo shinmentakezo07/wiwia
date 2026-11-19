@@ -157,6 +157,14 @@ func New(cfg *config.Config) (*App, error) {
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
+	// Match on the raw (still-escaped) path so a group name that itself
+	// contains a slash — the SPA uses model ids like "z-ai/glm-5" as group
+	// names, encoded as %2F like the Python backend's {name:path} route —
+	// stays one route segment. With the default decoded matching, net/http
+	// turns %2F into a real path separator first and the request falls
+	// through to NoRoute ("not found"). Params still arrive unescaped
+	// (UnescapePathValues defaults true).
+	r.UseRawPath = true
 	r.Use(gin.Recovery())
 	app := &App{State: state, Router: r}
 	app.registerMiddleware()
