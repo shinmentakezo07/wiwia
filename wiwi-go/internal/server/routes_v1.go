@@ -172,6 +172,7 @@ func (a *App) finish(ctx *core.RequestContext, status int, e *providers.WiwiErro
 		"status":             status, "cost": cost,
 		"prompt_tokens": prompt, "completion_tokens": completion,
 		"tok_in": prompt, "tok_out": completion,
+		"tps":     ctx.TPS(),
 		"ttft_ms": ctx.TTFTMs(), "latency_ms": ctx.LatencyMs(),
 		"was_stream": false,
 	})
@@ -198,6 +199,7 @@ func (a *App) logRequest(ctx *core.RequestContext) {
 	if d, ok := ctx.Deployment.(interface{ ModelName() string }); ok {
 		modelID = d.ModelName()
 	}
+	tps := ctx.TPS()
 	keyID := ""
 	if ctx.Auth != nil {
 		keyID = ctx.Auth.KeyID
@@ -208,10 +210,10 @@ func (a *App) logRequest(ctx *core.RequestContext) {
 	}
 	_, _ = a.State.Store.DB().Exec(a.State.Store.Rebind(
 		`INSERT INTO request_logs(id,request_id,ts,key_id,model_group,provider,model_id,status,
-		 prompt_tokens,completion_tokens,cached_tokens,reasoning_tokens,cost,latency_ms,ttft_ms,error,attempts,prompt_text)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
+		 prompt_tokens,completion_tokens,cached_tokens,reasoning_tokens,cost,latency_ms,ttft_ms,tps,error,attempts,prompt_text)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
 		id, ctx.RequestID, time.Now().Unix(), keyID, ctx.Group, providerName(ctx), modelID,
-		ctx.Status, prompt, completion, cached, reasoning, ctx.Cost, ctx.LatencyMs(), ctx.TTFTMs(),
+		ctx.Status, prompt, completion, cached, reasoning, ctx.Cost, ctx.LatencyMs(), ctx.TTFTMs(), tps,
 		errText, string(attempts), promptText)
 }
 

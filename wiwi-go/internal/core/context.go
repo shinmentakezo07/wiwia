@@ -96,3 +96,17 @@ func (c *RequestContext) TTFTMs() int {
 	}
 	return int(c.FirstTokenAt.Sub(c.Started).Milliseconds())
 }
+
+// TPS reports output tokens/sec over the generation window only
+// (first→last token), matching Python. A non-streaming request has no
+// separable generation phase and reports 0.
+func (c *RequestContext) TPS() float64 {
+	if c.Usage == nil || c.Usage.CompletionTokens <= 0 ||
+		c.FirstTokenAt == nil || c.LastTokenAt == nil {
+		return 0
+	}
+	if secs := c.LastTokenAt.Sub(*c.FirstTokenAt).Seconds(); secs > 0.05 {
+		return float64(c.Usage.CompletionTokens) / secs
+	}
+	return 0
+}

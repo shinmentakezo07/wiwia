@@ -24,11 +24,19 @@ func (s *Store) Migrate() error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("store: migrate: commit: %w", err)
 	}
-	alter := `ALTER TABLE users ADD COLUMN disabled INTEGER DEFAULT 0`
-	if s.driver == DriverPostgres {
-		alter = `ALTER TABLE users ADD COLUMN IF NOT EXISTS disabled INTEGER DEFAULT 0`
+	alters := []string{
+		`ALTER TABLE users ADD COLUMN disabled INTEGER DEFAULT 0`,
+		fmt.Sprintf(`ALTER TABLE request_logs ADD COLUMN tps %s`, s.realType()),
 	}
-	_, _ = s.db.Exec(alter)
+	if s.driver == DriverPostgres {
+		alters = []string{
+			`ALTER TABLE users ADD COLUMN IF NOT EXISTS disabled INTEGER DEFAULT 0`,
+			fmt.Sprintf(`ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS tps %s`, s.realType()),
+		}
+	}
+	for _, alter := range alters {
+		_, _ = s.db.Exec(alter)
+	}
 	return nil
 }
 
@@ -93,6 +101,7 @@ func (s *Store) schema() []string {
 			cost %[1]s,
 			latency_ms INTEGER,
 			ttft_ms INTEGER,
+			tps %[1]s,
 			error TEXT,
 			attempts TEXT,
 			prompt_text TEXT

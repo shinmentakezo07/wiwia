@@ -14,6 +14,7 @@ import (
 	"wiwi-go/internal/auth"
 	"wiwi-go/internal/config"
 	"wiwi-go/internal/cost"
+	"wiwi-go/internal/logging"
 	"wiwi-go/internal/router"
 )
 
@@ -437,24 +438,49 @@ func (a *App) adminDeletePricing(c *gin.Context) {
 }
 
 func (a *App) adminLogsRequests(c *gin.Context) {
-	limit := queryInt(c, "limit", 100)
+	// Same contract as Python: limit is capped at 50k (a safety net, not a
+	// product limit), minutes==0 means all-time, and offset pages the same
+	// ts-DESC / id-DESC ordering.
+	limit := queryInt(c, "limit", 10000)
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 50000 {
+		limit = 50000
+	}
+	minutes := queryInt(c, "minutes", 0)
+	if minutes < 0 {
+		minutes = 0
+	}
+	offset := queryInt(c, "offset", 0)
+	if offset < 0 {
+		offset = 0
+	}
+	where := ""
+	var args []any
+	if minutes > 0 {
+		where = " WHERE ts >= ?"
+		args = append(args, time.Now().Unix()-int64(minutes)*60)
+	}
+	args = append(args, limit, offset)
 	rows, err := a.State.Store.Query(a.State.Store.Rebind(
 		`SELECT id,request_id,ts,key_id,model_group,provider,model_id,status,prompt_tokens,
-		 completion_tokens,cached_tokens,reasoning_tokens,cost,latency_ms,ttft_ms,error
-		 FROM request_logs ORDER BY ts DESC LIMIT ?`), limit)
+		 completion_tokens,cached_tokens,reasoning_tokens,cost,latency_ms,ttft_ms,tps,error
+		 FROM request_logs`+where+` ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?`), args...)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	defer rows.Close()
+	c.Header("Cache-Control", "no-store")
 	out := []map[string]any{}
 	for rows.Next() {
 		var id, rid, keyID, group, prov, model, errText string
 		var ts int64
 		var status, pt, ct, cached, reasoning, lat, ttft int
-		var costv float64
+		var costv, tps float64
 		if err := rows.Scan(&id, &rid, &ts, &keyID, &group, &prov, &model, &status,
-			&pt, &ct, &cached, &reasoning, &costv, &lat, &ttft, &errText); err != nil {
+			&pt, &ct, &cached, &reasoning, &costv, &lat, &ttft, &tps, &errText); err != nil {
 			continue
 		}
 		out = append(out, map[string]any{
@@ -465,7 +491,7 @@ func (a *App) adminLogsRequests(c *gin.Context) {
 			"error_code": "", "error_message": errText,
 			"tok_in": pt, "tok_cached": cached, "tok_cache_creation": 0,
 			"tok_reasoning": reasoning, "tok_out": ct,
-			"usage_estimated": false, "tps": 0.0,
+			"usage_estimated": false, "tps": tps,
 			"ttft_ms": ttft, "latency_ms": lat, "cost": costv,
 			"was_stream": false, "cache_hit": cached > 0, "cache_savings": 0.0,
 			"response_cache_hit":   false,
@@ -477,8 +503,16 @@ func (a *App) adminLogsRequests(c *gin.Context) {
 }
 
 func (a *App) adminLogsAudit(c *gin.Context) {
+	limit := queryInt(c, "limit", 200)
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 5000 {
+		limit = 5000
+	}
+	c.Header("Cache-Control", "no-store")
 	rows, err := a.State.Store.Query(a.State.Store.Rebind(
-		`SELECT id,ts,actor,action,target,diff FROM audit_logs ORDER BY ts DESC LIMIT ?`), queryInt(c, "limit", 100))
+		`SELECT id,ts,actor,action,target,diff FROM audit_logs ORDER BY ts DESC, id DESC LIMIT ?`), limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -501,11 +535,16 @@ func (a *App) adminLogsAudit(c *gin.Context) {
 
 func (a *App) adminLogsProxy(c *gin.Context) {
 	events := a.State.Bus.EventsSince(queryInt64(c, "since", 0))
+	// Python serves the newest 500 ring entries, newest-first. Keep that
+	// contract: the console renders the array as it arrives.
+	if len(events) > 500 {
+		events = events[len(events)-500:]
+	}
 	out := make([]map[string]any, 0, len(events))
-	// Newest-first: the console renders the ring in the order it arrives.
 	for i := len(events) - 1; i >= 0; i-- {
 		out = append(out, consoleProxyEntry(events[i]))
 	}
+	c.Header("Cache-Control", "no-store")
 	c.JSON(http.StatusOK, gin.H{"logs": out})
 }
 
@@ -617,7 +656,8 @@ func (a *App) adminStatsOverview(c *gin.Context) {
 		args = append(args, cutoff)
 	}
 	var requests, errors, cacheHits, tokIn, tokCached, tokReasoning, tokOut int64
-	var cost float64
+	var tpsSamples, tpsCount int64
+	var tpsSum, cost float64
 	_ = a.State.Store.QueryRow(a.State.Store.Rebind(
 		`SELECT COUNT(*),
 		        COALESCE(SUM(CASE WHEN status >= 400 OR (error IS NOT NULL AND error != '') THEN 1 ELSE 0 END),0),
@@ -626,17 +666,34 @@ func (a *App) adminStatsOverview(c *gin.Context) {
 		        COALESCE(SUM(reasoning_tokens),0),
 		        COALESCE(SUM(completion_tokens),0),
 		        COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END),0),
-		        COALESCE(SUM(cost),0)
+		        COALESCE(SUM(cost),0),
+		        COALESCE(SUM(tps),0),
+		        COALESCE(SUM(CASE WHEN tps > 0 THEN 1 ELSE 0 END),0)
 		 FROM request_logs`+where), args...).
-		Scan(&requests, &errors, &tokIn, &tokCached, &tokReasoning, &tokOut, &cacheHits, &cost)
+		Scan(&requests, &errors, &tokIn, &tokCached, &tokReasoning, &tokOut,
+			&cacheHits, &cost, &tpsSum, &tpsCount)
 
+	// Rows already rolled up and deleted still count: without this the
+	// dashboard silently shrinks every time retention prunes.
+	roll := a.rollupTotals(hasWindow, cutoff)
+	requests += roll.requests
+	errors += roll.errors
+	tokIn += roll.tokIn
+	tokOut += roll.tokOut
+	cost += roll.cost
+	tpsSum += roll.tpsSum
+	tpsCount += roll.tpsCount
+	tpsSamples = tpsCount // exact coverage, not the capped sample length
+	hist := a.rollupHists(hasWindow, cutoff)
+
+	tpsAvg := 0.0
+	if tpsCount > 0 {
+		tpsAvg = roundTo(tpsSum/float64(tpsCount), 2)
+	}
 	rpm := 0.0
 	if hasWindow {
 		rpm = roundTo(float64(requests)/float64(minutes), 2)
 	}
-	// The frontend's OverviewStats shape. tps_* and cache_savings stay 0: the Go
-	// request_logs schema has no tps / cache_savings columns, and returning 0
-	// (not omitting the keys) is what keeps the console from reading undefined.
 	c.JSON(http.StatusOK, gin.H{
 		"window_minutes":      minutes,
 		"generated_at":        float64(now),
@@ -652,14 +709,66 @@ func (a *App) adminStatsOverview(c *gin.Context) {
 		"estimated_requests":  0,
 		"cache_hits":          cacheHits,
 		"cache_hit_rate":      roundTo(safeDiv(float64(cacheHits), float64(requests)), 4),
-		"tps_avg":             0.0,
-		"tps_p95":             0.0,
-		"tps_sample_ratio":    0.0,
-		"ttft_p95_ms":         roundTo(percentile95(a.sampleColumn("ttft_ms", hasWindow, cutoff)), 1),
-		"latency_p95_ms":      roundTo(percentile95(a.sampleColumn("latency_ms", hasWindow, cutoff)), 1),
+		"tps_avg":             tpsAvg,
+		"tps_p95":             roundTo(logging.PercentileWithSamples(a.sampleColumn("tps", hasWindow, cutoff), hist["tps"]), 2),
+		"tps_sample_ratio":    roundTo(safeDiv(float64(tpsSamples), float64(requests)), 4),
+		"ttft_p95_ms":         roundTo(logging.PercentileWithSamples(a.sampleColumn("ttft_ms", hasWindow, cutoff), hist["ttft_ms"]), 1),
+		"latency_p95_ms":      roundTo(logging.PercentileWithSamples(a.sampleColumn("latency_ms", hasWindow, cutoff), hist["latency_ms"]), 1),
 		"cost":                roundTo(cost, 6),
 		"cache_savings":       0.0,
 	})
+}
+
+type rollupSum struct {
+	requests, errors, tokIn, tokOut, tpsCount int64
+	cost, tpsSum                              float64
+}
+
+// rollupTotals aggregates request_rollups over the same window as the raw
+// read. Buckets are hour-floored, so the cutoff compares on bucket start.
+func (a *App) rollupTotals(hasWindow bool, cutoff int64) rollupSum {
+	q := `SELECT COALESCE(SUM(requests),0), COALESCE(SUM(errors),0),
+	             COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0),
+	             COALESCE(SUM(cost),0), COALESCE(SUM(tps_sum),0),
+	             COALESCE(SUM(tps_count),0)
+	      FROM request_rollups`
+	var args []any
+	if hasWindow {
+		q += " WHERE bucket >= ?"
+		args = append(args, cutoff)
+	}
+	var out rollupSum
+	_ = a.State.Store.QueryRow(a.State.Store.Rebind(q), args...).
+		Scan(&out.requests, &out.errors, &out.tokIn, &out.tokOut, &out.cost,
+			&out.tpsSum, &out.tpsCount)
+	return out
+}
+
+// rollupHists merges every stored p95_hist in the window by series, so raw
+// samples can be unioned with the rolled-up distribution.
+func (a *App) rollupHists(hasWindow bool, cutoff int64) map[string]map[int]int {
+	q := `SELECT p95_hist FROM request_rollups WHERE p95_hist != ''`
+	var args []any
+	if hasWindow {
+		q += " AND bucket >= ?"
+		args = append(args, cutoff)
+	}
+	rows, err := a.State.Store.Query(a.State.Store.Rebind(q), args...)
+	if err != nil {
+		return map[string]map[int]int{}
+	}
+	defer rows.Close()
+	out := map[string]map[int]int{}
+	for rows.Next() {
+		var text string
+		if rows.Scan(&text) != nil {
+			continue
+		}
+		for name, h := range logging.DecodeHists(text) {
+			out[name] = logging.MergeHists(out[name], h)
+		}
+	}
+	return out
 }
 
 // sampleColumn loads up to 5000 positive values of col in the window (newest
