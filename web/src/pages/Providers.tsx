@@ -196,7 +196,11 @@ function ProviderCard(props: {
 
   const s = props.stats;
   const totalKeys = props.p.keys.length;
-  const activeKeys = props.p.keys.filter((k) => k.enabled && k.status === "active").length;
+  // A key with no credential never serves, so counting it as active would
+  // report a pool that cannot route as healthy.
+  const activeKeys = props.p.keys.filter(
+    (k) => k.enabled && k.has_secret && k.status === "active",
+  ).length;
   const errorRate = s && s.requests > 0 ? s.errors / s.requests : 0;
   const cacheRate = s && s.tokIn > 0 ? s.tokCached / s.tokIn : 0;
   const badge = providerBadge(props.p.provider_type);
@@ -315,19 +319,23 @@ function ProviderCard(props: {
               <div className="flex items-center gap-2">
                 <span
                   className={`h-1.5 w-1.5 rounded-full ${
-                    k.status === "active"
-                      ? "bg-emerald-400"
-                      : k.status === "cooling"
-                        ? "bg-amber-400"
-                        : k.status === "invalid"
-                          ? "bg-red-400"
-                          : "bg-zinc-600"
+                    !k.has_secret
+                      ? "bg-amber-400"
+                      : k.status === "active"
+                        ? "bg-emerald-400"
+                        : k.status === "cooling"
+                          ? "bg-amber-400"
+                          : k.status === "invalid"
+                            ? "bg-red-400"
+                            : "bg-zinc-600"
                   }`}
                 />
                 <span className="font-medium text-[var(--admin-text)]">{k.label}</span>
               </div>
               <div className="flex items-center gap-2">
-                <Badge tone={STATUS_TONE[k.status]}>{k.status}</Badge>
+                <Badge tone={k.has_secret ? STATUS_TONE[k.status] : "amber"}>
+                  {k.has_secret ? k.status : "no secret"}
+                </Badge>
                 <span className="font-mono tabular-nums text-[var(--admin-text-dim)]">
                   {fmtInt(k.req_count)} reqs
                 </span>

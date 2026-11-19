@@ -4203,6 +4203,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
         return {
             "label": k.label,
             "masked": mask_key(k.secret),
+            # Whether the pool member can actually authenticate. An empty
+            # secret renders as the same ``***`` as a masked one, so without
+            # this flag a restored (credential-less) key is indistinguishable
+            # from a live one in the console.
+            "has_secret": bool((k.secret or "").strip()),
             "weight": k.weight,
             "enabled": k.enabled,
             "status": status,
@@ -4302,6 +4307,23 @@ def create_app(config: WiwiConfig) -> FastAPI:
                             request)
             key.weight = weight
             diff["weight"] = weight
+        if "secret" in body:
+            # The repair path for a key that has no credential: a key-pool row
+            # persisted by a secret-less backup import, or one whose secret was
+            # never filled in. An empty value is refused — it is the state this
+            # field exists to end, and an empty credential can only produce
+            # ``Authorization: Bearer `` (which httpx rejects before connect).
+            raw_secret = _interpolate(body["secret"])
+            if not isinstance(raw_secret, str) or not raw_secret.strip():
+                return _err(400, "invalid_request_error",
+                            "secret must be a non-empty string", request)
+            key.secret = raw_secret
+            diff["secret_updated"] = True
+            # A fresh credential is not the one that failed, so it must not
+            # inherit the retirement the old secret earned. Same reasoning as
+            # ``reset_status``; the operator can still disable it explicitly.
+            key.recover(force=True)
+            diff["reset_status"] = True
         if body.get("reset_status"):
             # The operator's explicit "this key is fine now". Clearing only
             # ``status``/``cooldown_until`` left ``err_count`` at its
@@ -5293,9 +5315,19 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return _err(404, "not_found_error", f"unknown provider '{name}'", request)
         key = next((k for k in acct.keys if k.available), None)
         if key is None:
+            blank = sum(1 for k in acct.keys if not (k.secret or "").strip())
+            off = sum(1 for k in acct.keys
+                      if not k.enabled and (k.secret or "").strip())
+            parts = []
+            if blank:
+                parts.append(f"{blank} without a secret (PATCH .../keys/<label>"
+                             f" {{\"secret\": ...}} to fill one in)")
+            if off:
+                parts.append(f"{off} disabled")
+            detail = f" ({'; '.join(parts)})" if parts else ""
             return _err(409, "invalid_request_error",
-                        f"no available key on provider '{name}' to fetch models",
-                        request)
+                        f"no available key on provider '{name}' to fetch models"
+                        f"{detail}", request)
         adapter = fresh_adapter(acct.provider_type)
         url = _provider_models_url(acct.provider_type, acct.base_url)
         headers = adapter.headers(ProviderKeyRef(label=key.label, secret=key.secret))
@@ -5307,9 +5339,15 @@ def create_app(config: WiwiConfig) -> FastAPI:
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as hc:
                 r = await hc.get(url, headers=headers)
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:
+            # Class name only: a DNS/TLS/connect failure and a request httpx
+            # refuses to send (e.g. an illegal header) are only distinguishable
+            # by the exception type, and dropping it made every one of them
+            # read "could not reach". The message is omitted because it can
+            # quote the credential.
             return _err(502, "api_connection_error",
-                        f"could not reach '{name}' ({safe_url})", request)
+                        f"could not reach '{name}' ({safe_url}): "
+                        f"{type(exc).__name__}", request)
         if r.status_code != 200:
             etype = ("rate_limit_error" if r.status_code == 429
                      else "authentication_error" if r.status_code in (401, 403)
@@ -5364,9 +5402,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as hc:
                 r = await hc.get(url, headers=headers)
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:
             return _err(502, "api_connection_error",
-                        f"could not reach Cline ({url})", request)
+                        f"could not reach Cline ({url}): {type(exc).__name__}",
+                        request)
         if r.status_code != 200:
             etype = ("rate_limit_error" if r.status_code == 429
                      else "authentication_error" if r.status_code in (401, 403)

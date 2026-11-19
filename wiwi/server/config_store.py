@@ -443,6 +443,22 @@ class ConfigStore:
                                 "w": weight, "e": int(enabled),
                                 "d": int(detached)})
 
+    async def get_key_secret(self, provider_name: str, label: str) -> str | None:
+        """The persisted plaintext secret for one key, or ``None`` with no row.
+
+        The backup merge consults this before it writes a key it did not find
+        in memory: the durable row, not the live pool, decides whether a
+        document that carries no secret is describing a credential-less key or
+        one whose credential must be preserved (``add_key`` overwrites the
+        secret, so writing the document's empty value erased it).
+        """
+        async with self.engine.connect() as conn:
+            row = (await conn.execute(
+                sa.text("SELECT secret FROM provider_keys"
+                        " WHERE provider_name = :p AND label = :l"),
+                {"p": provider_name, "l": label})).first()
+        return row[0] if row is not None else None
+
     async def update_key_secret(self, provider_name: str, label: str,
                                 secret: str, *, weight: int = 1,
                                 enabled: bool = True) -> None:
@@ -470,14 +486,18 @@ class ConfigStore:
                      "w": weight, "e": int(enabled)})
 
     async def upsert_key_routing(self, provider_name: str, label: str, *,
-                                  weight: int, enabled: bool) -> None:
+                                  weight: int, enabled: bool,
+                                  detached: bool = False) -> None:
         """Set a key's routing fields, creating the row when it has none.
 
         The secret is **preserved**: an existing row keeps its credential and
-        only ``weight``/``enabled`` move, while a row that does not exist is
-        created with an empty secret. That is the shape the backup import
-        needs — a document that carries no secret must not blank a working
-        credential, but it must still record the key's routing fields.
+        only ``weight``/``enabled``/``detached`` move, while a row that does
+        not exist is created with an empty secret. That is the shape the
+        backup import needs — a document that carries no secret must not blank
+        a working credential, but it must still record the key's routing
+        fields and must clear a tombstone for a key the merge names (leaving
+        ``detached=1`` made the key present in memory now and gone after the
+        next restart).
 
         ``add_key`` cannot do this: it takes the secret as a value and
         overwrites it. ``update_key`` cannot either: it raises
@@ -487,34 +507,39 @@ class ConfigStore:
         """
         if self._is_pg:
             sql = ("INSERT INTO provider_keys"
-                   " (provider_name, label, secret, weight, enabled)"
-                   " VALUES (:p,:l,'',:w,:e)"
+                   " (provider_name, label, secret, weight, enabled, detached)"
+                   " VALUES (:p,:l,'',:w,:e,:d)"
                    " ON CONFLICT (provider_name, label) DO UPDATE SET"
-                   " weight=EXCLUDED.weight, enabled=EXCLUDED.enabled")
+                   " weight=EXCLUDED.weight, enabled=EXCLUDED.enabled,"
+                   " detached=EXCLUDED.detached")
         else:
             # SQLite's INSERT OR REPLACE would reset the secret, so the
             # conflict arm updates the routing fields only.
             sql = ("INSERT INTO provider_keys"
-                   " (provider_name, label, secret, weight, enabled)"
-                   " VALUES (:p,:l,'',:w,:e)"
+                   " (provider_name, label, secret, weight, enabled, detached)"
+                   " VALUES (:p,:l,'',:w,:e,:d)"
                    " ON CONFLICT (provider_name, label) DO UPDATE SET"
-                   " weight=excluded.weight, enabled=excluded.enabled")
+                   " weight=excluded.weight, enabled=excluded.enabled,"
+                   " detached=excluded.detached")
         async with self.engine.begin() as conn:
             await conn.execute(sa.text(sql),
                                {"p": provider_name, "l": label,
-                                "w": weight, "e": int(enabled)})
+                                "w": weight, "e": int(enabled),
+                                "d": int(detached)})
 
     async def update_key(self, provider_name: str, label: str, *,
                          weight: int | None = None,
                          enabled: bool | None = None,
                          secret: str | None = None) -> None:
-        """Set a key's routing fields, creating an override row when needed.
+        """Set a key's routing fields (and optionally its secret).
 
         A YAML-defined key has no row, so the edit used to apply in memory and
         revert on restart (AUDIT #319). With ``secret`` supplied the row is
         created — carrying the live credential, so the DB override does not
-        blank the key at startup. Without it there is nothing safe to insert and
-        the historical ``ConfigStoreNotFound`` is raised.
+        blank the key at startup — and an existing row's secret is updated too,
+        which is how an operator fills in a placeholder a secret-less backup
+        import left behind. Without ``secret`` there is nothing safe to insert
+        and the historical ``ConfigStoreNotFound`` is raised.
         """
         sets: list[str] = []
         params: dict = {"p": provider_name, "l": label}
@@ -524,6 +549,9 @@ class ConfigStore:
         if enabled is not None:
             sets.append("enabled = :e")
             params["e"] = int(enabled)
+        if secret is not None:
+            sets.append("secret = :s")
+            params["s"] = secret
         if not sets:
             return
         async with self.engine.begin() as conn:

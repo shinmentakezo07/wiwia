@@ -5,7 +5,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Boxes, Briefcase, CheckCircle2, ChevronDown, ChevronUp, Cloud, Cpu, Eye, EyeOff, Globe, Layers, Link2, Loader2, LogIn, Plus, RefreshCw, Search, Server, Sparkles, Sunrise, Trash2, Unlink, X, Zap } from "lucide-react";
+import { ArrowLeft, Boxes, Briefcase, CheckCircle2, ChevronDown, ChevronUp, Cloud, Cpu, Eye, EyeOff, Globe, KeyRound, Layers, Link2, Loader2, LogIn, Plus, RefreshCw, Search, Server, Sparkles, Sunrise, Trash2, Unlink, X, Zap } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
   addDeployment,
@@ -115,6 +115,8 @@ function KeyRow(props: { provider: string; k: PoolKey; onError: (m: string) => v
   const [weight, setWeight] = useState(String(props.k.weight));
   const [revealed, setRevealed] = useState(false);
   const [secret, setSecret] = useState<string | null>(null);
+  const [editingSecret, setEditingSecret] = useState(false);
+  const [newSecret, setNewSecret] = useState("");
 
   const reveal = useMutation({
     mutationFn: () => revealProviderKey(props.provider, props.k.label),
@@ -138,6 +140,28 @@ function KeyRow(props: { provider: string; k: PoolKey; onError: (m: string) => v
     onError: (e) => props.onError(e.message),
   });
 
+  const setSecretMutation = useMutation({
+    mutationFn: (s: string) => patchProviderKey(props.provider, props.k.label, { secret: s }),
+    onSuccess: () => {
+      setEditingSecret(false);
+      setNewSecret("");
+      // The revealed plaintext is now stale.
+      setSecret(null);
+      setRevealed(false);
+      void qc.invalidateQueries({ queryKey: ["providers"] });
+    },
+    onError: (e) => props.onError(e.message),
+  });
+
+  const submitSecret = () => {
+    const value = newSecret.trim();
+    if (!value) {
+      props.onError("A key secret cannot be empty.");
+      return;
+    }
+    setSecretMutation.mutate(value);
+  };
+
   const del = useMutation({
     mutationFn: () => deleteProviderKey(props.provider, props.k.label),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["providers"] }),
@@ -148,26 +172,69 @@ function KeyRow(props: { provider: string; k: PoolKey; onError: (m: string) => v
     <tr className="group">
       <TD className="font-medium">
         <div className="flex items-center gap-2">
-          <span className={`h-1.5 w-1.5 rounded-full ${STATUS_DOT[props.k.status]}`} />
+          <span
+            className={`h-1.5 w-1.5 rounded-full ${
+              props.k.has_secret ? STATUS_DOT[props.k.status] : "bg-amber-400"
+            }`}
+          />
           {props.k.label}
         </div>
       </TD>
       <TD className="font-mono text-[12px] text-[var(--admin-text-dim)]">
-        <div className="flex items-center gap-1.5">
-          <span className={revealed ? "break-all" : ""}>
-            {revealed ? (secret ?? props.k.masked) : props.k.masked}
-          </span>
-          <button
-            type="button"
-            onClick={toggleReveal}
-            disabled={reveal.isPending}
-            className="shrink-0 rounded p-1 text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.03] hover:text-[var(--admin-text-muted)] disabled:opacity-50"
-            title={revealed ? "Hide key" : "Reveal key"}
-            aria-label={revealed ? "Hide key" : "Reveal key"}
+        {editingSecret ? (
+          <form
+            className="flex items-center gap-1"
+            onSubmit={(e) => { e.preventDefault(); submitSecret(); }}
           >
-            {reveal.isPending ? <Loader2 size={12} className="animate-spin" /> : revealed ? <EyeOff size={12} /> : <Eye size={12} />}
-          </button>
-        </div>
+            <Input
+              className="h-auto w-44 text-[12px]"
+              type="password"
+              autoComplete="off"
+              autoFocus
+              placeholder="Paste the key"
+              value={newSecret}
+              onChange={(e) => setNewSecret(e.target.value)}
+            />
+            <Button type="submit" variant="outline" disabled={setSecretMutation.isPending}>
+              {setSecretMutation.isPending ? "Saving…" : "Save"}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => { setEditingSecret(false); setNewSecret(""); }}
+            >
+              Cancel
+            </Button>
+          </form>
+        ) : (
+          <div className="flex items-center gap-1.5">
+            <span className={revealed ? "break-all" : ""}>
+              {props.k.has_secret
+                ? (revealed ? (secret ?? props.k.masked) : props.k.masked)
+                : "no secret"}
+            </span>
+            {props.k.has_secret && (
+              <button
+                type="button"
+                onClick={toggleReveal}
+                disabled={reveal.isPending}
+                className="shrink-0 rounded p-1 text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.03] hover:text-[var(--admin-text-muted)] disabled:opacity-50"
+                title={revealed ? "Hide key" : "Reveal key"}
+                aria-label={revealed ? "Hide key" : "Reveal key"}
+              >
+                {reveal.isPending ? <Loader2 size={12} className="animate-spin" /> : revealed ? <EyeOff size={12} /> : <Eye size={12} />}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setEditingSecret(true)}
+              className="shrink-0 rounded p-1 text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.03] hover:text-[var(--admin-text-muted)]"
+              title={props.k.has_secret ? "Replace key" : "Set key — this key has no credential and is disabled"}
+              aria-label={props.k.has_secret ? "Replace key" : "Set key"}
+            >
+              <KeyRound size={12} />
+            </button>
+          </div>
+        )}
       </TD>
       <TD>
         {editingWeight ? (
@@ -201,7 +268,9 @@ function KeyRow(props: { provider: string; k: PoolKey; onError: (m: string) => v
         )}
       </TD>
       <TD>
-        <Badge tone={STATUS_TONE[props.k.status]}>{props.k.status}</Badge>
+        <Badge tone={props.k.has_secret ? STATUS_TONE[props.k.status] : "amber"}>
+          {props.k.has_secret ? props.k.status : "no secret"}
+        </Badge>
       </TD>
       <TD>
         <Button variant="outline" disabled={patch.isPending}

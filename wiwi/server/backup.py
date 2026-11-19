@@ -446,14 +446,22 @@ async def _export_keys(state, include_secrets: bool) -> list[dict]:
     ``secret`` key is *absent* rather than null — a backup that carries no
     credentials should not carry the shape of one that does, and a merge can
     tell "unknown" from "intentionally empty".
+
+    A key whose own secret is empty has nothing to contribute even when
+    ``include_secrets`` is on: exporting ``"secret": ""`` made the document
+    fail its own import validation ("keys[i].secret is required"), so a
+    gateway carrying a credential-less placeholder could not round-trip its
+    backup at all. The key is still exported — label, weight, enabled — and
+    the merge reports it as credential-less instead.
     """
     out = []
     for name in sorted(state.router.providers):
         for k in state.router.providers[name].keys:
+            carries_secret = include_secrets and bool((k.secret or "").strip())
             out.append({
                 "provider_name": name,
                 "label": k.label,
-                **({"secret": k.secret} if include_secrets else {}),
+                **({"secret": k.secret} if carries_secret else {}),
                 "weight": k.weight,
                 "enabled": k.enabled,
             })
@@ -1050,7 +1058,12 @@ def _validate_keys(state, doc: dict, plan: dict) -> None:
         seen.add((provider, label))
         secret = entry.get("secret")
         if secret is not None:
-            secret = _as_str(secret, f"keys[{i}].secret")
+            # Empty means "this key carries no credential", not a value that
+            # must be non-empty: a document from an older export (or one from
+            # a gateway with credential-less placeholders) emits
+            # ``"secret": ""``, and rejecting it made a real backup
+            # un-importable. The merge creates such a key disabled.
+            secret = _as_str(secret, f"keys[{i}].secret", required=False) or None
         weight = entry.get("weight", 1)
         if weight is None:
             weight = 1
@@ -1530,7 +1543,13 @@ async def apply_backup(state, plan: dict) -> dict:
     if "providers" in selected:
         result["providers"] = await _apply_providers(state, plan["providers"])
     if "keys" in selected:
-        result["keys"] = await _apply_keys(state, plan["keys"])
+        result["keys"], keys_without_secret = await _apply_keys(
+            state, plan["keys"])
+        if keys_without_secret:
+            # Named in the response, not just logged: a key the file shipped
+            # without a credential is inert (created disabled), so "merged N
+            # keys" alone would tell the operator the restore worked.
+            result["keys_without_secret"] = keys_without_secret
     if "deployments" in selected:
         result["deployments"] = await _apply_deployments(
             state, plan["deployments"])
@@ -1669,7 +1688,7 @@ async def _apply_providers(state, entries: list[dict]) -> int:
     return applied
 
 
-async def _apply_keys(state, entries: list[dict]) -> int:
+async def _apply_keys(state, entries: list[dict]) -> tuple[int, list[str]]:
     """Merge provider key-pool entries, persisting each one.
 
     The DB row is written in two cases, and both are needed:
@@ -1691,6 +1710,15 @@ async def _apply_keys(state, entries: list[dict]) -> int:
     key*, not *does the document carry a secret*. An existing row keeps its
     secret; a new row is created with the empty secret the document
     implies, and the operator can fill it in afterwards.
+
+    A placeholder created this way is written **disabled**. It has no
+    credential, so it can never serve a request, and an enabled row that
+    cannot route is indistinguishable from a live one in the console — the
+    exact state a restored gateway was left in (an import of a secret-less
+    file turned an empty deployment into one whose every key answers
+    ``no available key`` without saying why). Every key still without a
+    secret on the target afterwards is returned by ``provider/label`` so the
+    merge result can name them.
     """
     from wiwi.router.router import ProviderKey
 
@@ -1703,13 +1731,31 @@ async def _apply_keys(state, entries: list[dict]) -> int:
             continue
         live = acct.get_key(k["label"])
         if live is None:
+            secret = (k["secret"] or "").strip()
+            if not secret and store is not None:
+                # The key can exist durably while missing from memory (a
+                # tombstoned row, or a provider rebuilt without it). ``add_key``
+                # upserts ``secret=EXCLUDED.secret``, so persisting the
+                # document's empty value here ERASED the stored credential —
+                # the way a secret-less export/import emptied a live pool.
+                secret = (await store.get_key_secret(k["provider_name"],
+                                                     k["label"]) or "").strip()
+            placeholder = not secret
+            enabled = k["enabled"] and not placeholder
             acct.keys.append(ProviderKey(
-                label=k["label"], secret=k["secret"] or "",
-                weight=k["weight"], enabled=k["enabled"]))
-            # A new key: persist it, secret or not, or it is lost on restart.
+                label=k["label"], secret=secret,
+                weight=k["weight"], enabled=enabled))
             if store is not None:
-                await store.add_key(k["provider_name"], k["label"],
-                                    k["secret"] or "", k["weight"], k["enabled"])
+                if secret:
+                    await store.add_key(k["provider_name"], k["label"],
+                                        secret, k["weight"], enabled)
+                else:
+                    # No credential anywhere: record the routing fields without
+                    # resetting a stored secret (an empty one here would also
+                    # clear ``detached`` and resurrect a tombstone).
+                    await store.upsert_key_routing(
+                        k["provider_name"], k["label"],
+                        weight=k["weight"], enabled=enabled)
         else:
             # weight/enabled are always written; the secret only when the
             # document carries one. A backup exported without secrets must not
@@ -1730,7 +1776,13 @@ async def _apply_keys(state, entries: list[dict]) -> int:
                                                    weight=k["weight"],
                                                    enabled=k["enabled"])
         applied += 1
-    return applied
+    without_secret = []
+    for k in entries:
+        acct = state.router.providers.get(k["provider_name"])
+        key = acct.get_key(k["label"]) if acct is not None else None
+        if key is not None and not (key.secret or "").strip():
+            without_secret.append(f"{k['provider_name']}/{k['label']}")
+    return applied, without_secret
 
 
 async def _apply_deployments(state, entries: list[dict]) -> int:

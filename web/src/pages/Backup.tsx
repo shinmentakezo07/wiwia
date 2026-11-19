@@ -68,13 +68,13 @@ const PARTIAL_SECTIONS: { id: BackupSections; row: string }[] = [
 function appliedOf(result: BackupImportResult, section: string): number | undefined {
   const raw = result[section as keyof BackupImportResult];
   if (typeof raw === "number") return raw;
-  if (raw && typeof raw === "object") return raw.written;
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw.written;
   return undefined;
 }
 
 function failedOf(result: BackupImportResult, section: string): number {
   const raw = result[section as keyof BackupImportResult];
-  return raw && typeof raw === "object" ? raw.failed : 0;
+  return raw && typeof raw === "object" && !Array.isArray(raw) ? raw.failed : 0;
 }
 
 /** Rows an export left out because a cap bit, phrased for a human.
@@ -137,13 +137,32 @@ function ImportSummary(props: { result: BackupImportResult; onDismiss: () => voi
   const failures = describeFailures(props.result);
   const skipped = props.result.audit_skipped;
   const redacted = props.result.settings_skipped ?? 0;
+  const noSecret = props.result.keys_without_secret ?? [];
   return (
     <Alert
-      tone={failures.length ? "warning" : "success"}
-      title={failures.length ? "Merged — some rows were rejected" : "Backup merged"}
+      tone={failures.length || noSecret.length ? "warning" : "success"}
+      title={
+        failures.length
+          ? "Merged — some rows were rejected"
+          : noSecret.length
+            ? "Merged — some keys have no credential"
+            : "Backup merged"
+      }
       onDismiss={props.onDismiss}
     >
       <p>{`Merged ${describeResult(props.result)}.`}</p>
+      {noSecret.length > 0 && (
+        <p className="mt-1">
+          {plural(noSecret.length, "provider key")} arrived without a secret and{" "}
+          {noSecret.length === 1 ? "was" : "were"} left disabled, so{" "}
+          {noSecret.length === 1 ? "it cannot" : "they cannot"} serve a request:{" "}
+          <strong className="text-[var(--admin-text)]">
+            {noSecret.join(", ")}
+          </strong>
+          . The file was exported without plaintext secrets — set each key&apos;s
+          credential on its provider page to bring the pool back.
+        </p>
+      )}
       {failures.length > 0 && (
         <>
           <p className="mt-1">

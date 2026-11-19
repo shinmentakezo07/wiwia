@@ -1132,3 +1132,97 @@ with a call still open would otherwise lose the model's own words.
 
 ---
 
+## 🟠 Fixed — sweep 2026-11-19 (credential-less provider keys: routed as live, and the backup could not round-trip them)
+
+### 601. A key with an empty secret counted as `available`, so the model fetch answered a bogus 502 and real traffic could be routed to a credential that cannot build a header
+
+**Severity:** 🟠 High · **Status: fixed** — round 208
+(`tests/test_fix_round208.py`)
+**Files:** `wiwi/router/router.py` (`ProviderKey.available`),
+`wiwi/server/app.py` (`GET /admin/providers/{name}/models`,
+`GET /admin/cline/models`, `_key_view`)
+
+**Trigger:** a pool whose only keys have an empty `secret` — the placeholder
+shape a secret-less backup import creates — and an admin clicking the
+provider's model browser. Reproduced from this checkout's own `wiwi.db`:
+`openrouter` carried 16 such rows, `NIM` 5.
+
+**Consequence:** `ProviderKey.available` ignored the credential, so the route
+selected one and built `Authorization: Bearer `. httpx refuses to send that
+header at all (`LocalProtocolError`, raised *before* connect), and
+`except httpx.HTTPError` turned it into `502 api_connection_error —
+could not reach 'openrouter'`: no upstream was contacted and the message named
+the wrong cause. The same selection feeds the chat path, so a request routed to
+a placeholder could not succeed either.
+
+**Fix:** `available` is false for an empty/whitespace secret, so every rotation
+site (`pick_key`, the healer probe, the admin fetches) skips such a key. The
+route now answers `409` naming the counts (`16 without a secret …; 2 disabled`)
+instead of a 502, and the transport branch includes the httpx exception class
+(never its message — it can quote the credential). `_key_view` gained
+`has_secret`, so the console can distinguish "no secret" from a masked one.
+
+### 602. `?include_secrets=1` exported `"secret": ""`, which the import validator rejected — a gateway could not round-trip its own backup — and a secret-less merge created those placeholders *enabled*
+
+**Severity:** 🟠 High · **Status: fixed** — round 208
+(`tests/test_fix_round208.py`)
+**Files:** `wiwi/server/backup.py` (`_export_keys`, `_validate_keys`,
+`_apply_keys`, `apply_backup`), `wiwi/server/config_store.py`
+(`update_key`), `wiwi/server/app.py` (`PATCH /admin/providers/{name}/keys/{label}`)
+
+**Trigger:** export the whole gateway with `include_secrets=1` from any state
+that contains a credential-less key, then import that file (verified against
+the live 32-key pool: 24 empty secrets).
+
+**Consequence:** the export emitted `"secret": ""` for every placeholder, and
+`_as_str(..., required=True)` rejected it: `400 keys[0].secret is required`.
+The backup produced by the same server could not be restored, and the operator
+saw only a schema error. Separately, merging a *secret-less* file created the
+placeholders **enabled** (round 161 made it persist them so a pool member was
+not lost), so the restored gateway looked fully configured while every fetch
+answered `no available key` with no reason.
+
+**Fix:** the export omits the `secret` field when the key has none (absent =
+unknown, the format's existing contract), and the validator accepts an empty
+value as absent, so older documents import too. A placeholder created from a
+secret-less entry is written *disabled* — it has no credential, so it must not
+be presented as a live pool member — and every key still without a secret is
+named in the merge response (`keys_without_secret`) and in the console's
+import summary. `update_key` now writes `secret` on an existing row and
+`PATCH …/keys/{label}` accepts a non-empty `secret`, which is the repair path
+for keys already in this state (the console exposes it as "Set key" /
+"Replace key" on the provider page).
+
+---
+### 603. A secret-less backup merge erased a credential that was still in the database
+
+**Severity:** 🔴 Critical · **Status: fixed** — round 208
+(`tests/test_fix_round208.py::test_secretless_merge_does_not_erase_a_stored_credential`)
+**Files:** `wiwi/server/backup.py` (`_apply_keys`), `wiwi/server/config_store.py`
+(`get_key_secret`, `upsert_key_routing`)
+
+**Trigger:** merge a backup exported without secrets on a gateway where a key
+exists durably but is **not in the live pool** — a tombstoned row, or a
+provider rebuilt without it — then restart. Reproduced against a file-backed
+store: row `secret = sk-live-credential-123456`, memory cleared, merge a
+secret-less document → `secret = ""`, `enabled = 0`.
+
+**Consequence:** `_apply_keys` decided "the target does not have this key"
+from `acct.get_key` alone, then persisted with `add_key`, whose upsert writes
+`secret=EXCLUDED.secret`. The document's empty value therefore overwrote the
+stored credential — the one failure mode that turns a working gateway into a
+credential-less one. The live database shows the shape: `openrouter`'s 16 keys
+served 1,538 successful requests through 2026-10-22 and are now all empty,
+which is why 17 model groups are unreachable and why
+`GET /admin/providers/openrouter/models` answered 502.
+
+**Fix:** before persisting a missing key, `_apply_keys` now asks the store for
+the row's secret (`get_key_secret`) and restores a durable credential into the
+pool instead of writing `""`. With no credential in either place the row is
+written through `upsert_key_routing`, which preserves the stored secret and
+now also clears a `detached` tombstone for a key the merge names (leaving it
+set made the key present in memory but gone after the next restart). The
+console marks such keys `no secret` in both provider views and the pool's
+"active" count excludes them.
+
+---

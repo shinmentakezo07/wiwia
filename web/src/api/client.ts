@@ -184,7 +184,7 @@ export const getBuiltinProviders = () =>
 export const patchProviderKey = (
   provider: string,
   label: string,
-  patch: { enabled?: boolean; weight?: number },
+  patch: { enabled?: boolean; weight?: number; secret?: string },
 ) =>
   api<{ key: PoolKey }>(`/admin/providers/${encodeURIComponent(provider)}/keys/${encodeURIComponent(label)}`, {
     method: "PATCH",

@@ -63,6 +63,15 @@ class ProviderKey:
 
     @property
     def available(self) -> bool:
+        # A credential-less key cannot build an outbound request at all:
+        # ``Authorization: Bearer `` is rejected by httpx *before* connect
+        # (``LocalProtocolError``), which surfaced as a generic 502 on the
+        # admin model-list fetch and would fail every real request routed to
+        # it. Empty-secret rows are placeholders a no-secrets backup import
+        # deliberately creates (``backup._apply_keys``); they must stay out of
+        # rotation until an operator supplies the secret.
+        if not self.secret or not self.secret.strip():
+            return False
         if not self.enabled or self.status not in (
                 "active", "cooling", "invalid", "probation"):
             return False

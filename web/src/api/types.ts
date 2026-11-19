@@ -3,6 +3,10 @@
 export interface PoolKey {
   label: string;
   masked: string;
+  /** False for a key with an empty secret — a placeholder a secret-less
+   *  backup restore leaves behind. It cannot authenticate, so the console
+   *  must not present its ``***`` mask as a live credential. */
+  has_secret: boolean;
   weight: number;
   enabled: boolean;
   status: "active" | "cooling" | "invalid" | "disabled";
@@ -690,5 +694,10 @@ export interface BackupImportResult {
    *  secret-less export strips their credentials and marks them, so they
    *  are skipped rather than written over the target's live records. */
   settings_skipped: number;
+  /** ``provider/label`` of every key the merge left without a credential.
+   *  A key the file supplies with no secret is created *disabled* — it cannot
+   *  serve a request — so this list is what tells the operator to fill the
+   *  secret in rather than assuming the pool was restored. */
+  keys_without_secret?: string[];
   responses: BackupSectionResult;
 }
