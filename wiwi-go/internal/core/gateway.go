@@ -390,13 +390,17 @@ func (g *Gateway) pump(ctx *RequestContext, dep *router.Deployment, key *router.
 			if suppressStart {
 				return true // resume: the client already saw the first start
 			}
-		case streaming.TextDelta, streaming.ToolCallOpen:
+		case streaming.TextDelta, streaming.ToolCallOpen, streaming.ThinkingDelta,
+			streaming.ToolCallArgsDelta:
 			contentSeen = true
 			watch.toIdle()
+			now := time.Now()
 			if ctx.FirstTokenAt == nil {
-				now := time.Now()
 				ctx.FirstTokenAt = &now
 			}
+			// Every content-bearing delta advances the generation window, so
+			// a tool-call-only or args-heavy stream still yields a TPS figure.
+			ctx.LastTokenAt = &now
 		case streaming.UsageFinal:
 			usage = d.(streaming.UsageFinal)
 		case streaming.Finish:
