@@ -479,7 +479,7 @@ async def test_the_request_that_reaches_zen_carries_the_field():
         async with httpx.AsyncClient(transport=transport,
                                      base_url="http://test") as c:
             route = respx.post(
-                "https://opencode.ai/inference/v1/chat/completions")
+                "https://opencode.ai/inference/openai/v1/chat/completions")
             route.respond(json={
                 "id": "x", "object": "chat.completion", "model": DEEPSEEK,
                 "choices": [{"index": 0,

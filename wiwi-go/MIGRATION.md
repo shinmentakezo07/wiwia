@@ -52,6 +52,21 @@ See `PARITY.md` for the per-subsystem coverage matrix and the explicit gaps.
 - Health healer wired on `healer.enabled` with per-key exponential probe backoff.
 - Regression tests for every item above.
 
+### Phase 10 — Parity closure ✅
+- Response-store lifecycle (pending sweeper, `ttl<=0`, master scope, `store:false`,
+  raw multi-turn replay, cache-hit persistence).
+- Forced streaming for Cline/WorkBuddy/OpenCode with SSE reassembly, plus their
+  stream-field quirks and default reasoning effort.
+- Config/HTTP pool parity (`http_keepalive_expiry_s`, singleflight limits,
+  response-store sweep interval, OTLP export timeout) and outbound pool wiring.
+- Cline browser redirect OAuth (`auto-connect` state + public callback).
+- OpenCode per-wire bases, credential headers, session fingerprint, Muse routes.
+- OpenCode free-tier decoys on both chat and Responses wires (full client schemas,
+  client tools win, streaming/non-streaming filtering, forced-auto tool_choice,
+  cloak opt-out).
+- WorkBuddy request shape (tool_choice normalization, system-message prepend,
+  identity/fingerprint sanitization).
+
 ## Verification gate
 ```bash
 cd wiwi-go
@@ -70,5 +85,5 @@ go vet ./...
   proxy tail, `no-store`).
 - Explicit `drop_params` allowlists for the OpenAI/Anthropic/Gemini/Responses wires.
 
-The only remaining documented gap is OpenCode's `jev-*` System One models, which are not
-a completion API (Python has the same limitation).
+Remaining documented gaps are listed in `PARITY.md` (OpenCode `jev-*`); they are not
+completion-API features.

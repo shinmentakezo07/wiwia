@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"wiwi-go/internal/cache"
 	"wiwi-go/internal/core"
 	"wiwi-go/internal/ir"
 	"wiwi-go/internal/providers"
@@ -295,11 +296,7 @@ func (a *App) handleResponses(c *gin.Context) {
 	}
 	if prev, _ := body["previous_response_id"].(string); prev != "" {
 		if stored, ok := a.State.Responses.Get(prev, keyID(ctx.Auth)); ok {
-			var msgs []ir.Message
-			appendInputMessages(&msgs, stored["_input"])
-			if txt := responseOutputText(stored); txt != "" {
-				msgs = append(msgs, ir.Message{Role: ir.RoleAssistant, Parts: []ir.Part{ir.NewTextPart(txt)}})
-			}
+			msgs := responseHistoryMessages(stored, ctx.IRReq.Model)
 			ctx.IRReq.Messages = append(msgs, ctx.IRReq.Messages...)
 		}
 	}
@@ -318,6 +315,7 @@ func (a *App) handleGetResponse(c *gin.Context) {
 		a.writeErr(c, core.SurfaceResponses, 404, "not_found_error", "response not found")
 		return
 	}
+	delete(body, "_input")
 	c.JSON(http.StatusOK, body)
 }
 
@@ -352,7 +350,17 @@ func (a *App) serveComplete(c *gin.Context, ctx *core.RequestContext, surface co
 		if b, ok := a.State.Cache.Get(cacheKey); ok {
 			ctx.ResponseCacheHit = true
 			a.finish(ctx, 200, nil)
-			c.Data(http.StatusOK, "application/json", rebaseHit(b, surface))
+			hit := rebaseHit(b, surface)
+			if surface == core.SurfaceResponses && responseStoreEnabled(body) {
+				var stored map[string]any
+				if json.Unmarshal(hit, &stored) == nil {
+					stored["_input"] = body["input"]
+					if id, ok := stored["id"].(string); ok {
+						_ = a.State.Responses.Save(id, keyID(ctx.Auth), stored)
+					}
+				}
+			}
+			c.Data(http.StatusOK, "application/json", hit)
 			return
 		}
 	}
@@ -360,20 +368,21 @@ func (a *App) serveComplete(c *gin.Context, ctx *core.RequestContext, surface co
 	// upstream call. Joiners are logged with the shared usage at cost=0.
 	if a.State.Cfg.Wiwi.SingleflightEnabled {
 		sfKey := cacheKeyFor(surface, ctx, c.GetHeader("anthropic-beta"))
-		b, err := a.State.Flight.Do(sfKey, func() ([]byte, error) {
+		res, joined, err := a.State.Flight.DoResult(sfKey, func() (cache.Result, error) {
 			turn, we := a.State.Gateway.Complete(ctx)
 			if we != nil {
-				return nil, we
+				return cache.Result{}, we
 			}
 			resp := wire.EncodeResponse(wire.Surface(surface), *turn, ctx.IRReq.Model, ctx.IRReq)
-			if surface == core.SurfaceResponses {
+			if surface == core.SurfaceResponses && responseStoreEnabled(body) {
 				stored := cloneMap(resp)
 				stored["_input"] = body["input"]
 				if id, ok := resp["id"].(string); ok {
 					_ = a.State.Responses.Save(id, keyID(ctx.Auth), stored)
 				}
 			}
-			return json.Marshal(resp)
+			b, jerr := json.Marshal(resp)
+			return cache.Result{Payload: b, Usage: turn.Usage, Cost: ctx.Cost}, jerr
 		})
 		if err != nil {
 			we := asWiwiError(err)
@@ -381,8 +390,31 @@ func (a *App) serveComplete(c *gin.Context, ctx *core.RequestContext, surface co
 			a.writeWiwiErr(c, surface, we)
 			return
 		}
+		if joined {
+			// Served from the leader's upstream call: log the shared usage,
+			// charge nothing, rebase the id onto this request, and persist the
+			// rebased copy when the Responses surface asked for storage.
+			ctx.Usage = &res.Usage
+			ctx.Cost = 0
+			ctx.Priced = true
+			ctx.Metadata["singleflight_joined"] = true
+			hit := rebaseHit(res.Payload, surface)
+			if surface == core.SurfaceResponses && responseStoreEnabled(body) {
+				var stored map[string]any
+				if json.Unmarshal(hit, &stored) == nil {
+					stored["_input"] = body["input"]
+					if id, ok := stored["id"].(string); ok {
+						_ = a.State.Responses.Save(id, keyID(ctx.Auth), stored)
+					}
+				}
+			}
+			a.finish(ctx, 200, nil)
+			c.Header("x-wiwi-singleflight", "JOINED")
+			c.Data(http.StatusOK, "application/json", hit)
+			return
+		}
 		a.finish(ctx, 200, nil)
-		c.Data(http.StatusOK, "application/json", b)
+		c.Data(http.StatusOK, "application/json", res.Payload)
 		return
 	}
 
@@ -398,7 +430,7 @@ func (a *App) serveComplete(c *gin.Context, ctx *core.RequestContext, surface co
 			a.State.Cache.Set(cacheKey, b)
 		}
 	}
-	if surface == core.SurfaceResponses {
+	if surface == core.SurfaceResponses && responseStoreEnabled(body) {
 		stored := cloneMap(resp)
 		stored["_input"] = body["input"]
 		if id, ok := resp["id"].(string); ok {
@@ -601,39 +633,36 @@ func cloneMap(m map[string]any) map[string]any {
 	return out
 }
 
-func appendInputMessages(msgs *[]ir.Message, input any) {
-	switch v := input.(type) {
-	case string:
-		*msgs = append(*msgs, ir.Message{Role: ir.RoleUser, Parts: []ir.Part{ir.NewTextPart(v)}})
-	case []any:
-		for _, item := range v {
-			m, ok := item.(map[string]any)
-			if !ok {
-				continue
-			}
-			role, _ := m["role"].(string)
-			if role == "" {
-				role = "user"
-			}
-			content, _ := m["content"].(string)
-			*msgs = append(*msgs, ir.Message{Role: ir.Role(role), Parts: []ir.Part{ir.NewTextPart(content)}})
-		}
+func responseStoreEnabled(body map[string]any) bool {
+	v, ok := body["store"]
+	if !ok {
+		return true
 	}
+	b, ok := v.(bool)
+	return !ok || b
 }
 
-func responseOutputText(stored map[string]any) string {
-	out, _ := stored["output"].([]any)
-	for _, item := range out {
-		m, _ := item.(map[string]any)
-		content, _ := m["content"].([]any)
-		for _, c := range content {
-			cm, _ := c.(map[string]any)
-			if t, _ := cm["text"].(string); t != "" {
-				return t
-			}
+// responseHistoryMessages turns a stored Responses turn back into IR: the
+// previous INPUT first (user/tool-result items), then the previous OUTPUT
+// (assistant text, tool calls). Decoding the raw items preserves tool calls and
+// images; a text-only extraction silently dropped them (Python with_history).
+func responseHistoryMessages(stored map[string]any, model string) []ir.Message {
+	var msgs []ir.Message
+	decode := func(items any) []ir.Message {
+		if items == nil {
+			return nil
 		}
+		req, err := wire.DecodeRequest(wire.SurfaceResponses, map[string]any{
+			"model": model, "input": items,
+		})
+		if err != nil {
+			return nil
+		}
+		return req.Messages
 	}
-	return ""
+	msgs = append(msgs, decode(stored["_input"])...)
+	msgs = append(msgs, decode(stored["output"])...)
+	return msgs
 }
 
 // rebaseHit rewrites a cached response's id/created onto the serving request so

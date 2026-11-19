@@ -83,6 +83,7 @@ type Deployment struct {
 	ExtraBody              map[string]any
 	PromptCache            bool
 	PromptCacheMinTokens   *int
+	OpencodeFreeTierCloak  *bool
 	current                float64
 	CooldownUntil          time.Time
 	RecentFails            int
@@ -263,6 +264,7 @@ func New(cfg *config.Config) *Router {
 			MaxInflight: m.Params.MaxInflight, Timeout: m.Params.Timeout,
 			ExtraHeaders: m.Params.ExtraHeaders, ExtraBody: m.Params.ExtraBody,
 			PromptCache: m.Params.PromptCache, PromptCacheMinTokens: m.Params.PromptCacheMinTokens,
+			OpencodeFreeTierCloak: m.Params.OpencodeFreeTierCloak,
 		}
 		if m.Params.MaxInflight != nil {
 			d.maxInflight = *m.Params.MaxInflight

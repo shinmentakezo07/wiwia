@@ -147,7 +147,7 @@ func (a *ResponsesAdapter) EncodeRequest(req ir.Request, modelID string, params 
 		body["tool_choice"] = map[string]any{"type": "function", "name": tc.Name}
 	}
 	for k, v := range params {
-		if k == "max_tokens" || k == "extra_body" || k == "drop_params" {
+		if k == "max_tokens" || k == "extra_body" || k == "drop_params" || k == "opencode_free_tier_cloak" {
 			continue
 		}
 		if _, exists := body[k]; !exists {

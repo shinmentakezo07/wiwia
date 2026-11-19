@@ -52,6 +52,36 @@ is not fixed in the same change.
 
 ## Archive index (fixed, newest first)
 
+## ✅ Fixed — a response written between sweeps could outlive its TTL forever (2026-11-19)
+
+**Section status:** fixed — #605 (round 209).
+
+### 605. The activity-gated Responses sweeper cleared its dirty flag before the just-written row's TTL elapsed, so the row was never swept
+
+**Severity:** 🟡 Medium · **Status: fixed** — round 209
+(`tests/test_fix_round209.py::test_response_sweep_forever_ticks_are_silent_while_idle`)
+**Files:** `wiwi/server/response_store.py` (`_pending`, `sweep`, `put`).
+
+**Trigger:** put a row, let one sweep tick run before that row's TTL elapses,
+then leave the store idle. The row is hidden by the read-path TTL check but is
+never deleted — the table grows without bound (and on a scale-to-zero database
+the next non-idle query pays for the scan).
+
+**Consequence:** #604 replaced the unconditional pass with a boolean `_dirty`
+flag: `put` set it, a successful sweep cleared it. A boolean cannot represent
+"written but not yet expired": the tick that fires before the TTL is due sees
+`_dirty=True`, issues, clears it, and no later tick has any reason to run. The
+round-209 idle-marker test failed intermittently (~3/5) with
+`assert n == 0, "a put must re-arm the sweeper"`.
+
+**Fix:** `_pending` is now a deque of wall-clock write timestamps, oldest
+first, and `_next_maintenance` records the next forced pass. `sweep` runs only
+when `now >= _next_maintenance` or the oldest pending write plus the current
+TTL has elapsed; it then deletes rows older than `now - ttl`, drops the
+satisfied timestamps, and re-arms one pass per TTL. Idle stores still issue no
+SQL (#604), and every row is guaranteed to cross a due boundary after its TTL.
+The same semantics are ported to `wiwi-go/internal/server/response_store.go`.
+
 ## ✅ Fixed — idle background sweepers kept a serverless database awake (2026-11-19)
 
 **Section status:** fixed — #604 (round 209).

@@ -256,6 +256,14 @@ func supportsReasoningEffort(providerType string) bool {
 	return true
 }
 
+// clientSentThinking mirrors Python's _client_sent_thinking: any explicit
+// reasoning knob suppresses Cline's xhigh default.
+func clientSentThinking(g ir.GenParams) bool {
+	return (g.ReasoningEffort != nil && *g.ReasoningEffort != "") ||
+		g.ThinkingBudget != nil ||
+		(g.ThinkingType != nil && *g.ThinkingType != "")
+}
+
 // emitPerMessageReasoning reports whether history assistant messages may carry
 // reasoning_content. Strict gateways reject the field on input.
 func emitPerMessageReasoning(providerType string) bool {

@@ -44,40 +44,68 @@ from __future__ import annotations
 import pytest
 
 from wiwi.providers.opencode_adapter import (
+    _ROUTE_BASES,
     OPENCODE_ZEN_BASE,
     OpencodeAdapter,
     route_for_model,
 )
 
-# Transcribed from the docs "Endpoints" table, 2026-10-14.
+# Transcribed from the docs "Endpoints" table, 2026-11-19
+# (https://opencode.ai/v2/docs/console/models/).
 DOCS_TABLE: list[tuple[str, str]] = [
-    # /responses — OpenAI Responses wire
-    ("gpt-6-astra", "responses"), ("gpt-6.1-sol", "responses"), ("gpt-5.5", "responses"),
-    ("gpt-5.4-mini", "responses"), ("gpt-5.3-codex", "responses"), ("gpt-5", "responses"),
-    ("gpt-5-nano", "responses"),
-    ("grok-4.7", "responses"), ("grok-4.5", "responses"), ("grok-build-0.1", "responses"),
+    # responses — OpenAI Responses wire
+    ("gpt-6.2-astra", "responses"), ("gpt-6.2-sol", "responses"),
+    ("gpt-6-astra", "responses"), ("gpt-6-sol", "responses"),
+    ("gpt-6.1-sol", "responses"), ("gpt-6-luna", "responses"),
+    ("gpt-5.6-sol", "responses"), ("gpt-5.6-terra", "responses"),
+    ("gpt-5.6-luna", "responses"), ("gpt-5.5", "responses"),
+    ("gpt-5.5-pro", "responses"), ("gpt-5.4", "responses"),
+    ("gpt-5.4-pro", "responses"), ("gpt-5.4-mini", "responses"),
+    ("gpt-5.4-nano", "responses"), ("gpt-5.3-codex", "responses"),
+    ("gpt-5.3-codex-spark", "responses"), ("gpt-5.2", "responses"),
+    ("gpt-5.2-codex", "responses"), ("gpt-5.1", "responses"),
+    ("gpt-5.1-codex", "responses"), ("gpt-5.1-codex-max", "responses"),
+    ("gpt-5.1-codex-mini", "responses"), ("gpt-5", "responses"),
+    ("gpt-5-codex", "responses"), ("gpt-5-nano", "responses"),
+    ("grok-4.7", "responses"), ("grok-4.6", "responses"),
+    ("grok-4.5", "responses"), ("grok-build-0.1", "responses"),
+    ("grok-code", "responses"),
     ("muse-spark-1.3", "responses"), ("muse-spark-1.2", "responses"),
     ("muse-spark-1.3-contributor-free", "responses"),
-    # /messages — Anthropic Messages wire
-    ("claude-fable-5.1", "messages"), ("claude-opus-5.5", "messages"),
-    ("claude-opus-4.8", "messages"), ("claude-sonnet-5.5", "messages"),
-    ("claude-sonnet-5", "messages"), ("claude-haiku-4.5", "messages"),
-    ("qwen3.8-flash", "messages"), ("qwen3.7-max", "messages"),
-    ("qwen3.7-plus", "messages"), ("qwen3.6-plus", "messages"),
+    ("muse-spark-1.2-contributor-free", "responses"),
+    ("muse-ember-1.0", "responses"), ("muse-wonder-1.0", "responses"),
+    # messages — Anthropic Messages wire
+    ("claude-fable-5.2", "messages"), ("claude-fable-5.1", "messages"),
+    ("claude-fable-5", "messages"), ("claude-opus-5.5", "messages"),
+    ("claude-opus-5", "messages"), ("claude-opus-4.8", "messages"),
+    ("claude-opus-4.7", "messages"), ("claude-opus-4.6", "messages"),
+    ("claude-opus-4.5", "messages"), ("claude-sonnet-5.5", "messages"),
+    ("claude-sonnet-5", "messages"), ("claude-sonnet-4.6", "messages"),
+    ("claude-sonnet-4.5", "messages"), ("claude-haiku-5.5", "messages"),
+    ("claude-haiku-4.5", "messages"),
+    ("qwen3.8-flash", "messages"), ("qwen3.6-plus", "messages"),
     ("qwen3.5-plus", "messages"),
-    # Gemini wire
-    ("gemini-4-argon", "gemini"), ("gemini-3.8-flash", "gemini"),
-    ("gemini-3-flash", "gemini"), ("gemini-3.1-pro", "gemini"),
+    # gemini wire
+    ("gemini-4-carbon", "gemini"), ("gemini-4-argon", "gemini"),
+    ("gemini-4-hydrogen", "gemini"),
+    ("gemini-3.8-flash", "gemini"), ("gemini-3.7-flash", "gemini"),
+    ("gemini-3.6-flash", "gemini"), ("gemini-3.5-flash", "gemini"),
+    ("gemini-3.5-flash-lite", "gemini"),
     # chat — everything else
-    ("qwen3.8-max", "chat"),
-    ("deepseek-v4.1-flash", "chat"), ("deepseek-v4-pro", "chat"),
-    ("minimax-m3", "chat"), ("minimax-m2.5", "chat"), ("minimax-m2.7", "chat"),
-    ("glm-5.3-flash", "chat"), ("glm-5.3", "chat"), ("glm-5.1", "chat"),
-    ("glm-5", "chat"), ("kimi-k2.5", "chat"), ("kimi-k2.6", "chat"),
+    ("qwen3.8-max", "chat"), ("qwen3-coder", "chat"),
+    ("deepseek-v4.1-flash", "chat"), ("deepseek-v4.1-flash-free", "chat"),
+    ("deepseek-v4-pro", "chat"),
+    ("minimax-m3", "chat"), ("minimax-m2.7", "chat"), ("minimax-m2.5", "chat"),
+    ("glm-5.3-flash", "chat"), ("glm-5.3", "chat"), ("glm-5.2", "chat"),
+    ("glm-5.1", "chat"), ("glm-5", "chat"),
+    ("kimi-k2.5", "chat"), ("kimi-k2.6", "chat"), ("kimi-k2.5-free", "chat"),
     ("kimi-k2.7-code", "chat"), ("kimi-k3", "chat"), ("mistral-large-4", "chat"),
-    ("big-pickle", "chat"), ("space-bunny-free", "chat"), ("cat-jam-free", "chat"),
-    ("exo-free", "chat"), ("mimo-v2.6-flash-free", "chat"),
-    ("longcat-2.5-preview-free", "chat"), ("step-5-preview-free", "chat"),
+    ("big-pickle", "chat"), ("iceman-free", "chat"),
+    ("inkling-2-small-free", "chat"), ("beam-free", "chat"),
+    ("flint-40b-free", "chat"), ("longcat-2.5-free", "chat"),
+    ("hy4-flash-free", "chat"), ("mimo-v2.6-flash-free", "chat"),
+    ("nemotron-3.5-lightning-free", "chat"),
+    ("nemotron-3.5-super-vl-free", "chat"),
 ]
 
 
@@ -109,9 +137,32 @@ def test_routing_is_case_and_whitespace_insensitive():
     assert route_for_model("GEMINI-3-FLASH") == "gemini"
 
 
-def test_the_default_base_is_the_canonical_inference_root():
-    # models.dev's `opencode.api` and every docs row use /inference/v1.
-    assert OPENCODE_ZEN_BASE == "https://opencode.ai/inference/v1"
+def test_the_default_bases_are_the_per_wire_canonical_roots():
+    # Re-fetched 2026-11-19: the docs table and models.dev `api` publish four
+    # different canonical roots; a deployment-set base_url overrides them all.
+    assert OPENCODE_ZEN_BASE == "https://opencode.ai/inference/openai/v1"
+    assert _ROUTE_BASES == {
+        "responses": "https://opencode.ai/inference/openai/v1",
+        "messages": "https://opencode.ai/inference/anthropic/v1",
+        "gemini": "https://opencode.ai/inference/google/v1beta",
+        "chat": "https://opencode.ai/inference/openai/v1",
+    }
+
+
+def test_default_urls_hit_the_canonical_root_of_each_wire():
+    a = OpencodeAdapter()
+    assert a.build_url("", "gpt-5.5", False) == (
+        "https://opencode.ai/inference/openai/v1/responses")
+    assert a.build_url("", "claude-sonnet-5", True) == (
+        "https://opencode.ai/inference/anthropic/v1/messages")
+    assert a.build_url("", "gemini-4-carbon", True) == (
+        "https://opencode.ai/inference/google/v1beta/models/gemini-4-carbon"
+        ":streamGenerateContent?alt=sse")
+    assert a.build_url("", "gemini-4-carbon", False) == (
+        "https://opencode.ai/inference/google/v1beta/models/gemini-4-carbon"
+        ":generateContent")
+    assert a.build_url("", "deepseek-v4-pro", True) == (
+        "https://opencode.ai/inference/openai/v1/chat/completions")
 
 
 def test_a_configured_base_url_still_wins():

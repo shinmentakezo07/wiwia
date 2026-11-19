@@ -26,20 +26,22 @@ Where a claim is transcribed from documentation instead of probed, it says so.
 
 ## What it is
 
-OpenCode Console (historically "Zen") is a multi-protocol gateway on one base
-URL. Which wire a model uses is **published per model**, not derived:
+OpenCode Console (historically "Zen") is a multi-protocol gateway. Which wire a
+model uses is **published per model**, not derived:
 
-| wire | models | endpoint | credential header |
-|---|---|---|---|
-| responses | `gpt-*`, `grok-*`, `muse-spark-*` | `{base}/responses` | `Authorization: Bearer` |
-| messages | `claude-*`, `qwen3.8-flash`, `qwen3.7-*`, `qwen3.6-*`, `qwen3.5-*` | `{base}/messages` | `x-api-key` |
-| gemini | `gemini-*` | `{base}/models/{id}:generateContent` | `x-goog-api-key` |
-| chat | everything else | `{base}/chat/completions` | `Authorization: Bearer` |
+| wire | models | canonical base | endpoint | credential header |
+|---|---|---|---|---|
+| responses | `gpt-*`, `grok-*`, `muse-spark-*`, `muse-ember-*`, `muse-wonder-*` | `https://opencode.ai/inference/openai/v1` | `{base}/responses` | `Authorization: Bearer` |
+| messages | `claude-*`, `qwen3.8-flash`, `qwen3.7-*`, `qwen3.6-*`, `qwen3.5-*` | `https://opencode.ai/inference/anthropic/v1` | `{base}/messages` | `x-api-key` |
+| gemini | `gemini-*` | `https://opencode.ai/inference/google/v1beta` | `{base}/models/{id}:generateContent` | `x-goog-api-key` |
+| chat | everything else | `https://opencode.ai/inference/openai/v1` | `{base}/chat/completions` | `Authorization: Bearer` |
 
-Base: `https://opencode.ai/inference/v1` (canonical — what models.dev, the docs
-table, and the client itself publish: `packages/ai/src/providers/opencode.ts`).
-The legacy `https://opencode.ai/zen/v1` **still routes** and existing configs
-keep working; only the default moved.
+The four wires publish **four different canonical bases** (re-fetched 2026-11-19
+from the docs table and models.dev; see the adapter's `_ROUTE_BASES`). A
+deployment-set `base_url` overrides them all — the legacy single-base escape
+hatch. Base: `https://opencode.ai/inference/openai/v1`. The legacy
+`https://opencode.ai/zen/v1` **still routes** and existing configs keep working;
+only the default moved.
 
 The legacy base is for **paid** models. Probed 2026-10-15 with this adapter's
 exact request shape, the same anonymous request that answers 200 on
@@ -380,7 +382,9 @@ npm was unreachable — failed all free-model traffic.
 providers:
   - name: zen
     provider: opencode
-    base_url: https://opencode.ai/inference/v1
+    # base_url is optional: the adapter routes each model to its canonical
+    # per-wire base (https://opencode.ai/inference/openai/v1 here); a set
+    # base_url overrides all four wires.
     keys:
       - {label: main, key: os.environ/OPENCODE_API_KEY}   # paid models
       - {label: anon, key: anonymous}                      # free models: Bearer public
@@ -476,9 +480,9 @@ from wiwi.wire import openai_chat as oc
 req = oc.decode_request({"model": "m", "messages": [{"role": "user", "content": "hi"}]})
 a = OpencodeAdapter()
 body = a.encode_request(req, "space-bunny-free", {})
-a.build_url("https://opencode.ai/inference/v1", "space-bunny-free", True)
+url = a.build_url("", "space-bunny-free", True)
 h = a.headers(ProviderKeyRef(label="anon", secret="anonymous"))
-r = httpx.post("https://opencode.ai/inference/v1/chat/completions",
+r = httpx.post(url,
                content=__import__("orjson").dumps(body), headers=h, timeout=90)
 print(r.status_code, r.text[:120])
 PY

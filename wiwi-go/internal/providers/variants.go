@@ -10,6 +10,17 @@ package providers
 // handshakes, auto-refresh) live in the provider-specific auth packages of the
 // Python implementation, not in the outbound wire adapter. The adapters below
 // receive an already-resolved secret through ProviderKeyRef.
+// RequiresStream reports whether a provider has no non-streaming mode. Python
+// marks these adapters “force_stream = True“; the gateway must request SSE
+// and reassemble it for a plain caller.
+func RequiresStream(providerType string) bool {
+	switch providerType {
+	case "cline", "workbuddy", "opencode":
+		return true
+	}
+	return false
+}
+
 func init() {
 	for _, name := range []string{"cline", "workbuddy", "hermes", "ifm"} {
 		providerType := name

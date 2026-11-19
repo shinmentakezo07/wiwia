@@ -1443,15 +1443,16 @@ BUILTIN_PROVIDER_TYPES: list[dict[str, str | list[str]]] = [
     {
         "provider_type": "opencode",
         "label": "OpenCode Zen",
-        # Must track OPENCODE_ZEN_BASE in the adapter: the admin UI offers this
+        # Must track the adapter's canonical bases: the admin UI offers this
         # as the base a new deployment gets, so a stale value here would create
-        # a provider pointing at the legacy root. Both roots route today; the
-        # canonical one is what models.dev and the docs table publish.
-        "default_base_url": "https://opencode.ai/inference/v1",
+        # a provider on a root the adapter no longer publishes. This base is
+        # the responses/chat root; the messages and gemini wires publish their
+        # own per-wire roots in the adapter (see `_ROUTE_BASES`).
+        "default_base_url": "https://opencode.ai/inference/openai/v1",
         "description": (
             "OpenCode Zen gateway (opencode.ai/zen) — curated coding models "
             "over four upstream protocols routed per model: Responses API "
-            "for GPT/Grok/Muse-Spark, Messages API for Claude/Qwen, Gemini "
+            "for GPT/Grok/Muse, Messages API for Claude/Qwen, Gemini "
             "generateContent for Gemini, Chat Completions for the rest. "
             "Authenticates with a Zen API key and sends a live "
             "User-Agent: opencode/<version> (refreshed every 5 min) so "

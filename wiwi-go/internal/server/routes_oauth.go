@@ -1,10 +1,13 @@
 package server
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -82,6 +85,84 @@ func oauthStatus(c oauth.Credential, lead int64) gin.H {
 	}
 }
 
+// -- redirect OAuth session (Python's oauth_pending) -----------------------
+
+type oauthSession struct {
+	Kind       string
+	Provider   string
+	ReturnPath string
+	CreatedAt  time.Time
+	TTL        time.Duration
+}
+
+func randomStateToken() string {
+	b := make([]byte, 24)
+	_, _ = rand.Read(b)
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func (a *App) evictExpiredOAuthPending() {
+	now := time.Now()
+	a.State.OAuthMu.Lock()
+	for k, v := range a.State.OAuthPending {
+		if now.Sub(v.CreatedAt) > v.TTL {
+			delete(a.State.OAuthPending, k)
+		}
+	}
+	a.State.OAuthMu.Unlock()
+}
+
+func (a *App) popOAuthSession(token string) (oauthSession, bool) {
+	a.State.OAuthMu.Lock()
+	s, ok := a.State.OAuthPending[token]
+	delete(a.State.OAuthPending, token)
+	a.State.OAuthMu.Unlock()
+	if !ok || time.Since(s.CreatedAt) > s.TTL {
+		return oauthSession{}, false
+	}
+	return s, true
+}
+
+// requestBase builds the absolute callback origin. public_url wins; otherwise
+// the request Host is used. X-Forwarded-Host is deliberately ignored.
+func (a *App) requestBase(c *gin.Context) string {
+	if u := strings.TrimSpace(a.State.Cfg.Wiwi.PublicURL); u != "" {
+		return strings.TrimRight(u, "/")
+	}
+	scheme := "http"
+	if c.Request.TLS != nil || strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https") {
+		scheme = "https"
+	}
+	host := c.Request.Host
+	if host == "" {
+		host = "localhost"
+	}
+	return scheme + "://" + host
+}
+
+func clineCallbackRedirect(c *gin.Context, returnPath, provider, email, errMsg string) {
+	q := url.Values{}
+	if provider != "" {
+		q.Set("cline_provider", provider)
+	}
+	if email != "" {
+		q.Set("cline_connected", "1")
+		q.Set("cline_email", email)
+	}
+	if errMsg != "" {
+		q.Set("cline_error", errMsg)
+	}
+	sep := "?"
+	if strings.Contains(returnPath, "?") {
+		sep = "&"
+	}
+	c.Redirect(http.StatusFound, returnPath+sep+q.Encode())
+}
+
+func validClineReturnPath(p string) bool {
+	return p == "/console" || strings.HasPrefix(p, "/console/")
+}
+
 // -- Cline ------------------------------------------------------------------
 
 func (a *App) adminClineLoginURL(c *gin.Context) {
@@ -92,52 +173,156 @@ func (a *App) adminClineLoginURL(c *gin.Context) {
 	if body.CallbackURL == "" {
 		body.CallbackURL = "https://app.cline.bot/callback"
 	}
-	c.JSON(http.StatusOK, gin.H{"url": oauth.ClineBuildAuthURL(body.CallbackURL)})
+	c.JSON(http.StatusOK, gin.H{"auth_url": oauth.ClineBuildAuthURL(body.CallbackURL)})
+}
+
+func maskToken(s string) string {
+	if len(s) <= 8 {
+		return "***"
+	}
+	return s[:4] + "…" + s[len(s)-4:]
 }
 
 func (a *App) adminClineConnect(c *gin.Context) {
 	var body struct {
-		Code string `json:"code"`
+		Provider string `json:"provider"`
+		Code     string `json:"code"`
 	}
-	if err := c.ShouldBindJSON(&body); err != nil || body.Code == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "code is required"})
+	if err := c.ShouldBindJSON(&body); err != nil || strings.TrimSpace(body.Code) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provider and code are required"})
+		return
+	}
+	provider := strings.TrimSpace(body.Provider)
+	legacyDefault := provider == ""
+	if legacyDefault {
+		provider = "cline"
+	}
+	p := a.findProvider(provider)
+	if p == nil {
+		if !legacyDefault {
+			c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("unknown provider %q", provider)})
+			return
+		}
+		p = a.oauthProvider(provider, "cline", oauth.ClineAPIBase)
+	}
+	if len(p.Keys) == 0 && !legacyDefault {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("provider %q has no keys — add a pool key first, then connect", provider)})
 		return
 	}
 	res, err := oauth.ClineExchangeCode(body.Code)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid Cline code: " + err.Error()})
 		return
 	}
-	a.storeClineCredential(c, res)
+	email := a.storeClineCredentialFor(c, provider, res)
+	access, _ := res["access_token"].(string)
+	c.JSON(http.StatusOK, gin.H{
+		"provider": provider, "email": email, "access_token_masked": maskToken(access),
+	})
 }
 
+// adminClineAutoConnect starts the redirect flow: it returns a Cline auth URL
+// whose callback points at this gateway. The pending state token is single-use
+// and carries the admin authorization; the public callback is not gated.
 func (a *App) adminClineAutoConnect(c *gin.Context) {
 	var body struct {
+		Provider     string `json:"provider"`
+		ReturnPath   string `json:"return_path"`
 		Code         string `json:"code"`
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
 		Email        string `json:"email"`
 	}
 	_ = c.ShouldBindJSON(&body)
-	if body.Code != "" {
-		res, err := oauth.ClineExchangeCode(body.Code)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	// Legacy direct-credential shape (Go-only before parity): keep it working.
+	if body.Code != "" || body.AccessToken != "" {
+		provider := strings.TrimSpace(body.Provider)
+		if provider == "" {
+			provider = "cline"
+		}
+		if body.Code != "" {
+			res, err := oauth.ClineExchangeCode(body.Code)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			email := a.storeClineCredentialFor(c, provider, res)
+			c.JSON(http.StatusOK, gin.H{"connected": true, "email": email})
 			return
 		}
-		a.storeClineCredential(c, res)
+		email := a.storeClineCredentialFor(c, provider, map[string]any{
+			"access_token": body.AccessToken, "refresh_token": body.RefreshToken, "email": body.Email,
+		})
+		c.JSON(http.StatusOK, gin.H{"connected": true, "email": email})
 		return
 	}
-	if body.AccessToken == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "code or access_token is required"})
+
+	provider := strings.TrimSpace(body.Provider)
+	returnPath := strings.TrimSpace(body.ReturnPath)
+	if provider == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provider is required"})
 		return
 	}
-	a.storeClineCredential(c, map[string]any{
-		"access_token": body.AccessToken, "refresh_token": body.RefreshToken, "email": body.Email,
+	if a.findProvider(provider) == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("unknown provider %q", provider)})
+		return
+	}
+	if !validClineReturnPath(returnPath) {
+		returnPath = "/console/oauth"
+	}
+	a.evictExpiredOAuthPending()
+	token := randomStateToken()
+	a.State.OAuthMu.Lock()
+	a.State.OAuthPending[token] = oauthSession{
+		Kind: "cline_redirect", Provider: provider, ReturnPath: returnPath,
+		CreatedAt: time.Now(), TTL: 600 * time.Second,
+	}
+	a.State.OAuthMu.Unlock()
+	cb := a.requestBase(c) + "/cline/oauth/callback?state=" + url.QueryEscape(token)
+	c.JSON(http.StatusOK, gin.H{
+		"auth_url": oauth.ClineBuildAuthURL(cb), "state": token, "provider": provider,
 	})
 }
 
+// clineOAuthCallback is public: the admin auth happened when the pending
+// session was created. The state token authorizes exactly one callback.
+func (a *App) clineOAuthCallback(c *gin.Context) {
+	code := strings.TrimSpace(c.Query("code"))
+	token := strings.TrimSpace(c.Query("state"))
+	if code == "" || token == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing code or state"})
+		return
+	}
+	sess, ok := a.popOAuthSession(token)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or expired session"})
+		return
+	}
+	provider := sess.Provider
+	returnPath := sess.ReturnPath
+	p := a.findProvider(provider)
+	if p == nil {
+		clineCallbackRedirect(c, returnPath, provider, "", "provider no longer exists")
+		return
+	}
+	res, err := oauth.ClineExchangeCode(code)
+	if err != nil {
+		clineCallbackRedirect(c, returnPath, provider, "", "invalid code: "+err.Error())
+		return
+	}
+	if len(p.Keys) == 0 {
+		clineCallbackRedirect(c, returnPath, provider, "", "provider has no pool keys")
+		return
+	}
+	email := a.storeClineCredentialFor(c, provider, res)
+	clineCallbackRedirect(c, returnPath, provider, email, "")
+}
+
 func (a *App) storeClineCredential(c *gin.Context, res map[string]any) {
+	a.storeClineCredentialFor(c, "cline", res)
+}
+
+func (a *App) storeClineCredentialFor(c *gin.Context, name string, res map[string]any) string {
 	access, _ := res["access_token"].(string)
 	refresh, _ := res["refresh_token"].(string)
 	email, _ := res["email"].(string)
@@ -146,16 +331,32 @@ func (a *App) storeClineCredential(c *gin.Context, res map[string]any) {
 		expires, _ = oauth.ParseISOTime(s)
 	}
 	cred := oauth.Credential{AccessToken: access, RefreshToken: refresh, Email: email, ExpiresAt: expires}
-	p := a.oauthProvider("cline", "cline", oauth.ClineAPIBase)
+	p := a.findProvider(name)
+	if p == nil {
+		p = a.oauthProvider(name, "cline", oauth.ClineAPIBase)
+	}
 	a.setOAuthKey(p, "oauth", oauth.Encode(oauth.ClinePrefix, cred))
 	_ = saveProvider(a.State.Store, *p)
-	a.State.Auth.Audit(a.actor(c), "cline.oauth.connect", "cline", email)
+	a.State.Auth.Audit(a.actor(c), "cline.oauth.connect", name, email)
 	a.rebuild()
-	c.JSON(http.StatusOK, gin.H{"connected": true, "email": email})
+	return email
 }
 
 func (a *App) adminClineStatus(c *gin.Context) {
-	cred, ok := a.oauthCredential("cline", oauth.ClinePrefix)
+	explicit := strings.TrimSpace(c.Query("provider")) != ""
+	provider := strings.TrimSpace(c.Query("provider"))
+	if provider == "" {
+		provider = "cline"
+	}
+	if a.findProvider(provider) == nil {
+		if explicit {
+			c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("unknown provider %q", provider)})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"connected": false})
+		return
+	}
+	cred, ok := a.oauthCredential(provider, oauth.ClinePrefix)
 	if !ok {
 		c.JSON(http.StatusOK, gin.H{"connected": false})
 		return
@@ -164,7 +365,22 @@ func (a *App) adminClineStatus(c *gin.Context) {
 }
 
 func (a *App) adminClineRefresh(c *gin.Context) {
-	cred, ok := a.oauthCredential("cline", oauth.ClinePrefix)
+	var body struct {
+		Provider string `json:"provider"`
+	}
+	_ = c.ShouldBindJSON(&body)
+	provider := strings.TrimSpace(body.Provider)
+	if provider == "" {
+		provider = strings.TrimSpace(c.Query("provider"))
+	}
+	if provider == "" {
+		provider = "cline"
+	}
+	if a.findProvider(provider) == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("unknown provider %q", provider)})
+		return
+	}
+	cred, ok := a.oauthCredential(provider, oauth.ClinePrefix)
 	if !ok || cred.RefreshToken == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no refresh token; reconnect"})
 		return
@@ -185,7 +401,7 @@ func (a *App) adminClineRefresh(c *gin.Context) {
 	if s, _ := res["expires_at"].(string); s != "" {
 		cred.ExpiresAt, _ = oauth.ParseISOTime(s)
 	}
-	p := a.oauthProvider("cline", "cline", oauth.ClineAPIBase)
+	p := a.findProvider(provider)
 	a.setOAuthKey(p, "oauth", oauth.Encode(oauth.ClinePrefix, cred))
 	_ = saveProvider(a.State.Store, *p)
 	a.rebuild()
@@ -193,14 +409,32 @@ func (a *App) adminClineRefresh(c *gin.Context) {
 }
 
 func (a *App) adminClineDisconnect(c *gin.Context) {
-	p := a.findProvider("cline")
-	if p != nil {
-		a.removeOAuthKey(p, "oauth")
-		_ = saveProvider(a.State.Store, *p)
+	var body struct {
+		Provider string `json:"provider"`
 	}
-	a.State.Auth.Audit(a.actor(c), "cline.oauth.disconnect", "cline", "")
+	_ = c.ShouldBindJSON(&body)
+	explicit := strings.TrimSpace(body.Provider) != "" || strings.TrimSpace(c.Query("provider")) != ""
+	provider := strings.TrimSpace(body.Provider)
+	if provider == "" {
+		provider = strings.TrimSpace(c.Query("provider"))
+	}
+	if provider == "" {
+		provider = "cline"
+	}
+	p := a.findProvider(provider)
+	if p == nil {
+		if explicit {
+			c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("unknown provider %q", provider)})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"provider": provider, "disconnected": true})
+		return
+	}
+	a.removeOAuthKey(p, "oauth")
+	_ = saveProvider(a.State.Store, *p)
+	a.State.Auth.Audit(a.actor(c), "cline.oauth.disconnect", provider, "")
 	a.rebuild()
-	c.JSON(http.StatusOK, gin.H{"connected": false})
+	c.JSON(http.StatusOK, gin.H{"provider": provider, "disconnected": true})
 }
 
 func (a *App) adminClineModels(c *gin.Context) {

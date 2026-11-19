@@ -18,11 +18,14 @@ type otlpExporter struct {
 	client   *http.Client
 }
 
-func newOTLPExporter(endpoint string, headers map[string]string) *otlpExporter {
+func newOTLPExporter(endpoint string, headers map[string]string, timeout time.Duration) *otlpExporter {
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
 	return &otlpExporter{
 		endpoint: endpoint,
 		headers:  headers,
-		client:   &http.Client{Timeout: 10 * time.Second},
+		client:   &http.Client{Timeout: timeout},
 	}
 }
 

@@ -195,7 +195,7 @@ Import accounts via `/admin/workbuddy/import` or the admin UI.
 
 ## `opencode`
 
-OpenCode Zen (`opencode.ai/zen`) — a multi-protocol gateway: the same base URL serves **four upstream wire formats, chosen per model** (see the Zen endpoints table). The adapter:
+OpenCode Zen (`opencode.ai/zen`) — a multi-protocol gateway: four upstream wire formats, each published on its own canonical base URL and chosen per model (see the Zen endpoints table: responses/chat `https://opencode.ai/inference/openai/v1`, messages `https://opencode.ai/inference/anthropic/v1`, gemini `https://opencode.ai/inference/google/v1beta`). A deployment-set `base_url` overrides them all. The adapter:
 
 - Routes each model to its correct upstream protocol.
 - Declares `force_stream` (the same `transport.forceStream: true` OpenCode's own provider entry carries): Zen answers as an event stream, so every upstream request asks for SSE and a non-streaming caller's reply is reassembled by the gateway's pump — like `cline` and `workbuddy`. The `gemini` route selects its wire from the URL (`:streamGenerateContent?alt=sse`), so its body carries no `stream` field. Also forces `stream_options.include_usage` on chat requests so an aggregated turn prices on real usage rather than the estimator.
@@ -211,7 +211,7 @@ The decoys are inert — the description is replaced so the model is told not to
 providers:
   - name: opencode-main
     provider: opencode
-    base_url: https://opencode.ai/inference/v1   # default; legacy /zen/v1 403s the free tier
+    base_url: https://opencode.ai/inference/openai/v1   # default (per-wire bases; legacy /zen/v1 still routes)
     keys:
       - {label: main, key: os.environ/OPENCODE_API_KEY}
 ```

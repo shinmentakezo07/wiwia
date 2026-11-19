@@ -8,6 +8,31 @@
 
 Each entry below records the before→after state, the exact files and lines changed, and the tests that cover it. When extending or modifying any of those areas, check this file for existing invariants before writing new code. When a new fix lands in one of these areas, add an entry to this file so a later agent does not rediscover and re-fix the same thing.
 
+## Round 208 — the opencode adapter tracks the current Console endpoints (2026-11-19)
+
+The Console endpoints moved: the docs (https://opencode.ai/v2/docs/console/models/,
+re-fetched 2026-11-19; models.dev `api.json` agrees) now publish per-wire bases —
+responses and chat on `https://opencode.ai/inference/openai/v1`, messages on
+`https://opencode.ai/inference/anthropic/v1`, gemini on `https://opencode.ai/inference/google/v1beta`
+— and muse-ember/muse-wonder moved onto the responses wire. A new System One
+endpoint (`/inference/systemone/v1/systemone`) serves the Jev and Decision models;
+the adapter still routes Jev to chat and deliberately does not claim it (supporting
+it needs a new route, not an update).
+
+- `OPENCODE_ZEN_BASE` → `https://opencode.ai/inference/openai/v1`; new
+  `_ROUTE_BASES` table (messages/gemini per-wire bases); `build_url` uses the
+  route's canonical base when the deployment sets no `base_url` — a
+  deployment-set `base_url` still overrides all four wires.
+- `_ROUTE_RULES`: `muse-ember-*`, `muse-wonder-*` → responses.
+- Router catalog: the OpenCode provider card's `default_base_url` follows.
+
+Coverage: updated `tests/test_fix_round27.py` (card default base, default URL
+assertion), `tests/test_fix_round148.py` (docs-table transcription, per-route
+canonical URL assertions), `tests/test_fix_round167.py` (chat URL on the new
+default base).
+
+---
+
 ## Round 207 — a spent free allowance wraps to a fallback instead of erroring (AUDIT #600) (2026-11-16)
 
 Two changes on the *upstream error extraction* path — one in the classifier,

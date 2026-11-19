@@ -98,6 +98,9 @@ func deploymentParams(d *router.Deployment, dropParams bool) map[string]any {
 			out["prompt_cache_min_tokens"] = *d.PromptCacheMinTokens
 		}
 	}
+	if d.OpencodeFreeTierCloak != nil {
+		out["opencode_free_tier_cloak"] = *d.OpencodeFreeTierCloak
+	}
 	return out
 }
 
@@ -122,6 +125,9 @@ func (g *Gateway) candidates(group string, contextOverflow bool) []string {
 }
 
 func (g *Gateway) callOnce(ctx *RequestContext, dep *router.Deployment, key *router.ProviderKey) (*ir.AssistantTurn, *providers.WiwiError) {
+	if providers.RequiresStream(dep.Provider.Type) {
+		return g.completeViaStream(ctx, dep, key)
+	}
 	adapter, err := providers.FreshAdapter(dep.Provider.Type)
 	if err != nil {
 		return nil, &providers.WiwiError{Status: 500, EType: "api_error", Message: err.Error()}
@@ -155,6 +161,90 @@ func (g *Gateway) callOnce(ctx *RequestContext, dep *router.Deployment, key *rou
 		return nil, &providers.WiwiError{Status: 502, EType: "api_error", Message: err.Error(), Retryable: true}
 	}
 	return &turn, nil
+}
+
+// completeViaStream serves a non-streaming caller from a streaming-only
+// upstream: encode with stream=true, pump SSE, and reassemble the deltas into
+// one AssistantTurn (Python gateway.force_stream parity).
+func (g *Gateway) completeViaStream(ctx *RequestContext, dep *router.Deployment, key *router.ProviderKey) (*ir.AssistantTurn, *providers.WiwiError) {
+	adapter, err := providers.FreshAdapter(dep.Provider.Type)
+	if err != nil {
+		return nil, &providers.WiwiError{Status: 500, EType: "api_error", Message: err.Error()}
+	}
+	req := ctx.IRReq
+	req.Model = dep.Model
+	req.Stream = true
+	req.StreamOptionsIncludeUsage = true
+	body, err := adapter.EncodeRequest(req, dep.Model, deploymentParams(dep, g.DropParams))
+	if err != nil {
+		return nil, &providers.WiwiError{Status: 500, EType: "api_error", Message: err.Error()}
+	}
+	headers := mergeHeaders(adapter.Headers(providers.ProviderKeyRef{Label: key.Label, Secret: key.Secret}), dep.Provider.ExtraHeaders)
+	for k, v := range dep.ExtraHeaders {
+		headers[k] = v
+	}
+	for k, v := range ctx.ForwardHeaders {
+		headers[k] = v
+	}
+	if dep.Provider.Type == "ifm" && ctx.SessionID != "" {
+		headers["X-Session-ID"] = ctx.SessionID
+	}
+	watch := newStreamWatchdog(g.StreamFirstChunkTimeoutS, g.StreamIdleTimeoutS)
+	defer watch.stop()
+	resp, err := providers.DoStreamCtx(watch.ctx, adapter.BuildURL(dep.Provider.BaseURL, dep.Model, true), headers, body)
+	if err != nil {
+		if watch.timedOut() {
+			return nil, &providers.WiwiError{Status: 504, EType: "timeout", Message: "upstream produced no data before the first-chunk timeout", Retryable: true}
+		}
+		return nil, &providers.WiwiError{Status: 502, EType: "api_connection_error", Message: err.Error(), Retryable: true}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		buf := make([]byte, 4096)
+		n, _ := resp.Body.Read(buf)
+		return nil, providers.ErrorFromProviderStatus(resp.StatusCode, buf[:n], dep.Provider.Type)
+	}
+
+	acc := newStreamAssembler()
+	var streamErr *providers.WiwiError
+	parseErr := streaming.Parse(resp.Body, func(ev streaming.Event) bool {
+		watch.kick()
+		if ev.Data == "" && ev.Event == "" {
+			return true
+		}
+		deltas, derr := adapter.DecodeStreamEvent(ev.Event, ev.Data)
+		if derr != nil {
+			return true
+		}
+		for _, d := range deltas {
+			if se, ok := d.(streaming.StreamError); ok {
+				streamErr = &providers.WiwiError{
+					Status: se.Status, EType: se.EType,
+					Message: se.ErrorText(), Retryable: se.Status == 0 || standardRetryable(se.Status),
+				}
+				return false
+			}
+			was := acc.content
+			acc.observe(d)
+			if !was && acc.content {
+				watch.toIdle()
+			}
+			if _, ok := d.(streaming.StreamEnd); ok {
+				return false
+			}
+		}
+		return true
+	})
+	if watch.timedOut() {
+		return nil, &providers.WiwiError{Status: 504, EType: "timeout", Message: "upstream stream stalled", Retryable: true}
+	}
+	if streamErr != nil {
+		return nil, streamErr
+	}
+	if !acc.content && parseErr != nil {
+		return nil, &providers.WiwiError{Status: 502, EType: "api_connection_error", Message: parseErr.Error(), Retryable: true}
+	}
+	return acc.turn(), nil
 }
 
 // Complete runs a non-streaming request through the retry/failover ladder.

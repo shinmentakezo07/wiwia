@@ -54,8 +54,12 @@ type AppState struct {
 	// 10 failed logins / 5 min per IP+account, 5 signups / hour per IP).
 	LoginThrottle  *attemptThrottle
 	SignupThrottle *attemptThrottle
-	stop           chan struct{}
-	stopOnce       sync.Once
+	// Pending redirect-OAuth sessions (Python's oauth_pending map). The state
+	// token is single-use and authorizes one public callback.
+	OAuthMu      sync.Mutex
+	OAuthPending map[string]oauthSession
+	stop         chan struct{}
+	stopOnce     sync.Once
 }
 
 // App bundles state and the Gin engine.
@@ -112,19 +116,23 @@ func New(cfg *config.Config) (*App, error) {
 		Cfg: cfg, Store: st, Auth: auth.NewService(st), Router: rt, Gateway: gw,
 		Cost: costEngine, Limiter: limiter,
 		Cache:  respCache,
-		Flight: cache.NewFlight(),
+		Flight: cache.NewFlightWithLimits(cfg.Wiwi.SingleflightMaxFlights, cfg.Wiwi.SingleflightMaxWaiters),
 		Bus:    logging.NewBus(4096), Totals: logging.NewTotals(), Metrics: metrics.NewCollector(),
 		Journal:        streaming.NewJournal(cfg.Router.StreamJournalEnabled, cfg.Router.StreamJournalDir, cfg.Router.StreamJournalTTLS, int64(cfg.Router.StreamJournalMaxBytes)),
 		Responses:      NewResponseStore(st, cfg.Wiwi.StoreResponses, cfg.Wiwi.ResponseStoreTTLS),
 		SessionSecret:  deriveSessionSecret(cfg),
 		LoginThrottle:  newAttemptThrottle(10, 5*time.Minute),
 		SignupThrottle: newAttemptThrottle(5, time.Hour),
+		OAuthPending:   map[string]oauthSession{},
 		StaticDir:      staticDir(), StartTime: time.Now(),
 		stop: make(chan struct{}),
 	}
 	state.Journal.Sweep()
+	state.Responses.Start(cfg.Wiwi.ResponseStoreSweepInterval)
 	providers.ConfigureToolSchemaCache(cfg.Wiwi.ToolSchemaCacheEntries)
-	tracer := telemetry.NewWithOTLP(cfg.Telemetry.Enabled, state.Bus, cfg.Telemetry.ServiceName, cfg.Telemetry.Endpoint, cfg.Telemetry.Headers, cfg.Telemetry.SampleRatio)
+	providers.ConfigureHTTPPool(cfg.Wiwi.HTTPMaxConnections, cfg.Wiwi.HTTPMaxKeepalive,
+		time.Duration(cfg.Wiwi.HTTPKeepaliveExpiryS*float64(time.Second)))
+	tracer := telemetry.NewWithOTLP(cfg.Telemetry.Enabled, state.Bus, cfg.Telemetry.ServiceName, cfg.Telemetry.Endpoint, cfg.Telemetry.Headers, cfg.Telemetry.SampleRatio, cfg.Telemetry.ExportTimeoutS)
 	state.Gateway.Tracer = tracer
 	state.Gateway.StreamCoalesce = cfg.Router.StreamCoalesce
 	state.Gateway.CoalesceMaxBytes = cfg.Router.StreamCoalesceMaxBytes
@@ -327,6 +335,7 @@ func (a *App) registerRoutes() {
 	r := a.Router
 
 	r.GET("/health", a.handleHealth)
+	r.GET("/cline/oauth/callback", a.clineOAuthCallback)
 	r.GET("/v1/models", a.requireAPI, a.handleModels)
 	r.GET("/public/models", a.handlePublicModels)
 	if a.State.Cfg.Router.PrometheusEnabled {
@@ -370,6 +379,9 @@ func (a *App) Close() {
 	})
 	if a.State.Healer != nil {
 		a.State.Healer.Stop()
+	}
+	if a.State.Responses != nil {
+		a.State.Responses.Stop()
 	}
 	if a.State.Store != nil {
 		_ = a.State.Store.Close()

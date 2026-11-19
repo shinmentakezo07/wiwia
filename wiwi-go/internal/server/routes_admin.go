@@ -1039,7 +1039,7 @@ func providerDefaultBaseURL(ptype string) string {
 	case "nvidia-nim":
 		return "https://integrate.api.nvidia.com/v1"
 	case "opencode":
-		return "https://opencode.ai/inference/v1"
+		return "https://opencode.ai/inference/openai/v1"
 	case "hermes":
 		return "https://inference-api.nousresearch.com/v1"
 	case "ifm":

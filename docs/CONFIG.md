@@ -495,7 +495,7 @@ There is no `api_key` field and no `budget_cap` field on a provider — keys liv
 | `nvidia-nim` | `https://integrate.api.nvidia.com/v1` | `Authorization: Bearer` |
 | `cline` | `https://api.cline.bot/api/v1` | OAuth → `Bearer workos:<token>` |
 | `workbuddy` | `https://copilot.tencent.com` | OAuth → access token |
-| `opencode` | `https://opencode.ai/inference/v1` | per-wire (Bearer / `x-api-key` / `x-goog-api-key`) |
+| `opencode` | `https://opencode.ai/inference/openai/v1` | per-wire (Bearer / `x-api-key` / `x-goog-api-key`) |
 | `hermes` | `https://inference-api.nousresearch.com/v1` | `Authorization: Bearer` (API key or OAuth device-code token) |
 | `ifm` | `https://api.ifm.ai/v1` | `Authorization: Bearer` (+ `X-Session-ID` conversation affinity) |
 

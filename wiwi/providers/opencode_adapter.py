@@ -5,22 +5,25 @@ wire formats, chosen per model from the "Endpoints" table at
 ``https://opencode.ai/docs/zen`` (see ``_ROUTE_RULES``, which is the
 transcription of that table and the authority for routing)::
 
-    responses  gpt-*, grok-*, muse-spark-*            POST {base}/responses
+    responses  gpt-*, grok-*, muse-spark-*, muse-ember-*,
+               muse-wonder-*                            POST {base}/responses
     messages   claude-*, qwen3.8-flash, qwen3.7-*,
                qwen3.6-*, qwen3.5-*                  POST {base}/messages
     gemini     gemini-*                               POST {base}/models/{id}:...
     chat       everything else                        POST {base}/chat/completions
 
-The base is ``https://opencode.ai/inference/v1`` — what ``models.dev`` lists as
-the ``opencode`` provider's ``api`` and what the docs table uses. The older
-``https://opencode.ai/zen/v1`` still routes (verified 2026-10-14: a paid model
-there returns the account's ``402 Insufficient account funds``, i.e. it reaches
-the API and authenticates), so an existing ``base_url`` pointing at ``zen/v1``
-keeps working; this constant only sets the default for deployments that do not
-set one. The catalog is **not** uniform enough for prefix guessing: the qwen
-family alone spans two wires (``qwen3.8-max`` is chat, ``qwen3.8-flash`` is
-messages) and ``models.dev`` carries no per-model overrides, so routing is
-table-driven and falls through to chat.
+The base is **per wire** (re-transcribed 2026-11-19 from the docs table and
+models.dev): responses and chat share ``https://opencode.ai/inference/openai/v1``
+(``OPENCODE_ZEN_BASE``), messages is ``https://opencode.ai/inference/anthropic/v1``,
+and gemini is ``https://opencode.ai/inference/google/v1beta`` — four different
+canonical roots, so a deployment-set ``base_url`` still overrides them all. The
+older ``https://opencode.ai/zen/v1`` still routes (verified 2026-10-14: a paid
+model there returns the account's ``402 Insufficient account funds``, i.e. it
+reaches the API and authenticates), so an existing ``base_url`` pointing at
+``zen/v1`` keeps working. The catalog is **not** uniform enough for prefix
+guessing: the qwen family alone spans two wires (``qwen3.8-max`` is chat,
+``qwen3.8-flash`` is messages) and ``models.dev`` carries no per-model
+overrides, so routing is table-driven and falls through to chat.
 
 The adapter delegates chat/messages/gemini to the existing adapters, and
 implements a minimal Responses upstream (text + reasoning + function tools) for
@@ -168,21 +171,35 @@ from wiwi.streaming import deltas as dl
 
 log = structlog.get_logger("wiwi.opencode_adapter")
 
-# Default base when a deployment does not set one. Console's canonical API root
-# per both models.dev and the docs table; the legacy ``/zen/v1`` root still
-# routes and is left working for existing configs (see the module docstring).
-OPENCODE_ZEN_BASE = "https://opencode.ai/inference/v1"
+# Default base when a deployment sets none — the responses/chat root, what
+# models.dev and the docs table publish as the provider's `api` (re-fetched
+# 2026-11-19). The other wires have their own canonical roots, see
+# ``_ROUTE_BASES``; the legacy ``/zen/v1`` root still routes and is left working
+# for existing configs (see the module docstring).
+OPENCODE_ZEN_BASE = "https://opencode.ai/inference/openai/v1"
 
 Route = Literal["responses", "messages", "gemini", "chat"]
 
+# The canonical base each wire publishes (re-fetched 2026-11-19 from the docs
+# table and models.dev `api`): four different roots. A deployment-set
+# ``base_url`` overrides them all — the legacy single-base escape hatch.
+_ROUTE_BASES: dict[Route, str] = {
+    "responses": OPENCODE_ZEN_BASE,
+    "messages": "https://opencode.ai/inference/anthropic/v1",
+    "gemini": "https://opencode.ai/inference/google/v1beta",
+    "chat": OPENCODE_ZEN_BASE,
+}
+
 # Per-model endpoint table, transcribed from the "Endpoints" section of
-# https://opencode.ai/docs/zen (fetched 2026-10-14), which is now the authority:
+# https://opencode.ai/v2/docs/console/models/ (fetched 2026-11-19; the same page
+# was /docs/zen), which is the authority:
 #
-#     responses   gpt-*, grok-*, muse-spark-*        POST {base}/responses
+#     responses   gpt-*, grok-*, muse-spark-*, muse-ember-*,
+#                 muse-wonder-*                            POST {base}/responses
 #     messages    claude-*, qwen3.8-flash,
-#                 qwen3.7-*, qwen3.6-*, qwen3.5-*   POST {base}/messages
-#     gemini      gemini-*                           POST {base}/models/{id}:...
-#     chat        everything else                    POST {base}/chat/completions
+#                 qwen3.7-*, qwen3.6-*, qwen3.5-*          POST {base}/messages
+#     gemini      gemini-*                                 POST {base}/models/{id}:...
+#     chat        everything else                          POST {base}/chat/completions
 #
 # **Prefix guessing does not work on this catalog, which is why this is a table.**
 # The qwen family alone straddles two wires — `qwen3.8-max` is on chat while
@@ -196,13 +213,15 @@ Route = Literal["responses", "messages", "gemini", "chat"]
 #
 # Widening a rule is therefore a docs edit, not a guess: add the model's row.
 #
-# `jev-*` is the one documented model with no chat wire at all — it is a System
-# One model on `/systemone` (a typed state+questions → values/probabilities
-# protocol), not a completion API. It falls through to chat and fails upstream;
-# it is not routable through `/v1/chat/completions`, `/v1/responses` or
-# `/v1/messages`, so this adapter does not claim to serve it.
+# `jev-*` is documented on the System One endpoint
+# (`https://opencode.ai/inference/systemone/v1/systemone`), not a completion
+# API. It still falls through to chat here and fails upstream — supporting it
+# means a new route, not a routing row — so this adapter deliberately does not
+# claim it.
 _ROUTE_RULES: tuple[tuple[tuple[str, ...], Route], ...] = (
-    (("gpt-", "grok-", "muse-spark-"), "responses"),
+    # muse-ember-*/muse-wonder-* joined responses 2026-11-19 (the docs table
+    # moved them off chat).
+    (("gpt-", "grok-", "muse-spark-", "muse-ember-", "muse-wonder-"), "responses"),
     (("claude-", "union-alpha"), "messages"),
     # Not a bare "qwen": qwen3.8-max is the exception and lives on chat.
     (("qwen3.8-flash", "qwen3.7-", "qwen3.6-", "qwen3.5-"), "messages"),
@@ -528,8 +547,14 @@ def route_for_model(model_id: str) -> Route:
     return "chat"
 
 
-def _base(base_url: str) -> str:
-    return (base_url or OPENCODE_ZEN_BASE).rstrip("/") or OPENCODE_ZEN_BASE
+def _base(base_url: str, route: Route) -> str:
+    """The root a route builds its path from.
+
+    A deployment-set ``base_url`` wins for every wire (the legacy override);
+    with none, the route's canonical base from ``_ROUTE_BASES`` is used.
+    """
+    base = (base_url or "").rstrip("/")
+    return base or _ROUTE_BASES[route]
 
 
 class OpencodeAdapter(WarningMixin):
@@ -698,7 +723,7 @@ class OpencodeAdapter(WarningMixin):
     def build_url(self, base_url: str, model_id: str, stream: bool) -> str:
         route = route_for_model(model_id)
         self._last_route = route
-        base = _base(base_url)
+        base = _base(base_url, route)
         if route == "responses":
             return f"{base}/responses"
         if route == "messages":

@@ -417,6 +417,10 @@ type WiwiSettings struct {
 	ToolSchemaCacheEntries     int     `yaml:"tool_schema_cache_entries"`
 	HTTPMaxConnections         int     `yaml:"http_max_connections"`
 	HTTPMaxKeepalive           int     `yaml:"http_max_keepalive_connections"`
+	HTTPKeepaliveExpiryS       float64 `yaml:"http_keepalive_expiry_s"`
+	SingleflightMaxFlights     int     `yaml:"singleflight_max_flights"`
+	SingleflightMaxWaiters     int     `yaml:"singleflight_max_waiters"`
+	ResponseStoreSweepInterval float64 `yaml:"response_store_sweep_interval_s"`
 
 	set setFlags
 }
@@ -475,11 +479,12 @@ type RealtimeSettings struct {
 }
 
 type TelemetrySettings struct {
-	Enabled     bool              `yaml:"enabled"`
-	Endpoint    string            `yaml:"endpoint"`
-	ServiceName string            `yaml:"service_name"`
-	SampleRatio float64           `yaml:"sample_ratio"`
-	Headers     map[string]string `yaml:"headers"`
+	Enabled        bool              `yaml:"enabled"`
+	Endpoint       string            `yaml:"endpoint"`
+	ServiceName    string            `yaml:"service_name"`
+	SampleRatio    float64           `yaml:"sample_ratio"`
+	ExportTimeoutS float64           `yaml:"export_timeout_s"`
+	Headers        map[string]string `yaml:"headers"`
 }
 
 type Config struct {
@@ -738,6 +743,7 @@ func (c *Config) ApplyDefaults() {
 	c.Router.applyDefaults()
 	c.General.applyDefaults()
 	c.Wiwi.applyDefaults()
+	c.Telemetry.applyDefaults()
 	c.Cache.applyDefaults()
 	c.Healer.applyDefaults()
 	c.Realtime.applyDefaults()
@@ -896,6 +902,24 @@ func (w *WiwiSettings) applyDefaults() {
 	if w.ResponseStoreTTLS == 0 && !w.set.has("response_store_ttl_s") {
 		w.ResponseStoreTTLS = 86400
 	}
+	if w.ResponseStoreSweepInterval == 0 && !w.set.has("response_store_sweep_interval_s") {
+		w.ResponseStoreSweepInterval = 300
+	}
+	if w.HTTPMaxConnections == 0 && !w.set.has("http_max_connections") {
+		w.HTTPMaxConnections = 200
+	}
+	if w.HTTPMaxKeepalive == 0 && !w.set.has("http_max_keepalive_connections") {
+		w.HTTPMaxKeepalive = 40
+	}
+	if w.HTTPKeepaliveExpiryS == 0 && !w.set.has("http_keepalive_expiry_s") {
+		w.HTTPKeepaliveExpiryS = 30
+	}
+	if w.SingleflightMaxFlights == 0 && !w.set.has("singleflight_max_flights") {
+		w.SingleflightMaxFlights = 2048
+	}
+	if w.SingleflightMaxWaiters == 0 && !w.set.has("singleflight_max_waiters") {
+		w.SingleflightMaxWaiters = 64
+	}
 	if w.LogRetentionDays == 0 && !w.set.has("log_retention_days") {
 		w.LogRetentionDays = 30
 	}
@@ -910,6 +934,12 @@ func (w *WiwiSettings) applyDefaults() {
 	}
 	if w.Port == 0 && !w.set.has("port") {
 		w.Port = 4000
+	}
+}
+
+func (t *TelemetrySettings) applyDefaults() {
+	if t.ExportTimeoutS <= 0 {
+		t.ExportTimeoutS = 10
 	}
 }
 
@@ -955,6 +985,21 @@ func (h *HealerSettings) applyDefaults() {
 func (c *Config) Validate() error {
 	if strings.TrimSpace(c.General.MasterKey) == "" {
 		return errors.New("master_key is required")
+	}
+	if c.Wiwi.ResponseStoreSweepInterval < 0 {
+		return errors.New("response_store_sweep_interval_s must be >= 0")
+	}
+	if c.Wiwi.HTTPKeepaliveExpiryS < 0 {
+		return errors.New("http_keepalive_expiry_s must be >= 0")
+	}
+	if c.Wiwi.SingleflightMaxFlights < 0 {
+		return errors.New("singleflight_max_flights must be >= 0")
+	}
+	if c.Wiwi.SingleflightMaxWaiters < 0 {
+		return errors.New("singleflight_max_waiters must be >= 0")
+	}
+	if c.Telemetry.ExportTimeoutS < 0 {
+		return errors.New("export_timeout_s must be >= 0")
 	}
 	seen := make(map[string]struct{}, len(c.Providers))
 	for i := range c.Providers {

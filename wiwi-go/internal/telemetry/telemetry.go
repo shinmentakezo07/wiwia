@@ -28,14 +28,14 @@ func New(enabled bool, bus *logging.Bus, service string) *Tracer {
 }
 
 // NewWithOTLP enables the OTLP/HTTP JSON exporter when endpoint is set.
-func NewWithOTLP(enabled bool, bus *logging.Bus, service, endpoint string, headers map[string]string, sample float64) *Tracer {
+func NewWithOTLP(enabled bool, bus *logging.Bus, service, endpoint string, headers map[string]string, sample float64, exportTimeoutS float64) *Tracer {
 	t := New(enabled, bus, service)
 	if sample <= 0 {
 		sample = 1
 	}
 	t.sample = sample
 	if enabled && endpoint != "" {
-		t.exporter = newOTLPExporter(endpoint, headers)
+		t.exporter = newOTLPExporter(endpoint, headers, time.Duration(exportTimeoutS*float64(time.Second)))
 	}
 	return t
 }

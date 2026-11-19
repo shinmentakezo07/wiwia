@@ -9,7 +9,28 @@ import (
 var (
 	clientMu     sync.Mutex
 	sharedClient *http.Client
+	poolMaxConns = 200
+	poolMaxIdle  = 40
+	poolIdleTTL  = 30 * time.Second
 )
+
+// ConfigureHTTPPool sets the outbound connection pool. It mirrors the Python
+// httpx limits (total connections, keepalive connections, keepalive expiry).
+// Zero values keep the previous setting.
+func ConfigureHTTPPool(maxConns, maxKeepalive int, idleTimeout time.Duration) {
+	clientMu.Lock()
+	defer clientMu.Unlock()
+	if maxConns > 0 {
+		poolMaxConns = maxConns
+	}
+	if maxKeepalive > 0 {
+		poolMaxIdle = maxKeepalive
+	}
+	if idleTimeout > 0 {
+		poolIdleTTL = idleTimeout
+	}
+	sharedClient = nil
+}
 
 // HTTPClient returns a pooled client. timeoutSec<=0 means no client timeout
 // (streams are governed by the pump's watchdogs instead).
@@ -19,9 +40,10 @@ func HTTPClient(timeoutSec float64) *http.Client {
 	if sharedClient == nil {
 		sharedClient = &http.Client{
 			Transport: &http.Transport{
-				MaxIdleConns:        200,
-				MaxIdleConnsPerHost: 40,
-				IdleConnTimeout:     30 * time.Second,
+				MaxIdleConns:        poolMaxConns,
+				MaxIdleConnsPerHost: poolMaxIdle,
+				MaxConnsPerHost:     poolMaxConns,
+				IdleConnTimeout:     poolIdleTTL,
 			},
 		}
 	}

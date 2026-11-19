@@ -2,6 +2,7 @@ package providers
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"wiwi-go/internal/ir"
@@ -56,6 +57,7 @@ func TestResponsesStreamEvents(t *testing.T) {
 func TestOpencodeRouting(t *testing.T) {
 	cases := map[string]string{
 		"gpt-4o": "responses", "grok-2": "responses", "muse-spark-1": "responses",
+		"muse-ember-1": "responses", "muse-wonder-1": "responses",
 		"claude-sonnet": "messages", "qwen3.7-max": "messages", "qwen3.8-flash": "messages",
 		"gemini-2.0": "gemini", "deepseek-chat": "chat", "qwen3.8-max": "chat",
 	}
@@ -70,6 +72,48 @@ func TestOpencodeRouting(t *testing.T) {
 	}
 	if got := a.BuildURL("https://x/v1", "claude-x", false); got != "https://x/v1/messages" {
 		t.Fatalf("messages url: %s", got)
+	}
+	// The default OpenAI root is treated as unset, so each wire gets its own
+	// canonical base (Python _ROUTE_BASES).
+	if got := a.BuildURL(opencodeDefaultBase, "claude-x", false); got != "https://opencode.ai/inference/anthropic/v1/messages" {
+		t.Fatalf("canonical messages url: %s", got)
+	}
+	if got := a.BuildURL(opencodeDefaultBase, "gemini-2.0", false); !strings.HasPrefix(got, "https://opencode.ai/inference/google/v1beta/models/") {
+		t.Fatalf("canonical gemini url: %s", got)
+	}
+	// Credential scheme follows the wire, not the adapter.
+	a.modelID = "claude-x"
+	if h := a.Headers(ProviderKeyRef{Label: "k", Secret: "sk"}); h["x-api-key"] != "sk" || h["Authorization"] != "" {
+		t.Fatalf("messages headers: %v", h)
+	}
+	a.modelID = "gemini-2.0"
+	if h := a.Headers(ProviderKeyRef{Label: "k", Secret: "sk"}); h["x-goog-api-key"] != "sk" {
+		t.Fatalf("gemini headers: %v", h)
+	}
+	a.modelID = "gpt-4o"
+	if h := a.Headers(ProviderKeyRef{Label: "k", Secret: "sk"}); h["Authorization"] != "Bearer sk" {
+		t.Fatalf("chat headers: %v", h)
+	}
+	if h := a.Headers(ProviderKeyRef{Label: "k", Secret: "anonymous"}); h["Authorization"] != "Bearer public" {
+		t.Fatalf("anonymous headers: %v", h)
+	}
+	reqWithMeta := ir.Request{
+		Model: "gpt-4o", Stream: false,
+		Extras: map[string]any{"metadata": map[string]any{"user_id": "u"}},
+	}
+	body, err := a.EncodeRequest(reqWithMeta, "gpt-4o", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["metadata"]; ok {
+		t.Fatalf("OpenCode must drop caller metadata: %v", body["metadata"])
+	}
+	body, err = a.EncodeRequest(reqWithMeta, "gpt-4o", map[string]any{"metadata": map[string]any{"x": 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["metadata"]; !ok {
+		t.Fatal("explicit extra_body metadata must be preserved")
 	}
 }
 

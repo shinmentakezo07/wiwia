@@ -103,7 +103,7 @@ def test_fresh_adapter_returns_private_instance():
 def test_builtin_catalog_has_opencode_card():
     cards = {c["provider_type"]: c for c in BUILTIN_PROVIDER_TYPES}
     assert "opencode" in cards
-    assert cards["opencode"]["default_base_url"] == "https://opencode.ai/inference/v1"
+    assert cards["opencode"]["default_base_url"] == "https://opencode.ai/inference/openai/v1"
 
 
 # -- live headers --------------------------------------------------------------
@@ -203,7 +203,8 @@ def test_build_url_gemini_stream_and_nonstream():
 
 def test_build_url_default_base_when_empty():
     a = OpencodeAdapter()
-    assert a.build_url("", "gpt-5.5", False).startswith("https://opencode.ai/inference/v1/")
+    assert a.build_url("", "gpt-5.5", False).startswith(
+        "https://opencode.ai/inference/openai/v1/")
 
 
 # -- encode --------------------------------------------------------------------

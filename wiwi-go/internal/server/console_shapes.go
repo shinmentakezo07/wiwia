@@ -132,7 +132,7 @@ var builtinProviders = []builtinProvider{
 	},
 	{
 		ProviderType: "opencode", Label: "OpenCode Zen",
-		DefaultBaseURL: "https://opencode.ai/inference/v1",
+		DefaultBaseURL: "https://opencode.ai/inference/openai/v1",
 		Description: "OpenCode Zen gateway (opencode.ai/zen) — curated coding models over " +
 			"four upstream protocols routed per model. Authenticates with a Zen API key " +
 			"and sends a live User-Agent: opencode/<version>.",

@@ -17,12 +17,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+from collections import deque
 from typing import Any, NamedTuple
 
 import orjson
 import sqlalchemy as sa
 import structlog
 from sqlalchemy.ext.asyncio import AsyncEngine
+
+from wiwi.state_machines import RESPONSE, response_state
 
 log = structlog.get_logger()
 
@@ -59,13 +62,19 @@ class ResponseStore:
         self.engine = engine
         self.ttl_s = ttl_s
         self._sweeper: asyncio.Task[None] | None = None
-        # True until the first sweep, and re-armed by every put. An idle store
-        # (no writes since the last sweep) skips the DELETE entirely: on a
-        # scale-to-zero Postgres (Neon) an unconditional 300 s query kept the
-        # endpoint from ever suspending — 24/7 compute for zero traffic
-        # (AUDIT #604). The first pass always runs: a restart may inherit
-        # expired rows from the previous process.
-        self._dirty = True
+        # Wall-clock write timestamps since the last sweep, oldest first. The
+        # earliest entry plus the current TTL is the next moment a row can be
+        # expired, so an idle store issues no SQL. A plain "dirty" flag was not
+        # enough: a tick that fired before the written row's TTL elapsed
+        # cleared the flag and the row was never swept (only hidden on read) —
+        # the flake pinned by round 209's "a put must re-arm the sweeper".
+        self._pending: deque[float] = deque()
+        # One maintenance pass per TTL. The first pass runs at startup: a
+        # restart may inherit expired rows from the previous process. Later
+        # passes catch rows inherited from another process and bound the lag
+        # for any row whose write this process did not observe. One query per
+        # TTL keeps a scale-to-zero database asleep (AUDIT #604).
+        self._next_maintenance = 0.0
 
     async def startup(self) -> None:
         async with self.engine.begin() as conn:
@@ -75,6 +84,7 @@ class ResponseStore:
     async def put(self, resp_id: str, key_id: str, model_group: str,
                   input_items: list[dict[str, Any]],
                   output: dict[str, Any]) -> None:
+        ts = time.time()
         async with self.engine.begin() as conn:
             await conn.execute(sa.text(
                 "INSERT INTO stored_responses"
@@ -84,10 +94,11 @@ class ResponseStore:
                 " ON CONFLICT (id) DO UPDATE SET"
                 " created_at = :ts, key_id = :key, model_group = :grp,"
                 " input_json = :inp, output_json = :out"),
-                {"id": resp_id, "ts": time.time(), "key": key_id, "grp": model_group,
+                {"id": resp_id, "ts": ts, "key": key_id, "grp": model_group,
                  "inp": orjson.dumps(input_items).decode(),
                  "out": orjson.dumps(output).decode()})
-        self._dirty = True
+        self._pending.append(ts)
+        RESPONSE.fire("put", instance=resp_id)
 
     async def get(self, resp_id: str, key_id: str) -> StoredResponse | None:
         async with self.engine.begin() as conn:
@@ -98,7 +109,8 @@ class ResponseStore:
             return None
         # Expiry on read, not only in the sweeper: a row past its TTL must never
         # be served just because the sweeper has not run yet.
-        if self.ttl_s > 0 and time.time() - row[1] > self.ttl_s:
+        if response_state(row[1], self.ttl_s) == "expired":
+            RESPONSE.fire("expire", instance=resp_id)
             return None
         if key_id != "master" and row[2] != key_id:
             return None  # another key's transcript: indistinguishable from absent
@@ -115,20 +127,32 @@ class ResponseStore:
                 res = await conn.execute(sa.text(
                     "DELETE FROM stored_responses WHERE id = :id AND key_id = :key"),
                     {"id": resp_id, "key": key_id})
+        if (res.rowcount or 0) > 0:
+            RESPONSE.fire("delete", instance=resp_id)
         return (res.rowcount or 0) > 0
 
     async def sweep(self, now: float | None = None) -> int:
-        if self.ttl_s <= 0 or not self._dirty:
+        if self.ttl_s <= 0:
             return 0
-        cutoff = (now if now is not None else time.time()) - self.ttl_s
+        now = time.time() if now is None else now
+        # Nothing can have expired before the oldest pending write's TTL has
+        # elapsed; the maintenance threshold catches rows this process did not
+        # write (another worker, or a restart) without an every-tick query.
+        due = now >= self._next_maintenance
+        if not due and self._pending:
+            due = now >= self._pending[0] + self.ttl_s
+        if not due:
+            return 0
+        cutoff = now - self.ttl_s
         async with self.engine.begin() as conn:
             res = await conn.execute(sa.text(
                 "DELETE FROM stored_responses WHERE created_at < :cutoff"),
                 {"cutoff": cutoff})
-        # Cleared only on success: a failed sweep stays dirty and is retried
-        # on the next tick. A put racing the DELETE re-arms the flag, costing
-        # one extra pass — never a missed expiry (reads enforce TTL anyway).
-        self._dirty = False
+        # Every row older than the cutoff is gone; keep only still-live write
+        # timestamps so the next due time tracks the oldest survivor.
+        while self._pending and self._pending[0] < cutoff:
+            self._pending.popleft()
+        self._next_maintenance = now + self.ttl_s
         return res.rowcount or 0
 
     async def sweep_forever(self, interval_s: float = 300.0) -> None:

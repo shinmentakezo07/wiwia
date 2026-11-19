@@ -102,8 +102,10 @@ export async function api<T>(
     // password users the token is empty → "Bearer " header is harmless and the
     // server falls back to the cookie.
     resp = await fetch(path, { ...init, headers, credentials: "include" });
-  } catch (e) {
-    throw new ApiError(0, `network error: ${String(e)}`);
+  } catch {
+    // String(e) leaks "TypeError: Failed to fetch" into user-facing alerts;
+    // the cause is always the same for the operator — the gateway is unreachable.
+    throw new ApiError(0, "Cannot reach the gateway. Check your connection and try again.");
   }
   if (resp.status === 401) {
     if (upstream401) {
@@ -489,11 +491,17 @@ export const signupUser = (body: { username: string; password: string }) =>
     credentials: "include",
   });
 
+// Login 401s are about the credential being submitted, not an expired admin
+// session — keep the server's wording ("invalid credentials", "invalid
+// master key") instead of the generic bearer message. UpstreamAuthError is
+// the existing no-session-redirect escape hatch; nothing here is upstream,
+// but the semantics (401 without the global sign-out bounce) are identical.
 export const loginUser = (body: { username: string; password: string }) =>
   api<{ user: User; playground_key?: string }>("/auth/login", {
     method: "POST",
     body: JSON.stringify(body),
     credentials: "include",
+    upstream401: true,
   });
 
 export const loginMaster = (body: { master_key: string }) =>
@@ -501,6 +509,7 @@ export const loginMaster = (body: { master_key: string }) =>
     method: "POST",
     body: JSON.stringify(body),
     credentials: "include",
+    upstream401: true,
   });
 
 export const logoutSession = () =>

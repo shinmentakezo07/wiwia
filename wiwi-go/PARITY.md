@@ -32,8 +32,10 @@ Ported provider logic:
 - **Anthropic**: prompt-cache breakpoint injection (`prompt_cache`), native
   `output_config` (effort + json_schema), thinking modes, cache-control passthrough.
 - **Gemini**: `google_search` builtin rendering, function declarations, usage.
-- **OpenCode**: per-model wire routing (responses / messages / gemini / chat), live
-  npm `User-Agent`, free-tier decoy tools, decoy-call filtering.
+- **OpenCode**: per-model wire routing (responses / messages / gemini / chat), each
+  wire's canonical base and credential header (`Bearer`, `x-api-key`, `x-goog-api-key`),
+  live npm `User-Agent`, v2 session fingerprint headers, free-tier decoy tools,
+  decoy-call filtering.
 - **NIM**: native MiniMax/StepFun tool-markup framer + parser, schema memoization.
 - **IFM**: `chat_template_kwargs` effort, `X-Session-ID` affinity, `reasoning_content`
   replay, platform-param drops.
@@ -44,6 +46,30 @@ Ported provider logic:
   fronts a DeepSeek model.
 
 ## Recently closed gaps
+- **Response-store lifecycle** — same pending-write sweeper semantics as Python
+  (idle stores issue no SQL; every row still crosses a due boundary), `ttl <= 0`
+  keeps rows forever, `master` may read/delete across key scopes, `store:false`
+  is honored at every save site, and cache hits persist a rebased copy so the
+  returned id stays resolvable. Multi-turn replay decodes the raw stored
+  `_input` and `output` (tool calls/results and images survive), not text only.
+- **Forced streaming** — Cline, WorkBuddy and OpenCode have no non-streaming
+  upstream mode (Python `force_stream = True`). A plain `/v1/*` caller now gets
+  SSE requested, pumped, and reassembled into one `AssistantTurn`; Cline and
+  WorkBuddy never send `stream_options`, and each applies its own default
+  reasoning effort. OpenCode chat adds `stream_options` only on this forced path.
+- **Config/HTTP pool fields** — `http_keepalive_expiry_s`,
+  `singleflight_max_flights`, `singleflight_max_waiters`,
+  `response_store_sweep_interval_s`, and `telemetry.export_timeout_s` are
+  parsed, defaulted, validated and wired (outbound pool limits, flight limits,
+  store sweeper, OTLP export deadline).
+- **Cline redirect OAuth** — `POST /admin/cline/auto-connect` supports the
+  browser redirect flow (`auth_url`, `state`, 600 s TTL, `/console` clamp), the
+  public single-use `GET /cline/oauth/callback` is registered, and
+  status/refresh/disconnect honor the `provider` selector.
+- **Singleflight joiners** — a joiner now receives the leader's usage in its
+  log row at `cost=0`, a rebased response id, the `x-wiwi-singleflight: JOINED`
+  header, and (Responses surface) a persisted rebased transcript, matching
+  Python's join path. The typed result carries payload/usage/cost.
 - **Console API shape parity** — the SPA now runs unchanged against this port:
   `/admin/models`, `/admin/keys`, `/admin/users`, `/admin/pricing` (USD per 1M),
   `/admin/provider-catalog` (a bare array), `/admin/logs/proxy`,
@@ -129,3 +155,9 @@ Ported provider logic:
 ## Remaining gaps (minor / documented)
 - **OpenCode `jev-*`** System One models remain unroutable (the Python adapter documents
   the same limitation; they are not a completion API).
+
+The OpenCode free-tier decoys (chat and Responses shapes, streaming and
+non-streaming filtering, forced-auto `tool_choice`, `big-pickle`, and the
+`opencode_free_tier_cloak` opt-out) and WorkBuddy's request-shape rules
+(tool_choice normalization, system-message prepend, prompt sanitization) are
+now ported and covered by `shape_parity_test.go`.

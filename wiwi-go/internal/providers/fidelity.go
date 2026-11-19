@@ -321,45 +321,150 @@ func applyIFM(body map[string]any, g ir.GenParams) {
 
 const opencodeUserAgent = "opencode/1.0.0"
 
-// opencodeDecoyTools are the inert tools the v2 client sends; the free-tier
-// request-shape gate rejects a *-free request without them.
-func opencodeDecoyTools() []any {
-	return []any{
-		map[string]any{"type": "function", "function": map[string]any{
-			"name": "read", "description": "Read a file",
-			"parameters": map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}}},
-		}},
-		map[string]any{"type": "function", "function": map[string]any{
-			"name": "shell", "description": "Run a shell command",
-			"parameters": map[string]any{"type": "object", "properties": map[string]any{"command": map[string]any{"type": "string"}}},
-		}},
+const opencodeDecoyDescription = "This tool is currently unavailable and must not be used."
+
+var opencodeDecoyParams = map[string]map[string]any{
+	"read": {
+		"type": "object",
+		"properties": map[string]any{
+			"path": map[string]any{"type": "string", "description": "File or directory to read"},
+			"offset": map[string]any{"type": "integer", "minimum": 0,
+				"description": "The line or directory entry to start reading from (1-based)"},
+			"limit": map[string]any{"type": "integer", "minimum": 0,
+				"description": "The maximum number of lines or directory entries to read (defaults to and capped at 2000)"},
+		},
+		"required":             []any{"path"},
+		"additionalProperties": false,
+	},
+	"shell": {
+		"type": "object",
+		"properties": map[string]any{
+			"command": map[string]any{"type": "string", "description": "Shell command string to execute"},
+			"workdir": map[string]any{"type": "string",
+				"description": "Working directory to execute the command in. Defaults to the current working directory. When possible, avoid changing directories in the command and set the working directory here instead."},
+			"timeout": map[string]any{"type": "integer", "minimum": 0,
+				"description": "Timeout in milliseconds. Set to 0 to disable the timeout. Defaults to 120000 for foreground commands. Background commands have no timeout by default."},
+			"background": map[string]any{"type": "boolean",
+				"description": "Run the command in the background and return immediately (useful for dev servers and long-running builds). You do not need to use '&' at the end of the command when using this parameter. You will be notified when it completes. DO NOT poll for completion."},
+		},
+		"required":             []any{"command"},
+		"additionalProperties": false,
+	},
+}
+
+var opencodeDecoyNames = []string{"read", "shell"}
+
+func opencodeDecoysChat() []any {
+	out := make([]any, 0, len(opencodeDecoyNames))
+	for _, name := range opencodeDecoyNames {
+		out = append(out, map[string]any{"type": "function", "function": map[string]any{
+			"name": name, "description": opencodeDecoyDescription,
+			"parameters": opencodeDecoyParams[name],
+		}})
 	}
+	return out
+}
+
+func opencodeDecoysResponses() []any {
+	out := make([]any, 0, len(opencodeDecoyNames))
+	for _, name := range opencodeDecoyNames {
+		out = append(out, map[string]any{
+			"type": "function", "name": name, "description": opencodeDecoyDescription,
+			"parameters": opencodeDecoyParams[name],
+		})
+	}
+	return out
 }
 
 func isOpencodeFreeModel(modelID string) bool {
-	return strings.HasSuffix(modelID, "-free") ||
-		strings.Contains(modelID, "-contributor-free")
+	m := strings.ToLower(strings.TrimSpace(modelID))
+	return strings.HasSuffix(m, "-free") || m == "big-pickle"
 }
 
-// applyOpencodeCloak injects the decoy tools for a free model.
-func applyOpencodeCloak(body map[string]any) {
-	existing, _ := body["tools"].([]any)
-	body["tools"] = append(existing, opencodeDecoyTools()...)
+func opencodeCloakRequested(params map[string]any) bool {
+	if v, ok := params["opencode_free_tier_cloak"].(bool); ok && !v {
+		return false
+	}
+	return true
 }
 
-// stripOpencodeDecoys drops tool calls aimed at the decoy tools.
-func stripOpencodeDecoys(turn *ir.AssistantTurn) {
-	if len(turn.ToolCalls) == 0 {
+func toolName(t any) string {
+	m := AsDict(t)
+	if fn := AsDict(m["function"]); len(fn) > 0 {
+		if n := AsString(fn["name"]); n != "" {
+			return n
+		}
+	}
+	return AsString(m["name"])
+}
+
+// applyOpencodeCloak adds only the decoys the client did not already declare
+// and returns the names this call injected (the decode-side filter must not
+// drop a client's own `read`/`shell` call).
+func applyOpencodeCloak(body map[string]any) map[string]bool {
+	tools, _ := body["tools"].([]any)
+	if len(tools) == 0 {
+		body["tools"] = opencodeDecoysChat()
+		if _, ok := body["tool_choice"]; !ok {
+			body["tool_choice"] = "none"
+		}
+		return map[string]bool{"read": true, "shell": true}
+	}
+	names := map[string]bool{}
+	for _, t := range tools {
+		if n := toolName(t); n != "" {
+			names[n] = true
+		}
+	}
+	added := map[string]bool{}
+	for _, d := range opencodeDecoysChat() {
+		name := toolName(d)
+		if !names[name] {
+			tools = append(tools, d)
+			added[name] = true
+		}
+	}
+	body["tools"] = tools
+	return added
+}
+
+// applyOpencodeResponsesCloak is the Responses-wire variant used by OpenCode's
+// free Muse models.
+func applyOpencodeResponsesCloak(body map[string]any) map[string]bool {
+	tools, _ := body["tools"].([]any)
+	names := map[string]bool{}
+	for _, t := range tools {
+		if n := toolName(t); n != "" {
+			names[n] = true
+		}
+	}
+	added := map[string]bool{}
+	for _, d := range opencodeDecoysResponses() {
+		name := toolName(d)
+		if !names[name] {
+			tools = append(tools, d)
+			added[name] = true
+		}
+	}
+	body["tools"] = tools
+	if _, ok := body["tool_choice"]; !ok {
+		body["tool_choice"] = "auto"
+	}
+	return added
+}
+
+var opencodeForceAutoToolChoice = map[string]bool{
+	"muse-spark-1.2-contributor-free": true,
+	"muse-spark-1.3-contributor-free": true,
+}
+
+func forceOpencodeAutoToolChoice(body map[string]any, modelID string) {
+	if !opencodeForceAutoToolChoice[strings.ToLower(strings.TrimSpace(modelID))] {
 		return
 	}
-	kept := turn.ToolCalls[:0]
-	for _, tc := range turn.ToolCalls {
-		if tc.Name == "read" || tc.Name == "shell" {
-			continue
-		}
-		kept = append(kept, tc)
+	if tc, ok := body["tool_choice"]; ok && tc != nil && tc != "auto" {
+		body["tool_choice"] = "auto"
 	}
-	turn.ToolCalls = kept
 }
 
 // -- NIM schema memo --------------------------------------------------------

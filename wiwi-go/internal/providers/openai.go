@@ -27,6 +27,10 @@ type OpenAIAdapter struct {
 	nimAliases map[string]map[string]string
 	nimSchemas map[string]map[string]any
 	nimFramer  *miniMaxFramer
+
+	// OpenCode free-tier decoy names this request injected; calls to these
+	// names are stripped on decode, while a client's own read/shell survives.
+	opencodeDecoys map[string]bool
 }
 
 func (a *OpenAIAdapter) ProviderType() string { return a.providerType }
@@ -68,6 +72,7 @@ func (a *OpenAIAdapter) Reset() {
 	a.nimAliases = nil
 	a.nimSchemas = nil
 	a.nimFramer = nil
+	a.opencodeDecoys = nil
 }
 
 // -- request encoding --------------------------------------------------------
@@ -141,6 +146,23 @@ func (a *OpenAIAdapter) EncodeRequest(req ir.Request, modelID string, params map
 	if req.Stream && req.StreamOptionsIncludeUsage {
 		body["stream_options"] = map[string]any{"include_usage": true}
 	}
+	// Streaming-only OAuth upstreams: force SSE and never send stream_options
+	// (both reject the field). Cline defaults to xhigh thinking when the
+	// client expressed no preference; WorkBuddy defaults to max.
+	if a.providerType == "cline" || a.providerType == "workbuddy" {
+		body["stream"] = true
+		delete(body, "stream_options")
+	}
+	if a.providerType == "cline" && !clientSentThinking(g) {
+		body["reasoning_effort"] = "xhigh"
+	}
+	if a.providerType == "workbuddy" {
+		if effort := g.EffectiveReasoningEffort(); effort != "" {
+			body["reasoning_effort"] = effort
+		} else {
+			body["reasoning_effort"] = "max"
+		}
+	}
 	// Provider-specific wire fidelity.
 	switch a.providerType {
 	case "nvidia-nim":
@@ -162,9 +184,12 @@ func (a *OpenAIAdapter) EncodeRequest(req ir.Request, modelID string, params map
 	case "ifm":
 		applyIFM(body, g)
 	case "opencode":
-		if isOpencodeFreeModel(modelID) {
-			applyOpencodeCloak(body)
+		if isOpencodeFreeModel(modelID) && opencodeCloakRequested(params) {
+			a.opencodeDecoys = applyOpencodeCloak(body)
 		}
+	case "workbuddy":
+		normalizeWorkBuddyToolChoice(body)
+		applyWorkBuddyMessages(body)
 	}
 
 	if deepseek {
@@ -188,7 +213,7 @@ func (a *OpenAIAdapter) EncodeRequest(req ir.Request, modelID string, params map
 	for k, v := range params {
 		switch k {
 		case "extra_body", "provider_type", "drop_params", "max_tokens",
-			"prompt_cache", "prompt_cache_min_tokens":
+			"prompt_cache", "prompt_cache_min_tokens", "opencode_free_tier_cloak":
 			continue
 		}
 		setDefault(body, k, v)
@@ -488,9 +513,6 @@ func (a *OpenAIAdapter) DecodeResponse(status int, body []byte) (ir.AssistantTur
 			ID: mapStr(tc, "id"), Name: name,
 			Args: args, RawArgs: rawArgs, BlockType: "tool_use",
 		})
-	}
-	if a.providerType == "opencode" {
-		stripOpencodeDecoys(&turn)
 	}
 	turn.StopReason = normalizeFinishReason(choice["finish_reason"])
 	if lp, ok := choice["logprobs"].(map[string]any); ok {
