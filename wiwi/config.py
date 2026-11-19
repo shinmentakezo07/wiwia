@@ -126,6 +126,11 @@ class ProviderDef(BaseModel):
     # When True (default), keys are selected via smooth weighted round-robin.
     # When False, keys are used sequentially (first available, in label order).
     round_robin: bool = True
+    # False takes the whole account out of rotation without deleting it or
+    # touching its keys: every deployment backed by this provider reports
+    # unavailable and pick_key refuses it. The admin PATCH persists the flag,
+    # so a disabled account stays disabled across a restart.
+    enabled: bool = True
     keys: list[KeyDef] = Field(default_factory=list)
     # Optional caller-facing alias for this account.  When set, clients can
     # request a model by the alias id and the router will resolve it to a

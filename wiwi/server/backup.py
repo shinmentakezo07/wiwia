@@ -433,6 +433,7 @@ async def _export_providers(state, include_secrets: bool) -> list[dict]:
         "timeout_s": acct.timeout_s,
         "extra_headers": dict(acct.extra_headers),
         "round_robin": acct.round_robin,
+        "enabled": acct.enabled,
         "alias_id": acct.alias_id,
     } for acct in (state.router.providers[name]
                    for name in sorted(state.router.providers))]
@@ -1003,6 +1004,9 @@ def _validate_providers(state, doc: dict, plan: dict) -> None:
         rr = entry.get("round_robin")
         if rr is not None and not isinstance(rr, bool):
             raise BackupError(f"providers[{i}].round_robin must be a boolean")
+        en = entry.get("enabled")
+        if en is not None and not isinstance(en, bool):
+            raise BackupError(f"providers[{i}].enabled must be a boolean")
         alias = entry.get("alias_id")
         if alias is not None:
             alias = _as_str(alias, f"providers[{i}].alias_id")
@@ -1012,6 +1016,7 @@ def _validate_providers(state, doc: dict, plan: dict) -> None:
         out.append({"name": name, "provider_type": ptype,
                     "base_url": base_url, "timeout_s": timeout_s,
                     "extra_headers": headers, "round_robin": rr,
+                    "enabled": en,
                     "alias_id": alias, "alias_id_set": "alias_id" in entry})
 
     # Alias claims are checked against the registry as it will look *after*
@@ -1655,6 +1660,7 @@ async def _apply_providers(state, entries: list[dict]) -> int:
                 extra_headers=dict(p["extra_headers"] or {}),
                 round_robin=(p["round_robin"]
                              if p["round_robin"] is not None else True),
+                enabled=(p["enabled"] if p["enabled"] is not None else True),
                 alias_id=p["alias_id"] if p["alias_id_set"] else None)
             state.router.providers[p["name"]] = acct
         else:
@@ -1666,6 +1672,8 @@ async def _apply_providers(state, entries: list[dict]) -> int:
                 acct.extra_headers = dict(p["extra_headers"])
             if p["round_robin"] is not None:
                 acct.round_robin = p["round_robin"]
+            if p["enabled"] is not None:
+                acct.enabled = p["enabled"]
         if p["alias_id_set"]:
             try:
                 state.router.set_provider_alias(p["name"], p["alias_id"])
@@ -1683,7 +1691,8 @@ async def _apply_providers(state, entries: list[dict]) -> int:
                 p["name"], p["provider_type"], acct.base_url,
                 timeout_s=acct.timeout_s,
                 extra_headers=dict(acct.extra_headers),
-                round_robin=acct.round_robin, alias_id=acct.alias_id)
+                round_robin=acct.round_robin, alias_id=acct.alias_id,
+                enabled=acct.enabled)
         applied += 1
     return applied
 

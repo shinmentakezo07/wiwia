@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS providers (
   timeout_s DOUBLE PRECISION NOT NULL DEFAULT 120.0,
   extra_headers TEXT NOT NULL DEFAULT '{}',
   round_robin INTEGER NOT NULL DEFAULT 1,
+  enabled INTEGER NOT NULL DEFAULT 1,
   alias_id TEXT,
   detached INTEGER NOT NULL DEFAULT 0
 );
@@ -219,6 +220,9 @@ class ConfigStore:
         if "round_robin" not in cols:
             await conn.execute(sa.text(
                 "ALTER TABLE providers ADD COLUMN round_robin INTEGER NOT NULL DEFAULT 1"))
+        if "enabled" not in cols:
+            await conn.execute(sa.text(
+                "ALTER TABLE providers ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"))
         if "alias_id" not in cols:
             await conn.execute(sa.text(
                 "ALTER TABLE providers ADD COLUMN alias_id TEXT"))
@@ -289,6 +293,7 @@ class ConfigStore:
                            timeout_s: float = 120.0,
                            extra_headers: dict | None = None,
                            round_robin: bool = True,
+                           enabled: bool = True,
                            alias_id: str | None = None,
                            detached: bool = False) -> None:
         """Upsert a provider row (an override row for a YAML account too).
@@ -300,28 +305,30 @@ class ConfigStore:
         """
         hdrs = orjson.dumps(extra_headers or {}).decode()
         rr = int(round_robin)
+        en = int(enabled)
         if self._is_pg:
             sql = ("INSERT INTO providers"
                    " (name, provider_type, base_url, timeout_s, extra_headers,"
-                   "  round_robin, alias_id, detached)"
-                   " VALUES (:n,:t,:b,:s,:h,:r,:a,:d)"
+                   "  round_robin, enabled, alias_id, detached)"
+                   " VALUES (:n,:t,:b,:s,:h,:r,:e,:a,:d)"
                    " ON CONFLICT (name) DO UPDATE SET"
                    " provider_type=EXCLUDED.provider_type,"
                    " base_url=EXCLUDED.base_url,"
                    " timeout_s=EXCLUDED.timeout_s,"
                    " extra_headers=EXCLUDED.extra_headers,"
                    " round_robin=EXCLUDED.round_robin,"
+                   " enabled=EXCLUDED.enabled,"
                    " alias_id=EXCLUDED.alias_id,"
                    " detached=EXCLUDED.detached")
         else:
             sql = ("INSERT OR REPLACE INTO providers"
                    " (name, provider_type, base_url, timeout_s, extra_headers,"
-                   "  round_robin, alias_id, detached)"
-                   " VALUES (:n,:t,:b,:s,:h,:r,:a,:d)")
+                   "  round_robin, enabled, alias_id, detached)"
+                   " VALUES (:n,:t,:b,:s,:h,:r,:e,:a,:d)")
         async with self.engine.begin() as conn:
             await conn.execute(sa.text(sql),
                                {"n": name, "t": provider_type, "b": base_url,
-                                "s": timeout_s, "h": hdrs, "r": rr,
+                                "s": timeout_s, "h": hdrs, "r": rr, "e": en,
                                 "a": alias_id, "d": int(detached)})
 
     async def update_provider(self, name: str, *, provider_type: str | None = None,
@@ -329,6 +336,7 @@ class ConfigStore:
                               timeout_s: float | None = None,
                               extra_headers: dict | None = None,
                               round_robin: bool | None = None,
+                              enabled: bool | None = None,
                               alias_id: str | None = None,
                               alias_id_set: bool = False,
                               new_name: str | None = None) -> None:
@@ -349,6 +357,9 @@ class ConfigStore:
         if round_robin is not None:
             sets.append("round_robin = :rr")
             params["rr"] = int(round_robin)
+        if enabled is not None:
+            sets.append("enabled = :en")
+            params["en"] = int(enabled)
         # alias_id is the one field that may be set to NULL — disambiguate
         # "leave alone" from "clear it" via a separate flag.
         if alias_id_set:
@@ -851,7 +862,7 @@ class ConfigStore:
         async with self.engine.connect() as conn:
             prov_rows = (await conn.execute(sa.text(
                 "SELECT name, provider_type, base_url, timeout_s, extra_headers,"
-                " round_robin, alias_id, detached FROM providers ORDER BY name"))).all()
+                " round_robin, enabled, alias_id, detached FROM providers ORDER BY name"))).all()
             key_rows = (await conn.execute(sa.text(
                 "SELECT provider_name, label, secret, weight, enabled, detached"
                 " FROM provider_keys ORDER BY id"))).all()
@@ -863,8 +874,8 @@ class ConfigStore:
             "providers": [
                 {"name": r[0], "provider_type": r[1], "base_url": r[2],
                  "timeout_s": r[3], "extra_headers": orjson.loads(r[4]),
-                 "round_robin": bool(r[5]), "alias_id": r[6],
-                 "detached": bool(r[7])}
+                 "round_robin": bool(r[5]), "enabled": bool(r[6]),
+                 "alias_id": r[7], "detached": bool(r[8])}
                 for r in prov_rows
             ],
             "keys": [

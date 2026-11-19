@@ -1448,6 +1448,7 @@ class AppState:
                     base_url=p["base_url"], timeout_s=p["timeout_s"],
                     extra_headers=p.get("extra_headers", {}),
                     round_robin=p.get("round_robin", True),
+                    enabled=p.get("enabled", True),
                     alias_id=p.get("alias_id"))
                 continue
             # The account came from YAML and a DB row exists for it: that row is
@@ -1460,6 +1461,7 @@ class AppState:
             acct.timeout_s = p["timeout_s"]
             acct.extra_headers = p.get("extra_headers", {})
             acct.round_robin = p.get("round_robin", True)
+            acct.enabled = p.get("enabled", True)
             acct.alias_id = p.get("alias_id")
         # reapply admin-saved alias_id (and the alias-to-provider map)
         for p in data["providers"]:
@@ -4248,6 +4250,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 "provider_type": acct.provider_type,
                 "base_url": acct.base_url,
                 "round_robin": acct.round_robin,
+                "enabled": acct.enabled,
                 "alias_id": acct.alias_id,
                 "healthy": acct.healthy,
                 "keys": [_key_view(k, mono, wall) for k in acct.keys],
@@ -4685,6 +4688,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         new_ptype: str | None = None
         new_base_url: str | None = None
         new_round_robin: bool | None = None
+        new_enabled: bool | None = None
         if "name" in body:
             new_name = str(body["name"]).strip()
             if not new_name:
@@ -4726,6 +4730,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
                             "round_robin must be a boolean", request)
             new_round_robin = body["round_robin"]
             diff["round_robin"] = new_round_robin
+        if "enabled" in body:
+            if not isinstance(body["enabled"], bool):
+                return _err(400, "invalid_request_error",
+                            "enabled must be a boolean", request)
+            new_enabled = body["enabled"]
+            diff["enabled"] = new_enabled
         alias_change: tuple[str | None, bool] | None = None
         if "alias_id" in body:
             alias_raw = body["alias_id"]
@@ -4752,6 +4762,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 "provider_type": new_ptype,
                 "base_url": new_base_url,
                 "round_robin": new_round_robin,
+                "enabled": new_enabled,
                 "new_name": new_name,
             }
             if alias_change is not None:
@@ -4774,6 +4785,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     extra_headers=acct.extra_headers,
                     round_robin=(new_round_robin if new_round_robin is not None
                                  else acct.round_robin),
+                    enabled=(new_enabled if new_enabled is not None
+                             else acct.enabled),
                     alias_id=(alias_change[0] if alias_change is not None
                               else acct.alias_id))
                 if final_name != name:
@@ -4782,6 +4795,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         timeout_s=acct.timeout_s,
                         extra_headers=acct.extra_headers,
                         round_robin=acct.round_robin,
+                        enabled=acct.enabled,
                         alias_id=acct.alias_id, detached=True)
         if new_ptype is not None:
             acct.provider_type = new_ptype
@@ -4789,6 +4803,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
             acct.base_url = new_base_url
         if new_round_robin is not None:
             acct.round_robin = new_round_robin
+        if new_enabled is not None:
+            acct.enabled = new_enabled
         # apply rename last so identity-based deployment refs stay valid
         if new_name is not None and new_name != name:
             acct.name = new_name
@@ -4834,6 +4850,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             "provider_type": acct.provider_type,
             "base_url": acct.base_url,
             "round_robin": acct.round_robin,
+            "enabled": acct.enabled,
             "alias_id": acct.alias_id,
             "healthy": acct.healthy,
             "keys": [_key_view(k, mono, wall) for k in acct.keys],
@@ -4872,6 +4889,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 "timeout_s": acct.timeout_s,
                 "extra_headers": dict(acct.extra_headers),
                 "round_robin": acct.round_robin,
+                "enabled": acct.enabled,
                 "alias_id": acct.alias_id,
                 "keys": [{"label": k.label, "secret": k.secret,
                           "weight": k.weight, "enabled": k.enabled}
@@ -4964,6 +4982,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     return _err(400, "invalid_request_error",
                                 "round_robin must be a boolean", request)
                 round_robin = raw["round_robin"]
+            enabled = None
+            if "enabled" in raw and raw["enabled"] is not None:
+                if not isinstance(raw["enabled"], bool):
+                    return _err(400, "invalid_request_error",
+                                "enabled must be a boolean", request)
+                enabled = raw["enabled"]
             alias_id_set = "alias_id" in raw
             alias_id = None
             if alias_id_set:
@@ -5063,6 +5087,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                            "base_url": base_url, "timeout_s": timeout_s,
                            "extra_headers": extra_headers,
                            "round_robin": round_robin,
+                           "enabled": enabled,
                            "alias_id": alias_id, "alias_id_set": alias_id_set,
                            "eff_alias": eff_alias, "keys": keys, "deps": deps})
         # Alias claims are checked against the map as it will look after the
@@ -5101,6 +5126,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     extra_headers=dict(p["extra_headers"] or {}),
                     round_robin=(p["round_robin"]
                                  if p["round_robin"] is not None else True),
+                    enabled=(p["enabled"] if p["enabled"] is not None else True),
                     alias_id=p["alias_id"] if p["alias_id_set"] else None)
                 state.router.providers[name] = acct
                 if acct.alias_id is not None:
@@ -5111,6 +5137,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         timeout_s=acct.timeout_s,
                         extra_headers=dict(acct.extra_headers),
                         round_robin=acct.round_robin,
+                        enabled=acct.enabled,
                         alias_id=acct.alias_id)
             else:
                 acct.provider_type = p["provider_type"]
@@ -5122,6 +5149,8 @@ def create_app(config: WiwiConfig) -> FastAPI:
                     acct.extra_headers = dict(p["extra_headers"])
                 if p["round_robin"] is not None:
                     acct.round_robin = p["round_robin"]
+                if p["enabled"] is not None:
+                    acct.enabled = p["enabled"]
                 if p["alias_id_set"]:
                     for k, v in list(state.router.alias_to_provider.items()):
                         if v == acct.name:
@@ -5137,6 +5166,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                             base_url=p["base_url"], timeout_s=p["timeout_s"],
                             extra_headers=p["extra_headers"],
                             round_robin=p["round_robin"],
+                            enabled=p["enabled"],
                             alias_id=(p["alias_id"] if p["alias_id_set"]
                                       else None),
                             alias_id_set=p["alias_id_set"])

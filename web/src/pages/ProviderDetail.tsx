@@ -1221,15 +1221,18 @@ export function AccountSettingsCard(props: { p: Provider; onError: (m: string) =
   const [type, setType] = useState(props.p.provider_type);
   const [baseUrl, setBaseUrl] = useState(props.p.base_url);
   const [aliasId, setAliasId] = useState(props.p.alias_id ?? "");
+  const [enabled, setEnabled] = useState(props.p.enabled);
   const [error, setError] = useState<string | null>(null);
 
   const save = useMutation({
     mutationFn: () => {
       const patch: { name?: string; base_url?: string;
-                     provider_type?: string; alias_id?: string | null } = {};
+                     provider_type?: string; alias_id?: string | null;
+                     enabled?: boolean } = {};
       if (name.trim() !== props.p.name) patch.name = name.trim();
       if (type !== props.p.provider_type) patch.provider_type = type;
       if (baseUrl.trim() !== props.p.base_url) patch.base_url = baseUrl.trim();
+      if (enabled !== props.p.enabled) patch.enabled = enabled;
       const trimmedAlias = aliasId.trim();
       if (trimmedAlias !== (props.p.alias_id ?? "")) {
         patch.alias_id = trimmedAlias === "" ? null : trimmedAlias;
@@ -1251,11 +1254,12 @@ export function AccountSettingsCard(props: { p: Provider; onError: (m: string) =
     name.trim() !== props.p.name ||
     type !== props.p.provider_type ||
     baseUrl.trim() !== props.p.base_url ||
-    aliasId.trim() !== (props.p.alias_id ?? "");
+    aliasId.trim() !== (props.p.alias_id ?? "") ||
+    enabled !== props.p.enabled;
 
   return (
     <Card className="xl:col-span-3">
-      <CardHeader title="Account settings" subtitle="Rename, change type, base URL, or alias id." />
+      <CardHeader title="Account settings" subtitle="Rename, change type, base URL, alias id, or availability." />
       <div className="space-y-3 px-4 pb-4 pt-2">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <Field label="Name">
@@ -1283,6 +1287,23 @@ export function AccountSettingsCard(props: { p: Provider; onError: (m: string) =
             className="font-mono"
           />
         </Field>
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--admin-border)] bg-white/[0.01] px-3 py-2.5">
+          <div className="min-w-0">
+            <p className="text-[13px] font-medium text-[var(--admin-text)]">
+              Enabled
+            </p>
+            <p className="text-[11px] text-[var(--admin-text-dim)]">
+              When off, every deployment on this account reports unavailable and
+              no key is selected. Keys and deployments are kept.
+            </p>
+          </div>
+          <Toggle
+            label="Enable provider account"
+            checked={enabled}
+            onChange={setEnabled}
+            className="after:absolute after:-inset-3 after:content-['']"
+          />
+        </div>
         {error && <ErrorText>{error}</ErrorText>}
         <div className="flex justify-end">
           <Button disabled={!dirty || save.isPending} onClick={() => save.mutate()}>

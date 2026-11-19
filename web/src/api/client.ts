@@ -223,7 +223,7 @@ export const deleteProvider = (name: string) =>
 export const patchProvider = (
   name: string,
   patch: { name?: string; base_url?: string; provider_type?: string;
-            round_robin?: boolean; alias_id?: string | null },
+            round_robin?: boolean; enabled?: boolean; alias_id?: string | null },
 ) =>
   api<Provider>(`/admin/providers/${encodeURIComponent(name)}`, {
     method: "PATCH",

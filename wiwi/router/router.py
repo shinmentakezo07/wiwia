@@ -184,6 +184,9 @@ class ProviderAccount:
     timeout_s: float = 120.0
     extra_headers: dict[str, str] = field(default_factory=dict)
     round_robin: bool = True
+    # Account-level switch: False removes the whole provider from rotation
+    # (its deployments become unavailable) without deleting keys or a DB row.
+    enabled: bool = True
     keys: list[ProviderKey] = field(default_factory=list)
     # Optional caller-facing alias id.  Mirrors ProviderDef.alias_id from
     # wiwi.yaml; admin API mutations keep it in sync.  Used by the router's
@@ -194,7 +197,9 @@ class ProviderAccount:
 
     @property
     def healthy(self) -> bool:
-        return any(k.available for k in self.keys)
+        # An account-level disable is a hard stop: even a pool full of live
+        # keys must not make the provider routable while the switch is off.
+        return self.enabled and any(k.available for k in self.keys)
 
     def get_key(self, label: str) -> ProviderKey | None:
         """Resolve the live pool entry for a key reference (by label)."""
@@ -219,6 +224,8 @@ class ProviderAccount:
         ``probation_weight`` scales the effective WRR weight of keys in
         ``probation`` status so a just-healed key earns back traffic gradually.
         """
+        if not self.enabled:
+            return None, 0.0
         async with self._rr_lock:
             for k in self.keys:
                 k.recover()
@@ -816,6 +823,7 @@ class Router:
                 base_url=p.base_url or _default_base_url(p.provider),
                 timeout_s=p.timeout_s, extra_headers=dict(p.extra_headers),
                 round_robin=p.round_robin,
+                enabled=p.enabled,
                 keys=[ProviderKey(label=k.label, secret=k.key, weight=k.weight,
                                   enabled=k.enabled) for k in p.keys],
                 alias_id=p.alias_id,

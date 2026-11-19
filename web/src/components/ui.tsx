@@ -273,6 +273,8 @@ export function Toggle(props: {
   /** Optional id, for callers that would rather wire `aria-labelledby` to a
    *  visible label than pass a duplicate string. */
   id?: string;
+  /** Extra classes, e.g. an enlarged hit area on a standalone switch. */
+  className?: string;
 }) {
   return (
     <button
@@ -285,7 +287,7 @@ export function Toggle(props: {
       onClick={() => props.onChange(!props.checked)}
       className={`relative h-5 w-9 shrink-0 rounded-full transition-colors disabled:opacity-50 ${
         props.checked ? "bg-blue-500/40" : "bg-white/[0.06]"
-      }`}
+      } ${props.className ?? ""}`}
       style={props.checked ? { boxShadow: "0 0 12px -2px rgba(59,130,246,0.3)" } : undefined}
     >
       <span

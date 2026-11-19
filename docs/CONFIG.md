@@ -457,6 +457,7 @@ providers:
     base_url: https://api.openai.com/v1    # optional; this is the default
     timeout_s: 120                        # optional; falls back to router_settings.timeout
     round_robin: true                     # true = smooth weighted round-robin; false = label order
+    enabled: true                         # false takes the account out of rotation (keys kept)
     extra_headers: {}                     # optional
     alias_id: null                        # optional caller-facing alias
     keys:                                 # at least one required
@@ -473,6 +474,7 @@ There is no `api_key` field and no `budget_cap` field on a provider — keys liv
 | `base_url` | per type | See the table below. |
 | `timeout_s` | `None` | Falls back to `router_settings.timeout` when unset. |
 | `round_robin` | `true` | `true` selects keys by smooth weighted round-robin; `false` takes the first available key in label order. |
+| `enabled` | `true` | `false` removes the whole account from rotation: every deployment backed by it reports unavailable and no key is selected. Keys and deployments are kept; the admin console toggles and bulk-updates this flag. |
 | `extra_headers` | `{}` | Extra headers on every upstream request for this account. |
 | `alias_id` | `None` | When set, clients can request a model by this alias. Providers sharing an alias pool into one cross-provider weighted round-robin. |
 | `keys` | — | **Required**, at least one. Each has `label`, `key`, `weight` (`>= 1`), `enabled`. |
@@ -573,7 +575,7 @@ All config is parsed through Pydantic v2 models in `wiwi/config.py`:
 - `RouterSettings` — routing strategy, retries, timeouts, cooldowns, fallbacks, streaming + journal knobs, Prometheus, cycle + failover policy, `session_affinity`/`session_affinity_ttl_s`, `prefix_affinity`/`prefix_affinity_ttl_s`
 - `CacheSettings` — enabled, ttl_s, max_entries, bypass_header
 - `HealerSettings` — enabled, tick_s, probe_timeout_s, max_probes_per_sweep, probation_weight, etc.
-- `ProviderDef` — per-provider config (`base_url`, `timeout_s`, `extra_headers`, `round_robin`, `keys`, `alias_id`)
+- `ProviderDef` — per-provider config (`base_url`, `timeout_s`, `extra_headers`, `round_robin`, `enabled`, `keys`, `alias_id`)
 - `KeyDef` — provider key entry (`label`, `key`, `weight`, `enabled`)
 - `DeploymentParams` — per-deployment overrides (`provider`, `model`, `weight`, `max_tokens`, `rpm`, `tpm`, `timeout`, `extra_headers`, `extra_body`, `prompt_cache`, …)
 - `ModelEntry` — model_list entry (`model_name`, `wiwi_params`)

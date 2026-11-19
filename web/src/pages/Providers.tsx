@@ -29,6 +29,7 @@ import {
   getProviders,
   getRequestLogs,
   importProviders,
+  patchProvider,
 } from "@/api/client";
 import type { PoolKey, Provider, ProviderBackup, RequestLogEntry } from "@/api/types";
 import {
@@ -41,6 +42,7 @@ import {
   Field,
   Input,
   Select,
+  Toggle,
 } from "@/components/ui";
 import { fmtInt, fmtPct, fmtTokens, fmtUsd } from "@/lib/format";
 import { datedFilename, downloadJson } from "@/api/backup";
@@ -194,6 +196,14 @@ function ProviderCard(props: {
     onError: (e) => props.onError(e.message),
   });
 
+  // Account-level switch. The server gates routing on it, so the list can
+  // change a provider's availability without deleting the account or keys.
+  const setEnabled = useMutation({
+    mutationFn: (enabled: boolean) => patchProvider(props.p.name, { enabled }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["providers"] }),
+    onError: (e) => props.onError(e.message),
+  });
+
   const s = props.stats;
   const totalKeys = props.p.keys.length;
   // A key with no credential never serves, so counting it as active would
@@ -209,7 +219,7 @@ function ProviderCard(props: {
     <Card className={props.selected ? "ring-1 ring-blue-500/40" : undefined}>
       {/* header */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--admin-border)] px-4 py-3">
-        <div className="flex items-center gap-2.5">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1.5">
           <label
             className="-ml-2 flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-lg transition-colors hover:bg-white/[0.04]"
             title={`Select ${props.p.name} for bulk actions`}
@@ -238,9 +248,25 @@ function ProviderCard(props: {
           </h3>
           <Badge tone="blue">{props.p.provider_type}</Badge>
           <div className="flex items-center gap-1.5">
+            <Toggle
+              label={`Enable provider ${props.p.name}`}
+              checked={props.p.enabled}
+              onChange={(v) => setEnabled.mutate(v)}
+              disabled={setEnabled.isPending}
+              className="after:absolute after:-inset-3 after:content-['']"
+            />
+            <span className="text-[11px] text-[var(--admin-text-muted)]">
+              {props.p.enabled ? "enabled" : "disabled"}
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5">
             <HealthDot healthy={props.p.healthy} />
             <span className="text-[11px] text-[var(--admin-text-muted)]">
-              {props.p.healthy ? "healthy" : "no healthy keys"}
+              {!props.p.enabled
+                ? "out of rotation"
+                : props.p.healthy
+                  ? "healthy"
+                  : "no healthy keys"}
             </span>
           </div>
           <Badge tone="gray">
@@ -503,6 +529,45 @@ export function ProvidersPage() {
     onError: (e) => setError(e.message),
   });
 
+  // Enable/disable every selected account. Sequential for the same reason as
+  // the deletes: each write rewrites the provider row that startup layers over
+  // YAML, and overlapping writes would interleave there. Partial failures keep
+  // the survivors selected so a retry targets exactly what failed.
+  const bulkSetEnabled = useMutation({
+    mutationFn: async ({ names, enabled }: { names: string[]; enabled: boolean }) => {
+      const failed: { name: string; message: string }[] = [];
+      for (const name of names) {
+        try {
+          await patchProvider(name, { enabled });
+        } catch (e) {
+          failed.push({ name, message: e instanceof Error ? e.message : String(e) });
+        }
+      }
+      return { failed, enabled, attempted: names.length };
+    },
+    onSuccess: ({ failed, enabled, attempted }) => {
+      const failedNames = new Set(failed.map((f) => f.name));
+      setSelectedNames((prev) => new Set([...prev].filter((name) => failedNames.has(name))));
+      void qc.invalidateQueries({ queryKey: ["providers"] });
+      void qc.invalidateQueries({ queryKey: ["model-groups"] });
+      if (failed.length > 0) {
+        setNotice(null);
+        setError(
+          `Could not ${enabled ? "enable" : "disable"} ${failed.length} provider` +
+            `${failed.length === 1 ? "" : "s"} — ` +
+            failed.map((f) => `${f.name}: ${f.message}`).join("; "),
+        );
+      } else {
+        setError(null);
+        setNotice(
+          `${enabled ? "Enabled" : "Disabled"} ${attempted} provider` +
+            `${attempted === 1 ? "" : "s"}.`,
+        );
+      }
+    },
+    onError: (e) => setError(e.message),
+  });
+
   const addProvider_ = useMutation({
     mutationFn: () =>
       addProvider({
@@ -670,17 +735,39 @@ export function ProvidersPage() {
           >
             {selectedNames.size} selected
           </span>
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto">
+            <Button
+              variant="outline"
+              disabled={selectedNames.size === 0 || bulkSetEnabled.isPending || bulkDelete.isPending}
+              onClick={() =>
+                bulkSetEnabled.mutate({ names: [...selectedNames], enabled: true })
+              }
+            >
+              {bulkSetEnabled.isPending && bulkSetEnabled.variables?.enabled
+                ? "Enabling…"
+                : "Enable"}
+            </Button>
+            <Button
+              variant="outline"
+              disabled={selectedNames.size === 0 || bulkSetEnabled.isPending || bulkDelete.isPending}
+              onClick={() =>
+                bulkSetEnabled.mutate({ names: [...selectedNames], enabled: false })
+              }
+            >
+              {bulkSetEnabled.isPending && !bulkSetEnabled.variables?.enabled
+                ? "Disabling…"
+                : "Disable"}
+            </Button>
             <Button
               variant="ghost"
-              disabled={selectedNames.size === 0 || bulkDelete.isPending}
+              disabled={selectedNames.size === 0 || bulkDelete.isPending || bulkSetEnabled.isPending}
               onClick={() => setSelectedNames(new Set())}
             >
               Clear
             </Button>
             <Button
               variant="danger"
-              disabled={selectedNames.size === 0 || bulkDelete.isPending}
+              disabled={selectedNames.size === 0 || bulkDelete.isPending || bulkSetEnabled.isPending}
               onClick={() => setBulkOpen(true)}
             >
               <Trash2 size={14} />{" "}

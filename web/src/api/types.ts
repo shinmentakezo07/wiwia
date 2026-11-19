@@ -21,6 +21,9 @@ export interface Provider {
   provider_type: string;
   base_url: string;
   round_robin: boolean;
+  /** Account-level switch. False removes the whole provider from rotation
+   *  without deleting it; its deployments report unavailable. */
+  enabled: boolean;
   alias_id: string | null;
   healthy: boolean;
   keys: PoolKey[];
@@ -508,6 +511,7 @@ export interface ProviderBackup {
   timeout_s?: number;
   extra_headers?: Record<string, string>;
   round_robin?: boolean;
+  enabled?: boolean;
   alias_id?: string | null;
   keys: ProviderBackupKey[];
   deployments?: ProviderBackupDeployment[];
