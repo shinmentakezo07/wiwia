@@ -1,6 +1,6 @@
 <div align="center">
 
-<img alt="wiwi" src="docs/assets/wiwi-mark.svg" width="96">
+<img alt="wiwi" src="web/public/wiwi-logo.png" width="96">
 
 <img alt="wiwi — one gateway, every dialect, any provider" src="docs/assets/wiwi-hero.svg" width="1280">
 

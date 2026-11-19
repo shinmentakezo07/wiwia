@@ -1528,7 +1528,7 @@ export function PlaygroundPage() {
               <History size={18} aria-hidden />
             </Button>
             <Link to="/" className="pg-brand flex min-w-0 items-center gap-2 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50" aria-label="wiwi home">
-              <img src="/wiwi-mark.svg" alt="wiwi" className="h-7 w-7 shrink-0 rounded-lg object-cover" />
+              <img src="/wiwi-logo.png" alt="wiwi" className="h-7 w-7 shrink-0 rounded-lg object-cover" />
               <span className="pg-wordmark text-[15px] font-semibold tracking-[-0.02em]">wiwi</span>
             </Link>
             <span className="pg-product-label hidden border-l border-[var(--admin-border)] pl-3 text-[12px] text-[var(--admin-text-dim)] sm:block">Playground</span>

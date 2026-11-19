@@ -351,7 +351,7 @@ export function GraphSection() {
             {/* Center: wiwi gateway */}
             <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-10">
               <Circle ref={centerRef} className="!h-20 !w-20 wiwi-gateway-node">
-                <img src="/wiwi-mark.svg" alt="wiwi" className="h-10 w-10 rounded-full object-cover" />
+                <img src="/wiwi-logo.png" alt="wiwi" className="h-10 w-10 rounded-full object-cover" />
               </Circle>
               <div className="mt-3 text-center">
                 <span className="text-[11px] font-medium uppercase tracking-wide text-[var(--admin-text-dim)]">wiwi gateway</span>

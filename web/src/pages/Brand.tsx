@@ -20,20 +20,20 @@ interface BrandAsset {
 
 const BRAND_ASSETS: BrandAsset[] = [
   {
-    name: "Logo mark",
-    description: "The square mark on its own. Use it where the product name is already visible.",
-    path: "/wiwi-mark.svg",
-    filename: "wiwi-mark.svg",
-    previewBg: "bg-zinc-100",
-    previewClass: "h-20 w-20",
+    name: "Logo",
+    description: "The black-hole mark used by the gateway, console, and favicons.",
+    path: "/wiwi-logo.png",
+    filename: "wiwi-logo.png",
+    previewBg: "bg-[var(--admin-bg)]",
+    previewClass: "h-24 w-24 rounded-[22px] object-cover",
   },
   {
-    name: "Full logo",
-    description: "The mark plus the wordmark, on the dark surface it was drawn for.",
-    path: "/wiwi-logo.svg",
-    filename: "wiwi-logo.svg",
+    name: "App icon",
+    description: "The 180px touch icon installed alongside the web app.",
+    path: "/apple-touch-icon.png",
+    filename: "apple-touch-icon.png",
     previewBg: "bg-[var(--admin-bg)]",
-    previewClass: "h-16 w-auto max-w-full",
+    previewClass: "h-24 w-24 rounded-[22px]",
   },
 ];
 

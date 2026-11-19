@@ -375,12 +375,12 @@ export function AdminLayout() {
         <div className="relative flex h-[72px] shrink-0 items-center gap-2 pr-3 pl-5">
           {showCollapsed ? (
             <Link to="/" className="mx-auto flex items-center">
-              <img src="/wiwi-mark.svg" alt="wiwi" className="h-9 w-9 rounded-[10px] object-cover ring-1 ring-white/[0.06] ring-inset" />
+              <img src="/wiwi-logo.png" alt="wiwi" className="h-9 w-9 rounded-[10px] object-cover ring-1 ring-white/[0.06] ring-inset" />
             </Link>
           ) : (
             <>
               <Link to="/" className="flex min-w-0 flex-1 items-center gap-3.5">
-                <img src="/wiwi-mark.svg" alt="wiwi" className="h-10 w-10 shrink-0 rounded-[12px] object-cover ring-1 ring-white/[0.06] ring-inset" />
+                <img src="/wiwi-logo.png" alt="wiwi" className="h-10 w-10 shrink-0 rounded-[12px] object-cover ring-1 ring-white/[0.06] ring-inset" />
                 <div className="min-w-0">
                   <h1 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
                     wiwi

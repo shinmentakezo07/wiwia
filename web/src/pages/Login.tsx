@@ -206,7 +206,7 @@ export function LoginPage() {
           className="relative flex items-center justify-center rounded-full border border-white/[0.14] bg-[#0b0b0f] shadow-[0_0_0_1px_rgba(255,255,255,0.04),0_20px_60px_-20px_rgba(99,102,241,0.45)]"
           style={{ width: "var(--lg-hub)", height: "var(--lg-hub)" }}
         >
-          <img src="/wiwi-mark.svg" alt="wiwi" className="h-7 w-7 sm:h-8 sm:w-8" />
+          <img src="/wiwi-logo.png" alt="wiwi" className="h-7 w-7 sm:h-8 sm:w-8" />
         </div>
         <span className="text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-300">wiwi</span>
       </div>
@@ -235,7 +235,7 @@ export function LoginPage() {
       <div className="relative mx-auto flex min-h-[100dvh] w-full max-w-6xl flex-col px-4 py-[var(--lg-pad-y)] sm:px-6 lg:px-8">
         <header className="flex items-center justify-between gap-3">
           <Link to="/" className="inline-flex min-h-11 items-center gap-2.5 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400">
-            <img src="/wiwi-mark.svg" alt="" className="h-7 w-7" aria-hidden="true" />
+            <img src="/wiwi-logo.png" alt="" className="h-7 w-7" aria-hidden="true" />
             <span className="text-sm font-semibold tracking-tight text-zinc-100">wiwi</span>
           </Link>
           <Link

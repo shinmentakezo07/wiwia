@@ -58,7 +58,7 @@ export function SignupPage() {
             className="inline-flex min-h-11 items-center gap-3 rounded-lg pr-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
             aria-label="wiwi home"
           >
-            <img src="/wiwi-mark.svg" alt="" className="h-9 w-9 rounded-[10px]" />
+            <img src="/wiwi-logo.png" alt="" className="h-9 w-9 rounded-[10px]" />
             <span className="text-[19px] font-semibold tracking-[-0.03em] text-white">wiwi</span>
             <span className="hidden h-4 w-px bg-white/15 sm:block" aria-hidden="true" />
             <span className="hidden text-xs text-zinc-400 sm:block">AI gateway, simplified</span>
