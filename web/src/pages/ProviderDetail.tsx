@@ -585,6 +585,13 @@ export function DeploymentsCard(props: { provider: string; onError: (m: string) 
   const q = useQuery({ queryKey: ["model-groups"], queryFn: getModels });
   const qc = useQueryClient();
   const [pending, setPending] = useState<{ group: string; model_id: string } | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const selectAllRef = useRef<HTMLInputElement>(null);
+
+  // Pair identity: group names and model ids can each contain slashes, so a
+  // delimiter-joined string could alias two different deployments.
+  const selKey = (group: string, modelId: string) => JSON.stringify([group, modelId]);
 
   const detach = useMutation({
     mutationFn: (t: { group: string; model_id: string }) =>
@@ -699,6 +706,54 @@ export function DeploymentsCard(props: { provider: string; onError: (m: string) 
     return Array.from(merged.values());
   }, [q.data, props.provider]);
 
+  const selectedTargets = rows.filter((d) => selected.has(selKey(d.group, d.model_id)));
+  const allSelected = rows.length > 0 && selectedTargets.length === rows.length;
+  const someSelected = selectedTargets.length > 0;
+
+  // A background refetch (or a single detach) can remove a row under the
+  // selection; drop those keys so the bulk bar never counts a vanished pair.
+  useEffect(() => {
+    setSelected((prev) => {
+      if (prev.size === 0) return prev;
+      const alive = new Set(rows.map((d) => selKey(d.group, d.model_id)));
+      const next = new Set([...prev].filter((k) => alive.has(k)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [rows]);
+
+  useEffect(() => {
+    if (selectAllRef.current) selectAllRef.current.indeterminate = someSelected && !allSelected;
+  }, [someSelected, allSelected]);
+
+  // Sequential, and a failure does not cancel the rest: each delete mutates
+  // the routing ledger on the backend, and the operator asked for all of them.
+  const bulkDetach = useMutation({
+    mutationFn: async (targets: { group: string; model_id: string }[]) => {
+      const failed: { group: string; model_id: string; message: string }[] = [];
+      for (const t of targets) {
+        try {
+          await deleteDeployment(t.group, props.provider, t.model_id);
+        } catch (e) {
+          failed.push({ ...t, message: e instanceof Error ? e.message : String(e) });
+        }
+      }
+      return { failed };
+    },
+    onSuccess: ({ failed }) => {
+      const failedKeys = new Set(failed.map((f) => selKey(f.group, f.model_id)));
+      setSelected((prev) => new Set([...prev].filter((k) => !failedKeys.has(k))));
+      setBulkOpen(false);
+      void qc.invalidateQueries({ queryKey: ["model-groups"] });
+      if (failed.length > 0) {
+        props.onError(
+          `Could not detach ${failed.length} deployment${failed.length === 1 ? "" : "s"} — ` +
+            failed.map((f) => `${f.group}/${f.model_id}: ${f.message}`).join("; "),
+        );
+      }
+    },
+    onError: (e) => props.onError(e.message),
+  });
+
   return (
     <Card>
       <CardHeader title="Models" right={<Badge tone="blue">{rows.length}</Badge>} />
@@ -722,7 +777,50 @@ export function DeploymentsCard(props: { provider: string; onError: (m: string) 
               </ul>
             </div>
           )}
-          <Table head={["Model", "Model ID", "Weight", "Ready", ""]}>
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-[var(--admin-border)] px-4 py-1">
+            <label className="flex h-11 cursor-pointer items-center gap-2 rounded-lg px-2 text-[12px] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]">
+              <input
+                ref={selectAllRef}
+                type="checkbox"
+                className="h-4 w-4 cursor-pointer accent-blue-500"
+                checked={allSelected}
+                onChange={(e) => {
+                  const on = e.target.checked;
+                  setSelected(
+                    on ? new Set(rows.map((d) => selKey(d.group, d.model_id))) : new Set(),
+                  );
+                }}
+                aria-label="Select all deployments of this provider"
+              />
+              Select all
+            </label>
+            <span
+              className="font-mono text-[11px] tabular-nums text-[var(--admin-text-dim)]"
+              aria-live="polite"
+            >
+              {selectedTargets.length} selected
+            </span>
+            <div className="ml-auto flex items-center gap-2">
+              <Button
+                variant="ghost"
+                disabled={selectedTargets.length === 0 || bulkDetach.isPending}
+                onClick={() => setSelected(new Set())}
+              >
+                Clear
+              </Button>
+              <Button
+                variant="danger"
+                disabled={selectedTargets.length === 0 || bulkDetach.isPending}
+                onClick={() => setBulkOpen(true)}
+              >
+                <Unlink size={14} />{" "}
+                {bulkDetach.isPending
+                  ? "Detaching…"
+                  : `Detach selected${selectedTargets.length > 0 ? ` (${selectedTargets.length})` : ""}`}
+              </Button>
+            </div>
+          </div>
+          <Table head={["", "Model", "Model ID", "Weight", "Ready", ""]}>
             {(() => {
               const seen = new Set<string>();
               return rows.map((d) => {
@@ -732,6 +830,25 @@ export function DeploymentsCard(props: { provider: string; onError: (m: string) 
                 return (
                   <Fragment key={`${d.group}/${d.model_id}`}>
                     <tr>
+                      <TD className="w-10">
+                        <label className="flex h-11 w-11 cursor-pointer items-center justify-center">
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 cursor-pointer accent-blue-500"
+                            checked={selected.has(selKey(d.group, d.model_id))}
+                            onChange={(e) => {
+                              const k = selKey(d.group, d.model_id);
+                              setSelected((prev) => {
+                                const next = new Set(prev);
+                                if (e.target.checked) next.add(k);
+                                else next.delete(k);
+                                return next;
+                              });
+                            }}
+                            aria-label={`Select ${d.model_id} in ${d.group}`}
+                          />
+                        </label>
+                      </TD>
                       <TD className="font-medium">{d.group}</TD>
                       <TD className="font-mono text-[12px]">{d.model_id}</TD>
                       <TD className="tabular-nums">{d.weight}</TD>
@@ -765,7 +882,7 @@ export function DeploymentsCard(props: { provider: string; onError: (m: string) 
                     </tr>
                     {expanded && isFirst && (
                       <tr>
-                        <td colSpan={5} className="bg-[var(--admin-bg-raised)] px-4 py-3">
+                        <td colSpan={6} className="bg-[var(--admin-bg-raised)] px-4 py-3">
                           <div className="space-y-3">
                             <div>
                               <div className="mb-1 text-[11px] uppercase tracking-wide text-[var(--admin-text-dim)]">
@@ -974,6 +1091,51 @@ export function DeploymentsCard(props: { provider: string; onError: (m: string) 
             onClick={() => pending && detach.mutate(pending)}
           >
             {detach.isPending ? "Detaching…" : "Detach"}
+          </Button>
+        </div>
+      </Dialog>
+      <Dialog
+        open={bulkOpen}
+        title={`Detach ${selectedTargets.length} model${selectedTargets.length === 1 ? "" : "s"}?`}
+        onClose={() => {
+          if (!bulkDetach.isPending) setBulkOpen(false);
+        }}
+      >
+        <p className="text-[13px] text-[var(--admin-text-muted)]">
+          These deployments stop routing to <span className="font-mono">{props.provider}</span>.
+          A model group left with no deployments disappears.
+        </p>
+        <ul className="mt-3 max-h-48 space-y-0.5 overflow-y-auto rounded-lg border border-[var(--admin-border)] p-2 font-mono text-[12px]">
+          {selectedTargets
+            .slice()
+            .sort((a, b) => `${a.group}/${a.model_id}`.localeCompare(`${b.group}/${b.model_id}`))
+            .map((d) => (
+              <li key={selKey(d.group, d.model_id)} className="truncate px-1 py-0.5">
+                <span className="text-[var(--admin-text)]">{d.group}</span>
+                <span className="text-[var(--admin-text-dim)]"> / {d.model_id}</span>
+              </li>
+            ))}
+        </ul>
+        {bulkDetach.error && (
+          <div className="mt-3"><ErrorText>{bulkDetach.error.message}</ErrorText></div>
+        )}
+        <div className="flex justify-end gap-2 pt-4">
+          <Button
+            variant="ghost"
+            type="button"
+            disabled={bulkDetach.isPending}
+            onClick={() => setBulkOpen(false)}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="danger"
+            disabled={bulkDetach.isPending}
+            onClick={() =>
+              bulkDetach.mutate(selectedTargets.map((d) => ({ group: d.group, model_id: d.model_id })))
+            }
+          >
+            {bulkDetach.isPending ? "Detaching…" : `Detach ${selectedTargets.length}`}
           </Button>
         </div>
       </Dialog>

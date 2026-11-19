@@ -1,7 +1,7 @@
 // Providers page — bento box layout with provider-type icons, health
 // indicators, accent stat cells, error-rate bars, and stagger entrance.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -178,6 +178,8 @@ function StatCell(props: {
 function ProviderCard(props: {
   p: Provider;
   stats: ProviderStats | undefined;
+  selected: boolean;
+  onToggleSelect: (name: string, on: boolean) => void;
   onError: (m: string) => void;
 }) {
   const [delOpen, setDelOpen] = useState(false);
@@ -200,10 +202,22 @@ function ProviderCard(props: {
   const badge = providerBadge(props.p.provider_type);
 
   return (
-    <Card>
+    <Card className={props.selected ? "ring-1 ring-blue-500/40" : undefined}>
       {/* header */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--admin-border)] px-4 py-3">
         <div className="flex items-center gap-2.5">
+          <label
+            className="-ml-2 flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-lg transition-colors hover:bg-white/[0.04]"
+            title={`Select ${props.p.name} for bulk actions`}
+          >
+            <input
+              type="checkbox"
+              className="h-4 w-4 cursor-pointer accent-blue-500"
+              checked={props.selected}
+              onChange={(e) => props.onToggleSelect(props.p.name, e.target.checked)}
+              aria-label={`Select provider ${props.p.name}`}
+            />
+          </label>
           {badge ? (
             <img
               src={badge}
@@ -367,6 +381,9 @@ export function ProvidersPage() {
   const [secret, setSecret] = useState("");
   const [importing, setImporting] = useState(false);
   const [q, setQ] = useState("");
+  const [selectedNames, setSelectedNames] = useState<Set<string>>(() => new Set());
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const selectAllRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   // Allow deep-linking from the Built-in Providers catalog: ?type=openrouter
@@ -406,6 +423,77 @@ export function ProvidersPage() {
           }),
     [accounts, terms],
   );
+
+  const allVisibleSelected =
+    visibleAccounts.length > 0 && visibleAccounts.every((p) => selectedNames.has(p.name));
+  const someVisibleSelected = visibleAccounts.some((p) => selectedNames.has(p.name));
+
+  // The native checkbox's "mixed" state is not a prop: set it imperatively so
+  // a partial selection reads as partial instead of as unchecked.
+  useEffect(() => {
+    if (selectAllRef.current) {
+      selectAllRef.current.indeterminate = someVisibleSelected && !allVisibleSelected;
+    }
+  }, [someVisibleSelected, allVisibleSelected]);
+
+  // Drop names that no longer exist after a delete or a background refresh, so
+  // the bulk bar never offers to delete a phantom account.
+  useEffect(() => {
+    setSelectedNames((prev) => {
+      if (prev.size === 0) return prev;
+      const alive = new Set(accounts.map((p) => p.name));
+      const next = new Set([...prev].filter((name) => alive.has(name)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [accounts]);
+
+  const toggleSelect = useCallback((name: string, on: boolean) => {
+    setSelectedNames((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(name);
+      else next.delete(name);
+      return next;
+    });
+  }, []);
+
+  // Sequential rather than parallel: each delete rewrites routing pools and
+  // tombstones, so overlapping writes would interleave on the backend. A
+  // failure does not abort the rest — the operator asked for all of them and
+  // the survivors stay selected.
+  const bulkDelete = useMutation({
+    mutationFn: async (names: string[]) => {
+      const failed: { name: string; message: string }[] = [];
+      for (const name of names) {
+        try {
+          await deleteProvider(name);
+        } catch (e) {
+          failed.push({ name, message: e instanceof Error ? e.message : String(e) });
+        }
+      }
+      return { failed, attempted: names.length };
+    },
+    onSuccess: ({ failed, attempted }) => {
+      const failedNames = new Set(failed.map((f) => f.name));
+      setSelectedNames((prev) => new Set([...prev].filter((name) => !failedNames.has(name))));
+      setBulkOpen(false);
+      void qc.invalidateQueries({ queryKey: ["providers"] });
+      void qc.invalidateQueries({ queryKey: ["model-groups"] });
+      if (failed.length > 0) {
+        setNotice(null);
+        setError(
+          `Could not delete ${failed.length} provider${failed.length === 1 ? "" : "s"} — ` +
+            failed.map((f) => `${f.name}: ${f.message}`).join("; "),
+        );
+      } else {
+        setError(null);
+        setNotice(
+          `Deleted ${attempted} provider${attempted === 1 ? "" : "s"}. ` +
+            "Their deployments were detached from every model group.",
+        );
+      }
+    },
+    onError: (e) => setError(e.message),
+  });
 
   const addProvider_ = useMutation({
     mutationFn: () =>
@@ -545,6 +633,56 @@ export function ProvidersPage() {
           </p>
         )}
       </div>
+      {visibleAccounts.length > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-[10px] border border-[var(--admin-border)] px-2 py-1">
+          <label className="flex h-11 cursor-pointer items-center gap-2 rounded-lg px-2 text-[12px] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]">
+            <input
+              ref={selectAllRef}
+              type="checkbox"
+              className="h-4 w-4 cursor-pointer accent-blue-500"
+              checked={allVisibleSelected}
+              onChange={(e) => {
+                const on = e.target.checked;
+                setSelectedNames((prev) => {
+                  const next = new Set(prev);
+                  for (const p of visibleAccounts) {
+                    if (on) next.add(p.name);
+                    else next.delete(p.name);
+                  }
+                  return next;
+                });
+              }}
+              aria-label="Select all visible provider accounts"
+            />
+            Select all{terms.length > 0 ? ` ${visibleAccounts.length} visible` : ""}
+          </label>
+          <span
+            className="font-mono text-[11px] tabular-nums text-[var(--admin-text-dim)]"
+            aria-live="polite"
+          >
+            {selectedNames.size} selected
+          </span>
+          <div className="ml-auto flex items-center gap-2">
+            <Button
+              variant="ghost"
+              disabled={selectedNames.size === 0 || bulkDelete.isPending}
+              onClick={() => setSelectedNames(new Set())}
+            >
+              Clear
+            </Button>
+            <Button
+              variant="danger"
+              disabled={selectedNames.size === 0 || bulkDelete.isPending}
+              onClick={() => setBulkOpen(true)}
+            >
+              <Trash2 size={14} />{" "}
+              {bulkDelete.isPending
+                ? "Deleting…"
+                : `Delete selected${selectedNames.size > 0 ? ` (${selectedNames.size})` : ""}`}
+            </Button>
+          </div>
+        </div>
+      )}
       {error && (
         <div className="mb-3">
           <ErrorText>{error}</ErrorText>
@@ -574,6 +712,8 @@ export function ProvidersPage() {
             key={p.name}
             p={p}
             stats={statsByProvider.get(p.name)}
+            selected={selectedNames.has(p.name)}
+            onToggleSelect={toggleSelect}
             onError={setError}
           />
         ))}
@@ -597,6 +737,51 @@ export function ProvidersPage() {
           </Card>
         )}
       </div>
+
+      <Dialog
+        open={bulkOpen}
+        title={`Delete ${selectedNames.size} provider${selectedNames.size === 1 ? "" : "s"}?`}
+        onClose={() => {
+          if (!bulkDelete.isPending) setBulkOpen(false);
+        }}
+      >
+        <p className="text-[13px] text-[var(--admin-text-muted)]">
+          Each account and its keys are removed from the live pool. Deployments that
+          pointed at these accounts are detached from their model groups; a group left
+          with no deployments disappears.
+        </p>
+        <ul className="mt-3 max-h-40 space-y-0.5 overflow-y-auto rounded-lg border border-[var(--admin-border)] p-2 font-mono text-[12px] text-[var(--admin-text)]">
+          {[...selectedNames].sort().map((n) => (
+            <li key={n} className="truncate px-1 py-0.5">
+              {n}
+            </li>
+          ))}
+        </ul>
+        {bulkDelete.error && (
+          <div className="mt-3">
+            <ErrorText>{bulkDelete.error.message}</ErrorText>
+          </div>
+        )}
+        <div className="flex justify-end gap-2 pt-4">
+          <Button
+            variant="ghost"
+            type="button"
+            disabled={bulkDelete.isPending}
+            onClick={() => setBulkOpen(false)}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="danger"
+            disabled={bulkDelete.isPending}
+            onClick={() => bulkDelete.mutate([...selectedNames])}
+          >
+            {bulkDelete.isPending
+              ? "Deleting…"
+              : `Delete ${selectedNames.size} provider${selectedNames.size === 1 ? "" : "s"}`}
+          </Button>
+        </div>
+      </Dialog>
 
       <Dialog open={addOpen} title="Add provider account" onClose={() => setAddOpen(false)}>
         <form
