@@ -1,7 +1,7 @@
 // Login — the console's front door. The routing schematic uses the same
 // AnimatedBeam primitive as the marketing site: one gateway, many providers.
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   ArrowRight,
@@ -47,6 +47,29 @@ export function LoginPage() {
   const [busy, setBusy] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [showKey, setShowKey] = useState(false);
+  const userRef = useRef<HTMLInputElement>(null);
+  const passRef = useRef<HTMLInputElement>(null);
+  const keyRef = useRef<HTMLInputElement>(null);
+  const retryRef = useRef(false);
+
+  // Land on the credential field, not the page chrome — but only on
+  // mouse-capable devices: autofocus on touch pops the on-screen keyboard
+  // over half the viewport before the user asked to type. `hover: hover`
+  // rather than `pointer: fine` — some desktop engines report no pointer.
+  useEffect(() => {
+    if (window.matchMedia("(hover: hover)").matches) userRef.current?.focus();
+  }, []);
+
+  // A rejected sign-in selects the credential for a quick retype. This must
+  // run after the busy=false render re-enables the inputs — a disabled field
+  // silently drops .focus(), and a setTimeout races React's commit.
+  useEffect(() => {
+    if (busy || !retryRef.current) return;
+    retryRef.current = false;
+    const field = (mode === "user" ? passRef : keyRef).current;
+    field?.focus();
+    field?.select();
+  }, [busy, mode]);
 
   // Beam refs (4 providers → hub) for the showcase and compact diagram.
   const showcaseRef = useRef<HTMLDivElement>(null);
@@ -58,17 +81,44 @@ export function LoginPage() {
     useRef<HTMLDivElement>(null),
   ];
 
+  function switchMode(next: "user" | "admin") {
+    setMode(next);
+    setError(null);
+    // Continue where the operator was: into the first field of the new mode.
+    (next === "user" ? userRef : keyRef).current?.focus();
+  }
+
+  // The form is noValidate so an empty submit gets the same inline alert
+  // as a rejected credential, with focus sent to the field to fix —
+  // native validation bubbles would float outside the card's design.
+  function missingField(): { ref: React.RefObject<HTMLInputElement | null>; msg: string } | null {
+    if (mode === "user") {
+      if (!username.trim()) return { ref: userRef, msg: "Enter your username." };
+      if (!password) return { ref: passRef, msg: "Enter your password." };
+    } else if (!key.trim()) {
+      return { ref: keyRef, msg: "Enter the gateway master key." };
+    }
+    return null;
+  }
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (busy) return;
+    const missing = missingField();
+    if (missing) {
+      setError(missing.msg);
+      missing.ref.current?.focus();
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
-      if (mode === "user") await login(username, password);
-      else await loginWithMaster(key);
-      navigate("/app", { replace: true });
+      if (mode === "user") await login(username.trim(), password);
+      else await loginWithMaster(key.trim());
+      navigate("/console", { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Sign-in failed");
+      retryRef.current = true;
     } finally {
       setBusy(false);
     }
@@ -196,7 +246,7 @@ export function LoginPage() {
           </Link>
         </header>
 
-        <main className="grid flex-1 items-center gap-8 py-6 lg:grid-cols-[1.02fr_0.98fr] lg:gap-12 lg:py-4">
+        <main className="grid flex-1 items-center gap-5 py-4 lg:grid-cols-[1.02fr_0.98fr] lg:gap-12 lg:py-4">
           {/* Left: product framing + live schematic */}
           <section className="lg-slide-left hidden lg:flex lg:h-full lg:max-h-[min(720px,calc(100dvh-120px))] lg:flex-col lg:justify-center">
             <div className="max-w-xl">
@@ -227,23 +277,18 @@ export function LoginPage() {
 
           {/* Right: sign-in */}
           <section className="lg-rise flex items-center justify-center lg:justify-end">
+            <h1 className="sr-only">Sign in to wiwi</h1>
             <div className="w-full max-w-[440px]">
-              <div className="mb-6 lg:hidden">
-                <p className="lg-eyebrow mb-2">AI gateway console</p>
-                <h1 className="text-[1.75rem] font-semibold leading-tight tracking-tight text-zinc-50">Sign in</h1>
-                <p className="mt-2 text-sm leading-relaxed text-zinc-400">Access your gateway dashboard, keys, and usage.</p>
-              </div>
-
               <div className="lg-login-card overflow-hidden rounded-[20px] border">
                 {/* Card header */}
-                <div className="border-b border-white/[0.06] px-6 py-5 sm:px-8">
+                <div className="lg-card-head border-b border-white/[0.06] px-5 py-4 sm:px-8 sm:py-5">
                   <div className="flex items-start gap-4">
                     <div className="lg-login-mark" aria-hidden="true">
                       <KeyRound className="h-5 w-5" strokeWidth={1.75} />
                     </div>
                     <div className="min-w-0 pt-0.5">
                       <p className="lg-eyebrow">Console access</p>
-                      <h2 className="mt-1 text-xl font-semibold tracking-tight text-zinc-50 sm:text-[1.35rem]">
+                      <h2 id="lg-title" className="mt-1 text-xl font-semibold tracking-tight text-zinc-50 sm:text-[1.35rem]">
                         {mode === "user" ? "Welcome back" : "Admin sign-in"}
                       </h2>
                       <p className="mt-1 text-sm text-zinc-400">
@@ -256,40 +301,55 @@ export function LoginPage() {
                 </div>
 
                 <form
-                  className="lg-card-body p-6 sm:p-8"
+                  className="lg-card-body p-5 sm:p-8"
                   onSubmit={submit}
-                  aria-label="Sign in"
+                  aria-labelledby="lg-title"
+                  noValidate
                 >
-                  {/* Mode segmented control */}
-                  <div className="lg-seg" role="tablist" aria-label="Sign-in method">
+                  {/* Mode choice — radios, not tabs: there is no tabpanel, the
+                      form below simply swaps its credential fields. Native
+                      inputs give arrow-key selection and correct semantics;
+                      the visible label carries the 44px target. */}
+                  <fieldset className="lg-seg">
+                    <legend className="sr-only">Sign-in method</legend>
                     <div
                       className="lg-seg-indicator"
                       style={{ transform: mode === "admin" ? "translateX(calc(100% + 4px))" : "translateX(0)" }}
                       aria-hidden="true"
                     />
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={mode === "user"}
-                      onClick={() => { setMode("user"); setError(null); }}
-                      className="relative z-[1] inline-flex h-11 min-h-11 items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
-                    >
-                      <UserRound className="h-4 w-4" aria-hidden="true" />
-                      <span>Account</span>
-                    </button>
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={mode === "admin"}
-                      onClick={() => { setMode("admin"); setError(null); }}
-                      className="relative z-[1] inline-flex h-11 min-h-11 items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
-                    >
-                      <ShieldCheck className="h-4 w-4" aria-hidden="true" />
-                      <span>Admin key</span>
-                    </button>
-                  </div>
+                    <label>
+                      <input
+                        type="radio"
+                        name="lg-mode"
+                        value="user"
+                        className="sr-only"
+                        checked={mode === "user"}
+                        disabled={busy}
+                        onChange={() => switchMode("user")}
+                      />
+                      <span className="lg-seg-option relative z-[1] inline-flex h-11 min-h-11 w-full cursor-pointer items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors">
+                        <UserRound className="h-4 w-4" aria-hidden="true" />
+                        <span>Account</span>
+                      </span>
+                    </label>
+                    <label>
+                      <input
+                        type="radio"
+                        name="lg-mode"
+                        value="admin"
+                        className="sr-only"
+                        checked={mode === "admin"}
+                        disabled={busy}
+                        onChange={() => switchMode("admin")}
+                      />
+                      <span className="lg-seg-option relative z-[1] inline-flex h-11 min-h-11 w-full cursor-pointer items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors">
+                        <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+                        <span>Admin key</span>
+                      </span>
+                    </label>
+                  </fieldset>
 
-                  <div className="mt-6 space-y-4">
+                  <div className="lg-card-form mt-5 space-y-4 sm:mt-6">
                     {mode === "user" ? (
                       <>
                         <div className="space-y-1.5">
@@ -298,10 +358,11 @@ export function LoginPage() {
                             <UserRound className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500 transition-colors group-focus-within:text-zinc-300" aria-hidden="true" />
                             <input
                               id="lg-user"
+                              ref={userRef}
                               className="admin-input h-12 w-full pl-10 text-[15px]"
                               autoComplete="username"
                               value={username}
-                              onChange={(e) => setUsername(e.target.value)}
+                              onChange={(e) => { setUsername(e.target.value); setError(null); }}
                               placeholder="e.g. alex"
                               required
                               disabled={busy}
@@ -314,11 +375,12 @@ export function LoginPage() {
                             <KeyRound className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500 transition-colors group-focus-within:text-zinc-300" aria-hidden="true" />
                             <input
                               id="lg-pass"
+                              ref={passRef}
                               className="admin-input h-12 w-full pl-10 pr-12 text-[15px]"
                               type={showPassword ? "text" : "password"}
                               autoComplete="current-password"
                               value={password}
-                              onChange={(e) => setPassword(e.target.value)}
+                              onChange={(e) => { setPassword(e.target.value); setError(null); }}
                               placeholder="••••••••"
                               required
                               disabled={busy}
@@ -343,15 +405,17 @@ export function LoginPage() {
                           <ShieldCheck className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500 transition-colors group-focus-within:text-zinc-300" aria-hidden="true" />
                           <input
                             id="lg-key"
+                            ref={keyRef}
                             className="admin-input h-12 w-full pl-10 pr-12 font-mono text-[13px]"
                             type={showKey ? "text" : "password"}
                             autoComplete="off"
                             spellCheck={false}
                             value={key}
-                            onChange={(e) => setKey(e.target.value)}
+                            onChange={(e) => { setKey(e.target.value); setError(null); }}
                             placeholder="sk-…"
                             required
                             disabled={busy}
+                            autoCapitalize="none"
                           />
                           <button
                             type="button"
@@ -383,50 +447,39 @@ export function LoginPage() {
                     <button
                       type="submit"
                       disabled={busy}
+                      aria-busy={busy}
                       className="group mt-1 inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl px-4 text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0b0d] disabled:cursor-not-allowed disabled:opacity-70"
                     >
                       {busy ? (
                         <><Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> Signing in…</>
                       ) : (
                         <>
-                          {mode === "user" ? "Sign in" : "Continue with master key"}
+                          {mode === "user" ? "Sign in" : "Sign in with master key"}
                           <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" aria-hidden="true" />
                         </>
                       )}
                     </button>
                   </div>
 
-                  <div className="mt-6 flex items-center gap-3" aria-hidden="true">
-                    <div className="h-px flex-1 bg-white/[0.07]" />
-                    <span className="text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-500">or</span>
-                    <div className="h-px flex-1 bg-white/[0.07]" />
-                  </div>
-
-                  <div className="mt-4 text-center text-sm text-zinc-400">
-                    {mode === "user" ? (
-                      <button
-                        type="button"
-                        onClick={() => { setMode("admin"); setError(null); }}
-                        className="inline-flex min-h-11 items-center justify-center rounded-lg px-3 font-medium text-zinc-300 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
-                      >
-                        Continue with master key
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => { setMode("user"); setError(null); }}
-                        className="inline-flex min-h-11 items-center justify-center rounded-lg px-3 font-medium text-zinc-300 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
-                      >
-                        Use account sign-in instead
-                      </button>
-                    )}
-                  </div>
+                  <p className="lg-card-alt mt-5 border-t border-white/[0.06] pt-3 text-center text-[13px] text-zinc-400 sm:mt-6 sm:pt-4">
+                    New to this gateway?{" "}
+                    <Link
+                      to="/signup"
+                      className="inline-flex min-h-11 items-center font-medium text-zinc-200 underline decoration-zinc-600 underline-offset-4 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                    >
+                      Create an account
+                    </Link>
+                  </p>
                 </form>
 
-                <div className="lg-card-footer border-t border-white/[0.06] bg-white/[0.015] px-6 py-4 sm:px-8">
+                <div className="lg-card-footer border-t border-white/[0.06] bg-white/[0.015] px-5 py-3 sm:px-8 sm:py-4">
                   <div className="flex items-center justify-center gap-2 text-xs text-zinc-500">
                     <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-zinc-400" aria-hidden="true" />
-                    <span>Credentials are sent to your gateway and never stored in the browser.</span>
+                    <span>
+                      {mode === "user"
+                        ? "Sent only to your gateway — sign-in uses a secure session cookie."
+                        : "The master key stays in this browser to authorize admin requests."}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -435,7 +488,7 @@ export function LoginPage() {
           </section>
         </main>
 
-        <footer className="mt-auto flex flex-col items-center justify-between gap-3 border-t border-white/[0.05] pt-4 text-xs text-zinc-500 sm:flex-row">
+        <footer className="mt-auto flex flex-row items-center justify-between gap-2 border-t border-white/[0.05] pt-3 text-xs text-zinc-500">
           <p>© {new Date().getFullYear()} wiwi</p>
           <div className="flex items-center gap-2 sm:gap-4">
             <Link to="/docs" className="inline-flex min-h-11 items-center rounded-md px-2 transition-colors hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400">Documentation</Link>
