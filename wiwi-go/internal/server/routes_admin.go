@@ -281,9 +281,10 @@ func (a *App) adminListProviders(c *gin.Context) {
 				masked = "••••"
 			}
 			keys = append(keys, map[string]any{
-				"label": k.Label, "masked": masked, "weight": k.Weight,
-				"enabled": k.Enabled, "status": status, "cooldown_remaining_s": cool,
-				"req_count": 0, "err_count": k.ErrCount, "last_used_ts": nil,
+				"label": k.Label, "masked": masked, "has_secret": k.Secret != "",
+				"weight": k.Weight, "enabled": k.Enabled, "status": status,
+				"cooldown_remaining_s": cool, "req_count": 0,
+				"err_count": k.ErrCount, "last_used_ts": nil,
 			})
 		}
 		var aliasID any

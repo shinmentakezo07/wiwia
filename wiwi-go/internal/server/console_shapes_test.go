@@ -55,8 +55,28 @@ func TestConsoleListEnvelopes(t *testing.T) {
 		}
 	}
 
+	// The Providers page renders a key's usability from "has_secret": a
+	// missing field reads as "no secret" for every key in the console.
+	w := do(t, app, "GET", "/admin/providers", "")
+	var providers map[string]any
+	decodeBody(t, w.Body.Bytes(), &providers)
+	rawList, _ := providers["providers"].([]any)
+	if len(rawList) == 0 {
+		t.Fatal("/admin/providers returned no providers")
+	}
+	for _, rp := range rawList {
+		p := rp.(map[string]any)
+		rawKeys, _ := p["keys"].([]any)
+		for _, rk := range rawKeys {
+			k := rk.(map[string]any)
+			if _, ok := k["has_secret"]; !ok {
+				t.Fatalf("provider %s key %v missing has_secret", p["name"], k["label"])
+			}
+		}
+	}
+
 	// /admin/models is the richer envelope.
-	w := do(t, app, "GET", "/admin/models", "")
+	w = do(t, app, "GET", "/admin/models", "")
 	var models map[string]any
 	decodeBody(t, w.Body.Bytes(), &models)
 	for _, k := range []string{"groups", "aliases", "provider_aliases", "strategy"} {
