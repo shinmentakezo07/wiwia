@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -206,6 +207,8 @@ func (g *Gateway) completeGroups(ctx *RequestContext, groups []string, prefix st
 					dep.OnKeyResult(key, 200, nil)
 					dep.OnDeploymentResult(200, nil)
 					ctx.NoteAttempt(dep.Name(), dep.Provider.Name, key.Label, "ok", int(time.Since(start).Milliseconds()), "", dep.Model)
+					log.Printf("wiwi: ok on %s/%s [%s/%s] in %dms",
+						ctx.Group, dep.Model, dep.Provider.Name, key.Label, time.Since(start).Milliseconds())
 					g.price(ctx, dep, turn.Usage)
 					g.Router.RecordAffinity(ctx.SessionID, prefix, dep.Name())
 					g.Router.ReleaseSlot(dep, ctx.Lane)
@@ -215,6 +218,8 @@ func (g *Gateway) completeGroups(ctx *RequestContext, groups []string, prefix st
 				dep.OnKeyResult(key, we.Status, we)
 				dep.OnDeploymentResult(we.Status, we)
 				ctx.NoteAttempt(dep.Name(), dep.Provider.Name, key.Label, we.EType, int(time.Since(start).Milliseconds()), we.Message, dep.Model)
+				log.Printf("wiwi: %s on %s/%s [%s/%s] in %dms: %s",
+					we.EType, ctx.Group, dep.Model, dep.Provider.Name, key.Label, time.Since(start).Milliseconds(), we.Message)
 				if !we.Retryable || (g.Router.FailoverStandard() && !standardRetryable(we.Status)) {
 					g.Router.ReleaseSlot(dep, ctx.Lane)
 					return nil, we
@@ -285,6 +290,8 @@ func (g *Gateway) Stream(ctx *RequestContext) <-chan streaming.Delta {
 					tape = t
 				}
 				if ok {
+					log.Printf("wiwi: ok on %s/%s [%s/%s]",
+						ctx.Group, dep.Model, dep.Provider.Name, key.Label)
 					g.Router.RecordAffinity(ctx.SessionID, prefix, dep.Name())
 					return
 				}
@@ -292,6 +299,8 @@ func (g *Gateway) Stream(ctx *RequestContext) <-chan streaming.Delta {
 				if we != nil {
 					dep.OnKeyResult(key, we.Status, we)
 					dep.OnDeploymentResult(we.Status, we)
+					log.Printf("wiwi: %s on %s/%s [%s/%s]: %s",
+						we.EType, ctx.Group, dep.Model, dep.Provider.Name, key.Label, we.Message)
 				}
 				// Mid-stream resume: content already flowed and no tool call is
 				// open, so retry on a fallback with the partial output prepended.
