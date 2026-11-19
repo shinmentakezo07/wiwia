@@ -436,17 +436,20 @@ func cacheKeyFor(surface core.Surface, ctx *core.RequestContext, anthropicBeta s
 	// two requests differing only in that header are two upstream requests and
 	// must not share a cached answer (AUDIT #329).
 	payload := map[string]any{
-		"group":          ctx.Group,
-		"surface":        string(surface),
-		"key_id":         keyID(ctx.Auth),
-		"model":          ctx.IRReq.Model,
-		"messages":       ctx.IRReq.Messages,
-		"tools":          ctx.IRReq.Tools,
-		"tool_choice":    ctx.IRReq.ToolChoice,
-		"gen_params":     ctx.IRReq.GenParams,
-		"extras":         ctx.IRReq.Extras,
-		"anthropic_beta": anthropicBeta,
-		"stream":         false,
+		"group":              ctx.Group,
+		"surface":            string(surface),
+		"key_id":             keyID(ctx.Auth),
+		"model":              ctx.IRReq.Model,
+		"messages":           ctx.IRReq.Messages,
+		"tools":              ctx.IRReq.Tools,
+		"tool_choice":        ctx.IRReq.ToolChoice,
+		"gen_params":         ctx.IRReq.GenParams,
+		"extras":             ctx.IRReq.Extras,
+		"mcp_servers":        ctx.IRReq.MCPServers,
+		"container":          ctx.IRReq.Container,
+		"context_management": ctx.IRReq.ContextManagement,
+		"anthropic_beta":     anthropicBeta,
+		"stream":             false,
 	}
 	blob, _ := json.Marshal(payload)
 	sum := sha256.Sum256(blob)

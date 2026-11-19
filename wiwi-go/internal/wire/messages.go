@@ -11,8 +11,8 @@ import (
 // messagesPassthroughKeys are the top-level Messages params the IR does not
 // model but an Anthropic upstream accepts verbatim.
 var messagesPassthroughKeys = map[string]struct{}{
-	"service_tier": {}, "speed": {}, "metadata": {}, "mcp_servers": {},
-	"container": {}, "context_management": {}, "fallbacks": {}, "cache_control": {},
+	"service_tier": {}, "speed": {}, "metadata": {}, "fallbacks": {},
+	"cache_control": {},
 }
 
 // decodeMessages decodes an Anthropic Messages request body.
@@ -134,14 +134,52 @@ func decodeMessages(body map[string]any) (ir.Request, error) {
 	}
 
 	return ir.Request{
-		Model:      model,
-		Messages:   messages,
-		Tools:      tools,
-		ToolChoice: toolChoice,
-		GenParams:  g,
-		Stream:     boolValue(body["stream"]),
-		Extras:     pickExtras(body, messagesPassthroughKeys),
+		Model:             model,
+		Messages:          messages,
+		Tools:             tools,
+		ToolChoice:        toolChoice,
+		GenParams:         g,
+		Stream:            boolValue(body["stream"]),
+		Extras:            pickExtras(body, messagesPassthroughKeys),
+		MCPServers:        decodeMCPServers(body["mcp_servers"]),
+		Container:         asObject(body["container"]),
+		ContextManagement: asObject(body["context_management"]),
 	}, nil
+}
+
+// decodeMCPServers parses the typed mcp_servers array; a malformed entry is
+// skipped rather than failing the whole request.
+func decodeMCPServers(raw any) []ir.MCPServer {
+	list, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]ir.MCPServer, 0, len(list))
+	for _, item := range list {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		m := ir.MCPServer{
+			Type:               strOrEmpty(obj["type"]),
+			Name:               strOrEmpty(obj["name"]),
+			URL:                strOrEmpty(obj["url"]),
+			AuthorizationToken: strOrEmpty(obj["authorization_token"]),
+		}
+		if tc, ok := obj["tool_configuration"].(map[string]any); ok {
+			m.ToolConfiguration = tc
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// asObject returns raw when it is a JSON object, else nil.
+func asObject(raw any) map[string]any {
+	if obj, ok := raw.(map[string]any); ok {
+		return obj
+	}
+	return nil
 }
 
 // decodeMessagesContent decodes a Messages `content` field (string or blocks).

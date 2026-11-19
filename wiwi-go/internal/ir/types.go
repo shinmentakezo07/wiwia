@@ -163,6 +163,17 @@ func thinkingBudgetToEffort(b int) string {
 	}
 }
 
+// MCPServer is one entry of Anthropic's top-level `mcp_servers`. Modelled
+// rather than left in Extras so the Messages surface owns its shape and other
+// adapters cannot accidentally forward it to an incompatible upstream.
+type MCPServer struct {
+	Type               string         `json:"type,omitempty"`
+	Name               string         `json:"name,omitempty"`
+	URL                string         `json:"url,omitempty"`
+	AuthorizationToken string         `json:"authorization_token,omitempty"`
+	ToolConfiguration  map[string]any `json:"tool_configuration,omitempty"`
+}
+
 type Request struct {
 	Model                     string         `json:"model"`
 	Messages                  []Message      `json:"messages"`
@@ -172,6 +183,11 @@ type Request struct {
 	Stream                    bool           `json:"stream"`
 	StreamOptionsIncludeUsage bool           `json:"stream_options_include_usage"`
 	Extras                    map[string]any `json:"extras"`
+	// Anthropic 2026 top-level request surface, modelled so the IR (and the
+	// response cache key) carries it instead of an opaque extras entry.
+	MCPServers        []MCPServer    `json:"mcp_servers,omitempty"`
+	Container         map[string]any `json:"container,omitempty"`
+	ContextManagement map[string]any `json:"context_management,omitempty"`
 }
 
 type Usage struct {

@@ -129,8 +129,40 @@ func (a *AnthropicAdapter) EncodeRequest(req ir.Request, modelID string, params 
 	if req.Stream {
 		body["stream"] = true
 	}
-	mergeDefaults(body, req.Extras)
+	// Modelled Anthropic 2026 surface. Keeping these typed (instead of in
+	// Extras) is what lets the cache key see them and stops a non-Anthropic
+	// upstream from ever receiving them.
+	if len(req.MCPServers) > 0 {
+		body["mcp_servers"] = req.MCPServers
+	}
+	if req.Container != nil {
+		body["container"] = req.Container
+	}
+	if req.ContextManagement != nil {
+		body["context_management"] = req.ContextManagement
+	}
+	// Extras: keys the codec recognized as this provider's own 2026 surface
+	// ride through; anything else only under drop_params=false.
+	dropParams := true
+	if v, ok := params["drop_params"].(bool); ok {
+		dropParams = v
+	}
+	for k, v := range req.Extras {
+		if !dropParams || anthropicStandardExtras[k] {
+			if _, exists := body[k]; !exists {
+				body[k] = v
+			}
+		}
+	}
 	return body, nil
+}
+
+// anthropicStandardExtras are top-level Messages params the IR does not model
+// but the API accepts verbatim (from the Python adapter).
+var anthropicStandardExtras = map[string]bool{
+	"service_tier": true, "speed": true, "metadata": true, "mcp_servers": true,
+	"container": true, "context_management": true, "fallbacks": true,
+	"cache_control": true,
 }
 
 type anthropicSystemPart struct {
