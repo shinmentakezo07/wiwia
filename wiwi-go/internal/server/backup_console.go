@@ -139,15 +139,16 @@ func (a *App) buildBackupDoc(sections []string, includeSecrets, includeBodies bo
 			counts[section] = map[string]any{}
 		case "prices":
 			rows := []map[string]any{}
-			raw := a.exportTable(`SELECT model,prompt,completion,cached FROM model_prices ORDER BY model`,
-				[]string{"model", "prompt", "completion", "cached"})
+			raw := a.exportTable(
+				`SELECT model_id,input_cost_per_token,output_cost_per_token,cache_read_input_cost_per_token FROM model_prices ORDER BY model_id`,
+				[]string{"model_id", "input_cost_per_token", "output_cost_per_token", "cache_read_input_cost_per_token"})
 			for _, r := range raw {
 				row := map[string]any{
-					"model_id":              mapStr(r, "model"),
-					"input_cost_per_token":  numOr(r["prompt"], 0),
-					"output_cost_per_token": numOr(r["completion"], 0),
+					"model_id":              mapStr(r, "model_id"),
+					"input_cost_per_token":  numOr(r["input_cost_per_token"], 0),
+					"output_cost_per_token": numOr(r["output_cost_per_token"], 0),
 				}
-				if cached := numOr(r["cached"], 0); cached != 0 {
+				if cached := numOr(r["cache_read_input_cost_per_token"], 0); cached != 0 {
 					row["cache_read_input_cost_per_token"] = cached
 				}
 				rows = append(rows, row)
@@ -155,12 +156,12 @@ func (a *App) buildBackupDoc(sections []string, includeSecrets, includeBodies bo
 			doc[section] = rows
 			counts[section] = len(rows)
 		case "users":
-			rows := a.exportTable(`SELECT id,username,pw_hash,role,created_at,COALESCE(disabled,0) FROM users ORDER BY username`,
-				[]string{"id", "username", "pw_hash", "role", "created_at", "disabled"})
+			rows := a.exportTable(`SELECT id,username,password_hash,role,created_at,COALESCE(disabled,0) FROM users ORDER BY username`,
+				[]string{"id", "username", "password_hash", "role", "created_at", "disabled"})
 			out := make([]map[string]any, 0, len(rows))
 			for _, r := range rows {
 				out = append(out, map[string]any{
-					"id": r["id"], "username": r["username"], "password_hash": r["pw_hash"],
+					"id": r["id"], "username": r["username"], "password_hash": r["password_hash"],
 					"role": r["role"], "created_at": r["created_at"],
 					"disabled": numOr(r["disabled"], 0) != 0,
 				})
@@ -168,8 +169,8 @@ func (a *App) buildBackupDoc(sections []string, includeSecrets, includeBodies bo
 			doc[section] = out
 			counts[section] = len(out)
 		case "vkeys":
-			rows := a.exportTable(`SELECT id,key_hash,name,models,max_budget,spend,budget_reserved,rpm,tpm,expires_at,enabled,owner,created_at FROM vkeys ORDER BY created_at`,
-				[]string{"id", "key_hash", "name", "models", "max_budget", "spend", "budget_reserved", "rpm", "tpm", "expires_at", "enabled", "owner", "created_at"})
+			rows := a.exportTable(`SELECT id,key_hash,key_alias,models,max_budget,spend_to_date,budget_reserved,rpm,tpm,expires_at,disabled,owner_id,created_at FROM vkeys ORDER BY created_at`,
+				[]string{"id", "key_hash", "key_alias", "models", "max_budget", "spend_to_date", "budget_reserved", "rpm", "tpm", "expires_at", "disabled", "owner_id", "created_at"})
 			out := make([]map[string]any, 0, len(rows))
 			for _, r := range rows {
 				var models []string
@@ -180,18 +181,18 @@ func (a *App) buildBackupDoc(sections []string, includeSecrets, includeBodies bo
 					models = []string{}
 				}
 				out = append(out, map[string]any{
-					"id": r["id"], "key_hash": r["key_hash"], "key_alias": r["name"],
+					"id": r["id"], "key_hash": r["key_hash"], "key_alias": r["key_alias"],
 					"models": models, "max_budget": r["max_budget"],
-					"spend_to_date": r["spend"], "budget_reserved": r["budget_reserved"],
+					"spend_to_date": r["spend_to_date"], "budget_reserved": r["budget_reserved"],
 					"rpm": r["rpm"], "tpm": r["tpm"], "expires_at": r["expires_at"],
-					"disabled": numOr(r["enabled"], 1) == 0, "owner_id": nilIfEmpty(mapStr(r, "owner")),
+					"disabled": numOr(r["disabled"], 0) != 0, "owner_id": nilIfEmpty(mapStr(r, "owner_id")),
 					"created_at": r["created_at"],
 				})
 			}
 			doc[section] = out
 			counts[section] = len(out)
 		case "logs":
-			cols := []string{"id", "request_id", "ts", "key_id", "model_group", "provider", "model_id", "status", "prompt_tokens", "completion_tokens", "cached_tokens", "reasoning_tokens", "cost", "latency_ms", "ttft_ms", "error"}
+			cols := []string{"id", "request_id", "ts", "key_id", "model_group", "provider", "model_id", "status", "tok_in", "tok_out", "tok_cached", "tok_reasoning", "cost", "latency_ms", "ttft_ms", "error_message"}
 			rows := a.exportTable(`SELECT `+strings.Join(cols, ",")+` FROM request_logs ORDER BY ts DESC LIMIT 10000`, cols)
 			doc[section] = map[string]any{"request_logs": rows}
 			counts[section] = map[string]any{"request_logs": len(rows)}
@@ -416,7 +417,7 @@ func (a *App) applyBackupSection(section string, value any) int {
 				PromptCache: mapBool(m, "prompt_cache", false),
 			}
 			a.State.Cfg.ModelList = append(a.State.Cfg.ModelList, config.ModelEntry{ModelName: group, Params: params})
-			_ = saveDeployment(a.State.Store, group+"|"+provider+"|"+model, group, params)
+			_ = saveDeployment(a.State.Store, group, provider, model, params)
 			n++
 		}
 		a.rebuild()
@@ -508,10 +509,11 @@ func (a *App) applyBackupSection(section string, value any) int {
 			if mapBool(m, "disabled", false) {
 				disabled = 1
 			}
+			now := numOr(m["created_at"], float64(time.Now().Unix()))
 			_, _ = a.State.Store.DB().Exec(a.State.Store.Rebind(
-				`INSERT INTO users(id,username,pw_hash,role,created_at,disabled) VALUES(?,?,?,?,?,?)
-				 ON CONFLICT(id) DO UPDATE SET username=excluded.username,pw_hash=excluded.pw_hash,role=excluded.role,disabled=excluded.disabled`),
-				id, username, mapStr(m, "password_hash"), mapStr(m, "role"), numOr(m["created_at"], float64(time.Now().Unix())), disabled)
+				`INSERT INTO users(id,username,password_hash,role,disabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?)
+				 ON CONFLICT(id) DO UPDATE SET username=excluded.username,password_hash=excluded.password_hash,role=excluded.role,disabled=excluded.disabled,updated_at=excluded.updated_at`),
+				id, username, mapStr(m, "password_hash"), mapStr(m, "role"), disabled, now, now)
 			n++
 		}
 		return n
@@ -529,20 +531,28 @@ func (a *App) applyBackupSection(section string, value any) int {
 				id = "key_" + keyHash[:8]
 			}
 			models, _ := json.Marshal(m["models"])
-			enabled := 1
+			disabled := 0
 			if mapBool(m, "disabled", false) {
-				enabled = 0
+				disabled = 1
+			}
+			now := numOr(m["created_at"], float64(time.Now().Unix()))
+			var expires any
+			if e := m["expires_at"]; e != nil {
+				expires = e
+			}
+			var owner any
+			if o := mapStr(m, "owner_id"); o != "" {
+				owner = o
 			}
 			_, _ = a.State.Store.DB().Exec(a.State.Store.Rebind(
-				`INSERT INTO vkeys(id,name,owner,key_hash,max_budget,spend,rpm,tpm,models,enabled,expires_at,created_at,budget_reserved)
-				 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-				 ON CONFLICT(id) DO UPDATE SET name=excluded.name,key_hash=excluded.key_hash,max_budget=excluded.max_budget,
-				 spend=excluded.spend,rpm=excluded.rpm,tpm=excluded.tpm,models=excluded.models,enabled=excluded.enabled,
-				 expires_at=excluded.expires_at,budget_reserved=excluded.budget_reserved`),
-				id, mapStr(m, "key_alias"), mapStr(m, "owner_id"), keyHash,
-				numOr(m["max_budget"], 0), numOr(m["spend_to_date"], 0),
-				numOr(m["rpm"], 0), numOr(m["tpm"], 0), string(models), enabled,
-				numOr(m["expires_at"], 0), numOr(m["created_at"], float64(time.Now().Unix())),
+				`INSERT INTO vkeys(id,key_hash,key_alias,models,max_budget,spend_to_date,rpm,tpm,expires_at,disabled,owner_id,created_at,updated_at,budget_reserved)
+				 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+				 ON CONFLICT(id) DO UPDATE SET key_hash=excluded.key_hash,key_alias=excluded.key_alias,max_budget=excluded.max_budget,
+				 spend_to_date=excluded.spend_to_date,rpm=excluded.rpm,tpm=excluded.tpm,models=excluded.models,disabled=excluded.disabled,
+				 owner_id=excluded.owner_id,expires_at=excluded.expires_at,budget_reserved=excluded.budget_reserved,updated_at=excluded.updated_at`),
+				id, keyHash, mapStr(m, "key_alias"), string(models),
+				m["max_budget"], numOr(m["spend_to_date"], 0),
+				m["rpm"], m["tpm"], expires, disabled, owner, now, now,
 				numOr(m["budget_reserved"], 0))
 			n++
 		}
@@ -554,8 +564,10 @@ func (a *App) applyBackupSection(section string, value any) int {
 func (a *App) upsertPrice(model string, p cost.ModelPrice) {
 	a.State.Cost.Upsert(model, p)
 	_, _ = a.State.Store.DB().Exec(a.State.Store.Rebind(
-		`INSERT INTO model_prices(model,prompt,completion,cached) VALUES(?,?,?,?)
-		 ON CONFLICT(model) DO UPDATE SET prompt=excluded.prompt,completion=excluded.completion,cached=excluded.cached`),
+		`INSERT INTO model_prices(model_id,input_cost_per_token,output_cost_per_token,cache_read_input_cost_per_token) VALUES(?,?,?,?)
+		 ON CONFLICT(model_id) DO UPDATE SET input_cost_per_token=excluded.input_cost_per_token,
+		 output_cost_per_token=excluded.output_cost_per_token,
+		 cache_read_input_cost_per_token=excluded.cache_read_input_cost_per_token`),
 		model, p.Prompt, p.Completion, p.Cached)
 }
 
@@ -573,7 +585,7 @@ func (a *App) applyLegacyBackup(doc map[string]any) {
 				}
 				for _, m := range cfg.ModelList {
 					a.State.Cfg.ModelList = append(a.State.Cfg.ModelList, m)
-					_ = saveDeployment(a.State.Store, m.ModelName+"|"+m.Params.Provider+"|"+m.Params.Model, m.ModelName, m.Params)
+					_ = saveDeployment(a.State.Store, m.ModelName, m.Params.Provider, m.Params.Model, m.Params)
 				}
 			}
 		}
@@ -584,7 +596,7 @@ func (a *App) applyLegacyBackup(doc map[string]any) {
 				var m config.ModelEntry
 				if json.Unmarshal(b, &m) == nil && m.ModelName != "" {
 					a.State.Cfg.ModelList = append(a.State.Cfg.ModelList, m)
-					_ = saveDeployment(a.State.Store, m.ModelName+"|"+m.Params.Provider+"|"+m.Params.Model, m.ModelName, m.Params)
+					_ = saveDeployment(a.State.Store, m.ModelName, m.Params.Provider, m.Params.Model, m.Params)
 				}
 			}
 		}

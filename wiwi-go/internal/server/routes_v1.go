@@ -183,7 +183,6 @@ func (a *App) logRequest(ctx *core.RequestContext) {
 	if a.State.Store == nil {
 		return
 	}
-	id := "req_" + ctx.RequestID
 	attempts, _ := json.Marshal(ctx.Attempts)
 	var errText string
 	if ctx.Error != nil {
@@ -205,17 +204,25 @@ func (a *App) logRequest(ctx *core.RequestContext) {
 	if ctx.Auth != nil {
 		keyID = ctx.Auth.KeyID
 	}
-	promptText := ""
+	// StorePromptsInSpendLogs gates the raw prompt in request_body; the
+	// Python schema has no prompt_text column, so the text rides the
+	// documented column instead.
+	requestBody := any(nil)
 	if a.State.Cfg.Wiwi.StorePromptsInSpendLogs {
-		promptText = lastUserText(ctx)
+		if t := lastUserText(ctx); t != "" {
+			requestBody = t
+		}
 	}
 	_, _ = a.State.Store.DB().Exec(a.State.Store.Rebind(
-		`INSERT INTO request_logs(id,request_id,ts,key_id,model_group,provider,model_id,status,
-		 prompt_tokens,completion_tokens,cached_tokens,reasoning_tokens,cost,latency_ms,ttft_ms,tps,error,attempts,prompt_text)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
-		id, ctx.RequestID, time.Now().Unix(), keyID, ctx.Group, providerName(ctx), modelID,
-		ctx.Status, prompt, completion, cached, reasoning, ctx.Cost, ctx.LatencyMs(), ctx.TTFTMs(), tps,
-		errText, string(attempts), promptText)
+		`INSERT INTO request_logs(request_id,ts,surface,key_alias,key_id,model_group,provider,provider_key_label,
+		 model_id,status,error_code,error_message,tok_in,tok_cached,tok_cache_creation,tok_reasoning,tok_out,
+		 usage_estimated,tps,ttft_ms,latency_ms,cost,was_stream,cache_hit,cache_savings,response_cache_hit,
+		 attempts,translation_warnings,request_body,response_body)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
+		ctx.RequestID, time.Now().Unix(), string(ctx.Surface), "", keyID, ctx.Group,
+		providerName(ctx), "", modelID, ctx.Status, "", errText,
+		prompt, cached, 0, reasoning, completion, 0, tps, ctx.TTFTMs(), ctx.LatencyMs(),
+		ctx.Cost, 0, 0, 0.0, 0, string(attempts), "[]", requestBody, nil)
 }
 
 func providerName(ctx *core.RequestContext) string {

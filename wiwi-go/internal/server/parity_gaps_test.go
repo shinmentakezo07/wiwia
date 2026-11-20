@@ -10,11 +10,11 @@ import (
 func insertLog(t *testing.T, app *App, id string, ts int64, tps, ttft, latency float64) {
 	t.Helper()
 	_, err := app.State.Store.DB().Exec(app.State.Store.Rebind(
-		`INSERT INTO request_logs(id,request_id,ts,key_id,model_group,provider,model_id,status,
-		 prompt_tokens,completion_tokens,cached_tokens,reasoning_tokens,cost,latency_ms,ttft_ms,tps,error,attempts)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
-		id, id, ts, "k", "g", "p", "m", 200, 10, 5, 0, 0, 0.1,
-		int(latency), int(ttft), tps, "", "[]")
+		`INSERT INTO request_logs(request_id,ts,key_id,model_group,provider,model_id,status,
+		 tok_in,tok_out,tok_cached,tok_reasoning,cost,latency_ms,ttft_ms,tps,error_message,attempts)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
+		id, ts, "k", "g", "p", "m", 200, 10, 5, 0, 0, 0.1,
+		int64(latency), int64(ttft), tps, "", "[]")
 	if err != nil {
 		t.Fatalf("insert %s: %v", id, err)
 	}
@@ -59,8 +59,8 @@ func TestAdminLogFiltersAndPagination(t *testing.T) {
 	// Audit pagination and clamping.
 	for i := 0; i < 3; i++ {
 		_, _ = app.State.Store.DB().Exec(app.State.Store.Rebind(
-			`INSERT INTO audit_logs(id,ts,actor,action,target,diff) VALUES(?,?,?,?,?,?)`),
-			fmt.Sprintf("a%d", i), now-int64(i), "admin", "x", "t", "{}")
+			`INSERT INTO audit_logs(ts,actor,action,target,diff) VALUES(?,?,?,?,?)`),
+			now-int64(i), "admin", "x", "t", "{}")
 	}
 	w = do(t, app, "GET", "/admin/logs/audit?limit=2", "")
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {

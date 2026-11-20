@@ -168,9 +168,9 @@ func TestRetentionRollup(t *testing.T) {
 	// Insert two rows that are far in the past.
 	for i := 0; i < 2; i++ {
 		_, _ = app.State.Store.DB().Exec(app.State.Store.Rebind(
-			`INSERT INTO request_logs(id,request_id,ts,key_id,model_group,provider,model_id,status,prompt_tokens,completion_tokens,cached_tokens,reasoning_tokens,cost,latency_ms,ttft_ms,error,attempts)
-			 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
-			"old"+string(rune('a'+i)), "r", 1, "k", "g", "p", "m", 200, 10, 5, 0, 0, 0.5, 1, 0, "", "[]")
+			`INSERT INTO request_logs(request_id,ts,key_id,model_group,provider,model_id,status,tok_in,tok_out,tok_cached,tok_reasoning,cost,latency_ms,ttft_ms,error_message,attempts)
+			 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
+			"old"+string(rune('a'+i)), 1, "k", "g", "p", "m", 200, 10, 5, 0, 0, 0.5, 1, 0, "", "[]")
 	}
 	app.pruneLogs()
 	var count int

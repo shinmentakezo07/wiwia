@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"time"
@@ -70,24 +71,58 @@ func pbkdf2SHA256(password, salt []byte, iter, keyLen int) []byte {
 	return out[:keyLen]
 }
 
+// hashPassword writes Python's exact format (wiwi/auth/users.py hash_password):
+// "pbkdf2_sha256$<iters>$<salt-hex>$<dk-hex>", 200k iterations, 16-byte salt.
+// Both backends share the users table, so a password set through one must
+// verify on the other.
 func hashPassword(password string) string {
 	salt := make([]byte, 16)
 	_, _ = rand.Read(salt)
-	dk := pbkdf2SHA256([]byte(password), salt, 100_000, 32)
-	return "pbkdf2$100000$" + base64.RawStdEncoding.EncodeToString(salt) + "$" + base64.RawStdEncoding.EncodeToString(dk)
+	dk := pbkdf2SHA256([]byte(password), salt, 200_000, 32)
+	return "pbkdf2_sha256$200000$" + hex.EncodeToString(salt) + "$" + hex.EncodeToString(dk)
 }
 
 func verifyPassword(password, stored string) bool {
 	parts := strings.Split(stored, "$")
-	if len(parts) != 4 || parts[0] != "pbkdf2" {
+	if len(parts) != 4 {
+		return false
+	}
+	if parts[0] != "pbkdf2_sha256" {
+		// Legacy Go rows ("pbkdf2$...") pre-date schema sharing; the
+		// users a Go install created before the merge still verify.
+		if parts[0] == "pbkdf2" {
+			return verifyPasswordLegacy(password, parts)
+		}
 		return false
 	}
 	var iter int
-	if _, err := fmtSscan(parts[1], &iter); err != nil {
+	if _, err := fmtSscan(parts[1], &iter); err != nil || iter <= 0 || iter > 10_000_000 {
+		return false
+	}
+	salt, err := hex.DecodeString(parts[2])
+	if err != nil {
+		return false
+	}
+	want, err := hex.DecodeString(parts[3])
+	if err != nil {
+		return false
+	}
+	got := pbkdf2SHA256([]byte(password), salt, iter, len(want))
+	return subtle.ConstantTimeCompare(got, want) == 1
+}
+
+// verifyPasswordLegacy checks the pre-shared-schema Go format
+// "pbkdf2$<iters>$<salt-b64>$<dk-b64>". Only ever produced by old Go
+// installs, so a row in Python's format never takes this path.
+func verifyPasswordLegacy(password string, parts []string) bool {
+	var iter int
+	if _, err := fmtSscan(parts[1], &iter); err != nil || iter <= 0 || iter > 10_000_000 {
 		return false
 	}
 	salt, err := base64.RawStdEncoding.DecodeString(parts[2])
 	if err != nil {
+		// hex salts (Python-written) are rejected by base64 sometimes;
+		// cross-backend rows were never in this format anyway.
 		return false
 	}
 	want, err := base64.RawStdEncoding.DecodeString(parts[3])
@@ -250,6 +285,13 @@ func (s *Service) ValidateSession(secret, cookie string) (*User, error) {
 	}
 	u.CreatedAt = int64(createdF)
 	return &u, nil
+}
+
+// DeleteSession removes the session row named by a signed cookie.
+func (s *Service) DeleteSession(secret, cookie string) {
+	if id, ok := verifySession(secret, cookie); ok {
+		_, _ = s.store.DB().Exec(s.store.Rebind(`DELETE FROM sessions WHERE id=?`), id)
+	}
 }
 
 func signSession(secret, id string) string {

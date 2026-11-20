@@ -44,6 +44,10 @@ type Service struct {
 
 func NewService(s *store.Store) *Service { return &Service{store: s} }
 
+// Store exposes the underlying store for callers that need raw SQL over the
+// shared schema (the interop helper, admin ad-hoc queries).
+func (s *Service) Store() *store.Store { return s.store }
+
 func HashKey(plaintext string) string {
 	sum := sha256.Sum256([]byte(plaintext))
 	return hex.EncodeToString(sum[:])
@@ -128,8 +132,11 @@ func (s *Service) Authenticate(plaintext string) (*VKey, error) {
 	}
 	hash := HashKey(plaintext)
 	row := s.store.QueryRow(s.store.Rebind(
-		`SELECT id,key_alias,key_hash,max_budget,spend_to_date,rpm,tpm,models,disabled,expires_at,created_at,budget_reserved
-		 FROM vkeys WHERE key_hash=?`), hash)
+		`SELECT v.id,v.key_alias,v.key_hash,v.max_budget,v.spend_to_date,v.rpm,v.tpm,v.models,v.disabled,v.expires_at,v.created_at,v.budget_reserved
+		 FROM vkeys v
+		 WHERE v.key_hash=?
+		 AND (v.owner_id IS NULL OR EXISTS (
+			 SELECT 1 FROM users u WHERE u.id = v.owner_id AND COALESCE(u.disabled,0) = 0))`), hash)
 	v, err := scanKey(row)
 	if err != nil {
 		return nil, ErrUnauthorized

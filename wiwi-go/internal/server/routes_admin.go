@@ -339,7 +339,7 @@ func (a *App) adminPatchModelGroup(c *gin.Context) {
 			m := &a.State.Cfg.ModelList[i]
 			if m.ModelName == group && m.Params.Provider == d.Provider.Name && m.Params.Model == d.Model {
 				m.Params.Weight = w
-				_ = saveDeployment(a.State.Store, group+"|"+d.Provider.Name+"|"+d.Model, group, m.Params)
+				_ = saveDeployment(a.State.Store, group, d.Provider.Name, d.Model, m.Params)
 			}
 		}
 	}
@@ -364,12 +364,14 @@ func (a *App) adminListAliases(c *gin.Context) {
 // is what the console lists and what a backup carries — matching Python's
 // config_store-backed /admin/pricing.
 func (a *App) dbPrices() []map[string]any {
-	rows := a.exportTable(`SELECT model,prompt,completion,cached FROM model_prices ORDER BY model`,
-		[]string{"model", "prompt", "completion", "cached"})
+	rows := a.exportTable(
+		`SELECT model_id,input_cost_per_token,output_cost_per_token,cache_read_input_cost_per_token FROM model_prices ORDER BY model_id`,
+		[]string{"model_id", "input_cost_per_token", "output_cost_per_token", "cache_read_input_cost_per_token"})
 	out := make([]map[string]any, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, consolePrice(mapStr(r, "model"),
-			numOr(r["prompt"], 0), numOr(r["completion"], 0), numOr(r["cached"], 0)))
+		out = append(out, consolePrice(mapStr(r, "model_id"),
+			numOr(r["input_cost_per_token"], 0), numOr(r["output_cost_per_token"], 0),
+			numOr(r["cache_read_input_cost_per_token"], 0)))
 	}
 	return out
 }
@@ -423,8 +425,11 @@ func (a *App) adminUpsertPricing(c *gin.Context) {
 	}
 	a.State.Cost.Upsert(model, price)
 	_, _ = a.State.Store.DB().Exec(a.State.Store.Rebind(
-		`INSERT INTO model_prices(model,prompt,completion,cached) VALUES(?,?,?,?)
-		 ON CONFLICT(model) DO UPDATE SET prompt=excluded.prompt,completion=excluded.completion,cached=excluded.cached`),
+		`INSERT INTO model_prices(model_id,input_cost_per_token,output_cost_per_token,cache_read_input_cost_per_token)
+		 VALUES(?,?,?,?)
+		 ON CONFLICT(model_id) DO UPDATE SET input_cost_per_token=excluded.input_cost_per_token,
+		 output_cost_per_token=excluded.output_cost_per_token,
+		 cache_read_input_cost_per_token=excluded.cache_read_input_cost_per_token`),
 		model, price.Prompt, price.Completion, price.Cached)
 	a.State.Auth.Audit(a.actor(c), "pricing.upsert", model, "")
 	c.JSON(http.StatusOK, consolePrice(model, price.Prompt, price.Completion, price.Cached))
@@ -433,7 +438,7 @@ func (a *App) adminUpsertPricing(c *gin.Context) {
 func (a *App) adminDeletePricing(c *gin.Context) {
 	model := pricingModelID(c)
 	a.State.Cost.Delete(model)
-	_, _ = a.State.Store.DB().Exec(a.State.Store.Rebind(`DELETE FROM model_prices WHERE model=?`), model)
+	_, _ = a.State.Store.DB().Exec(a.State.Store.Rebind(`DELETE FROM model_prices WHERE model_id=?`), model)
 	a.State.Auth.Audit(a.actor(c), "pricing.delete", model, "")
 	c.JSON(http.StatusOK, gin.H{"deleted": true, "model_id": model})
 }
@@ -465,8 +470,9 @@ func (a *App) adminLogsRequests(c *gin.Context) {
 	}
 	args = append(args, limit, offset)
 	rows, err := a.State.Store.Query(a.State.Store.Rebind(
-		`SELECT id,request_id,ts,key_id,model_group,provider,model_id,status,prompt_tokens,
-		 completion_tokens,cached_tokens,reasoning_tokens,cost,latency_ms,ttft_ms,tps,error
+		`SELECT COALESCE(CAST(id AS TEXT),''),request_id,ts,key_id,key_alias,surface,model_group,provider,model_id,status,
+		 COALESCE(error_code,''),COALESCE(error_message,''),tok_in,tok_cached,tok_cache_creation,tok_reasoning,tok_out,
+		 cost,latency_ms,ttft_ms,tps,COALESCE(was_stream,0),COALESCE(cache_hit,0),COALESCE(response_cache_hit,0)
 		 FROM request_logs`+where+` ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?`), args...)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -476,26 +482,30 @@ func (a *App) adminLogsRequests(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	out := []map[string]any{}
 	for rows.Next() {
-		var id, rid, keyID, group, prov, model, errText string
-		var ts int64
-		var status, pt, ct, cached, reasoning, lat, ttft int
+		var id, rid, keyID, keyAlias, surface, group, prov, model string
+		var errCode, errMsg string
+		var ts float64
+		var status, tokIn, tokOut, tokCached, cacheCre, reasoning int
+		var lat, ttft, wasStream, cacheHit, respCacheHit int
 		var costv, tps float64
-		if err := rows.Scan(&id, &rid, &ts, &keyID, &group, &prov, &model, &status,
-			&pt, &ct, &cached, &reasoning, &costv, &lat, &ttft, &tps, &errText); err != nil {
+		if err := rows.Scan(&id, &rid, &ts, &keyID, &keyAlias, &surface, &group,
+			&prov, &model, &status, &errCode, &errMsg,
+			&tokIn, &tokCached, &cacheCre, &reasoning, &tokOut,
+			&costv, &lat, &ttft, &tps, &wasStream, &cacheHit, &respCacheHit); err != nil {
 			continue
 		}
 		out = append(out, map[string]any{
 			"stream": "request", "id": id, "request_id": rid, "ts": ts,
-			"key_id": keyID, "key_alias": "", "surface": "",
+			"key_id": keyID, "key_alias": keyAlias, "surface": surface,
 			"model_group": group, "provider": prov, "model_id": model,
 			"provider_key_label": "", "status": status,
-			"error_code": "", "error_message": errText,
-			"tok_in": pt, "tok_cached": cached, "tok_cache_creation": 0,
-			"tok_reasoning": reasoning, "tok_out": ct,
+			"error_code": errCode, "error_message": errMsg,
+			"tok_in": tokIn, "tok_cached": tokCached, "tok_cache_creation": cacheCre,
+			"tok_reasoning": reasoning, "tok_out": tokOut,
 			"usage_estimated": false, "tps": tps,
 			"ttft_ms": ttft, "latency_ms": lat, "cost": costv,
-			"was_stream": false, "cache_hit": cached > 0, "cache_savings": 0.0,
-			"response_cache_hit":   false,
+			"was_stream": wasStream != 0, "cache_hit": cacheHit != 0, "cache_savings": 0.0,
+			"response_cache_hit":   respCacheHit != 0,
 			"translation_warnings": []string{}, "attempts": []any{},
 			"request_body": nil,
 		})
@@ -513,7 +523,7 @@ func (a *App) adminLogsAudit(c *gin.Context) {
 	}
 	c.Header("Cache-Control", "no-store")
 	rows, err := a.State.Store.Query(a.State.Store.Rebind(
-		`SELECT id,ts,actor,action,target,diff FROM audit_logs ORDER BY ts DESC, id DESC LIMIT ?`), limit)
+		`SELECT COALESCE(CAST(id AS TEXT),''),ts,actor,action,target,diff FROM audit_logs ORDER BY ts DESC, id DESC LIMIT ?`), limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -522,7 +532,7 @@ func (a *App) adminLogsAudit(c *gin.Context) {
 	out := []map[string]any{}
 	for rows.Next() {
 		var id, actor, action, target, diff string
-		var ts int64
+		var ts float64
 		if rows.Scan(&id, &ts, &actor, &action, &target, &diff) != nil {
 			continue
 		}
@@ -551,8 +561,9 @@ func (a *App) adminLogsProxy(c *gin.Context) {
 
 func (a *App) adminRequestMetrics(c *gin.Context) {
 	row := a.State.Store.QueryRow(a.State.Store.Rebind(
-		`SELECT status,prompt_tokens,completion_tokens,cost,latency_ms,ttft_ms,attempts
-		 FROM request_logs WHERE request_id=? OR id=? LIMIT 1`), c.Param("id"), c.Param("id"))
+		`SELECT status,COALESCE(tok_in,0),COALESCE(tok_out,0),COALESCE(cost,0),
+		 COALESCE(latency_ms,0),COALESCE(ttft_ms,0),COALESCE(attempts,'[]')
+		 FROM request_logs WHERE request_id=? LIMIT 1`), c.Param("id"))
 	var status, pt, ct, lat, ttft int
 	var costv float64
 	var attempts string
@@ -661,12 +672,12 @@ func (a *App) adminStatsOverview(c *gin.Context) {
 	var tpsSum, cost float64
 	_ = a.State.Store.QueryRow(a.State.Store.Rebind(
 		`SELECT COUNT(*),
-		        COALESCE(SUM(CASE WHEN status >= 400 OR (error IS NOT NULL AND error != '') THEN 1 ELSE 0 END),0),
-		        COALESCE(SUM(prompt_tokens),0),
-		        COALESCE(SUM(cached_tokens),0),
-		        COALESCE(SUM(reasoning_tokens),0),
-		        COALESCE(SUM(completion_tokens),0),
-		        COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END),0),
+		        COALESCE(SUM(CASE WHEN status >= 400 OR COALESCE(error_message,'') != '' THEN 1 ELSE 0 END),0),
+		        COALESCE(SUM(tok_in),0),
+		        COALESCE(SUM(tok_cached),0),
+		        COALESCE(SUM(tok_reasoning),0),
+		        COALESCE(SUM(tok_out),0),
+		        COALESCE(SUM(CASE WHEN tok_cached > 0 THEN 1 ELSE 0 END),0),
 		        COALESCE(SUM(cost),0),
 		        COALESCE(SUM(tps),0),
 		        COALESCE(SUM(CASE WHEN tps > 0 THEN 1 ELSE 0 END),0)
@@ -729,13 +740,13 @@ type rollupSum struct {
 // read. Buckets are hour-floored, so the cutoff compares on bucket start.
 func (a *App) rollupTotals(hasWindow bool, cutoff int64) rollupSum {
 	q := `SELECT COALESCE(SUM(requests),0), COALESCE(SUM(errors),0),
-	             COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0),
+	             COALESCE(SUM(tok_in),0), COALESCE(SUM(tok_out),0),
 	             COALESCE(SUM(cost),0), COALESCE(SUM(tps_sum),0),
 	             COALESCE(SUM(tps_count),0)
 	      FROM request_rollups`
 	var args []any
 	if hasWindow {
-		q += " WHERE bucket >= ?"
+		q += " WHERE bucket_ts >= ?"
 		args = append(args, cutoff)
 	}
 	var out rollupSum
@@ -864,10 +875,10 @@ func (a *App) adminStatsTimeseries(c *gin.Context) {
 	hasWindow := minutes > 0
 	cutoff := int64(0)
 	q := `SELECT (ts/?) AS bucket,
-	             COALESCE(SUM(prompt_tokens),0),
-	             COALESCE(SUM(cached_tokens),0),
-	             COALESCE(SUM(reasoning_tokens),0),
-	             COALESCE(SUM(completion_tokens),0)
+	             COALESCE(SUM(tok_in),0),
+	             COALESCE(SUM(tok_cached),0),
+	             COALESCE(SUM(tok_reasoning),0),
+	             COALESCE(SUM(tok_out),0)
 	      FROM request_logs`
 	args := []any{size}
 	if hasWindow {
@@ -1335,7 +1346,7 @@ func (a *App) adminAddDeployment(c *gin.Context) {
 	p := config.DeploymentParams{Provider: body.Provider, Model: modelID, Weight: weight}
 	a.State.Cfg.ModelList = append(a.State.Cfg.ModelList, config.ModelEntry{ModelName: group, Params: p})
 	id := group + "|" + p.Provider + "|" + p.Model
-	_ = saveDeployment(a.State.Store, id, group, p)
+	_ = saveDeployment(a.State.Store, group, p.Provider, p.Model, p)
 	a.State.Auth.Audit(a.actor(c), "deployment.add", id, "")
 	a.rebuild()
 	c.JSON(http.StatusOK, gin.H{"deployment": map[string]any{
@@ -1375,7 +1386,7 @@ func (a *App) adminDeleteDeployment(c *gin.Context) {
 		return
 	}
 	a.State.Cfg.ModelList = kept
-	_ = deleteDeployment(a.State.Store, group+"|"+provider+"|"+model)
+	_ = deleteDeployment(a.State.Store, group, provider, model)
 	a.State.Auth.Audit(a.actor(c), "deployment.delete", group, "")
 	a.rebuild()
 	c.JSON(http.StatusOK, gin.H{
@@ -1467,7 +1478,7 @@ func (a *App) adminImportProviders(c *gin.Context) {
 	}
 	for _, m := range body.ModelList {
 		a.State.Cfg.ModelList = append(a.State.Cfg.ModelList, m)
-		_ = saveDeployment(a.State.Store, m.ModelName+"|"+m.Params.Provider+"|"+m.Params.Model, m.ModelName, m.Params)
+		_ = saveDeployment(a.State.Store, m.ModelName, m.Params.Provider, m.Params.Model, m.Params)
 	}
 	a.State.Auth.Audit(a.actor(c), "providers.import", "", "")
 	a.rebuild()
