@@ -92,10 +92,11 @@ func TestOpenMigrateSQLiteFile(t *testing.T) {
 	if busy != 5000 {
 		t.Errorf("busy_timeout = %d, want 5000", busy)
 	}
-
 	want := []string{
-		"audit_logs", "deployments", "model_prices", "providers", "request_logs",
-		"responses", "sessions", "settings", "users", "vkeys",
+		"audit_logs", "deployments", "model_price_scopes", "model_prices",
+		"provider_keys", "providers", "request_logs", "request_rollups",
+		"responses", "sessions", "settings", "stored_responses",
+		"sweep_locks", "users", "vkeys",
 	}
 	var got []string
 	rows, err := s.Query(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)
@@ -243,25 +244,24 @@ func TestExecQueryQueryRow(t *testing.T) {
 	if err := s.Migrate(); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-
-	if err := s.Exec(`INSERT INTO model_prices(model, prompt, completion, cached) VALUES(?, ?, ?, ?)`,
+	if err := s.Exec(`INSERT INTO model_prices(model_id, input_cost_per_token, output_cost_per_token, cache_read_input_cost_per_token) VALUES(?, ?, ?, ?)`,
 		"gpt-4o", 0.0000025, 0.00001, 0.00000125); err != nil {
 		t.Fatalf("Exec: %v", err)
 	}
 
 	var completion float64
-	if err := s.QueryRow(`SELECT completion FROM model_prices WHERE model = ?`, "gpt-4o").Scan(&completion); err != nil {
+	if err := s.QueryRow(`SELECT output_cost_per_token FROM model_prices WHERE model_id = ?`, "gpt-4o").Scan(&completion); err != nil {
 		t.Fatalf("QueryRow: %v", err)
 	}
 	if completion != 0.00001 {
 		t.Errorf("completion = %v, want 0.00001", completion)
 	}
 
-	if err := s.QueryRow(`SELECT completion FROM model_prices WHERE model = ?`, "nope").Scan(&completion); err != sql.ErrNoRows {
+	if err := s.QueryRow(`SELECT output_cost_per_token FROM model_prices WHERE model_id = ?`, "nope").Scan(&completion); err != sql.ErrNoRows {
 		t.Errorf("QueryRow(missing) err = %v, want sql.ErrNoRows", err)
 	}
 
-	rows, err := s.Query(`SELECT model FROM model_prices`)
+	rows, err := s.Query(`SELECT model_id FROM model_prices`)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}

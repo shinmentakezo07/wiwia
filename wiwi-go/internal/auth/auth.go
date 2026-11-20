@@ -19,7 +19,9 @@ var (
 	ErrBudgetExceeded = errors.New("budget exceeded")
 )
 
-// VKey is a virtual key as stored (never carries the plaintext).
+// VKey is a virtual key as stored (never carries the plaintext). The JSON
+// shape is the console's (console_shapes.go maps it to Python's key objects);
+// the persistence layer beneath it uses Python's schema columns.
 type VKey struct {
 	ID             string   `json:"id"`
 	Name           string   `json:"name"`
@@ -57,6 +59,24 @@ func GeneratePlaintext() string {
 	return "sk-wiwi-" + randomToken(24)
 }
 
+// nowFloat is the epoch float Python writes into every timestamp column
+// (time.time()). Whole-second int64s stay exact in a float64, so converting
+// back with int64(f) is lossless for API-shaped values.
+func nowFloat() float64 { return float64(time.Now().UnixNano()) / 1e9 }
+
+// modelsJSON mirrors Python's “models“ column: a JSON-array TEXT, "[]" when
+// empty — never a comma-joined string.
+func modelsJSON(models []string) string {
+	if len(models) == 0 {
+		return "[]"
+	}
+	b, err := json.Marshal(models)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
+}
+
 // Generate mints a new virtual key, returning the plaintext exactly once.
 func (s *Service) Generate(name string, maxBudget *float64, rpm, tpm *int, models []string, ttlSeconds int64) (string, *VKey, error) {
 	return s.GenerateOwned("", name, maxBudget, rpm, tpm, models, ttlSeconds, 0)
@@ -67,27 +87,32 @@ func (s *Service) GenerateOwned(owner, name string, maxBudget *float64, rpm, tpm
 	if name == "" {
 		name = "key"
 	}
-	if owner != "" && maxKeys > 0 {
-		var count int
-		_ = s.store.QueryRow(s.store.Rebind(`SELECT COUNT(*) FROM vkeys WHERE owner=?`), owner).Scan(&count)
-		if count >= maxKeys {
-			return "", nil, fmt.Errorf("max_keys_per_user (%d) reached", maxKeys)
+	var ownerArg any
+	if owner != "" {
+		ownerArg = owner
+		if maxKeys > 0 {
+			var count int
+			_ = s.store.QueryRow(s.store.Rebind(`SELECT COUNT(*) FROM vkeys WHERE owner_id=?`), owner).Scan(&count)
+			if count >= maxKeys {
+				return "", nil, fmt.Errorf("max_keys_per_user (%d) reached", maxKeys)
+			}
 		}
 	}
 	plain := GeneratePlaintext()
 	hash := HashKey(plain)
 	id := "vk_" + randomToken(8)
 	now := time.Now().Unix()
+	nowF := nowFloat()
+	var expiresF any
 	var expires int64
 	if ttlSeconds > 0 {
 		expires = now + ttlSeconds
+		expiresF = float64(expires)
 	}
-	modelsStr := strings.Join(models, ",")
-	_, err := s.store.DB().Exec(s.store.Rebind(
-		`INSERT INTO vkeys(id,name,owner,key_hash,max_budget,spend,rpm,tpm,models,enabled,expires_at,created_at,budget_reserved)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`),
-		id, name, owner, hash, maxBudget, 0.0, rpm, tpm, modelsStr, 1, expires, now, 0.0)
-	if err != nil {
+	if _, err := s.store.DB().Exec(s.store.Rebind(
+		`INSERT INTO vkeys(id,key_hash,key_alias,models,max_budget,spend_to_date,rpm,tpm,expires_at,disabled,owner_id,created_at,updated_at)
+		 VALUES(?,?,?,?,?,0,?,?,?,?,?,?,?)`),
+		id, hash, name, modelsJSON(models), maxBudget, rpm, tpm, expiresF, 0, ownerArg, nowF, nowF); err != nil {
 		return "", nil, err
 	}
 	return plain, &VKey{
@@ -103,7 +128,7 @@ func (s *Service) Authenticate(plaintext string) (*VKey, error) {
 	}
 	hash := HashKey(plaintext)
 	row := s.store.QueryRow(s.store.Rebind(
-		`SELECT id,name,key_hash,max_budget,spend,rpm,tpm,models,enabled,expires_at,created_at,budget_reserved
+		`SELECT id,key_alias,key_hash,max_budget,spend_to_date,rpm,tpm,models,disabled,expires_at,created_at,budget_reserved
 		 FROM vkeys WHERE key_hash=?`), hash)
 	v, err := scanKey(row)
 	if err != nil {
@@ -129,28 +154,33 @@ func scanKey(r rowScanner) (*VKey, error) {
 	var maxBudget *float64
 	var rpm, tpm *int
 	var models string
-	var enabled int
+	var disabled int
 	var spend, reserved *float64
-	var expires *int64
+	// created_at/expires_at are epoch floats in Python's schema. A *int64
+	// scan of a float64 value fails on Postgres, so scan float64 and convert.
+	var createdF float64
+	var expiresF *float64
 	if err := r.Scan(&v.ID, &v.Name, &v.KeyHash, &maxBudget, &spend, &rpm, &tpm,
-		&models, &enabled, &expires, &v.CreatedAt, &reserved); err != nil {
+		&models, &disabled, &expiresF, &createdF, &reserved); err != nil {
 		return nil, err
 	}
 	v.MaxBudget = maxBudget
 	v.RPM = rpm
 	v.TPM = tpm
-	v.Enabled = enabled != 0
+	v.Enabled = disabled == 0
 	if spend != nil {
 		v.Spend = *spend
 	}
 	if reserved != nil {
 		v.BudgetReserved = *reserved
 	}
-	if expires != nil {
-		v.ExpiresAt = *expires
+	if expiresF != nil {
+		v.ExpiresAt = int64(*expiresF)
 	}
-	if models != "" {
-		v.Models = strings.Split(models, ",")
+	v.CreatedAt = int64(createdF)
+	v.Models = nil
+	if models != "" && models != "[]" {
+		_ = json.Unmarshal([]byte(models), &v.Models)
 	}
 	return &v, nil
 }
@@ -158,7 +188,7 @@ func scanKey(r rowScanner) (*VKey, error) {
 // List returns all virtual keys (no plaintext).
 func (s *Service) List() ([]*VKey, error) {
 	rows, err := s.store.Query(s.store.Rebind(
-		`SELECT id,name,key_hash,max_budget,spend,rpm,tpm,models,enabled,expires_at,created_at,budget_reserved
+		`SELECT id,key_alias,key_hash,max_budget,spend_to_date,rpm,tpm,models,disabled,expires_at,created_at,budget_reserved
 		 FROM vkeys ORDER BY created_at DESC`))
 	if err != nil {
 		return nil, err
@@ -177,13 +207,14 @@ func (s *Service) List() ([]*VKey, error) {
 
 func (s *Service) Get(id string) (*VKey, error) {
 	row := s.store.QueryRow(s.store.Rebind(
-		`SELECT id,name,key_hash,max_budget,spend,rpm,tpm,models,enabled,expires_at,created_at,budget_reserved
+		`SELECT id,key_alias,key_hash,max_budget,spend_to_date,rpm,tpm,models,disabled,expires_at,created_at,budget_reserved
 		 FROM vkeys WHERE id=?`), id)
 	return scanKey(row)
 }
 
 func (s *Service) SetEnabled(id string, enabled bool) error {
-	_, err := s.store.DB().Exec(s.store.Rebind(`UPDATE vkeys SET enabled=? WHERE id=?`), boolInt(enabled), id)
+	_, err := s.store.DB().Exec(s.store.Rebind(`UPDATE vkeys SET disabled=?, updated_at=? WHERE id=?`),
+		boolInt(!enabled), nowFloat(), id)
 	return err
 }
 
@@ -194,27 +225,27 @@ func (s *Service) Delete(id string) error {
 
 func (s *Service) Patch(id string, maxBudget *float64, rpm, tpm *int, models []string, name *string) error {
 	if name != nil {
-		if _, err := s.store.DB().Exec(s.store.Rebind(`UPDATE vkeys SET name=? WHERE id=?`), *name, id); err != nil {
+		if _, err := s.store.DB().Exec(s.store.Rebind(`UPDATE vkeys SET key_alias=?, updated_at=? WHERE id=?`), *name, nowFloat(), id); err != nil {
 			return err
 		}
 	}
 	if maxBudget != nil {
-		if _, err := s.store.DB().Exec(s.store.Rebind(`UPDATE vkeys SET max_budget=? WHERE id=?`), *maxBudget, id); err != nil {
+		if _, err := s.store.DB().Exec(s.store.Rebind(`UPDATE vkeys SET max_budget=?, updated_at=? WHERE id=?`), *maxBudget, nowFloat(), id); err != nil {
 			return err
 		}
 	}
 	if rpm != nil {
-		if _, err := s.store.DB().Exec(s.store.Rebind(`UPDATE vkeys SET rpm=? WHERE id=?`), *rpm, id); err != nil {
+		if _, err := s.store.DB().Exec(s.store.Rebind(`UPDATE vkeys SET rpm=?, updated_at=? WHERE id=?`), *rpm, nowFloat(), id); err != nil {
 			return err
 		}
 	}
 	if tpm != nil {
-		if _, err := s.store.DB().Exec(s.store.Rebind(`UPDATE vkeys SET tpm=? WHERE id=?`), *tpm, id); err != nil {
+		if _, err := s.store.DB().Exec(s.store.Rebind(`UPDATE vkeys SET tpm=?, updated_at=? WHERE id=?`), *tpm, nowFloat(), id); err != nil {
 			return err
 		}
 	}
 	if models != nil {
-		if _, err := s.store.DB().Exec(s.store.Rebind(`UPDATE vkeys SET models=? WHERE id=?`), strings.Join(models, ","), id); err != nil {
+		if _, err := s.store.DB().Exec(s.store.Rebind(`UPDATE vkeys SET models=?, updated_at=? WHERE id=?`), modelsJSON(models), nowFloat(), id); err != nil {
 			return err
 		}
 	}
@@ -226,13 +257,14 @@ func (s *Service) Patch(id string, maxBudget *float64, rpm, tpm *int, models []s
 // column), which is how the console's "tick to clear" controls work.
 func (s *Service) PatchConsole(id string, fields map[string]json.RawMessage) error {
 	exec := func(col string, v any) error {
-		_, err := s.store.DB().Exec(s.store.Rebind(`UPDATE vkeys SET `+col+`=? WHERE id=?`), v, id)
+		_, err := s.store.DB().Exec(s.store.Rebind(
+			`UPDATE vkeys SET `+col+`=?, updated_at=? WHERE id=?`), v, nowFloat(), id)
 		return err
 	}
 	if raw, ok := fields["name"]; ok && !isJSONNull(raw) {
 		var v string
 		if json.Unmarshal(raw, &v) == nil {
-			if err := exec("name", v); err != nil {
+			if err := exec("key_alias", v); err != nil {
 				return err
 			}
 		}
@@ -267,18 +299,18 @@ func (s *Service) PatchConsole(id string, fields map[string]json.RawMessage) err
 		}
 		var v int64
 		if json.Unmarshal(raw, &v) == nil {
-			if err := exec(f.col, v); err != nil {
+			if err := exec(f.col, float64(v)); err != nil {
 				return err
 			}
 		}
 	}
 	if raw, ok := fields["models"]; ok {
 		if isJSONNull(raw) {
-			return exec("models", "")
+			return exec("models", "[]")
 		}
 		var models []string
 		if json.Unmarshal(raw, &models) == nil {
-			return exec("models", strings.Join(models, ","))
+			return exec("models", modelsJSON(models))
 		}
 	}
 	return nil
@@ -300,7 +332,7 @@ func (s *Service) ReserveBudget(id string, dollars float64) error {
 	}
 	defer tx.Rollback()
 	row := tx.QueryRow(s.store.Rebind(
-		`SELECT max_budget,spend,budget_reserved FROM vkeys WHERE id=?`), id)
+		`SELECT max_budget,spend_to_date,budget_reserved FROM vkeys WHERE id=?`), id)
 	var maxBudget *float64
 	var spend, reserved float64
 	if err := row.Scan(&maxBudget, &spend, &reserved); err != nil {
@@ -310,7 +342,7 @@ func (s *Service) ReserveBudget(id string, dollars float64) error {
 		return ErrBudgetExceeded
 	}
 	if _, err := tx.Exec(s.store.Rebind(
-		`UPDATE vkeys SET budget_reserved=?, reserved_at=? WHERE id=?`), reserved+dollars, time.Now().Unix(), id); err != nil {
+		`UPDATE vkeys SET budget_reserved=?, reserved_at=? WHERE id=?`), reserved+dollars, nowFloat(), id); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -319,8 +351,9 @@ func (s *Service) ReserveBudget(id string, dollars float64) error {
 // Settle converts a reservation into spend (refunding the unused part).
 func (s *Service) Settle(id string, reserved, cost float64) error {
 	_, err := s.store.DB().Exec(s.store.Rebind(
-		`UPDATE vkeys SET spend=spend+?, budget_reserved=CASE WHEN budget_reserved>=? THEN budget_reserved-? ELSE 0 END WHERE id=?`),
-		cost, reserved, reserved, id)
+		`UPDATE vkeys SET spend_to_date=spend_to_date+?, updated_at=?,`+
+			` budget_reserved=CASE WHEN budget_reserved>=? THEN budget_reserved-? ELSE 0 END WHERE id=?`),
+		cost, nowFloat(), reserved, reserved, id)
 	return err
 }
 
@@ -329,16 +362,18 @@ func (s *Service) AddSpend(id string, cost float64) error {
 	if id == "" || cost <= 0 {
 		return nil
 	}
-	_, err := s.store.DB().Exec(s.store.Rebind(`UPDATE vkeys SET spend=spend+? WHERE id=?`), cost, id)
+	_, err := s.store.DB().Exec(s.store.Rebind(`UPDATE vkeys SET spend_to_date=spend_to_date+?, updated_at=? WHERE id=?`),
+		cost, nowFloat(), id)
 	return err
 }
 
-// Audit records an admin mutation.
+// Audit records an admin mutation. id is auto-generated by the database
+// (INTEGER autoincrement / SERIAL); Go inserts only the data columns, matching
+// Python's journal sink.
 func (s *Service) Audit(actor, action, target string, diff string) {
-	id := "aud_" + randomToken(8)
 	_, _ = s.store.DB().Exec(s.store.Rebind(
-		`INSERT INTO audit_logs(id,ts,actor,action,target,diff) VALUES(?,?,?,?,?,?)`),
-		id, time.Now().Unix(), actor, action, target, diff)
+		`INSERT INTO audit_logs(ts,actor,action,target,diff) VALUES(?,?,?,?,?)`),
+		nowFloat(), actor, action, target, diff)
 }
 
 func boolInt(b bool) int {

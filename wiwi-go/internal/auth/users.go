@@ -119,24 +119,24 @@ func (s *Service) CreateUser(username, password, role string) (*User, error) {
 		role = "user"
 	}
 	id := "usr_" + randomToken(8)
-	now := time.Now().Unix()
-	_, err := s.store.DB().Exec(s.store.Rebind(
-		`INSERT INTO users(id,username,pw_hash,role,created_at) VALUES(?,?,?,?,?)`),
-		id, username, hashPassword(password), role, now)
-	if err != nil {
+	now := nowFloat()
+	if _, err := s.store.DB().Exec(s.store.Rebind(
+		`INSERT INTO users(id,username,password_hash,role,disabled,created_at,updated_at) VALUES(?,?,?,?,0,?,?)`),
+		id, username, hashPassword(password), role, now, now); err != nil {
 		return nil, ErrUserExists
 	}
-	return &User{ID: id, Username: username, Role: role, CreatedAt: now}, nil
+	return &User{ID: id, Username: username, Role: role, CreatedAt: int64(now)}, nil
 }
 
 // AuthenticateUser verifies a username/password pair.
 func (s *Service) AuthenticateUser(username, password string) (*User, error) {
 	row := s.store.QueryRow(s.store.Rebind(
-		`SELECT id,username,pw_hash,role,created_at,COALESCE(disabled,0) FROM users WHERE username=?`), username)
+		`SELECT id,username,password_hash,role,created_at,COALESCE(disabled,0) FROM users WHERE username=?`), username)
 	var u User
 	var pwHash string
 	var disabled int
-	if err := row.Scan(&u.ID, &u.Username, &pwHash, &u.Role, &u.CreatedAt, &disabled); err != nil {
+	var createdF float64
+	if err := row.Scan(&u.ID, &u.Username, &pwHash, &u.Role, &createdF, &disabled); err != nil {
 		return nil, ErrBadLogin
 	}
 	if disabled != 0 {
@@ -145,6 +145,7 @@ func (s *Service) AuthenticateUser(username, password string) (*User, error) {
 	if !verifyPassword(password, pwHash) {
 		return nil, ErrBadLogin
 	}
+	u.CreatedAt = int64(createdF)
 	return &u, nil
 }
 
@@ -159,9 +160,11 @@ func (s *Service) ListUsers() ([]*User, error) {
 	for rows.Next() {
 		var u User
 		var disabled int
-		if err := rows.Scan(&u.ID, &u.Username, &u.Role, &u.CreatedAt, &disabled); err != nil {
+		var createdF float64
+		if err := rows.Scan(&u.ID, &u.Username, &u.Role, &createdF, &disabled); err != nil {
 			return nil, err
 		}
+		u.CreatedAt = int64(createdF)
 		u.Disabled = disabled != 0
 		out = append(out, &u)
 	}
@@ -173,15 +176,17 @@ func (s *Service) GetUser(id string) (*User, error) {
 		`SELECT id,username,role,created_at,COALESCE(disabled,0) FROM users WHERE id=?`), id)
 	var u User
 	var disabled int
-	if err := row.Scan(&u.ID, &u.Username, &u.Role, &u.CreatedAt, &disabled); err != nil {
+	var createdF float64
+	if err := row.Scan(&u.ID, &u.Username, &u.Role, &createdF, &disabled); err != nil {
 		return nil, err
 	}
+	u.CreatedAt = int64(createdF)
 	u.Disabled = disabled != 0
 	return &u, nil
 }
 
 func (s *Service) SetUserRole(id, role string) error {
-	_, err := s.store.DB().Exec(s.store.Rebind(`UPDATE users SET role=? WHERE id=?`), role, id)
+	_, err := s.store.DB().Exec(s.store.Rebind(`UPDATE users SET role=?, updated_at=? WHERE id=?`), role, nowFloat(), id)
 	return err
 }
 
@@ -190,7 +195,7 @@ func (s *Service) SetUserDisabled(id string, disabled bool) error {
 	if disabled {
 		v = 1
 	}
-	_, err := s.store.DB().Exec(s.store.Rebind(`UPDATE users SET disabled=? WHERE id=?`), v, id)
+	_, err := s.store.DB().Exec(s.store.Rebind(`UPDATE users SET disabled=?, updated_at=? WHERE id=?`), v, nowFloat(), id)
 	return err
 }
 
@@ -200,10 +205,10 @@ func (s *Service) NewSession(secret, userID string, ttlSeconds int64) (string, e
 		ttlSeconds = 86400
 	}
 	id := randomToken(16)
-	now := time.Now().Unix()
+	now := nowFloat()
 	if _, err := s.store.DB().Exec(s.store.Rebind(
 		`INSERT INTO sessions(id,user_id,created_at,expires_at) VALUES(?,?,?,?)`),
-		id, userID, now, now+ttlSeconds); err != nil {
+		id, userID, now, now+float64(ttlSeconds)); err != nil {
 		return "", err
 	}
 	return signSession(secret, id), nil
@@ -219,12 +224,13 @@ func (s *Service) ValidateSession(secret, cookie string) (*User, error) {
 	// read the session's user_id first and special-case the reserved id before
 	// joining users (Python's resolve_current_user does the same).
 	var userID string
-	var expires int64
+	var expiresF float64
 	if err := s.store.QueryRow(s.store.Rebind(
 		`SELECT user_id, expires_at FROM sessions WHERE id=?`), id).
-		Scan(&userID, &expires); err != nil {
+		Scan(&userID, &expiresF); err != nil {
 		return nil, ErrBadSession
 	}
+	expires := int64(expiresF)
 	if expires > 0 && time.Now().Unix() > expires {
 		return nil, ErrBadSession
 	}
@@ -235,19 +241,15 @@ func (s *Service) ValidateSession(secret, cookie string) (*User, error) {
 		`SELECT id,username,role,created_at,COALESCE(disabled,0) FROM users WHERE id=?`), userID)
 	var u User
 	var disabled int
-	if err := row.Scan(&u.ID, &u.Username, &u.Role, &u.CreatedAt, &disabled); err != nil {
+	var createdF float64
+	if err := row.Scan(&u.ID, &u.Username, &u.Role, &createdF, &disabled); err != nil {
 		return nil, ErrBadSession
 	}
 	if disabled != 0 {
 		return nil, ErrBadSession
 	}
+	u.CreatedAt = int64(createdF)
 	return &u, nil
-}
-
-func (s *Service) DeleteSession(secret, cookie string) {
-	if id, ok := verifySession(secret, cookie); ok {
-		_, _ = s.store.DB().Exec(s.store.Rebind(`DELETE FROM sessions WHERE id=?`), id)
-	}
 }
 
 func signSession(secret, id string) string {
