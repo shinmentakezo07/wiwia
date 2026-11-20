@@ -117,6 +117,11 @@ func (a *App) handleLogin(c *gin.Context) {
 
 func (a *App) handleLogout(c *gin.Context) {
 	if cookie, err := c.Cookie("wiwi_session"); err == nil {
+		// Drop the cached playground plaintext before ending the session, so no
+		// credential outlives the session that created it.
+		if u, uerr := a.State.Auth.ValidateSession(a.State.SessionSecret, cookie); uerr == nil {
+			a.State.PGBearers.drop(u.ID)
+		}
 		a.State.Auth.DeleteSession(a.State.SessionSecret, cookie)
 	}
 	c.SetCookie("wiwi_session", "", -1, "/", "", false, true)
@@ -159,7 +164,7 @@ func (a *App) handlePlaygroundKey(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "not logged in"})
 		return
 	}
-	plain, v, err := a.State.Auth.Generate("playground-"+u.Username, nil, nil, nil, nil, 3600)
+	plain, v, err := a.mintPlaygroundKey(u)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

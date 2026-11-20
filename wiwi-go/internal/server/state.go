@@ -58,8 +58,11 @@ type AppState struct {
 	// token is single-use and authorizes one public callback.
 	OAuthMu      sync.Mutex
 	OAuthPending map[string]oauthSession
-	stop         chan struct{}
-	stopOnce     sync.Once
+	// Playground key plaintexts, bounded and LRU-evicted (Python's
+	// state.pg_bearers). Keyed by actor id.
+	PGBearers *pgBearerCache
+	stop      chan struct{}
+	stopOnce  sync.Once
 }
 
 // App bundles state and the Gin engine.
@@ -124,6 +127,7 @@ func New(cfg *config.Config) (*App, error) {
 		LoginThrottle:  newAttemptThrottle(10, 5*time.Minute),
 		SignupThrottle: newAttemptThrottle(5, time.Hour),
 		OAuthPending:   map[string]oauthSession{},
+		PGBearers:      newPGBearerCache(pgBearerCacheMax),
 		StaticDir:      staticDir(), StartTime: time.Now(),
 		stop: make(chan struct{}),
 	}
@@ -348,7 +352,11 @@ func (a *App) registerRoutes() {
 
 	v1 := r.Group("/v1", a.requireAPI)
 	v1.POST("/chat/completions", a.handleChatCompletions)
-	v1.POST("/playground/completions", a.handleChatCompletions)
+	// Behind the session cookie, not a bearer: the playground key is resolved
+	// server-side exactly as Python's route does. Registering it inside the
+	// requireAPI group made a logged-in browser's playground 401 with
+	// "invalid or missing API key".
+	r.POST("/v1/playground/completions", a.requirePlayground, a.handleChatCompletions)
 	v1.POST("/completions", a.handleLegacyCompletions)
 	v1.POST("/responses", a.handleResponses)
 	v1.GET("/responses/:id", a.handleGetResponse)

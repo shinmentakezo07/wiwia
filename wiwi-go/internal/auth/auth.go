@@ -125,6 +125,64 @@ func (s *Service) GenerateOwned(owner, name string, maxBudget *float64, rpm, tpm
 	}, nil
 }
 
+// MintPlaygroundKey mints a playground key under the same rules Python's
+// _mint_playground_key applies: a TTL so abandoned keys expire, and at most
+// maxLive live playground keys per owner. The oldest are expired rather than
+// deleted, so audit history survives. An empty owner mints an unowned key
+// (the synthetic master has no users row, so an owned key would fail its
+// owner check and never authenticate).
+func (s *Service) MintPlaygroundKey(owner string, ttlSeconds int64, maxLive int) (string, *VKey, error) {
+	ownerClause := "owner_id IS NULL"
+	var ownerArgs []any
+	if owner != "" {
+		ownerClause = "owner_id=?"
+		ownerArgs = append(ownerArgs, owner)
+	}
+	now := nowFloat()
+	liveWhere := ownerClause +
+		" AND key_alias='playground' AND (expires_at IS NULL OR expires_at > ?)" +
+		" AND COALESCE(disabled,0)=0"
+	if maxLive > 1 {
+		var count int
+		if err := s.store.QueryRow(s.store.Rebind(
+			"SELECT COUNT(*) FROM vkeys WHERE "+liveWhere),
+			append(append([]any{}, ownerArgs...), now)...).Scan(&count); err != nil {
+			return "", nil, err
+		}
+		if count >= maxLive {
+			// Expire the oldest so that maxLive-1 remain live before the mint.
+			rows, err := s.store.Query(s.store.Rebind(
+				"SELECT id FROM vkeys WHERE "+liveWhere+
+					" ORDER BY created_at ASC LIMIT ?"),
+				append(append([]any{}, ownerArgs...), now, count-(maxLive-1))...)
+			if err != nil {
+				return "", nil, err
+			}
+			var stale []string
+			for rows.Next() {
+				var id string
+				if err := rows.Scan(&id); err != nil {
+					rows.Close()
+					return "", nil, err
+				}
+				stale = append(stale, id)
+			}
+			rows.Close()
+			if err := rows.Err(); err != nil {
+				return "", nil, err
+			}
+			for _, id := range stale {
+				if _, err := s.store.DB().Exec(s.store.Rebind(
+					"UPDATE vkeys SET expires_at=?, updated_at=? WHERE id=?"),
+					now, now, id); err != nil {
+					return "", nil, err
+				}
+			}
+		}
+	}
+	return s.GenerateOwned(owner, "playground", nil, nil, nil, nil, ttlSeconds, 0)
+}
+
 // Authenticate resolves a plaintext key to its record.
 func (s *Service) Authenticate(plaintext string) (*VKey, error) {
 	if plaintext == "" {

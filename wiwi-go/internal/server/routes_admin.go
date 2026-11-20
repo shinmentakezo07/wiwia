@@ -234,6 +234,11 @@ func (a *App) adminPatchUser(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		if *body.Disabled {
+			// A disabled account's cached playground plaintext must not keep
+			// authenticating (Authenticate's owner check also fails closed).
+			a.State.PGBearers.drop(id)
+		}
 	}
 	a.State.Auth.Audit(a.actor(c), "user.patch", id, "")
 	u, err := a.State.Auth.GetUser(id)
