@@ -16,6 +16,7 @@ import (
 	"wiwi-go/internal/cache"
 	"wiwi-go/internal/core"
 	"wiwi-go/internal/ir"
+	"wiwi-go/internal/logging"
 	"wiwi-go/internal/providers"
 	"wiwi-go/internal/streaming"
 	"wiwi-go/internal/wire"
@@ -133,20 +134,33 @@ func (a *App) finish(ctx *core.RequestContext, status int, e *providers.WiwiErro
 	if ctx.Auth != nil && !ctx.Auth.IsMaster {
 		if a.State.SpendBuffer != nil {
 			a.State.SpendBuffer.Add(ctx.Auth.KeyID, ctx.BudgetReserved, cost)
-		} else {
-			_ = a.State.Auth.Settle(ctx.Auth.KeyID, ctx.BudgetReserved, cost)
+		} else if err := a.State.Auth.Settle(ctx.Auth.KeyID, ctx.BudgetReserved, cost); err != nil {
+			// The budget cap was not enforced for this request; a scrape of
+			// wiwi_spend_charge_failures_total must show it.
+			a.State.SpendChargeFailures.Add(1)
 		}
 	}
 	prompt, completion := 0, 0
+	cached, cacheCreation, reasoning := 0, 0, 0
+	estimated := false
 	if ctx.Usage != nil {
 		prompt, completion = ctx.Usage.PromptTokens, ctx.Usage.CompletionTokens
+		cached, cacheCreation = ctx.Usage.CachedTokens, ctx.Usage.CacheCreationTokens
+		reasoning, estimated = ctx.Usage.ReasoningTokens, ctx.Usage.Estimated
 	}
 	isErr := e != nil || status >= 400
+	streamErr := ctx.WasStream && status >= 500
 	if ctx.Usage != nil && !ctx.Priced {
 		ctx.Metadata["unpriced"] = true
 		a.State.Bus.Publish("unpriced", map[string]any{"request_id": ctx.RequestID, "group": ctx.Group})
 	}
-	a.State.Totals.AddRequest(prompt, completion, cost, isErr)
+	a.State.Totals.AddRequest(logging.RequestStats{
+		Prompt: prompt, Completion: completion, Cached: cached,
+		CacheCreation: cacheCreation, Reasoning: reasoning, Cost: cost,
+		IsErr: isErr, PromptCacheHit: cached > 0,
+		ResponseCacheHit: ctx.ResponseCacheHit, Estimated: estimated,
+		StreamError: streamErr,
+	})
 	if isErr {
 		a.State.Metrics.Inc("wiwi_requests_failed_total", 1)
 	} else {
@@ -173,9 +187,12 @@ func (a *App) finish(ctx *core.RequestContext, status int, e *providers.WiwiErro
 		"status":             status, "cost": cost,
 		"prompt_tokens": prompt, "completion_tokens": completion,
 		"tok_in": prompt, "tok_out": completion,
+		"tok_cached": cached, "tok_cache_creation": cacheCreation,
+		"tok_reasoning": reasoning, "usage_estimated": estimated,
+		"cache_hit": cached > 0, "response_cache_hit": ctx.ResponseCacheHit,
 		"tps":     ctx.TPS(),
 		"ttft_ms": ctx.TTFTMs(), "latency_ms": ctx.LatencyMs(),
-		"was_stream": false,
+		"was_stream": ctx.WasStream,
 	})
 }
 
@@ -542,6 +559,7 @@ func (a *App) serveStream(c *gin.Context, ctx *core.RequestContext, surface core
 		emit(enc.Encode(d))
 	}
 
+	ctx.WasStream = true
 	ch := a.State.Gateway.Stream(ctx)
 	var ticker *time.Ticker
 	var tickC <-chan time.Time

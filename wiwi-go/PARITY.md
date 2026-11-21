@@ -12,8 +12,8 @@ Remaining gaps are listed at the bottom.
 | OpenAI Responses | `POST /v1/responses`, `GET/DELETE /v1/responses/{id}` | Full (stored state, key-scoped, TTL) |
 | Anthropic Messages | `POST /v1/messages`, `/v1/messages/count_tokens` | Full (blocks, tools, thinking, stream) |
 | Legacy Completions | `POST /v1/completions` | Full |
-| Realtime | `WS /v1/realtime` | Relay with per-adapter `RealtimeURL` |
-| Models / health / metrics | `/v1/models`, `/public/models`, `/health`, `/metrics` | Full |
+| Realtime | `WS /v1/realtime` | Full (auth incl. `?key=`, model allowlist, budget/rate/unpriced admission, deployment/key pick, usage-peak billing + request log) |
+| Models / health / metrics | `/v1/models`, `/public/models`, `/health`, `/metrics` | Full (Python series names/types, admin-gated, disabled 404 body, lifecycle loss counters) |
 
 ## Outbound providers (13) — Full wire coverage
 `openai`, `openai-compatible`, `gmicloud`, `bai`, `openrouter`, `nvidia-nim`,
@@ -46,6 +46,21 @@ Ported provider logic:
   fronts a DeepSeek model.
 
 ## Recently closed gaps
+- **Operator metrics parity** — `/metrics` is always registered (disabled = 404
+  with the Python body), requires the master key or an admin session when
+  enabled, and renders the Python series names/types (`wiwi_requests_total`,
+  `wiwi_tokens_total{kind=...}`, prompt/response cache hits, estimated usage,
+  cost, stream errors, status/provider breakdowns, duration/TTFT/TPS
+  quantiles, `tps_sample_ratio`, loss counters). Process-lifetime counters are
+  carried by `Totals`/`AppState`, never re-derived from the event ring.
+- **Realtime admission and billing** — the socket now passes the same gates as
+  an HTTP request (model allowlist, per-key and global RPM/TPM, unpriced
+  policy, budget reservation, deployment/key pool pick with realtime-capability
+  check) before the upgrade, so refusals are real 4xx/5xx responses. The
+  session's peak usage (top-level `usage` or `response.usage`, including the
+  final `response.done` after a max-session grace) is priced, settled against
+  the reservation, logged, counted in totals/metrics, and published on the
+  request bus. A zero-usage session increments `realtime_usage_missing`.
 - **Response-store lifecycle** — same pending-write sweeper semantics as Python
   (idle stores issue no SQL; every row still crosses a due boundary), `ttl <= 0`
   keeps rows forever, `master` may read/delete across key scopes, `store:false`

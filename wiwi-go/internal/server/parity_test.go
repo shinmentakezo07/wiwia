@@ -158,8 +158,11 @@ func TestAliasPooling(t *testing.T) {
 func TestRealtimeDisabled(t *testing.T) {
 	app, _ := newCountingApp(t, nil)
 	w := do(t, app, "GET", "/v1/realtime?model=gpt-test", "")
-	if w.Code != http.StatusNotImplemented {
-		t.Fatalf("expected 501, got %d", w.Code)
+	// Python refuses a disabled realtime surface with 404 in the caller's
+	// dialect (app.py:3682); 501 is reserved for a provider type that has no
+	// realtime capability.
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
 	}
 }
 

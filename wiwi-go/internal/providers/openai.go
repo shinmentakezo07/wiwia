@@ -714,11 +714,27 @@ func init() {
 	}
 }
 
-// RealtimeURL derives the Realtime WebSocket endpoint from the deployment's
-// base_url (https -> wss, http -> ws).
-func (a *OpenAIAdapter) RealtimeURL(baseURL string) string {
+// RealtimeSupported reports whether a provider type exposes the OpenAI
+// Realtime WebSocket surface. Python keeps it on the OpenAI-wire adapters only:
+// openai, openai-compatible, gmicloud and bai. Everything else must answer 501
+// rather than relay to a made-up /realtime path.
+func RealtimeSupported(providerType string) bool {
+	switch providerType {
+	case "openai", "openai-compatible", "gmicloud", "bai":
+		return true
+	}
+	return false
+}
+
+// RealtimeURL derives the Realtime WebSocket endpoint from a deployment's
+// base_url (https -> wss, http -> ws). ok is false for provider types with no
+// realtime capability.
+func RealtimeURL(providerType, baseURL string) (string, bool) {
+	if !RealtimeSupported(providerType) {
+		return "", false
+	}
 	base := strings.TrimRight(baseURL, "/")
 	base = strings.Replace(base, "https://", "wss://", 1)
 	base = strings.Replace(base, "http://", "ws://", 1)
-	return base + "/realtime"
+	return base + "/realtime", true
 }

@@ -82,6 +82,17 @@ func (a *App) handleHealth(c *gin.Context) {
 		"available_groups": availableGroups,
 		"providers":        len(providers),
 		"uptime_s":         int(time.Since(a.State.StartTime).Seconds()),
+		// Go logs synchronously: no queue drops, no failed asynchronous
+		// writes. The fields still exist so dashboards written against the
+		// Python backend keep resolving them.
+		"dropped_request_logs":      0,
+		"failed_request_log_writes": 0,
+		"dropped_proxy_logs":        0,
+		"failed_audit_log_writes":   0,
+		"dropped_log_events":        0,
+		"spend_charge_failures":     a.State.SpendChargeFailures.Load(),
+		"spend_flush_failures":      0,
+		"realtime_usage_missing":    a.State.RealtimeUsageMissing.Load(),
 	})
 }
 
@@ -98,14 +109,24 @@ func (a *App) handlePublicModels(c *gin.Context) {
 }
 
 func (a *App) handleMetrics(c *gin.Context) {
-	snap := a.State.Totals.Snapshot()
-	a.State.Metrics.Set("wiwi_requests_total", snap["requests"])
-	a.State.Metrics.Set("wiwi_errors_total", snap["errors"])
-	a.State.Metrics.Set("wiwi_prompt_tokens_total", snap["prompt_tokens"])
-	a.State.Metrics.Set("wiwi_completion_tokens_total", snap["completion_tokens"])
-	a.State.Metrics.Set("wiwi_cost_usd_total", snap["cost"])
+	// Disabled answers 404 before authorization, exactly as Python does: the
+	// endpoint's existence is not an operator secret, and a scrape against a
+	// disabled instance should say so rather than 401.
+	if !a.State.Cfg.Router.PrometheusEnabled {
+		c.String(http.StatusNotFound,
+			"Prometheus metrics are disabled. Set "+
+				"router_settings.prometheus_enabled: true to enable this endpoint.\n")
+		return
+	}
+	a.requireAdmin(c)
+	if c.IsAborted() {
+		return
+	}
+	events := a.State.Bus.EventsSince(0)
+	body := renderMetrics(events, a.State.Totals.Snapshot(),
+		a.State.SpendChargeFailures.Load(), a.State.RealtimeUsageMissing.Load())
 	c.Header("Content-Type", "text/plain; version=0.0.4")
-	c.String(http.StatusOK, a.State.Metrics.Render())
+	c.String(http.StatusOK, body)
 }
 
 func (a *App) handleCountTokens(c *gin.Context) {

@@ -68,6 +68,9 @@ type RequestContext struct {
 	Status           int
 	Error            *providers.WiwiError
 	Metadata         map[string]any
+	// WasStream marks a request served over SSE; the exporter distinguishes a
+	// mid-stream failure from an ordinary error with it.
+	WasStream bool
 
 	SessionID      string
 	Lane           string

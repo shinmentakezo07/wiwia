@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -61,8 +62,13 @@ type AppState struct {
 	// Playground key plaintexts, bounded and LRU-evicted (Python's
 	// state.pg_bearers). Keyed by actor id.
 	PGBearers *pgBearerCache
-	stop      chan struct{}
-	stopOnce  sync.Once
+	// Process-lifetime operator counters that cannot be derived from the
+	// request-event ring. Read atomically by /health and the Prometheus
+	// exporter so the two surfaces cannot disagree (AUDIT #347).
+	SpendChargeFailures  atomic.Int64
+	RealtimeUsageMissing atomic.Int64
+	stop                 chan struct{}
+	stopOnce             sync.Once
 }
 
 // App bundles state and the Gin engine.
@@ -342,13 +348,16 @@ func (a *App) registerRoutes() {
 	r.GET("/cline/oauth/callback", a.clineOAuthCallback)
 	r.GET("/v1/models", a.requireAPI, a.handleModels)
 	r.GET("/public/models", a.handlePublicModels)
-	if a.State.Cfg.Router.PrometheusEnabled {
-		p := a.State.Cfg.Router.PrometheusPath
-		if p == "" {
-			p = "/metrics"
-		}
-		r.GET(p, a.handleMetrics)
+	// Always registered: when disabled the handler answers 404 with the
+	// documented body, exactly as Python does. Conditional registration made
+	// the path fall through to the SPA's index.html, which scrape clients read
+	// as a successful scrape with zero series.
+	p := a.State.Cfg.Router.PrometheusPath
+	if p == "" {
+		p = "/metrics"
 	}
+	r.GET(p, a.handleMetrics)
+	r.GET("/v1/realtime", a.requireRealtimeAuth, a.handleRealtime)
 
 	v1 := r.Group("/v1", a.requireAPI)
 	v1.POST("/chat/completions", a.handleChatCompletions)
@@ -363,7 +372,6 @@ func (a *App) registerRoutes() {
 	v1.DELETE("/responses/:id", a.handleDeleteResponse)
 	v1.POST("/messages", a.handleMessages)
 	v1.POST("/messages/count_tokens", a.handleCountTokens)
-	v1.GET("/realtime", a.handleRealtime)
 
 	authGroup := r.Group("/auth")
 	authGroup.POST("/signup", a.handleSignup)

@@ -25,8 +25,8 @@ func TestBusAndTotals(t *testing.T) {
 	}
 
 	tot := NewTotals()
-	tot.AddRequest(10, 5, 0.5, false)
-	tot.AddRequest(1, 1, 0.1, true)
+	tot.AddRequest(RequestStats{Prompt: 10, Completion: 5, Cost: 0.5})
+	tot.AddRequest(RequestStats{Prompt: 1, Completion: 1, Cost: 0.1, IsErr: true})
 	s := tot.Snapshot()
 	if s["requests"] != 2 || s["errors"] != 1 || s["prompt_tokens"] != 11 {
 		t.Fatalf("totals: %v", s)
