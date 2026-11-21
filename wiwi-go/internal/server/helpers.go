@@ -55,19 +55,33 @@ func readBody(c *gin.Context) (map[string]any, error) {
 }
 
 func (a *App) handleHealth(c *gin.Context) {
-	groups := map[string]int{}
-	for _, g := range a.State.Router.Groups() {
-		groups[g] = len(a.State.Router.Deployments(g))
+	// Python's /health returns COUNTS here, not maps. Returning
+	// map[group]count / map[provider]type made every value an object, and the
+	// Settings page renders ``{health.providers}`` directly, so the console
+	// crashed with React #31 ("Objects are not valid as a React child") as
+	// soon as a gateway had two providers.
+	groups := a.State.Router.Groups()
+	providers := a.State.Router.Providers()
+	now := time.Now()
+	availableGroups := 0
+	for _, g := range groups {
+		for _, d := range a.State.Router.Deployments(g) {
+			if d.Available(now) {
+				availableGroups++
+				break
+			}
+		}
 	}
-	providersMap := map[string]string{}
-	for name, acct := range a.State.Router.Providers() {
-		providersMap[name] = acct.Type
+	status := "degraded"
+	if len(providers) > 0 && availableGroups > 0 {
+		status = "ok"
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"status":    "ok",
-		"groups":    groups,
-		"providers": providersMap,
-		"uptime_s":  int(time.Since(a.State.StartTime).Seconds()),
+		"status":           status,
+		"groups":           len(groups),
+		"available_groups": availableGroups,
+		"providers":        len(providers),
+		"uptime_s":         int(time.Since(a.State.StartTime).Seconds()),
 	})
 }
 

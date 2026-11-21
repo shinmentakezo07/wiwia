@@ -76,6 +76,32 @@ func TestHealthAndModels(t *testing.T) {
 	}
 }
 
+// The console's Settings page renders health.groups / health.providers
+// directly. A map there (group->count / provider->type) is an object child
+// and crashes React with #31.
+func TestHealthReportsCountsNotMaps(t *testing.T) {
+	app, _ := newTestApp(t)
+	w := do(t, app, "GET", "/health", "")
+	if w.Code != 200 {
+		t.Fatalf("health: %d %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Status          string `json:"status"`
+		Groups          int    `json:"groups"`
+		AvailableGroups int    `json:"available_groups"`
+		Providers       int    `json:"providers"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("health body is not counts: %v (%s)", err, w.Body.String())
+	}
+	if resp.Groups != 1 || resp.Providers != 1 || resp.AvailableGroups != 1 {
+		t.Fatalf("health counts: %+v", resp)
+	}
+	if resp.Status != "ok" {
+		t.Fatalf("status = %q, want ok", resp.Status)
+	}
+}
+
 func TestChatNonStream(t *testing.T) {
 	app, _ := newTestApp(t)
 	w := do(t, app, "POST", "/v1/chat/completions", `{"model":"gpt-test","messages":[{"role":"user","content":"hi"}]}`)
