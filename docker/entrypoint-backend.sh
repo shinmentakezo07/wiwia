@@ -6,19 +6,23 @@
 # loudly instead of looping as an unhealthy ghost.
 set -eu
 
-BACKEND="${BACKEND:-py}"
+# Nothing sent (unset, empty, or whitespace-only) means the Python backend.
+# Normalize case too, so GO/Go/PY all work without listing each spelling in
+# the case branches below.
+BACKEND="$(printf '%s' "${BACKEND:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+[ -n "$BACKEND" ] || BACKEND=py
 PORT="${PORT:-4000}"
 CFG="${WIWI_CONFIG_PATH:-/app/wiwi.yaml}"
 
 case "$BACKEND" in
-    go|golang|GO|Go)
+    go|golang)
         echo "==> wiwi: starting Go backend (wiwi-go)"
         # --config and --port are the Go CLI's only flags (--host does not
         # exist there); wiwi-go binds 0.0.0.0 by default, which is what the
         # container needs. --port wins over any config value.
         exec /app/wiwi-go/bin/wiwi --config "$CFG" --port "$PORT"
         ;;
-    py|python|python3|PY|Py|"")
+    py|python|python3)
         echo "==> wiwi: starting Python backend (wiwi)"
         exec wiwi --config "$CFG" --host 0.0.0.0 --port "$PORT" "$@"
         ;;
