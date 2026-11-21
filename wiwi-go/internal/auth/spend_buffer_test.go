@@ -17,3 +17,19 @@ func TestSpendBufferFlush(t *testing.T) {
 		t.Fatalf("reserved=%v", got.BudgetReserved)
 	}
 }
+
+func TestSpendBufferCountsFailedFlush(t *testing.T) {
+	svc := newSvc(t)
+	_, v, _ := svc.Generate("b", floatPtr(10), nil, nil, nil, 0)
+	buf := NewSpendBuffer(0, 100, 1)
+	buf.Add(v.ID, 0.2, 0.1)
+	// A closed database is the deterministic form of the failure this counter
+	// exists for: the batch is lost and the budget cap was not enforced.
+	if err := svc.Store().Close(); err != nil {
+		t.Fatal(err)
+	}
+	buf.flush(svc)
+	if got := buf.FlushFailures.Load(); got != 1 {
+		t.Fatalf("flush failures = %d", got)
+	}
+}

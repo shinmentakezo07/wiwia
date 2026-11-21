@@ -95,7 +95,7 @@ func TestOpenMigrateSQLiteFile(t *testing.T) {
 	want := []string{
 		"audit_logs", "deployments", "model_price_scopes", "model_prices",
 		"provider_keys", "providers", "request_logs", "request_rollups",
-		"responses", "sessions", "settings", "stored_responses",
+		"sessions", "settings", "stored_responses",
 		"sweep_locks", "users", "vkeys",
 	}
 	var got []string

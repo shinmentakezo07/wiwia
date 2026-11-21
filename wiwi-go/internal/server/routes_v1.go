@@ -230,7 +230,7 @@ func (a *App) logRequest(ctx *core.RequestContext) {
 			requestBody = t
 		}
 	}
-	_, _ = a.State.Store.DB().Exec(a.State.Store.Rebind(
+	if _, err := a.State.Store.DB().Exec(a.State.Store.Rebind(
 		`INSERT INTO request_logs(request_id,ts,surface,key_alias,key_id,model_group,provider,provider_key_label,
 		 model_id,status,error_code,error_message,tok_in,tok_cached,tok_cache_creation,tok_reasoning,tok_out,
 		 usage_estimated,tps,ttft_ms,latency_ms,cost,was_stream,cache_hit,cache_savings,response_cache_hit,
@@ -239,7 +239,11 @@ func (a *App) logRequest(ctx *core.RequestContext) {
 		ctx.RequestID, time.Now().Unix(), string(ctx.Surface), "", keyID, ctx.Group,
 		providerName(ctx), "", modelID, ctx.Status, "", errText,
 		prompt, cached, 0, reasoning, completion, 0, tps, ctx.TTFTMs(), ctx.LatencyMs(),
-		ctx.Cost, 0, 0, 0.0, 0, string(attempts), "[]", requestBody, nil)
+		ctx.Cost, 0, 0, 0.0, 0, string(attempts), "[]", requestBody, nil); err != nil {
+		// A lost row is exactly the observability hole the loss counters
+		// exist for; /health and /metrics must show it.
+		a.State.FailedRequestLogWrites.Add(1)
+	}
 }
 
 func providerName(ctx *core.RequestContext) string {
@@ -380,7 +384,7 @@ func (a *App) serveComplete(c *gin.Context, ctx *core.RequestContext, surface co
 				if json.Unmarshal(hit, &stored) == nil {
 					stored["_input"] = body["input"]
 					if id, ok := stored["id"].(string); ok {
-						_ = a.State.Responses.Save(id, keyID(ctx.Auth), stored)
+						_ = a.State.Responses.Save(id, keyID(ctx.Auth), ctx.Group, stored)
 					}
 				}
 			}
@@ -402,7 +406,7 @@ func (a *App) serveComplete(c *gin.Context, ctx *core.RequestContext, surface co
 				stored := cloneMap(resp)
 				stored["_input"] = body["input"]
 				if id, ok := resp["id"].(string); ok {
-					_ = a.State.Responses.Save(id, keyID(ctx.Auth), stored)
+					_ = a.State.Responses.Save(id, keyID(ctx.Auth), ctx.Group, stored)
 				}
 			}
 			b, jerr := json.Marshal(resp)
@@ -428,7 +432,7 @@ func (a *App) serveComplete(c *gin.Context, ctx *core.RequestContext, surface co
 				if json.Unmarshal(hit, &stored) == nil {
 					stored["_input"] = body["input"]
 					if id, ok := stored["id"].(string); ok {
-						_ = a.State.Responses.Save(id, keyID(ctx.Auth), stored)
+						_ = a.State.Responses.Save(id, keyID(ctx.Auth), ctx.Group, stored)
 					}
 				}
 			}
@@ -458,7 +462,7 @@ func (a *App) serveComplete(c *gin.Context, ctx *core.RequestContext, surface co
 		stored := cloneMap(resp)
 		stored["_input"] = body["input"]
 		if id, ok := resp["id"].(string); ok {
-			_ = a.State.Responses.Save(id, keyID(ctx.Auth), stored)
+			_ = a.State.Responses.Save(id, keyID(ctx.Auth), ctx.Group, stored)
 		}
 	}
 	a.finish(ctx, 200, nil)

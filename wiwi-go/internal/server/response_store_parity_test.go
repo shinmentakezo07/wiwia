@@ -10,7 +10,7 @@ func TestResponseStoreMasterReadAndSweep(t *testing.T) {
 	rs := app.State.Responses
 	rs.ttl = 1
 
-	if err := rs.Save("r1", "key-a", map[string]any{"ok": true}); err != nil {
+	if err := rs.Save("r1", "key-a", "group", map[string]any{"ok": true}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := rs.Get("r1", "key-b"); ok {
@@ -38,7 +38,7 @@ func TestResponseStoreMasterReadAndSweep(t *testing.T) {
 func TestResponseStoreZeroTTLKeepsForever(t *testing.T) {
 	app, _ := newTestApp(t)
 	rs := NewResponseStore(app.State.Store, true, 0)
-	if err := rs.Save("keep", "k", map[string]any{"x": 1}); err != nil {
+	if err := rs.Save("keep", "k", "group", map[string]any{"x": 1}); err != nil {
 		t.Fatal(err)
 	}
 	if removed := rs.Sweep(time.Now().Unix() + 10_000_000); removed != 0 {

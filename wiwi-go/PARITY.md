@@ -46,6 +46,16 @@ Ported provider logic:
   fronts a DeepSeek model.
 
 ## Recently closed gaps
+- **Shared-database Responses state** — the Go store now writes Python's
+  `stored_responses` table (input/output split, float epochs, key scoping) and
+  reads rows Python wrote; the Go-only `responses` table is gone. A response id
+  saved by either backend resolves on the other.
+- **Real log/spend loss counters** — failed request-log writes, failed audit
+  writes and failed batched spend settlements are counted by the subsystem that
+  owns them and exported through `/health` (`failed_request_log_writes`,
+  `failed_audit_log_writes`, `spend_flush_failures`) and `/metrics`
+  (`wiwi_request_logs_failed_total`, `wiwi_audit_logs_failed_total`). They were
+  previously hard-coded to zero.
 - **Operator metrics parity** — `/metrics` is always registered (disabled = 404
   with the Python body), requires the master key or an admin session when
   enabled, and renders the Python series names/types (`wiwi_requests_total`,

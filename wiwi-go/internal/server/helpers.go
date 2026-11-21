@@ -86,12 +86,12 @@ func (a *App) handleHealth(c *gin.Context) {
 		// writes. The fields still exist so dashboards written against the
 		// Python backend keep resolving them.
 		"dropped_request_logs":      0,
-		"failed_request_log_writes": 0,
+		"failed_request_log_writes": a.State.FailedRequestLogWrites.Load(),
 		"dropped_proxy_logs":        0,
-		"failed_audit_log_writes":   0,
+		"failed_audit_log_writes":   a.State.Auth.AuditFailures.Load(),
 		"dropped_log_events":        0,
 		"spend_charge_failures":     a.State.SpendChargeFailures.Load(),
-		"spend_flush_failures":      0,
+		"spend_flush_failures":      spendFlushFailures(a),
 		"realtime_usage_missing":    a.State.RealtimeUsageMissing.Load(),
 	})
 }
@@ -106,6 +106,13 @@ func (a *App) handleModels(c *gin.Context) {
 
 func (a *App) handlePublicModels(c *gin.Context) {
 	c.JSON(http.StatusOK, a.consolePublicModels())
+}
+
+func spendFlushFailures(a *App) int64 {
+	if a.State.SpendBuffer == nil {
+		return 0
+	}
+	return a.State.SpendBuffer.FlushFailures.Load()
 }
 
 func (a *App) handleMetrics(c *gin.Context) {
@@ -123,8 +130,12 @@ func (a *App) handleMetrics(c *gin.Context) {
 		return
 	}
 	events := a.State.Bus.EventsSince(0)
-	body := renderMetrics(events, a.State.Totals.Snapshot(),
-		a.State.SpendChargeFailures.Load(), a.State.RealtimeUsageMissing.Load())
+	body := renderMetrics(events, a.State.Totals.Snapshot(), metricLossCounters{
+		FailedRequestLogWrites: a.State.FailedRequestLogWrites.Load(),
+		FailedAuditLogWrites:   a.State.Auth.AuditFailures.Load(),
+		SpendChargeFailures:    a.State.SpendChargeFailures.Load(),
+		RealtimeUsageMissing:   a.State.RealtimeUsageMissing.Load(),
+	})
 	c.Header("Content-Type", "text/plain; version=0.0.4")
 	c.String(http.StatusOK, body)
 }

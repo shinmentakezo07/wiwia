@@ -268,15 +268,8 @@ func (s *Store) schema() []string {
 			output_json TEXT NOT NULL
 		)`,
 
-		`CREATE TABLE IF NOT EXISTS responses (
-			id TEXT PRIMARY KEY,
-			key_id TEXT,
-			body TEXT,
-			created_at INTEGER,
-			expires_at INTEGER
-		)`,
-
 		`CREATE INDEX IF NOT EXISTS idx_request_logs_ts ON request_logs(ts)`,
+		`CREATE INDEX IF NOT EXISTS idx_stored_responses_created ON stored_responses(created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_vkeys_key_hash ON vkeys(key_hash)`,
 	}
 }

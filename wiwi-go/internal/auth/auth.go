@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"wiwi-go/internal/store"
@@ -40,6 +41,9 @@ type VKey struct {
 // Service owns virtual-key, user, and session persistence.
 type Service struct {
 	store *store.Store
+	// AuditFailures counts admin audit rows lost to a failed write. It is
+	// process-lifetime and monotonic, exported by /health and /metrics.
+	AuditFailures atomic.Int64
 }
 
 func NewService(s *store.Store) *Service { return &Service{store: s} }
@@ -436,9 +440,11 @@ func (s *Service) AddSpend(id string, cost float64) error {
 // (INTEGER autoincrement / SERIAL); Go inserts only the data columns, matching
 // Python's journal sink.
 func (s *Service) Audit(actor, action, target string, diff string) {
-	_, _ = s.store.DB().Exec(s.store.Rebind(
+	if _, err := s.store.DB().Exec(s.store.Rebind(
 		`INSERT INTO audit_logs(ts,actor,action,target,diff) VALUES(?,?,?,?,?)`),
-		nowFloat(), actor, action, target, diff)
+		nowFloat(), actor, action, target, diff); err != nil {
+		s.AuditFailures.Add(1)
+	}
 }
 
 func boolInt(b bool) int {

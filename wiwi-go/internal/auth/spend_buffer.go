@@ -2,6 +2,7 @@ package auth
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -14,6 +15,12 @@ type pendingSpend struct {
 // settlement per flush (spend_batching_enabled). The reservation stays in the
 // DB until the flush, so a crash fails closed.
 type SpendBuffer struct {
+	// FlushFailures counts keys whose batched settlement failed to persist.
+	// A failed batch is lost (not retried), so a rising value means the
+	// budget cap was not enforced (Python reports the same counter as
+	// spend.flush_failures).
+	FlushFailures atomic.Int64
+
 	mu         sync.Mutex
 	pending    map[string]*pendingSpend
 	interval   time.Duration
@@ -60,7 +67,9 @@ func (b *SpendBuffer) flush(svc *Service) {
 	b.pending = map[string]*pendingSpend{}
 	b.mu.Unlock()
 	for keyID, p := range batch {
-		_ = svc.Settle(keyID, p.reserved, p.cost)
+		if err := svc.Settle(keyID, p.reserved, p.cost); err != nil {
+			b.FlushFailures.Add(1)
+		}
 	}
 }
 

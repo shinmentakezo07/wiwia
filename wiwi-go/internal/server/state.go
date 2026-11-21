@@ -65,10 +65,12 @@ type AppState struct {
 	// Process-lifetime operator counters that cannot be derived from the
 	// request-event ring. Read atomically by /health and the Prometheus
 	// exporter so the two surfaces cannot disagree (AUDIT #347).
-	SpendChargeFailures  atomic.Int64
-	RealtimeUsageMissing atomic.Int64
-	stop                 chan struct{}
-	stopOnce             sync.Once
+	SpendChargeFailures    atomic.Int64
+	RealtimeUsageMissing   atomic.Int64
+	FailedRequestLogWrites atomic.Int64
+	FailedAuditLogWrites   atomic.Int64
+	stop                   chan struct{}
+	stopOnce               sync.Once
 }
 
 // App bundles state and the Gin engine.

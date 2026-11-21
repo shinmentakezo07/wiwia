@@ -75,7 +75,7 @@ func TestMetricsEmitsPythonParityFamilies(t *testing.T) {
 	events := []logging.Event{{Type: "request", Data: map[string]any{
 		"latency_ms": 10.0, "ttft_ms": 4.0, "tps": 20.0, "status": 200, "provider": "p",
 	}}}
-	out := renderMetrics(events, app.State.Totals.Snapshot(), 0, 0)
+	out := renderMetrics(events, app.State.Totals.Snapshot(), metricLossCounters{})
 	for _, want := range []string{
 		`wiwi_request_duration_ms{quantile="0.5"} 10.0`,
 		`wiwi_request_duration_ms{quantile="0.95"} 10.0`,

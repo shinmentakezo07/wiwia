@@ -61,20 +61,27 @@ const metricsHeader = `# HELP wiwi_requests_total Total number of requests.
 // window (summary/breakdown values) plus process-lifetime totals and loss
 // counters. The split is deliberate: quantiles are honestly per-scrape, while
 // counters must never decrease on ring eviction (AUDIT #180).
+type metricLossCounters struct {
+	FailedRequestLogWrites int64
+	FailedAuditLogWrites   int64
+	SpendChargeFailures    int64
+	RealtimeUsageMissing   int64
+}
+
 func renderMetrics(events []logging.Event, totals map[string]float64,
-	spendChargeFailures, realtimeUsageMissing int64) string {
+	loss metricLossCounters) string {
 	var b strings.Builder
 	b.WriteString(metricsHeader)
-	// The Go backend logs synchronously, so it has no queue drops or failed
-	// asynchronous writes; the four loss-series are still exported at zero so
-	// a dashboard that references them does not break after a backend switch.
+	// The Go backend logs synchronously, so there is no queue to drop from;
+	// the dropped series are exported at zero, while failed writes are real
+	// counters from their owning subsystems.
 	b.WriteString("wiwi_request_logs_dropped_total 0\n")
-	b.WriteString("wiwi_request_logs_failed_total 0\n")
+	fmt.Fprintf(&b, "wiwi_request_logs_failed_total %d\n", loss.FailedRequestLogWrites)
 	b.WriteString("wiwi_proxy_logs_dropped_total 0\n")
-	b.WriteString("wiwi_audit_logs_failed_total 0\n")
+	fmt.Fprintf(&b, "wiwi_audit_logs_failed_total %d\n", loss.FailedAuditLogWrites)
 	b.WriteString("wiwi_log_events_dropped_total 0\n")
-	fmt.Fprintf(&b, "wiwi_spend_charge_failures_total %d\n", spendChargeFailures)
-	fmt.Fprintf(&b, "wiwi_realtime_usage_missing_total %d\n", realtimeUsageMissing)
+	fmt.Fprintf(&b, "wiwi_spend_charge_failures_total %d\n", loss.SpendChargeFailures)
+	fmt.Fprintf(&b, "wiwi_realtime_usage_missing_total %d\n", loss.RealtimeUsageMissing)
 
 	reqs := totals["requests"]
 	fmt.Fprintf(&b, "wiwi_requests_total %s\n", floatText(reqs))

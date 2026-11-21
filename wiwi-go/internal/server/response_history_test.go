@@ -9,7 +9,7 @@ import (
 
 func TestGetResponseHidesStoredInput(t *testing.T) {
 	app, _ := newTestApp(t)
-	if err := app.State.Responses.Save("resp_x", "master", map[string]any{
+	if err := app.State.Responses.Save("resp_x", "master", "gpt-test", map[string]any{
 		"id": "resp_x", "object": "response", "output": []any{}, "_input": "secret question",
 	}); err != nil {
 		t.Fatal(err)
