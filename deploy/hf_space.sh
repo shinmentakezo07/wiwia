@@ -143,7 +143,11 @@ cd "$WORK/space"
 # hence the explicit track. git-lfs uploads the objects to HF's LFS endpoint
 # during push, authenticating through the same helper.
 git lfs install --local >/dev/null
-git lfs track "*.png" >/dev/null
+# Every raster/binary asset type the web UI can carry, not just PNG: a JPG in
+# web/public once got the push rejected with "contains binary files".
+for pattern in "*.png" "*.jpg" "*.jpeg" "*.gif" "*.webp" "*.avif" "*.ico" "*.woff" "*.woff2" "*.ttf" "*.otf" "*.mp4" "*.webm" "*.pdf"; do
+  git lfs track "$pattern" >/dev/null
+done
 
 MSG="Deploy wiwi $REV"
 
