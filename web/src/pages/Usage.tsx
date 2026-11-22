@@ -9,6 +9,8 @@ import {
   ArrowDownToLine,
   ArrowUpFromLine,
   Brain,
+  ChevronLeft,
+  ChevronRight,
   DollarSign,
   Download,
   Gauge,
@@ -54,6 +56,7 @@ import {
   StatCard,
   Table,
   TD,
+  SectionHeading,
 } from "@/components/ui";
 import {
   fmtDateTime,
@@ -498,6 +501,19 @@ export function UsagePage() {
     return rows.sort((a, b) => b.requests - a.requests);
   }, [allLogs, groupDim]);
 
+  // Grouped summary is paged (5 rows per page) so a long tail of models/keys
+  // doesn't push the request log off-screen.
+  const GROUP_PAGE_SIZE = 5;
+  const [groupPage, setGroupPage] = useState(0);
+  const groupPageCount = Math.max(1, Math.ceil(groupRows.length / GROUP_PAGE_SIZE));
+  // Clamp rather than reset in an effect: the row set shrinks when the range
+  // changes, and a stale page index would otherwise render an empty table.
+  const safeGroupPage = Math.min(groupPage, groupPageCount - 1);
+  const pagedGroupRows = groupRows.slice(
+    safeGroupPage * GROUP_PAGE_SIZE,
+    safeGroupPage * GROUP_PAGE_SIZE + GROUP_PAGE_SIZE,
+  );
+
   const [hoveredSlice, setHoveredSlice] = useState<number | null>(null);
 
   const tpsBuckets = useMemo<TpsBucket[]>(
@@ -596,6 +612,7 @@ export function UsagePage() {
   const onGroupDimChange = (v: string) => {
     setGroupDim(v as GroupDim);
     setFilterGroup(null);
+    setGroupPage(0);
   };
 
   // Manual refresh alongside the 10–15s polls and the live SSE invalidation:
@@ -679,12 +696,7 @@ export function UsagePage() {
   }, [logs]);
 
   return (
-    <div
-      style={{
-        opacity: overviewQuery.isFetching && overviewQuery.data ? 0.7 : 1,
-        transition: "opacity 200ms",
-      }}
-    >
+    <div className={`admin-dash${overviewQuery.isFetching && overviewQuery.data ? " is-refetching" : ""}`}>
       <PageHeader
         title="Usage"
         subtitle={o ? `Per-request detail · ${o.window_minutes === 0 ? 'all time' : `last ${o.window_minutes} min`}` : "Per-request usage detail"}
@@ -742,7 +754,7 @@ export function UsagePage() {
       <ImportedCsvNotice csv={importedCsv} scopeNote={importedScopeNote} />
 
       {/* Hero row: 4 featured stat cards with icons, sparklines, deltas */}
-      <div className="admin-stagger grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="admin-stagger admin-kpi-band is-hero grid-cols-2 lg:grid-cols-4">
         <StatCard
           featured
           icon={Activity}
@@ -804,7 +816,7 @@ export function UsagePage() {
 
       {/* Secondary stat row: token breakdown, each tile showing its share of
           the window's total tokens via an inline progress bar */}
-      <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+      <div className="admin-kpi-band is-secondary grid-cols-2 sm:grid-cols-3 xl:grid-cols-6">
         <StatCard
           icon={ArrowDownToLine}
           label="tokens in"
@@ -885,7 +897,8 @@ export function UsagePage() {
       </div>
 
       {/* Live pulse + gauges */}
-      <div className="mt-4 grid gap-4 xl:grid-cols-5">
+      <SectionHeading label="Live" hint="trailing minute of the poll window" />
+      <div className="grid gap-4 xl:grid-cols-5">
         <VisualCard
           title="live pulse"
           subtitle="requests per 2s · last 60s"
@@ -952,7 +965,8 @@ export function UsagePage() {
       </div>
 
       {/* Breakdowns: token mix, status mix, ttft profile */}
-      <div className="mt-4 grid gap-4 xl:grid-cols-3">
+      <SectionHeading label="Breakdown" hint="where tokens and time go" />
+      <div className="grid gap-4 xl:grid-cols-3">
         <VisualCard title="token mix" subtitle="share of total tokens" icon={PieChartIcon}>
           <TokenRibbon parts={tokenParts} total={totalTokens} />
         </VisualCard>
@@ -967,7 +981,8 @@ export function UsagePage() {
       </div>
 
       {/* Ranked breakdowns, click-through into the existing group filter */}
-      <div className="mt-4 grid gap-4 xl:grid-cols-3">
+      <SectionHeading label="Top contributors" hint="click a row to filter" />
+      <div className="grid gap-4 xl:grid-cols-3">
         <VisualCard
           title={groupDim === "model" ? "top models" : "by model"}
           subtitle="requests · spend"
@@ -1015,7 +1030,8 @@ export function UsagePage() {
       </div>
 
       {/* Charts: TPS area chart + token share donut */}
-      <div className="mt-4 grid gap-4 xl:grid-cols-2">
+      <SectionHeading label="Performance" hint="throughput, share and latency" />
+      <div className="grid gap-4 xl:grid-cols-2">
         <Card>
           <CardHeader
             title="Output throughput over time"
@@ -1043,7 +1059,7 @@ export function UsagePage() {
                     <stop offset="100%" stopColor="#a855f7" stopOpacity={0} />
                   </linearGradient>
                 </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#ffffff" strokeOpacity={0.06} vertical={false} />
+                <CartesianGrid strokeDasharray="2 4" stroke="#ffffff" strokeOpacity={0.045} vertical={false} />
                 <XAxis
                   dataKey="t"
                   tickFormatter={(t: number) =>
@@ -1132,7 +1148,7 @@ export function UsagePage() {
                   {hoveredSlice !== null && share[hoveredSlice] ? (
                     <>
                       <span className="admin-label">{share[hoveredSlice].name}</span>
-                      <span className="font-mono text-[18px] font-bold tabular-nums text-[var(--admin-text)]">
+                      <span className="font-mono text-[20px] font-medium tracking-[-0.03em] tabular-nums text-[var(--admin-text)]">
                         {fmtTokens(share[hoveredSlice].value)}
                       </span>
                       <span className="mt-0.5 font-mono text-[11px] text-[var(--admin-text-dim)]">
@@ -1141,7 +1157,7 @@ export function UsagePage() {
                     </>
                   ) : (
                     <>
-                      <span className="font-mono text-[18px] font-bold tabular-nums text-[var(--admin-text)]">
+                      <span className="font-mono text-[20px] font-medium tracking-[-0.03em] tabular-nums text-[var(--admin-text)]">
                         {fmtTokens(totalTokens)}
                       </span>
                       <span className="admin-label mt-1">total tokens</span>
@@ -1219,7 +1235,7 @@ export function UsagePage() {
                     <stop offset="100%" stopColor={latColor} stopOpacity={0.08} />
                   </linearGradient>
                 </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#ffffff" strokeOpacity={0.06} vertical={false} />
+                <CartesianGrid strokeDasharray="2 4" stroke="#ffffff" strokeOpacity={0.045} vertical={false} />
                 <XAxis
                   dataKey="label"
                   tick={{ fontSize: 11, fill: "#6b7280" }}
@@ -1251,7 +1267,8 @@ export function UsagePage() {
       </Card>
 
       {/* Grouped summary with inline bar indicators */}
-      <Card className="mt-4">
+      <SectionHeading label="Requests" hint="grouped summary and per-request log" />
+      <Card>
         <CardHeader
           title="Grouped summary"
           subtitle="Click a row to filter the charts above"
@@ -1285,7 +1302,7 @@ export function UsagePage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {groupRows.map((r) => {
+                  {pagedGroupRows.map((r) => {
                     const isActive =
                       filterGroup?.dim === groupDim && filterGroup.name === r.name;
                     return (
@@ -1324,6 +1341,57 @@ export function UsagePage() {
                 </tbody>
               </table>
             </div>
+            {groupPageCount > 1 && (
+              <div className="admin-pager">
+                <span className="admin-pager-info">
+                  {fmtInt(safeGroupPage * GROUP_PAGE_SIZE + 1)}–
+                  {fmtInt(Math.min(groupRows.length, (safeGroupPage + 1) * GROUP_PAGE_SIZE))} of{" "}
+                  {fmtInt(groupRows.length)} {groupDim}s
+                </span>
+                <div className="admin-pager-controls">
+                  <button
+                    type="button"
+                    className="admin-pager-btn"
+                    onClick={() => setGroupPage(Math.max(0, safeGroupPage - 1))}
+                    disabled={safeGroupPage === 0}
+                    aria-label="Previous page"
+                  >
+                    <ChevronLeft size={14} />
+                  </button>
+                  {Array.from({ length: groupPageCount }, (_, i) => i)
+                    .filter(
+                      (i) =>
+                        i === 0 || i === groupPageCount - 1 || Math.abs(i - safeGroupPage) <= 1,
+                    )
+                    .map((i, idx, arr) => (
+                      <span key={i} className="contents">
+                        {idx > 0 && i - arr[idx - 1] > 1 && (
+                          <span className="admin-pager-gap" aria-hidden>
+                            …
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          className={`admin-pager-btn${i === safeGroupPage ? " is-active" : ""}`}
+                          onClick={() => setGroupPage(i)}
+                          aria-current={i === safeGroupPage ? "page" : undefined}
+                        >
+                          {i + 1}
+                        </button>
+                      </span>
+                    ))}
+                  <button
+                    type="button"
+                    className="admin-pager-btn"
+                    onClick={() => setGroupPage(Math.min(groupPageCount - 1, safeGroupPage + 1))}
+                    disabled={safeGroupPage >= groupPageCount - 1}
+                    aria-label="Next page"
+                  >
+                    <ChevronRight size={14} />
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </Card>

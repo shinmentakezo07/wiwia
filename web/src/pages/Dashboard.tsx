@@ -22,9 +22,9 @@ import {
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import {
+  Area,
+  AreaChart,
   CartesianGrid,
-  Line,
-  LineChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -34,7 +34,7 @@ import { getOverview, getProviders, getRequestLogs } from "@/api/client";
 import { useAuth } from "@/api/auth";
 import { useAdminStream, useLiveInvalidation } from "@/api/stream";
 import type { RequestLogEntry } from "@/api/types";
-import { Card, CardHeader, ErrorText, LiveBadge, PageHeader, Spinner, StatCard } from "@/components/ui";
+import { Card, CardHeader, ErrorText, LiveBadge, PageHeader, SectionHeading, Spinner, StatCard } from "@/components/ui";
 import {
   GaugeRing,
   HealthGrid,
@@ -528,13 +528,14 @@ export function DashboardPage() {
   const tpsSharePct =
     typeof o?.tps_sample_ratio === "number" ? Math.round(o.tps_sample_ratio * 100) : null;
 
+  const healthyCount = healthItems.filter((h) => h.ok).length;
+  const healthTone =
+    healthyCount === healthItems.length ? "ok" : healthyCount === 0 ? "down" : "warn";
+
   return (
-    <div
-      style={{
-        opacity: overviewQuery.isFetching && overviewQuery.data ? 0.7 : 1,
-        transition: "opacity 200ms",
-      }}
-    >
+    // Refetch dim is delayed in CSS so the frequent SSE-driven refetches don't
+    // flicker the whole page; only a genuinely slow poll shows the hold state.
+    <div className={`admin-dash${overviewQuery.isFetching && overviewQuery.data ? " is-refetching" : ""}`}>
       <PageHeader
         title={isAdmin ? "Dashboard" : "Your dashboard"}
         subtitle={
@@ -544,7 +545,17 @@ export function DashboardPage() {
               : "Gateway activity"
             : "Usage across your virtual keys"
         }
-        right={<LiveBadge connected={connected} />}
+        right={
+          <>
+            {isAdmin && healthItems.length > 0 && (
+              <span className={`admin-health-pill is-${healthTone}`}>
+                <span className="admin-health-pill-dot" aria-hidden />
+                {healthyCount}/{healthItems.length} upstreams healthy
+              </span>
+            )}
+            <LiveBadge connected={connected} />
+          </>
+        }
       />
       {overviewQuery.isLoading && (
         <div className="flex justify-center py-10">
@@ -553,7 +564,7 @@ export function DashboardPage() {
       )}
       {overviewQuery.error && <ErrorText>{overviewQuery.error.message}</ErrorText>}
 
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="admin-kpi-band is-hero grid-cols-2 lg:grid-cols-4">
         <StatCard
           featured
           icon={Activity}
@@ -608,7 +619,7 @@ export function DashboardPage() {
 
       {/* Secondary tokens sit one rank below the headline: same component,
           no icon rails, no sparklines — a quieter rule of figures. */}
-      <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+      <div className="admin-kpi-band is-secondary grid-cols-2 sm:grid-cols-3 xl:grid-cols-6">
         <StatCard
           compact
           icon={ArrowDownToLine}
@@ -669,7 +680,8 @@ export function DashboardPage() {
 
       {/* Live pulse meter: one bar per 2s across the trailing minute. SSE
           events land here directly, so the meter moves between polls. */}
-      <div className="mt-4 grid gap-4 xl:grid-cols-3">
+      <SectionHeading label="Live" hint="per-second stream" />
+      <div className="grid gap-4 xl:grid-cols-3">
         <VisualCard
           title="live pulse"
           subtitle="requests per 2s · last 60s"
@@ -718,7 +730,8 @@ export function DashboardPage() {
         </VisualCard>
       </div>
 
-      <div className="mt-4 grid gap-4 xl:grid-cols-3">
+      <SectionHeading label="Breakdown" hint="where tokens and time go" />
+      <div className="grid gap-4 xl:grid-cols-3">
         <VisualCard
           title="token mix"
           subtitle={o ? `last ${o.window_minutes} min` : "current window"}
@@ -736,7 +749,8 @@ export function DashboardPage() {
         </VisualCard>
       </div>
 
-      <div className="mt-4">
+      <SectionHeading label="Upstreams & models" hint="who is serving the traffic" />
+      <div>
         <VisualCard
           title="provider health"
           subtitle="configured upstreams"
@@ -752,10 +766,6 @@ export function DashboardPage() {
             emptyLabel={isAdmin ? "No providers configured." : "Admin-only view."}
           />
         </VisualCard>
-      </div>
-
-      <div className="mt-4">
-        <LiveSparkline series={live} connected={connected} />
       </div>
 
       {/* ── Leaderboard ───────────────────────────────────────────────────
@@ -836,8 +846,9 @@ export function DashboardPage() {
       {/* One throughput chart, not two: requests and errors share a y-axis
           (both are counts of the same thing), so they belong on one frame.
           Token volume lives in the token-mix ribbon. */}
-      <div className="mt-4">
-        <Card clip={false}>
+      <SectionHeading label="Traffic" hint="last 30 min" />
+      <div className="grid gap-4 xl:grid-cols-3">
+        <Card clip={false} className="xl:col-span-2">
           <CardHeader
             icon={Activity}
             title="Requests & errors / min"
@@ -851,8 +862,18 @@ export function DashboardPage() {
           />
           <div className="h-[240px] p-3 pr-5">
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={reqSeries} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-                <CartesianGrid stroke="#ffffff" strokeOpacity={0.05} vertical={false} />
+              <AreaChart data={reqSeries} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="wiwi-req-fill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={COLORS.requests} stopOpacity={0.14} />
+                    <stop offset="100%" stopColor={COLORS.requests} stopOpacity={0.02} />
+                  </linearGradient>
+                  <linearGradient id="wiwi-err-fill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={COLORS.errors} stopOpacity={0.12} />
+                    <stop offset="100%" stopColor={COLORS.errors} stopOpacity={0.02} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid stroke="#ffffff" strokeOpacity={0.045} strokeDasharray="2 4" vertical={false} />
                 <XAxis
                   dataKey="t"
                   tickFormatter={(t: number) => fmtTime(t)}
@@ -872,28 +893,37 @@ export function DashboardPage() {
                   content={<ChartTooltip fmt={(v) => fmtInt(v)} />}
                   cursor={{ stroke: "#3b82f6", strokeOpacity: 0.25 }}
                 />
-                <Line
+                <Area
                   type="monotone"
                   dataKey="requests"
                   name="requests"
                   stroke={COLORS.requests}
                   strokeWidth={2}
+                  fill="url(#wiwi-req-fill)"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
                   dot={false}
-                  activeDot={{ r: 4, strokeWidth: 0 }}
+                  activeDot={{ r: 4, strokeWidth: 2, stroke: "#0a0a0a" }}
                 />
-                <Line
+                <Area
                   type="monotone"
                   dataKey="errors"
                   name="errors"
                   stroke={COLORS.errors}
-                  strokeWidth={1.75}
+                  strokeWidth={2}
+                  fill="url(#wiwi-err-fill)"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
                   dot={false}
-                  activeDot={{ r: 4, strokeWidth: 0 }}
+                  activeDot={{ r: 4, strokeWidth: 2, stroke: "#0a0a0a" }}
                 />
-              </LineChart>
+              </AreaChart>
             </ResponsiveContainer>
           </div>
         </Card>
-      </div>    </div>
+
+        <LiveSparkline series={live} connected={connected} />
+      </div>
+    </div>
   );
 }

@@ -2807,6 +2807,158 @@ select.admin-input option {
   }
 }
 
+/* ── docs: motion & surface refinement ─────────────────────────────────────
+   One idea, applied consistently: the page assembles itself in reading order
+   (masthead → wire strip → sections), and the wire strip shows the request
+   actually travelling left → right. Everything is transform/opacity only (no
+   layout cost), 150–600 ms, and gated on both the OS preference and the
+   console's .reduce-motion toggle. */
+
+.docs-masthead::after {
+  /* Faint engineering grid behind the masthead, faded out toward the edges so
+     it reads as paper texture rather than decoration. */
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    linear-gradient(var(--docs-hair) 1px, transparent 1px),
+    linear-gradient(90deg, var(--docs-hair) 1px, transparent 1px);
+  background-size: 32px 32px;
+  mask-image: radial-gradient(60rem 22rem at 30% 0%, #000 10%, transparent 75%);
+  -webkit-mask-image: radial-gradient(60rem 22rem at 30% 0%, #000 10%, transparent 75%);
+  opacity: 0.55;
+  /* Rasterise once on its own layer so scrolling never repaints the mask. */
+  transform: translateZ(0);
+}
+
+/* Surfaces: lift on hover only where hover exists; focus-within mirrors it so
+   keyboard users get the same affordance. */
+.docs-wire-chip,
+.docs-ep,
+.docs-step,
+.docs-code,
+.docs-table-wrap,
+.docs-note {
+  transition: border-color 0.2s ease, background-color 0.2s ease, transform 0.2s ease;
+}
+.docs-code:focus-within,
+.docs-table-wrap:focus-within {
+  border-color: var(--docs-hair-2);
+}
+@media (hover: hover) {
+  .docs-wire-chip:hover {
+    transform: translateX(2px);
+    border-color: var(--docs-hair-2);
+  }
+  .docs-ep:hover {
+    background: rgba(255, 255, 255, 0.018);
+  }
+  .docs-ep:hover .docs-path {
+    color: var(--admin-text);
+  }
+  .docs-step:hover .docs-step-num {
+    color: var(--docs-sky);
+  }
+  .docs-code:hover,
+  .docs-table-wrap:hover {
+    border-color: var(--docs-hair-2);
+  }
+  .docs-table tbody tr:hover > * {
+    background: rgba(255, 255, 255, 0.02);
+  }
+}
+.docs-step-num,
+.docs-path {
+  transition: color 0.2s ease;
+}
+.docs-head-anchor {
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+@keyframes docs-rise {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes docs-flow {
+  0% { transform: translateX(-4px); opacity: 0.35; }
+  50% { transform: translateX(3px); opacity: 1; }
+  100% { transform: translateX(-4px); opacity: 0.35; }
+}
+@keyframes docs-node-ring {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(147, 197, 253, 0); }
+  50% { box-shadow: 0 0 0 4px rgba(147, 197, 253, 0.08); }
+}
+@keyframes docs-copied {
+  0% { transform: scale(0.92); }
+  60% { transform: scale(1.06); }
+  100% { transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  /* Masthead assembles in reading order. */
+  .docs-kicker,
+  .docs-display,
+  .docs-lead,
+  .docs-hero-actions,
+  .docs-wire > * {
+    animation: docs-rise 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .docs-display { animation-delay: 60ms; }
+  .docs-lead { animation-delay: 120ms; }
+  .docs-hero-actions { animation-delay: 180ms; }
+  .docs-wire > :nth-child(1) { animation-delay: 240ms; }
+  .docs-wire > :nth-child(2) { animation-delay: 300ms; }
+  .docs-wire > :nth-child(3) { animation-delay: 340ms; }
+  .docs-wire > :nth-child(4) { animation-delay: 400ms; }
+  .docs-wire > :nth-child(5) { animation-delay: 440ms; }
+
+  /* Inbound chips stagger in as a list, not as one block. */
+  .docs-wire-chip { animation: docs-rise 0.45s cubic-bezier(0.22, 1, 0.36, 1) both; }
+  .docs-wire-chip:nth-child(1) { animation-delay: 300ms; }
+  .docs-wire-chip:nth-child(2) { animation-delay: 340ms; }
+  .docs-wire-chip:nth-child(3) { animation-delay: 380ms; }
+  .docs-wire-chip:nth-child(4) { animation-delay: 420ms; }
+  .docs-wire-chip:nth-child(5) { animation-delay: 460ms; }
+
+  /* The arrows carry the thesis: traffic moves left → right. */
+  .docs-wire-arrow {
+    animation: docs-flow 2.4s ease-in-out 0.9s infinite;
+    will-change: transform, opacity;
+  }
+
+  /* Copy confirmation: a tiny pop so the state change is felt, not just read. */
+  .docs-code-copy[aria-label$="copied"] svg,
+  .docs-pathcopy[aria-label$="copied"] svg {
+    animation: docs-copied 0.28s ease-out;
+  }
+
+  @media (hover: hover) {
+    .docs-head-anchor { transform: translateX(-3px); }
+    .docs-head-title:hover .docs-head-anchor,
+    .docs-head-anchor:focus-visible { transform: none; }
+  }
+
+}
+
+.reduce-motion .docs-page *,
+.reduce-motion .docs-page *::before,
+.reduce-motion .docs-page *::after {
+  animation: none !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .docs-wire-chip,
+  .docs-ep,
+  .docs-step,
+  .docs-code,
+  .docs-table-wrap,
+  .docs-note,
+  .docs-head-anchor {
+    transition: none;
+  }
+}
+
 
 /* ─── Login page: split-panel console ───────────────────────────────────── */
 
@@ -6012,3 +6164,351 @@ mark.mc-hit {
     min-height: 44px;
   }
 }
+
+/* ─── Login page: visual polish layer ───────────────────────────────────── */
+
+/* Card: faint indigo hairline on top edge + deeper ambient shadow */
+.lg-login-card {
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.02),
+    0 24px 60px -20px rgba(0, 0, 0, 0.75),
+    0 0 80px -30px rgba(99, 102, 241, 0.25);
+}
+.lg-login-card::after {
+  content: "";
+  position: absolute;
+  inset: 0 18% auto 18%;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(165, 180, 252, 0.55), transparent);
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* Inputs: indigo focus ring, icon lights up with the field */
+.lg-login-card .admin-input:focus {
+  border-color: rgba(129, 140, 248, 0.6) !important;
+  background: rgba(255, 255, 255, 0.045) !important;
+  box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.16), 0 1px 2px rgba(0, 0, 0, 0.3) inset;
+}
+.lg-login-card .group > svg { transition: color 0.18s ease, transform 0.18s ease; }
+.lg-login-card .group:focus-within > svg:first-child { color: #a5b4fc; }
+.lg-login-card .admin-input[aria-invalid="true"] {
+  border-color: rgba(248, 113, 113, 0.55) !important;
+  box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.12);
+}
+
+/* Segmented control: subtle indigo tint on the active pill */
+.lg-login-card .lg-seg-indicator {
+  background: linear-gradient(180deg, rgba(129, 140, 248, 0.16), rgba(255, 255, 255, 0.06));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 0 0 1px rgba(129, 140, 248, 0.22),
+    0 2px 8px -2px rgba(99, 102, 241, 0.35);
+}
+
+/* Submit: soft sheen, lift on hover, press on click, arrow nudge */
+.lg-login-card button[type="submit"] {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(180deg, #ffffff 0%, #e9e9ee 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.7),
+    0 1px 2px rgba(0, 0, 0, 0.35),
+    0 8px 24px -10px rgba(165, 180, 252, 0.55);
+  transition: transform 0.16s ease, box-shadow 0.2s ease, background 0.2s ease, opacity 0.2s ease;
+}
+.lg-login-card button[type="submit"]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 30%, rgba(255, 255, 255, 0.9) 50%, transparent 70%);
+  transform: translateX(-120%);
+  pointer-events: none;
+}
+.lg-login-card button[type="submit"]:hover:not(:disabled) {
+  background: linear-gradient(180deg, #ffffff 0%, #f1f1f5 100%);
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.8),
+    0 2px 4px rgba(0, 0, 0, 0.35),
+    0 14px 32px -12px rgba(165, 180, 252, 0.7);
+}
+.lg-login-card button[type="submit"]:active:not(:disabled) {
+  transform: translateY(0) scale(0.985);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.18), 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+.lg-login-card button[type="submit"] svg:last-child { transition: transform 0.2s ease; }
+.lg-login-card button[type="submit"]:hover:not(:disabled) svg:last-child:not(.animate-spin) {
+  transform: translateX(3px);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .lg-login-card button[type="submit"]:hover:not(:disabled)::before {
+    animation: lg-sheen 0.9s ease;
+  }
+  .lg-login-card [role="alert"] { animation: lg-nudge 0.32s ease; }
+}
+@keyframes lg-sheen { to { transform: translateX(120%); } }
+@keyframes lg-nudge {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-4px); }
+  75% { transform: translateX(4px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lg-login-card button[type="submit"],
+  .lg-login-card button[type="submit"]:hover:not(:disabled),
+  .lg-login-card button[type="submit"]:active:not(:disabled) { transform: none; }
+}
+
+/* ─── Dashboard: product-grade visual layer ─────────────────────────────────
+   Direction: Vercel / Linear / Stripe consoles. Fewer boxes, more structure.
+   KPIs sit in one connected band split by hairlines instead of four floating
+   cards; surfaces get a top-lit edge instead of glows; numbers are tabular,
+   tightly tracked, solid ink (no gradient text). Scoped to .admin-dash so the
+   other admin pages are untouched. */
+
+.admin-dash {
+  --dash-line: rgba(255, 255, 255, 0.07);
+  --dash-line-strong: rgba(255, 255, 255, 0.11);
+  --dash-surface: #0b0b0c;
+  --dash-surface-2: #0f0f11;
+  position: relative;
+  transition: opacity 240ms ease;
+}
+/* Delay the dim so sub-second SSE refetches never flicker the page. */
+.admin-dash.is-refetching { opacity: 0.8; transition-delay: 400ms; }
+
+/* Ambient backdrop: one soft top light + a faint dot grid that fades out. */
+.admin-dash::before {
+  content: "";
+  position: absolute;
+  inset: -32px -32px auto;
+  height: 420px;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(60% 100% at 50% 0%, rgba(59, 130, 246, 0.07), transparent 70%),
+    radial-gradient(rgba(255, 255, 255, 0.06) 1px, transparent 1px) 0 0 / 22px 22px;
+  -webkit-mask-image: linear-gradient(180deg, #000 0%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 0%, transparent 100%);
+}
+.admin-dash > * { position: relative; z-index: 1; }
+
+/* Surfaces: top-lit hairline edge, no hover glow, no lift. */
+.admin-dash .admin-card {
+  background: linear-gradient(180deg, var(--dash-surface-2) 0%, var(--dash-surface) 100%);
+  border-color: var(--dash-line);
+  border-radius: 12px;
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.045),
+    0 1px 2px rgba(0, 0, 0, 0.4);
+}
+.admin-dash .admin-card:hover {
+  border-color: var(--dash-line-strong);
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.06),
+    0 1px 2px rgba(0, 0, 0, 0.4);
+}
+.admin-dash .admin-card::before { display: none; }
+.admin-dash .admin-card > .border-b { border-color: var(--dash-line); }
+.admin-dash .admin-card h3 { font-size: 13px; font-weight: 500; letter-spacing: -0.005em; }
+
+/* KPI band: one surface, cells divided by 1px rules (gap shows the line). */
+.admin-kpi-band {
+  display: grid;
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--dash-line);
+  border-radius: 14px;
+  background: var(--dash-line);
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.045), 0 8px 30px -16px rgba(0, 0, 0, 0.9);
+}
+.admin-dash .admin-kpi-band > .admin-card {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: var(--dash-surface);
+  transition: background-color 0.2s ease;
+}
+.admin-dash .admin-kpi-band > .admin-card:hover { background: var(--dash-surface-2); box-shadow: none; }
+.admin-dash .admin-kpi-band .admin-stat-wash { display: none; }
+.admin-dash .admin-kpi-band .admin-stat-highlight { background: var(--dash-surface); }
+.admin-kpi-band.is-hero > .admin-card { padding: 22px 24px 20px; }
+.admin-kpi-band.is-secondary { margin-top: 12px; border-radius: 12px; }
+.admin-kpi-band.is-secondary > .admin-card { padding: 14px 18px; }
+
+/* Figures: solid ink, tabular, tight. Replaces the gradient-clipped value. */
+.admin-dash .admin-stat-value {
+  background: none;
+  -webkit-text-fill-color: currentColor;
+  color: #f5f5f6;
+  font-weight: 500;
+  letter-spacing: -0.035em;
+  font-variant-numeric: tabular-nums;
+}
+.admin-kpi-band.is-hero .admin-stat-value { font-size: 30px; }
+.admin-kpi-band.is-secondary .admin-stat-value { color: #e4e4e7; }
+.admin-dash .admin-label {
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--admin-text-muted);
+}
+
+/* Delta chips read as quiet inline annotations, not badges. */
+.admin-dash .admin-delta-chip {
+  border: 0;
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-size: 10.5px;
+}
+
+/* Section bands */
+.admin-dash-section {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 36px 0 14px;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  color: #ededef;
+}
+.admin-dash-section-hint {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--admin-text-dim);
+}
+.admin-dash-section::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  align-self: center;
+  margin-left: 6px;
+  background: var(--dash-line);
+}
+
+/* Header pills: Vercel-style status chips. */
+.admin-dash .admin-live-badge,
+.admin-health-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  padding: 0 11px;
+  border-radius: 999px;
+  border: 1px solid var(--dash-line-strong);
+  background: rgba(255, 255, 255, 0.025);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: #d4d4d8;
+}
+.admin-dash .admin-card .admin-live-badge { height: 22px; font-size: 11px; padding: 0 9px; }
+.admin-health-pill-dot { width: 7px; height: 7px; border-radius: 999px; }
+.admin-health-pill.is-ok .admin-health-pill-dot { background: #22c55e; box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.16); }
+.admin-health-pill.is-warn .admin-health-pill-dot { background: #eab308; box-shadow: 0 0 0 3px rgba(234, 179, 8, 0.16); }
+.admin-health-pill.is-down .admin-health-pill-dot { background: #ef4444; box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.16); }
+.admin-health-pill.is-down { border-color: rgba(239, 68, 68, 0.3); color: #fca5a5; }
+
+/* Chart tooltip: frosted, compact, high-contrast value. */
+.admin-dash .admin-chart-tooltip {
+  border: 1px solid var(--dash-line-strong);
+  border-radius: 10px;
+  background: rgba(17, 17, 19, 0.86);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.9);
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+/* ─── Usage + Dashboard: tables, controls, donut inside the dash system ──── */
+
+/* Tables sit flush inside their card: no double border, sentence-case head. */
+.admin-dash .admin-card .admin-table {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.admin-dash .admin-table thead tr { background: rgba(255, 255, 255, 0.015); border-color: var(--dash-line); }
+.admin-dash .admin-table thead { background: var(--dash-surface); }
+.admin-dash .admin-table th {
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--admin-text-dim);
+  padding: 11px 20px;
+}
+.admin-dash .admin-table td {
+  padding: 11px 20px;
+  font-size: 13px;
+  border-color: rgba(255, 255, 255, 0.045);
+}
+.admin-dash .admin-table tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
+.admin-dash .admin-lb th { font-size: 11px; letter-spacing: 0; text-transform: none; font-weight: 500; }
+.admin-dash .admin-lb td { border-color: rgba(255, 255, 255, 0.045); }
+
+/* Filter chip in the header reads as a removable token, same height as pills. */
+.admin-dash .admin-badge-violet {
+  height: 28px;
+  padding: 0 6px 0 11px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+/* Entrance stagger on the KPI band fades only, so the 1px rules never split. */
+.admin-kpi-band.admin-stagger > * { transform: none !important; }
+
+/* Recharts: one quiet axis tone, and donut slices separated by the surface. */
+.admin-dash .recharts-cartesian-axis-tick-value { fill: #71717a; font-size: 10.5px; }
+.admin-dash .recharts-sector { stroke: var(--dash-surface); stroke-width: 2px; }
+
+/* ─── Usage: grouped-summary pager ─────────────────────────────────────── */
+
+.admin-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--admin-border);
+}
+.admin-pager-info {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--admin-text-dim);
+}
+.admin-pager-controls { display: flex; align-items: center; gap: 4px; }
+.admin-pager-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 7px;
+  border: 1px solid var(--admin-border-hover);
+  background: rgba(255, 255, 255, 0.02);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  color: var(--admin-text-muted);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.admin-pager-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.05); color: #e5e7eb; }
+.admin-pager-btn.is-active {
+  border-color: rgba(59, 130, 246, 0.45);
+  background: rgba(59, 130, 246, 0.12);
+  color: #bfdbfe;
+}
+.admin-pager-btn:disabled { opacity: 0.35; cursor: default; }
+.admin-pager-btn:focus-visible { outline: 2px solid var(--admin-accent); outline-offset: 1px; }
+.admin-pager-gap { padding: 0 2px; color: var(--admin-text-dim); font-size: 11px; }

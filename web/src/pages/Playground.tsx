@@ -1883,8 +1883,9 @@ function HeroEmptyState(props: {
                   className="pg-sugg-enter pg-suggestion-card group flex min-h-14 w-full items-center justify-between gap-3 border-b border-[var(--admin-border)] px-1 py-3 text-left text-[13px] leading-relaxed text-[var(--admin-text-muted)] transition-colors duration-200 hover:bg-white/[0.025] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50 sm:text-[14px]"
                   style={{ animationDelay: `${i * 0.04}s` }}
                 >
+                  <span className="pg-sugg-index shrink-0 font-mono text-[11px] tabular-nums text-[var(--admin-text-dim)]" aria-hidden>{String(i + 1).padStart(2, "0")}</span>
                   <span className="min-w-0 flex-1 leading-relaxed">{s}</span>
-                  <ArrowUp size={16} className="mt-0.5 shrink-0 text-[var(--admin-text-dim)] transition-[transform,color] group-hover:-translate-y-0.5 group-hover:text-brand-300" aria-hidden />
+                  <ArrowUp size={16} className="pg-sugg-arrow mt-0.5 shrink-0 text-[var(--admin-text-dim)] transition-[transform,color] group-hover:-translate-y-0.5 group-hover:text-brand-300 group-focus-visible:-translate-y-0.5 group-focus-visible:text-brand-300" aria-hidden />
                 </button>
               ))}
             </div>

@@ -1,7 +1,7 @@
 // Shared UI kit — cloned from the Dra admin design system: admin-card
 // surfaces, hairline borders, uppercase micro-labels, mono tabular values.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type {
   AnchorHTMLAttributes,
   ButtonHTMLAttributes,
@@ -96,6 +96,17 @@ export function PageHeader(props: { title: ReactNode; subtitle?: ReactNode; righ
           viewport. */}
       <div className="flex flex-wrap items-center justify-end gap-2">{props.right}</div>
     </div>
+  );
+}
+
+/** Quiet rule that groups a console page into scannable bands, so a grid of
+ *  cards reads as sections rather than a wall. Styled under `.admin-dash`. */
+export function SectionHeading(props: { label: string; hint?: string }) {
+  return (
+    <h3 className="admin-dash-section">
+      <span>{props.label}</span>
+      {props.hint && <span className="admin-dash-section-hint">{props.hint}</span>}
+    </h3>
   );
 }
 
@@ -329,28 +340,40 @@ const STAT_ACCENT: Record<StatTone, string> = {
 };
 
 function TileSparkline(props: { points: number[]; accent: string }) {
-  const w = 96;
-  const h = 26;
+  const w = 104;
+  const h = 32;
   const max = Math.max(1, ...props.points);
-  const pts = props.points.map((v, i) => {
-    const x = props.points.length <= 1 ? 0 : (i / (props.points.length - 1)) * w;
-    const y = h - 2 - (v / max) * (h - 4);
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  });
-  const lastPair = pts[pts.length - 1] ?? `${w},${h - 2}`;
-  const [lx, ly] = lastPair.split(",").map(Number);
+  const n = props.points.length;
+  const xy = props.points.map((v, i) => [
+    n <= 1 ? 0 : (i / (n - 1)) * w,
+    h - 3 - (v / max) * (h - 6),
+  ]);
+  const line = xy.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+  const area = `0,${h} ${line} ${w},${h}`;
+  const [lx, ly] = xy[xy.length - 1] ?? [w, h - 3];
+  // useId keeps gradient ids unique when several tiles render side by side.
+  const gid = `tile-spark-${useId().replace(/:/g, "")}`;
   return (
-    <svg viewBox={`0 0 ${w} ${h}`} className="h-[26px] w-24 shrink-0" aria-hidden>
+    <svg viewBox={`0 0 ${w} ${h}`} className="h-8 w-[104px] shrink-0 overflow-visible" aria-hidden>
+      <defs>
+        <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={props.accent} stopOpacity={0.22} />
+          <stop offset="100%" stopColor={props.accent} stopOpacity={0} />
+        </linearGradient>
+      </defs>
+      <polygon points={area} fill={`url(#${gid})`} />
       <polyline
-        points={pts.join(" ")}
+        points={line}
         fill="none"
-        stroke="var(--admin-text-dim)"
+        stroke={props.accent}
+        strokeOpacity={0.85}
         strokeWidth={1.5}
         strokeLinecap="round"
         strokeLinejoin="round"
-        opacity={0.55}
+        vectorEffect="non-scaling-stroke"
       />
-      <circle cx={lx} cy={ly} r={2.5} fill={props.accent} />
+      <circle cx={lx} cy={ly} r={5} fill={props.accent} opacity={0.18} />
+      <circle cx={lx} cy={ly} r={2.25} fill={props.accent} />
     </svg>
   );
 }
