@@ -3467,6 +3467,55 @@ select.admin-input option {
   }
 }
 
+/* ─── Enterprise showcase: card spotlight, diagram beams, provider chips ──── */
+
+.ent-spotlight {
+  background: radial-gradient(
+    260px circle at var(--x, 50%) var(--y, 0%),
+    rgba(96, 165, 250, 0.12),
+    rgba(139, 92, 246, 0.05) 40%,
+    transparent 70%
+  );
+}
+
+@keyframes ent-beam-fall {
+  from { transform: translateY(-100%); }
+  to   { transform: translateY(200%); }
+}
+@keyframes ent-chip-glow {
+  0%, 100% { background-color: rgba(255, 255, 255, 0.03); border-color: rgba(255, 255, 255, 0.06); }
+  50%      { background-color: rgba(59, 130, 246, 0.16); border-color: rgba(96, 165, 250, 0.35); }
+}
+
+.ent-beam { opacity: 0; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .ent-beam {
+    opacity: 1;
+    animation: ent-beam-fall 1.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  }
+  .ent-chip { animation: ent-chip-glow 3s ease-in-out infinite; }
+}
+
+/* Quickstart terminal: beam travelling down the step spine + blinking caret */
+@keyframes qs-spine-fall {
+  0%   { top: -1.5rem; opacity: 0; }
+  15%  { opacity: 1; }
+  85%  { opacity: 1; }
+  100% { top: 100%; opacity: 0; }
+}
+@keyframes qs-caret-blink {
+  0%, 49%   { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+.qs-spine-beam { top: -1.5rem; opacity: 0; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .qs-spine-beam { animation: qs-spine-fall 2.7s ease-in-out infinite; }
+  .qs-caret { animation: qs-caret-blink 1.1s steps(1) infinite; }
+}
+
 /* ─── Shimmer button (from llmgateway-ref ShimmerButton) ────────────────── */
 
 @keyframes shimmer-slide {
