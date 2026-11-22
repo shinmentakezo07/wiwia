@@ -485,6 +485,19 @@ type TelemetrySettings struct {
 	SampleRatio    float64           `yaml:"sample_ratio"`
 	ExportTimeoutS float64           `yaml:"export_timeout_s"`
 	Headers        map[string]string `yaml:"headers"`
+
+	set setFlags
+}
+
+func (t *TelemetrySettings) UnmarshalYAML(n *yaml.Node) error {
+	type plain TelemetrySettings
+	var v plain
+	if err := n.Decode(&v); err != nil {
+		return err
+	}
+	*t = TelemetrySettings(v)
+	t.set = nodeKeys(n)
+	return nil
 }
 
 type Config struct {
@@ -940,6 +953,17 @@ func (w *WiwiSettings) applyDefaults() {
 func (t *TelemetrySettings) applyDefaults() {
 	if t.ExportTimeoutS <= 0 {
 		t.ExportTimeoutS = 10
+	}
+	// sample_ratio is a ratio, not a count: 0 is a legitimate "export nothing"
+	// and must not be rewritten to 1 (Python clamps to [0,1] and honors 0).
+	if !t.set.has("sample_ratio") {
+		t.SampleRatio = 1
+	}
+	if t.SampleRatio < 0 {
+		t.SampleRatio = 0
+	}
+	if t.SampleRatio > 1 {
+		t.SampleRatio = 1
 	}
 }
 

@@ -1465,6 +1465,7 @@ BUILTIN_PROVIDER_TYPES: list[dict[str, str | list[str]]] = [
             "deepseek-v4-pro",
             "glm-5.2",
             "kimi-k2.6",
+            "moonshotai-kimi-k3.1-pro-trial",
         ],
         "context_window": "varies per model",
         "docs_url": "https://opencode.ai/docs/zen",

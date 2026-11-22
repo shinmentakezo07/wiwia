@@ -31,6 +31,10 @@ type Gateway struct {
 	StreamResume bool
 	// LoopLimit aborts degenerate repetition (0 disables).
 	LoopLimit int
+	// LoopDetection mirrors router_settings.stream_loop_detection: false turns
+	// the detector off regardless of LoopLimit (Python treats both switches
+	// the same way).
+	LoopDetection bool
 	// DropParams governs unmodelled caller extras: when true (the default)
 	// adapters forward only the keys their wire documents; when false they
 	// forward every extra raw. Mirrors wiwi_settings.drop_params.
@@ -49,7 +53,7 @@ type Gateway struct {
 }
 
 func New(rt *router.Router, ce *cost.Engine) *Gateway {
-	g := &Gateway{Router: rt, Cost: ce, NumRetries: rt.NumRetries(), LoopLimit: 100, DropParams: true}
+	g := &Gateway{Router: rt, Cost: ce, NumRetries: rt.NumRetries(), LoopLimit: 100, LoopDetection: true, DropParams: true}
 	rt.ApplyThresholds()
 	rt.InitLaneCaps()
 	return g
@@ -149,12 +153,14 @@ func (g *Gateway) callOnce(ctx *RequestContext, dep *router.Deployment, key *rou
 		headers["X-Session-ID"] = ctx.SessionID
 	}
 	url := adapter.BuildURL(dep.Provider.BaseURL, dep.Model, false)
-	respBody, status, err := providers.DoRequest(url, headers, body, timeoutOf(dep))
+	respBody, status, respHeaders, err := providers.DoRequestHeadersCtx(ctx.Context(), url, headers, body, timeoutOf(dep))
 	if err != nil {
 		return nil, &providers.WiwiError{Status: 502, EType: "api_connection_error", Message: err.Error(), Retryable: true}
 	}
 	if status != http.StatusOK {
-		return nil, providers.ErrorFromProviderStatus(status, respBody, dep.Provider.Type)
+		we := providers.ErrorFromProviderStatus(status, respBody, dep.Provider.Type)
+		we.RetryAfter = providers.RetryAfterSeconds(respHeaders)
+		return nil, we
 	}
 	turn, err := adapter.DecodeResponse(status, respBody)
 	if err != nil {
@@ -189,7 +195,7 @@ func (g *Gateway) completeViaStream(ctx *RequestContext, dep *router.Deployment,
 	if dep.Provider.Type == "ifm" && ctx.SessionID != "" {
 		headers["X-Session-ID"] = ctx.SessionID
 	}
-	watch := newStreamWatchdog(g.StreamFirstChunkTimeoutS, g.StreamIdleTimeoutS)
+	watch := newStreamWatchdog(ctx.Context(), g.StreamFirstChunkTimeoutS, g.StreamIdleTimeoutS)
 	defer watch.stop()
 	resp, err := providers.DoStreamCtx(watch.ctx, adapter.BuildURL(dep.Provider.BaseURL, dep.Model, true), headers, body)
 	if err != nil {
@@ -202,7 +208,9 @@ func (g *Gateway) completeViaStream(ctx *RequestContext, dep *router.Deployment,
 	if resp.StatusCode != http.StatusOK {
 		buf := make([]byte, 4096)
 		n, _ := resp.Body.Read(buf)
-		return nil, providers.ErrorFromProviderStatus(resp.StatusCode, buf[:n], dep.Provider.Type)
+		we := providers.ErrorFromProviderStatus(resp.StatusCode, buf[:n], dep.Provider.Type)
+		we.RetryAfter = providers.RetryAfterSeconds(resp.Header)
+		return nil, we
 	}
 
 	acc := newStreamAssembler()
@@ -275,16 +283,31 @@ func (g *Gateway) completeGroups(ctx *RequestContext, groups []string, prefix st
 	for _, grp := range groups {
 		excludeDeps := map[string]bool{}
 		for attempt := 0; attempt <= g.NumRetries; attempt++ {
-			dep, err := g.Router.PickDeploymentFor(grp, excludeDeps, ctx.SessionID, prefix)
+			dep, err := g.Router.PickDeploymentFor(grp, excludeDeps, ctx.SessionID, prefix, ctx.EstTokens)
 			if err != nil {
+				if capErr, ok := err.(*router.RateCapError); ok {
+					lastErr = &providers.WiwiError{
+						Status: 429, EType: "rate_limit_error",
+						Message:    fmt.Sprintf("all deployments for '%s' are at their rpm/tpm cap", grp),
+						Retryable:  true,
+						RetryAfter: float64(capErr.RetryAfter),
+					}
+					break
+				}
 				break
 			}
 			if !g.Router.ReserveSlot(dep, ctx.Lane) {
 				excludeDeps[dep.Name()] = true
 				continue
 			}
+			// Per-deployment rpm/tpm admission (Python reserve_slot). The slot
+			// is refunded unless usage is settled, so a failed attempt cannot
+			// hold the cap for the rest of the window.
+			dep.ReserveDepSlot(ctx.RequestID, ctx.EstTokens)
+			ctx.DepSlotReserved = dep
 			ctx.Deployment = dep
 			keyExclude := map[string]bool{}
+			var attemptErr *providers.WiwiError
 			for keyAttempt := 0; keyAttempt < 2; keyAttempt++ {
 				key, err := dep.PickKey(keyExclude)
 				if err != nil {
@@ -300,10 +323,14 @@ func (g *Gateway) completeGroups(ctx *RequestContext, groups []string, prefix st
 					log.Printf("wiwi: ok on %s/%s [%s/%s] in %dms",
 						ctx.Group, dep.Model, dep.Provider.Name, key.Label, time.Since(start).Milliseconds())
 					g.price(ctx, dep, turn.Usage)
+					// A priced request keeps its slot: settle the estimated
+					// tokens with real usage so the cap reflects billing.
+					dep.SettleDepTokens(ctx.RequestID, turn.Usage.PromptTokens+turn.Usage.CompletionTokens)
 					g.Router.RecordAffinity(ctx.SessionID, prefix, dep.Name())
 					g.Router.ReleaseSlot(dep, ctx.Lane)
 					return turn, nil
 				}
+				attemptErr = we
 				lastErr = we
 				dep.OnKeyResult(key, we.Status, we)
 				dep.OnDeploymentResult(we.Status, we)
@@ -311,13 +338,22 @@ func (g *Gateway) completeGroups(ctx *RequestContext, groups []string, prefix st
 				log.Printf("wiwi: %s on %s/%s [%s/%s] in %dms: %s",
 					we.EType, ctx.Group, dep.Model, dep.Provider.Name, key.Label, time.Since(start).Milliseconds(), we.Message)
 				if !we.Retryable || (g.Router.FailoverStandard() && !standardRetryable(we.Status)) {
+					dep.RefundDepSlot(ctx.RequestID)
+					ctx.DepSlotReserved = nil
 					g.Router.ReleaseSlot(dep, ctx.Lane)
 					return nil, we
 				}
 				keyExclude[key.Label] = true
 			}
+			dep.RefundDepSlot(ctx.RequestID)
+			ctx.DepSlotReserved = nil
 			g.Router.ReleaseSlot(dep, ctx.Lane)
 			excludeDeps[dep.Name()] = true
+			if attemptErr != nil && attempt < g.NumRetries && len(groups) > 0 {
+				// Python sleeps min(5, max(retry_after, 0.5*2**attempt)) + jitter
+				// between attempts so a 429 with Retry-After is not hammered.
+				SleepBackoff(ctx.Done(), attempt, attemptErr.RetryAfter)
+			}
 		}
 	}
 	if lastErr == nil {
@@ -358,7 +394,7 @@ func (g *Gateway) Stream(ctx *RequestContext) <-chan streaming.Delta {
 			excludeDeps := map[string]bool{}
 			for attempt := 0; attempt <= g.NumRetries; attempt++ {
 				prefix := prefixOf(ctx.IRReq)
-				dep, err := g.Router.PickDeploymentFor(grp, excludeDeps, ctx.SessionID, prefix)
+				dep, err := g.Router.PickDeploymentFor(grp, excludeDeps, ctx.SessionID, prefix, ctx.EstTokens)
 				if err != nil {
 					break
 				}
@@ -367,6 +403,8 @@ func (g *Gateway) Stream(ctx *RequestContext) <-chan streaming.Delta {
 					continue
 				}
 				ctx.Deployment = dep
+				dep.ReserveDepSlot(ctx.RequestID, ctx.EstTokens)
+				ctx.DepSlotReserved = dep
 				key, err := dep.PickKey(nil)
 				if err != nil {
 					g.Router.ReleaseSlot(dep, ctx.Lane)
@@ -382,15 +420,26 @@ func (g *Gateway) Stream(ctx *RequestContext) <-chan streaming.Delta {
 				if ok {
 					log.Printf("wiwi: ok on %s/%s [%s/%s]",
 						ctx.Group, dep.Model, dep.Provider.Name, key.Label)
+					if ctx.Usage != nil {
+						dep.SettleDepTokens(ctx.RequestID, ctx.Usage.PromptTokens+ctx.Usage.CompletionTokens)
+					} else {
+						dep.SettleDepTokens(ctx.RequestID, ctx.EstTokens)
+					}
+					ctx.DepSlotReserved = nil
 					g.Router.RecordAffinity(ctx.SessionID, prefix, dep.Name())
 					return
 				}
+				dep.RefundDepSlot(ctx.RequestID)
+				ctx.DepSlotReserved = nil
 				lastErr = we
 				if we != nil {
 					dep.OnKeyResult(key, we.Status, we)
 					dep.OnDeploymentResult(we.Status, we)
 					log.Printf("wiwi: %s on %s/%s [%s/%s]: %s",
 						we.EType, ctx.Group, dep.Model, dep.Provider.Name, key.Label, we.Message)
+				}
+				if attempt < g.NumRetries && we != nil {
+					SleepBackoff(ctx.Done(), attempt, we.RetryAfter)
 				}
 				// Mid-stream resume: content already flowed and no tool call is
 				// open, so retry on a fallback with the partial output prepended.
@@ -453,7 +502,7 @@ func (g *Gateway) pump(ctx *RequestContext, dep *router.Deployment, key *router.
 	if dep.Provider.Type == "ifm" && ctx.SessionID != "" {
 		headers["X-Session-ID"] = ctx.SessionID
 	}
-	watch := newStreamWatchdog(g.StreamFirstChunkTimeoutS, g.StreamIdleTimeoutS)
+	watch := newStreamWatchdog(ctx.Context(), g.StreamFirstChunkTimeoutS, g.StreamIdleTimeoutS)
 	defer watch.stop()
 	resp, err := providers.DoStreamCtx(watch.ctx, adapter.BuildURL(dep.Provider.BaseURL, dep.Model, true), headers, body)
 	if err != nil {
@@ -466,7 +515,9 @@ func (g *Gateway) pump(ctx *RequestContext, dep *router.Deployment, key *router.
 	if resp.StatusCode != http.StatusOK {
 		buf := make([]byte, 4096)
 		n, _ := resp.Body.Read(buf)
-		return false, providers.ErrorFromProviderStatus(resp.StatusCode, buf[:n], dep.Provider.Type), false, tapeIn
+		we := providers.ErrorFromProviderStatus(resp.StatusCode, buf[:n], dep.Provider.Type)
+		we.RetryAfter = providers.RetryAfterSeconds(resp.Header)
+		return false, we, false, tapeIn
 	}
 
 	started := false
@@ -475,9 +526,14 @@ func (g *Gateway) pump(ctx *RequestContext, dep *router.Deployment, key *router.
 	if tape == nil && g.resumeEnabled() {
 		tape = streaming.NewStreamTape()
 	}
-	detector := streaming.NewLoopDetector(g.LoopLimit)
+	loopLimit := g.LoopLimit
+	if !g.LoopDetection {
+		loopLimit = 0
+	}
+	detector := streaming.NewLoopDetector(loopLimit)
 	usage := streaming.UsageFinal{}
 	finished := false
+	abortedForLoop := false
 
 	forward := func(d streaming.Delta) bool {
 		if tape != nil {
@@ -554,6 +610,8 @@ func (g *Gateway) pump(ctx *RequestContext, dep *router.Deployment, key *router.
 				return false
 			}
 			if detector.Observe(d) {
+				// Repetition guard: this is a deliberate, complete stop.
+				abortedForLoop = true
 				send(streaming.Finish{StopReason: ir.StopStop})
 				send(streaming.StreamEnd{})
 				return false
@@ -571,8 +629,15 @@ func (g *Gateway) pump(ctx *RequestContext, dep *router.Deployment, key *router.
 	if !started && !contentSeen && parseErr != nil {
 		return false, &providers.WiwiError{Status: 502, EType: "api_connection_error", Message: parseErr.Error(), Retryable: true}, contentSeen, tape
 	}
-	if !finished {
-		send(streaming.Finish{StopReason: ir.StopStop})
+	// A stream that stopped before its terminal Finish is truncated, not
+	// complete: reporting it as success would bill a partial answer and mark
+	// the deployment healthy (Python treats this as a retryable failure).
+	if !finished && !abortedForLoop {
+		msg := "upstream stream ended before a terminal frame"
+		if parseErr != nil {
+			msg = parseErr.Error()
+		}
+		return false, &providers.WiwiError{Status: 502, EType: "api_connection_error", Message: msg, Retryable: true}, contentSeen, tape
 	}
 	u := ir.Usage{
 		PromptTokens: usage.Prompt, CompletionTokens: usage.Output,
@@ -602,14 +667,17 @@ type streamWatchdog struct {
 	expired  bool
 }
 
-func newStreamWatchdog(firstS, idleS float64) *streamWatchdog {
+func newStreamWatchdog(parent context.Context, firstS, idleS float64) *streamWatchdog {
 	if firstS <= 0 {
 		firstS = 300
 	}
 	if idleS <= 0 {
 		idleS = 30
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
 	w := &streamWatchdog{
 		ctx: ctx, cancel: cancel,
 		first: time.Duration(firstS * float64(time.Second)),

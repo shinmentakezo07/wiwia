@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"math/rand"
 	"reflect"
 	"time"
 
@@ -30,7 +31,12 @@ func New(enabled bool, bus *logging.Bus, service string) *Tracer {
 // NewWithOTLP enables the OTLP/HTTP JSON exporter when endpoint is set.
 func NewWithOTLP(enabled bool, bus *logging.Bus, service, endpoint string, headers map[string]string, sample float64, exportTimeoutS float64) *Tracer {
 	t := New(enabled, bus, service)
-	if sample <= 0 {
+	// 0 is a legitimate ratio (export nothing), not "unset": silently turning
+	// it into 1 would export every span of a deployment that asked for none.
+	if sample < 0 {
+		sample = 0
+	}
+	if sample > 1 {
 		sample = 1
 	}
 	t.sample = sample
@@ -91,13 +97,29 @@ func (s *Span) End(err error) {
 		data["error"] = err.Error()
 	}
 	s.tracer.bus.Publish("span", data)
-	if s.tracer.exporter != nil {
+	// telemetry.sample_ratio is the trace sampler (Python's TraceIdRatioBased):
+	// a span outside the sample is gauged locally but not exported.
+	if s.tracer.exporter != nil && !s.tracer.sampled() {
 		errMsg := ""
 		if err != nil && !isNilErr(err) {
 			errMsg = err.Error()
 		}
 		s.tracer.exporter.export(s.tracer.service, s.Name, s.TraceID, s.SpanID, s.Start, time.Now(), s.Attrs, errMsg)
 	}
+}
+
+// sampled decides whether this span is exported, honoring telemetry.sample_ratio.
+func (t *Tracer) sampled() bool {
+	if t == nil {
+		return false
+	}
+	if t.sample >= 1 {
+		return true
+	}
+	if t.sample <= 0 {
+		return false
+	}
+	return rand.Float64() < t.sample
 }
 
 // isNilErr reports whether err is nil or a typed-nil pointer wrapped in an

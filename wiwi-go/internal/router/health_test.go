@@ -37,7 +37,7 @@ func TestAffinityPin(t *testing.T) {
 	target := r.Deployments("g")[1]
 	r.RecordAffinity("sess-1", "", target.Name())
 	for i := 0; i < 5; i++ {
-		d, err := r.PickDeploymentFor("g", nil, "sess-1", "")
+		d, err := r.PickDeploymentFor("g", nil, "sess-1", "", 0)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
 	"wiwi-go/internal/core"
@@ -71,12 +72,20 @@ func (a *App) handleRealtime(c *gin.Context) {
 	if ai.IsMaster {
 		bucket = "master"
 	}
-	if ok, retry := a.State.Limiter.Allow("key:"+bucket, ai.RPM, ai.TPM, 0); !ok {
+	// A realtime session is admitted as one identity-scoped reservation per
+	// bucket; usage settles it when the socket closes (or it is refunded if
+	// the session never produced a turn).
+	rid := requestID(c)
+	if rid == "" {
+		rid = uuid.NewString()
+	}
+	if ok, retry := a.State.Limiter.Reserve("key:"+bucket, rid, ai.RPM, ai.TPM, 0); !ok {
 		c.Header("Retry-After", strconv.Itoa(int(retry)+1))
 		a.writeErr(c, core.SurfaceChat, 429, "rate_limit_error", "rate limit exceeded")
 		return
 	}
-	if ok, retry := a.State.Limiter.Allow("global", a.State.Router.GlobalRPM(), a.State.Router.GlobalTPM(), 0); !ok {
+	if ok, retry := a.State.Limiter.Reserve("global", rid, a.State.Router.GlobalRPM(), a.State.Router.GlobalTPM(), 0); !ok {
+		a.State.Limiter.Refund("key:"+bucket, rid)
 		c.Header("Retry-After", strconv.Itoa(int(retry)+1))
 		a.writeErr(c, core.SurfaceChat, 429, "rate_limit_error", "gateway rate limit exceeded")
 		return
@@ -92,6 +101,8 @@ func (a *App) handleRealtime(c *gin.Context) {
 			}
 		}
 		if !priced {
+			a.State.Limiter.Refund("key:"+bucket, rid)
+			a.State.Limiter.Refund("global", rid)
 			a.writeErr(c, core.SurfaceChat, 503, "service_unavailable",
 				"model is not priced; ask an admin to add a price")
 			return
@@ -139,6 +150,8 @@ func (a *App) handleRealtime(c *gin.Context) {
 				break
 			}
 		}
+		a.State.Limiter.Refund("key:"+bucket, rid)
+		a.State.Limiter.Refund("global", rid)
 		if unsupported {
 			a.writeErr(c, core.SurfaceChat, 501, "not_implemented_error",
 				"provider has no realtime surface")
@@ -152,12 +165,16 @@ func (a *App) handleRealtime(c *gin.Context) {
 
 	adapter, err := providers.FreshAdapter(dep.Provider.Type)
 	if err != nil {
+		a.State.Limiter.Refund("key:"+bucket, rid)
+		a.State.Limiter.Refund("global", rid)
 		a.writeErr(c, core.SurfaceChat, 501, "not_implemented_error",
 			"provider has no realtime surface")
 		return
 	}
 	upURL, ok := providers.RealtimeURL(dep.Provider.Type, dep.Provider.BaseURL)
 	if !ok {
+		a.State.Limiter.Refund("key:"+bucket, rid)
+		a.State.Limiter.Refund("global", rid)
 		a.writeErr(c, core.SurfaceChat, 501, "not_implemented_error",
 			"provider has no realtime surface")
 		return
@@ -167,14 +184,19 @@ func (a *App) handleRealtime(c *gin.Context) {
 	started := time.Now()
 	ctx := &core.RequestContext{
 		Surface: core.SurfaceChat, IRReq: ir.Request{Model: model},
-		Started: started, RequestID: requestID(c), Auth: ai, Group: group,
+		Started: started, RequestID: rid, Auth: ai, Group: group,
 		Deployment: dep, SessionID: sessionID, Lane: lane,
 		Metadata: map[string]any{},
+		RateBuckets: []core.RateBucketReservation{
+			{Bucket: "key:" + bucket, RequestID: rid},
+			{Bucket: "global", RequestID: rid},
+		},
 	}
 	// Conservative reservation, settled against the real usage at session end
 	// (a zero-usage session gets the reservation refunded).
 	if !ai.IsMaster && ai.MaxBudget > 0 {
 		if err := a.State.Auth.ReserveBudget(ai.KeyID, 0.01); err != nil {
+			a.refundRateLimits(ctx)
 			a.writeErr(c, core.SurfaceChat, 402, "budget_exceeded", "budget exceeded")
 			return
 		}
@@ -188,6 +210,7 @@ func (a *App) handleRealtime(c *gin.Context) {
 		if ctx.BudgetReserved > 0 {
 			_ = a.State.Auth.Settle(ai.KeyID, ctx.BudgetReserved, 0)
 		}
+		a.refundRateLimits(ctx)
 		return
 	}
 	defer client.Close()
@@ -227,6 +250,21 @@ func (a *App) handleRealtime(c *gin.Context) {
 	errc := make(chan error, 2)
 	upstreamDone := make(chan struct{})
 	var wg sync.WaitGroup
+	// lastTraffic is stamped on every frame in either direction, so the idle
+	// timeout measures real silence instead of being reset on a fixed schedule
+	// (which let a wedged socket live forever).
+	var trafficMu sync.Mutex
+	lastTraffic := time.Now()
+	touch := func() {
+		trafficMu.Lock()
+		lastTraffic = time.Now()
+		trafficMu.Unlock()
+	}
+	idleSince := func() time.Duration {
+		trafficMu.Lock()
+		defer trafficMu.Unlock()
+		return time.Since(lastTraffic)
+	}
 	pump := func(dst, src *websocket.Conn, onText func([]byte)) {
 		defer wg.Done()
 		for {
@@ -235,6 +273,7 @@ func (a *App) handleRealtime(c *gin.Context) {
 				errc <- err
 				return
 			}
+			touch()
 			if mt == websocket.TextMessage && onText != nil {
 				onText(data)
 			}
@@ -253,24 +292,31 @@ func (a *App) handleRealtime(c *gin.Context) {
 
 	idle := time.Duration(a.State.Cfg.Realtime.IdleTimeoutS * float64(time.Second))
 	maxSession := time.Duration(a.State.Cfg.Realtime.MaxSessionS * float64(time.Second))
-	resetDeadlines := func() {
-		if idle > 0 {
-			_ = client.SetReadDeadline(time.Now().Add(idle))
-			_ = upstream.SetReadDeadline(time.Now().Add(idle))
-		}
-	}
-	resetDeadlines()
-	stopKeepalive := make(chan struct{})
+	stopWatch := make(chan struct{})
+	defer close(stopWatch)
+	idleFired := make(chan struct{})
 	if idle > 0 {
+		// Deadlines are refreshed only while frames keep arriving; a socket that
+		// goes quiet trips the idle timer for real.
 		go func() {
-			ticker := time.NewTicker(idle / 2)
-			defer ticker.Stop()
+			tick := idle / 4
+			if tick < 250*time.Millisecond {
+				tick = 250 * time.Millisecond
+			}
+			t := time.NewTicker(tick)
+			defer t.Stop()
 			for {
 				select {
-				case <-ticker.C:
-					resetDeadlines()
-				case <-stopKeepalive:
+				case <-stopWatch:
 					return
+				case <-t.C:
+					silent := idleSince()
+					if silent >= idle {
+						close(idleFired)
+						return
+					}
+					_ = client.SetReadDeadline(time.Now().Add(idle - silent))
+					_ = upstream.SetReadDeadline(time.Now().Add(idle - silent))
 				}
 			}
 		}()
@@ -279,6 +325,7 @@ func (a *App) handleRealtime(c *gin.Context) {
 	select {
 	case <-errc:
 	case <-c.Request.Context().Done():
+	case <-idleFired:
 	case <-time.After(maxSession):
 		// Give the provider a short grace to flush its final
 		// response.done/usage frame before the socket is torn down; the peak
@@ -288,7 +335,6 @@ func (a *App) handleRealtime(c *gin.Context) {
 		case <-time.After(750 * time.Millisecond):
 		}
 	}
-	close(stopKeepalive)
 	_ = client.Close()
 	_ = upstream.Close()
 	wg.Wait()

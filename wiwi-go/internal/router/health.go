@@ -152,29 +152,30 @@ func (r *Router) InitLaneCaps() {
 
 // PickDeploymentFor selects a deployment, honoring session/prefix affinity as a
 // soft preference, health scoring, and the concurrency ceiling.
-func (r *Router) PickDeploymentFor(group string, exclude map[string]bool, sessionID, prefix string) (*Deployment, error) {
-	if r.healthModel == "scored" || r.maxInflight > 0 || r.lanes != nil || r.sessionPins != nil {
+func (r *Router) PickDeploymentFor(group string, exclude map[string]bool, sessionID, prefix string, estTokens int) (*Deployment, error) {
+	if r.healthModel == "scored" || r.maxInflight > 0 || r.lanes != nil || r.sessionAffinity || r.prefixAffinity {
 		if pref := r.affinityPin(sessionID, prefix); pref != "" {
 			for _, d := range r.Deployments(group) {
-				if d.Name() == pref && (exclude == nil || !exclude[pref]) && d.Available(time.Now()) {
+				now := time.Now()
+				if d.Name() == pref && (exclude == nil || !exclude[pref]) && d.Available(now) && !d.RateLimited(now, estTokens) {
 					return d, nil
 				}
 			}
 		}
 	}
-	return r.PickDeployment(group, exclude)
+	return r.PickDeploymentLimited(group, exclude, estTokens)
 }
 
 func (r *Router) affinityPin(sessionID, prefix string) string {
 	now := time.Now()
 	r.pinMu.Lock()
 	defer r.pinMu.Unlock()
-	if sessionID != "" {
+	if sessionID != "" && r.sessionAffinity {
 		if p, ok := r.sessionPins[sessionID]; ok && now.Before(p.expires) {
 			return p.deployment
 		}
 	}
-	if prefix != "" {
+	if prefix != "" && r.prefixAffinity {
 		if p, ok := r.prefixPins[prefix]; ok && now.Before(p.expires) {
 			return p.deployment
 		}
@@ -190,10 +191,16 @@ func (r *Router) RecordAffinity(sessionID, prefix, depName string) {
 	now := time.Now()
 	r.pinMu.Lock()
 	defer r.pinMu.Unlock()
-	if sessionID != "" && r.sessionTTL > 0 {
+	if r.sessionPins == nil {
+		r.sessionPins = map[string]pin{}
+	}
+	if r.prefixPins == nil {
+		r.prefixPins = map[string]pin{}
+	}
+	if sessionID != "" && r.sessionAffinity && r.sessionTTL > 0 {
 		r.sessionPins[sessionID] = pin{deployment: depName, expires: now.Add(r.sessionTTL)}
 	}
-	if prefix != "" && r.prefixTTL > 0 {
+	if prefix != "" && r.prefixAffinity && r.prefixTTL > 0 {
 		r.prefixPins[prefix] = pin{deployment: depName, expires: now.Add(r.prefixTTL)}
 	}
 }

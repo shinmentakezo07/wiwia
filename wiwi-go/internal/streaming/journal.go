@@ -19,6 +19,10 @@ type JournalRecord struct {
 	Data  string `json:"data"`
 	Ts    int64  `json:"ts"`
 	KeyID string `json:"key_id,omitempty"`
+	// Done marks a terminal record: the stream finished and a reconnect must
+	// replay the journal instead of re-running the upstream request (AUDIT
+	// parity: replay must never bill a second generation).
+	Done bool `json:"done,omitempty"`
 }
 
 // Journal persists encoded SSE frames per request so a reconnecting client can
@@ -68,6 +72,14 @@ func (j *Journal) Append(requestID, keyID, event, data string) int64 {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	id := j.nextID[requestID] + 1
+	if j.nextID[requestID] == 0 {
+		// Resuming after a restart: continue the journal's numbering instead
+		// of restarting at 1, which would replay the client's Last-Event-ID
+		// against duplicate ids.
+		if last := j.lastIDLocked(requestID); last >= id {
+			id = last + 1
+		}
+	}
 	j.nextID[requestID] = id
 	rec := JournalRecord{ID: id, Event: event, Data: data, Ts: time.Now().Unix(), KeyID: keyID}
 	b, _ := json.Marshal(rec)
@@ -106,7 +118,7 @@ func (j *Journal) Replay(requestID, keyID string, afterID int64) []JournalRecord
 		if json.Unmarshal(sc.Bytes(), &rec) != nil {
 			continue
 		}
-		if rec.ID <= afterID {
+		if rec.Done || rec.ID <= afterID {
 			continue
 		}
 		if keyID != "" && rec.KeyID != "" && rec.KeyID != keyID {
@@ -149,7 +161,82 @@ func (j *Journal) Sweep() int {
 func (j *Journal) LastID(requestID string) int64 {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	return j.nextID[requestID]
+	if last := j.nextID[requestID]; last > 0 {
+		return last
+	}
+	return j.lastIDLocked(requestID)
+}
+
+// MarkDone records that this request's stream reached its terminal frame, so a
+// reconnect replays the journal instead of re-running the upstream request
+// (which would duplicate content and bill a second generation).
+func (j *Journal) MarkDone(requestID, keyID string) {
+	if !j.Enabled() || requestID == "" {
+		return
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	rec := JournalRecord{ID: j.nextID[requestID] + 1, Done: true, Ts: time.Now().Unix(), KeyID: keyID}
+	j.nextID[requestID] = rec.ID
+	b, _ := json.Marshal(rec)
+	f, err := os.OpenFile(j.path(requestID), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	n, _ := f.Write(append(b, '\n'))
+	j.activeSize[requestID] += int64(n)
+}
+
+// IsDone reports whether the journal already holds this request's terminal
+// frame.
+func (j *Journal) IsDone(requestID string) bool {
+	if !j.Enabled() || requestID == "" {
+		return false
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	f, err := os.Open(j.path(requestID))
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	done := false
+	for sc.Scan() {
+		var rec JournalRecord
+		if json.Unmarshal(sc.Bytes(), &rec) != nil {
+			continue
+		}
+		if rec.Done {
+			done = true
+		}
+	}
+	return done
+}
+
+// lastIDLocked reads the highest persisted id straight from the journal file,
+// used when this process did not write the stream (restart resume).
+func (j *Journal) lastIDLocked(requestID string) int64 {
+	f, err := os.Open(j.path(requestID))
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	var last int64
+	for sc.Scan() {
+		var rec JournalRecord
+		if json.Unmarshal(sc.Bytes(), &rec) != nil {
+			continue
+		}
+		if rec.ID > last {
+			last = rec.ID
+		}
+	}
+	return last
 }
 
 // List returns journal request ids sorted by modification time (newest first).

@@ -19,6 +19,7 @@
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-22c55e?style=for-the-badge&logo=opensourceinitiative&logoColor=white"></a>
   <img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white">
   <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white">
+  <img alt="Go backend" src="https://img.shields.io/badge/Go-Gin-00ADD8?style=for-the-badge&logo=go&logoColor=white">
   <img alt="React 19" src="https://img.shields.io/badge/React_19-Vite_6-149eca?style=for-the-badge&logo=react&logoColor=white">
   <img alt="Self-hosted" src="https://img.shields.io/badge/self--hosted-one%20process-F59E0B?style=for-the-badge&logo=docker&logoColor=white">
 </p>
@@ -28,11 +29,15 @@
     <td align="center"><b>3</b><br/><sub>inbound dialects</sub></td>
     <td align="center"><b>13</b><br/><sub>outbound providers</sub></td>
     <td align="center"><b>39</b><br/><sub>possible pairings</sub></td>
-    <td align="center"><b>16</b><br/><sub>modules to write</sub></td>
+    <td align="center"><b>2</b><br/><sub>interchangeable backends</sub></td>
   </tr>
 </table>
 
 **No pairwise converters. Every request decodes into one canonical IR and re-encodes in the caller's dialect.**
+
+**Two implementations, one contract.** Choose the Python/FastAPI backend (`wiwi/`, the default) or the Go/Gin
+backend (`wiwi-go/`). Both serve the same API and React console, read the same configuration, and share SQLite or
+Postgres state.
 
 </div>
 
@@ -54,6 +59,7 @@
 
 **Run it**
 - [⚡ Quickstart](#-quickstart) — install, mint a key, connect a client
+- [🐍🐹 Choose a backend](#-choose-a-backend) — Python or Go, locally or in one Docker image
 - [🧑‍🍳 Recipes](#-recipes) — four copy-paste setups
 - [📡 What ships](#-what-ships) — inbound surfaces and outbound providers
 - [⚙️ Configuration](#-configuration) — the annotated `wiwi.yaml`
@@ -149,7 +155,8 @@ export OPENAI_API_KEY=sk-... \
        WIWI_MASTER_KEY=sk-wiwi-master-mysecret
 ```
 
-**③ Install and run** — binds <code>0.0.0.0:4000</code>.
+**③ Install and run** — binds <code>0.0.0.0:4000</code>. Python is the default; see
+[Choose a backend](#-choose-a-backend) for Go and the combined development stack.
 
 ```bash
 uv venv && uv pip install -e ".[dev]"
@@ -194,8 +201,30 @@ docker compose up --build
 ```
 
 Postgres 16 + Redis + wiwi together, a `wiwi_data` volume, `DATABASE_URL` defaulted to the bundled Postgres.
-Override with `DATABASE_URL=sqlite+aiosqlite:///…` to stay on SQLite. Three-stage build: `uv` installs Python
-deps → `npm` builds the SPA → the runtime image runs as non-root `wiwi` (uid 10001).
+Override with `DATABASE_URL=sqlite+aiosqlite:///…` to stay on SQLite. The four-stage build installs Python deps,
+builds the SPA and Go binary, then produces one runtime image that runs as non-root `wiwi` (uid 10001).
+
+### 🐍🐹 Choose a backend
+
+The two backends are alternatives, not two processes to run together. **Python/FastAPI is the default**; Go/Gin
+implements the same canonical-IR architecture and admin surface. The repository's shared-database suite proves
+that keys, users, and prices written by one backend can be read and updated by the other. Provider and runtime
+parity is tracked in [`wiwi-go/PARITY.md`](wiwi-go/PARITY.md).
+
+| Environment | Python (default) | Go |
+|---|---|---|
+| Server only | `wiwi --config wiwi.yaml` | `cd wiwi-go && CGO_ENABLED=1 go build -o bin/wiwi ./cmd/wiwi && ./bin/wiwi --config ../wiwi.yaml` |
+| Backend + Vite UI | `./start.sh py` | `./start.sh go` |
+| Docker / Compose | `BACKEND=py docker compose up --build` | `BACKEND=go docker compose up --build` |
+
+The Go build needs the toolchain from `wiwi-go/go.mod` and **CGO enabled** for SQLite. Go has no hot reload;
+`./start.sh go` rebuilds the binary. Docker builds both backends once, so changing `BACKEND` and restarting needs
+no rebuild. The runtime image uses `DATABASE_URL=sqlite+aiosqlite:////app/data/wiwi.db` by default and persists
+the journal under `/data/journals`; it normalizes that URL for the Go driver.
+
+**Railway:** set `BACKEND=go` to select Go; leave it unset (or use `py`) for Python. Keep the same `WIWI_CONFIG`
+and `DATABASE_URL` when switching backends, and use managed Postgres for durable Railway state. `PORT` selects
+the listen port in the container, and `/health` is the healthcheck.
 
 ### 🚂 Or deploy to Railway
 
@@ -470,9 +499,10 @@ Four things wiwi does that a config-file gateway doesn't.
 - Retries with `fallbacks:` plus a separate `context_window_fallbacks:` table for overflow errors.
 - Strategies: `simple-shuffle`, `least-busy`, `latency-based`; `cycle_every_n` forces the cursor to advance so
   traffic actually *rotates* rather than just weight-spreading.
-- Optional scored health model — EWMA latency + success rate, adaptive cooldowns, and an opt-in `HealthHealer`
-  that probes sick keys with 1-token requests and restores them into a reduced-weight *probation* state.
-  **Off by default** — probes spend real provider money.
+- Optional `HealthHealer` probes sick keys with 1-token requests and restores them into a reduced-weight
+  *probation* state. **Off by default** — probes spend real provider money. The Go router also supports the
+  `health_model: scored` EWMA latency/success-rate model and adaptive cooldowns; the Python config does not
+  currently expose those fields.
 
 ### 🔐 Keys, budgets, and what it cost
 
@@ -538,6 +568,7 @@ mutable object threaded through every stage, so reading its fields tells you wha
 | <img src="web/public/logos/inbound/openai-completions.svg" width="26" height="26" alt="Legacy completions"> | `/v1/completions` | ⚪ **OpenAI Completions** *(legacy)* | the pre-chat shape — `choices[].text`, not a chat transcript |
 | 🔌 | `WS /v1/realtime` | realtime | bidirectional audio/text, relayed upstream |
 | 🧾 | `GET/DELETE /v1/responses/{id}` | 🟣 Responses | retrieve or drop a stored response |
+| 🎮 | `POST /v1/playground/completions` | 🟢 OpenAI Chat | browser playground, authenticated by `wiwi_session` |
 | 📋 | `GET /v1/models` · `GET /public/models` | model list | all |
 | 💚 | `GET /health` | liveness | `{status, groups, providers}` |
 | 📈 | `GET /metrics` | Prometheus | opt-in, master-key gated |
@@ -772,27 +803,34 @@ wiwi_settings:
 </div>
 
 ```
-wiwi/                      38.7k lines of Python across 80 modules
+wiwi/                      ~45k lines of Python across 96 modules (including type stubs)
 ├── main.py                CLI entrypoint (wiwi --config …)
 ├── config.py              YAML → pydantic; env interpolation; PROVIDER_TYPES
 ├── ir/                    Canonical IR: types.py (tagged parts, messages, tools, params) + builtin_tools.py
 ├── wire/                  Inbound codecs: openai_chat · openai_responses · anthropic_messages · openai_completions (legacy)
 ├── providers/             Outbound adapters + base.py protocol + registry.py
 ├── core/                  gateway.py (execution engine) · context.py (RequestContext) · recovery.py
-├── streaming/             deltas · coalesce · loopdetect · resume · partial_json · validation · tape_store
+├── streaming/             deltas · machine · coalesce · loopdetect · resume · partial_json · validation · tape_store
 ├── router/router.py       Model groups, key pools (smooth WRR), cooldowns, retries, fallbacks
 ├── auth/                  keys.py · service.py · users.py
 ├── ratelimit/ · cache/ · cost/ · logging_core/
-└── server/                app.py (FastAPI factory + /admin/*) · stats.py · metrics.py · config_store.py
+└── server/                app.py · routers/ · schemas/ · services/ · stats.py · metrics.py · config_store.py
+
+wiwi-go/                   ~24k lines of Go implementation, 83 non-test files
+├── cmd/wiwi/              CLI entrypoint; cmd/shared-db-interop/ proves Python ↔ Go database compatibility
+└── internal/              config · ir · wire · providers · router · core · streaming · auth · ratelimit
+                           cache · cost · logging · metrics · oauth · server · store · telemetry · versions
+
+web/                       React 19 + TypeScript strict + Vite 6 + Tailwind 4; shared by both backends
 ```
 
 <table>
   <tr>
-    <td align="center"><b>94</b><br/><sub>Python modules</sub></td>
-    <td align="center"><b>43.6k</b><br/><sub>lines of Python</sub></td>
-    <td align="center"><b>38.2k</b><br/><sub>lines of TS/TSX</sub></td>
-    <td align="center"><b>63</b><br/><sub>SPA route paths</sub></td>
-    <td align="center"><b>3995</b><br/><sub>tests collected</sub></td>
+    <td align="center"><b>96</b><br/><sub>Python files</sub></td>
+    <td align="center"><b>83</b><br/><sub>Go implementation files</sub></td>
+    <td align="center"><b>102</b><br/><sub>TS/TSX files</sub></td>
+    <td align="center"><b>9 + 59</b><br/><sub>method/path pairs: /v1 + /admin</sub></td>
+    <td align="center"><b>4401</b><br/><sub>Python tests passing</sub></td>
     <td align="center"><b>0</b><br/><sub>ruff findings</sub></td>
   </tr>
 </table>
@@ -805,7 +843,8 @@ wiwi/                      38.7k lines of Python across 80 modules
 
 `StreamStart` → `TextDelta` · `ThinkingDelta` → `ToolCallOpen` → `ToolCallArgsDelta`* → `ToolCallClose` → `UsageFinal` → `Finish` → `StreamEnd`
 
-<sub>tool blocks nest strictly per index, one open/close pair per call · exactly one start, one usage, one finish · one terminal</sub>
+<sub>tool blocks have one open/close pair per index · parallel calls are siblings · usage may repeat and is emitted
+last-write-wins · exactly one start and finish · one terminal</sub>
 
 </div>
 
@@ -831,7 +870,7 @@ All `/admin/*` requires the master key (`Authorization: Bearer …`) or an admin
 | **Models & routing** | `GET /admin/models` · `PATCH /admin/model-groups/{name}` · `POST/DELETE …/deployments` · `POST /admin/aliases` · `GET/PUT/DELETE /admin/pricing/{id}` |
 | **Logs & stats** | `GET /admin/logs/{requests,proxy,audit}` · `GET /admin/logs/requests/{id}/metrics` · `GET /admin/stream` (SSE) · `GET /admin/stats/{overview,timeseries}` · `GET/PUT /admin/alert-rules` |
 | **Users & sessions** | `GET /admin/users` · `PATCH /admin/users/{uid}` · `POST /auth/{signup,login,logout}` · `GET /auth/me` |
-| **OAuth** | `/admin/cline/oauth/*` · `/cline/oauth/callback` · `/admin/workbuddy/*` |
+| **OAuth** | `/admin/cline/oauth/*` · `/cline/oauth/callback` · `/admin/workbuddy/*` · `/admin/hermes/oauth/*` |
 
 → Every endpoint, field, and a runnable `curl` for each → [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md).
 
@@ -840,13 +879,23 @@ All `/admin/*` requires the master key (`Authorization: Bearer …`) or an admin
 ## 🧪 Development
 
 ```bash
-python3 -m pytest tests/ -q                                 # 3995 collected
-python3 -m pytest tests/test_fix_round205.py -q            # latest regression file
-python3 -m pytest tests/test_router.py -k cooldown -q      # by name
+# Python — run from the repo root; full suite and lint are the pre-completion gate
+python3 -m pytest tests/ -q
+ruff check wiwi/ tests/ scripts/
+python3 scripts/audit_lint.py
 
-ruff check wiwi/ tests/                                     # line-length 100, target py311
-cd web && npm run build                                     # tsc -b && vite build
-cd web && npm run lint                                      # eslint (web/ is not ruff-covered)
+# Cross-backend SQLite interoperability (builds the Go helper itself)
+python3 -m pytest tests/test_shared_db_go.py -q
+
+# Go — CGO is required by the SQLite driver
+(cd wiwi-go && CGO_ENABLED=1 go test ./... && go vet ./...)
+
+# Frontend — npm is authoritative; lint, unit tests, typecheck + build
+(cd web && npm ci && npm run lint && npm test && npm run build)
+
+# Focused tests and benchmark — also run from the repo root
+python3 -m pytest tests/test_fix_round211.py -q            # highest-numbered regression file at last review
+python3 -m pytest tests/test_router.py -k cooldown -q      # by name
 python3 bench.py -n 10 -c 1,4,16                            # TTFT / p50 / p95 / TPS sweep
 ```
 
@@ -855,11 +904,17 @@ The suite mixes **unit tests** (`respx` HTTP mocks), **ASGI end-to-end** runs th
 write bare `async def test_…`, no decorator. There is no `conftest.py`; each file builds its own config factory
 and ASGI client.
 
-Bugfix regressions land in the next thematic `test_fix_roundN.py` — **round 164 is current**. Gaps in the numbering
-are real; find the next unused N with `ls tests/test_fix_round*.py`, never assume one.
+Bugfix regressions land in the next `test_fix_roundN.py` — **round 211 is the highest present**, so round 212 is
+next. Gaps in the numbering are real and filenames sort lexicographically: find the maximum numerically rather
+than trusting the last line of `ls`.
 
 > The counts in this README are checked in periodically. Re-derive them with
-> `python3 -m pytest tests/ -q --collect-only | tail -2`, `ls tests/*.py | wc -l`, and `find wiwi -name '*.py' -exec cat {} + | wc -l`.
+> `python3 -m pytest tests/ -q`, `find wiwi -name '*.py' | wc -l`, and
+> `find wiwi-go -name '*.go' ! -name '*_test.go' | wc -l`.
+
+Last verified in this checkout: **4401 Python tests passed, 12 skipped**; all Go packages passed tests and vet;
+**48 frontend tests passed**; the frontend production build succeeded; Python lint and audit-register lint passed.
+CI runs the same Python, Go, shared-database, and web gates in separate jobs.
 
 ---
 
@@ -873,6 +928,7 @@ are real; find the next unused N with `ls tests/test_fix_round*.py`, never assum
 | [`docs/PROVIDERS.md`](docs/PROVIDERS.md) | Per-provider setup guide |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/CORE.md`](docs/CORE.md) · [`docs/STREAMING.md`](docs/STREAMING.md) | System design |
 | [`docs/ADMIN.md`](docs/ADMIN.md) | Console + admin API design, design system |
+| [`wiwi-go/README.md`](wiwi-go/README.md) · [`wiwi-go/PARITY.md`](wiwi-go/PARITY.md) | Go build/run guide · per-subsystem parity matrix |
 | `UPDATE.md` | **Read before touching translation.** Changelog of every OpenAI ↔ Anthropic fix with before/after snippets |
 | `AUDIT.md` | Known-bug register: severity, `file:line`, fix sketches |
 
@@ -890,6 +946,8 @@ are real; find the next unused N with `ls tests/test_fix_round*.py`, never assum
 - Virtual keys are **SHA-256-hashed at rest**, constant-time compare; plaintext returned once, at mint.
 - `public_url` pins OAuth callback origins — `X-Forwarded-Host` is never trusted for URL building, and
   `X-Forwarded-For` is consulted only for rate-limit buckets, never for authentication.
+- **Never commit tokens to deploy manifests.** HuggingFace Spaces are public: `deploy/hf_space.sh` reads
+  `HF_TOKEN` only from the gitignored `.env`; `.env.example` must keep it empty.
 - **Never add dialect- or provider-specific branches in `core/`, `router/`, or `auth/`.** Dialect logic belongs in
   `wire/`; provider logic in `providers/`.
 
@@ -909,6 +967,6 @@ Use it, fork it, ship it commercially. If you operate a server for paying custom
 
 <img src="docs/assets/wiwi-mark.svg" width="44" alt="wiwi">
 
-<sub>MIT licensed · server operation governed by <a href="TERMS.md">Terms of Use</a> · built with Python 3.11+, FastAPI, React 19, and npm</sub>
+<sub>MIT licensed · server operation governed by <a href="TERMS.md">Terms of Use</a> · built with Python/FastAPI or Go/Gin, React 19, and npm</sub>
 
 </div>

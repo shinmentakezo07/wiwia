@@ -136,7 +136,7 @@ var builtinProviders = []builtinProvider{
 		Description: "OpenCode Zen gateway (opencode.ai/zen) — curated coding models over " +
 			"four upstream protocols routed per model. Authenticates with a Zen API key " +
 			"and sends a live User-Agent: opencode/<version>.",
-		LatestModels:  []string{"gpt-5.5", "claude-sonnet-5", "gemini-3.1-pro", "deepseek-v4-pro", "glm-5.2", "kimi-k2.6"},
+		LatestModels:  []string{"gpt-5.5", "claude-sonnet-5", "gemini-3.1-pro", "deepseek-v4-pro", "glm-5.2", "kimi-k2.6", "moonshotai-kimi-k3.1-pro-trial"},
 		ContextWindow: "varies per model",
 		DocsURL:       "https://opencode.ai/docs/zen",
 	},

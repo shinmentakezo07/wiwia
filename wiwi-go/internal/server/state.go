@@ -140,6 +140,21 @@ func New(cfg *config.Config) (*App, error) {
 		stop: make(chan struct{}),
 	}
 	state.Journal.Sweep()
+	// Journal expiry is swept periodically, not only at startup: a long-running
+	// gateway otherwise accumulates journals forever (Python sweeps in the
+	// same lifespan loop).
+	go func() {
+		t := time.NewTicker(5 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-state.stop:
+				return
+			case <-t.C:
+				state.Journal.Sweep()
+			}
+		}
+	}()
 	state.Responses.Start(cfg.Wiwi.ResponseStoreSweepInterval)
 	providers.ConfigureToolSchemaCache(cfg.Wiwi.ToolSchemaCacheEntries)
 	providers.ConfigureHTTPPool(cfg.Wiwi.HTTPMaxConnections, cfg.Wiwi.HTTPMaxKeepalive,
@@ -154,9 +169,10 @@ func New(cfg *config.Config) (*App, error) {
 	state.Gateway.StreamResumeMode = cfg.Router.StreamResume
 	state.Gateway.ResumeMaxRetries = cfg.Router.StreamResumeMaxRetries
 	state.Gateway.DropParams = cfg.Wiwi.DropParams
-	if cfg.Router.StreamLoopLimit > 0 {
-		state.Gateway.LoopLimit = cfg.Router.StreamLoopLimit
-	}
+	// stream_loop_detection gates the detector outright and stream_loop_limit
+	// decides the repeat count; -1 fires on the first chunk, 0 disables.
+	state.Gateway.LoopDetection = cfg.Router.StreamLoopDetection
+	state.Gateway.LoopLimit = cfg.Router.StreamLoopLimit
 
 	if cfg.Healer.Enabled {
 		h := core.NewHealer(rt, cfg.Healer.TickS, cfg.Healer.ProbeTimeoutS, cfg.Healer.MaxProbesPerSweep)

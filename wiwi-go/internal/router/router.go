@@ -101,6 +101,11 @@ type Deployment struct {
 	laneCaps     map[string]int
 	alpha        float64
 	adaptive     bool
+
+	// Per-deployment rpm/tpm sliding windows, created lazily so an uncapped
+	// deployment pays nothing (see slots.go).
+	rpmWindow *depWindow
+	tpmWindow *depWindow
 }
 
 func (d *Deployment) Name() string {
@@ -184,9 +189,14 @@ type Router struct {
 	defaultLane string
 	sessionTTL  time.Duration
 	prefixTTL   time.Duration
-	pinMu       sync.Mutex
-	sessionPins map[string]pin
-	prefixPins  map[string]pin
+	// sessionAffinity/prefixAffinity mirror router_settings.session_affinity /
+	// prefix_affinity: a false toggle must really disable the pin, not merely
+	// leave a stale default TTL in place.
+	sessionAffinity bool
+	prefixAffinity  bool
+	pinMu           sync.Mutex
+	sessionPins     map[string]pin
+	prefixPins      map[string]pin
 }
 
 type pin struct {
@@ -217,6 +227,8 @@ func New(cfg *config.Config) *Router {
 		defaultLane:            cfg.Router.DefaultLane,
 		sessionTTL:             time.Duration(cfg.Router.SessionAffinityTTLS * float64(time.Second)),
 		prefixTTL:              time.Duration(cfg.Router.PrefixAffinityTTLS * float64(time.Second)),
+		sessionAffinity:        cfg.Router.SessionAffinity,
+		prefixAffinity:         cfg.Router.PrefixAffinity,
 		sessionPins:            map[string]pin{},
 		prefixPins:             map[string]pin{},
 	}
@@ -337,6 +349,14 @@ func (r *Router) Fallbacks(group string, contextOverflow bool) []string {
 
 // PickDeployment selects a healthy deployment by smooth weighted round-robin.
 func (r *Router) PickDeployment(group string, exclude map[string]bool) (*Deployment, error) {
+	return r.PickDeploymentLimited(group, exclude, 0)
+}
+
+// PickDeploymentLimited is PickDeployment with per-deployment rpm/tpm caps
+// applied: a deployment at its cap is skipped, and when every healthy
+// deployment is capped the error is a retryable 429 with a real horizon rather
+// than a 503 outage (Python AUDIT #101).
+func (r *Router) PickDeploymentLimited(group string, exclude map[string]bool, estTokens int) (*Deployment, error) {
 	deps := r.Deployments(group)
 	now := time.Now()
 	r.mu.Lock()
@@ -346,6 +366,7 @@ func (r *Router) PickDeployment(group string, exclude map[string]bool) (*Deploym
 
 	var candidates []*Deployment
 	total := 0.0
+	capped := []*Deployment{}
 	for _, d := range deps {
 		if exclude != nil && exclude[d.Name()] {
 			continue
@@ -360,6 +381,10 @@ func (r *Router) PickDeployment(group string, exclude map[string]bool) (*Deploym
 			if full {
 				continue
 			}
+		}
+		if d.RateLimited(now, estTokens) {
+			capped = append(capped, d)
+			continue
 		}
 		if r.strategy == "least-busy" {
 			candidates = append(candidates, d)
@@ -379,6 +404,15 @@ func (r *Router) PickDeployment(group string, exclude map[string]bool) (*Deploym
 		d.mu.Unlock()
 	}
 	if len(candidates) == 0 {
+		if len(capped) > 0 {
+			retryAfter := capped[0].RetryAfterS(now)
+			for _, d := range capped[1:] {
+				if ra := d.RetryAfterS(now); ra < retryAfter {
+					retryAfter = ra
+				}
+			}
+			return nil, &RateCapError{Group: group, RetryAfter: retryAfter}
+		}
 		return nil, fmt.Errorf("no healthy deployment for group %q", group)
 	}
 	switch r.strategy {

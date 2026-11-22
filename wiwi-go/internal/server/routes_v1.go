@@ -18,6 +18,7 @@ import (
 	"wiwi-go/internal/ir"
 	"wiwi-go/internal/logging"
 	"wiwi-go/internal/providers"
+	"wiwi-go/internal/router"
 	"wiwi-go/internal/streaming"
 	"wiwi-go/internal/wire"
 )
@@ -50,17 +51,27 @@ func (a *App) prepare(c *gin.Context, surface core.Surface, body map[string]any)
 		a.writeErr(c, surface, 404, "not_found_error", "model not found: "+irReq.Model)
 		return nil
 	}
-	// rate limit (per key) + global
+	// Prompt-token estimate: TPM admission and the budget reservation both use
+	// it, and the stream pump falls back to it when the provider omits usage.
+	estTokens := core.EstimateRequestTokens(irReq)
+	rid := requestID(c)
+	if rid == "" {
+		rid = uuid.NewString()
+	}
+	// rate limit (per key) + global, as identity-scoped reservations so a
+	// failed request can be refunded instead of throttling its window (Python
+	// AUDIT #70).
 	bucket := ai.KeyID
 	if ai.IsMaster {
 		bucket = "master"
 	}
-	if ok, retry := a.State.Limiter.Allow("key:"+bucket, ai.RPM, ai.TPM, 0); !ok {
+	if ok, retry := a.State.Limiter.Reserve("key:"+bucket, rid, ai.RPM, ai.TPM, estTokens); !ok {
 		c.Header("Retry-After", strconv.Itoa(int(retry)+1))
 		a.writeErr(c, surface, 429, "rate_limit_error", "rate limit exceeded")
 		return nil
 	}
-	if ok, retry := a.State.Limiter.Allow("global", a.State.Router.GlobalRPM(), a.State.Router.GlobalTPM(), 0); !ok {
+	if ok, retry := a.State.Limiter.Reserve("global", rid, a.State.Router.GlobalRPM(), a.State.Router.GlobalTPM(), estTokens); !ok {
+		a.State.Limiter.Refund("key:"+bucket, rid)
 		c.Header("Retry-After", strconv.Itoa(int(retry)+1))
 		a.writeErr(c, surface, 429, "rate_limit_error", "gateway rate limit exceeded")
 		return nil
@@ -81,15 +92,24 @@ func (a *App) prepare(c *gin.Context, surface core.Surface, body map[string]any)
 	}
 	ctx := &core.RequestContext{
 		Surface: surface, IRReq: irReq, Started: time.Now(),
-		RequestID: requestID(c), Auth: ai, Group: group,
+		RequestID: rid, Auth: ai, Group: group, EstTokens: estTokens,
 		Metadata: map[string]any{}, ForwardHeaders: forwardHeaders(c),
 		SessionID: c.GetHeader("x-wiwi-session-id"),
 		Lane:      c.GetHeader("x-wiwi-lane"),
+		RateBuckets: []core.RateBucketReservation{
+			{Bucket: "key:" + bucket, RequestID: rid},
+			{Bucket: "global", RequestID: rid},
+		},
 	}
-	// budget reservation (a conservative estimate)
+	// Upstream calls must die with the caller, so the request context carries
+	// the HTTP request's cancellation.
+	ctx.SetCancel(c.Request.Context())
+	// budget reservation: priced against the estimated prompt plus a
+	// completion allowance, not a flat penny.
 	if !ai.IsMaster && ai.MaxBudget > 0 {
-		est := 0.01
+		est := a.estimateBudget(group, irReq, estTokens)
 		if err := a.State.Auth.ReserveBudget(ai.KeyID, est); err != nil {
+			a.refundRateLimits(ctx)
 			a.writeErr(c, surface, 402, "budget_exceeded", "budget exceeded")
 			return nil
 		}
@@ -131,6 +151,25 @@ func (a *App) finish(ctx *core.RequestContext, status int, e *providers.WiwiErro
 	ctx.Status = status
 	ctx.Error = e
 	cost := ctx.Cost
+	// Reconcile the admission reservation with what was actually billed. A
+	// request that produced no usage releases both windows entirely; one that
+	// produced usage settles the estimate in place (Python _release_tpm_
+	// reservation / record_tokens).
+	if ctx.Usage != nil {
+		for _, b := range ctx.RateBuckets {
+			a.State.Limiter.Settle(b.Bucket, b.RequestID, ctx.Usage.PromptTokens+ctx.Usage.CompletionTokens)
+		}
+	} else {
+		a.refundRateLimits(ctx)
+	}
+	if dep, ok := ctx.DepSlotReserved.(*router.Deployment); ok && dep != nil {
+		if ctx.Usage != nil {
+			dep.SettleDepTokens(ctx.RequestID, ctx.Usage.PromptTokens+ctx.Usage.CompletionTokens)
+		} else {
+			dep.RefundDepSlot(ctx.RequestID)
+		}
+		ctx.DepSlotReserved = nil
+	}
 	if ctx.Auth != nil && !ctx.Auth.IsMaster {
 		if a.State.SpendBuffer != nil {
 			a.State.SpendBuffer.Add(ctx.Auth.KeyID, ctx.BudgetReserved, cost)
@@ -196,6 +235,35 @@ func (a *App) finish(ctx *core.RequestContext, status int, e *providers.WiwiErro
 	})
 }
 
+// refundRateLimits releases an admitted request's key/global reservations when
+// it produced no billable usage.
+func (a *App) refundRateLimits(ctx *core.RequestContext) {
+	for _, b := range ctx.RateBuckets {
+		a.State.Limiter.Refund(b.Bucket, b.RequestID)
+	}
+}
+
+// estimateBudget prices the estimated prompt plus a completion allowance so a
+// budget reservation is the right order of magnitude (Python reserves against
+// prompt tokens + max_tokens rather than a flat guess).
+func (a *App) estimateBudget(group string, req ir.Request, promptTokens int) float64 {
+	maxOut := 1024
+	if req.GenParams.MaxTokens != nil && *req.GenParams.MaxTokens > 0 {
+		maxOut = *req.GenParams.MaxTokens
+	}
+	best := 0.0
+	for _, d := range a.State.Router.Deployments(group) {
+		c, ok := a.State.Cost.Compute(d.Model, ir.Usage{PromptTokens: promptTokens, CompletionTokens: maxOut})
+		if ok && c > best {
+			best = c
+		}
+	}
+	if best <= 0 {
+		return 0.01
+	}
+	return best
+}
+
 func (a *App) logRequest(ctx *core.RequestContext) {
 	if a.State.Store == nil {
 		return
@@ -206,11 +274,39 @@ func (a *App) logRequest(ctx *core.RequestContext) {
 		errText = ctx.Error.Message
 	}
 	prompt, completion, cached, reasoning := 0, 0, 0, 0
+	cacheCreation, estimated := 0, 0
 	if ctx.Usage != nil {
 		prompt = ctx.Usage.PromptTokens
 		completion = ctx.Usage.CompletionTokens
 		cached = ctx.Usage.CachedTokens
+		cacheCreation = ctx.Usage.CacheCreationTokens
 		reasoning = ctx.Usage.ReasoningTokens
+		if ctx.Usage.Estimated {
+			estimated = 1
+		}
+	}
+	// error_code is the machine-readable class, kept separate from the free-text
+	// message so a spend report can group failures without parsing prose.
+	errorCode := ""
+	if ctx.Error != nil {
+		errorCode = ctx.Error.EType
+	}
+	keyLabel := ""
+	if k, ok := ctx.Key.(*router.ProviderKey); ok && k != nil {
+		keyLabel = k.Label
+	}
+	cacheHit, responseCacheHit := 0, 0
+	if ctx.CacheHit || cached > 0 {
+		cacheHit = 1
+	}
+	if ctx.ResponseCacheHit {
+		responseCacheHit = 1
+	}
+	cacheSavings, _ := ctx.Metadata["cache_savings"].(float64)
+	translationWarnings, _ := json.Marshal(ctx.TranslationWarnings)
+	wasStream := 0
+	if ctx.WasStream {
+		wasStream = 1
 	}
 	modelID := ""
 	if d, ok := ctx.Deployment.(interface{ ModelName() string }); ok {
@@ -236,14 +332,23 @@ func (a *App) logRequest(ctx *core.RequestContext) {
 		 usage_estimated,tps,ttft_ms,latency_ms,cost,was_stream,cache_hit,cache_savings,response_cache_hit,
 		 attempts,translation_warnings,request_body,response_body)
 		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
-		ctx.RequestID, time.Now().Unix(), string(ctx.Surface), "", keyID, ctx.Group,
-		providerName(ctx), "", modelID, ctx.Status, "", errText,
-		prompt, cached, 0, reasoning, completion, 0, tps, ctx.TTFTMs(), ctx.LatencyMs(),
-		ctx.Cost, 0, 0, 0.0, 0, string(attempts), "[]", requestBody, nil); err != nil {
+		ctx.RequestID, time.Now().Unix(), string(ctx.Surface), keyAliasOf(ctx), keyID, ctx.Group,
+		providerName(ctx), keyLabel, modelID, ctx.Status, errorCode, errText,
+		prompt, cached, cacheCreation, reasoning, completion, estimated,
+		tps, ctx.TTFTMs(), ctx.LatencyMs(),
+		ctx.Cost, wasStream, cacheHit, cacheSavings, responseCacheHit,
+		string(attempts), string(translationWarnings), requestBody, nil); err != nil {
 		// A lost row is exactly the observability hole the loss counters
 		// exist for; /health and /metrics must show it.
 		a.State.FailedRequestLogWrites.Add(1)
 	}
+}
+
+func keyAliasOf(ctx *core.RequestContext) string {
+	if ctx.Auth != nil {
+		return ctx.Auth.KeyName
+	}
+	return ""
 }
 
 func providerName(ctx *core.RequestContext) string {
@@ -544,7 +649,12 @@ func (a *App) serveStream(c *gin.Context, ctx *core.RequestContext, surface core
 		}
 	}
 	if lastID > 0 {
-		for _, rec := range a.State.Journal.Replay(streamID, keyID(ctx.Auth), lastID) {
+		// Resume: replay what the client missed. When the journal already holds
+		// the whole stream (it finished), the replay IS the answer — re-running
+		// the upstream request would duplicate content, bill a second
+		// generation and emit a malformed second start (Python journal replay).
+		replayed := a.State.Journal.Replay(streamID, keyID(ctx.Auth), lastID)
+		for _, rec := range replayed {
 			if rec.Event != "" {
 				c.Writer.Write([]byte("event: " + rec.Event + "\n"))
 			}
@@ -552,6 +662,22 @@ func (a *App) serveStream(c *gin.Context, ctx *core.RequestContext, surface core
 		}
 		if flusher != nil {
 			flusher.Flush()
+		}
+		if len(replayed) > 0 && a.State.Journal.IsDone(streamID) {
+			a.finish(ctx, 200, nil)
+			return
+		}
+		if len(replayed) == 0 {
+			// Nothing new to send: the stream is already complete on the
+			// client, so end the response without touching the upstream.
+			if a.State.Journal.IsDone(streamID) {
+				emit(enc.End())
+				if flusher != nil {
+					flusher.Flush()
+				}
+				a.finish(ctx, 200, nil)
+				return
+			}
 		}
 	}
 	emit(enc.Start())
@@ -587,8 +713,10 @@ func (a *App) serveStream(c *gin.Context, ctx *core.RequestContext, surface core
 				handle(d)
 			}
 		case <-clientGone:
-			// Client disconnected: drain for grace seconds so usage/billing
-			// stays accurate, then stop.
+			// Client disconnected: keep draining for stream_grace_drain_s so the
+			// completion is still billed accurately, then stop. With no grace
+			// configured the upstream is cancelled immediately.
+			ctx.MarkClientGone()
 			if grace := a.State.Cfg.Router.StreamGraceDrainS; grace > 0 {
 				gone = true
 				graceC = time.After(time.Duration(grace * float64(time.Second)))
@@ -609,13 +737,20 @@ func (a *App) serveStream(c *gin.Context, ctx *core.RequestContext, surface core
 			}
 		}
 	}
-	emit(enc.End())
+	if streamErr == nil {
+		emit(enc.End())
+	}
 	if flusher != nil {
 		flusher.Flush()
 	}
 	status := 200
 	if streamErr != nil {
 		status = streamErr.Status
+	}
+	// The terminal frame is recorded so a later reconnect can replay it instead
+	// of invoking the provider again.
+	if a.State.Journal.Enabled() {
+		a.State.Journal.MarkDone(streamID, keyID(ctx.Auth))
 	}
 	a.finish(ctx, status, streamErr)
 }

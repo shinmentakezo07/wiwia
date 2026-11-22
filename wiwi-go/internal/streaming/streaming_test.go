@@ -46,14 +46,58 @@ func TestCoalesce(t *testing.T) {
 	}
 }
 
+// TestLoopDetect pins Python's loopdetect.py semantics: with limit=3 the third
+// pass over the same chunk is still not evidence (threshold max(3, limit-p)),
+// so the stream trips on the fourth. The old Go detector compared only to the
+// immediately preceding chunk and reported a trip one chunk early.
 func TestLoopDetect(t *testing.T) {
 	d := NewLoopDetector(3)
-	if d.Observe(TextDelta{Text: "x"}) {
-		t.Fatal("early trip")
+	for i := 1; i <= 3; i++ {
+		if d.Observe(TextDelta{Text: "x"}) {
+			t.Fatalf("tripped early on chunk %d", i)
+		}
 	}
-	d.Observe(TextDelta{Text: "x"})
 	if !d.Observe(TextDelta{Text: "x"}) {
-		t.Fatal("expected trip")
+		t.Fatal("expected trip on chunk 4")
+	}
+}
+
+// TestLoopDetectPeriod covers the shape the old detector could not see at all:
+// a repeated sentence (period 2) rather than a repeated single chunk.
+func TestLoopDetectPeriod(t *testing.T) {
+	d := NewLoopDetector(10)
+	pattern := []string{"the same sentence ", "repeated again "}
+	tripped := false
+	for i := 0; i < 20 && !tripped; i++ {
+		tripped = d.Observe(TextDelta{Text: pattern[i%2]})
+	}
+	if !tripped {
+		t.Fatal("period-2 loop was not detected")
+	}
+}
+
+// TestLoopDetectDisabled: stream_loop_limit <= 0 disables detection entirely.
+func TestLoopDetectDisabled(t *testing.T) {
+	for _, limit := range []int{0, -1} {
+		d := NewLoopDetector(limit)
+		for i := 0; i < 500; i++ {
+			if d.Observe(TextDelta{Text: "x"}) {
+				t.Fatalf("limit=%d tripped", limit)
+			}
+		}
+	}
+}
+
+// TestLoopDetectThinking: a model can run away inside its reasoning trace, so
+// thinking deltas feed the detector too (Python AUDIT #280).
+func TestLoopDetectThinking(t *testing.T) {
+	d := NewLoopDetector(4)
+	tripped := false
+	for i := 0; i < 12 && !tripped; i++ {
+		tripped = d.Observe(ThinkingDelta{Text: "hmm "})
+	}
+	if !tripped {
+		t.Fatal("thinking loop was not detected")
 	}
 }
 

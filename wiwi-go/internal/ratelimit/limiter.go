@@ -1,5 +1,11 @@
 // Package ratelimit implements per-bucket sliding-window request and token
 // limits. A bucket is any caller-chosen key (typically key id + limit kind).
+//
+// Admission is a *reservation*: Reserve records the request id alongside the
+// estimated token count so Settle can replace the estimate with real usage and
+// Refund can give it back when the request never reached an upstream. Without
+// that pairing a 5xx would hold a phantom TPM slot for the rest of the window
+// and throttle unrelated requests (Python AUDIT #70).
 package ratelimit
 
 import (
@@ -15,8 +21,10 @@ const window = 60 * time.Second
 const sweepThreshold = 2048
 
 type event struct {
-	at     time.Time
-	tokens int
+	at        time.Time
+	tokens    int
+	id        string
+	estimated bool
 }
 
 // bucket is one sliding window. Its mutex is only ever taken while holding the
@@ -39,11 +47,11 @@ func New() *Limiter {
 	return &Limiter{buckets: make(map[string]*bucket), now: time.Now}
 }
 
-// Allow admits one request against the bucket's limits and records its token
-// estimate. rpm or tpm <= 0 means that dimension is unlimited. When denied,
-// retryAfter is the number of seconds until enough of the oldest events leave
-// the window for the request to fit.
-func (l *Limiter) Allow(name string, rpm, tpm, estTokens int) (ok bool, retryAfter float64) {
+// Reserve admits one request against the bucket's limits and records its token
+// estimate under requestID. rpm or tpm <= 0 means that dimension is unlimited.
+// When denied, retryAfter is the number of seconds until enough of the oldest
+// events leave the window for the request to fit.
+func (l *Limiter) Reserve(name, requestID string, rpm, tpm, estTokens int) (ok bool, retryAfter float64) {
 	if rpm <= 0 && tpm <= 0 {
 		return true, 0
 	}
@@ -57,14 +65,7 @@ func (l *Limiter) Allow(name string, rpm, tpm, estTokens int) (ok bool, retryAft
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	// Drop events that left the window.
-	live := b.events[:0]
-	for _, ev := range b.events {
-		if ev.at.After(cutoff) {
-			live = append(live, ev)
-		}
-	}
-	b.events = live
+	l.pruneLocked(b, cutoff)
 
 	if rpm > 0 && len(b.events) >= rpm {
 		return false, timeLeft(b.events[0].at, now)
@@ -75,27 +76,101 @@ func (l *Limiter) Allow(name string, rpm, tpm, estTokens int) (ok bool, retryAft
 			used += ev.tokens
 		}
 		if used+estTokens > tpm {
-			// A single request larger than the whole budget can never fit;
-			// otherwise wait for the oldest events covering the shortfall.
-			wait := window
-			need := used + estTokens - tpm
-			freed := 0
-			for _, ev := range b.events {
-				freed += ev.tokens
-				if freed >= need {
-					wait = ev.at.Add(window).Sub(now)
-					break
-				}
-			}
-			if wait <= 0 {
-				wait = time.Millisecond
-			}
-			return false, wait.Seconds()
+			return false, retryFor(b.events, used+estTokens-tpm, now)
 		}
 	}
 
-	b.events = append(b.events, event{at: now, tokens: estTokens})
+	b.events = append(b.events, event{at: now, tokens: estTokens, id: requestID, estimated: true})
 	return true, 0
+}
+
+// Allow is Reserve without identity: the reservation cannot be settled or
+// refunded later. Kept for callers that hold no request id.
+func (l *Limiter) Allow(name string, rpm, tpm, estTokens int) (bool, float64) {
+	return l.Reserve(name, "", rpm, tpm, estTokens)
+}
+
+// Settle replaces the reservation tagged requestID with the request's actual
+// usage and makes it non-refundable. A request whose own reservation aged out
+// of the window records its real usage as a fresh event instead of adopting
+// another in-flight request's estimate.
+func (l *Limiter) Settle(name, requestID string, tokens int) {
+	if tokens < 0 {
+		tokens = 0
+	}
+	b := l.lookup(name)
+	if b == nil {
+		// Real usage for a bucket whose reservation aged out (a long stream):
+		// create the window so the tokens are still accounted for.
+		b = l.bucket(name)
+	}
+	now := l.now()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	l.pruneLocked(b, now.Add(-window))
+
+	if requestID != "" {
+		for i := len(b.events) - 1; i >= 0; i-- {
+			if b.events[i].id != requestID {
+				continue
+			}
+			b.events[i].tokens = tokens
+			b.events[i].estimated = false
+			return
+		}
+	}
+	b.events = append(b.events, event{at: now, tokens: tokens, id: requestID})
+}
+
+// Refund gives back a reservation whose request never consumed tokens. Only
+// still-estimated events are removed, so a completed request keeps its slot.
+func (l *Limiter) Refund(name, requestID string) {
+	if requestID == "" {
+		return
+	}
+	b := l.lookup(name)
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	live := b.events[:0]
+	for _, ev := range b.events {
+		if ev.id == requestID && ev.estimated {
+			continue
+		}
+		live = append(live, ev)
+	}
+	b.events = live
+}
+
+// pruneLocked drops events that left the window. Callers hold b.mu.
+func (l *Limiter) pruneLocked(b *bucket, cutoff time.Time) {
+	live := b.events[:0]
+	for _, ev := range b.events {
+		if ev.at.After(cutoff) {
+			live = append(live, ev)
+		}
+	}
+	b.events = live
+}
+
+// retryFor is the wait until enough of the oldest events leave the window to
+// free need tokens.
+func retryFor(events []event, need int, now time.Time) float64 {
+	wait := window
+	freed := 0
+	for _, ev := range events {
+		freed += ev.tokens
+		if freed >= need {
+			wait = ev.at.Add(window).Sub(now)
+			break
+		}
+	}
+	if wait <= 0 {
+		wait = time.Millisecond
+	}
+	return wait.Seconds()
 }
 
 // timeLeft is the time until an event recorded at `at` leaves the window.
@@ -119,6 +194,13 @@ func (l *Limiter) bucket(name string) *bucket {
 	b := &bucket{}
 	l.buckets[name] = b
 	return b
+}
+
+// lookup returns an existing bucket without creating one.
+func (l *Limiter) lookup(name string) *bucket {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buckets[name]
 }
 
 // sweepLocked drops buckets with no live events. Callers hold l.mu.
