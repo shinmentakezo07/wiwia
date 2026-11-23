@@ -42,9 +42,18 @@ const GUIDES: Guide[] = [
   { slug: "codex-cli", title: "Codex CLI", description: "Use the gateway with OpenAI's Codex CLI for AI-powered terminal coding.", category: "Terminal", minutes: 3, featured: true },
   { slug: "cline", title: "Cline (VS Code)", description: "Integrate the gateway with Cline for AI-powered coding assistance directly in VS Code.", category: "IDE", minutes: 3 },
   { slug: "opencode", title: "OpenCode", description: "Use the gateway with OpenCode CLI for AI-powered development workflows.", category: "Terminal", minutes: 3 },
-  { slug: "continue", title: "Continue CLI", description: "Use the gateway with Continue's open-source AI code assistant CLI.", category: "Terminal", minutes: 3 },
+  { slug: "continue", title: "Continue", description: "Use the gateway with Continue's open-source assistant for VS Code, JetBrains and the CLI.", category: "IDE", minutes: 3 },
   { slug: "github-copilot", title: "GitHub Copilot app", description: "Use the gateway as a model provider in GitHub's Copilot desktop app for agent sessions with any model.", category: "Desktop", minutes: 4 },
   { slug: "n8n", title: "n8n Workflows", description: "Connect n8n workflow automation to the gateway for AI-powered automation pipelines.", category: "Automation", minutes: 5 },
+  { slug: "gemini-cli", title: "Gemini CLI", description: "Run Google's open-source terminal agent through the gateway's OpenAI-compatible endpoint.", category: "Terminal", minutes: 3 },
+  { slug: "aider", title: "Aider", description: "Pair-program in your terminal with any model behind the gateway.", category: "Terminal", minutes: 2 },
+  { slug: "roo-code", title: "Roo Code", description: "Route every Roo Code mode in VS Code through the gateway.", category: "IDE", minutes: 3 },
+  { slug: "kilo-code", title: "Kilo Code", description: "Use the gateway as Kilo Code's OpenAI-compatible provider.", category: "IDE", minutes: 3 },
+  { slug: "zed", title: "Zed", description: "Register the gateway as an OpenAI-compatible provider for Zed's Agent Panel.", category: "IDE", minutes: 4 },
+  { slug: "open-webui", title: "Open WebUI", description: "Add the gateway as an OpenAI connection in a self-hosted chat UI.", category: "Desktop", minutes: 3 },
+  { slug: "librechat", title: "LibreChat", description: "Define the gateway as a custom endpoint in librechat.yaml.", category: "Desktop", minutes: 4 },
+  { slug: "langchain", title: "LangChain", description: "Point ChatOpenAI at the gateway with a one-line base_url change.", category: "Automation", minutes: 2 },
+  { slug: "vercel-ai-sdk", title: "Vercel AI SDK", description: "Create an OpenAI-compatible provider for generateText and streamText.", category: "Automation", minutes: 3 },
 ];
 
 // Class strings are literal so Tailwind's scanner keeps them.

@@ -194,8 +194,8 @@ opencode run -m wiwi/gpt-4o "hi"`,
     ],
   },
   continue: {
-    title: "Continue CLI",
-    category: "Terminal",
+    title: "Continue",
+    category: "IDE",
     intro:
       "Use the gateway with Continue's open-source AI code assistant CLI. Continue supports OpenAI-compatible providers via its config file.",
     steps: [
@@ -238,6 +238,289 @@ API Key:   sk-wiwi-…`,
       {
         title: "Select models",
         body: "Models from your wiwi config appear in the picker. Agent sessions run against wiwi and are logged with full usage and cost.",
+      },
+    ],
+  },
+  "gemini-cli": {
+    title: 'Gemini CLI',
+    category: "Terminal",
+    intro:
+      "Run Google's open-source Gemini CLI through the gateway. The CLI talks to the Gemini API, so point it at a wiwi deployment that exposes your Gemini-family models through an OpenAI-compatible route, or use a fork such as one with OpenAI provider support.",
+    steps: [
+      {
+        title: 'Mint a virtual key',
+        body: 'Create a virtual key (sk-wiwi-…) in the admin UI. Each tool gets its own key, budget and logs.',
+      },
+      {
+        title: 'Point the CLI at the gateway',
+        body: 'Set the base URL and key in your shell.',
+        code: {
+          code: `export OPENAI_BASE_URL=http://localhost:4000/v1
+export OPENAI_API_KEY=sk-wiwi-…`,
+          label: "env",
+        },
+      },
+      {
+        title: 'Run it',
+        body: 'Start the CLI and pick a model your wiwi config exposes.',
+        code: {
+          code: `gemini`,
+          label: "terminal",
+        },
+      },
+    ],
+  },
+  "aider": {
+    title: 'Aider',
+    category: "Terminal",
+    intro:
+      'Aider supports any OpenAI-compatible endpoint. Prefix the model with openai/ so Aider uses the generic OpenAI client against wiwi.',
+    steps: [
+      {
+        title: 'Mint a virtual key',
+        body: 'Create a virtual key (sk-wiwi-…) in the admin UI. Each tool gets its own key, budget and logs.',
+      },
+      {
+        title: 'Point Aider at the gateway',
+        body: 'Aider reads the base URL and key from the environment.',
+        code: {
+          code: `export OPENAI_API_BASE=http://localhost:4000/v1
+export OPENAI_API_KEY=sk-wiwi-…`,
+          label: "env",
+        },
+      },
+      {
+        title: 'Run it',
+        body: 'Use the openai/ prefix with any model name from your wiwi config.',
+        code: {
+          code: `aider --model openai/gpt-4o`,
+          label: "terminal",
+        },
+      },
+    ],
+  },
+  "roo-code": {
+    title: 'Roo Code',
+    category: "IDE",
+    intro:
+      'Roo Code ships an OpenAI Compatible provider. Every mode (Code, Architect, Ask, Debug) then routes through wiwi.',
+    steps: [
+      {
+        title: 'Mint a virtual key',
+        body: 'Create a virtual key (sk-wiwi-…) in the admin UI. Each tool gets its own key, budget and logs.',
+      },
+      {
+        title: 'Add the provider',
+        body: 'Roo Code settings → API Provider → OpenAI Compatible.',
+        code: {
+          code: `Base URL:  http://localhost:4000/v1
+API Key:   sk-wiwi-…
+Model:     gpt-4o`,
+          label: "roo code settings",
+        },
+      },
+      {
+        title: 'Use it',
+        body: "Pick any model wiwi exposes. Requests appear in the gateway's request logs with usage and cost.",
+      },
+    ],
+  },
+  "kilo-code": {
+    title: 'Kilo Code',
+    category: "IDE",
+    intro:
+      'Kilo Code is an open-source VS Code agent with an OpenAI Compatible provider option.',
+    steps: [
+      {
+        title: 'Mint a virtual key',
+        body: 'Create a virtual key (sk-wiwi-…) in the admin UI. Each tool gets its own key, budget and logs.',
+      },
+      {
+        title: 'Add the provider',
+        body: 'Kilo Code settings → API Provider → OpenAI Compatible.',
+        code: {
+          code: `Base URL:  http://localhost:4000/v1
+API Key:   sk-wiwi-…
+Model:     gpt-4o`,
+          label: "kilo code settings",
+        },
+      },
+      {
+        title: 'Use it',
+        body: 'Switch models freely; wiwi handles routing, failover and budgets.',
+      },
+    ],
+  },
+  "zed": {
+    title: 'Zed',
+    category: "IDE",
+    intro:
+      "Register the gateway as an OpenAI-compatible provider in Zed's settings so the Agent Panel and inline assist can use any wiwi model.",
+    steps: [
+      {
+        title: 'Mint a virtual key',
+        body: 'Create a virtual key (sk-wiwi-…) in the admin UI. Each tool gets its own key, budget and logs.',
+      },
+      {
+        title: 'Add the provider',
+        body: "Add this to ~/.config/zed/settings.json, then paste the virtual key when Zed prompts for the provider's API key.",
+        code: {
+          code: `{
+  "language_models": {
+    "openai_compatible": {
+      "wiwi": {
+        "api_url": "http://localhost:4000/v1",
+        "available_models": [
+          { "name": "gpt-4o", "max_tokens": 128000 }
+        ]
+      }
+    }
+  }
+}`,
+          label: "settings.json",
+        },
+      },
+      {
+        title: 'Select the model',
+        body: 'Open the Agent Panel and choose the wiwi model.',
+      },
+    ],
+  },
+  "open-webui": {
+    title: 'Open WebUI',
+    category: "Desktop",
+    intro:
+      'Open WebUI connects to any OpenAI API. Add wiwi as a connection and every model in your config appears in the model picker.',
+    steps: [
+      {
+        title: 'Mint a virtual key',
+        body: 'Create a virtual key (sk-wiwi-…) in the admin UI. Each tool gets its own key, budget and logs.',
+      },
+      {
+        title: 'Add a connection',
+        body: 'Admin Panel → Settings → Connections → OpenAI API → add.',
+        code: {
+          code: `URL:  http://localhost:4000/v1
+Key:  sk-wiwi-…`,
+          label: "open webui",
+        },
+      },
+      {
+        title: 'Or set it at startup',
+        body: 'Pass the connection as environment variables when running the container.',
+        code: {
+          code: `docker run -d -p 3000:8080 \
+  -e OPENAI_API_BASE_URL=http://localhost:4000/v1 \
+  -e OPENAI_API_KEY=sk-wiwi-… \
+  ghcr.io/open-webui/open-webui:main`,
+          label: "terminal",
+        },
+      },
+    ],
+  },
+  "librechat": {
+    title: 'LibreChat',
+    category: "Desktop",
+    intro:
+      "Define wiwi as a custom endpoint in librechat.yaml. LibreChat lists the gateway's models automatically when fetch is enabled.",
+    steps: [
+      {
+        title: 'Mint a virtual key',
+        body: 'Create a virtual key (sk-wiwi-…) in the admin UI. Each tool gets its own key, budget and logs.',
+      },
+      {
+        title: 'Add a custom endpoint',
+        body: 'In librechat.yaml:',
+        code: {
+          code: `endpoints:
+  custom:
+    - name: "wiwi"
+      apiKey: "\${WIWI_API_KEY}"
+      baseURL: "http://localhost:4000/v1"
+      models:
+        default: ["gpt-4o"]
+        fetch: true`,
+          label: "librechat.yaml",
+        },
+      },
+      {
+        title: 'Set the key',
+        body: "Put the virtual key in LibreChat's .env and restart.",
+        code: {
+          code: `WIWI_API_KEY=sk-wiwi-…`,
+          label: ".env",
+        },
+      },
+    ],
+  },
+  "langchain": {
+    title: 'LangChain',
+    category: "Automation",
+    intro:
+      "LangChain's OpenAI and Anthropic chat models accept a base URL, so pointing them at wiwi is a one-line change.",
+    steps: [
+      {
+        title: 'Mint a virtual key',
+        body: 'Create a virtual key (sk-wiwi-…) in the admin UI. Each tool gets its own key, budget and logs.',
+      },
+      {
+        title: 'Python',
+        body: "Use ChatOpenAI with the gateway's base URL.",
+        code: {
+          code: `from langchain_openai import ChatOpenAI
+
+llm = ChatOpenAI(
+    model="gpt-4o",
+    base_url="http://localhost:4000/v1",
+    api_key="sk-wiwi-…",
+)
+print(llm.invoke("Hello").content)`,
+          label: "python",
+        },
+      },
+      {
+        title: 'Any model',
+        body: 'Change model= to any name your wiwi config exposes — Claude, Gemini, DeepSeek — with no other code changes.',
+      },
+    ],
+  },
+  "vercel-ai-sdk": {
+    title: 'Vercel AI SDK',
+    category: "Automation",
+    intro:
+      'Create an OpenAI-compatible provider pointed at wiwi and use it with generateText, streamText and tool calling.',
+    steps: [
+      {
+        title: 'Mint a virtual key',
+        body: 'Create a virtual key (sk-wiwi-…) in the admin UI. Each tool gets its own key, budget and logs.',
+      },
+      {
+        title: 'Install',
+        body: 'Add the AI SDK and the OpenAI-compatible provider.',
+        code: {
+          code: `npm install ai @ai-sdk/openai-compatible`,
+          label: "terminal",
+        },
+      },
+      {
+        title: 'Create the provider',
+        body: 'Use it anywhere the SDK accepts a model.',
+        code: {
+          code: `import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { generateText } from "ai";
+
+const wiwi = createOpenAICompatible({
+  name: "wiwi",
+  baseURL: "http://localhost:4000/v1",
+  apiKey: process.env.WIWI_API_KEY,
+});
+
+const { text } = await generateText({
+  model: wiwi("gpt-4o"),
+  prompt: "Hello",
+});`,
+          label: "ts",
+        },
       },
     ],
   },
