@@ -67,6 +67,29 @@ func (p Part) Map(key string) map[string]any {
 	return m
 }
 
+func (p Part) Int(key string) int {
+	if p.Payload == nil {
+		return 0
+	}
+	// Handle both int and float64 (JSON numbers unmarshal as float64)
+	switch v := p.Payload[key].(type) {
+	case int:
+		return v
+	case float64:
+		return int(v)
+	default:
+		return 0
+	}
+}
+
+func (p Part) Slice(key string) []any {
+	if p.Payload == nil {
+		return nil
+	}
+	s, _ := p.Payload[key].([]any)
+	return s
+}
+
 func NewTextPart(text string) Part {
 	return Part{Type: PartText, Payload: map[string]any{"type": "text", "text": text}}
 }
@@ -99,4 +122,50 @@ func NewThinkingPart(text string) Part {
 	return Part{Type: PartThinking, Payload: map[string]any{
 		"type": "thinking", "text": text, "block_type": "thinking",
 	}}
+}
+
+func NewAudioPart(b64, mime string) Part {
+	if mime == "" {
+		mime = "audio/wav"
+	}
+	return Part{Type: PartAudio, Payload: map[string]any{
+		"type": "audio", "b64": b64, "mime": mime,
+	}}
+}
+
+func NewDocumentPart(b64, url, mime string) Part {
+	if mime == "" {
+		mime = "application/pdf"
+	}
+	m := map[string]any{"type": "document", "mime": mime}
+	if b64 != "" {
+		m["b64"] = b64
+	}
+	if url != "" {
+		m["url"] = url
+	}
+	return Part{Type: PartDocument, Payload: m}
+}
+
+func NewDocumentPartWithFileID(fileID string) Part {
+	return Part{Type: PartDocument, Payload: map[string]any{
+		"type": "document", "file_id": fileID,
+	}}
+}
+
+// SetDocumentMetadata adds optional name, context, and cache_control to a document part.
+func SetDocumentMetadata(p Part, name, context string, cacheControl map[string]any) Part {
+	if p.Type != PartDocument || p.Payload == nil {
+		return p
+	}
+	if name != "" {
+		p.Payload["name"] = name
+	}
+	if context != "" {
+		p.Payload["context"] = context
+	}
+	if cacheControl != nil {
+		p.Payload["cache_control"] = cacheControl
+	}
+	return p
 }
