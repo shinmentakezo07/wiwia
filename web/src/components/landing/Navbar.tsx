@@ -144,10 +144,18 @@ function DropdownMenu({ label, links, cols }: { label: string; links: NavLink[];
   }, [open]);
 
   return (
-    <div className="relative" onMouseEnter={() => setOpen(true)} onMouseLeave={() => setOpen(false)}>
+    <div
+      className="relative"
+      onPointerEnter={(e) => e.pointerType === "mouse" && setOpen(true)}
+      onPointerLeave={(e) => e.pointerType === "mouse" && setOpen(false)}
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOpen(false);
+      }}
+    >
       <button
         type="button"
-        onClick={() => setOpen(!open)}
+        // Hover already opened it for a mouse; a click must not toggle it shut again.
+        onClick={(e) => setOpen(e.nativeEvent instanceof PointerEvent && e.nativeEvent.pointerType === "mouse" ? true : !open)}
         aria-expanded={open}
         className="flex items-center gap-1 rounded-lg px-3 py-2 text-sm text-[var(--admin-text-muted)] transition-colors duration-200 hover:bg-white/[0.05] hover:text-[var(--admin-text)]"
       >
@@ -166,10 +174,11 @@ function DropdownMenu({ label, links, cols }: { label: string; links: NavLink[];
         <div
           className={`grid gap-1 overflow-hidden rounded-2xl border border-white/[0.07] bg-[var(--admin-surface)]/95 p-2 shadow-[0_24px_70px_-16px_rgba(0,0,0,0.85)] backdrop-blur-xl ${cols}`}
         >
-          {links.map((link) => {
+          {links.map((link, i) => {
             const IconComp = link.icon;
             const iconColor = link.gradient.split(" ").slice(-1).join(" ");
-            const tileClasses = `group/product flex items-start gap-3 rounded-xl border border-transparent bg-linear-to-br from-transparent to-transparent p-2.5 no-underline outline-none transition-all duration-200 ${link.gradient}`;
+            const tileClasses = `group/product flex items-start gap-3 rounded-xl border border-transparent bg-linear-to-br from-transparent to-transparent p-2.5 no-underline outline-none transition-all duration-200 hover:border-white/[0.06] hover:-translate-y-px focus-visible:border-white/[0.12] focus-visible:ring-2 focus-visible:ring-white/15 ${link.gradient} ${open ? "wiwi-nav-tile" : ""}`;
+            const tileStyle = open ? { animationDelay: `${i * 30}ms` } : undefined;
             const body = (
               <>
                 <div className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-white/[0.05] bg-white/[0.04]">
@@ -182,11 +191,11 @@ function DropdownMenu({ label, links, cols }: { label: string; links: NavLink[];
               </>
             );
             return link.external ? (
-              <a key={link.title} href={link.href} target="_blank" rel="noopener noreferrer" className={tileClasses}>
+              <a key={link.title} href={link.href} target="_blank" rel="noopener noreferrer" className={tileClasses} style={tileStyle}>
                 {body}
               </a>
             ) : (
-              <Link key={link.title} to={link.href} className={tileClasses}>
+              <Link key={link.title} to={link.href} className={tileClasses} style={tileStyle} onClick={() => setOpen(false)}>
                 {body}
               </Link>
             );
@@ -230,7 +239,7 @@ export function Navbar({ sticky = true }: { sticky?: boolean }) {
       <nav className="mx-auto max-w-[1400px]" aria-label="Main">
         {/* Floating glass pill — hairline border + blur that deepens on scroll */}
         <div
-          className={`relative overflow-hidden rounded-2xl border backdrop-blur-xl transition-all duration-300 ${
+          className={`relative rounded-2xl border backdrop-blur-xl transition-all duration-300 ${
             isScrolled
               ? "border-white/[0.08] bg-[var(--admin-bg)]/70 shadow-[0_12px_40px_-12px_rgba(0,0,0,0.75)]"
               : "border-white/[0.04] bg-[var(--admin-bg)]/30"

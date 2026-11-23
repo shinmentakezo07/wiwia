@@ -135,12 +135,15 @@ func (g GenParams) EffectiveThinkingBudget() (int, bool) {
 	if g.ThinkingBudget != nil {
 		return *g.ThinkingBudget, true
 	}
-	for _, e := range []*string{g.ReasoningEffort, g.Effort} {
-		if e != nil && *e != "" {
-			if b, ok := EffortToThinkingBudget(*e); ok {
-				return b, true
-			}
-		}
+	// Mirrors the Python accessor: a set effort field maps through the budget
+	// table AND RETURNS — an unknown level ("typo", a future spelling) means
+	// thinking OFF, never a silent fallback to the next knob that would turn
+	// it back on (round-124 pins "unknown effort leaves thinking OFF").
+	if g.ReasoningEffort != nil && *g.ReasoningEffort != "" {
+		return EffortToThinkingBudget(*g.ReasoningEffort)
+	}
+	if g.Effort != nil && *g.Effort != "" {
+		return EffortToThinkingBudget(*g.Effort)
 	}
 	if g.ThinkingType != nil && *g.ThinkingType == "enabled" {
 		return EffortBudgets["medium"], true

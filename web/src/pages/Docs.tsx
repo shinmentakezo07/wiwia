@@ -192,7 +192,8 @@ function TabbedCode(props: { tabs: { label: string; code: string }[] }) {
           </button>
         ))}
       </div>
-      <CodeBlock code={active.code} label={active.label} />
+      {/* Keyed so a tab switch remounts and replays the fade-in. */}
+      <CodeBlock key={active.label} code={active.code} label={active.label} />
     </div>
   );
 }

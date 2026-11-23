@@ -137,6 +137,11 @@ Ported provider logic:
   `context_management` are modelled fields on the IR (and part of the response
   cache key) instead of opaque `extras`; only the Anthropic adapter forwards
   them.
+- **Unknown reasoning effort leaves thinking OFF** — `GenParams.EffectiveThinkingBudget`
+  returns on the effort→budget map like Python (round-124 contract) instead of
+  skipping an unknown level and falling through to the next knob, which silently
+  re-enabled thinking at the medium default on a typo'd effort. Pinned in
+  `internal/ir/types_test.go`.
 
 
 ## Core pipeline — Full
