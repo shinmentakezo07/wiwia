@@ -3547,50 +3547,17 @@ select.admin-input option {
   .hero-grid { animation: hero-grid-pan 24s linear infinite; }
 }
 
-/* ─── Reliability page: attempt-trace replay and escalation motion ──────────
-   The trace is the page's argument, so it replays once on mount and on
-   request: rows rise in sequence, the connector draws between them, and each
-   status chip pops after its row lands. Everything is gated on
-   prefers-reduced-motion — with reduce, the trace is simply static. */
+/* ─── Reliability page: one-shot attempt-trace reveal ───────────────────────
+   Rows rise in sequence when a scenario is picked or replayed. No looping
+   animation; gated on prefers-reduced-motion (with reduce, the trace is static). */
 
 @keyframes rel-trace-in {
   from { opacity: 0; transform: translateY(6px); }
   to   { opacity: 1; transform: none; }
 }
-@keyframes rel-trace-line {
-  from { transform: scaleY(0); }
-  to   { transform: scaleY(1); }
-}
-@keyframes rel-trace-status {
-  0%   { opacity: 0; transform: scale(0.84); }
-  65%  { transform: scale(1.06); }
-  100% { opacity: 1; transform: scale(1); }
-}
-@keyframes rel-arrow-nudge {
-  0%, 100% { transform: translateX(0); opacity: 0.4; }
-  50%      { transform: translateX(3px); opacity: 0.9; }
-}
-@keyframes rel-arrow-nudge-y {
-  0%, 100% { transform: translateY(0); opacity: 0.4; }
-  50%      { transform: translateY(3px); opacity: 0.9; }
-}
-@keyframes rel-spine-sweep {
-  0%   { top: -2.5rem; opacity: 0; }
-  12%  { opacity: 1; }
-  85%  { opacity: 1; }
-  100% { top: 100%; opacity: 0; }
-}
-
-/* Hidden above the spine until its animation runs. */
-.rel-spine-dot { top: -2.5rem; }
 
 @media (prefers-reduced-motion: no-preference) {
-  .rel-trace-row { animation: rel-trace-in 0.42s cubic-bezier(0.22, 0.61, 0.36, 1) both; }
-  .rel-trace-line { transform-origin: top; animation: rel-trace-line 0.36s ease-out both; }
-  .rel-trace-status { animation: rel-trace-status 0.4s cubic-bezier(0.22, 0.61, 0.36, 1) both; }
-  .rel-arrow-nudge { animation: rel-arrow-nudge 2.8s ease-in-out infinite; }
-  .rel-arrow-nudge-y { animation: rel-arrow-nudge-y 2.8s ease-in-out infinite; }
-  .rel-spine-dot { animation: rel-spine-sweep 6.5s linear infinite; }
+  .rel-trace-row { animation: rel-trace-in 0.32s cubic-bezier(0.22, 0.61, 0.36, 1) both; }
 }
 
 
