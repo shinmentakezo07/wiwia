@@ -8,7 +8,17 @@
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, ArrowDown, ArrowUp, Check, KeyRound, Plus, X } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowDown,
+  ArrowUp,
+  Check,
+  ChevronUp,
+  KeyRound,
+  MoreHorizontal,
+  Plus,
+  X,
+} from "lucide-react";
 import { deleteKey, disableKey, generateKey, listKeys, patchKey } from "@/api/client";
 import type { VirtualKey } from "@/api/types";
 import {
@@ -62,6 +72,12 @@ const STATUS_DOT: Record<Status, string> = {
   disabled: "bg-zinc-500",
 };
 
+const STATUS_RAIL: Record<Status, string> = {
+  active: "before:bg-emerald-400/70",
+  expired: "before:bg-amber-400/80",
+  disabled: "before:bg-zinc-600",
+};
+
 /** Fraction of the budget cap already spent, or null when the key has no cap. */
 function budgetUsed(k: VirtualKey): number | null {
   if (k.max_budget == null || k.max_budget <= 0) return null;
@@ -81,6 +97,27 @@ function fmtExpiryRelative(tsSec: number, nowMs: number): string {
 }
 
 const EXPIRY_WARN_MS = 3 * 86400 * 1000;
+const EXPIRY_SOON_MS = 7 * 86400 * 1000;
+
+/** Stable short handle for a key id. Duplicate aliases are legal, so the row
+ *  carries the id fragment; the full value lives in the tooltip and detail row. */
+const shortId = (id: string) => (id.length > 10 ? `${id.slice(0, 10)}…` : id);
+
+/** A still-live key inside the seven-day rotation window. */
+function expiresSoon(k: VirtualKey, nowMs: number): boolean {
+  return (
+    !k.disabled &&
+    k.expires_at != null &&
+    k.expires_at * 1000 > nowMs &&
+    k.expires_at * 1000 - nowMs <= EXPIRY_SOON_MS
+  );
+}
+
+const STATUS_TEXT: Record<Status, string> = {
+  active: "text-emerald-400/80",
+  expired: "text-amber-400/90",
+  disabled: "text-zinc-500",
+};
 
 /* ------------------------------------------------------------ filter + sort */
 
@@ -133,43 +170,110 @@ function compareKeys(a: VirtualKey, b: VirtualKey, s: Sort, dir: "asc" | "desc")
 /* ------------------------------------------------------------------ summary */
 
 /** One strip instead of four tiles: the account at a glance, divided by hairlines. */
-function SummaryStrip(props: { keys: VirtualKey[] }) {
-  const { keys } = props;
+function SummaryStrip(props: { keys: VirtualKey[]; nowMs: number }) {
+  const { keys, nowMs } = props;
   const active = keys.filter((k) => keyStatus(k) === "active").length;
   const spend = keys.reduce((s, k) => s + (k.spend_to_date || 0), 0);
-  const caps = keys.reduce((s, k) => s + (k.max_budget && k.max_budget > 0 ? k.max_budget : 0), 0);
+  const capped = keys.filter((k) => k.max_budget != null && k.max_budget > 0);
+  const caps = capped.reduce((s, k) => s + (k.max_budget ?? 0), 0);
   const near = keys.filter(isNearCap).length;
-  const items: { label: string; value: string; sub: string; warn?: boolean }[] = [
-    { label: "Keys", value: fmtInt(keys.length), sub: `${fmtInt(active)} active` },
-    { label: "Spend", value: fmtUsd(spend), sub: caps > 0 ? `of ${fmtUsd(caps)} in caps` : "no caps set" },
-    { label: "Near cap", value: fmtInt(near), sub: near > 0 ? "at 80% or more" : "all clear", warn: near > 0 },
+  const soon = keys.filter((k) => expiresSoon(k, nowMs)).length;
+  const never = keys.filter((k) => k.expires_at == null).length;
+  // Who is spending: the four biggest keys as shares of total spend, the rest pooled.
+  const ranked = [...keys].filter((k) => k.spend_to_date > 0).sort((a, b) => b.spend_to_date - a.spend_to_date);
+  const top = ranked.slice(0, 4);
+  const other = spend - top.reduce((s, k) => s + k.spend_to_date, 0);
+  const SHADE = ["bg-[var(--admin-accent)]", "bg-[var(--admin-accent)]/70", "bg-[var(--admin-accent)]/45", "bg-[var(--admin-accent)]/25"];
+  const side: { label: string; value: string; sub: string; warn?: boolean }[] = [
+    { label: "Active", value: `${fmtInt(active)}/${fmtInt(keys.length)}`, sub: "keys in service" },
+    { label: "Near cap", value: fmtInt(near), sub: near > 0 ? "at 80% or more" : "all within budget", warn: near > 0 },
     {
-      label: "Never expire",
-      value: fmtInt(keys.filter((k) => k.expires_at == null).length),
-      sub: "no expiry set",
+      label: "Expiring ≤7d",
+      value: fmtInt(soon),
+      sub: soon > 0 ? "rotate before they lapse" : "none this week",
+      warn: soon > 0,
     },
+    { label: "No expiry", value: fmtInt(never), sub: never > 0 ? "live until revoked" : "all expire" },
   ];
   return (
-    <dl className="mb-4 grid grid-cols-2 overflow-hidden rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] sm:grid-cols-4">
-      {items.map((it, i) => (
-        <div
-          key={it.label}
-          className={`px-4 py-3 ${i % 2 === 1 ? "border-l border-[var(--admin-border)]" : ""} ${
-            i > 1 ? "border-t border-[var(--admin-border)] sm:border-t-0" : ""
-          } ${i > 0 ? "sm:border-l" : ""}`}
-        >
-          <dt className="admin-label">{it.label}</dt>
-          <dd
-            className={`mt-1 font-mono text-[20px] font-semibold tabular-nums leading-none ${
-              it.warn ? "text-amber-400" : "text-[var(--admin-text)]"
-            }`}
-          >
-            {it.value}
-          </dd>
-          <dd className="mt-1.5 truncate text-[11px] text-[var(--admin-text-dim)]">{it.sub}</dd>
+    <section
+      aria-label="Key summary"
+      className="mb-4 grid overflow-hidden rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] lg:grid-cols-[minmax(0,1.7fr)_minmax(0,1fr)]"
+    >
+      <div className="min-w-0 p-5">
+        <div className="flex items-center justify-between gap-3">
+          <p className="admin-label">Lifetime spend</p>
+          <span className="font-mono text-[10.5px] tabular-nums text-[var(--admin-text-dim)]">
+            {fmtInt(keys.length)} keys
+          </span>
         </div>
-      ))}
-    </dl>
+        <p className="mt-2 flex flex-wrap items-baseline gap-x-3 font-mono tabular-nums">
+          <span className="text-[2rem] font-semibold leading-none tracking-tight text-[var(--admin-text)]">
+            {fmtUsd(spend)}
+          </span>
+          <span className="text-[12px] text-[var(--admin-text-dim)]">
+            {caps > 0
+              ? `of ${fmtUsd(caps)} across ${fmtInt(capped.length)} capped ${capped.length === 1 ? "key" : "keys"}`
+              : "no caps set"}
+          </span>
+        </p>
+        {spend > 0 ? (
+          <>
+            <div
+              role="img"
+              aria-label={`Spend split: ${top.map((k) => `${k.alias} ${fmtUsd(k.spend_to_date)}`).join(", ")}`}
+              className="mt-4 flex h-2 gap-0.5 overflow-hidden rounded-full"
+            >
+              {top.map((k, i) => (
+                <span key={k.id} className={SHADE[i]} style={{ flexGrow: k.spend_to_date, flexBasis: 0 }} />
+              ))}
+              {other > 0 && <span className="bg-white/15" style={{ flexGrow: other, flexBasis: 0 }} />}
+            </div>
+            <ul className="mt-3 flex flex-wrap gap-x-4 gap-y-1.5 text-[11.5px] text-[var(--admin-text-muted)]">
+              {top.map((k, i) => (
+                <li key={k.id} className="flex min-w-0 items-center gap-1.5">
+                  <span aria-hidden className={`h-2 w-2 shrink-0 rounded-sm ${SHADE[i]}`} />
+                  <span className="max-w-[9rem] truncate">{k.alias}</span>
+                  <span className="font-mono tabular-nums text-[var(--admin-text-dim)]">
+                    {Math.round((k.spend_to_date / spend) * 100)}%
+                  </span>
+                </li>
+              ))}
+              {other > 0 && (
+                <li className="flex items-center gap-1.5">
+                  <span aria-hidden className="h-2 w-2 shrink-0 rounded-sm bg-white/15" />
+                  Others
+                </li>
+              )}
+            </ul>
+          </>
+        ) : (
+          <p className="mt-4 text-[12px] text-[var(--admin-text-dim)]">No spend recorded yet.</p>
+        )}
+      </div>
+      <dl className="grid grid-cols-2 border-t border-[var(--admin-border)] lg:grid-cols-1 lg:border-l lg:border-t-0">
+        {side.map((it, i) => (
+          <div
+            key={it.label}
+            className={`flex min-w-0 flex-col justify-center border-[var(--admin-border)] px-4 py-3 lg:flex-row lg:items-baseline lg:justify-between lg:gap-3 ${
+              i % 2 === 1 ? "border-l" : ""
+            } ${i >= 2 ? "border-t" : ""} ${i > 0 ? "lg:border-t" : "lg:border-t-0"} lg:border-l-0`}
+          >
+            <div className="min-w-0">
+              <dt className="admin-label">{it.label}</dt>
+              <dd className="mt-1 hidden truncate text-[11px] text-[var(--admin-text-dim)] sm:block">{it.sub}</dd>
+            </div>
+            <dd
+              className={`mt-1 font-mono text-[20px] font-semibold tabular-nums leading-none lg:mt-0 ${
+                it.warn ? "text-amber-400" : "text-[var(--admin-text)]"
+              }`}
+            >
+              {it.value}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </section>
   );
 }
 
@@ -203,7 +307,9 @@ function useKeyActions(k: VirtualKey, onError: (m: string) => void) {
 function Meter(props: { k: VirtualKey }) {
   const { k } = props;
   const used = budgetUsed(k);
+  const pct = used != null ? Math.round(used * 100) : null;
   const tone = used != null && used >= 1 ? "text-red-400" : used != null && used >= NEAR_CAP ? "text-amber-400" : "";
+  const held = k.budget_reserved ?? 0;
   return (
     <div className="min-w-0">
       {used != null ? (
@@ -211,35 +317,64 @@ function Meter(props: { k: VirtualKey }) {
       ) : (
         <div aria-hidden className="h-1.5 rounded-full border border-dashed border-[var(--admin-border)]" />
       )}
-      <p className={`mt-1.5 font-mono text-[12px] tabular-nums ${tone || "text-[var(--admin-text)]"}`}>
-        {fmtUsd(k.spend_to_date)}
-        <span className="text-[var(--admin-text-dim)]">
-          {k.max_budget != null ? ` / ${fmtUsd(k.max_budget)} · ${Math.round((used ?? 0) * 100)}%` : " · no cap"}
+      <p className="mt-1.5 flex items-baseline gap-2 font-mono text-[12px] tabular-nums">
+        <span className={`min-w-0 truncate ${tone || "text-[var(--admin-text)]"}`}>
+          {fmtUsd(k.spend_to_date)}
+          {k.max_budget != null && (
+            <span className="text-[var(--admin-text-dim)]"> / {fmtUsd(k.max_budget)}</span>
+          )}
+        </span>
+        <span className="ml-auto shrink-0 text-[10.5px] text-[var(--admin-text-dim)]">
+          {pct != null ? `${pct}%` : "no cap"}
         </span>
       </p>
+      {held > 0 && (
+        <p className="mt-0.5 font-mono text-[10.5px] tabular-nums text-[var(--admin-text-dim)]">
+          {fmtUsd(held)} held for in-flight requests
+        </p>
+      )}
     </div>
   );
 }
 
-function KeyRow(props: { k: VirtualKey; onEdit: (k: VirtualKey) => void; onError: (m: string) => void }) {
-  const { k } = props;
+function KeyRow(props: {
+  k: VirtualKey;
+  nowMs: number;
+  onEdit: (k: VirtualKey) => void;
+  onError: (m: string) => void;
+}) {
+  const { k, nowMs } = props;
   const status = keyStatus(k);
-  const nowMs = useNow();
   const [open, setOpen] = useState(false);
   const { armed, setArmed, toggle, revoke } = useKeyActions(k, props.onError);
   const soon = k.expires_at != null && !k.disabled && k.expires_at * 1000 - nowMs <= EXPIRY_WARN_MS;
   const shown = k.models.slice(0, 3);
   const rest = k.models.length - shown.length;
+  const panelId = `key-actions-${k.id}`;
 
   return (
-    <li className="px-4 py-3.5">
+    <li
+      className={`relative px-4 py-4 pl-5 transition-colors hover:bg-white/[0.015] before:absolute before:inset-y-3 before:left-0 before:w-0.5 before:rounded-r-full before:content-[''] ${STATUS_RAIL[status]} ${
+        status === "disabled" ? "opacity-70" : ""
+      }`}
+    >
       <div className="grid items-center gap-x-6 gap-y-3 md:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,0.9fr)_auto]">
         {/* identity */}
         <div className="min-w-0">
-          <div className="flex items-center gap-2">
+          <div className="flex min-w-0 items-center gap-2">
             <span aria-hidden className={`h-2 w-2 shrink-0 rounded-full ${STATUS_DOT[status]}`} />
-            <h3 className="truncate text-[13.5px] font-medium text-[var(--admin-text)]">{k.alias}</h3>
-            <span className="shrink-0 text-[11px] text-[var(--admin-text-dim)]">{status}</span>
+            <h3 className="min-w-0 truncate text-[13.5px] font-medium text-[var(--admin-text)]">{k.alias}</h3>
+            <span
+              className={`shrink-0 text-[10px] font-semibold uppercase tracking-[0.08em] ${STATUS_TEXT[status]}`}
+            >
+              {status}
+            </span>
+            <span
+              className="ml-auto hidden shrink-0 font-mono text-[10px] text-[var(--admin-text-dim)] sm:inline"
+              title={k.id}
+            >
+              {shortId(k.id)}
+            </span>
           </div>
           <div className="mt-1.5 flex flex-wrap items-center gap-1">
             {k.models.length === 0 ? (
@@ -267,7 +402,9 @@ function KeyRow(props: { k: VirtualKey; onEdit: (k: VirtualKey) => void; onError
         {/* limits + expiry */}
         <div className="min-w-0 space-y-1 font-mono text-[12px] tabular-nums text-[var(--admin-text-muted)]">
           <p>
-            {k.rpm != null ? fmtInt(k.rpm) : "∞"} rpm · {k.tpm != null ? fmtInt(k.tpm) : "∞"} tpm
+            <span className="text-[var(--admin-text)]">{k.rpm != null ? fmtInt(k.rpm) : "∞"}</span> rpm
+            <span className="px-1 text-[var(--admin-text-dim)]">·</span>
+            <span className="text-[var(--admin-text)]">{k.tpm != null ? fmtInt(k.tpm) : "∞"}</span> tpm
           </p>
           <p
             title={k.expires_at != null ? fmtDateTime(k.expires_at) : undefined}
@@ -284,37 +421,53 @@ function KeyRow(props: { k: VirtualKey; onEdit: (k: VirtualKey) => void; onError
           </Button>
           <Button
             variant="ghost"
+            className="px-3"
             aria-expanded={open}
-            aria-label={`More actions for ${k.alias}`}
+            aria-controls={panelId}
+            aria-label={`${open ? "Hide" : "Show"} actions for ${k.alias}`}
             onClick={() => {
               setOpen((v) => !v);
               setArmed(false);
             }}
           >
-            {open ? "Less" : "More"}
+            {open ? <ChevronUp size={15} aria-hidden /> : <MoreHorizontal size={15} aria-hidden />}
           </Button>
         </div>
       </div>
 
       {open && (
-        <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-[var(--admin-border)] pt-3 md:justify-end">
-          <Button variant="outline" disabled={toggle.isPending} onClick={() => toggle.mutate()}>
-            {k.disabled ? "Enable key" : "Disable key"}
-          </Button>
-          {armed ? (
-            <>
-              <Button variant="danger" disabled={revoke.isPending} onClick={() => revoke.mutate()}>
-                {revoke.isPending ? "Revoking…" : "Confirm revoke"}
+        <div id={panelId} className="mt-3 border-t border-[var(--admin-border)] pt-3">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="admin-label shrink-0">Key ID</span>
+              <code
+                className="min-w-0 truncate font-mono text-[11.5px] text-[var(--admin-text-muted)]"
+                title={k.id}
+              >
+                {k.id}
+              </code>
+              <CopyButton text={k.id} className="shrink-0 px-2.5 py-1 text-[11px]" />
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5 sm:justify-end">
+              <Button variant="outline" disabled={toggle.isPending} onClick={() => toggle.mutate()}>
+                {k.disabled ? "Enable key" : "Disable key"}
               </Button>
-              <Button variant="ghost" disabled={revoke.isPending} onClick={() => setArmed(false)}>
-                Cancel
-              </Button>
-            </>
-          ) : (
-            <Button variant="danger" onClick={() => setArmed(true)}>
-              Revoke
-            </Button>
-          )}
+              {armed ? (
+                <>
+                  <Button variant="danger" disabled={revoke.isPending} onClick={() => revoke.mutate()}>
+                    {revoke.isPending ? "Revoking…" : "Confirm revoke"}
+                  </Button>
+                  <Button variant="ghost" disabled={revoke.isPending} onClick={() => setArmed(false)}>
+                    Cancel
+                  </Button>
+                </>
+              ) : (
+                <Button variant="danger" onClick={() => setArmed(true)}>
+                  Revoke
+                </Button>
+              )}
+            </div>
+          </div>
         </div>
       )}
     </li>
@@ -322,6 +475,23 @@ function KeyRow(props: { k: VirtualKey; onEdit: (k: VirtualKey) => void; onError
 }
 
 /* ------------------------------------------------------------------ toolbar */
+
+/** Desktop column guide for the ledger list. Rows are one responsive grid, so
+ *  the labels reuse the same tracks and gutters; below md the grid stacks and
+ *  the labels would lie, so they are hidden. */
+function KeyListHeader() {
+  return (
+    <div
+      aria-hidden="true"
+      className="hidden gap-x-6 border-b border-[var(--admin-border)] px-4 py-2 pl-5 md:grid md:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,0.9fr)_auto] md:items-center"
+    >
+      <span className="admin-label">Key</span>
+      <span className="admin-label">Budget use</span>
+      <span className="admin-label">Limits &amp; expiry</span>
+      <span className="admin-label text-right">Actions</span>
+    </div>
+  );
+}
 
 function FilterTabs(props: { value: Filter; onChange: (f: Filter) => void; counts: Record<Filter, number> }) {
   return (
@@ -846,6 +1016,7 @@ function KeyDialog(props: { target: VirtualKey | "new"; onClose: () => void }) {
 
 export function VirtualKeysPage() {
   const query = useQuery({ queryKey: ["keys"], queryFn: listKeys, refetchInterval: 30_000 });
+  const nowMs = useNow();
   const [pageError, setPageError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
@@ -885,7 +1056,7 @@ export function VirtualKeysPage() {
         </div>
       )}
 
-      {all.length > 0 && <SummaryStrip keys={all} />}
+      {all.length > 0 && <SummaryStrip keys={all} nowMs={nowMs} />}
 
       <Card>
         {query.isLoading && (
@@ -919,21 +1090,29 @@ export function VirtualKeysPage() {
         {all.length > 0 && (
           <>
             <div className="space-y-2 border-b border-[var(--admin-border)] px-4 py-3">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                 <SearchInput
                   value={search}
                   onChange={setSearch}
                   placeholder="Search by name or model…"
                   className="min-w-0 flex-1"
                 />
-                <Select value={sort} onChange={(v) => setSort(v as Sort)} options={SORT_OPTIONS} />
-                <Button
-                  variant="outline"
-                  aria-label={dir === "asc" ? "Sort ascending" : "Sort descending"}
-                  onClick={() => setDir((d) => (d === "asc" ? "desc" : "asc"))}
-                >
-                  {dir === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
-                </Button>
+                <div className="flex items-center gap-2">
+                  <Select
+                    value={sort}
+                    onChange={(v) => setSort(v as Sort)}
+                    options={SORT_OPTIONS}
+                    className="min-w-0 flex-1 sm:flex-none"
+                  />
+                  <Button
+                    variant="outline"
+                    className="shrink-0"
+                    aria-label={dir === "asc" ? "Sort ascending" : "Sort descending"}
+                    onClick={() => setDir((d) => (d === "asc" ? "desc" : "asc"))}
+                  >
+                    {dir === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
+                  </Button>
+                </div>
               </div>
               <FilterTabs value={filter} onChange={setFilter} counts={counts} />
             </div>
@@ -953,11 +1132,14 @@ export function VirtualKeysPage() {
                 </button>
               </EmptyState>
             ) : (
-              <ul className="divide-y divide-[var(--admin-border)]">
-                {visible.map((k) => (
-                  <KeyRow key={k.id} k={k} onEdit={setDialog} onError={setPageError} />
-                ))}
-              </ul>
+              <>
+                <KeyListHeader />
+                <ul className="divide-y divide-[var(--admin-border)]">
+                  {visible.map((k) => (
+                    <KeyRow key={k.id} k={k} nowMs={nowMs} onEdit={setDialog} onError={setPageError} />
+                  ))}
+                </ul>
+              </>
             )}
           </>
         )}
