@@ -2,12 +2,11 @@
 // current release. Presentation only — the entry data below is the source of truth.
 //
 // Visual language: flat ledger, same as the rest of the public front — mono
-// micro-labels, hairline rules, a sticky version index on desktop, and small
-// type dots on change rows. No boxed cards, no beams, no glow.
+// micro-labels, hairline rules, a sticky version index on desktop, and a
+// timeline spine with node dots running down the releases. No boxed cards,
+// no beams, no glow.
 
 import { useMemo, useState } from "react";
-import type { LucideIcon } from "lucide-react";
-import { AlertCircle, Check, Wrench } from "lucide-react";
 import { Badge } from "@/components/ui";
 
 type ChangeKind = "feature" | "fix" | "improvement";
@@ -19,55 +18,122 @@ interface ChangelogEntry {
   changes: string[];
 }
 
+// Entries are curated from the git history on main — one release per month,
+// each change traceable to a commit. Prefix verbs feed classifyChange().
 const ENTRIES: ChangelogEntry[] = [
   {
-    version: "0.6.0",
-    date: "August 2025",
+    version: "2026.11",
+    date: "November 2026",
     changes: [
-      "Add session auth with public/guarded route split and role-aware admin layout",
-      "Add Landing, Signup, Users, Playground, ModelsCatalog, and Docs pages",
-      "Add dual-mode Login (master-key admin vs user account)",
-      "Fix post-login navigation to /app for master-key admin",
+      "Add a full Go port of the gateway, interoperable with Python's shared database",
+      "Add backend selection in Docker (BACKEND=go|py) with the Go playground served from the session cookie",
+      "Match the console's admin API shapes in the Go backend and flush its SSE stream so the console shows LIVE",
+      "Add per-key 429 failover to a sibling key without burning retries",
+      "Wrap an entitlement refusal to a fallback instead of erroring",
+      "Throttle auth attempts per client IP",
+      "Model Anthropic MCP servers and context management on the IR",
+      "Add performance optimizations across gateway hot paths and reduce console polling intervals",
+      "Add provider-level enable/disable and bulk detach selection on providers and models",
+      "Record TPS and percentile histograms across rollups, counting thinking and tool-arg deltas",
+      "Skip idle background sweeps so a serverless database can suspend",
+      "Ship the real wiwi logo — the black-hole cat mark, everywhere",
+      "Redesign login, signup, and the sign-in card in a monochrome responsive layout",
+      "Redesign the dashboard, docs, and models catalog with monochrome layouts",
+      "Redesign the Enterprise showcase, Quickstart band, and token cost calculator",
+      "Add guides for 9 more clients and redesign the Integrations, Migration, and Products pages",
+      "Fix SSE event ordering and parallel tool-call interleaving",
+      "Fix cancelled streams from storing completed Responses turns",
+      "Guard typed-wrong tool names and audio formats in the wire codecs",
+      "Make IR reasoning accessors total and reject non-finite numeric parameters",
+      "Redesign the changelog itself as the flat release ledger and restyle the About page",
     ],
   },
   {
-    version: "0.5.0",
-    date: "August 2025",
+    version: "2026.10",
+    date: "October 2026",
     changes: [
-      "Add cross-provider routing: Claude Code backed by GPT and vice versa",
-      "Add OpenRouter adapter with reasoning parameter translation",
-      "Fix reasoning/thinking parameter translation between OpenAI and Anthropic",
-      "Fix multi-turn conversation tool_result message handling",
+      "Persist Responses-API state and accept previous_response_id continuation, served back over GET and DELETE",
+      "Add the legacy completions surface at /v1/completions",
+      "Add a no-op-by-default OTLP tracing facade with proven OTLP export",
+      "Shed, partition, and pin requests by concurrency with priority lanes carried on the virtual key",
+      "Relay realtime WebSocket sessions to the upstream with per-session billing and refusal semantics",
+      "Add the Hermes (Nous Portal) provider with OAuth, an auto-refresh sweeper, and one Nous account per pool key",
+      "Add whole-gateway JSON backup and restore",
+      "Add the IFM (MBZUAI) provider and close the round-183 to 187 audit sweep",
+      "Add CSV import for the request log and export of the full usage history",
+      "Add the Runtime Cloud deployment harness, failing loudly on bad config",
+      "Speak the current OpenCode client fingerprint for the free tier and document the request-shape gate",
+      "Measure TPS as output generation speed, recorded even for tool-call-only streams",
+      "Rebuild the public docs page as a reference manual with a nine-tile Features grid",
+      "Rebuild the Models console page as a ruled table and the public catalog as a ledger with a card view",
+      "Rebuild the docs provider map by upstream wire family",
+      "Redesign the Virtual Keys console, its dialogs, and the connected-accounts console",
+      "Restore the official provider logos in the hero and rebrand the pricing tiers as DevPass service plans",
+      "Fix the SSE replay cursor so a reconnect repeats nothing and misses nothing",
+      "Fix thirteen defects in the delta and chunk flow",
+      "Fix six translation losses between the dialects and providers, and report the survivals to callers",
+      "Fix the data a mid-stream failover and a failed attempt quietly dropped",
+      "Fix an unwritable stream journal dir that refused virtual-key streams",
+      "Preserve the upstream 529 so an overload reaches the client as overloaded_error",
+      "Fix five wire-codec defects found by source review, including the structured-output schema coercion at every inbound decoder",
+      "Fix the backup merge so imported state actually reaches the database",
     ],
   },
   {
-    version: "0.4.0",
-    date: "July 2025",
+    version: "2026.09",
+    date: "September 2026",
     changes: [
-      "Add key pools with smooth weighted round-robin routing",
-      "Add per-key cooldowns and automatic retries on transient failures",
-      "Add fallback model groups so a flaky upstream never reaches the caller",
-      "Add cost tracking with per-key, per-model, per-provider breakdowns",
+      "Add the exact-match response cache with cache-hit observability",
+      "Add a durable stream journal for restart-safe SSE replay",
+      "Add a Redis response-cache backend and Anthropic prompt-cache breakpoints",
+      "Add Backoff and CircuitBreaker recovery primitives, shared by the Cline and WorkBuddy circuits",
+      "Add the HealthHealer: probe sick keys and deployments, restore them via half-weight probation",
+      "Add the OpenCode Zen provider with per-model protocol routing",
+      "Add the Combos admin page for composing cross-provider model groups",
+      "Add provider export/import backup endpoints and UI",
+      "Enforce budget caps on both response paths, answering refusals with 402",
+      "Enforce per-deployment rpm/tpm caps as sliding windows",
+      "Bound the request log by row count and roll long-range stats up in the DB",
+      "Give Anthropic Messages and OpenAI Chat one shared translation spine",
+      "Serve all stats windows from the DB so 1h/6h/24h survive restarts",
+      "Fetch live Cline CLI and CodeBuddy versions so client fingerprints stay current",
+      "Default WorkBuddy reasoning_effort to max and Cline to xhigh when the client is silent",
+      "Fix SSE data loss when a provider stream ends without a trailing blank line",
+      "Fix cross-request tool state corruption by using a private adapter per stream",
+      "Fix eleven streaming contract violations, from tool open/close ordering to synthesized finish frames",
+      "Fix Anthropic /v1/messages fidelity for Claude Code: tool search, effort, and server-tool round-trips",
+      "Make revocation, rate limits, and config load fail closed",
+      "Surface accounting losses instead of reporting success",
+      "Fix rate-limiter RPM refunds and the unbounded window sweep",
+      "Key retroactive pricing on the full model id",
+      "Fix the round-41, 45, 46 and 90 audit sweeps with regression suites for each",
     ],
   },
   {
-    version: "0.3.0",
-    date: "July 2025",
+    version: "2026.08",
+    date: "August 2026",
     changes: [
-      "Add virtual keys with model allowlists, expiry, and spend caps",
-      "Add per-key budgets and RPM/TPM rate limits",
-      "Add structured request logs with token usage and latency",
-      "Add admin web UI (React 19 + TypeScript + Vite + Tailwind 4)",
-    ],
-  },
-  {
-    version: "0.2.0",
-    date: "June 2025",
-    changes: [
-      "Add OpenAI Responses (Codex CLI) inbound dialect",
-      "Add Anthropic Messages (Claude Code) inbound dialect",
-      "Define IRStreamDelta taxonomy as the streaming contract",
-      "Add Gemini provider adapter",
+      "Add the gateway core: IR types, wire codecs for OpenAI Chat and Anthropic Messages, provider adapters and registry",
+      "Add the model router, streaming SSE, virtual-key auth, cost pricing, and rate limiting",
+      "Add the FastAPI server, CLI entrypoint, structured logging, Docker image, and pytest suite",
+      "Add the admin stats API and the React console with live SSE dashboards",
+      "Add provider edit and delete endpoints, the provider detail page, and the stats bento",
+      "Add the NVIDIA NIM and GMI Cloud provider adapters, and B.AI with DeepSeek thinking-mode handling",
+      "Add the OpenRouter adapter with cross-provider reasoning-effort translation",
+      "Add the Cline provider with automatic OAuth redirect flow, on-demand token refresh, and cross-account weighted routing",
+      "Add the WorkBuddy provider with region routing, token refresh, and auths JSON import/export",
+      "Add user accounts: pbkdf2 hashing, signed sessions, /auth endpoints, and owner-scoped keys and logs",
+      "Add the public front — Landing, Signup, dual-mode Login, ModelsCatalog, Docs — with session auth and role-aware console",
+      "Add the Playground as a chat arena with history, auto-minted key, and Markdown rendering",
+      "Add Postgres support and DB persistence for admin config, with 7d/30d/all-time Usage stats backed by indexes",
+      "Add per-provider model pricing CRUD on /analytics",
+      "Add DB-backed long-range stats windows and the request detail drawer with prompt/response display",
+      "Fix 51 bugs across gateway, wire codecs, providers, router, and admin UI from the first full audit",
+      "Fix cost=0 for all requests by stripping the provider-type prefix in pricing lookups",
+      "Fix the streaming ASGI crash on connect-phase upstream errors",
+      "Stop returning plaintext provider keys from the admin API",
+      "Make loop detection O(1) per token and bound the rate-limit windows and auth cache",
+      "Pin key-pool deployments and harden provider prompt-cache plumbing",
     ],
   },
 ];
@@ -77,28 +143,25 @@ const KIND_ORDER: ChangeKind[] = ["feature", "fix", "improvement"];
 // Class strings are literal so Tailwind's scanner keeps them.
 const KIND_META: Record<
   ChangeKind,
-  { label: string; plural: string; icon: LucideIcon; dot: string; count: string }
+  { label: string; plural: string; dot: string; text: string }
 > = {
   feature: {
     label: "Feature",
     plural: "Features",
-    icon: Check,
     dot: "bg-emerald-400",
-    count: "text-emerald-300/80",
+    text: "text-emerald-300/80",
   },
   fix: {
     label: "Fix",
     plural: "Fixes",
-    icon: AlertCircle,
     dot: "bg-amber-400",
-    count: "text-amber-300/80",
+    text: "text-amber-300/80",
   },
   improvement: {
     label: "Improvement",
     plural: "Improvements",
-    icon: Wrench,
     dot: "bg-sky-400",
-    count: "text-sky-300/80",
+    text: "text-sky-300/80",
   },
 };
 
@@ -108,7 +171,7 @@ function classifyChange(change: string): ChangeKind {
   return "improvement";
 }
 
-/** Drops the leading "Add"/"Fix" verb: the kind dot already carries it. */
+/** Drops the leading "Add"/"Fix" verb: the kind column already carries it. */
 function changeText(change: string): string {
   const stripped = change.replace(/^(add|fix)\s+/i, "");
   return stripped.charAt(0).toUpperCase() + stripped.slice(1);
@@ -123,11 +186,6 @@ function entryCounts(changes: string[]): Record<ChangeKind, number> {
 const TOTAL_CHANGES = ENTRIES.reduce((n, e) => n + e.changes.length, 0);
 const TOTAL_COUNTS = entryCounts(ENTRIES.flatMap((e) => e.changes));
 
-function countLabel(counts: Record<ChangeKind, number>): string {
-  return KIND_ORDER.filter((kind) => counts[kind] > 0)
-    .map((kind) => `${counts[kind]} ${KIND_META[kind].plural.toLowerCase()}`)
-    .join(" · ");
-}
 
 export function ChangelogPage() {
   const [filter, setFilter] = useState<Filter>("all");
@@ -216,6 +274,12 @@ export function ChangelogPage() {
                     "lg:rounded-md",
                   ].join(" ")}
                 >
+                  {f.id !== "all" && (
+                    <span
+                      aria-hidden
+                      className={`size-1.5 shrink-0 rounded-full ${KIND_META[f.id].dot}`}
+                    />
+                  )}
                   {f.label}
                   <span className="font-mono text-[11px] text-[var(--admin-text-dim)]">
                     {f.count}
@@ -244,7 +308,7 @@ export function ChangelogPage() {
                   />
                   v{entry.version}
                   <span className="text-[10px] text-[var(--admin-text-dim)]">
-                    {entry.date.split(" ")[1]}
+                    {entry.date.split(" ")[0]}
                   </span>
                 </a>
               ))}
@@ -267,8 +331,20 @@ export function ChangelogPage() {
                   <li
                     key={entry.version}
                     id={`v${entry.version}`}
-                    className={`scroll-mt-24 ${i > 0 ? "mt-10 border-t border-[var(--admin-border)] pt-8" : ""}`}
+                    className={`relative scroll-mt-24 sm:pl-7 ${i > 0 ? "mt-10" : ""}`}
                   >
+                    {/* Timeline spine: hairline + node dot per release. The
+                        rule stops at the last node so the ledger doesn't trail
+                        off past the final release. hidden on mobile where the
+                        grid is gone and the dot would float untethered. */}
+                    <span
+                      aria-hidden
+                      className={`absolute bottom-0 left-[5px] top-1 w-px bg-[var(--admin-border)] ${i === visible.length - 1 ? "hidden sm:hidden" : "hidden sm:block"}`}
+                    />
+                    <span
+                      aria-hidden
+                      className={`absolute left-0 top-[7px] hidden size-[11px] rounded-full border sm:block ${isLatest ? "border-blue-400 bg-blue-400/20" : "border-white/20 bg-[var(--admin-bg)]"}`}
+                    />
                     <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
                       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
                         <h2 className="font-mono text-[22px] font-semibold tracking-[-0.03em] text-[var(--admin-text)]">
@@ -279,30 +355,42 @@ export function ChangelogPage() {
                           {entry.date}
                         </span>
                       </div>
-                      <p className="font-mono text-[10.5px] tracking-[0.04em] text-[var(--admin-text-dim)]">
-                        {filter === "all" ? countLabel(counts) : `${changes.length} matching`}
+                      <p className="flex flex-wrap items-baseline gap-x-2 gap-y-1 font-mono text-[10.5px] tracking-[0.04em]">
+                        {filter === "all" ? (
+                          KIND_ORDER.filter((kind) => counts[kind] > 0).map((kind) => (
+                            <span key={kind} className={KIND_META[kind].text}>
+                              {counts[kind]} {kind}
+                            </span>
+                          ))
+                        ) : (
+                          <span className="text-[var(--admin-text-dim)]">
+                            {changes.length} matching
+                          </span>
+                        )}
                       </p>
                     </div>
 
                     <ul
                       aria-label={`Changes in v${entry.version}`}
-                      className="mt-4 divide-y divide-[var(--admin-border)] border-t border-[var(--admin-border)]"
+                      className="mt-4 divide-y divide-[var(--admin-border)] sm:divide-transparent sm:space-y-3"
                     >
                       {changes.map((change) => {
                         const meta = KIND_META[classifyChange(change)];
                         return (
                           <li
                             key={change}
-                            className="flex items-start gap-3 py-4 sm:gap-4"
+                            className="rounded-md py-3 transition-colors sm:rounded-lg sm:py-2.5 sm:hover:bg-white/[0.02]"
                           >
-                            <span
-                              className={`mt-[7px] size-[7px] shrink-0 rounded-full ${meta.dot}`}
-                              aria-hidden
-                            />
-                            <span className="min-w-0 break-words text-[13.5px] leading-relaxed text-[var(--admin-text-muted)]">
-                              <span className="sr-only">{meta.label}: </span>
-                              {changeText(change)}
-                            </span>
+                            <div className="flex flex-col gap-1 sm:flex-row sm:items-baseline sm:gap-4">
+                              <span
+                                className={`font-mono text-[10.5px] uppercase tracking-[0.14em] sm:w-24 sm:shrink-0 sm:text-right ${meta.text}`}
+                              >
+                                {meta.label}
+                              </span>
+                              <p className="min-w-0 break-words text-[13.5px] leading-relaxed text-[var(--admin-text-muted)]">
+                                {changeText(change)}
+                              </p>
+                            </div>
                           </li>
                         );
                       })}
