@@ -6647,3 +6647,44 @@ mark.mc-hit {
 .admin-pager-btn:disabled { opacity: 0.35; cursor: default; }
 .admin-pager-btn:focus-visible { outline: 2px solid var(--admin-accent); outline-offset: 1px; }
 .admin-pager-gap { padding: 0 2px; color: var(--admin-text-dim); font-size: 11px; }
+
+
+/* Frosted-glass dialog (opt-in via <Dialog glass>). A faint indigo/violet wash
+   behind the blur gives the translucent panel something to refract; the panel
+   itself is a low-alpha surface with a top-edge highlight. Falls back to a
+   near-opaque surface where backdrop-filter is unsupported. */
+.admin-glass-overlay {
+  background:
+    radial-gradient(60% 50% at 20% 0%, rgba(99, 102, 241, 0.06), transparent 70%),
+    rgba(0, 0, 0, 0.72);
+  -webkit-backdrop-filter: blur(8px) saturate(1);
+  backdrop-filter: blur(10px) saturate(1.2);
+}
+.admin-glass-panel {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, rgba(255, 255, 255, 0.01) 38%),
+    rgba(9, 9, 11, 0.94);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 28px 80px -16px rgba(0, 0, 0, 0.75),
+    0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+@supports ((-webkit-backdrop-filter: none) or (backdrop-filter: none)) {
+  .admin-glass-panel {
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.045) 0%, rgba(255, 255, 255, 0.01) 38%),
+      rgba(8, 8, 10, 0.78);
+    -webkit-backdrop-filter: blur(24px) saturate(1.1);
+    backdrop-filter: blur(24px) saturate(1.1);
+  }
+}
+.admin-glass-panel .admin-input {
+  background: rgba(0, 0, 0, 0.35);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+.admin-glass-panel .admin-input:focus {
+  background: rgba(0, 0, 0, 0.5);
+  border-color: rgba(129, 140, 248, 0.5);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.16);
+}

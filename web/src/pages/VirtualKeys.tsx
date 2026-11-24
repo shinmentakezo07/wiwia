@@ -1,25 +1,14 @@
 // VirtualKeys page — issue and manage client credentials: budgets, rate limits,
 // model allowlists, expiry. Generated plaintext keys are revealed exactly once.
+//
+// Layout: one summary strip, one toolbar, one list of rows. A row is a single
+// responsive grid (stacked below md, four tracks from md) — there is no separate
+// table and card rendering to keep in sync. Create and edit share one dialog.
 
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  AlertTriangle,
-  Check,
-  Clock,
-  Gauge,
-  KeyRound,
-  Layers,
-  Plus,
-  ShieldCheck,
-  Sparkles,
-  Upload,
-  Wallet,
-  X,
-  Zap,
-} from "lucide-react";
-import type { LucideIcon } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, Check, KeyRound, Plus, X } from "lucide-react";
 import { deleteKey, disableKey, generateKey, listKeys, patchKey } from "@/api/client";
 import type { VirtualKey } from "@/api/types";
 import {
@@ -36,49 +25,20 @@ import {
   PageHeader,
   ProgressBar,
   Select,
-  SortHeader,
-  StatCard,
-  Table,
-  TD,
 } from "@/components/ui";
 import { SearchInput, useNow } from "@/pages/logs-shared";
 import { fmtDateTime, fmtInt, fmtUsd } from "@/lib/format";
 
-/** "" → null (means "leave unchanged"); unparsable → NaN; otherwise the number. */
+/* ------------------------------------------------------------------ helpers */
+
+/** "" → null (leave unchanged / unlimited); unparsable → NaN; otherwise the number. */
 function tryParse(s: string): number | null {
   const t = s.trim();
   if (!t) return null;
   return Number.isFinite(Number(t)) ? Number(t) : NaN;
 }
 
-function numbersValid(ns: (number | null)[]): boolean {
-  return ns.every((n) => n === null || !Number.isNaN(n));
-}
-
-function isBad(n: number | null): boolean {
-  return n !== null && Number.isNaN(n);
-}
-
-/** "720" → "30d", "24" → "1d", "1.5" → "1.5h", "" → "never". Used by the
- *  footer recap so the picked limits read at a glance. */
-function humanTtl(hours: string): string {
-  const h = hours.trim();
-  if (!h) return "never";
-  const n = Number(h);
-  if (!Number.isFinite(n)) return "—";
-  if (n >= 24 && n % 24 === 0) return `${Math.round(n / 24)}d`;
-  return `${h}h`;
-}
-
-/** "100000" → "100k", "2500" → "2500". Keeps the footer recap on one line. */
-function compactNum(v: string): string {
-  const n = v.trim();
-  if (!n) return "∞";
-  if (!Number.isFinite(Number(n))) return "—";
-  const num = Number(n);
-  if (num >= 1_000_000) return `${Math.round(num / 1000)}k`;
-  return n;
-}
+const isBad = (n: number | null) => n !== null && Number.isNaN(n);
 
 /** "a, b,,c" → ["a","b","c"]; "" → [] (= all models). */
 function parseCsv(s: string): string[] {
@@ -88,37 +48,31 @@ function parseCsv(s: string): string[] {
     .filter(Boolean);
 }
 
-type KeyStatus = { label: "active" | "expired" | "disabled"; tone: "green" | "amber" | "gray" };
+type Status = "active" | "expired" | "disabled";
 
-function keyStatus(k: VirtualKey): KeyStatus {
-  if (k.disabled) return { label: "disabled", tone: "gray" };
-  if (k.expires_at != null && k.expires_at * 1000 < Date.now()) {
-    return { label: "expired", tone: "amber" };
-  }
-  return { label: "active", tone: "green" };
+function keyStatus(k: VirtualKey): Status {
+  if (k.disabled) return "disabled";
+  if (k.expires_at != null && k.expires_at * 1000 < Date.now()) return "expired";
+  return "active";
 }
 
-/** Fraction of a key's budget cap already spent, or null when it has no cap.
- *  The single definition of "how full is this key" — the stat tile, the filter
- *  chip count and the row's progress bar all read this so they cannot disagree. */
+const STATUS_DOT: Record<Status, string> = {
+  active: "bg-emerald-400",
+  expired: "bg-amber-400",
+  disabled: "bg-zinc-500",
+};
+
+/** Fraction of the budget cap already spent, or null when the key has no cap. */
 function budgetUsed(k: VirtualKey): number | null {
   if (k.max_budget == null || k.max_budget <= 0) return null;
   return k.spend_to_date / k.max_budget;
 }
 
-/** The threshold at which a capped key counts as "near cap", matching the
- *  amber band of `ProgressBar`'s own tone scale. */
 const NEAR_CAP = 0.8;
+const isNearCap = (k: VirtualKey) => (budgetUsed(k) ?? 0) >= NEAR_CAP;
 
-function isNearCap(k: VirtualKey): boolean {
-  const used = budgetUsed(k);
-  return used != null && used >= NEAR_CAP;
-}
-
-/** Expiry that counts down: "in 3d" for keys still live, "2d ago" for expired
- *  ones, exact datetime always available as the title. An operator scanning
- *  the list cares about *how soon*, not the calendar date. */
-function fmtExpiryRelative(tsSec: number, nowMs = Date.now()): string {
+/** "in 3d" / "2d ago". The exact date is always available as the title. */
+function fmtExpiryRelative(tsSec: number, nowMs: number): string {
   const s = (tsSec * 1000 - nowMs) / 1000;
   const a = Math.abs(s);
   const unit =
@@ -126,281 +80,321 @@ function fmtExpiryRelative(tsSec: number, nowMs = Date.now()): string {
   return s >= 0 ? `in ${unit}` : `${unit} ago`;
 }
 
-/** True when a key expires within the next 3 days — the window in which the
- *  expiry deserves the amber warning treatment, matching `fmtExpiryRelative`'s
- *  "days" granularity. */
-const EXPIRY_SOON_SEC = 3 * 86400;
+const EXPIRY_WARN_MS = 3 * 86400 * 1000;
 
-function expiringSoon(k: VirtualKey, nowMs = Date.now()): boolean {
-  return k.expires_at != null && !k.disabled && k.expires_at * 1000 - nowMs <= EXPIRY_SOON_SEC * 1000;
+/* ------------------------------------------------------------ filter + sort */
+
+type Filter = "all" | "active" | "near-cap" | "expired" | "disabled";
+
+const FILTERS: { id: Filter; label: string }[] = [
+  { id: "all", label: "All" },
+  { id: "active", label: "Active" },
+  { id: "near-cap", label: "Near cap" },
+  { id: "expired", label: "Expired" },
+  { id: "disabled", label: "Disabled" },
+];
+
+function matchesFilter(k: VirtualKey, f: Filter): boolean {
+  if (f === "all") return true;
+  if (f === "near-cap") return isNearCap(k);
+  return keyStatus(k) === f;
 }
 
-/** The expiry text for a row/card cell: relative by default, absolute on hover,
- *  amber when it has already passed or is within 3 days. */
-function ExpiryText(props: { k: VirtualKey; nowMs: number }) {
-  const { k, nowMs } = props;
-  if (k.expires_at == null) return <span className="text-[var(--admin-text-dim)]">never</span>;
-  const soon = expiringSoon(k, nowMs);
+type Sort = "name" | "budget" | "rpm" | "expires";
+
+const SORT_OPTIONS: { value: string; label: string }[] = [
+  { value: "name", label: "Name" },
+  { value: "budget", label: "Budget use" },
+  { value: "rpm", label: "RPM" },
+  { value: "expires", label: "Expiry" },
+];
+
+function sortValue(k: VirtualKey, s: Sort): number | string {
+  switch (s) {
+    case "name":
+      return k.alias.toLowerCase();
+    case "budget":
+      return budgetUsed(k) ?? Number.POSITIVE_INFINITY;
+    case "rpm":
+      return k.rpm ?? Number.POSITIVE_INFINITY;
+    case "expires":
+      return k.expires_at ?? Number.POSITIVE_INFINITY;
+  }
+}
+
+function compareKeys(a: VirtualKey, b: VirtualKey, s: Sort, dir: "asc" | "desc"): number {
+  const av = sortValue(a, s);
+  const bv = sortValue(b, s);
+  const cmp =
+    typeof av === "number" && typeof bv === "number" ? av - bv : String(av).localeCompare(String(bv));
+  return dir === "asc" ? cmp : -cmp;
+}
+
+/* ------------------------------------------------------------------ summary */
+
+/** One strip instead of four tiles: the account at a glance, divided by hairlines. */
+function SummaryStrip(props: { keys: VirtualKey[] }) {
+  const { keys } = props;
+  const active = keys.filter((k) => keyStatus(k) === "active").length;
+  const spend = keys.reduce((s, k) => s + (k.spend_to_date || 0), 0);
+  const caps = keys.reduce((s, k) => s + (k.max_budget && k.max_budget > 0 ? k.max_budget : 0), 0);
+  const near = keys.filter(isNearCap).length;
+  const items: { label: string; value: string; sub: string; warn?: boolean }[] = [
+    { label: "Keys", value: fmtInt(keys.length), sub: `${fmtInt(active)} active` },
+    { label: "Spend", value: fmtUsd(spend), sub: caps > 0 ? `of ${fmtUsd(caps)} in caps` : "no caps set" },
+    { label: "Near cap", value: fmtInt(near), sub: near > 0 ? "at 80% or more" : "all clear", warn: near > 0 },
+    {
+      label: "Never expire",
+      value: fmtInt(keys.filter((k) => k.expires_at == null).length),
+      sub: "no expiry set",
+    },
+  ];
   return (
-    <span
-      title={fmtDateTime(k.expires_at)}
-      className={`font-mono text-[12px] tabular-nums ${
-        soon ? "text-amber-400" : "text-[var(--admin-text-dim)]"
-      }`}
-    >
-      {fmtExpiryRelative(k.expires_at, nowMs)}
-    </span>
+    <dl className="mb-4 grid grid-cols-2 overflow-hidden rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] sm:grid-cols-4">
+      {items.map((it, i) => (
+        <div
+          key={it.label}
+          className={`px-4 py-3 ${i % 2 === 1 ? "border-l border-[var(--admin-border)]" : ""} ${
+            i > 1 ? "border-t border-[var(--admin-border)] sm:border-t-0" : ""
+          } ${i > 0 ? "sm:border-l" : ""}`}
+        >
+          <dt className="admin-label">{it.label}</dt>
+          <dd
+            className={`mt-1 font-mono text-[20px] font-semibold tabular-nums leading-none ${
+              it.warn ? "text-amber-400" : "text-[var(--admin-text)]"
+            }`}
+          >
+            {it.value}
+          </dd>
+          <dd className="mt-1.5 truncate text-[11px] text-[var(--admin-text-dim)]">{it.sub}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }
 
-/** Status pill with a leading colored dot. The dot carries the state color at a
- *  glance even when the label is truncated on a narrow screen; the pill uses the
- *  shared admin-badge tone so it matches the rest of the console. */
-const STATUS_DOT: Record<KeyStatus["tone"], string> = {
-  green: "bg-emerald-400",
-  amber: "bg-amber-400",
-  gray: "bg-zinc-500",
-};
+/* --------------------------------------------------------------------- rows */
 
-/** Icon tint matching the status dot, for the key tile. */
-const STATUS_ICON: Record<KeyStatus["tone"], string> = {
-  green: "text-emerald-400/70",
-  amber: "text-amber-400/70",
-  gray: "text-zinc-500",
-};
-
-/** The tile's background tint per status — barely-there, so the accent reads
- *  as atmosphere rather than a colored block. */
-const STATUS_TILE: Record<KeyStatus["tone"], string> = {
-  green: "bg-emerald-500/[0.04]",
-  amber: "bg-amber-500/[0.05]",
-  gray: "bg-transparent",
-};
-
-function StatusBadge(props: { tone: KeyStatus["tone"]; label: string }) {
-  return (
-    <span
-      className={`admin-badge admin-badge-${
-        props.tone === "green" ? "green" : props.tone === "amber" ? "amber" : "gray"
-      }`}
-    >
-      <span aria-hidden className={`h-1.5 w-1.5 rounded-full ${STATUS_DOT[props.tone]}`} />
-      {props.label}
-    </span>
-  );
+function useKeyActions(k: VirtualKey, onError: (m: string) => void) {
+  const qc = useQueryClient();
+  const [armed, setArmed] = useState(false);
+  // An abandoned "Revoke" disarms itself so a later stray click cannot fire it.
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(false), 6000);
+    return () => clearTimeout(t);
+  }, [armed]);
+  const toggle = useMutation({
+    mutationFn: () => disableKey(k.id, !k.disabled),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["keys"] }),
+    onError: (e) => onError(e.message),
+  });
+  const revoke = useMutation({
+    mutationFn: () => deleteKey(k.id),
+    onSuccess: () => {
+      setArmed(false);
+      void qc.invalidateQueries({ queryKey: ["keys"] });
+    },
+    onError: (e) => onError(e.message),
+  });
+  return { armed, setArmed, toggle, revoke };
 }
 
-/** A single "clear this field → unlimited" toggle in the edit dialog. Rows keep
- *  a ≥44px hit area for touch and an amber tint when armed so the intent is
- *  unmistakable on a phone, not just on a checkbox tick. */
-function ClearCheck(props: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
-  return (
-    <label
-      className={`flex min-h-11 cursor-pointer items-center gap-2.5 rounded-md px-2.5 text-[12.5px] transition-colors ${
-        props.checked
-          ? "bg-[#1a1408] text-amber-200"
-          : "text-[var(--admin-text-muted)] hover:bg-[#141414]"
-      }`}
-    >
-      <input
-        type="checkbox"
-        checked={props.checked}
-        onChange={(e) => props.onChange(e.target.checked)}
-        className="h-4 w-4 shrink-0 rounded border-[var(--admin-border)] accent-white"
-      />
-      {props.label}
-    </label>
-  );
-}
-
-function BudgetCell(props: { k: VirtualKey }) {
+function Meter(props: { k: VirtualKey }) {
   const { k } = props;
   const used = budgetUsed(k);
-  // The bar already shifts emerald → amber → red, but the reader still has to do
-  // the division to learn "how close". Print the percentage, and tint the value
-  // with the same band the bar is in so the two read as one signal.
-  const hot = used != null && used >= NEAR_CAP;
-  const capped = used != null && used >= 1;
+  const tone = used != null && used >= 1 ? "text-red-400" : used != null && used >= NEAR_CAP ? "text-amber-400" : "";
   return (
-    <div className="w-40 space-y-1">
-      {used != null && <ProgressBar value={used} />}
-      <span
-        className={`font-mono text-[12px] tabular-nums ${
-          capped ? "text-red-400" : hot ? "text-amber-400" : "text-[var(--admin-text)]"
-        }`}
-      >
+    <div className="min-w-0">
+      {used != null ? (
+        <ProgressBar value={used} />
+      ) : (
+        <div aria-hidden className="h-1.5 rounded-full border border-dashed border-[var(--admin-border)]" />
+      )}
+      <p className={`mt-1.5 font-mono text-[12px] tabular-nums ${tone || "text-[var(--admin-text)]"}`}>
         {fmtUsd(k.spend_to_date)}
-        {k.max_budget != null && (
-          <span className="text-[var(--admin-text-dim)]"> / {fmtUsd(k.max_budget)}</span>
-        )}
-        {used != null && (
-          <span className="text-[var(--admin-text-dim)]"> {Math.round(used * 100)}%</span>
-        )}
-      </span>
+        <span className="text-[var(--admin-text-dim)]">
+          {k.max_budget != null ? ` / ${fmtUsd(k.max_budget)} · ${Math.round((used ?? 0) * 100)}%` : " · no cap"}
+        </span>
+      </p>
     </div>
   );
 }
 
-/** Red validation line rendered under a Field (Field's own hint stays neutral). */
+function KeyRow(props: { k: VirtualKey; onEdit: (k: VirtualKey) => void; onError: (m: string) => void }) {
+  const { k } = props;
+  const status = keyStatus(k);
+  const nowMs = useNow();
+  const [open, setOpen] = useState(false);
+  const { armed, setArmed, toggle, revoke } = useKeyActions(k, props.onError);
+  const soon = k.expires_at != null && !k.disabled && k.expires_at * 1000 - nowMs <= EXPIRY_WARN_MS;
+  const shown = k.models.slice(0, 3);
+  const rest = k.models.length - shown.length;
+
+  return (
+    <li className="px-4 py-3.5">
+      <div className="grid items-center gap-x-6 gap-y-3 md:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,0.9fr)_auto]">
+        {/* identity */}
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span aria-hidden className={`h-2 w-2 shrink-0 rounded-full ${STATUS_DOT[status]}`} />
+            <h3 className="truncate text-[13.5px] font-medium text-[var(--admin-text)]">{k.alias}</h3>
+            <span className="shrink-0 text-[11px] text-[var(--admin-text-dim)]">{status}</span>
+          </div>
+          <div className="mt-1.5 flex flex-wrap items-center gap-1">
+            {k.models.length === 0 ? (
+              <span className="text-[11.5px] text-[var(--admin-text-dim)]">all models</span>
+            ) : (
+              <>
+                {shown.map((m) => (
+                  <Badge key={m} tone="blue">
+                    {m}
+                  </Badge>
+                ))}
+                {rest > 0 && (
+                  <Badge tone="gray" title={k.models.slice(3).join(", ")}>
+                    +{rest}
+                  </Badge>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* budget */}
+        <Meter k={k} />
+
+        {/* limits + expiry */}
+        <div className="min-w-0 space-y-1 font-mono text-[12px] tabular-nums text-[var(--admin-text-muted)]">
+          <p>
+            {k.rpm != null ? fmtInt(k.rpm) : "∞"} rpm · {k.tpm != null ? fmtInt(k.tpm) : "∞"} tpm
+          </p>
+          <p
+            title={k.expires_at != null ? fmtDateTime(k.expires_at) : undefined}
+            className={soon ? "text-amber-400" : "text-[var(--admin-text-dim)]"}
+          >
+            {k.expires_at != null ? `expires ${fmtExpiryRelative(k.expires_at, nowMs)}` : "never expires"}
+          </p>
+        </div>
+
+        {/* actions */}
+        <div className="flex items-center gap-1.5 md:justify-end">
+          <Button variant="outline" className="flex-1 md:flex-none" onClick={() => props.onEdit(k)}>
+            Edit
+          </Button>
+          <Button
+            variant="ghost"
+            aria-expanded={open}
+            aria-label={`More actions for ${k.alias}`}
+            onClick={() => {
+              setOpen((v) => !v);
+              setArmed(false);
+            }}
+          >
+            {open ? "Less" : "More"}
+          </Button>
+        </div>
+      </div>
+
+      {open && (
+        <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-[var(--admin-border)] pt-3 md:justify-end">
+          <Button variant="outline" disabled={toggle.isPending} onClick={() => toggle.mutate()}>
+            {k.disabled ? "Enable key" : "Disable key"}
+          </Button>
+          {armed ? (
+            <>
+              <Button variant="danger" disabled={revoke.isPending} onClick={() => revoke.mutate()}>
+                {revoke.isPending ? "Revoking…" : "Confirm revoke"}
+              </Button>
+              <Button variant="ghost" disabled={revoke.isPending} onClick={() => setArmed(false)}>
+                Cancel
+              </Button>
+            </>
+          ) : (
+            <Button variant="danger" onClick={() => setArmed(true)}>
+              Revoke
+            </Button>
+          )}
+        </div>
+      )}
+    </li>
+  );
+}
+
+/* ------------------------------------------------------------------ toolbar */
+
+function FilterTabs(props: { value: Filter; onChange: (f: Filter) => void; counts: Record<Filter, number> }) {
+  return (
+    <div role="group" aria-label="Filter keys" className="-mx-1 flex gap-1 overflow-x-auto px-1 pb-0.5">
+      {FILTERS.map((f) => {
+        const on = props.value === f.id;
+        return (
+          <button
+            key={f.id}
+            type="button"
+            aria-pressed={on}
+            onClick={() => props.onChange(f.id)}
+            className={`inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg px-3 text-[12.5px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500 ${
+              on
+                ? "bg-[#1a1a1a] text-[var(--admin-text)]"
+                : "text-[var(--admin-text-muted)] hover:bg-[#141414] hover:text-[var(--admin-text)]"
+            }`}
+          >
+            {f.label}
+            <span className="font-mono text-[11px] tabular-nums text-[var(--admin-text-dim)]">
+              {props.counts[f.id]}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/* --------------------------------------------------------------- form pieces */
+
 function FieldError(props: { children: ReactNode }) {
   return <p className="mt-1 text-[11px] font-medium text-red-400">{props.children}</p>;
 }
 
-/** Inset panel wrapping one logical group of the create form, numbered so the
- *  three groups read as an ordered pass over the key's shape. Solid surfaces
- *  (no transparency) keep the groups legible against the dialog body. */
-function FormSection(props: { index: string; icon: LucideIcon; title: string; desc?: string; children: ReactNode }) {
-  const Icon = props.icon;
-  return (
-    <section className="rounded-2xl border border-[var(--admin-border)] bg-[#0c0c0c] p-4">
-      <div className="mb-3.5 flex items-center gap-2.5">
-        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[#1a1a1a]">
-          <Icon className="h-3.5 w-3.5 text-[var(--admin-text)]" />
-        </span>
-        <div className="min-w-0 leading-tight">
-          <p className="admin-label">{props.title}</p>
-          {props.desc && <p className="mt-0.5 text-[11px] text-[var(--admin-text-dim)]">{props.desc}</p>}
-        </div>
-        <span className="ml-auto shrink-0 font-mono text-[11px] tabular-nums text-[var(--admin-text-dim)]">
-          {props.index}
-        </span>
-      </div>
-      <div className="space-y-3">{props.children}</div>
-    </section>
-  );
-}
-
-/** Two-up selectable card — used for the key-source choice. */
-function KeySourceCard(props: {
-  active: boolean;
-  icon: LucideIcon;
-  title: string;
-  desc: string;
-  onClick: () => void;
-}) {
-  const Icon = props.icon;
-  return (
-    <button
-      type="button"
-      aria-pressed={props.active}
-      onClick={props.onClick}
-      className={`relative flex flex-1 items-start gap-2.5 rounded-xl border p-3.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500 ${
-        props.active
-          ? "border-[#232323] bg-[#1a1a1a]"
-          : "border-[var(--admin-border)] bg-[#0c0c0c] hover:border-[#1f1f1f] hover:bg-[#141414]"
-      }`}
-    >
-      {props.active && (
-        <span
-          aria-hidden
-          className="absolute right-2.5 top-2.5 flex h-4 w-4 items-center justify-center rounded-full bg-[#2a2a2a]"
-        >
-          <Check size={10} className="text-[var(--admin-text)]" />
-        </span>
-      )}
-      <span
-        className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
-          props.active ? "bg-[#2a2a2a]" : "bg-[#1a1a1a]"
-        }`}
-      >
-        <Icon className={`h-4 w-4 ${props.active ? "text-[var(--admin-text)]" : "text-[var(--admin-text-dim)]"}`} />
-      </span>
-      <div className="min-w-0 pr-5">
-        <p className="text-[13px] font-medium text-[var(--admin-text)]">{props.title}</p>
-        <p className="mt-0.5 text-[11px] leading-tight text-[var(--admin-text-dim)]">{props.desc}</p>
-      </div>
-    </button>
-  );
-}
-
-/** Selectable pill — the one pill affordance on this page, used both for the
- *  list's filter chips and for the create dialog's limit presets. The icon is
- *  optional so a filter chip can lead with its own glyph and a preset with the
- *  lightning bolt. */
-function Pill(props: {
-  active: boolean;
-  label: string;
-  onClick: () => void;
-  icon?: LucideIcon;
-  /** Trailing count, e.g. how many keys a filter would show. */
-  count?: number;
-}) {
-  const Icon = props.icon;
-  return (
-    <button
-      type="button"
-      aria-pressed={props.active}
-      onClick={props.onClick}
-      className={`inline-flex min-h-11 items-center gap-1.5 rounded-full border px-3.5 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500 ${
-        props.active
-          ? "border-indigo-400/25 bg-[var(--admin-accent-soft)] text-[var(--admin-text)]"
-          : "border-[var(--admin-border)] bg-[#0c0c0c] text-[var(--admin-text-muted)] hover:border-[#1f1f1f] hover:bg-[#141414] hover:text-[var(--admin-text)]"
-      }`}
-    >
-      {Icon && (
-        <Icon
-          size={11}
-          className={props.active ? "text-indigo-300" : "text-[var(--admin-text-dim)]"}
-        />
-      )}
-      {props.label}
-      {props.count != null && (
-        <span
-          className={`font-mono text-[10.5px] tabular-nums ${
-            props.active ? "text-[var(--admin-text-muted)]" : "text-[var(--admin-text-dim)]"
-          }`}
-        >
-          {props.count}
-        </span>
-      )}
-    </button>
-  );
-}
-
-/** Chip input for the model allowlist. Enter/comma commits a model, Backspace
- *  on an empty input drops the last chip, and an empty list means "all models".
- *  Remove buttons keep a 44px hit area via negative margins so the chips stay
- *  visually compact on touch. */
+/** Chip input for the model allowlist: Enter/comma commits, Backspace on an
+ *  empty input drops the last chip. Empty list = all models. */
 function ModelChips(props: { value: string; onChange: (v: string) => void }) {
   const [draft, setDraft] = useState("");
   const chips = parseCsv(props.value);
 
   function commit(raw: string) {
-    const parts = raw
-      .split(",")
-      .map((t) => t.trim())
-      .filter(Boolean);
+    const parts = parseCsv(raw);
     if (parts.length === 0) return;
-    const next = [...chips, ...parts.filter((p) => !chips.includes(p))];
-    props.onChange(next.join(", "));
+    props.onChange([...chips, ...parts.filter((p) => !chips.includes(p))].join(", "));
     setDraft("");
   }
 
   return (
-    <div className="rounded-lg border border-[var(--admin-border)] bg-[#0c0c0c] p-1.5 transition-colors focus-within:border-[#232323]">
+    <div className="rounded-lg border border-white/[0.08] bg-black/40 p-1.5 focus-within:border-indigo-400/40 focus-within:bg-black/55">
       {chips.length > 0 && (
-        <div className="mb-1.5 flex flex-wrap gap-1.5">
+        <ul className="mb-1.5 flex flex-wrap gap-1.5">
           {chips.map((m) => (
-            <span
+            <li
               key={m}
-              className="inline-flex items-center gap-1 rounded-md bg-[#1a1a1a] py-1 pl-2 pr-1 text-[12px] font-medium text-[var(--admin-text)]"
+              className="inline-flex items-center gap-1 rounded-md border border-white/[0.08] bg-white/[0.08] py-1 pl-2 pr-1 font-mono text-[12px] text-[var(--admin-text)]"
             >
-              <Layers size={10} className="text-[var(--admin-text-muted)]" />
-              <span className="font-mono">{m}</span>
+              {m}
               <button
                 type="button"
                 aria-label={`Remove ${m}`}
                 onClick={() => props.onChange(chips.filter((c) => c !== m).join(", "))}
-                className="-my-2.5 -mr-1.5 flex h-11 w-11 items-center justify-center rounded-md text-[var(--admin-text-dim)] transition-colors hover:bg-[#232323] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500"
+                className="-my-2.5 -mr-1.5 flex h-11 w-11 items-center justify-center rounded-md text-[var(--admin-text-dim)] hover:bg-[#232323] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500"
               >
                 <X size={12} />
               </button>
-            </span>
+            </li>
           ))}
-        </div>
+        </ul>
       )}
       <input
         value={draft}
+        aria-label="Add model"
         onChange={(e) => {
           const v = e.target.value;
           if (v.includes(",")) commit(v);
@@ -415,23 +409,61 @@ function ModelChips(props: { value: string; onChange: (v: string) => void }) {
           }
         }}
         onBlur={() => commit(draft)}
-        placeholder={chips.length === 0 ? "model-a, model-b — empty = all models" : "Add model…"}
-        className="w-full min-w-0 bg-transparent px-1.5 py-1 text-[13px] text-[var(--admin-text)] outline-none placeholder:text-[var(--admin-text-dim)]"
+        placeholder={chips.length === 0 ? "model-a, model-b" : "Add model…"}
+        className="min-h-9 w-full min-w-0 bg-transparent px-1.5 text-[13px] text-[var(--admin-text)] outline-none placeholder:text-[var(--admin-text-dim)]"
       />
     </div>
   );
 }
 
-/** Quick limit profiles: budget (USD), rpm, tpm, expiry (hours). */
-const LIMIT_PRESETS: { id: string; label: string; values: { budget: string; rpm: string; tpm: string; ttl: string } }[] = [
-  { id: "open", label: "Unrestricted", values: { budget: "", rpm: "", tpm: "", ttl: "" } },
-  { id: "standard", label: "Standard", values: { budget: "25", rpm: "60", tpm: "100000", ttl: "" } },
-  { id: "strict", label: "Strict", values: { budget: "5", rpm: "20", tpm: "20000", ttl: "24" } },
+/** A numeric limit. In edit mode a "Remove limit" toggle sits under the input, so
+ *  clearing a limit is explicit. */
+function LimitField(props: {
+  label: string;
+  hint: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder: string;
+  suffix?: string;
+  step?: number | "any";
+  clear?: { checked: boolean; onChange: (v: boolean) => void };
+}) {
+  const n = tryParse(props.value);
+  return (
+    <div>
+      <Field label={props.label} hint={props.hint}>
+        <NumberInput
+          min={0}
+          step={props.step}
+          value={props.value}
+          onChange={props.onChange}
+          placeholder={props.placeholder}
+          suffix={props.suffix}
+        />
+      </Field>
+      {isBad(n) && <FieldError>Not a number</FieldError>}
+      {props.clear && (
+        <label className="mt-1 flex min-h-11 cursor-pointer items-center gap-2 text-[12px] text-[var(--admin-text-muted)]">
+          <input
+            type="checkbox"
+            checked={props.clear.checked}
+            onChange={(e) => props.clear?.onChange(e.target.checked)}
+            className="h-4 w-4 accent-white"
+          />
+          Remove limit (unlimited)
+        </label>
+      )}
+    </div>
+  );
+}
+
+const PRESETS: { id: string; label: string; budget: string; rpm: string; tpm: string; ttl: string }[] = [
+  { id: "open", label: "Unrestricted", budget: "", rpm: "", tpm: "", ttl: "" },
+  { id: "standard", label: "Standard", budget: "25", rpm: "60", tpm: "100000", ttl: "" },
+  { id: "strict", label: "Strict", budget: "5", rpm: "20", tpm: "20000", ttl: "24" },
 ];
 
-/** Expiry durations offered as one-click choices; "custom" reveals an hours input. */
-const EXPIRY_OPTIONS: { value: string; label: string }[] = [
-  { value: "", label: "Never expires" },
+const EXPIRY_PRESETS: { value: string; label: string }[] = [
   { value: "24", label: "24 hours" },
   { value: "168", label: "7 days" },
   { value: "720", label: "30 days" },
@@ -439,541 +471,409 @@ const EXPIRY_OPTIONS: { value: string; label: string }[] = [
   { value: "custom", label: "Custom…" },
 ];
 
-/** The list's filter chips. Each predicate is applied over the FULL key set, so
- *  a chip's count always describes the whole account rather than the filtered
- *  view — the same rule the stat tiles follow. */
-type KeyFilter = "all" | "active" | "near-cap" | "expired" | "disabled";
-
-const FILTERS: { id: KeyFilter; label: string; icon: LucideIcon }[] = [
-  { id: "all", label: "All", icon: Layers },
-  { id: "active", label: "Active", icon: ShieldCheck },
-  { id: "near-cap", label: "Near cap", icon: Gauge },
-  { id: "expired", label: "Expired", icon: Clock },
-  { id: "disabled", label: "Disabled", icon: X },
-];
-
-function matchesFilter(k: VirtualKey, f: KeyFilter): boolean {
-  switch (f) {
-    case "all":
-      return true;
-    case "active":
-      return keyStatus(k).label === "active";
-    case "near-cap":
-      return isNearCap(k);
-    case "expired":
-      return keyStatus(k).label === "expired";
-    case "disabled":
-      return keyStatus(k).label === "disabled";
-  }
-}
-
-/** Sortable columns. `budget` sorts by fraction-of-cap consumed (uncapped keys
- *  last); `expires` puts never-expiring keys last rather than at epoch 0. */
-type KeySort = "name" | "budget" | "rpm" | "expires";
-type SortDir = "asc" | "desc";
-
-/** Column index of each sortable column within the table's `head` array. Needed
- *  because `aria-sort` must sit on the `<th>`, and the sortable columns are not
- *  contiguous — Status and Models sit between Budget and RPM. */
-const SORT_COLUMN_INDEX: Record<KeySort, number> = {
-  name: 0,
-  budget: 3,
-  rpm: 4,
-  expires: 6,
-};
-
-/** The same sort choice for narrow screens, where the table (and its sortable
- *  headers) is hidden but the cards still honour the active sort. */
-const SORT_OPTIONS: { value: string; label: string }[] = [
-  { value: "name", label: "Name" },
-  { value: "budget", label: "Budget use" },
-  { value: "rpm", label: "RPM" },
-  { value: "expires", label: "Expires soon" },
-];
-
-function sortValue(k: VirtualKey, s: KeySort): number | string {
-  switch (s) {
-    case "name":
-      return k.alias.toLowerCase();
-    case "budget":
-      return budgetUsed(k) ?? Number.POSITIVE_INFINITY;
-    case "rpm":
-      return k.rpm ?? Number.POSITIVE_INFINITY;
-    case "expires":
-      return k.expires_at ?? Number.POSITIVE_INFINITY;
-  }
-}
-
-function compareKeys(a: VirtualKey, b: VirtualKey, s: KeySort, dir: SortDir): number {
-  const av = sortValue(a, s);
-  const bv = sortValue(b, s);
-  const cmp =
-    typeof av === "number" && typeof bv === "number"
-      ? av - bv
-      : String(av).localeCompare(String(bv));
-  return dir === "asc" ? cmp : -cmp;
-}
-
-/** Disable/enable + the two-step revoke, shared by the desktop row and the
- *  mobile card. Extracted rather than inlined twice so the revoke's auto-disarm
- *  timer exists in exactly one place — two copies would be free to drift. */
-function useKeyActions(k: VirtualKey, onError: (m: string) => void) {
-  const qc = useQueryClient();
-  const [confirmingRevoke, setConfirmingRevoke] = useState(false);
-  // Disarm the two-step confirm a few seconds after arming, so an abandoned
-  // "Revoke" never stays live where a later stray click could fire it.
-  useEffect(() => {
-    if (!confirmingRevoke) return;
-    const t = setTimeout(() => setConfirmingRevoke(false), 6000);
-    return () => clearTimeout(t);
-  }, [confirmingRevoke]);
-  const disable = useMutation({
-    mutationFn: () => disableKey(k.id, !k.disabled),
-    onSuccess: () => void qc.invalidateQueries({ queryKey: ["keys"] }),
-    onError: (e) => onError(e.message),
-  });
-  const revoke = useMutation({
-    mutationFn: () => deleteKey(k.id),
-    onSuccess: () => {
-      setConfirmingRevoke(false);
-      void qc.invalidateQueries({ queryKey: ["keys"] });
-    },
-    onError: (e) => onError(e.message),
-  });
-  return { confirmingRevoke, setConfirmingRevoke, disable, revoke };
-}
-
-type KeyActionProps = { k: VirtualKey; onEdit: (k: VirtualKey) => void; onError: (m: string) => void };
-
-/** The Edit / Disable / Revoke group. `stretch` gives each button the full
- *  column width inside a mobile card; the table row right-aligns them. */
-function KeyActions(props: KeyActionProps & { stretch?: boolean }) {
-  const { confirmingRevoke, setConfirmingRevoke, disable, revoke } = useKeyActions(
-    props.k,
-    props.onError,
+/** Labelled group inside the dialog; groups are separated by a hairline. */
+function Group(props: { title: string; desc?: string; children: ReactNode }) {
+  return (
+    <section className="space-y-3 border-t border-white/[0.06] pt-5 first:border-t-0 first:pt-0">
+      <div>
+        <h4 className="admin-label">{props.title}</h4>
+        {props.desc && <p className="mt-0.5 text-[11.5px] text-[var(--admin-text-dim)]">{props.desc}</p>}
+      </div>
+      {props.children}
+    </section>
   );
+}
+
+/** Segmented single-choice control (radio semantics, 44px tap targets). */
+function Segmented<T extends string>(props: {
+  label: string;
+  value: T;
+  onChange: (v: T) => void;
+  options: { value: T; label: string }[];
+}) {
   return (
     <div
-      className={`flex flex-wrap items-center gap-1.5 ${props.stretch ? "w-full" : "justify-end"}`}
+      role="radiogroup"
+      aria-label={props.label}
+      className="inline-flex w-full gap-0.5 rounded-xl border border-white/[0.08] bg-black/40 p-0.5 sm:w-auto"
     >
-      <Button
-        variant="outline"
-        className={props.stretch ? "flex-1" : undefined}
-        onClick={() => props.onEdit(props.k)}
-      >
-        Edit
-      </Button>
-      <Button
-        variant="outline"
-        className={props.stretch ? "flex-1" : undefined}
-        disabled={disable.isPending}
-        onClick={() => disable.mutate()}
-      >
-        {props.k.disabled ? "Enable" : "Disable"}
-      </Button>
-      {/* Two-step destructive action: the first click arms a short confirm
-          inline instead of a native window.confirm, so the intent is clear
-          and the button gives undo-style feedback. Auto-cancels after a
-          few seconds so an abandoned confirm never lingers armed. */}
-      {confirmingRevoke ? (
-        <>
-          <Button
-            variant="danger"
-            className={props.stretch ? "flex-1" : undefined}
-            disabled={revoke.isPending}
-            onClick={() => revoke.mutate()}
+      {props.options.map((o) => {
+        const on = props.value === o.value;
+        return (
+          <button
+            key={o.value}
+            type="button"
+            role="radio"
+            aria-checked={on}
+            onClick={() => props.onChange(o.value)}
+            className={`min-h-11 flex-1 rounded-[10px] px-3.5 text-[12.5px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500 sm:flex-none ${
+              on
+                ? "bg-white/[0.09] text-[var(--admin-text)] shadow-sm shadow-black/40 ring-1 ring-inset ring-white/[0.10]"
+                : "text-[var(--admin-text-muted)] hover:text-[var(--admin-text)]"
+            }`}
           >
-            {revoke.isPending ? "Revoking…" : "Confirm revoke"}
-          </Button>
-          <Button
-            variant="ghost"
-            className={props.stretch ? "flex-1" : undefined}
-            disabled={revoke.isPending}
-            onClick={() => setConfirmingRevoke(false)}
-          >
-            Cancel
-          </Button>
-        </>
-      ) : (
-        <Button
-          variant="danger"
-          className={props.stretch ? "flex-1" : undefined}
-          onClick={() => setConfirmingRevoke(true)}
-        >
-          Revoke
-        </Button>
-      )}
+            {o.label}
+          </button>
+        );
+      })}
     </div>
   );
 }
 
-/** The model allowlist, rendered identically in the table cell and the card.
- *  Beyond three models the rest fold into a "+N" chip with the full list on
- *  hover — a 10-model allowlist used to push the row's height and width past
- *  every other row's. */
-function ModelList(props: { models: string[] }) {
-  if (props.models.length === 0) {
-    return (
-      <span
-        className="text-[var(--admin-text-dim)]"
-        title="No allowlist: every model group is reachable"
-      >
-        all
-      </span>
-    );
-  }
-  const shown = props.models.slice(0, 3);
-  const rest = props.models.slice(3);
-  return (
-    <span className="flex flex-wrap gap-1">
-      {shown.map((m) => (
-        <Badge key={m} tone="blue">
-          {m}
-        </Badge>
-      ))}
-      {rest.length > 0 && (
-        <Badge tone="gray" title={rest.join(", ")}>
-          +{rest.length}
-        </Badge>
-      )}
-    </span>
-  );
-}
+/* ------------------------------------------------------------------- dialog */
 
-/** One key as a stacked card — the whole list below `md`, where an 8-column
- *  table would only be reachable by scrolling sideways. Shows exactly the
- *  fields the row shows, wrapped instead of truncated. */
-function KeyCard(props: KeyActionProps) {
-  const { k } = props;
-  const status = keyStatus(k);
-  const nowMs = useNow();
-  return (
-    <article
-      aria-label={`${k.alias}, ${status.label}`}
-      className="rounded-xl border border-[var(--admin-border)] bg-[#0c0c0c] p-3.5 transition-colors hover:border-[var(--admin-border-hover)]"
-    >
-      <div className="flex items-start gap-2.5">
-        <span
-          className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[var(--admin-border)] ${STATUS_TILE[status.tone]}`}
-        >
-          <KeyRound size={14} className={STATUS_ICON[status.tone]} />
-        </span>
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-[13.5px] font-medium text-[var(--admin-text)]">{k.alias}</p>
-          <div className="mt-1.5">
-            <StatusBadge tone={status.tone} label={status.label} />
-          </div>
-        </div>
-      </div>
-
-      <div className="mt-3">
-        <ModelList models={k.models} />
-      </div>
-
-      <div className="mt-3">
-        <BudgetCell k={k} />
-      </div>
-
-      <dl className="mt-3 flex flex-wrap gap-x-4 gap-y-1.5 border-t border-[var(--admin-border)] pt-2.5">
-        <div className="flex items-baseline gap-1.5">
-          <dt className="admin-label">rpm</dt>
-          <dd className="font-mono text-[11.5px] tabular-nums text-[var(--admin-text)]">
-            {k.rpm != null ? fmtInt(k.rpm) : "∞"}
-          </dd>
-        </div>
-        <div className="flex items-baseline gap-1.5">
-          <dt className="admin-label">tpm</dt>
-          <dd className="font-mono text-[11.5px] tabular-nums text-[var(--admin-text)]">
-            {k.tpm != null ? fmtInt(k.tpm) : "∞"}
-          </dd>
-        </div>
-        <div className="flex items-baseline gap-1.5">
-          <dt className="admin-label">expires</dt>
-          <dd>
-            <ExpiryText k={k} nowMs={nowMs} />
-          </dd>
-        </div>
-      </dl>
-
-      <div className="mt-3 border-t border-[var(--admin-border)] pt-3">
-        <KeyActions {...props} stretch />
-      </div>
-    </article>
-  );
-}
-
-function KeyRow(props: KeyActionProps) {
-  const { k } = props;
-  const status = keyStatus(k);
-  const nowMs = useNow();
-  return (
-    <tr className="group">
-      {/* Sticky identity cell so horizontal scroll keeps the row's name — and
-          now its status, via the tinted tile — pinned. */}
-      <TD className="sticky left-0 z-10 bg-[var(--admin-surface)] after:absolute after:inset-y-0 after:right-0 after:w-px after:bg-[var(--admin-border)] after:content-['']">
-        <span className="flex items-center gap-2.5">
-          <span
-            className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-[var(--admin-border)] transition-colors group-hover:border-[var(--admin-border-hover)] ${STATUS_TILE[status.tone]}`}
-          >
-            <KeyRound size={13} className={STATUS_ICON[status.tone]} />
-          </span>
-          <span className="min-w-0 truncate font-medium text-[var(--admin-text)]">{k.alias}</span>
-        </span>
-      </TD>
-      <TD>
-        <StatusBadge tone={status.tone} label={status.label} />
-      </TD>
-      <TD>
-        <ModelList models={k.models} />
-      </TD>
-      <TD>
-        <BudgetCell k={k} />
-      </TD>
-      <TD className="font-mono tabular-nums">{k.rpm != null ? fmtInt(k.rpm) : "—"}</TD>
-      <TD className="hidden font-mono tabular-nums lg:table-cell">{k.tpm != null ? fmtInt(k.tpm) : "—"}</TD>
-      <TD className="hidden xl:table-cell">
-        <ExpiryText k={k} nowMs={nowMs} />
-      </TD>
-      <TD>
-        <KeyActions {...props} />
-      </TD>
-    </tr>
-  );
-}
-
-export function VirtualKeysPage() {
+/** One dialog for both create and edit. Mounted only while open, so its state is
+ *  seeded fresh from `target` every time and needs no reset logic. */
+function KeyDialog(props: { target: VirtualKey | "new"; onClose: () => void }) {
   const qc = useQueryClient();
+  const edit = props.target === "new" ? null : props.target;
 
-  // -- list -------------------------------------------------------------------
-  const [pageError, setPageError] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<KeyFilter>("all");
-  const [sortKey, setSortKey] = useState<KeySort>("name");
-  const [sortDir, setSortDir] = useState<SortDir>("asc");
-  const query = useQuery({ queryKey: ["keys"], queryFn: listKeys, refetchInterval: 30_000 });
-
-  // -- create dialog ------------------------------------------------------------
-  const [createOpen, setCreateOpen] = useState(false);
-  const [created, setCreated] = useState<{ key: string; name: string } | null>(null);
-  const [createError, setCreateError] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
-  const [authMode, setAuthMode] = useState<"random" | "custom">("random");
+  const [custom, setCustom] = useState(false);
   const [customKey, setCustomKey] = useState("");
-  const [modelsCsv, setModelsCsv] = useState("");
-  const [budget, setBudget] = useState("");
-  const [rpm, setRpm] = useState("");
-  const [tpm, setTpm] = useState("");
-  const [ttlHours, setTtlHours] = useState("");
-  const [expiryCustom, setExpiryCustom] = useState(false);
+  const [models, setModels] = useState(edit ? edit.models.join(", ") : "");
+  const [budget, setBudget] = useState(edit?.max_budget != null ? String(edit.max_budget) : "");
+  const [rpm, setRpm] = useState(edit?.rpm != null ? String(edit.rpm) : "");
+  const [tpm, setTpm] = useState(edit?.tpm != null ? String(edit.tpm) : "");
+  // Expiry select: "" = never (create) / keep current (edit); "never" = remove (edit only).
+  const [expiry, setExpiry] = useState("");
+  const [hours, setHours] = useState("");
+  const [clr, setClr] = useState({ budget: false, rpm: false, tpm: false, models: false });
+  const [error, setError] = useState<string | null>(null);
+  const [created, setCreated] = useState<{ key: string; name: string } | null>(null);
 
+  // In edit mode the limit inputs are seeded with the current values; only
+  // fields that differ are sent, so an untouched field can never overwrite.
   const budgetN = tryParse(budget);
   const rpmN = tryParse(rpm);
   const tpmN = tryParse(tpm);
-  const ttlHN = tryParse(ttlHours);
-  const numsOk = numbersValid([budgetN, rpmN, tpmN, ttlHN]);
-  const customTooShort = authMode === "custom" && customKey.trim().length < 16;
+  const hoursN = expiry === "custom" ? tryParse(hours) : expiry && expiry !== "never" ? Number(expiry) : null;
+  const numsOk = ![budgetN, rpmN, tpmN, expiry === "custom" ? hoursN : null].some(isBad);
+  const customShort = !edit && custom && customKey.trim().length < 16;
+  const customHoursMissing = expiry === "custom" && hoursN == null;
 
-  function openCreate() {
-    setName("");
-    setNameTouched(false);
-    setAuthMode("random");
-    setCustomKey("");
-    setModelsCsv("");
-    setBudget("");
-    setRpm("");
-    setTpm("");
-    setTtlHours("");
-    setExpiryCustom(false);
-    setCreated(null);
-    setCreateError(null);
-    setCreateOpen(true);
-  }
-
-  function closeCreate() {
-    setCreateOpen(false);
-    setCreated(null);
-  }
+  const why =
+    !edit && !name.trim()
+      ? "Name is required"
+      : !numsOk
+        ? "A limit holds something that isn't a number"
+        : customShort
+          ? "A custom key must be at least 16 characters"
+          : customHoursMissing
+            ? "Enter the custom expiry in hours, or pick a duration"
+            : null;
 
   const create = useMutation({
     mutationFn: (body: Parameters<typeof generateKey>[0]) => generateKey(body),
-    onSuccess: (data) => setCreated({ key: data.key, name: name.trim() }),
-    onError: (e) => setCreateError(e.message),
-  });
-
-  // -- edit dialog --------------------------------------------------------------
-  const [editTarget, setEditTarget] = useState<VirtualKey | null>(null);
-  const [editError, setEditError] = useState<string | null>(null);
-  const [editBudget, setEditBudget] = useState("");
-  const [editRpm, setEditRpm] = useState("");
-  const [editTpm, setEditTpm] = useState("");
-  const [editModels, setEditModels] = useState("");
-  const [editExpiryCustom, setEditExpiryCustom] = useState(false);
-  const [editHours, setEditHours] = useState("");
-  const [clearExpiry, setClearExpiry] = useState(false);
-  const [clearBudget, setClearBudget] = useState(false);
-  const [clearRpm, setClearRpm] = useState(false);
-  const [clearTpm, setClearTpm] = useState(false);
-  const [clearModels, setClearModels] = useState(false);
-
-  const editBudgetN = tryParse(editBudget);
-  const editRpmN = tryParse(editRpm);
-  const editTpmN = tryParse(editTpm);
-  const editHoursN = tryParse(editHours);
-  const editNumsOk = numbersValid([editBudgetN, editRpmN, editTpmN, editHoursN]);
-  // Mirrors the create form: "custom" wins, otherwise a value that is not one
-  // of the listed durations (because it was typed in) also means custom.
-  const editExpiryPicked =
-    editExpiryCustom ||
-    (editHours !== "" &&
-      !EXPIRY_OPTIONS.some((o) => o.value !== "custom" && o.value === editHours))
-      ? "custom"
-      : editHours;
-
-  function pickEditExpiry(v: string) {
-    if (v === "custom") setEditExpiryCustom(true);
-    else {
-      setEditExpiryCustom(false);
-      setEditHours(v);
-    }
-  }
-
-  function openEdit(k: VirtualKey) {
-    setEditTarget(k);
-    // Seed every editable field from the key being edited. The inputs are the
-    // only source the patch is built from, so an unseeded field would either
-    // send a stale value from the previously edited key or read as "empty"
-    // and overwrite the stored one (models = [] silently means all-allowed).
-    setEditBudget(k.max_budget != null ? String(k.max_budget) : "");
-    setEditRpm(k.rpm != null ? String(k.rpm) : "");
-    setEditTpm(k.tpm != null ? String(k.tpm) : "");
-    setEditModels(k.models.join(", "));
-    // Expiry is deliberately left blank: an untouched field must mean "leave
-    // unchanged", and pre-filling a duration would silently reschedule the key
-    // every time the dialog is opened. The current value is shown as a hint and
-    // can be cleared explicitly.
-    setEditExpiryCustom(false);
-    setEditHours("");
-    setClearExpiry(false);
-    setClearBudget(false);
-    setClearRpm(false);
-    setClearTpm(false);
-    setClearModels(false);
-    setEditError(null);
-  }
-
-  function closeEdit() {
-    setEditTarget(null);
-    setEditError(null);
-  }
-
-  const editSave = useMutation({
-    mutationFn: (args: { id: string; patch: Parameters<typeof patchKey>[1] }) =>
-      patchKey(args.id, args.patch),
-    onSuccess: () => {
-      closeEdit();
+    onSuccess: (d) => {
+      setCreated({ key: d.key, name: name.trim() });
       void qc.invalidateQueries({ queryKey: ["keys"] });
     },
-    onError: (e) => setEditError(e.message),
+    onError: (e) => setError(e.message),
   });
+  const save = useMutation({
+    mutationFn: (a: { id: string; patch: Parameters<typeof patchKey>[1] }) => patchKey(a.id, a.patch),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["keys"] });
+      props.onClose();
+    },
+    onError: (e) => setError(e.message),
+  });
+  const pending = create.isPending || save.isPending;
 
-  // Picking "Custom…" without typing hours used to be a silent no-op: the field
-  // read as set, but the patch carried no expiry at all. Block the save and say
-  // why inline instead — hover-only feedback is invisible on touch.
-  const editExpiryMissing = editExpiryPicked !== "" && editHoursN == null;
-  const editBlockedWhy = !editNumsOk
-    ? "A limit field holds something that isn't a number"
-    : editExpiryMissing
-      ? "Enter the custom expiry in hours, or pick a duration"
-      : editSave.isPending
-        ? "Saving…"
-        : null;
-  const canSaveEdit = editBlockedWhy == null;
+  function submit() {
+    setNameTouched(true);
+    if (why || pending) return;
+    setError(null);
+    const list = parseCsv(models);
+    if (!edit) {
+      create.mutate({
+        name: name.trim(),
+        custom_key: custom ? customKey.trim() : undefined,
+        ...(list.length > 0 ? { models: list } : {}),
+        max_budget: budgetN ?? undefined,
+        rpm: rpmN ?? undefined,
+        tpm: tpmN ?? undefined,
+        ttl_seconds: hoursN != null ? Math.round(hoursN * 3600) : undefined,
+      });
+      return;
+    }
+    const patch: Parameters<typeof patchKey>[1] = {};
+    if (clr.budget) patch.max_budget = null;
+    else if (budgetN != null && budgetN !== edit.max_budget) patch.max_budget = budgetN;
+    if (clr.rpm) patch.rpm = null;
+    else if (rpmN != null && rpmN !== edit.rpm) patch.rpm = rpmN;
+    if (clr.tpm) patch.tpm = null;
+    else if (tpmN != null && tpmN !== edit.tpm) patch.tpm = tpmN;
+    if (clr.models) patch.models = [];
+    else if (list.length > 0 && list.join(",") !== edit.models.join(",")) patch.models = list;
+    if (expiry === "never") patch.expires_at = null;
+    else if (hoursN != null) patch.expires_at = Math.round(Date.now() / 1000 + hoursN * 3600);
+    save.mutate({ id: edit.id, patch });
+  }
 
-  // -- create-form derived state ------------------------------------------------
-  const models = parseCsv(modelsCsv);
-  const activePreset = LIMIT_PRESETS.find(
-    (p) =>
-      p.values.budget === budget &&
-      p.values.rpm === rpm &&
-      p.values.tpm === tpm &&
-      p.values.ttl === ttlHours,
+  /* reveal-once */
+  if (created) {
+    return (
+      <Dialog
+      glass
+        open
+        contained
+        icon={Check}
+        title="Key created"
+        subtitle={`${created.name || "Key"} is live. Copy the plaintext now; it is never shown again.`}
+        onClose={props.onClose}
+      >
+        <div className="space-y-4">
+          <div className="rounded-xl border border-white/[0.08] bg-black/45 p-4">
+            <p className="admin-label mb-1.5">Secret key</p>
+            <p className="break-all font-mono text-[14px] leading-relaxed text-[var(--admin-text)]">{created.key}</p>
+          </div>
+          <p className="flex items-start gap-2.5 rounded-lg border border-amber-500/30 bg-[#1a1408] px-3.5 py-3 text-[12px] leading-relaxed text-amber-200">
+            <AlertTriangle size={14} className="mt-0.5 shrink-0 text-amber-400" />
+            Only a SHA-256 hash is stored. Keep this key in your secret manager.
+          </p>
+          <p className="break-all font-mono text-[12px] text-[var(--admin-text-muted)]">
+            Authorization: Bearer <span className="text-[var(--admin-text)]">{created.key}</span>
+          </p>
+          <div className="flex flex-col-reverse gap-2.5 border-t border-[var(--admin-border)] pt-4 sm:flex-row sm:justify-end">
+            <CopyButton text={created.key} />
+            <Button onClick={props.onClose}>Done</Button>
+          </div>
+        </div>
+      </Dialog>
+    );
+  }
+
+  const expiryOptions = edit
+    ? [
+        { value: "", label: edit.expires_at != null ? `Keep (${fmtDateTime(edit.expires_at)})` : "Keep (never expires)" },
+        { value: "never", label: "Remove expiry" },
+        ...EXPIRY_PRESETS,
+      ]
+    : [{ value: "", label: "Never expires" }, ...EXPIRY_PRESETS];
+
+  return (
+    <Dialog
+      glass
+      open
+      contained
+      wide
+      icon={KeyRound}
+      title={edit ? `Edit ${edit.alias}` : "New virtual key"}
+      subtitle={edit ? "Only the fields you change are saved." : "Every limit is optional and can be changed later."}
+      onClose={props.onClose}
+      footer={
+        <>
+          {!edit && (
+            <p className="hidden min-w-0 flex-1 truncate font-mono text-[11.5px] tabular-nums text-[var(--admin-text-dim)] sm:block">
+              {budget ? `$${budget}` : "no cap"} · {rpm || "∞"} rpm · {tpm || "∞"} tpm ·{" "}
+              {expiry === "custom" ? (hours ? `${hours}h` : "custom") : (expiryOptions.find((o) => o.value === expiry)?.label ?? "").toLowerCase()}
+            </p>
+          )}
+          <Button variant="ghost" type="button" onClick={props.onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" form="key-form" disabled={!!why || pending} title={why ?? undefined}>
+            {pending ? "Saving…" : edit ? "Save changes" : "Create key"}
+          </Button>
+        </>
+      }
+    >
+      <form
+        id="key-form"
+        className="-mr-2 min-h-0 flex-1 space-y-5 overflow-y-auto pr-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          submit();
+        }}
+      >
+        {!edit && (
+          <Group title="Identity" desc="Who this key is for and how its secret is made.">
+            <Field label="Name" hint="A label for where this key is used.">
+              <Input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                onBlur={() => setNameTouched(true)}
+                placeholder="ci-pipeline"
+                autoFocus
+              />
+            </Field>
+            {nameTouched && !name.trim() && <FieldError>Name is required</FieldError>}
+            <Segmented
+              label="Secret source"
+              value={custom ? "own" : "generated"}
+              onChange={(v) => setCustom(v === "own")}
+              options={[
+                { value: "generated", label: "Generate for me" },
+                { value: "own", label: "Bring my own" },
+              ]}
+            />
+            {custom && (
+              <div>
+                <Field label="Custom key" hint="At least 16 characters; stored hashed.">
+                  <Input
+                    value={customKey}
+                    onChange={(e) => setCustomKey(e.target.value)}
+                    placeholder="sk-my-own-value…"
+                    className="font-mono"
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </Field>
+                {customKey.trim().length > 0 && customShort && (
+                  <FieldError>Custom keys must be at least 16 characters</FieldError>
+                )}
+              </div>
+            )}
+          </Group>
+        )}
+
+        <Group title="Limits" desc="Leave a field empty for no limit.">
+          {!edit && (
+            <div role="group" aria-label="Limit presets" className="flex flex-wrap items-center gap-1.5">
+              <span className="admin-label mr-1">Start from</span>
+              {PRESETS.map((p) => {
+                const on =
+                  p.budget === budget &&
+                  p.rpm === rpm &&
+                  p.tpm === tpm &&
+                  p.ttl === (expiry === "custom" ? hours : expiry);
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    aria-pressed={on}
+                    onClick={() => {
+                      setBudget(p.budget);
+                      setRpm(p.rpm);
+                      setTpm(p.tpm);
+                      setExpiry(p.ttl);
+                      setHours("");
+                    }}
+                    className={`min-h-11 rounded-full border px-3.5 text-[12.5px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500 ${
+                      on
+                        ? "border-indigo-400/25 bg-[var(--admin-accent-soft)] text-[var(--admin-text)]"
+                        : "border-white/[0.08] text-[var(--admin-text-muted)] hover:bg-white/[0.05] hover:text-[var(--admin-text)]"
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          <div className="grid gap-x-3 gap-y-2 rounded-xl border border-white/[0.07] bg-black/30 p-3.5 sm:grid-cols-3">
+            <LimitField
+              label="Budget"
+              hint="Lifetime spend cap."
+              value={budget}
+              onChange={setBudget}
+              placeholder="unlimited"
+              suffix="USD"
+              step="any"
+              clear={edit ? { checked: clr.budget, onChange: (v) => setClr((c) => ({ ...c, budget: v })) } : undefined}
+            />
+            <LimitField
+              label="RPM"
+              hint="Requests per minute."
+              value={rpm}
+              onChange={setRpm}
+              placeholder="unlimited"
+              clear={edit ? { checked: clr.rpm, onChange: (v) => setClr((c) => ({ ...c, rpm: v })) } : undefined}
+            />
+            <LimitField
+              label="TPM"
+              hint="Tokens per minute."
+              value={tpm}
+              onChange={setTpm}
+              placeholder="unlimited"
+              clear={edit ? { checked: clr.tpm, onChange: (v) => setClr((c) => ({ ...c, tpm: v })) } : undefined}
+            />
+          </div>
+        </Group>
+
+        <Group title="Access" desc="When the key stops working and which models it can reach.">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Expires in" hint={edit ? "Counted from now." : "Counted from creation."}>
+              <Select value={expiry} onChange={setExpiry} options={expiryOptions} className="w-full" />
+            </Field>
+            {expiry === "custom" && (
+              <div>
+                <Field label="Custom hours" hint="Hours from now.">
+                  <NumberInput min={0} step="any" value={hours} onChange={setHours} placeholder="720" suffix="hrs" />
+                </Field>
+                {isBad(hoursN) && <FieldError>Not a number</FieldError>}
+              </div>
+            )}
+          </div>
+          <div>
+            <div className="mb-1.5 flex items-center justify-between gap-2">
+              <span className="admin-label">Model allowlist</span>
+              <span className="text-[11px] text-[var(--admin-text-dim)]">
+                {parseCsv(models).length === 0 ? "empty = all models" : `${parseCsv(models).length} allowed`}
+              </span>
+            </div>
+            <ModelChips value={models} onChange={setModels} />
+            {edit && (
+              <label className="mt-1 flex min-h-11 cursor-pointer items-center gap-2 text-[12px] text-[var(--admin-text-muted)]">
+                <input
+                  type="checkbox"
+                  checked={clr.models}
+                  onChange={(e) => setClr((c) => ({ ...c, models: e.target.checked }))}
+                  className="h-4 w-4 accent-white"
+                />
+                Remove allowlist (all models)
+              </label>
+            )}
+          </div>
+        </Group>
+
+        {why && (nameTouched || edit) && (
+          <p role="alert" className="flex items-center gap-1.5 text-[11.5px] text-amber-400">
+            <AlertTriangle size={12} className="shrink-0" />
+            {why}
+          </p>
+        )}
+        {error && <ErrorText>{error}</ErrorText>}
+      </form>
+    </Dialog>
   );
-  const expiryPicked =
-    expiryCustom || (ttlHours !== "" && !EXPIRY_OPTIONS.some((o) => o.value !== "custom" && o.value === ttlHours))
-      ? "custom"
-      : ttlHours;
-  const canCreate = name.trim() !== "" && numsOk && !customTooShort && !create.isPending;
-  const blockedWhy = !name.trim()
-    ? "Name is required"
-    : !numsOk
-      ? "A limit field holds something that isn't a number"
-      : customTooShort
-        ? "A custom key must be at least 16 characters"
-        : create.isPending
-          ? "Creating…"
-          : null;
+}
 
-  function pickExpiry(v: string) {
-    if (v === "custom") {
-      setExpiryCustom(true);
-    } else {
-      setExpiryCustom(false);
-      setTtlHours(v);
-    }
-  }
+/* --------------------------------------------------------------------- page */
 
-  // -- list view model ---------------------------------------------------------
-  // Search matches the key alias or any model on its allowlist, so an operator
-  // can find a key by the model it was scoped to, not just by name. The
-  // summaries are computed over the FULL set (not the filtered view) so the
-  // counts always describe the whole account, whatever the current search.
-  const allKeys = query.data?.keys ?? [];
+export function VirtualKeysPage() {
+  const query = useQuery({ queryKey: ["keys"], queryFn: listKeys, refetchInterval: 30_000 });
+  const [pageError, setPageError] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState<Filter>("all");
+  const [sort, setSort] = useState<Sort>("name");
+  const [dir, setDir] = useState<"asc" | "desc">("asc");
+  const [dialog, setDialog] = useState<VirtualKey | "new" | null>(null);
+
+  const all = query.data?.keys ?? [];
   const needle = search.trim().toLowerCase();
-  const searchedKeys = needle
-    ? allKeys.filter(
-        (k) =>
-          k.alias.toLowerCase().includes(needle) ||
-          k.models.some((m) => m.toLowerCase().includes(needle)),
-      )
-    : allKeys;
-  // Search narrows, then the filter chip narrows further. Sorting is stable and
-  // applied last, so the card list below `md` and the table above it can never
-  // disagree about order.
-  const visibleKeys = [...searchedKeys]
+  const searched = needle
+    ? all.filter((k) => k.alias.toLowerCase().includes(needle) || k.models.some((m) => m.toLowerCase().includes(needle)))
+    : all;
+  const visible = searched
     .filter((k) => matchesFilter(k, filter))
-    .sort((a, b) => compareKeys(a, b, sortKey, sortDir) || a.alias.localeCompare(b.alias));
-
-  function onSort(k: KeySort) {
-    if (k === sortKey) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
-    else {
-      setSortKey(k);
-      // Names read best A→Z; every measure is most useful highest-first.
-      setSortDir(k === "name" ? "asc" : "desc");
-    }
-  }
-
-  const activeCount = allKeys.filter((k) => !k.disabled).length;
-  const totalSpend = allKeys.reduce((s, k) => s + (k.spend_to_date || 0), 0);
-  const nearCap = allKeys.filter(isNearCap).length;
-  // Budget-cap aggregates for the Spend tile's utilization bar: the sum of all
-  // caps (uncapped keys contribute nothing — a ∞ cap would make the fraction
-  // meaningless) and how many keys actually have a cap.
-  const cappedKeys = allKeys.filter((k) => k.max_budget != null && k.max_budget > 0).length;
-  const totalBudget = allKeys.reduce((s, k) => s + (k.max_budget && k.max_budget > 0 ? k.max_budget : 0), 0);
-
-  // `aria-sort` lives on the <th>, so mark the active column by its index.
-  const headSort = {
-    [SORT_COLUMN_INDEX[sortKey]]: sortDir === "asc" ? ("ascending" as const) : ("descending" as const),
-  };
+    .sort((a, b) => compareKeys(a, b, sort, dir) || a.alias.localeCompare(b.alias));
+  // Counts describe the whole account, whatever the search says.
+  const counts = Object.fromEntries(FILTERS.map((f) => [f.id, all.filter((k) => matchesFilter(k, f.id)).length])) as Record<
+    Filter,
+    number
+  >;
 
   return (
     <div>
       <PageHeader
         title="Virtual Keys"
-        subtitle="Client credentials callers authenticate with — per-key budgets, rate limits, and model access."
+        subtitle="Client credentials callers authenticate with: per-key budgets, rate limits and model access."
         right={
-          <Button onClick={openCreate}>
+          <Button onClick={() => setDialog("new")}>
             <Plus size={14} /> New key
           </Button>
         }
@@ -985,65 +885,13 @@ export function VirtualKeysPage() {
         </div>
       )}
 
-      {/* Account-level summary — the shared StatCard (accent glow + icon) so
-          these read as the same "live surface" language the Dashboard uses,
-          rather than a flat one-off box. */}
-      {query.data && query.data.keys.length > 0 && (
-        <div className="mb-3 grid grid-cols-2 gap-2.5 sm:grid-cols-4">
-          <StatCard
-            icon={KeyRound}
-            label="Keys"
-            value={fmtInt(query.data.keys.length)}
-            numeric={query.data.keys.length}
-            format={fmtInt}
-            sub={`${activeCount} active`}
-          />
-          <StatCard
-            icon={ShieldCheck}
-            label="Active"
-            value={fmtInt(activeCount)}
-            numeric={activeCount}
-            format={fmtInt}
-            tone="success"
-            sub="in rotation"
-          />
-          <StatCard
-            icon={Wallet}
-            label="Spend to date"
-            value={fmtUsd(totalSpend)}
-            numeric={totalSpend}
-            format={fmtUsd}
-            tone="brand"
-            sub={`${cappedKeys} of budget cap${cappedKeys === 1 ? "" : "s"} used`}
-            progress={
-              totalBudget > 0
-                ? {
-                    value: Math.min(1, totalSpend / totalBudget),
-                    color: totalSpend / totalBudget >= 1 ? "bg-red-400" : undefined,
-                  }
-                : undefined
-            }
-            progressRight={totalBudget > 0 ? `of ${fmtUsd(totalBudget)} caps` : undefined}
-          />
-          <StatCard
-            icon={AlertTriangle}
-            label="Near cap"
-            value={fmtInt(nearCap)}
-            numeric={nearCap}
-            format={fmtInt}
-            tone={nearCap > 0 ? "warning" : "default"}
-            sub={nearCap > 0 ? "≥80% of budget" : "all clear"}
-          />
-        </div>
-      )}
+      {all.length > 0 && <SummaryStrip keys={all} />}
 
       <Card>
         {query.isLoading && (
-          /* Skeleton rows rather than a lone spinner, so the first paint has
-             the shape of the list that is about to arrive. */
-          <div className="space-y-2.5 p-3">
+          <div className="space-y-px p-4">
             {[0, 1, 2].map((i) => (
-              <div key={i} className="admin-skeleton h-[74px] w-full rounded-xl" />
+              <div key={i} className="admin-skeleton h-[68px] w-full rounded-lg" />
             ))}
           </div>
         )}
@@ -1052,664 +900,72 @@ export function VirtualKeysPage() {
             <ErrorText>{query.error.message}</ErrorText>
           </div>
         )}
-        {query.data && query.data.keys.length > 0 && (
-          <div className="space-y-2.5 border-b border-[var(--admin-border)] px-4 py-3">
-            <div className="flex items-center gap-3">
-              <SearchInput
-                value={search}
-                onChange={setSearch}
-                placeholder="Search by name or model…"
-                className="min-w-0 flex-1"
-              />
-              {/* The sortable headers live inside the table, which is hidden
-                  below md — so the cards need the same control up here. */}
-              <Select
-                className="md:hidden"
-                value={sortKey}
-                onChange={(v) => setSortKey(v as KeySort)}
-                options={SORT_OPTIONS}
-              />
-              <span className="hidden shrink-0 font-mono text-[11px] tabular-nums text-[var(--admin-text-dim)] sm:block">
-                {needle || filter !== "all"
-                  ? `${visibleKeys.length}/${allKeys.length}`
-                  : `${allKeys.length}`}
-              </span>
+
+        {query.data && all.length === 0 && (
+          <div className="flex flex-col items-center gap-3 px-4 py-14 text-center">
+            <KeyRound size={20} className="text-[var(--admin-text-dim)]" />
+            <div>
+              <p className="text-[13.5px] font-medium text-[var(--admin-text)]">No virtual keys yet</p>
+              <p className="mt-1 text-[12px] text-[var(--admin-text-dim)]">
+                Issue a credential to give an app its own budget, rate limits and model access.
+              </p>
             </div>
-            <div className="-mx-1 flex flex-wrap gap-2 px-1">
-              {FILTERS.map((f) => (
-                <Pill
-                  key={f.id}
-                  label={f.label}
-                  icon={f.icon}
-                  active={filter === f.id}
-                  count={allKeys.filter((k) => matchesFilter(k, f.id)).length}
-                  onClick={() => setFilter(f.id)}
-                />
-              ))}
-            </div>
+            <Button onClick={() => setDialog("new")}>
+              <Plus size={14} /> New key
+            </Button>
           </div>
         )}
-        {query.data &&
-          (query.data.keys.length === 0 ? (
-            /* The zero state should offer the action it is describing. */
-            <div className="admin-empty-state flex flex-col items-center gap-3 px-4 py-12 text-center">
-              <span className="flex h-11 w-11 items-center justify-center rounded-full bg-white/[0.04]">
-                <KeyRound size={18} className="text-[var(--admin-text-dim)]" />
-              </span>
-              <div>
-                <p className="text-[13.5px] font-medium text-[var(--admin-text)]">
-                  No virtual keys yet
-                </p>
-                <p className="mt-1 text-[12px] text-[var(--admin-text-dim)]">
-                  Issue a client credential to give an app its own budget, rate limits and
-                  model access.
-                </p>
-              </div>
-              <Button onClick={openCreate}>
-                <Plus size={14} /> New key
-              </Button>
-            </div>
-          ) : visibleKeys.length === 0 ? (
-            <EmptyState>
-              No keys match.{" "}
-              <button
-                type="button"
-                onClick={() => {
-                  setSearch("");
-                  setFilter("all");
-                }}
-                className="font-medium text-[var(--admin-accent)] underline-offset-2 hover:underline focus-visible:outline-none focus-visible:underline"
-              >
-                Clear search and filters
-              </button>
-            </EmptyState>
-          ) : (
-            <>
-              <div className="hidden md:block">
-                <Table
-                  head={[
-                    <SortHeader
-                      key="name"
-                      label="Name"
-                      k="name"
-                      active={sortKey}
-                      dir={sortDir}
-                      onSort={onSort}
-                    />,
-                    "Status",
-                    "Models",
-                    <SortHeader
-                      key="budget"
-                      label="Budget"
-                      k="budget"
-                      active={sortKey}
-                      dir={sortDir}
-                      onSort={onSort}
-                    />,
-                    <SortHeader
-                      key="rpm"
-                      label="RPM"
-                      k="rpm"
-                      active={sortKey}
-                      dir={sortDir}
-                      onSort={onSort}
-                    />,
-                    "TPM",
-                    <SortHeader
-                      key="expires"
-                      label="Expires"
-                      k="expires"
-                      active={sortKey}
-                      dir={sortDir}
-                      onSort={onSort}
-                    />,
-                    "",
-                  ]}
-                  headSort={headSort}
+
+        {all.length > 0 && (
+          <>
+            <div className="space-y-2 border-b border-[var(--admin-border)] px-4 py-3">
+              <div className="flex items-center gap-2">
+                <SearchInput
+                  value={search}
+                  onChange={setSearch}
+                  placeholder="Search by name or model…"
+                  className="min-w-0 flex-1"
+                />
+                <Select value={sort} onChange={(v) => setSort(v as Sort)} options={SORT_OPTIONS} />
+                <Button
+                  variant="outline"
+                  aria-label={dir === "asc" ? "Sort ascending" : "Sort descending"}
+                  onClick={() => setDir((d) => (d === "asc" ? "desc" : "asc"))}
                 >
-                  {visibleKeys.map((k) => (
-                    <KeyRow key={k.id} k={k} onEdit={openEdit} onError={setPageError} />
-                  ))}
-                </Table>
+                  {dir === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
+                </Button>
               </div>
-              <div className="space-y-2.5 p-2.5 md:hidden">
-                {visibleKeys.map((k) => (
-                  <KeyCard key={k.id} k={k} onEdit={openEdit} onError={setPageError} />
+              <FilterTabs value={filter} onChange={setFilter} counts={counts} />
+            </div>
+
+            {visible.length === 0 ? (
+              <EmptyState>
+                No keys match.{" "}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSearch("");
+                    setFilter("all");
+                  }}
+                  className="font-medium text-[var(--admin-accent)] underline-offset-2 hover:underline focus-visible:outline-none focus-visible:underline"
+                >
+                  Clear search and filters
+                </button>
+              </EmptyState>
+            ) : (
+              <ul className="divide-y divide-[var(--admin-border)]">
+                {visible.map((k) => (
+                  <KeyRow key={k.id} k={k} onEdit={setDialog} onError={setPageError} />
                 ))}
-              </div>
-            </>
-          ))}
+              </ul>
+            )}
+          </>
+        )}
       </Card>
 
-      {/* -- create / reveal-once ------------------------------------------- */}
-      <Dialog
-        open={createOpen}
-        wide
-        contained
-        icon={created ? Check : KeyRound}
-        title={created ? "Key created" : "New virtual key"}
-        subtitle={
-          created
-            ? `${created.name || "Key"} is live — copy the plaintext now, it's never shown again.`
-            : "Issue a client credential. Every limit is optional and editable later."
-        }
-        onClose={closeCreate}
-      >
-        {created ? (
-          <div className="flex min-h-0 flex-1 flex-col">
-            <div className="-mr-1 min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
-              {/* Reveal-once secret panel — elevated neutral surface with a
-                  faint emerald success wash, so the plaintext reads as the
-                  single focal value of a completed action. */}
-              <div className="relative overflow-hidden rounded-2xl border border-emerald-500/20 bg-[#141414] p-4">
-                <span
-                  aria-hidden
-                  className="pointer-events-none absolute inset-0"
-                  style={{
-                    background:
-                      "radial-gradient(120% 90% at 100% 0%, rgba(52,211,153,0.08) 0%, transparent 60%)",
-                  }}
-                />
-                <div className="relative flex items-center gap-3">
-                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#1a1a1a]">
-                    <Check className="h-4.5 w-4.5 text-emerald-400" />
-                  </span>
-                  <div className="min-w-0">
-                    <p className="text-[14px] font-semibold text-[var(--admin-text)]">
-                      {created.name || "Key"} created
-                    </p>
-                    <p className="mt-0.5 text-[12px] text-[var(--admin-text-muted)]">
-                      Copy it now — the plaintext is never shown again.
-                    </p>
-                  </div>
-                </div>
-                <div className="relative mt-3.5">
-                  <p className="admin-label mb-1.5">Secret key</p>
-                  <p className="break-all font-mono text-[15px] leading-relaxed tracking-wide text-[var(--admin-text)]">
-                    {created.key}
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex items-start gap-2.5 rounded-lg border border-amber-500/30 bg-[#1a1408] px-3.5 py-3">
-                <AlertTriangle size={14} className="mt-0.5 shrink-0 text-amber-400" />
-                <p className="text-[12px] leading-relaxed text-amber-200">
-                  This is the only time the plaintext is shown. wiwi stores a SHA-256 hash — keep
-                  the key in your secret manager.
-                </p>
-              </div>
-
-              <div className="rounded-lg border border-[var(--admin-border)] bg-[#0c0c0c] px-3.5 py-3">
-                <p className="admin-label mb-1.5">Authenticate with</p>
-                <p className="break-all font-mono text-[12px] text-[var(--admin-text-muted)]">
-                  Authorization: Bearer <span className="text-[var(--admin-text)]">{created.key}</span>
-                </p>
-                <p className="mt-1.5 text-[11px] text-[var(--admin-text-dim)]">
-                  Works on /v1/chat/completions, /v1/responses and /v1/messages (x-api-key is also
-                  accepted on the Anthropic surface).
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-5 flex flex-col-reverse gap-2.5 border-t border-[#171717] pt-4 sm:flex-row sm:items-center sm:justify-end">
-              <CopyButton text={created.key} />
-              <Button
-                className="min-w-0 sm:w-auto"
-                onClick={() => {
-                  closeCreate();
-                  void qc.invalidateQueries({ queryKey: ["keys"] });
-                }}
-              >
-                Done
-              </Button>
-            </div>
-          </div>
-        ) : (
-          <form
-            className="flex min-h-0 flex-1 flex-col"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!name.trim() || !numsOk || customTooShort) return;
-              setCreateError(null);
-              const modelList = parseCsv(modelsCsv);
-              create.mutate({
-                name: name.trim(),
-                custom_key: authMode === "custom" ? customKey.trim() : undefined,
-                ...(modelList.length > 0 ? { models: modelList } : {}),
-                max_budget: budgetN ?? undefined,
-                rpm: rpmN ?? undefined,
-                tpm: tpmN ?? undefined,
-                ttl_seconds: ttlHN != null ? Math.round(ttlHN * 3600) : undefined,
-              });
-            }}
-          >
-            <div className="-mr-1 min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
-              <p className="flex items-start gap-2.5 rounded-lg border border-[var(--admin-border)] bg-[#0c0c0c] px-3.5 py-3 text-[12px] leading-relaxed text-[var(--admin-text-muted)]">
-                <ShieldCheck size={14} className="mt-0.5 shrink-0 text-[var(--admin-text-dim)]" />
-                <span>
-                  Limits are optional — leave any of them empty for unrestricted access. Every limit
-                  can be changed later from the key&apos;s Edit action.
-                </span>
-              </p>
-
-              <FormSection index="01" icon={KeyRound} title="Identity" desc="Name this key and choose how it's generated.">
-                <div>
-                  <Field label="Name" hint="A label for where this key will be used.">
-                    <Input
-                      value={name}
-                      onChange={(e) => setName(e.target.value)}
-                      onBlur={() => setNameTouched(true)}
-                      placeholder="ci-pipeline"
-                      autoFocus
-                    />
-                  </Field>
-                  {nameTouched && !name.trim() && <FieldError>Name is required</FieldError>}
-                </div>
-                <div>
-                  <span className="admin-label mb-1.5 block">Key source</span>
-                  <div className="flex flex-col gap-3 sm:flex-row">
-                    <KeySourceCard
-                      active={authMode === "random"}
-                      icon={Sparkles}
-                      title="Generate random"
-                      desc="Wiwi creates a strong key."
-                      onClick={() => setAuthMode("random")}
-                    />
-                    <KeySourceCard
-                      active={authMode === "custom"}
-                      icon={Upload}
-                      title="Bring your own"
-                      desc="Use an existing secret."
-                      onClick={() => setAuthMode("custom")}
-                    />
-                  </div>
-                </div>
-                {authMode === "custom" && (
-                  <div>
-                    <Field label="Custom key" hint="At least 16 characters; stored hashed.">
-                      <Input
-                        value={customKey}
-                        onChange={(e) => setCustomKey(e.target.value)}
-                        placeholder="sk-my-own-value…"
-                        className="font-mono"
-                      />
-                    </Field>
-                    {customKey.trim().length > 0 && customTooShort && (
-                      <FieldError>Custom keys must be at least 16 characters</FieldError>
-                    )}
-                  </div>
-                )}
-              </FormSection>
-
-              <FormSection
-                index="02"
-                icon={ShieldCheck}
-                title="Access & limits"
-                desc="Constrain which models this key can reach and how much it can spend."
-              >
-                <div>
-                  <div className="mb-1.5 flex items-center justify-between gap-2">
-                    <span className="admin-label">Model allowlist</span>
-                    {models.length === 0 && (
-                      <span className="text-[11px] text-[var(--admin-text-dim)]">empty = all models</span>
-                    )}
-                  </div>
-                  <ModelChips value={modelsCsv} onChange={setModelsCsv} />
-                </div>
-
-                <div>
-                  <span className="admin-label mb-1.5 block">Quick presets</span>
-                  <div className="flex flex-wrap gap-2">
-                    {LIMIT_PRESETS.map((p) => (
-                      <Pill
-                        key={p.id}
-                        label={p.label}
-                        icon={Zap}
-                        active={activePreset?.id === p.id}
-                        onClick={() => {
-                          setBudget(p.values.budget);
-                          setRpm(p.values.rpm);
-                          setTpm(p.values.tpm);
-                          setTtlHours(p.values.ttl);
-                          setExpiryCustom(false);
-                        }}
-                      />
-                    ))}
-                  </div>
-                </div>
-
-                <div className="grid gap-3 sm:grid-cols-3">
-                  <div>
-                    <Field label="Budget" hint="Lifetime spend cap; empty = unlimited.">
-                      <NumberInput
-                        min={0}
-                        step="any"
-                        value={budget}
-                        onChange={setBudget}
-                        placeholder="25"
-                        suffix="USD"
-                      />
-                    </Field>
-                    {isBad(budgetN) && <FieldError>Not a number</FieldError>}
-                  </div>
-                  <div>
-                    <Field label="RPM" hint="Requests/min; empty = unlimited.">
-                      <NumberInput
-                        min={0}
-                        value={rpm}
-                        onChange={setRpm}
-                        placeholder="60"
-                      />
-                    </Field>
-                    {isBad(rpmN) && <FieldError>Not a number</FieldError>}
-                  </div>
-                  <div>
-                    <Field label="TPM" hint="Tokens/min; empty = unlimited.">
-                      <NumberInput
-                        min={0}
-                        value={tpm}
-                        onChange={setTpm}
-                        placeholder="100000"
-                      />
-                    </Field>
-                    {isBad(tpmN) && <FieldError>Not a number</FieldError>}
-                  </div>
-                </div>
-              </FormSection>
-
-              <FormSection index="03" icon={Clock} title="Lifetime" desc="When this key stops working.">
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <Field label="Expires in" hint="Pick a duration or set a custom one.">
-                    <Select
-                      value={expiryPicked}
-                      onChange={pickExpiry}
-                      options={EXPIRY_OPTIONS}
-                    />
-                  </Field>
-                  {expiryPicked === "custom" && (
-                    <div>
-                      <Field label="Custom hours" hint="Hours from now; empty = never expires.">
-                        <NumberInput
-                          min={0}
-                          step="any"
-                          value={ttlHours}
-                          onChange={setTtlHours}
-                          placeholder="720"
-                          suffix="hrs"
-                        />
-                      </Field>
-                      {isBad(ttlHN) && <FieldError>Not a number</FieldError>}
-                    </div>
-                  )}
-                </div>
-              </FormSection>
-
-              {createError && <ErrorText>{createError}</ErrorText>}
-            </div>
-
-            {/* Sticky summary + actions. Kept OUT of the scrolling body so the
-                live recap and the primary CTA are always reachable, whatever
-                the form height — on a short phone the action bar never scrolls
-                out from under the user's thumb. */}
-            <div className="mt-5 shrink-0 border-t border-[#171717] pt-4">
-              {/* Live recap — every picked limit reads at a glance so the user
-                  can commit without scrolling back up to check each field. */}
-              <div className="mb-3.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-[var(--admin-text-dim)]">
-                <span className="admin-label">Summary</span>
-                <span className="font-mono tabular-nums text-[var(--admin-text-muted)]">
-                  {models.length > 0 ? `${models.length} model${models.length > 1 ? "s" : ""}` : "all models"}
-                </span>
-                <span aria-hidden>·</span>
-                <span className="font-mono tabular-nums text-[var(--admin-text-muted)]">
-                  {budget.trim() ? `$${budget.trim()} budget` : "unlimited budget"}
-                </span>
-                <span aria-hidden>·</span>
-                <span className="font-mono tabular-nums text-[var(--admin-text-muted)]">
-                  {compactNum(rpm)} rpm
-                </span>
-                <span aria-hidden>·</span>
-                <span className="font-mono tabular-nums text-[var(--admin-text-muted)]">
-                  {compactNum(tpm)} tpm
-                </span>
-                <span aria-hidden>·</span>
-                <span className="font-mono tabular-nums text-[var(--admin-text-muted)]">
-                  expires {humanTtl(ttlHours)}
-                </span>
-              </div>
-
-              {/* Readiness: the CTA explains *why* it is disabled inline, rather
-                  than only on hover — hover-only feedback is invisible on touch. */}
-              {!canCreate && blockedWhy && (
-                <p className="mb-2.5 flex items-center gap-1.5 text-[11px] text-amber-400">
-                  <AlertTriangle size={12} className="shrink-0" />
-                  {blockedWhy}
-                </p>
-              )}
-
-              <div className="flex flex-col-reverse gap-2.5 sm:flex-row sm:items-center sm:justify-between">
-                <p className="hidden text-[11px] text-[var(--admin-text-dim)] sm:block">
-                  The plaintext key is shown once, after creation.
-                </p>
-                <div className="flex flex-col-reverse gap-2.5 sm:flex-row">
-                  <Button variant="ghost" type="button" onClick={closeCreate}>
-                    Cancel
-                  </Button>
-                  {/* Neutral primary CTA — solid white button, matching the
-                      dialog's no-color, no-transparency treatment. */}
-                  <Button
-                    type="submit"
-                    disabled={!canCreate}
-                    title={blockedWhy ?? undefined}
-                    className="border-[#e5e5e5] bg-white text-black hover:bg-[#e5e5e5]"
-                  >
-                    {create.isPending ? (
-                      <>
-                        <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                        Creating…
-                      </>
-                    ) : (
-                      <>
-                        <Sparkles size={14} /> Create key
-                      </>
-                    )}
-                  </Button>
-                </div>
-              </div>
-            </div>
-          </form>
-        )}
-      </Dialog>
-
-      {/* -- edit ------------------------------------------------------------ */}
-      <Dialog
-        open={editTarget != null}
-        contained
-        wide
-        icon={ShieldCheck}
-        title={editTarget ? `Edit ${editTarget.alias}` : "Edit key"}
-        subtitle="Every field is left as-is unless you change it here."
-        onClose={closeEdit}
-        footer={
-          <>
-            <Button variant="ghost" type="button" onClick={closeEdit}>
-              Cancel
-            </Button>
-            {/* `form=` binds this footer button to the scrolling form above it,
-                so the primary action can live in the dialog's own footer
-                instead of trailing the fields. */}
-            <Button type="submit" form="edit-key-form" disabled={!canSaveEdit} title={editBlockedWhy ?? undefined}>
-              {editSave.isPending ? "Saving…" : "Save changes"}
-            </Button>
-          </>
-        }
-      >
-        {editTarget && (
-          <form
-            id="edit-key-form"
-            className="flex min-h-0 flex-1 flex-col"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!canSaveEdit) return;
-              setEditError(null);
-              const patch: Parameters<typeof patchKey>[1] = {};
-              // Empty input = leave unchanged (field omitted); a value overwrites;
-              // clearing happens only via the explicit checkboxes/nulls below.
-              if (clearBudget) patch.max_budget = null;
-              else if (editBudgetN != null) patch.max_budget = editBudgetN;
-              if (clearRpm) patch.rpm = null;
-              else if (editRpmN != null) patch.rpm = editRpmN;
-              if (clearTpm) patch.tpm = null;
-              else if (editTpmN != null) patch.tpm = editTpmN;
-              // The allowlist follows the same rule as the numeric fields: a
-              // non-empty list overwrites, an emptied input means "leave
-              // unchanged" and only the checkbox sends the all-models [].
-              if (clearModels) patch.models = [];
-              else if (editModels.trim()) patch.models = parseCsv(editModels);
-              if (clearExpiry) patch.expires_at = null;
-              // `patchKey` takes an absolute timestamp, so a chosen duration is
-              // resolved to one here. An untouched expiry field is "" and sends
-              // nothing — opening the dialog must never reschedule a key.
-              else if (editExpiryPicked !== "" && editHoursN != null) {
-                patch.expires_at = Math.round(Date.now() / 1000 + editHoursN * 3600);
-              }
-              editSave.mutate({ id: editTarget.id, patch });
-            }}
-          >
-            <div className="-mr-1 min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
-              <FormSection
-                index="01"
-                icon={ShieldCheck}
-                title="Access & limits"
-                desc="Empty = leave unchanged. Tick a box to clear it."
-              >
-                <div className="grid gap-3 sm:grid-cols-3">
-                  <div>
-                    <Field
-                      label="Budget"
-                      hint={`Currently ${
-                        editTarget.max_budget != null
-                          ? fmtUsd(editTarget.max_budget)
-                          : "unlimited"
-                      }.`}
-                    >
-                      <NumberInput
-                        min={0}
-                        step="any"
-                        value={editBudget}
-                        onChange={setEditBudget}
-                        placeholder="unchanged"
-                        suffix="USD"
-                      />
-                    </Field>
-                    {isBad(editBudgetN) && <FieldError>Not a number</FieldError>}
-                  </div>
-                  <div>
-                    <Field label="RPM" hint="Requests per minute.">
-                      <NumberInput
-                        min={0}
-                        value={editRpm}
-                        onChange={setEditRpm}
-                        placeholder="unchanged"
-                      />
-                    </Field>
-                    {isBad(editRpmN) && <FieldError>Not a number</FieldError>}
-                  </div>
-                  <div>
-                    <Field label="TPM" hint="Tokens per minute.">
-                      <NumberInput
-                        min={0}
-                        value={editTpm}
-                        onChange={setEditTpm}
-                        placeholder="unchanged"
-                      />
-                    </Field>
-                    {isBad(editTpmN) && <FieldError>Not a number</FieldError>}
-                  </div>
-                </div>
-                <div className="flex flex-col gap-1 rounded-lg border border-[var(--admin-border)] bg-[#0a0a0a] p-1">
-                  <ClearCheck
-                    label="Clear budget → unlimited"
-                    checked={clearBudget}
-                    onChange={setClearBudget}
-                  />
-                  <ClearCheck label="Clear RPM → unlimited" checked={clearRpm} onChange={setClearRpm} />
-                  <ClearCheck label="Clear TPM → unlimited" checked={clearTpm} onChange={setClearTpm} />
-                </div>
-              </FormSection>
-
-              <FormSection
-                index="02"
-                icon={Layers}
-                title="Model access"
-                desc="Which model groups this key can reach."
-              >
-                <div>
-                  <div className="mb-1.5 flex items-center justify-between gap-2">
-                    <span className="admin-label">Model allowlist</span>
-                    {parseCsv(editModels).length === 0 && (
-                      <span className="text-[11px] text-[var(--admin-text-dim)]">
-                        empty = leave unchanged
-                      </span>
-                    )}
-                  </div>
-                  <ModelChips value={editModels} onChange={setEditModels} />
-                </div>
-                <div className="flex flex-col gap-1 rounded-lg border border-[var(--admin-border)] bg-[#0a0a0a] p-1">
-                  <ClearCheck
-                    label="Clear allowlist → all models"
-                    checked={clearModels}
-                    onChange={setClearModels}
-                  />
-                </div>
-              </FormSection>
-
-              <FormSection index="03" icon={Clock} title="Lifetime" desc="When this key stops working.">
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <Field
-                    label="Expires in"
-                    hint={
-                      editTarget.expires_at != null
-                        ? `Currently ${fmtDateTime(editTarget.expires_at)}. Leave as-is to keep it.`
-                        : "This key does not expire."
-                    }
-                  >
-                    <Select
-                      value={editExpiryPicked}
-                      onChange={pickEditExpiry}
-                      options={EXPIRY_OPTIONS}
-                      className="w-full"
-                    />
-                  </Field>
-                  {editExpiryPicked === "custom" && (
-                    <div>
-                      <Field label="Custom hours" hint="Counted from now.">
-                        <NumberInput
-                          min={0}
-                          step="any"
-                          value={editHours}
-                          onChange={setEditHours}
-                          placeholder="720"
-                          suffix="hrs"
-                        />
-                      </Field>
-                      {isBad(editHoursN) && <FieldError>Not a number</FieldError>}
-                    </div>
-                  )}
-                </div>
-                <div className="flex flex-col gap-1 rounded-lg border border-[var(--admin-border)] bg-[#0a0a0a] p-1">
-                  <ClearCheck
-                    label="Clear expiry → never expires"
-                    checked={clearExpiry}
-                    onChange={setClearExpiry}
-                  />
-                </div>
-              </FormSection>
-
-              {editError && <ErrorText>{editError}</ErrorText>}
-            </div>
-          </form>
-        )}
-      </Dialog>
+      {dialog != null && (
+        <KeyDialog key={dialog === "new" ? "new" : dialog.id} target={dialog} onClose={() => setDialog(null)} />
+      )}
     </div>
   );
 }

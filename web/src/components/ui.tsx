@@ -753,6 +753,9 @@ export function Dialog(props: {
   footer?: ReactNode;
   /** Hide the default bottom hairline divider on the footer. */
   footerBordered?: boolean;
+  /** Frosted-glass treatment: blurred translucent panel over a softly dimmed,
+   *  blurred backdrop. Opt-in so every other dialog keeps its solid surface. */
+  glass?: boolean;
 }) {
   const panelRef = useRef<HTMLDivElement | null>(null);
   // `onClose` is read through a ref so the focus effect below can depend on
@@ -820,7 +823,9 @@ export function Dialog(props: {
   const Icon = props.icon;
   return createPortal(
     <div
-      className={`admin-overlay-enter fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/70 ${
+      className={`admin-overlay-enter fixed inset-0 z-50 flex items-start justify-center overflow-y-auto ${
+        props.glass ? "admin-glass-overlay" : "bg-black/70"
+      } ${
         props.contained ? "p-3 pt-[6vh] sm:p-4 sm:pt-[8vh]" : "p-4 pt-[10vh]"
       }`}
       onClick={(e) => {
@@ -832,7 +837,11 @@ export function Dialog(props: {
         role="dialog"
         aria-modal="true"
         tabIndex={-1}
-        className={`admin-dialog-enter w-full overflow-hidden rounded-2xl border border-white/[0.06] bg-[var(--admin-surface-elevated)] shadow-2xl shadow-black/60 ${SIZE_CLASS[sizeClass]} ${
+        className={`admin-dialog-enter w-full overflow-hidden rounded-2xl ${
+          props.glass
+            ? "admin-glass-panel"
+            : "border border-white/[0.06] bg-[var(--admin-surface-elevated)] shadow-2xl shadow-black/60"
+        } ${SIZE_CLASS[sizeClass]} ${
           props.contained ? "flex max-h-[88vh] flex-col" : ""
         }`}
       >
@@ -882,7 +891,9 @@ export function Dialog(props: {
             className={
               props.footerBordered === false
                 ? "flex flex-col-reverse gap-2.5 px-5 py-4 sm:flex-row sm:items-center sm:justify-end"
-                : "flex flex-col-reverse gap-2.5 border-t border-white/[0.06] bg-[#0c0c0c] px-5 py-4 sm:flex-row sm:items-center sm:justify-end"
+                : `flex flex-col-reverse gap-2.5 border-t px-5 py-4 sm:flex-row sm:items-center sm:justify-end ${
+                    props.glass ? "border-white/[0.08] bg-white/[0.02]" : "border-white/[0.06] bg-[#0c0c0c]"
+                  }`
             }
           >
             {props.footer}
