@@ -90,7 +90,9 @@ async def _signup(client: AsyncClient) -> tuple[AsyncClient, str]:
     r = await client.post("/auth/signup",
                           json={"username": "pguser", "password": "password1"})
     assert r.status_code == 201, r.text
-    return client, r.json()["playground_key"]
+    # Login/signup start a session only; the wrapper mints on first use.
+    key = (await client.post("/auth/playground-key")).json()["key"]
+    return client, key
 
 
 async def _disable_own_key(client: AsyncClient, key_id: str) -> None:
@@ -102,13 +104,13 @@ async def _disable_own_key(client: AsyncClient, key_id: str) -> None:
 async def test_disabled_playground_key_heals_on_the_next_request(tmp_path):
     """A key the owner disables must be replaced by a fresh mint, not served.
 
-    Sequence: signup (a playground key is minted and cached) → the owner
-    disables that key → a Playground request must still succeed. Before the
-    fix it answered 401 forever, because the wrapper's revalidation accepted
-    the disabled key and so never re-minted.
+    Sequence: the first playground-key resolution mints and caches a key → the
+    owner disables that key → a Playground request must still succeed. Before
+    the fix it answered 401 forever, because the wrapper's revalidation
+    accepted the disabled key and so never re-minted.
     """
     client, pg_key = await _signup(await _client(tmp_path))
-    assert pg_key, "signup must mint a playground key"
+    assert pg_key, "the fallback must mint a playground key"
 
     # The owner disables their own playground key.
     listing = await client.get("/admin/keys")

@@ -153,7 +153,8 @@ async def test_logout_drops_the_cached_playground_bearer(tmp_path):
         r = await client.post("/auth/login",
                               json={"username": "joe", "password": "password123"})
         assert r.status_code == 200
-        assert st.pg_bearers.get(u.id), "login must have cached a playground key"
+        assert (await client.post("/auth/playground-key")).status_code == 200
+        assert st.pg_bearers.get(u.id), "the wrapper must have cached a playground key"
 
         await client.post("/auth/logout")
         assert st.pg_bearers.get(u.id) == "", (
@@ -169,6 +170,7 @@ async def test_disabling_a_user_drops_their_cached_playground_bearer(tmp_path):
         u = await st.users.create_user("joe", "password123")
         await client.post("/auth/login",
                           json={"username": "joe", "password": "password123"})
+        assert (await client.post("/auth/playground-key")).status_code == 200
         assert st.pg_bearers.get(u.id)
 
         r = await client.patch(f"/admin/users/{u.id}", json={"disabled": True},
@@ -192,8 +194,10 @@ async def test_two_admins_do_not_share_one_playground_key(tmp_path):
 
         await client.post("/auth/login",
                           json={"username": "bossone", "password": "password123"})
+        await client.post("/auth/playground-key")
         await client.post("/auth/login",
                           json={"username": "bosstwo", "password": "password123"})
+        await client.post("/auth/playground-key")
 
         ka, kb = st.pg_bearers.get(a.id), st.pg_bearers.get(b.id)
         assert ka and kb, "both admins must have a cached playground key"
@@ -219,6 +223,7 @@ async def test_admin_playground_calls_do_not_collapse_to_one_key(tmp_path, count
             await client.post(
                 "/auth/login",
                 json={"username": adm.username, "password": "password123"})
+            await client.post("/auth/playground-key")
         keys = {st.pg_bearers.get(adm.id) for adm in admins}
         assert None not in keys
         assert len(keys) == count, "admins collapsed onto a shared playground key"

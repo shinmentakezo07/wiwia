@@ -328,7 +328,6 @@ async def test_login_master_key_sets_admin(tmp_path):
     assert r.status_code == 200
     assert r.json()["user"] == {"id": "master", "username": "master",
                                 "role": "admin"}
-    assert "playground_key" in r.json()
     await client.aclose()
 
 
@@ -343,40 +342,31 @@ async def test_logout_clears_cookie(tmp_path):
     await client.aclose()
 
 
-# -- Playground key minted at login/signup + fallback endpoint -----------------
+# -- Playground key minted on demand + fallback endpoint -----------------
 
 
-async def test_login_mints_playground_key(tmp_path):
-    """A fresh playground key is returned on every login, not just on
-    demand — so the Playground can use it immediately without a second
-    call (the old /admin/keys/generate-on-mount path that created an
-    orphaned key on every page load)."""
+async def test_login_does_not_mint_a_playground_key(tmp_path):
+    """Login only starts a session. The Playground mints its hidden key on the
+    first request and reuses it, so repeated logins cannot leave unused
+    credentials in the owner's key list."""
     client = await _client_for_config(tmp_path, _CONFIG)
     await client.post("/auth/signup", json={"username": "pkey1",
                                             "password": "password1"})
     r = await client.post("/auth/login", json={"username": "pkey1",
                                                "password": "password1"})
     assert r.status_code == 200
-    body = r.json()
-    assert "playground_key" in body
-    assert body["playground_key"]
-    assert body["playground_key"].startswith("sk-wiwi-")
-    # The key is real: it authenticates against /v1/models
-    r2 = await client.get("/v1/models", headers={
-        "Authorization": f"Bearer {body['playground_key']}"})
-    assert r2.status_code == 200
+    assert "playground_key" not in r.json()
     await client.aclose()
 
 
-async def test_signup_mints_playground_key(tmp_path):
+async def test_signup_does_not_mint_a_playground_key(tmp_path):
     client = await _client_for_config(tmp_path, _CONFIG)
     r = await client.post("/auth/signup", json={"username": "pkey2",
                                                 "password": "password1"})
     assert r.status_code == 201
-    body = r.json()
-    assert "playground_key" in body
-    assert body["playground_key"]
-    assert body["playground_key"].startswith("sk-wiwi-")
+    assert "playground_key" not in r.json()
+    keys = (await client.get("/admin/keys")).json()["keys"]
+    assert not [k for k in keys if k["alias"] == "playground"]
     await client.aclose()
 
 
@@ -405,18 +395,20 @@ async def test_playground_key_fallback_for_session(tmp_path):
     await client.aclose()
 
 
-async def test_each_login_mints_fresh_key(tmp_path):
-    """Every login produces a different key — no key reuse across sessions."""
+async def test_repeated_logins_reuse_one_playground_key(tmp_path):
+    """The fallback endpoint returns the same live credential every time; a
+    second login neither mints nor rotates it."""
     client = await _client_for_config(tmp_path, _CONFIG)
     await client.post("/auth/signup", json={"username": "pkey4",
                                             "password": "password1"})
-    r1 = await client.post("/auth/login", json={"username": "pkey4",
-                                                "password": "password1"})
-    k1 = r1.json()["playground_key"]
-    r2 = await client.post("/auth/login", json={"username": "pkey4",
-                                                "password": "password1"})
-    k2 = r2.json()["playground_key"]
-    assert k1 != k2, "each login must mint a fresh key"
+    k1 = (await client.post("/auth/playground-key")).json()["key"]
+    await client.post("/auth/login", json={"username": "pkey4",
+                                               "password": "password1"})
+    k2 = (await client.post("/auth/playground-key")).json()["key"]
+    assert k1 == k2, "the playground key must be reused, not re-minted"
+    keys = (await client.get("/admin/keys")).json()["keys"]
+    live = [k for k in keys if k["alias"] == "playground"]
+    assert len(live) == 1, live
     await client.aclose()
 
 
@@ -501,16 +493,16 @@ async def test_user_cannot_access_admin_users_403(tmp_path):
 @respx.mock
 async def test_user_keys_scoped(tmp_path):
     client = await _client_for_config(tmp_path, _CONFIG)
-    # user A signup (also mints a playground key)
+    # user A signup
     await client.post("/auth/signup", json={"username": "al1", "password": "password1"})
     r_a = await client.post("/admin/keys/generate", json={"name": "ka"})
     kid_a = r_a.json()["id"]
-    # logout, signup B (also mints a playground key)
+    # logout, signup B
     await client.post("/auth/logout")
     await client.post("/auth/signup", json={"username": "bo1", "password": "password1"})
     r_b = await client.post("/admin/keys/generate", json={"name": "kb"})
     kid_b = r_b.json()["id"]
-    # B lists keys → only kb + the signup-minted playground key (not ka)
+    # B lists keys → only kb (not ka)
     ids = [k["id"] for k in (await client.get("/admin/keys")).json()["keys"]]
     assert kid_b in ids
     assert kid_a not in ids

@@ -1,16 +1,14 @@
-"""Round 100 — Playground self-heals a revoked/expired bearer.
+"""Round 100 — Playground bearer lifetime.
 
-Every login mints a fresh playground key and the per-owner cap
-(`_MAX_PLAYGROUND_KEYS_PER_USER = 5`) expires the oldest ones, so a key
-handed out at login N is dead by login N+5. The browser keeps that key in
-`sessionStorage` and the Playground component holds it in `bearer` state,
-so nothing notices: every `/v1/chat/completions` came back
-`401 invalid API key` even though the session cookie was perfectly valid
-and `/admin/models` returned 200 in the same breath.
+Originally every login minted a fresh playground key and the per-owner cap
+(`_MAX_PLAYGROUND_KEYS_PER_USER = 5`) expired the oldest ones, so a key handed
+out at login N was dead by login N+5 — and every login left another unused
+credential in the owner's key list.
 
-These tests pin the *server* half that makes the cap observable (the
-contract the client half relies on) and assert the client contract that
-the fix must satisfy.
+That per-login mint is gone: login and signup start a session and nothing
+else, and the Playground wrapper mints one hidden key on first use and reuses
+it for the account's whole life. These tests pin that reuse contract and
+assert the client contract that the fix must satisfy.
 """
 
 from asgi_lifespan import LifespanManager
@@ -70,32 +68,33 @@ def _config_from_path(path: str):
 # -- the server contract the client fix depends on ---------------------------
 
 
-async def test_playground_key_cap_expires_the_oldest_key(tmp_path):
-    """The cap must retire the *oldest* live playground key, not the newest.
+async def test_repeated_logins_do_not_accumulate_playground_keys(tmp_path):
+    """Login mints nothing; repeated fallback calls return the same key.
 
-    The client re-mints on a 401 and retries once, so it needs the key it
-    just received to still be usable. If the cap retired the wrong end of
-    the list, the retry would loop straight back into another 401.
+    A login that minted a credential leaked an unused key into the owner's
+    list on every sign-in. The wrapper now mints once, on demand, and reuses
+    that credential until it expires or is revoked.
     """
     client = await _client_for_config(tmp_path, _CONFIG_YAML)
-    keys = []
     for _ in range(6):
         r = await client.post("/auth/login", json={"master_key": MASTER})
-        keys.append(r.json()["playground_key"])
+        assert r.status_code == 200
+        assert "playground_key" not in r.json()
 
-    # The newest key still authenticates after the cap fired.
-    r = await client.get("/v1/models", headers={"Authorization": f"Bearer {keys[-1]}"})
+    r = await client.post("/auth/playground-key")
     assert r.status_code == 200
-    # The oldest one does not — this is exactly the 401 the Playground used
-    # to hand straight to the user.
-    r = await client.get("/v1/models", headers={"Authorization": f"Bearer {keys[0]}"})
-    assert r.status_code == 401
+    key = r.json()["key"]
+    r = await client.get("/v1/models", headers={"Authorization": f"Bearer {key}"})
+    assert r.status_code == 200
+
+    for _ in range(4):
+        again = await client.post("/auth/playground-key")
+        assert again.json()["key"] == key, "the live key must be reused"
     await client.aclose()
 
 
-async def test_reminted_key_is_live_even_at_the_cap(tmp_path):
-    """Sanity guard for the fix's retry: re-minting yields a live key even
-    once the account is at its cap."""
+async def test_one_live_playground_key_after_many_logins(tmp_path):
+    """The owner's key list holds exactly one playground credential."""
     client = await _client_for_config(tmp_path, _CONFIG_YAML)
     for _ in range(6):
         await client.post("/auth/login", json={"master_key": MASTER})
@@ -104,6 +103,10 @@ async def test_reminted_key_is_live_even_at_the_cap(tmp_path):
     key = r.json()["key"]
     r = await client.get("/v1/models", headers={"Authorization": f"Bearer {key}"})
     assert r.status_code == 200
+
+    keys = (await client.get("/admin/keys")).json()["keys"]
+    playground = [k for k in keys if k["alias"] == "playground"]
+    assert len(playground) == 1, playground
     await client.aclose()
 
 

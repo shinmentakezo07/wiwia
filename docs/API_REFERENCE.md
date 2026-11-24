@@ -309,7 +309,7 @@ Cookie-session auth for the multi-user UI (separate from virtual keys). Password
 | `/auth/login` | POST | Log in; sets the session cookie. |
 | `/auth/logout` | POST | Clear session. |
 | `/auth/me` | GET | Current user + role. |
-| `/auth/playground-key` | POST | Mint a scoped temporary virtual key for the playground. |
+| `/auth/playground-key` | POST | Return the session's playground virtual key, minting one (24h TTL) only when none is live. |
 
 Roles: normal users see only their own keys' usage in `/app/*`; admins see the full console.
 
@@ -426,7 +426,7 @@ curl -X POST localhost:4000/auth/signup  -d '{"email": "...", "password": "..."}
 curl -X POST localhost:4000/auth/login   -d '{"email": "...", "password": "..."}'
 curl -X POST localhost:4000/auth/logout
 curl localhost:4000/auth/me
-curl -X POST localhost:4000/auth/playground-key       # scoped 24h session key
+curl -X POST localhost:4000/auth/playground-key       # the session's 24h key (reused)
 ```
 
 ### OAuth providers (Cline / WorkBuddy)

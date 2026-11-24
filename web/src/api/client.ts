@@ -485,7 +485,7 @@ export const putAlertRules = (rules: AlertRule[]) =>
 export const getMe = () => api<{ user: User | null }>("/auth/me");
 
 export const signupUser = (body: { username: string; password: string }) =>
-  api<{ user: User; playground_key?: string }>("/auth/signup", {
+  api<{ user: User }>("/auth/signup", {
     method: "POST",
     body: JSON.stringify(body),
     credentials: "include",
@@ -497,7 +497,7 @@ export const signupUser = (body: { username: string; password: string }) =>
 // the existing no-session-redirect escape hatch; nothing here is upstream,
 // but the semantics (401 without the global sign-out bounce) are identical.
 export const loginUser = (body: { username: string; password: string }) =>
-  api<{ user: User; playground_key?: string }>("/auth/login", {
+  api<{ user: User }>("/auth/login", {
     method: "POST",
     body: JSON.stringify(body),
     credentials: "include",
@@ -505,7 +505,7 @@ export const loginUser = (body: { username: string; password: string }) =>
   });
 
 export const loginMaster = (body: { master_key: string }) =>
-  api<{ user: User; playground_key?: string }>("/auth/login", {
+  api<{ user: User }>("/auth/login", {
     method: "POST",
     body: JSON.stringify(body),
     credentials: "include",

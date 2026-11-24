@@ -94,11 +94,13 @@ async def test_admin_key_generate_is_capped(tmp_path):
     try:
         st = app.state.wiwi
         uid = await _admin_session(app, client, "boss")
-        # Login already mints one playground key under this owner, so the
-        # ceiling is shared exactly as it is for any other account.
+        # Login mints nothing; the owner starts empty and the ceiling is
+        # shared with the playground key the wrapper mints on first use.
         live = await st.auth.count_keys(owner_id=uid)
-        assert live == 1, live
+        assert live == 0, live
         r = await client.post("/admin/keys/generate", json={"name": "k0"})
+        assert r.status_code == 200, r.text
+        r = await client.post("/admin/keys/generate", json={"name": "k1"})
         assert r.status_code == 200, r.text
         assert await st.auth.count_keys(owner_id=uid) == 2
 

@@ -190,6 +190,7 @@ async def test_imported_vkey_owner_id_points_at_the_targets_user(client):
                            json={"username": "alice", "password": "hunter2hunter2"})
     assert r.status_code == 201, r.text
     src_uid = r.json()["user"]["id"]
+    assert (await client.post("/auth/playground-key")).status_code == 200
     doc = await _export(client, sections="users,vkeys")
     assert doc["users"][0]["id"] == src_uid
 
@@ -199,6 +200,7 @@ async def test_imported_vkey_owner_id_points_at_the_targets_user(client):
                            json={"username": "alice", "password": "hunter2hunter2"})
         tgt_uid = r.json()["user"]["id"]
         assert tgt_uid != src_uid
+        assert (await tgt.post("/auth/playground-key")).status_code == 200
 
         m = await _merge(tgt, doc, sections=["users", "vkeys"])
         assert m.status_code == 200, m.text
@@ -222,7 +224,7 @@ async def test_imported_vkey_with_a_dangling_owner_is_rejected_by_auth(client):
     r = await client.post("/auth/signup",
                            json={"username": "alice", "password": "hunter2hunter2"})
     assert r.status_code == 201, r.text
-    playground_key = r.json()["playground_key"]
+    playground_key = (await client.post("/auth/playground-key")).json()["key"]
     assert await client.wiwi.auth.authenticate(playground_key) is not None
 
     doc = await _export(client, sections="users,vkeys")

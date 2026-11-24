@@ -163,9 +163,10 @@ async def test_wrapper_attributes_the_request_to_the_playground_key(tmp_path):
     state = app.state.wiwi
     r = await client.get("/auth/me")
     user_id = r.json()["user"]["id"]
+    assert (await client.post("/auth/playground-key")).status_code == 200
     keys = await state.auth.list_keys_for_owner(user_id)
     pg = [k for k in keys if k["alias"] == "playground"]
-    assert pg, "signup must mint a playground key"
+    assert pg, "the wrapper must mint a playground key"
     pg_id = pg[0]["id"]
 
     respx.post("https://api.openai.com/v1/chat/completions").respond(json=OPENAI_BODY)

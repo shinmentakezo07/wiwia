@@ -393,11 +393,12 @@ from wiwi.wire import openai_chat as oc
 from wiwi.wire import openai_completions as ocmpl
 from wiwi.wire import openai_responses as orp
 
-# Playground keys are minted automatically on login/signup, so they must be
-# bounded: a TTL keeps abandoned ones from living forever, and a per-user cap
-# stops repeated logins from accumulating unlimited live credentials.
+# The Playground uses one hidden virtual key per user, minted on demand and
+# then reused for every later request — logging in no longer creates a key.
+# A TTL keeps an abandoned key from living forever, and the cap is one so
+# repeated use can never accumulate live credentials in the owner's key list.
 _PLAYGROUND_KEY_TTL_S = 24 * 3600.0
-_MAX_PLAYGROUND_KEYS_PER_USER = 5
+_MAX_PLAYGROUND_KEYS_PER_USER = 1
 
 # The synthetic master actor (``current_user`` mints it for a master bearer or
 # a master session cookie). Real user ids are "u" + 16 hex, so this value can
@@ -3520,10 +3521,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
         Same decoder, same encoder, same ``run_chat_like`` execution — the only
         difference is admission: the ``wiwi_session`` cookie identifies the
-        caller, and the playground virtual key is resolved server-side and
-        injected as the bearer. Key material never reaches the browser, so a
-        key that the per-owner cap expired (the old "401 invalid API key" in a
-        perfectly logged-in tab) can no longer happen.
+        caller, and the user's playground virtual key is resolved server-side
+        and injected as the bearer. That key is minted once on first use and
+        reused for every later request, and the material never reaches the
+        browser, so a key that expired or was revoked (the old "401 invalid API
+        key" in a perfectly logged-in tab) is replaced transparently instead.
         """
         if state.auth is None:
             return _err(500, "api_error", "gateway not initialized", request)
@@ -6313,16 +6315,13 @@ def create_app(config: WiwiConfig) -> FastAPI:
             return _err(400, "invalid_request_error", str(e), request)
         # The slot was reserved atomically before creation (AUDIT #221/#89), so
         # a successful signup consumes it with no further bookkeeping.
-        # Mint a fresh playground key when the new user is being logged in so
-        # the Playground can use it immediately without a separate call.
-        pg_key = ""
+        #
+        # No playground key is minted here any more: the wrapper mints one on
+        # the first /v1/playground/completions call and reuses it from then
+        # on, so signup cannot leave an unused credential behind.
         anon = await current_user(request) is None
-        if anon and state.auth is not None:
-            with contextlib.suppress(Exception):
-                pg_key = await _mint_playground_key(u)
         resp = ORJSONResponse(
-            {"user": {"id": u.id, "username": u.username, "role": u.role},
-             "playground_key": pg_key},
+            {"user": {"id": u.id, "username": u.username, "role": u.role}},
             status_code=201)
         # Only log in the new user when the caller is anonymous: an admin
         # creating a user via signup should keep their own session.
@@ -6334,26 +6333,25 @@ def create_app(config: WiwiConfig) -> FastAPI:
         return resp
 
     async def _mint_playground_key(actor: UserInfo) -> str:
-        """Mint a fresh virtual key for the playground, scoped to the actor.
+        """Mint the playground virtual key for *actor*.
 
-        Every real account owns its key (admins included — see
+        Called only when no cached key is usable, so the account normally keeps
+        the one credential it was first given rather than collecting a new key
+        per login. Every real account owns its key (admins included — see
         ``_key_owner_id``), so it shows up in the owner's key list, respects
         role-based filtering, and gets its own budget and per-owner cap. Only
         the synthetic master is un-owned.
         """
         owner_id = _key_owner_id(actor)
-        # Bound the key: a TTL so abandoned keys expire, and a per-owner cap so
-        # repeated logins (or repeated /auth/playground-key calls) cannot
-        # accumulate unbounded live credentials. Without both, every login
-        # minted another never-expiring, unlimited-budget key.
-        #
-        # The cap applies to admins too — they now own their key (see
+        # Bound the key: a TTL so an abandoned one expires, and a cap of one so
+        # a re-mint (after a process restart, a TTL expiry or a revoke) retires
+        # the previous live key instead of adding a rival to the owner's list.
+        # The cap applies to admins too — they own their key (see
         # `_key_owner_id`), so the count is per admin rather than across all of
         # them. Before round 105 admins minted unowned keys and were exempt
         # twice over: `create_key`'s per-owner limit skips owner_id=None, and
         # this branch skipped them as well, so admin playground keys grew
-        # without limit. React StrictMode double-invokes the mint effect in
-        # dev, so the leak was 2 keys per mount.
+        # without limit.
         service = state.auth
         if service is not None:
             active = await service.count_keys(owner_id=owner_id, alias="playground")
@@ -6411,17 +6409,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
         if mk:
             if hmac.compare_digest(str(mk).encode(),
                                    (config.general_settings.master_key or "").encode()):
-                # Mint a fresh playground key alongside the session cookie so
-                # the Playground can use it immediately without a second call.
-                pg_key = ""
-                if state.auth is not None:
-                    with contextlib.suppress(Exception):
-                        pg_key = await _mint_playground_key(_master_actor())
+                # No playground key is minted on login: the wrapper mints one
+                # on the first Playground request and reuses it thereafter.
                 resp = ORJSONResponse(
                     {"user": {"id": _SYNTHETIC_MASTER_ID,
                               "username": _SYNTHETIC_MASTER_ID,
-                              "role": "admin"},
-                     "playground_key": pg_key})
+                              "role": "admin"}})
                 _set_session_cookie(resp, _SYNTHETIC_MASTER_ID, "admin",
                                     secure=_request_is_https(
                                         request,
@@ -6445,15 +6438,10 @@ def create_app(config: WiwiConfig) -> FastAPI:
         # Successful login clears any accumulated failures for this scope
         # (including the slot just reserved above).
         await state.login_throttle.reset(scope)
-        # Mint a fresh playground key alongside the session cookie so the
-        # Playground can use it immediately without a second call.
-        pg_key = ""
-        if state.auth is not None:
-            with contextlib.suppress(Exception):
-                pg_key = await _mint_playground_key(u)
+        # No playground key is minted on login: the wrapper mints one on the
+        # first Playground request and reuses it thereafter.
         resp = ORJSONResponse(
-            {"user": {"id": u.id, "username": u.username, "role": u.role},
-             "playground_key": pg_key})
+            {"user": {"id": u.id, "username": u.username, "role": u.role}})
         _set_session_cookie(resp, u.id, u.role,
                             secure=_request_is_https(
                                 request,
@@ -6487,15 +6475,16 @@ def create_app(config: WiwiConfig) -> FastAPI:
     #
     # Holding the plaintext here is what removes the browser round-trip
     # entirely: the SPA calls /v1/playground/completions with only its session
-    # cookie, and the key material never travels to the client. The plaintext
-    # is re-validated through AuthService.authenticate on every resolution, so
-    # a key the per-owner cap expired, a TTL expiry, or a revoke is detected on
-    # the next request and healed by a fresh mint — the exact failure the old
-    # client-side 401 dance existed to paper over. authenticate()'s own TTL
-    # cache makes the repeat validation cheap. Every mint path routes through
-    # _mint_playground_key, which registers its plaintext here, so a key
-    # handed to ANY client (signup response, /auth/playground-key, the
-    # wrapper) is the key the wrapper reuses instead of minting a rival.
+    # cookie, and the key material never travels to the client. Login and
+    # signup mint nothing; the wrapper mints one key on first use and reuses it
+    # for the account's whole life. The plaintext is re-validated through
+    # AuthService.authenticate on every resolution, so a TTL expiry, a revoke
+    # or a disable is detected on the next request and healed by a single
+    # replacement mint — the exact failure the old client-side 401 dance
+    # existed to paper over. authenticate()'s own TTL cache makes the repeat
+    # validation cheap. Every mint path routes through _mint_playground_key,
+    # which registers its plaintext here, so /auth/playground-key and the
+    # wrapper always reuse one credential instead of minting rivals.
 
     def _playground_key_usable(info) -> bool:
         """Whether an authenticated playground key is fit to be handed back.
@@ -6527,9 +6516,11 @@ def create_app(config: WiwiConfig) -> FastAPI:
         """Return a live playground virtual key plaintext for *actor*.
 
         Resolution order: cached plaintext that still authenticates AND is still
-        usable → a fresh capped mint (same per-owner cap and TTL as
-        /auth/playground-key). Raises on a mint failure; the caller converts
-        that into a 500.
+        usable → one capped mint (same per-owner cap and TTL as
+        /auth/playground-key). This is the only path that mints during normal
+        use, so the same key is reused for the account's whole life instead of
+        a fresh credential per login. Raises on a mint failure; the caller
+        converts that into a 500.
         """
         service = state.auth
         if service is None:  # guarded by the caller, kept for type-checking
@@ -6543,19 +6534,29 @@ def create_app(config: WiwiConfig) -> FastAPI:
 
     @app.post("/auth/playground-key")
     async def auth_playground_key(request: Request):
-        """Mint a fresh playground key for the current session.
+        """Return the current session's playground key, minting only if needed.
 
         Back-compat fallback for tooling that still wants a bearer: the SPA's
-        Playground no longer calls this — /v1/playground/completions resolves
-        and rotates the key server-side. Requires an authenticated session —
-        anonymous callers get 401.
+        Playground does not call this — /v1/playground/completions resolves
+        and reuses the key server-side. Repeated calls return the same live
+        credential rather than minting a rival one each time. Requires an
+        authenticated session — anonymous callers get 401.
         """
         actor = await current_user(request)
         if actor is None:
             return _err(401, "authentication_error", "authentication required", request)
         if state.auth is None:
             return _err(500, "api_error", "gateway not initialized", request)
-        plaintext = await _mint_playground_key(actor)
+        try:
+            plaintext = await _playground_bearer(actor)
+        except Exception as e:  # noqa: BLE001 — mint/DB failure is a 500, not a crash
+            import structlog as _sl
+
+            _sl.get_logger("wiwi.playground").error(
+                "playground_bearer_unavailable", user_id=actor.id,
+                error=type(e).__name__, detail=str(e))
+            return _err(500, "api_error",
+                        "could not prepare the playground key", request)
         return ORJSONResponse({"key": plaintext})
 
     # -- public: secret-free model catalog (no auth) --------------------------

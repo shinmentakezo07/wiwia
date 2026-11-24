@@ -52,6 +52,21 @@ is not fixed in the same change.
 
 ## Archive index (fixed, newest first)
 
+## ✅ Fixed — Playground minted a fresh API key on every login and exposed it (2026-11-24)
+
+**Section status:** fixed — #606 (round 212).
+
+### 606. `/auth/login` and `/auth/signup` minted a new playground key per call, returned its plaintext, and kept up to five live keys per user
+
+**Severity:** 🟡 Medium · **Status: fixed** — round 212 (`tests/test_fix_round212.py`)
+**Where:** `wiwi/server/app.py` — `_mint_playground_key` was called from `/auth/signup`, both `/auth/login` branches, and `/auth/playground-key`; `_MAX_PLAYGROUND_KEYS_PER_USER = 5`.
+
+**Trigger:** sign in twice. Each login minted a fresh virtual key (`alias="playground"`), put its plaintext in the response body as `playground_key`, and cached it for the wrapper. The cap counted only *live* keys, so one account could hold five playground credentials and every login rotated one out.
+
+**Consequence:** the owner's key list filled with unused `playground` entries, and a live plaintext credential travelled in every login/signup response — for a value no client read: the SPA posts to `/v1/playground/completions`, which authenticates the session cookie and injects the key server-side.
+
+**Fix:** login and signup mint nothing and return no `playground_key`. `_playground_bearer` (also behind `/auth/playground-key`) reuses the cached live key and mints only when none is usable; the per-owner cap is one, so a re-mint (TTL expiry, revoke, restart) retires the previous live row instead of adding a rival. `web/src/api/client.ts` drops the now-unused response field.
+
 ## ✅ Fixed — a response written between sweeps could outlive its TTL forever (2026-11-19)
 
 **Section status:** fixed — #605 (round 209).

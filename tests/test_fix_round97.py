@@ -55,6 +55,8 @@ async def test_playground_metrics_route_returns_exact_ring_event(tmp_path):
         )
         assert signup.status_code == 201
         user_id = signup.json()["user"]["id"]
+        # Signup starts a session only; resolve the playground key first.
+        assert (await client.post("/auth/playground-key")).status_code == 200
         keys = await app.state.wiwi.auth.list_keys_for_owner(user_id)
         event = LogEvent(
             stream="request",
@@ -94,6 +96,7 @@ async def test_playground_metrics_route_reads_db_event_and_marks_estimate(tmp_pa
             "/auth/signup", json={"username": "db-user", "password": "password1"}
         )
         user_id = signup.json()["user"]["id"]
+        assert (await client.post("/auth/playground-key")).status_code == 200
         keys = await app.state.wiwi.auth.list_keys_for_owner(user_id)
         await app.state.wiwi.logs.db_sink.write_requests([
             LogEvent(
@@ -129,6 +132,7 @@ async def test_playground_metrics_route_does_not_expose_another_user_event(tmp_p
             "/auth/signup", json={"username": "owner-user", "password": "password1"}
         )
         first_id = first.json()["user"]["id"]
+        assert (await client.post("/auth/playground-key")).status_code == 200
         first_key = (await app.state.wiwi.auth.list_keys_for_owner(first_id))[0]["id"]
         await client.post("/auth/logout")
         second = await client.post(
@@ -174,9 +178,11 @@ async def test_streamed_request_metrics_match_response_request_id(tmp_path):
         signup = await client.post(
             "/auth/signup", json={"username": "stream-user", "password": "password1"}
         )
+        assert signup.status_code == 201
+        pg_key = (await client.post("/auth/playground-key")).json()["key"]
         response = await client.post(
             "/v1/chat/completions",
-            headers={"Authorization": f"Bearer {signup.json()['playground_key']}"},
+            headers={"Authorization": f"Bearer {pg_key}"},
             json={
                 "model": "gpt-4o",
                 "stream": True,

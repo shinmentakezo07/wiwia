@@ -32,7 +32,7 @@ Browser ──► :4000/                  (SPA — admin console at /console + p
 
 - Console login validates the master key once (probe call), stores it in `localStorage`, and sends `Authorization: Bearer <key>` on every admin call. Accepted trade-off (user decision): localStorage is XSS-readable; fine for single-admin self-hosting.
 - User accounts (`/auth/signup|login|logout|me`) use stdlib PBKDF2 password hashing and HMAC-signed HttpOnly cookies. Roles: `user` / `admin`; admins manage accounts at `/admin/users`.
-- The playground (`/auth/playground-key`) mints a scoped temporary virtual key so public-front users can try models without a real key.
+- The playground (`/auth/playground-key`) resolves one scoped temporary virtual key per user, minted on first use and reused (24h TTL, at most one live key), so public-front users can try models without a real key.
 
 ## 3. Admin console pages
 
