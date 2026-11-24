@@ -1,11 +1,14 @@
 // Changelog — release ledger. Entries are newest-first; the first entry is the
 // current release. Presentation only — the entry data below is the source of truth.
+//
+// Visual language: flat ledger, same as the rest of the public front — mono
+// micro-labels, hairline rules, a sticky version index on desktop, and small
+// type dots on change rows. No boxed cards, no beams, no glow.
 
 import { useMemo, useState } from "react";
-import { Bug, Layers, Sparkles } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { Badge, Card } from "@/components/ui";
-import { HERO_BEAMS_COMPACT, HeroBeamBackdrop } from "@/components/HeroBeamBackdrop";
+import { AlertCircle, Check, Wrench } from "lucide-react";
+import { Badge } from "@/components/ui";
 
 type ChangeKind = "feature" | "fix" | "improvement";
 type Filter = "all" | ChangeKind;
@@ -71,33 +74,31 @@ const ENTRIES: ChangelogEntry[] = [
 
 const KIND_ORDER: ChangeKind[] = ["feature", "fix", "improvement"];
 
+// Class strings are literal so Tailwind's scanner keeps them.
 const KIND_META: Record<
   ChangeKind,
-  { label: string; plural: string; icon: LucideIcon; bar: string; text: string; chip: string }
+  { label: string; plural: string; icon: LucideIcon; dot: string; count: string }
 > = {
   feature: {
     label: "Feature",
     plural: "Features",
-    icon: Sparkles,
-    bar: "bg-emerald-400/70",
-    text: "text-emerald-300",
-    chip: "border-emerald-400/20 bg-emerald-400/[0.07]",
+    icon: Check,
+    dot: "bg-emerald-400",
+    count: "text-emerald-300/80",
   },
   fix: {
     label: "Fix",
     plural: "Fixes",
-    icon: Bug,
-    bar: "bg-amber-400/70",
-    text: "text-amber-300",
-    chip: "border-amber-400/20 bg-amber-400/[0.07]",
+    icon: AlertCircle,
+    dot: "bg-amber-400",
+    count: "text-amber-300/80",
   },
   improvement: {
     label: "Improvement",
     plural: "Improvements",
-    icon: Layers,
-    bar: "bg-sky-400/70",
-    text: "text-sky-300",
-    chip: "border-sky-400/20 bg-sky-400/[0.07]",
+    icon: Wrench,
+    dot: "bg-sky-400",
+    count: "text-sky-300/80",
   },
 };
 
@@ -107,39 +108,25 @@ function classifyChange(change: string): ChangeKind {
   return "improvement";
 }
 
-/** Drops the leading "Add"/"Fix" verb: the kind icon already carries it. */
+/** Drops the leading "Add"/"Fix" verb: the kind dot already carries it. */
 function changeText(change: string): string {
   const stripped = change.replace(/^(add|fix)\s+/i, "");
   return stripped.charAt(0).toUpperCase() + stripped.slice(1);
 }
 
-function countKinds(changes: string[]) {
+function entryCounts(changes: string[]): Record<ChangeKind, number> {
   const counts: Record<ChangeKind, number> = { feature: 0, fix: 0, improvement: 0 };
   for (const change of changes) counts[classifyChange(change)] += 1;
   return counts;
 }
 
 const TOTAL_CHANGES = ENTRIES.reduce((n, e) => n + e.changes.length, 0);
-const TOTAL_COUNTS = countKinds(ENTRIES.flatMap((e) => e.changes));
+const TOTAL_COUNTS = entryCounts(ENTRIES.flatMap((e) => e.changes));
 
-function ScopeBar({ counts, total }: { counts: Record<ChangeKind, number>; total: number }) {
-  return (
-    <div
-      className="flex h-1 w-full overflow-hidden rounded-full bg-white/[0.06] sm:w-40"
-      role="img"
-      aria-label={`Scope: ${counts.feature} features, ${counts.fix} fixes, ${counts.improvement} improvements`}
-    >
-      {KIND_ORDER.map((kind) =>
-        counts[kind] === 0 ? null : (
-          <span
-            key={kind}
-            className={KIND_META[kind].bar}
-            style={{ width: `${(counts[kind] / (total || 1)) * 100}%` }}
-          />
-        ),
-      )}
-    </div>
-  );
+function countLabel(counts: Record<ChangeKind, number>): string {
+  return KIND_ORDER.filter((kind) => counts[kind] > 0)
+    .map((kind) => `${counts[kind]} ${KIND_META[kind].plural.toLowerCase()}`)
+    .join(" · ");
 }
 
 export function ChangelogPage() {
@@ -165,197 +152,168 @@ export function ChangelogPage() {
   ];
 
   return (
-    <div className="mx-auto max-w-5xl space-y-10 pb-16 lg:space-y-12">
-      <section
-        aria-labelledby="changelog-heading"
-        className="relative isolate overflow-hidden rounded-2xl border border-white/[0.08] bg-[#080808]"
-      >
-        <HeroBeamBackdrop beams={HERO_BEAMS_COMPACT} className="opacity-35" />
-        <div aria-hidden className="hero-grid pointer-events-none absolute inset-0 opacity-25" />
-        <div
-          className="wiwi-top-highlight pointer-events-none absolute inset-x-0 top-0 h-px opacity-60"
-          aria-hidden
-        />
+    <div className="mx-auto max-w-5xl pb-16">
+      {/* Header — quiet typographic open, no boxed hero */}
+      <header className="pb-8 pt-4 sm:pt-8">
+        <p className="font-mono text-[10.5px] uppercase tracking-[0.16em] text-[var(--admin-text-dim)]">
+          <span className="text-blue-400/80">release</span>
+          <span aria-hidden> · </span>
+          ledger
+        </p>
+        <h1 className="mt-3 max-w-xl text-[clamp(2.1rem,5vw,3.35rem)] font-semibold leading-[1.06] tracking-[-0.04em] text-[var(--admin-text)]">
+          Changelog
+        </h1>
+        <p className="mt-5 max-w-[52ch] text-[14.5px] leading-[1.75] text-[var(--admin-text-muted)] sm:text-[15px]">
+          What shipped, grouped by release. The gateway&rsquo;s behavior is the source of truth;
+          this page is the human-readable record.
+        </p>
+        <p className="mt-6 flex flex-wrap items-center gap-x-3 gap-y-1.5 border-t border-[var(--admin-border)] pt-4 font-mono text-[11px] tracking-[0.04em] text-[var(--admin-text-dim)]">
+          <span>
+            <span className="text-[var(--admin-text)]">{ENTRIES.length}</span> releases
+          </span>
+          <span aria-hidden>·</span>
+          <span>
+            <span className="text-[var(--admin-text)]">{TOTAL_CHANGES}</span> changes
+          </span>
+          <span aria-hidden>·</span>
+          <span>
+            latest{" "}
+            <a
+              href={`#v${latest.version}`}
+              className="text-blue-300 outline-none transition-colors hover:text-blue-200 focus-visible:ring-2 focus-visible:ring-blue-500/60"
+            >
+              v{latest.version}
+            </a>{" "}
+            {latest.date}
+          </span>
+        </p>
+      </header>
 
-        <div className="relative px-5 pb-7 pt-8 sm:px-8 sm:pb-8 sm:pt-9 lg:px-10">
-          <div className="flex flex-col gap-8 lg:flex-row lg:items-end lg:justify-between">
-            <div className="min-w-0 max-w-xl">
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-                <Badge tone="blue">
-                  <span className="mr-1 size-1.5 rounded-full bg-blue-400" aria-hidden />
-                  Current v{latest.version}
-                </Badge>
-                <span className="font-mono text-[11px] tracking-[0.04em] text-[var(--admin-text-dim)]">
-                  {latest.date}
-                </span>
-              </div>
-              <h1
-                id="changelog-heading"
-                className="mt-5 text-[clamp(2.1rem,5vw,3.35rem)] font-semibold leading-[1.06] tracking-[-0.04em] text-[var(--admin-text)]"
-              >
-                Release ledger.{" "}
-                <span className="text-[var(--admin-text-muted)]">Every change, by version.</span>
-              </h1>
-              <p className="mt-5 max-w-[49ch] text-[14.5px] leading-[1.75] text-[var(--admin-text-muted)] sm:text-[15px]">
-                What shipped, grouped by release. The gateway&apos;s behavior is the source of
-                truth; this page is the human-readable record.
-              </p>
-            </div>
-
-            <dl className="grid w-full grid-cols-3 gap-px overflow-hidden rounded-xl border border-white/[0.07] bg-white/[0.07] sm:max-w-sm lg:w-[320px]">
-              {[
-                { label: "Releases", value: String(ENTRIES.length) },
-                { label: "Changes", value: String(TOTAL_CHANGES) },
-                { label: "Fixes", value: String(TOTAL_COUNTS.fix) },
-              ].map((item) => (
-                <div key={item.label} className="bg-black/40 px-4 py-3">
-                  <dt className="font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--admin-text-dim)]">
-                    {item.label}
-                  </dt>
-                  <dd className="mt-1 font-mono text-xl font-medium tracking-[-0.03em] text-[var(--admin-text)]">
-                    {item.value}
-                  </dd>
-                </div>
-              ))}
-            </dl>
-          </div>
-
-          <nav
-            aria-label="Jump to release"
-            className="mt-8 flex flex-wrap gap-2 border-t border-white/[0.06] pt-5"
+      <div className="lg:grid lg:grid-cols-[176px_minmax(0,1fr)] lg:gap-10">
+        {/* Version index + filters — sticky sidebar on desktop, inline rows on mobile */}
+        <aside className="mb-6 lg:mb-0">
+          <div
+            role="group"
+            aria-label="Filter changes by type"
+            className="flex flex-wrap gap-1 lg:sticky lg:top-6 lg:flex-col lg:gap-0.5"
           >
-            {ENTRIES.map((entry, i) => (
-              <a
-                key={entry.version}
-                href={`#v${entry.version}`}
-                className="inline-flex min-h-11 items-center rounded-lg border border-white/[0.08] bg-white/[0.02] px-3.5 font-mono text-[12px] text-[var(--admin-text-muted)] outline-none transition-colors hover:border-white/[0.16] hover:text-[var(--admin-text)] focus-visible:ring-2 focus-visible:ring-blue-500/60"
-                aria-current={i === 0 ? "true" : undefined}
-              >
-                v{entry.version}
-              </a>
-            ))}
-          </nav>
-        </div>
-      </section>
-
-      <section aria-label="Release timeline">
-        <div
-          role="group"
-          aria-label="Filter changes by type"
-          className="mb-6 flex flex-wrap items-center gap-2"
-        >
-          {filters.map((f) => {
-            const active = filter === f.id;
-            return (
-              <button
-                key={f.id}
-                type="button"
-                aria-pressed={active}
-                onClick={() => setFilter(f.id)}
-                className={[
-                  "inline-flex min-h-11 items-center gap-2 rounded-lg border px-3.5 text-[13px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-blue-500/60",
-                  active
-                    ? "border-blue-400/30 bg-blue-500/[0.1] text-[var(--admin-text)]"
-                    : "border-white/[0.08] bg-white/[0.02] text-[var(--admin-text-muted)] hover:border-white/[0.16] hover:text-[var(--admin-text)]",
-                ].join(" ")}
-              >
-                {f.label}
-                <span className="font-mono text-[11px] text-[var(--admin-text-dim)]">{f.count}</span>
-              </button>
-            );
-          })}
-        </div>
-
-        {visible.length === 0 ? (
-          <Card className="p-8 text-center text-[13px] text-[var(--admin-text-muted)]">
-            No changes match this filter.
-          </Card>
-        ) : (
-          <ol className="relative space-y-5">
-            <span
-              aria-hidden
-              className="absolute bottom-2 left-[7px] top-2 hidden w-px bg-gradient-to-b from-white/[0.14] via-white/[0.07] to-transparent lg:block"
-            />
-            {visible.map(({ entry, changes }) => {
-              const isLatest = entry.version === latest.version;
-              const counts = countKinds(entry.changes);
+            <p className="mb-2 hidden font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--admin-text-dim)] lg:block">
+              Filter
+            </p>
+            {filters.map((f) => {
+              const active = filter === f.id;
               return (
-                <li key={entry.version} className="relative lg:pl-10">
+                <button
+                  key={f.id}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() => setFilter(f.id)}
+                  className={[
+                    "inline-flex min-h-11 items-center gap-2 rounded-lg px-3 text-[13px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-blue-500/60",
+                    active
+                      ? "bg-white/[0.05] font-medium text-[var(--admin-text)]"
+                      : "text-[var(--admin-text-muted)] hover:bg-white/[0.02] hover:text-[var(--admin-text)]",
+                    "lg:rounded-md",
+                  ].join(" ")}
+                >
+                  {f.label}
+                  <span className="font-mono text-[11px] text-[var(--admin-text-dim)]">
+                    {f.count}
+                  </span>
+                </button>
+              );
+            })}
+
+            <p className="mb-2 mt-6 hidden font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--admin-text-dim)] lg:block">
+              Releases
+            </p>
+            <nav
+              aria-label="Jump to release"
+              className="hidden flex-col gap-0.5 lg:flex"
+            >
+              {ENTRIES.map((entry, i) => (
+                <a
+                  key={entry.version}
+                  href={`#v${entry.version}`}
+                  aria-current={i === 0 ? "true" : undefined}
+                  className="inline-flex min-h-11 items-center gap-2 rounded-md px-3 font-mono text-[12px] text-[var(--admin-text-muted)] outline-none transition-colors hover:bg-white/[0.02] hover:text-[var(--admin-text)] focus-visible:ring-2 focus-visible:ring-blue-500/60"
+                >
                   <span
                     aria-hidden
-                    className={[
-                      "absolute left-0 top-7 hidden size-[15px] rounded-full border-2 lg:block",
-                      isLatest
-                        ? "border-blue-400 bg-blue-400/30"
-                        : "border-white/[0.2] bg-[var(--admin-surface)]",
-                    ].join(" ")}
+                    className={`size-1.5 rounded-full ${i === 0 ? "bg-blue-400" : "bg-white/25"}`}
                   />
-                  <Card
-                    className={[
-                      "overflow-hidden p-0",
-                      isLatest ? "border-blue-400/[0.18]" : "border-white/[0.06]",
-                    ].join(" ")}
+                  v{entry.version}
+                  <span className="text-[10px] text-[var(--admin-text-dim)]">
+                    {entry.date.split(" ")[1]}
+                  </span>
+                </a>
+              ))}
+            </nav>
+          </div>
+        </aside>
+
+        {/* Release ledger */}
+        <section aria-label="Release timeline">
+          {visible.length === 0 ? (
+            <p className="rounded-xl border border-dashed border-white/[0.08] p-8 text-center text-[13px] text-[var(--admin-text-muted)]">
+              No changes match this filter.
+            </p>
+          ) : (
+            <ol>
+              {visible.map(({ entry, changes }, i) => {
+                const isLatest = entry.version === latest.version;
+                const counts = entryCounts(entry.changes);
+                return (
+                  <li
+                    key={entry.version}
+                    id={`v${entry.version}`}
+                    className={`scroll-mt-24 ${i > 0 ? "mt-10 border-t border-[var(--admin-border)] pt-8" : ""}`}
                   >
-                    <header
-                      className={[
-                        "flex flex-col gap-4 border-b border-white/[0.05] px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6",
-                        isLatest ? "bg-blue-500/[0.04]" : "bg-white/[0.01]",
-                      ].join(" ")}
-                    >
-                      <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
-                        <h2 className="font-mono text-2xl font-semibold tracking-[-0.03em] text-[var(--admin-text)]">
-                          <a
-                            href={`#v${entry.version}`}
-                            id={`v${entry.version}`}
-                            className="scroll-mt-24 rounded-sm outline-none transition-colors hover:text-blue-300 focus-visible:ring-2 focus-visible:ring-blue-500/60"
-                          >
-                            v{entry.version}
-                          </a>
+                    <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+                      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                        <h2 className="font-mono text-[22px] font-semibold tracking-[-0.03em] text-[var(--admin-text)]">
+                          v{entry.version}
                         </h2>
                         {isLatest && <Badge tone="blue">current</Badge>}
                         <span className="font-mono text-[11px] tracking-[0.04em] text-[var(--admin-text-dim)]">
                           {entry.date}
                         </span>
                       </div>
-                      <div className="flex flex-col gap-2 sm:items-end">
-                        <ScopeBar counts={counts} total={entry.changes.length} />
-                        <p className="font-mono text-[10.5px] text-[var(--admin-text-dim)]">
-                          {filter === "all"
-                            ? `${entry.changes.length} changes`
-                            : `${changes.length} of ${entry.changes.length} changes`}
-                        </p>
-                      </div>
-                    </header>
+                      <p className="font-mono text-[10.5px] tracking-[0.04em] text-[var(--admin-text-dim)]">
+                        {filter === "all" ? countLabel(counts) : `${changes.length} matching`}
+                      </p>
+                    </div>
 
                     <ul
-                      className="divide-y divide-white/[0.05] px-5 sm:px-6"
                       aria-label={`Changes in v${entry.version}`}
+                      className="mt-4 divide-y divide-[var(--admin-border)] border-t border-[var(--admin-border)]"
                     >
                       {changes.map((change) => {
                         const meta = KIND_META[classifyChange(change)];
-                        const Icon = meta.icon;
                         return (
-                          <li key={change} className="flex items-start gap-3.5 py-3.5 sm:gap-4">
+                          <li
+                            key={change}
+                            className="flex items-start gap-3 py-4 sm:gap-4"
+                          >
                             <span
-                              className={`mt-0.5 inline-flex size-6 shrink-0 items-center justify-center rounded-md border ${meta.chip} ${meta.text}`}
-                            >
-                              <Icon size={13} aria-hidden />
-                              <span className="sr-only">{meta.label}: </span>
-                            </span>
+                              className={`mt-[7px] size-[7px] shrink-0 rounded-full ${meta.dot}`}
+                              aria-hidden
+                            />
                             <span className="min-w-0 break-words text-[13.5px] leading-relaxed text-[var(--admin-text-muted)]">
+                              <span className="sr-only">{meta.label}: </span>
                               {changeText(change)}
                             </span>
                           </li>
                         );
                       })}
                     </ul>
-                  </Card>
-                </li>
-              );
-            })}
-          </ol>
-        )}
-      </section>
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+        </section>
+      </div>
     </div>
   );
 }
