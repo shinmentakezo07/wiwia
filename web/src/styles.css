@@ -228,9 +228,9 @@ body {
    with a violet secondary, tiny uppercase labels, mono tabular values. */
 
 [data-admin] {
-  --admin-bg: #050505;
-  --admin-surface: #0a0a0a;
-  --admin-surface-elevated: #0e0e0e;
+  --admin-bg: #000000;
+  --admin-surface: #050505;
+  --admin-surface-elevated: #0a0a0a;
   --admin-border: rgba(255, 255, 255, 0.04);
   --admin-border-hover: rgba(255, 255, 255, 0.08);
   --admin-text: #ffffff;

@@ -456,44 +456,57 @@ function AddKeysCard(props: { provider: string; existing: number; onError: (m: s
     setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
 
   return (
-    <Card>
-      <CardHeader title="Add API keys" subtitle="Paste several at once — one row per key." />
-      <div className="space-y-2 px-4 pb-4 pt-1">
+    <Card className="self-start">
+      <CardHeader icon={KeyRound} title="Add API keys" subtitle="One row per key." />
+      <div className="space-y-3 p-5">
         {rows.map((r, i) => (
-          <div key={i} className="flex items-start gap-2">
-            <div className="flex-1 space-y-2">
-              <Input
-                value={r.label}
-                placeholder={`Label (key-${props.existing + i + 1})`}
-                onChange={(e) => update(i, { label: e.target.value })}
-              />
+          <div key={i} className="rounded-lg border border-[var(--admin-border)] p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="admin-label">Key {props.existing + i + 1}</span>
+              <button
+                type="button"
+                aria-label={`Remove key row ${i + 1}`}
+                disabled={rows.length === 1}
+                onClick={() => setRows((rs) => rs.filter((_, j) => j !== i))}
+                className="flex h-8 w-8 items-center justify-center rounded-md text-[var(--admin-text-dim)] hover:text-[var(--admin-text)] disabled:invisible focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+              >
+                <X size={13} />
+              </button>
+            </div>
+            <div className="flex gap-2">
+              <div className="min-w-0 flex-1">
+                <Input
+                  value={r.label}
+                  aria-label="Key label"
+                  placeholder={`key-${props.existing + i + 1}`}
+                  onChange={(e) => update(i, { label: e.target.value })}
+                />
+              </div>
+              <div className="w-16 shrink-0">
+                <Input
+                  type="number"
+                  min={1}
+                  value={r.weight}
+                  aria-label="Key weight"
+                  title="Weight"
+                  onChange={(e) => update(i, { weight: e.target.value })}
+                />
+              </div>
+            </div>
+            <div className="mt-2">
               <Input
                 value={r.secret}
                 type="password"
                 autoComplete="off"
+                aria-label="API key"
                 placeholder="sk-…"
+                className="font-mono"
                 onChange={(e) => update(i, { secret: e.target.value })}
               />
             </div>
-            <Input
-              className="w-16"
-              type="number"
-              min={1}
-              value={r.weight}
-              title="Weight"
-              onChange={(e) => update(i, { weight: e.target.value })}
-            />
-            <Button
-              variant="ghost"
-              aria-label="Remove row"
-              disabled={rows.length === 1}
-              onClick={() => setRows((rs) => rs.filter((_, j) => j !== i))}
-            >
-              <X size={14} />
-            </Button>
           </div>
         ))}
-        <div className="flex items-center justify-between pt-1">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <Button variant="outline" onClick={() => setRows((rs) => [...rs, emptyRow()])}>
             <Plus size={14} /> Another key
           </Button>
@@ -591,131 +604,194 @@ function ModelPickerCard(props: { p: Provider; onError: (m: string) => void }) {
   const visible = (models ?? []).filter((m) => m.toLowerCase().includes(filter.toLowerCase()));
   const toggle = (mid: string) =>
     setSelected((sel) => (sel.includes(mid) ? sel.filter((x) => x !== mid) : [...sel, mid]));
+  const allVisibleOn = visible.length > 0 && visible.every((m) => selected.includes(m));
+  const toggleAllVisible = () =>
+    setSelected((sel) =>
+      allVisibleOn
+        ? sel.filter((m) => !visible.includes(m))
+        : [...sel, ...visible.filter((m) => !sel.includes(m))],
+    );
+  const w = Math.max(1, parseInt(weight, 10) || 1);
+  const sectionLabel = "admin-label mb-2 flex items-center justify-between gap-2";
+
   return (
-    <Card>
+    <Card className="xl:col-span-2">
       <CardHeader
-        title="Model IDs"
+        icon={Layers}
+        title="Models"
         subtitle={
           props.p.provider_type === "cline"
-            ? "Global Cline model list (shared across all Cline accounts)."
-            : "Fetch what this account can serve, pick, apply."
+            ? "Global Cline list, shared across all Cline accounts."
+            : `${deployedHere.size} deployed from this account`
         }
         right={
-          <Button
-            variant="outline"
-            disabled={fetchM.isPending}
-            onClick={() => fetchM.mutate()}
-          >
-            <RefreshCw size={14} /> {fetchM.isPending ? "Fetching…" : "Fetch"}
+          <Button variant="outline" disabled={fetchM.isPending} onClick={() => fetchM.mutate()}>
+            {fetchM.isPending
+              ? <Loader2 size={14} className="motion-safe:animate-spin" />
+              : <RefreshCw size={14} />}
+            {models === null ? "Fetch" : "Refetch"}
           </Button>
         }
       />
-      <div className="space-y-3 px-4 pb-4 pt-1">
-        {/* Add by id, without needing a successful upstream fetch first. */}
-        <form
-          className="space-y-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            addCustom.mutate();
-          }}
-        >
-          <div className="flex items-start gap-2">
-            <Input
-              value={customId}
-              placeholder="Add a model id (e.g. gpt-4o, z-ai/glm-5.2)"
-              aria-label="Model id"
-              onChange={(e) => {
-                setCustomId(e.target.value);
-                setCustomError(null);
-              }}
-            />
-            <div className="w-20">
-              <Field label="Weight">
-                <Input type="number" min={1} value={weight}
-                       onChange={(e) => setWeight(e.target.value)} />
-              </Field>
+      <div className="space-y-5 p-5">
+        {/* ── 1. pick from upstream ─────────────────────────────── */}
+        <section aria-label="Upstream models">
+          <div className={sectionLabel}>
+            <span>From upstream</span>
+            {models !== null && models.length > 0 && (
+              <span className="font-mono normal-case tracking-normal">
+                {visible.length}/{models.length}
+              </span>
+            )}
+          </div>
+
+          {fetchM.error && <div className="mb-2"><ErrorText>{fetchM.error.message}</ErrorText></div>}
+
+          {fetchM.isPending && (
+            <div className="space-y-1.5 rounded-lg border border-[var(--admin-border)] p-2" aria-busy="true">
+              {[0, 1, 2, 3].map((i) => (
+                <div key={i} className="h-7 rounded-md bg-white/[0.03] motion-safe:animate-pulse" />
+              ))}
             </div>
-          </div>
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] text-[var(--admin-text-dim)]">
-              Becomes its own model group, named after the id.
-            </span>
-            <Button
-              type="submit"
-              disabled={!customId.trim() || addCustom.isPending}
+          )}
+
+          {models === null && !fetchM.isPending && (
+            <button
+              type="button"
+              onClick={() => fetchM.mutate()}
+              className="flex min-h-[88px] w-full flex-col items-center justify-center gap-1.5 rounded-lg border border-dashed border-[var(--admin-border-hover)] px-4 text-center transition-colors hover:border-[var(--admin-accent)]/40 hover:bg-white/[0.015] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
             >
-              <Plus size={14} /> {addCustom.isPending ? "Adding…" : "Add model"}
-            </Button>
-          </div>
-          {customError && <ErrorText>{customError}</ErrorText>}
-        </form>
+              <RefreshCw size={16} className="text-[var(--admin-text-dim)]" aria-hidden />
+              <span className="text-[13px] text-[var(--admin-text-muted)]">Fetch model list</span>
+              <span className="max-w-full break-all font-mono text-[11px] text-[var(--admin-text-dim)]">
+                {props.p.base_url || "default endpoint"}
+              </span>
+            </button>
+          )}
 
-        <div className="flex items-center gap-2">
-          <span className="h-px flex-1 bg-white/[0.06]" />
-          <span className="text-[11px] text-[var(--admin-text-dim)]">or pick from upstream</span>
-          <span className="h-px flex-1 bg-white/[0.06]" />
-        </div>
+          {models !== null && !fetchM.isPending && models.length === 0 && (
+            <EmptyState>
+              No models returned{props.p.provider_type === "cline" ? " by any Cline account" : " by this account"}.
+            </EmptyState>
+          )}
 
-        {fetchM.error && <ErrorText>{fetchM.error.message}</ErrorText>}
-
-        {models !== null && (
-          <>
-            {models.length === 0 ? (
-              <EmptyState>No models returned{props.p.provider_type === "cline" ? " by any Cline account" : " by this account"}.</EmptyState>
-            ) : (
-              <>
-                <div className="relative">
-                  <Search size={13} className="absolute top-1/2 left-2.5 -translate-y-1/2 text-[var(--admin-text-dim)]" />
-                  <Input
-                    className="pl-7"
-                    value={filter}
-                    placeholder="Filter models…"
-                    onChange={(e) => setFilter(e.target.value)}
-                  />
-                </div>
-                <div className="max-h-56 space-y-0.5 overflow-y-auto rounded-lg border border-white/[0.04] p-1">
-                  {visible.map((mid) => {
-                    const on = selected.includes(mid);
-                    return (
+          {models !== null && !fetchM.isPending && models.length > 0 && (
+            <div className="overflow-hidden rounded-lg border border-[var(--admin-border)]">
+              <div className="flex items-center gap-2 border-b border-[var(--admin-border)] px-2.5">
+                <Search size={13} className="shrink-0 text-[var(--admin-text-dim)]" aria-hidden />
+                <input
+                  value={filter}
+                  aria-label="Filter models"
+                  placeholder="Filter models…"
+                  onChange={(e) => setFilter(e.target.value)}
+                  className="min-h-[40px] w-full bg-transparent text-[13px] text-[var(--admin-text)] placeholder:text-[var(--admin-text-dim)] focus:outline-none"
+                />
+                {filter && (
+                  <button type="button" aria-label="Clear filter" onClick={() => setFilter("")}
+                          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-[var(--admin-text-dim)] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50">
+                    <X size={13} />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={toggleAllVisible}
+                  disabled={visible.length === 0}
+                  className="min-h-[32px] shrink-0 rounded-md px-2 text-[11px] font-medium text-[var(--admin-text-muted)] hover:bg-white/[0.04] hover:text-[var(--admin-text)] disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+                >
+                  {allVisibleOn ? "Clear" : "Select all"}
+                </button>
+              </div>
+              <ul className="max-h-64 overflow-y-auto p-1" role="listbox" aria-multiselectable="true" aria-label="Models">
+                {visible.map((mid) => {
+                  const on = selected.includes(mid);
+                  const deployed = deployedHere.has(mid);
+                  return (
+                    <li key={mid} role="option" aria-selected={on}>
                       <button
-                        key={mid}
                         type="button"
                         onClick={() => toggle(mid)}
-                        className={`flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left font-mono text-[12px] transition-colors ${
-                          on
-                            ? "bg-blue-500/15 text-blue-200"
-                            : "hover:bg-white/[0.03] text-[var(--admin-text-dim)]"
+                        className={`flex min-h-[40px] w-full items-center gap-2.5 rounded-md px-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50 ${
+                          on ? "bg-[var(--admin-accent-soft)]" : "hover:bg-white/[0.03]"
                         }`}
                       >
-                        <span className="truncate">{mid}</span>
-                        {deployedHere.has(mid) && <Badge tone="green">deployed</Badge>}
+                        <span
+                          aria-hidden
+                          className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors ${
+                            on ? "border-[var(--admin-accent)] bg-[var(--admin-accent)]" : "border-white/20"
+                          }`}
+                        >
+                          {on && <CheckCircle2 size={11} className="text-white" />}
+                        </span>
+                        <span className={`min-w-0 flex-1 truncate font-mono text-[12px] ${on ? "text-[var(--admin-text)]" : "text-[var(--admin-text-muted)]"}`} title={mid}>
+                          {mid}
+                        </span>
+                        {deployed && <Badge tone="green">deployed</Badge>}
                       </button>
-                    );
-                  })}
-                  {visible.length === 0 && (
-                    <p className="px-2 py-3 text-[12px] text-[var(--admin-text-dim)]">No matches.</p>
-                  )}
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-[11px] text-[var(--admin-text-dim)]">
-                    {selected.length} selected{selected.length > 1 ? " — added as fallback deployments" : ""} · weight {Math.max(1, parseInt(weight, 10) || 1)}
-                  </span>
-                  <Button
-                    disabled={selected.length === 0 || attach.isPending}
-                    onClick={() => attach.mutate()}
-                  >
-                    {attach.isPending ? "Adding…" : `Apply ${selected.length || ""} model${selected.length > 1 ? "s" : ""}`}
-                  </Button>
-                </div>
-                {attach.error && <ErrorText>{attach.error.message}</ErrorText>}
-              </>
-            )}
-          </>
-        )}
+                    </li>
+                  );
+                })}
+                {visible.length === 0 && (
+                  <li className="px-2 py-4 text-center text-[12px] text-[var(--admin-text-dim)]">
+                    No models match “{filter}”.
+                  </li>
+                )}
+              </ul>
+            </div>
+          )}
+        </section>
 
-        {models === null && !fetchM.isPending && (
-          <EmptyState>Click “Fetch” to pull model IDs from {props.p.base_url || "the upstream"}.</EmptyState>
-        )}
+        {/* ── 2. hand-typed id ──────────────────────────────────── */}
+        <section aria-label="Add model by id">
+          <div className={sectionLabel}><span>Add by id</span></div>
+          <form
+            className="flex flex-col gap-2 sm:flex-row"
+            onSubmit={(e) => {
+              e.preventDefault();
+              addCustom.mutate();
+            }}
+          >
+            <div className="min-w-0 flex-1">
+              <Input
+                value={customId}
+                placeholder="gpt-4o, z-ai/glm-5.2…"
+                aria-label="Model id"
+                className="font-mono"
+                onChange={(e) => {
+                  setCustomId(e.target.value);
+                  setCustomError(null);
+                }}
+              />
+            </div>
+            <Button type="submit" variant="outline" disabled={!customId.trim() || addCustom.isPending}>
+              <Plus size={14} /> {addCustom.isPending ? "Adding…" : "Add"}
+            </Button>
+          </form>
+          {customError
+            ? <div className="mt-2"><ErrorText>{customError}</ErrorText></div>
+            : <p className="mt-1.5 text-[11px] text-[var(--admin-text-dim)]">Becomes its own model group, named after the id.</p>}
+        </section>
+
+        {/* ── action bar: weight is shared by both paths ────────── */}
+        <div className="flex flex-wrap items-center gap-3 border-t border-[var(--admin-border)] pt-4">
+          <label className="flex items-center gap-2 text-[12px] text-[var(--admin-text-muted)]">
+            Weight
+            <span className="w-20">
+              <Input type="number" min={1} value={weight} aria-label="Deployment weight"
+                     onChange={(e) => setWeight(e.target.value)} />
+            </span>
+          </label>
+          <span className="min-w-0 flex-1 whitespace-nowrap text-[11px] text-[var(--admin-text-dim)]">
+            {selected.length > 0
+              ? `${selected.length} selected${selected.length > 1 ? " · added as fallbacks" : ""}`
+              : "Nothing selected"}
+          </span>
+          <Button disabled={selected.length === 0 || attach.isPending} onClick={() => attach.mutate()}>
+            {attach.isPending
+              ? "Applying…"
+              : `Apply${selected.length ? ` ${selected.length}` : ""} model${selected.length === 1 ? "" : "s"} · w${w}`}
+          </Button>
+          {attach.error && <div className="w-full"><ErrorText>{attach.error.message}</ErrorText></div>}
+        </div>
       </div>
     </Card>
   );
@@ -897,8 +973,13 @@ export function DeploymentsCard(props: { provider: string; onError: (m: string) 
   });
 
   return (
-    <Card>
-      <CardHeader title="Models" right={<Badge tone="blue">{rows.length}</Badge>} />
+    <Card className="xl:col-span-3">
+      <CardHeader
+        icon={Boxes}
+        title="Deployments"
+        subtitle="Model groups this account currently serves."
+        right={<Badge tone="blue">{rows.length}</Badge>}
+      />
       {q.isLoading ? (
         <Spinner />
       ) : rows.length === 0 ? (
@@ -1925,44 +2006,87 @@ export function ProviderDetailPage() {
     );
   }
 
+  const keyCounts = p.keys.reduce(
+    (acc, k) => ({ ...acc, [k.status]: acc[k.status] + 1 }),
+    { active: 0, cooling: 0, invalid: 0, disabled: 0 } as Record<PoolKey["status"], number>,
+  );
+  const stats: { label: string; value: number; dot: string }[] = [
+    { label: "Active", value: keyCounts.active, dot: "bg-emerald-400" },
+    { label: "Cooling", value: keyCounts.cooling, dot: "bg-amber-400" },
+    { label: "Invalid", value: keyCounts.invalid, dot: "bg-red-400" },
+    { label: "Disabled", value: keyCounts.disabled, dot: "bg-zinc-500" },
+  ];
+
   return (
-    <div>
+    <div className="admin-dash">
+      <Link
+        to="/console/providers"
+        className="mb-3 inline-flex min-h-[44px] items-center gap-1.5 rounded-md text-[13px] font-medium text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50 sm:min-h-0"
+      >
+        <ArrowLeft size={14} /> Providers
+      </Link>
       <PageHeader
         title={
-          <span className="flex items-center gap-3">
-            <Link to="/console/providers" aria-label="Back to providers"
-                  className="text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]">
-              <ArrowLeft size={18} />
-            </Link>
-            <span className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--admin-border)] bg-white/[0.02]">
-              <PIcon size={15} className="text-[var(--admin-text-muted)]" />
+          <span className="flex min-w-0 items-center gap-3">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-[var(--admin-border)] bg-white/[0.03]">
+              <PIcon size={18} className="text-[var(--admin-text-muted)]" aria-hidden />
             </span>
-            {p.name}
+            <span className="min-w-0 break-all">{p.name}</span>
           </span>
         }
-        subtitle={`${p.provider_type} · ${p.base_url || "(default endpoint)"}`}
+        subtitle={
+          <span className="flex flex-wrap items-center gap-2">
+            <Badge tone="gray">{p.provider_type}</Badge>
+            {!p.enabled && <Badge tone="amber">disabled</Badge>}
+            <span className="min-w-0 break-all" title={p.base_url || undefined}>
+              {p.base_url || "default endpoint"}
+            </span>
+          </span>
+        }
         right={
-          <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1.5 rounded-lg border border-[var(--admin-border)] px-2.5 py-1.5">
-              <span className="relative flex h-2 w-2">
+          <>
+            <div
+              role="status"
+              className="flex min-h-[36px] items-center gap-1.5 rounded-lg border border-[var(--admin-border)] px-2.5"
+            >
+              <span className="relative flex h-2 w-2" aria-hidden>
                 {p.healthy && (
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-40" />
+                  <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-40 motion-safe:animate-ping" />
                 )}
                 <span className={`relative inline-flex h-2 w-2 rounded-full ${p.healthy ? "bg-emerald-400" : "bg-red-400"}`} />
               </span>
               <span className="text-[11px] text-[var(--admin-text-muted)]">
-                {p.healthy ? "healthy" : "no healthy keys"}
+                {p.healthy ? "Healthy" : "No healthy keys"}
               </span>
             </div>
-            <Button variant="outline" onClick={() => void q.refetch()}>
-              <RefreshCw size={14} /> Refresh
+            <Button variant="outline" onClick={() => void q.refetch()} disabled={q.isFetching}>
+              <RefreshCw size={14} className={q.isFetching ? "motion-safe:animate-spin" : ""} /> Refresh
             </Button>
             <Button variant="danger" onClick={() => setDelOpen(true)}>
-              <Trash2 size={14} /> Delete provider
+              <Trash2 size={14} /> Delete
             </Button>
-          </div>
+          </>
         }
       />
+      <dl className="mb-6 grid grid-cols-2 overflow-hidden rounded-xl border border-[var(--admin-border)] sm:grid-cols-5">
+        <div className="col-span-2 border-b border-[var(--admin-border)] px-4 py-3 sm:col-span-1 sm:border-b-0 sm:border-r">
+          <dt className="admin-label">Keys</dt>
+          <dd className="m-0 mt-1 text-xl font-semibold tabular-nums text-[var(--admin-text)]">{p.keys.length}</dd>
+        </div>
+        {stats.map((s, i) => (
+          <div
+            key={s.label}
+            className={`px-4 py-3 ${i % 2 === 0 ? "border-r" : ""} ${i < 2 ? "border-b sm:border-b-0" : ""} ${i < 3 ? "sm:border-r" : "sm:border-r-0"} border-[var(--admin-border)]`}
+          >
+            <dt className="admin-label flex items-center gap-1.5">
+              <span className={`h-1.5 w-1.5 rounded-full ${s.dot}`} aria-hidden /> {s.label}
+            </dt>
+            <dd className={`m-0 mt-1 text-xl font-semibold tabular-nums ${s.value ? "text-[var(--admin-text)]" : "text-[var(--admin-text-dim)]"}`}>
+              {s.value}
+            </dd>
+          </div>
+        ))}
+      </dl>
       {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
       <Dialog open={delOpen} title={`Delete provider ${p.name}?`} onClose={() => setDelOpen(false)}>
         <p className="text-[13px] text-[var(--admin-text-muted)]">
