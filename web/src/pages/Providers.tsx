@@ -1,27 +1,25 @@
-// Providers page — bento box layout with provider-type icons, health
-// indicators, accent stat cells, error-rate bars, and stagger entrance.
+// Providers — the upstream-account ledger. Same language as the Models
+// routing ledger: one ruled table, not a stack of identical cards. Each row is
+// an account: who it is (hue, name, type, endpoint), whether it can serve, how
+// its key pool splits traffic, and what it carried in the recent log window.
+// Colour is spent on two registers only: account identity (the shared
+// provider hue) and state (serving / cooling / down).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  AlertTriangle,
-  ArrowDownToLine,
-  ArrowUpFromLine,
-  DollarSign,
   Download,
   Layers,
-  Pencil,
   Plus,
   RefreshCw,
   Search,
   Server,
+  Settings2,
   Trash2,
   Upload,
   X,
-  Zap,
 } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
 import {
   addProvider,
   deleteProvider,
@@ -33,46 +31,21 @@ import {
 } from "@/api/client";
 import type { PoolKey, Provider, ProviderBackup, RequestLogEntry } from "@/api/types";
 import {
-  Badge,
   Button,
-  Card,
   Dialog,
   EmptyState,
   ErrorText,
   Field,
+  Figure,
   Input,
+  PageHeader,
   Select,
+  Skeleton,
   Toggle,
 } from "@/components/ui";
 import { fmtInt, fmtPct, fmtTokens, fmtUsd } from "@/lib/format";
+import { providerHue } from "@/lib/provider-hue";
 import { datedFilename, downloadJson } from "@/api/backup";
-
-const STATUS_TONE: Record<PoolKey["status"], "green" | "amber" | "red" | "gray"> = {
-  active: "green",
-  cooling: "amber",
-  invalid: "red",
-  disabled: "gray",
-};
-
-// The canonical provider badges from `web/public/logos/` — the same tiles the
-// README and the built-in providers catalog embed. One entry per type in
-// `wiwi/config.py:PROVIDER_TYPES`; anything unknown falls back to a generic
-// server glyph.
-const PROVIDER_BADGE: Record<string, string> = {
-  openai: "/logos/openai.svg",
-  anthropic: "/logos/anthropic.svg",
-  gemini: "/logos/gemini.svg",
-  openrouter: "/logos/openrouter.svg",
-  "nvidia-nim": "/logos/nvidia-nim.svg",
-  "openai-compatible": "/logos/openai-compatible.svg",
-  gmicloud: "/logos/gmicloud.svg",
-  bai: "/logos/bai.svg",
-  workbuddy: "/logos/workbuddy.svg",
-  cline: "/logos/cline.svg",
-  opencode: "/logos/opencode.svg",
-  hermes: "/logos/hermes.svg",
-  ifm: "/logos/ifm.svg",
-};
 
 const PROVIDER_TYPE_OPTIONS = [
   { value: "openai", label: "OpenAI" },
@@ -90,9 +63,7 @@ const PROVIDER_TYPE_OPTIONS = [
   { value: "openai-compatible", label: "OpenAI-compatible URL" },
 ];
 
-function providerBadge(type: string): string | null {
-  return PROVIDER_BADGE[type] ?? null;
-}
+const TYPE_LABEL = new Map(PROVIDER_TYPE_OPTIONS.map((o) => [o.value, o.label]));
 
 /** Lowercased haystack for the account search box: name, provider type, base
  *  URL, routing alias id, and every key label. Callers match each
@@ -102,6 +73,55 @@ function providerHaystack(p: Provider): string {
   const parts = [p.name, p.provider_type, p.base_url, p.alias_id ?? ""];
   for (const k of p.keys) parts.push(k.label);
   return parts.join(" ").toLowerCase();
+}
+
+/** A key with no credential never serves, so counting it as active would
+ *  report a pool that cannot route as healthy. */
+function isServingKey(k: PoolKey): boolean {
+  return k.enabled && k.has_secret && k.status === "active";
+}
+
+/** What a key can do right now. A key with no secret cannot authenticate
+ *  whatever its status says; it is a placeholder and reads as one. */
+function keyState(k: PoolKey): PoolKey["status"] {
+  return !k.has_secret || !k.enabled ? "disabled" : k.status;
+}
+
+const KEY_COLOR: Record<PoolKey["status"], string> = {
+  active: "var(--admin-success)",
+  cooling: "var(--admin-warning)",
+  invalid: "var(--admin-danger)",
+  disabled: "rgba(255, 255, 255, 0.14)",
+};
+
+// "Serving" mirrors the server's routing gate: enabled, with a healthy key.
+type AccountState = "serving" | "attention" | "off";
+type AccountFilter = "all" | AccountState;
+
+function accountState(p: Provider): AccountState {
+  if (!p.enabled) return "off";
+  return p.healthy ? "serving" : "attention";
+}
+
+const FILTERS: { value: AccountFilter; label: string }[] = [
+  { value: "all", label: "All accounts" },
+  { value: "serving", label: "Serving" },
+  { value: "attention", label: "Needs attention" },
+  { value: "off", label: "Out of rotation" },
+];
+
+/** Status text, not a pill — the ledger's convention. */
+function healthOf(p: Provider): { color: string; word: string } {
+  if (!p.enabled) return { color: "var(--admin-text-dim)", word: "out of rotation" };
+  if (p.healthy) return { color: "var(--admin-success)", word: "serving" };
+  if (p.keys.length === 0) return { color: "var(--admin-warning)", word: "no keys" };
+  return { color: "var(--admin-danger)", word: "no healthy keys" };
+}
+
+function errorTone(rate: number): string | undefined {
+  if (rate > 0.1) return "var(--admin-danger)";
+  if (rate > 0.03) return "var(--admin-warning)";
+  return undefined;
 }
 
 // -- per-provider stats aggregation from the request-log ring -------------------
@@ -134,50 +154,93 @@ function computeProviderStats(logs: RequestLogEntry[]): Map<string, ProviderStat
   return m;
 }
 
-function HealthDot({ healthy }: { healthy: boolean }) {
-  return (
-    <span className="relative flex h-2 w-2">
-      {healthy && (
-        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-40" />
-      )}
-      <span
-        className={`relative inline-flex h-2 w-2 rounded-full ${
-          healthy ? "bg-emerald-400" : "bg-red-400"
-        }`}
-      />
-    </span>
-  );
-}
+const FOCUS_RING =
+  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50";
 
-function StatCell(props: {
-  icon: LucideIcon;
-  label: string;
-  value: string;
-  tone?: "danger" | "accent" | "success";
-}) {
-  const Icon = props.icon;
-  const color =
-    props.tone === "danger"
-      ? "text-red-400"
-      : props.tone === "accent"
-        ? "text-blue-400"
-        : props.tone === "success"
-          ? "text-emerald-400"
-          : "text-[var(--admin-text)]";
+// One grid for the column guide and every row, so the columns cannot drift.
+// Phones: checkbox | identity | actions, with the pool and metrics on their
+// own lines under the identity. lg+: the full ledger.
+const ROW_GRID =
+  "grid grid-cols-[44px_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 px-2 lg:grid-cols-[44px_minmax(0,1.4fr)_minmax(10rem,1fr)_4.5rem_4.5rem_8rem_4.5rem_7.5rem] xl:grid-cols-[44px_minmax(0,1.4fr)_minmax(12rem,1fr)_4.5rem_4.5rem_8rem_4.5rem_11rem] lg:px-3";
+
+const HEAD =
+  "text-[9.5px] font-semibold uppercase tracking-[0.14em] text-[var(--admin-text-dim)] whitespace-nowrap";
+
+/** The key pool drawn as the traffic split it is. Round-robin segments are
+ *  sized by weight (that is how the router divides requests); a sequential
+ *  pool draws equal segments, because weight does not decide who serves. */
+function PoolSplit(props: { p: Provider; href: string }) {
+  const { p } = props;
+  if (p.keys.length === 0) {
+    return (
+      <p className="wl-meta">
+        <span style={{ color: "var(--admin-warning)" }}>Empty pool.</span>{" "}
+        <Link
+          to={props.href}
+          className={`rounded text-[var(--admin-text-muted)] underline underline-offset-2 hover:text-[var(--admin-text)] ${FOCUS_RING}`}
+        >
+          Add a key
+        </Link>{" "}
+        before it can serve.
+      </p>
+    );
+  }
+  const share = (k: PoolKey) => (p.round_robin ? Math.max(1, k.weight) : 1);
+  const total = p.keys.reduce((acc, k) => acc + share(k), 0);
+  const serving = p.keys.filter(isServingKey).length;
+  const cooling = p.keys.filter((k) => keyState(k) === "cooling").length;
+  const invalid = p.keys.filter((k) => keyState(k) === "invalid").length;
   return (
-    <div className="group/cell relative overflow-hidden px-3 py-2.5 transition-colors hover:bg-white/[0.015]">
-      <div className="mb-1 flex items-center gap-1.5">
-        <Icon size={11} className="text-[var(--admin-text-dim)]" />
-        <span className="admin-label">{props.label}</span>
+    <div className="min-w-0">
+      <div
+        className="wl-split flex gap-px"
+        role="img"
+        aria-label={`Key pool: ${p.keys
+          .map((k) => `${k.label} ${keyState(k)}, weight ${k.weight}`)
+          .join("; ")}`}
+      >
+        {p.keys.map((k) => (
+          <span
+            key={k.label}
+            title={`${k.label} · ${keyState(k)} · weight ${k.weight}`}
+            style={{ width: `${(share(k) / total) * 100}%`, backgroundColor: KEY_COLOR[keyState(k)] }}
+          />
+        ))}
       </div>
-      <p className={`font-mono text-[15px] font-semibold tabular-nums ${color}`}>
-        {props.value}
+      <p className="wl-meta mt-1.5">
+        <span className="font-mono tabular-nums text-[var(--admin-text-muted)]">
+          {serving}/{p.keys.length}
+        </span>{" "}
+        serving · {p.round_robin ? "round-robin" : "sequential"}
+        {cooling > 0 && <span style={{ color: "var(--admin-warning)" }}>, {cooling} cooling</span>}
+        {invalid > 0 && <span style={{ color: "var(--admin-danger)" }}>, {invalid} invalid</span>}
       </p>
     </div>
   );
 }
 
-function ProviderCard(props: {
+function Num(props: { value: string; sub?: string; tone?: string; subTone?: string; empty?: boolean }) {
+  return (
+    <div className="hidden text-right lg:block">
+      <div
+        className="wl-num"
+        style={{ color: props.empty ? "var(--admin-text-dim)" : (props.tone ?? "var(--admin-text)") }}
+      >
+        {props.value}
+      </div>
+      {props.sub && (
+        <div
+          className="wl-num mt-0.5 !text-[10.5px]"
+          style={{ color: props.subTone ?? "var(--admin-text-dim)" }}
+        >
+          {props.sub}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProviderRow(props: {
   p: Provider;
   stats: ProviderStats | undefined;
   selected: boolean;
@@ -204,182 +267,147 @@ function ProviderCard(props: {
     onError: (e) => props.onError(e.message),
   });
 
+  const p = props.p;
   const s = props.stats;
-  const totalKeys = props.p.keys.length;
-  // A key with no credential never serves, so counting it as active would
-  // report a pool that cannot route as healthy.
-  const activeKeys = props.p.keys.filter(
-    (k) => k.enabled && k.has_secret && k.status === "active",
-  ).length;
+  const href = `/console/providers/${encodeURIComponent(p.name)}`;
+  const health = healthOf(p);
   const errorRate = s && s.requests > 0 ? s.errors / s.requests : 0;
   const cacheRate = s && s.tokIn > 0 ? s.tokCached / s.tokIn : 0;
-  const badge = providerBadge(props.p.provider_type);
+  const cacheTone = cacheRate > 0.1 ? "var(--admin-success)" : undefined;
 
   return (
-    <Card className={props.selected ? "ring-1 ring-blue-500/40" : undefined}>
-      {/* header */}
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--admin-border)] px-4 py-3">
-        <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1.5">
-          <label
-            className="-ml-2 flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-lg transition-colors hover:bg-white/[0.04]"
-            title={`Select ${props.p.name} for bulk actions`}
-          >
-            <input
-              type="checkbox"
-              className="h-4 w-4 cursor-pointer accent-blue-500"
-              checked={props.selected}
-              onChange={(e) => props.onToggleSelect(props.p.name, e.target.checked)}
-              aria-label={`Select provider ${props.p.name}`}
-            />
-          </label>
-          {badge ? (
-            <img
-              src={badge}
-              alt=""
-              className="h-7 w-7 shrink-0 rounded-lg object-contain"
-            />
-          ) : (
-            <div className="flex h-7 w-7 items-center justify-center rounded-lg border border-[var(--admin-border)] bg-white/[0.02]">
-              <Server size={14} className="text-[var(--admin-text-muted)]" />
-            </div>
-          )}
-          <h3 className="text-[14px] font-semibold tracking-[-0.01em] text-[var(--admin-text)]">
-            {props.p.name}
-          </h3>
-          <Badge tone="blue">{props.p.provider_type}</Badge>
-          <div className="flex items-center gap-1.5">
-            <Toggle
-              label={`Enable provider ${props.p.name}`}
-              checked={props.p.enabled}
-              onChange={(v) => setEnabled.mutate(v)}
-              disabled={setEnabled.isPending}
-              className="after:absolute after:-inset-3 after:content-['']"
-            />
-            <span className="text-[11px] text-[var(--admin-text-muted)]">
-              {props.p.enabled ? "enabled" : "disabled"}
-            </span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <HealthDot healthy={props.p.healthy} />
-            <span className="text-[11px] text-[var(--admin-text-muted)]">
-              {!props.p.enabled
-                ? "out of rotation"
-                : props.p.healthy
-                  ? "healthy"
-                  : "no healthy keys"}
-            </span>
-          </div>
-          <Badge tone="gray">
-            {activeKeys}/{totalKeys} keys
-          </Badge>
-        </div>
-        <div className="flex items-center gap-2">
-          <Link
-            to={`/console/providers/${encodeURIComponent(props.p.name)}`}
-            className="inline-flex"
-            title="Open provider detail"
-          >
-            <Button variant="outline">
-              <Pencil size={14} /> Edit
-            </Button>
-          </Link>
-          <Button variant="danger" onClick={() => setDelOpen(true)}>
-            <Trash2 size={14} /> Delete
-          </Button>
-        </div>
-      </div>
-
-      {/* base url */}
-      <div className="flex items-center gap-2 px-4 pb-2 pt-2 font-mono text-[11px] text-[var(--admin-text-dim)]">
-        <span className="h-1 w-1 rounded-full bg-[var(--admin-text-dim)]" />
-        {props.p.base_url || "(default endpoint)"}
-      </div>
-
-      {/* bento stats grid */}
-      <div className="grid grid-cols-2 divide-x divide-y divide-[var(--admin-border)] border-t border-[var(--admin-border)] sm:grid-cols-3 lg:grid-cols-6 sm:divide-y-0">
-        <StatCell icon={Server} label="Requests" value={s ? fmtInt(s.requests) : "—"} tone="accent" />
-        <StatCell
-          icon={AlertTriangle}
-          label="Errors"
-          value={s ? fmtInt(s.errors) : "—"}
-          tone={s && s.errors > 0 ? "danger" : undefined}
+    <li
+      className={`${ROW_GRID} border-t border-[var(--admin-border)] py-3 transition-colors first:border-t-0 hover:bg-white/[0.016] ${
+        props.selected ? "bg-blue-500/[0.05] hover:bg-blue-500/[0.07]" : ""
+      }`}
+    >
+      <label
+        className="flex h-11 w-11 cursor-pointer items-center justify-center rounded-lg"
+        title={`Select ${p.name} for bulk actions`}
+      >
+        <input
+          type="checkbox"
+          className="h-4 w-4 cursor-pointer accent-blue-500"
+          checked={props.selected}
+          onChange={(e) => props.onToggleSelect(p.name, e.target.checked)}
+          aria-label={`Select provider ${p.name}`}
         />
-        <StatCell icon={ArrowDownToLine} label="Tokens In" value={s ? fmtTokens(s.tokIn) : "—"} />
-        <StatCell icon={ArrowUpFromLine} label="Tokens Out" value={s ? fmtTokens(s.tokOut) : "—"} />
-        <StatCell
-          icon={Zap}
-          label="Cached"
-          value={s ? fmtTokens(s.tokCached) : "—"}
-          tone={cacheRate > 0.1 ? "success" : undefined}
-        />
-        <StatCell icon={DollarSign} label="Cost" value={s ? fmtUsd(s.cost) : "—"} />
-      </div>
+      </label>
 
-      {/* error-rate bar */}
-      {s && s.requests > 0 && (
-        <div className="flex items-center gap-3 px-4 py-2">
-          <span className="admin-label whitespace-nowrap">Error rate</span>
-          <div className="h-1 flex-1 overflow-hidden rounded-full bg-white/[0.04]">
-            <div
-              className={`h-full rounded-full transition-all duration-500 ${
-                errorRate > 0.1
-                  ? "bg-red-400"
-                  : errorRate > 0.03
-                    ? "bg-amber-400"
-                    : "bg-emerald-400"
+      {/* identity: the account's hue, name and state on one line */}
+      <div className="min-w-0">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span
+            className="wl-hue"
+            style={{ backgroundColor: providerHue(p.name), opacity: p.enabled ? 1 : 0.35 }}
+            aria-hidden
+          />
+          <h3 className="m-0 min-w-0">
+            <Link
+              to={href}
+              className={`wl-group-name block truncate rounded underline-offset-4 hover:underline ${FOCUS_RING} ${
+                p.enabled ? "" : "!text-[var(--admin-text-muted)]"
               }`}
-              style={{ width: `${Math.max(2, errorRate * 100)}%` }}
-            />
-          </div>
-          <span className="font-mono text-[11px] tabular-nums text-[var(--admin-text-muted)]">
-            {fmtPct(errorRate)}
+            >
+              {p.name}
+            </Link>
+          </h3>
+          <span className="wl-state shrink-0" style={{ color: health.color }}>
+            {health.word}
           </span>
         </div>
-      )}
-
-      {/* compact key pool preview */}
-      {props.p.keys.length > 0 && (
-        <div className="space-y-0.5 border-t border-[var(--admin-border)] px-4 py-3">
-          {props.p.keys.slice(0, 3).map((k) => (
-            <div key={k.label} className="flex items-center justify-between text-[12px]">
-              <div className="flex items-center gap-2">
-                <span
-                  className={`h-1.5 w-1.5 rounded-full ${
-                    !k.has_secret
-                      ? "bg-amber-400"
-                      : k.status === "active"
-                        ? "bg-emerald-400"
-                        : k.status === "cooling"
-                          ? "bg-amber-400"
-                          : k.status === "invalid"
-                            ? "bg-red-400"
-                            : "bg-zinc-600"
-                  }`}
-                />
-                <span className="font-medium text-[var(--admin-text)]">{k.label}</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <Badge tone={k.has_secret ? STATUS_TONE[k.status] : "amber"}>
-                  {k.has_secret ? k.status : "no secret"}
-                </Badge>
-                <span className="font-mono tabular-nums text-[var(--admin-text-dim)]">
-                  {fmtInt(k.req_count)} reqs
-                </span>
-              </div>
-            </div>
-          ))}
-          {props.p.keys.length > 3 && (
-            <Link
-              to={`/console/providers/${encodeURIComponent(props.p.name)}`}
-              className="inline-block pt-1 text-[11px] text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]"
-            >
-              +{props.p.keys.length - 3} more…
-            </Link>
+        <p className="wl-meta mt-0.5 flex min-w-0 gap-2 pl-[18px]">
+          <span className="shrink-0">{TYPE_LABEL.get(p.provider_type) ?? p.provider_type}</span>
+          <span className="min-w-0 truncate font-mono" title={p.base_url || undefined}>
+            {p.base_url || "default endpoint"}
+          </span>
+          {p.alias_id && (
+            <span className="hidden shrink-0 font-mono xl:inline">alias {p.alias_id}</span>
           )}
-        </div>
+        </p>
+      </div>
+
+      {/* actions: row one on phones, the last column from lg up */}
+      <div className="flex items-center justify-end lg:order-last">
+        <span className="flex h-11 w-11 items-center justify-center">
+          <Toggle
+            label={`Route traffic to ${p.name}`}
+            checked={p.enabled}
+            onChange={(v) => setEnabled.mutate(v)}
+            disabled={setEnabled.isPending}
+            className="after:absolute after:-inset-3 after:content-['']"
+          />
+        </span>
+        <Link
+          to={href}
+          title={`Manage ${p.name}`}
+          className={`admin-btn admin-btn-ghost min-h-11 min-w-11 justify-center px-2.5 lg:min-h-9 lg:min-w-9 ${FOCUS_RING}`}
+        >
+          <Settings2 size={14} aria-hidden />
+          <span className="sr-only xl:not-sr-only">Manage</span>
+        </Link>
+        <Button
+          variant="ghost"
+          onClick={() => setDelOpen(true)}
+          aria-label={`Delete provider ${p.name}`}
+          title="Delete provider"
+          className="min-h-11 min-w-11 justify-center px-0 text-[var(--admin-text-dim)] hover:text-red-400 lg:min-h-9 lg:min-w-9"
+        >
+          <Trash2 size={14} aria-hidden />
+        </Button>
+      </div>
+
+      <div className="col-span-2 col-start-2 min-w-0 lg:col-span-1 lg:col-start-auto">
+        <PoolSplit p={p} href={href} />
+      </div>
+
+      {/* phones: the four figures ride one quiet line under the pool */}
+      <p className="wl-m col-span-2 col-start-2 m-0 flex flex-wrap gap-x-4 gap-y-1 font-mono text-[11px] tabular-nums text-[var(--admin-text-dim)] lg:hidden">
+        {s ? (
+          <>
+            <span>
+              <span className="text-[var(--admin-text)]">{fmtInt(s.requests)}</span> req
+            </span>
+            <span style={{ color: s.errors > 0 ? errorTone(errorRate) : undefined }}>
+              {fmtPct(errorRate)} err
+            </span>
+            <span>
+              <span className="text-[var(--admin-text)]">{fmtTokens(s.tokIn)}</span> →{" "}
+              <span className="text-[var(--admin-text)]">{fmtTokens(s.tokOut)}</span>
+            </span>
+            <span className="text-[var(--admin-text)]">{fmtUsd(s.cost)}</span>
+          </>
+        ) : (
+          <span className="font-sans">No requests in the recent log window.</span>
+        )}
+      </p>
+
+      {s ? (
+        <>
+          <Num value={fmtInt(s.requests)} />
+          <Num
+            value={fmtInt(s.errors)}
+            sub={fmtPct(errorRate)}
+            tone={s.errors > 0 ? (errorTone(errorRate) ?? "var(--admin-text)") : undefined}
+            subTone={s.errors > 0 ? errorTone(errorRate) : undefined}
+          />
+          <Num
+            value={`${fmtTokens(s.tokIn)} → ${fmtTokens(s.tokOut)}`}
+            sub={s.tokIn > 0 ? `${fmtPct(cacheRate)} cached` : undefined}
+            subTone={cacheTone}
+          />
+          <Num value={fmtUsd(s.cost)} />
+        </>
+      ) : (
+        <>
+          <Num value="—" empty />
+          <Num value="—" empty />
+          <Num value="—" empty />
+          <Num value="—" empty />
+        </>
       )}
 
-      <Dialog open={delOpen} title={`Delete provider ${props.p.name}?`} onClose={() => setDelOpen(false)}>
+      <Dialog open={delOpen} title={`Delete provider ${p.name}?`} onClose={() => setDelOpen(false)}>
         <p className="text-[13px] text-[var(--admin-text-muted)]">
           This removes the account and all its keys from the live pool. If any
           model group still references it, deletion will be blocked.
@@ -398,7 +426,7 @@ function ProviderCard(props: {
           </Button>
         </div>
       </Dialog>
-    </Card>
+    </li>
   );
 }
 
@@ -415,6 +443,7 @@ export function ProvidersPage() {
   const [secret, setSecret] = useState("");
   const [importing, setImporting] = useState(false);
   const [q, setQ] = useState("");
+  const [filter, setFilter] = useState<AccountFilter>("all");
   const [selectedNames, setSelectedNames] = useState<Set<string>>(() => new Set());
   const [bulkOpen, setBulkOpen] = useState(false);
   const selectAllRef = useRef<HTMLInputElement>(null);
@@ -447,7 +476,7 @@ export function ProvidersPage() {
   );
   // Stable identities so the filter memo only recomputes on real data changes.
   const accounts = useMemo(() => query.data?.providers ?? [], [query.data]);
-  const visibleAccounts = useMemo(
+  const searched = useMemo(
     () =>
       terms.length === 0
         ? accounts
@@ -457,6 +486,41 @@ export function ProvidersPage() {
           }),
     [accounts, terms],
   );
+  // Counts follow the search, so each filter says what clicking it would show.
+  const filterCounts = useMemo(() => {
+    const c: Record<AccountFilter, number> = { all: searched.length, serving: 0, attention: 0, off: 0 };
+    for (const p of searched) c[accountState(p)] += 1;
+    return c;
+  }, [searched]);
+  const visibleAccounts = useMemo(
+    () => (filter === "all" ? searched : searched.filter((p) => accountState(p) === filter)),
+    [searched, filter],
+  );
+
+  // Fleet totals for the summary band. "Serving" mirrors the server's routing
+  // gate: an account must be enabled and hold at least one healthy key.
+  const fleet = useMemo(() => {
+    let serving = 0;
+    let enabled = 0;
+    let keys = 0;
+    let activeKeys = 0;
+    let requests = 0;
+    let errors = 0;
+    let cost = 0;
+    for (const p of accounts) {
+      if (p.enabled) enabled += 1;
+      if (p.enabled && p.healthy) serving += 1;
+      keys += p.keys.length;
+      activeKeys += p.keys.filter(isServingKey).length;
+      const s = statsByProvider.get(p.name);
+      if (s) {
+        requests += s.requests;
+        errors += s.errors;
+        cost += s.cost;
+      }
+    }
+    return { serving, enabled, keys, activeKeys, requests, errors, cost };
+  }, [accounts, statsByProvider]);
 
   const allVisibleSelected =
     visibleAccounts.length > 0 && visibleAccounts.every((p) => selectedNames.has(p.name));
@@ -620,164 +684,151 @@ export function ProvidersPage() {
   };
 
   return (
-    <div>
-      <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="text-2xl font-semibold tracking-[-0.02em] text-[var(--admin-text)]">
-            Providers
-          </h2>
-          {query.data && (
-            <p className="mt-0.5 font-mono text-[11px] text-[var(--admin-text-dim)]">
-              {query.data.providers.length} account{query.data.providers.length === 1 ? "" : "s"} ·{" "}
-              {query.data.providers.reduce((acc, p) => acc + p.keys.length, 0)} total keys
-            </p>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          <Link to="/console/builtin-providers" className="inline-flex">
-            <Button variant="ghost">
-              <Layers size={14} /> Catalog
-            </Button>
-          </Link>
-          <Button variant="outline" onClick={() => void doExport()}>
-            <Download size={14} /> Export
-          </Button>
-          <Button
-            variant="outline"
-            disabled={importing}
-            onClick={() => fileRef.current?.click()}
-          >
-            <Upload size={14} /> {importing ? "Importing…" : "Import"}
-          </Button>
-          <input
-            ref={fileRef}
-            type="file"
-            accept="application/json,.json"
-            className="hidden"
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) void doImportFile(f);
-              e.target.value = "";
-            }}
-          />
-          <Button variant="outline" onClick={() => void qc.invalidateQueries({ queryKey: ["providers"] })}>
-            <RefreshCw size={14} /> Refresh
-          </Button>
-          <Button onClick={() => setAddOpen(true)}>
-            <Plus size={14} /> Add provider
-          </Button>
-        </div>
-      </div>
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        <div className="relative min-w-0 flex-1 basis-64">
-          <Search
-            size={14}
-            aria-hidden
-            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--admin-text-dim)]"
-          />
-          <Input
-            type="search"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Search accounts by name, type, URL, alias, or key label…"
-            aria-label="Search provider accounts"
-            spellCheck={false}
-            autoComplete="off"
-            className="min-h-11 pl-9 pr-12"
-          />
-          {q !== "" && (
-            <button
-              type="button"
-              aria-label="Clear search"
-              onClick={() => setQ("")}
-              className="absolute right-1 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-lg text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+    <div className={`admin-dash${query.isFetching && query.data ? " is-refetching" : ""}`}>
+      <PageHeader
+        title="Providers"
+        subtitle="Upstream accounts and the key pools that serve them."
+        right={
+          <>
+            <Link
+              to="/console/builtin-providers"
+              className={`admin-btn admin-btn-ghost ${FOCUS_RING}`}
             >
-              <X size={14} />
-            </button>
-          )}
-        </div>
-        {terms.length > 0 && (
-          <p
-            className="font-mono text-[11px] tabular-nums text-[var(--admin-text-muted)]"
-            aria-live="polite"
-          >
-            {visibleAccounts.length} of {accounts.length} account
-            {accounts.length === 1 ? "" : "s"}
-          </p>
-        )}
-      </div>
-      {visibleAccounts.length > 0 && (
-        <div className="mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-[10px] border border-[var(--admin-border)] px-2 py-1">
-          <label className="flex h-11 cursor-pointer items-center gap-2 rounded-lg px-2 text-[12px] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]">
+              <Layers size={14} aria-hidden />
+              <span className="sr-only sm:not-sr-only">Catalog</span>
+            </Link>
+            <Button variant="outline" onClick={() => void doExport()}>
+              <Download size={14} aria-hidden />
+              <span className="sr-only sm:not-sr-only">Export</span>
+            </Button>
+            <Button
+              variant="outline"
+              disabled={importing}
+              onClick={() => fileRef.current?.click()}
+            >
+              <Upload size={14} aria-hidden />
+              <span className="sr-only sm:not-sr-only">{importing ? "Importing…" : "Import"}</span>
+            </Button>
             <input
-              ref={selectAllRef}
-              type="checkbox"
-              className="h-4 w-4 cursor-pointer accent-blue-500"
-              checked={allVisibleSelected}
+              ref={fileRef}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
               onChange={(e) => {
-                const on = e.target.checked;
-                setSelectedNames((prev) => {
-                  const next = new Set(prev);
-                  for (const p of visibleAccounts) {
-                    if (on) next.add(p.name);
-                    else next.delete(p.name);
-                  }
-                  return next;
-                });
+                const f = e.target.files?.[0];
+                if (f) void doImportFile(f);
+                e.target.value = "";
               }}
-              aria-label="Select all visible provider accounts"
             />
-            Select all{terms.length > 0 ? ` ${visibleAccounts.length} visible` : ""}
-          </label>
-          <span
-            className="font-mono text-[11px] tabular-nums text-[var(--admin-text-dim)]"
-            aria-live="polite"
-          >
-            {selectedNames.size} selected
+            <Button
+              variant="outline"
+              onClick={() => void qc.invalidateQueries({ queryKey: ["providers"] })}
+              aria-label="Refresh providers"
+              disabled={query.isFetching}
+            >
+              <RefreshCw
+                size={14}
+                className={query.isFetching ? "motion-safe:animate-spin" : ""}
+                aria-hidden
+              />
+            </Button>
+            <Button onClick={() => setAddOpen(true)}>
+              <Plus size={14} /> Add provider
+            </Button>
+          </>
+        }
+      />
+      {/* Summary: one ruled line of figures, matching the Models and Combos
+          ledgers — not a band of stat boxes. "Can the fleet serve right now"
+          is answered before any single account is read. */}
+      {query.data && accounts.length > 0 && (
+        <div className="mb-5 flex flex-wrap items-center gap-x-7 gap-y-4 border-y border-[var(--admin-border)] py-4">
+          <Figure label="Accounts" value={fmtInt(accounts.length)} />
+          <Figure
+            label="Serving"
+            value={`${fmtInt(fleet.serving)} of ${fmtInt(fleet.enabled)}`}
+            tone={
+              fleet.enabled === 0
+                ? undefined
+                : fleet.serving === fleet.enabled
+                  ? "var(--admin-success)"
+                  : fleet.serving > 0
+                    ? "var(--admin-warning)"
+                    : "var(--admin-danger)"
+            }
+          />
+          <Figure
+            label="Keys serving"
+            value={`${fmtInt(fleet.activeKeys)} of ${fmtInt(fleet.keys)}`}
+            tone={fleet.activeKeys < fleet.keys ? "var(--admin-warning)" : undefined}
+          />
+          <Figure label="Requests" value={fmtInt(fleet.requests)} />
+          <Figure
+            label="Error rate"
+            value={fleet.requests > 0 ? fmtPct(fleet.errors / fleet.requests) : "—"}
+            tone={fleet.requests > 0 ? errorTone(fleet.errors / fleet.requests) : undefined}
+          />
+          <Figure label="Cost" value={fmtUsd(fleet.cost)} />
+          <span className="ml-auto hidden font-mono text-[11px] text-[var(--admin-text-dim)] sm:inline">
+            traffic from the recent request log
           </span>
-          <div className="ml-auto flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto">
-            <Button
-              variant="outline"
-              disabled={selectedNames.size === 0 || bulkSetEnabled.isPending || bulkDelete.isPending}
-              onClick={() =>
-                bulkSetEnabled.mutate({ names: [...selectedNames], enabled: true })
-              }
-            >
-              {bulkSetEnabled.isPending && bulkSetEnabled.variables?.enabled
-                ? "Enabling…"
-                : "Enable"}
-            </Button>
-            <Button
-              variant="outline"
-              disabled={selectedNames.size === 0 || bulkSetEnabled.isPending || bulkDelete.isPending}
-              onClick={() =>
-                bulkSetEnabled.mutate({ names: [...selectedNames], enabled: false })
-              }
-            >
-              {bulkSetEnabled.isPending && !bulkSetEnabled.variables?.enabled
-                ? "Disabling…"
-                : "Disable"}
-            </Button>
-            <Button
-              variant="ghost"
-              disabled={selectedNames.size === 0 || bulkDelete.isPending || bulkSetEnabled.isPending}
-              onClick={() => setSelectedNames(new Set())}
-            >
-              Clear
-            </Button>
-            <Button
-              variant="danger"
-              disabled={selectedNames.size === 0 || bulkDelete.isPending || bulkSetEnabled.isPending}
-              onClick={() => setBulkOpen(true)}
-            >
-              <Trash2 size={14} />{" "}
-              {bulkDelete.isPending
-                ? "Deleting…"
-                : `Delete selected${selectedNames.size > 0 ? ` (${selectedNames.size})` : ""}`}
-            </Button>
-          </div>
         </div>
       )}
+
+      <div className="relative mb-2">
+        <Search
+          size={14}
+          aria-hidden
+          className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--admin-text-dim)]"
+        />
+        <Input
+          type="search"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search by name, type, URL, alias, or key label…"
+          aria-label="Search provider accounts"
+          spellCheck={false}
+          autoComplete="off"
+          className="min-h-11 pl-9 pr-12"
+        />
+        {q !== "" && (
+          <button
+            type="button"
+            aria-label="Clear search"
+            onClick={() => setQ("")}
+            className={`absolute right-1 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-lg text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)] ${FOCUS_RING}`}
+          >
+            <X size={14} />
+          </button>
+        )}
+      </div>
+
+      {/* Filter rail: quiet text choices with an underline on the active one. */}
+      {accounts.length > 0 && (
+        <div className="mb-3 flex items-center gap-x-5 overflow-x-auto whitespace-nowrap border-b border-[var(--admin-border)] [scrollbar-width:none]">
+          {FILTERS.map((o) => (
+            <button
+              key={o.value}
+              type="button"
+              aria-pressed={filter === o.value}
+              onClick={() => setFilter(o.value)}
+              className={`wl-filter ${FOCUS_RING}`}
+            >
+              {o.label}
+              <span className="ml-1.5 font-mono text-[11px] tabular-nums opacity-60">
+                {fmtInt(filterCounts[o.value])}
+              </span>
+            </button>
+          ))}
+          <span
+            className="ml-auto hidden py-2 font-mono text-[11px] tabular-nums text-[var(--admin-text-muted)] sm:block"
+            aria-live="polite"
+          >
+            {fmtInt(visibleAccounts.length)} of {fmtInt(accounts.length)} accounts
+          </span>
+        </div>
+      )}
+
       {error && (
         <div className="mb-3">
           <ErrorText>{error}</ErrorText>
@@ -790,48 +841,160 @@ export function ProvidersPage() {
           </p>
         </div>
       )}
+      {query.error && <ErrorText>{query.error.message}</ErrorText>}
+
       {query.isLoading && (
-        <div className="space-y-4">
-          {[0, 1].map((i) => (
-            <div
-              key={i}
-              className="admin-skeleton h-[180px] rounded-[14px]"
-            />
+        <div className="wl-shell" role="status" aria-busy="true" aria-label="Loading providers">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="border-t border-[var(--admin-border)] px-4 py-4 first:border-t-0">
+              <Skeleton className="h-4 w-48" />
+              <Skeleton className="mt-2.5 h-1.5 w-full max-w-md" />
+            </div>
           ))}
         </div>
       )}
-      {query.error && <ErrorText>{query.error.message}</ErrorText>}
-      <div className="admin-stagger space-y-4">
-        {visibleAccounts.map((p) => (
-          <ProviderCard
-            key={p.name}
-            p={p}
-            stats={statsByProvider.get(p.name)}
-            selected={selectedNames.has(p.name)}
-            onToggleSelect={toggleSelect}
-            onError={setError}
-          />
-        ))}
-        {query.data && accounts.length === 0 && (
-          <Card>
-            <EmptyState>No providers configured.</EmptyState>
-          </Card>
-        )}
-        {query.data && accounts.length > 0 && visibleAccounts.length === 0 && (
-          <Card>
-            <EmptyState>
-              No provider account matches “{q.trim()}”.{" "}
-              <button
-                type="button"
-                onClick={() => setQ("")}
-                className="rounded text-[var(--admin-text-muted)] underline underline-offset-2 transition-colors hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+
+      {query.data && (
+        <div className="wl-shell">
+          {visibleAccounts.length > 0 && (
+            // Column guide. With a selection it turns into the bulk bar, so
+            // the actions sit where the selection was made instead of in a
+            // second toolbar that is empty most of the time.
+            <div
+              className={`${selectedNames.size > 0 ? "flex flex-wrap items-center gap-x-2 gap-y-1 px-2 lg:px-3" : ROW_GRID} min-h-11 border-b border-[var(--admin-border)] bg-white/[0.012] py-1`}
+            >
+              <label
+                className="flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-lg"
+                title="Select all visible accounts"
               >
-                Clear search
-              </button>
+                <input
+                  ref={selectAllRef}
+                  type="checkbox"
+                  className="h-4 w-4 cursor-pointer accent-blue-500"
+                  checked={allVisibleSelected}
+                  onChange={(e) => {
+                    const on = e.target.checked;
+                    setSelectedNames((prev) => {
+                      const next = new Set(prev);
+                      for (const p of visibleAccounts) {
+                        if (on) next.add(p.name);
+                        else next.delete(p.name);
+                      }
+                      return next;
+                    });
+                  }}
+                  aria-label="Select all visible provider accounts"
+                />
+              </label>
+              {selectedNames.size === 0 ? (
+                <>
+                  <span className={HEAD}>Account</span>
+                  <span className={`${HEAD} hidden lg:block`}>Key pool</span>
+                  <span className={`${HEAD} hidden text-right lg:block`}>Requests</span>
+                  <span className={`${HEAD} hidden text-right lg:block`}>Errors</span>
+                  <span className={`${HEAD} hidden text-right lg:block`}>Tokens in → out</span>
+                  <span className={`${HEAD} hidden text-right lg:block`}>Cost</span>
+                  <span aria-hidden />
+                </>
+              ) : (
+                <>
+                  <span
+                    className="font-mono text-[11px] tabular-nums text-[var(--admin-text)]"
+                    aria-live="polite"
+                  >
+                    {selectedNames.size} selected
+                  </span>
+                  <div className="ml-auto flex flex-wrap items-center justify-end gap-1">
+                    <Button
+                      variant="ghost"
+                      disabled={bulkSetEnabled.isPending || bulkDelete.isPending}
+                      onClick={() =>
+                        bulkSetEnabled.mutate({ names: [...selectedNames], enabled: true })
+                      }
+                    >
+                      {bulkSetEnabled.isPending && bulkSetEnabled.variables?.enabled
+                        ? "Enabling…"
+                        : "Enable"}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      disabled={bulkSetEnabled.isPending || bulkDelete.isPending}
+                      onClick={() =>
+                        bulkSetEnabled.mutate({ names: [...selectedNames], enabled: false })
+                      }
+                    >
+                      {bulkSetEnabled.isPending && !bulkSetEnabled.variables?.enabled
+                        ? "Disabling…"
+                        : "Disable"}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      disabled={bulkDelete.isPending || bulkSetEnabled.isPending}
+                      onClick={() => setSelectedNames(new Set())}
+                    >
+                      Clear
+                    </Button>
+                    <Button
+                      variant="danger"
+                      disabled={bulkDelete.isPending || bulkSetEnabled.isPending}
+                      onClick={() => setBulkOpen(true)}
+                    >
+                      <Trash2 size={14} aria-hidden />
+                      {bulkDelete.isPending ? "Deleting…" : `Delete ${selectedNames.size}`}
+                    </Button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+          <ul className="admin-stagger m-0 list-none p-0">
+            {visibleAccounts.map((p) => (
+              <ProviderRow
+                key={p.name}
+                p={p}
+                stats={statsByProvider.get(p.name)}
+                selected={selectedNames.has(p.name)}
+                onToggleSelect={toggleSelect}
+                onError={setError}
+              />
+            ))}
+          </ul>
+          {accounts.length === 0 && (
+            <EmptyState
+              icon={Server}
+              title="No provider accounts yet"
+              action={
+                <Button onClick={() => setAddOpen(true)}>
+                  <Plus size={14} /> Add provider
+                </Button>
+              }
+            >
+              Requests cannot route until at least one upstream account holds a key.
+              Add one here, or start from a preset in the catalog.
             </EmptyState>
-          </Card>
-        )}
-      </div>
+          )}
+          {accounts.length > 0 && visibleAccounts.length === 0 && (
+            <EmptyState
+              icon={Search}
+              title="No account matches."
+              action={
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setQ("");
+                    setFilter("all");
+                  }}
+                >
+                  Clear search and filter
+                </Button>
+              }
+            >
+              {q.trim() ? `Nothing matches “${q.trim()}”` : "Nothing is in this state"}
+              {filter !== "all" ? ` under ${FILTERS.find((f) => f.value === filter)?.label}.` : "."}
+            </EmptyState>
+          )}
+        </div>
+      )}
 
       <Dialog
         open={bulkOpen}
