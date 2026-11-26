@@ -34,6 +34,66 @@ MAX_BUFFER_BYTES = 1024 * 1024
 MAX_REPAIR_DEPTH = 4096
 
 
+class _ScanState:
+    """Scanner state at ``pos`` — lets ``PartialJSONParser`` resume the scan
+    where the previous ``feed`` stopped instead of rescanning the whole buffer
+    (quadratic in the argument size; AUDIT #620)."""
+
+    __slots__ = (
+        "escaped",
+        "in_string",
+        "open_idx",
+        "open_is_key",
+        "pos",
+        "prev_sig",
+        "stack",
+    )
+
+    def __init__(self) -> None:
+        self.stack: list[str] = []
+        self.in_string = False
+        self.escaped = False
+        self.prev_sig = ""
+        self.open_idx = -1
+        self.open_is_key = False
+        self.pos = 0
+
+
+def _scan_into(st: _ScanState, text: str) -> None:
+    """Advance ``st`` over ``text[st.pos:]``. Same rules as ``_scan_json``."""
+    stack = st.stack
+    in_string, escaped, prev_sig = st.in_string, st.escaped, st.prev_sig
+    open_idx, open_is_key = st.open_idx, st.open_is_key
+    for idx in range(st.pos, len(text)):
+        ch = text[idx]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == _QUOTE:
+                in_string = False
+                prev_sig = ch
+            continue
+        if ch == _QUOTE:
+            in_string = True
+            open_idx = idx
+            open_is_key = (prev_sig in ("{", ",") and bool(stack)
+                           and stack[-1] == "}")
+        elif ch in _OPEN_CLOSE:
+            if len(stack) < MAX_REPAIR_DEPTH:
+                stack.append(_OPEN_CLOSE[ch])
+            prev_sig = ch
+        elif ch in _CLOSE_CHARS and stack and stack[-1] == ch:
+            stack.pop()
+            prev_sig = ch
+        elif not ch.isspace():
+            prev_sig = ch
+    st.in_string, st.escaped, st.prev_sig = in_string, escaped, prev_sig
+    st.open_idx, st.open_is_key = open_idx, open_is_key
+    st.pos = len(text)
+
+
 def _scan_json(text: str) -> tuple[list[str], bool, int, bool]:
     """Track JSON nesting and string state in one pass.
 
@@ -104,6 +164,95 @@ _DANGLING_NUMBER = re.compile(r"[0-9][0-9.eE+-]*[.eE+-]$")
 _TRAILING_STRING = re.compile(r'"(?:[^"\\]|\\.)*"$')
 
 
+def _tail_run(text: str, chars: str) -> int:
+    """Start index of the maximal run of ``chars`` ending at the tail.
+
+    Replaces ``re.search(r"[...]+$")``: an unanchored search with a ``$`` tail
+    restarts at every position of a long run and is quadratic in its length,
+    so a 4 KB string value cost ~4 ms per streamed fragment.
+    """
+    i = len(text)
+    while i > 0 and text[i - 1] in chars:
+        i -= 1
+    return i
+
+
+_HEX = frozenset("0123456789abcdefABCDEF")
+
+
+class _TailMatch:
+    """The slice of ``re.Match`` the repair code reads, for the linear scans."""
+
+    __slots__ = ("_groups", "_start")
+
+    def __init__(self, start: int, *groups: str) -> None:
+        self._start, self._groups = start, groups
+
+    def start(self) -> int:
+        return self._start
+
+    def group(self, i: int) -> str:
+        return self._groups[i - 1]
+
+
+def _tail_u_escape(text: str, lo: int, hi: int) -> _TailMatch | None:
+    """Linear ``re.search(r'(\\\\+)u([0-9a-fA-F]{lo,hi})$', text)``."""
+    n = len(text)
+    h = n
+    while h > 0 and n - h < hi and text[h - 1] in _HEX:
+        h -= 1
+    if n - h < lo or h == 0 or text[h - 1] != "u":
+        return None
+    u = h - 1
+    s = u
+    while s > 0 and text[s - 1] == "\\":
+        s -= 1
+    if s == u:
+        return None
+    return _TailMatch(s, text[s:u], text[h:])
+
+
+def _trailing_string_start(text: str) -> int | None:
+    """Linear ``_TRAILING_STRING.search(text).start()``: the opening quote of a
+    string that ends the text. Walks back to the nearest quote not escaped by
+    an odd backslash run."""
+    if len(text) < 2 or text[-1] != _QUOTE:
+        return None
+    n_bs = 0
+    i = len(text) - 2
+    while i >= 0 and text[i] == "\\":
+        n_bs += 1
+        i -= 1
+    if n_bs % 2 == 1:
+        return None                      # the final quote is itself escaped
+    while i >= 0:
+        if text[i] == _QUOTE:
+            j = i - 1
+            while j >= 0 and text[j] == "\\":
+                j -= 1
+            if (i - 1 - j) % 2 == 0:
+                return i
+        i -= 1
+    return None
+
+
+_LETTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+_NUM_TAIL = frozenset("0123456789.eE+-")
+
+
+def _dangling_number_start(text: str) -> int | None:
+    """Linear equivalent of ``_DANGLING_NUMBER.search(text).start()``."""
+    if not text or text[-1] not in ".eE+-":
+        return None
+    i = _tail_run(text, _NUM_TAIL)
+    # The token must start with a digit: skip leading non-digits of the run.
+    while i < len(text) and not text[i].isdigit():
+        i += 1
+    if i >= len(text) - 1 and not (i < len(text) and text[i].isdigit()):
+        return None
+    return i if i < len(text) - 1 else None
+
+
 def _trim_incomplete_value(text: str, stack: list[str]) -> str:
     """Cut a truncated JSON text back to its last complete element.
 
@@ -150,20 +299,20 @@ def _trim_incomplete_value(text: str, stack: list[str]) -> str:
         # would run a tool on a value the model never wrote; dropping the token
         # lets the passes above drop the key that owned it, which is the honest
         # answer.
-        m = _DANGLING_NUMBER.search(text)
-        if m is not None:
-            text = text[:m.start()]
+        start = _dangling_number_start(text)
+        if start is not None:
+            text = text[:start]
             continue
-        m = re.search(r"[A-Za-z]+$", text)
-        if m is not None:
-            completion = _PARTIAL_LITERALS.get(m.group(0))
+        start = _tail_run(text, _LETTERS)
+        if start < len(text):
+            completion = _PARTIAL_LITERALS.get(text[start:])
             if completion is None:
                 return text          # true/false/null are already complete
-            return text[:m.start()] + completion
+            return text[:start] + completion
         if text.endswith(_QUOTE):
-            m = _TRAILING_STRING.search(text)
-            if m is not None:
-                before = text[:m.start()].rstrip()
+            ts = _trailing_string_start(text)
+            if ts is not None:
+                before = text[:ts].rstrip()
                 # A complete string with nothing after it and no colon in front
                 # is a KEY whose value never arrived. Only inside an object: the
                 # same string inside an array is a finished value.
@@ -175,7 +324,9 @@ def _trim_incomplete_value(text: str, stack: list[str]) -> str:
         return text
 
 
-def _repair_truncated_json(text: str) -> str:
+def _repair_truncated_json(
+        text: str,
+        scanned: tuple[list[str], bool, int, bool] | None = None) -> str:
     """Append missing closing characters for truncated JSON.
 
     Tracks nesting depth and string state, then appends whatever closers
@@ -188,13 +339,18 @@ def _repair_truncated_json(text: str) -> str:
     cut inside a *key* drops the pair rather than closing a key that can never
     be given a value.
     """
-    stack, in_string, open_idx, open_is_key = _scan_json(text)
+    stack, in_string, open_idx, open_is_key = (
+        scanned if scanned is not None else _scan_json(text))
     # A stream cut mid-key (``{"qu``) has no value to keep: closing the key's
     # quote yields ``{"qu"}``, which is not JSON either, so drop the pair and
     # re-scan. Each pass strictly shortens the text, so this terminates.
     while in_string and open_is_key:
         text = text[:open_idx].rstrip()
-        stack, in_string, open_idx, open_is_key = _scan_json(text)
+        # No rescan needed: the text before the key's opening quote ends
+        # outside a string, and string contents never touch the stack, so the
+        # stack is unchanged and the cut text is not in a string. A full
+        # rescan here made every mid-key cut O(buffer) (AUDIT #620).
+        in_string = False
     suffix = ""
     if in_string:
         # Unterminated string. Count the trailing backslash run: an ODD run
@@ -215,9 +371,9 @@ def _repair_truncated_json(text: str) -> str:
         # escaped-backslash pairs and the trailing ``u…`` is literal text
         # (``"C:\\u0f`` must NOT be stripped). Strip only the one fresh
         # backslash + hex tail, preserving the pairs before it.
-        m = re.search(r'(\\+)u[0-9a-fA-F]{0,3}$', text)
+        m = _tail_u_escape(text, 0, 3)
         if m and len(m.group(1)) % 2 == 1:
-            text = re.sub(r'\\u[0-9a-fA-F]{0,3}$', '', text)
+            text = text[:m.start() + len(m.group(1)) - 1]
         # A *complete* \uXXXX escape at the tail may still be half of a
         # surrogate pair whose low half never arrived (the model was cut
         # mid-emoji by a token limit). Closing the string there yields a lone
@@ -233,7 +389,7 @@ def _repair_truncated_json(text: str) -> str:
         # trailing ``uXXXX`` is literal text (``"C:\\uD83D`` is a literal
         # ``\uD83D``), so stripping it left a dangling backslash and lost the
         # whole argument object (AUDIT #193).
-        m = re.search(r'(\\+)u([0-9a-fA-F]{4})$', text)
+        m = _tail_u_escape(text, 4, 4)
         if m and len(m.group(1)) % 2 == 1:
             # Drop only the one fresh backslash that opens the escape; the
             # complete escaped pairs before it stay (``"a\\\uD83D`` decodes
@@ -251,7 +407,7 @@ def _repair_truncated_json(text: str) -> str:
                 # *real* escape too — an even run before its ``u`` makes it
                 # literal text, and treating it as the pair's high half kept
                 # the lone low surrogate alive (AUDIT #193).
-                prev = re.search(r'(\\+)u([0-9a-fA-F]{4})$', text[:m.start()])
+                prev = _tail_u_escape(text[:m.start()], 4, 4)
                 if not (prev and len(prev.group(1)) % 2 == 1
                         and 0xD800 <= int(prev.group(2), 16) <= 0xDBFF):
                     text = text[:m.start()] + keep
@@ -263,7 +419,9 @@ def _repair_truncated_json(text: str) -> str:
     return text + suffix
 
 
-def parse_partial(text: str) -> tuple[Any, bool]:
+def parse_partial(
+        text: str,
+        scanned: tuple[list[str], bool, int, bool] | None = None) -> tuple[Any, bool]:
     """Parse potentially-incomplete JSON.
 
     Returns ``(value, complete)``.  When *complete* is ``False`` the JSON
@@ -282,7 +440,7 @@ def parse_partial(text: str) -> tuple[Any, bool]:
     except json.JSONDecodeError:
         pass
     # Try repairing truncated JSON.
-    repaired = _repair_truncated_json(text)
+    repaired = _repair_truncated_json(text, scanned)
     try:
         return json.loads(repaired), False
     except json.JSONDecodeError:
@@ -301,6 +459,19 @@ class PartialJSONParser:
 
     def __init__(self) -> None:
         self._buf = ""
+        self._scan = _ScanState()
+
+    def _scanned(self) -> tuple[list[str], bool, int, bool]:
+        """The scan of ``self._buf.strip()``, resumed from the last feed.
+
+        Leading whitespace is never inside a string, so stripping it only
+        shifts ``open_idx``; trailing whitespace changes no field returned.
+        """
+        _scan_into(self._scan, self._buf)
+        st = self._scan
+        lead = len(self._buf) - len(self._buf.lstrip())
+        idx = st.open_idx - lead if st.open_idx >= 0 else -1
+        return list(st.stack), st.in_string, idx, st.open_is_key
 
     def feed(self, fragment: str) -> Any:
         """Accumulate *fragment* and return the best-effort parsed value.
@@ -316,11 +487,12 @@ class PartialJSONParser:
         fragment must not exceed the bound after account for its tail.
         """
         if not fragment:
-            return parse_partial(self._buf)[0]
+            return parse_partial(self._buf, self._scanned())[0]
         # Cheap check: if the fragment alone reaches the cap, only keep
         # its tail. Otherwise append and trim the head if needed.
         if len(fragment) >= MAX_BUFFER_BYTES:
             self._buf = fragment[-MAX_BUFFER_BYTES:]
+            self._scan = _ScanState()
         else:
             self._buf += fragment
             overflow = len(self._buf) - MAX_BUFFER_BYTES
@@ -328,13 +500,14 @@ class PartialJSONParser:
                 # Drop the overflow from the head, keeping the most recent
                 # MAX_BUFFER_BYTES characters intact.
                 self._buf = self._buf[overflow:]
-        return parse_partial(self._buf)[0]
+                self._scan = _ScanState()    # head moved: indices are stale
+        return parse_partial(self._buf, self._scanned())[0]
 
     def finalize(self) -> Any:
         """Repair and parse the accumulated buffer. Always returns a dict."""
         if not self._buf.strip():
             return {}
-        repaired = _repair_truncated_json(self._buf.strip())
+        repaired = _repair_truncated_json(self._buf.strip(), self._scanned())
         try:
             result = json.loads(repaired)
             if isinstance(result, dict):
@@ -350,3 +523,4 @@ class PartialJSONParser:
 
     def reset(self) -> None:
         self._buf = ""
+        self._scan = _ScanState()

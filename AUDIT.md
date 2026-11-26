@@ -1307,6 +1307,26 @@ console marks such keys `no secret` in both provider views and the pool's
 
 ---
 
+## ✅ Fixed — round 215 sweep 2026-11-26 (partial-JSON parser was quadratic)
+
+**Section status:** fixed — round 215. Tests: `tests/test_fix_round215.py`.
+
+### 620. Streaming tool arguments cost O(n²) CPU on the event loop — 1.3 s for a 4.5 KB call
+
+**Severity:** 🟠 Medium · **Status: fixed** — round 215
+(`test_large_tool_call_streams_in_linear_time`, `test_resumed_scan_matches_full_scan_at_every_cut`)
+**Files:** `wiwi/streaming/partial_json.py`
+
+**Trigger:** any streamed tool call with a long string argument (a file write). Every
+`PartialJSONParser.feed` re-ran unanchored `[...]+$` tail regexes, which retry from every
+position of a long run, and rescanned the whole buffer — ~4.6 ms per 16-byte fragment at
+4.5 KB, blocking every other request on the loop. **Fix:** tail regexes replaced by linear
+backward scans (`_tail_run`, `_dangling_number_start`, `_tail_u_escape`,
+`_trailing_string_start`); the scanner resumes from the last feed (`_ScanState`, reset on a
+head-trim); the mid-key drop no longer rescans. 4.5 KB: 1303 ms → 2 ms. Differential-tested
+against the previous implementation on 63k prefixes and 4k streamed docs: identical output.
+Remaining cost is the per-feed `json.loads` of the buffer (~100 ms total at 55 KB).
+
 ## ✅ Fixed — round 214 sweep 2026-11-26 (IR gaps: refusal slot, tool_result spelling)
 
 **Section status:** fixed — round 214. Tests: `tests/test_fix_round214.py`.
