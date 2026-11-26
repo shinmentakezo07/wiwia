@@ -1307,12 +1307,38 @@ console marks such keys `no secret` in both provider views and the pool's
 
 ---
 
+## ✅ Fixed — round 214 sweep 2026-11-26 (IR gaps: refusal slot, tool_result spelling)
+
+**Section status:** fixed — round 214. Tests: `tests/test_fix_round214.py`.
+
+### 618. An upstream refusal was folded into the answer text, so no client could tell it from an answer
+
+**Severity:** 🟠 Medium · **Status: fixed** — round 214
+(`test_chat_encoder_emits_refusal_slot_not_content`, `test_responses_encoder_emits_refusal_content_part`)
+**Files:** `wiwi/ir/types.py` (`AssistantTurn.refusal`, new), `wiwi/providers/openai_adapter.py`
+(`decode_response`), `wiwi/wire/openai_chat.py` / `openai_responses.py` (`encode_response`)
+
+**Trigger:** an OpenAI upstream answering `{"content": null, "refusal": "..."}`. The adapter
+surfaced the refusal as `text` and the IR had no other carrier, so Chat clients got it in
+`content` and Responses clients as `output_text`. **Fix:** `AssistantTurn.refusal` carries it;
+the adapter still mirrors it into `text` for refusal-less dialects, and the Chat/Responses sync
+encoders emit `message.refusal` / a `refusal` content part instead. Streaming refusal deltas are
+not yet split out (follow-up).
+
+### 619. `ToolResultPart.block_type` forwarded any junk spelling verbatim
+
+**Severity:** ⚪ Low · **Status: fixed** — round 214 (`test_tool_result_block_type_degrades`)
+**Files:** `wiwi/ir/types.py` (`ToolResultPart.__post_init__`)
+
+**Trigger:** a non-string or non-`*_tool_result` block type reaching the IR. **Fix:** degrade to
+`tool_result` outside the open `*_tool_result` family, the same rule `ToolUsePart` applies.
+
 ## 🟠 Fixed — round 213 sweep 2026-11-26 (wire/IR audit: eleven decode/fold defects)
 
 Full detail per fix: `tests/test_fix_round213.py` (57 tests). Translation notes:
 UPDATE.md "Round 213".
 
-### 604. An Anthropic `document` block attached by Files-API `file_id` was dropped whole
+### 607. An Anthropic `document` block attached by Files-API `file_id` was dropped whole
 
 **Severity:** 🔴 High · **Status: fixed** — round 213
 (`tests/test_fix_round213.py::test_anthropic_document_file_id_decodes_to_a_document_part`)
@@ -1326,7 +1352,7 @@ re-emit already existed; round 198 fixed the same arm on the Responses surface.
 A source with no usable id is dropped — re-rendering it would have emitted a
 base64 document with `"data": null` (the bogus block AUDIT #168's image arm drops).
 
-### 605. A signature did not end a thinking block — the Anthropic encoder fused consecutive signed blocks
+### 608. A signature did not end a thinking block — the Anthropic encoder fused consecutive signed blocks
 
 **Severity:** 🔴 High · **Status: fixed** — round 213
 (`test_two_signed_thinking_blocks_stay_two_blocks`, and the deferred/live twins)
@@ -1343,7 +1369,7 @@ signature-only delta arriving behind an open tool block now defers with the run
 instead of riding `_pending_sig` into the wrong block. `_defer` keeps
 signature-only entries (they are a run boundary, not empties).
 
-### 606. The resume tape and the force-stream turn fused thinking blocks the same way
+### 609. The resume tape and the force-stream turn fused thinking blocks the same way
 
 **Severity:** 🔴 High · **Status: fixed** — round 213
 (`test_tape_folds_a_thinking_run_at_each_signature`, `test_force_stream_fold_keeps_thinking_blocks_separate`)
@@ -1360,7 +1386,7 @@ unsigned `ThinkingPart`. A redacted blob survived the tape but not the gateway.
 redacted is its own opaque block, other content deltas are boundaries — used by
 both sites so they cannot drift.
 
-### 607. `redacted_thinking` closed an open tool block mid-arguments
+### 610. `redacted_thinking` closed an open tool block mid-arguments
 
 **Severity:** 🟠 Medium · **Status: fixed** — round 213
 (`test_redacted_thinking_does_not_close_an_open_tool_block`)
@@ -1373,7 +1399,7 @@ with truncated arguments. **Fix:** behind an open tool group the blob defers lik
 interleaved text and the flush emits it as its own self-contained block in
 arrival order.
 
-### 608. Responses streamed logprobs kept only the last frame
+### 611. Responses streamed logprobs kept only the last frame
 
 **Severity:** 🟠 Medium · **Status: fixed** — round 213
 (`test_responses_stream_merges_logprobs_across_frames`)
@@ -1388,7 +1414,7 @@ token). The encoder stashed each frame with `=`, so the terminal
 concatenate, scalars keep first) moved to `deltas.merge_logprobs` and both
 reassembly arms call it — one implementation, no drift.
 
-### 609. A reasoning-only Responses turn emitted an empty `message` item
+### 612. A reasoning-only Responses turn emitted an empty `message` item
 
 **Severity:** 🟠 Medium · **Status: fixed** — round 213
 (`test_responses_sync_reasoning_only_turn_emits_no_empty_message`)
@@ -1401,7 +1427,7 @@ replay round-trip fed it back as history. **Fix:** a message rides along when
 there is text, or when the turn is empty (the client needs some output);
 reasoning-only and tool-only turns carry their real items only.
 
-### 610. `stream` / `include_usage` accepted truthy junk
+### 613. `stream` / `include_usage` accepted truthy junk
 
 **Severity:** 🟠 Medium · **Status: fixed** — round 213
 (`test_stream_flag_ignores_a_string_false_on_every_surface`)
@@ -1415,7 +1441,7 @@ not ask for. Same for `stream_options.include_usage` on the two OpenAI
 surfaces. **Fix:** `tr.wire_bool` honours only the two spellings the wire
 defines, `true` and `1`.
 
-### 611. Legacy `functions` / `function_call` rode `extras` to the upstream a second time
+### 614. Legacy `functions` / `function_call` rode `extras` to the upstream a second time
 
 **Severity:** 🔴 High · **Status: fixed** — round 213
 (`test_legacy_functions_do_not_ride_extras`)
@@ -1426,7 +1452,7 @@ Both were decoded into `tools`/`tool_choice` **and** forwarded verbatim through
 extras, so an OpenAI upstream received two conflicting tool declarations.
 **Fix:** both keys are known — decoded, not forwarded.
 
-### 612. A replayed Chat refusal was dropped, emptying the turn
+### 615. A replayed Chat refusal was dropped, emptying the turn
 
 **Severity:** 🔴 High · **Status: fixed** — round 213
 (`test_chat_assistant_refusal_field_decodes_as_text`)
@@ -1440,7 +1466,7 @@ a `TextPart` — the same place the adapters already put an upstream refusal —
 assistant-role only, appended after content and before tool calls. Typed-wrong
 refusals are ignored; a `refusal` on a user message is not history.
 
-### 613. `strict` forwarded malformed values verbatim
+### 616. `strict` forwarded malformed values verbatim
 
 **Severity:** 🟠 Medium · **Status: fixed** — round 213
 (`test_strict_typed_wrong_is_dropped_on_every_surface`)
@@ -1452,7 +1478,7 @@ any surface — the value rode to the upstream body, which 400s naming nothing
 the caller sent. **Fix:** `tr.wire_bool_opt` normalises: `None` when absent or
 malformed, real booleans and `0`/`1` forwarded as-is, at all six decode sites.
 
-### 614. An unknown usage convention was re-based anyway
+### 617. An unknown usage convention was re-based anyway
 
 **Severity:** 🟠 Medium · **Status: fixed** — round 213
 (`test_unknown_usage_convention_is_emitted_verbatim`)

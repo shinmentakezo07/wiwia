@@ -750,7 +750,12 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
         # tool-only turn carries its real items; an empty-string message
         # after them is noise the stream arm never emits, and on replay it
         # round-tripped into a placeholder text block (round 213).
-        output.append(_message_item(turn.text, req_id))
+        item = _message_item(turn.text, req_id)
+        if turn.refusal:
+            # Responses spells a refusal as its own content part (AUDIT #618).
+            parts = [] if turn.text == turn.refusal else item["content"]
+            item["content"] = parts + [{"type": "refusal", "refusal": turn.refusal}]
+        output.append(item)
         out_id += 1
     for t in turn.tool_calls:
         if t.builtin is not None:

@@ -503,8 +503,10 @@ class OpenAIAdapter(WarningMixin):
         message = as_dict(choice.get("message"))
         # refusal carries the content-filter explanation when content is null;
         # surface it as the turn text so it survives crossing to other dialects.
-        turn = ir.AssistantTurn(text=message.get("content")
-                                or message.get("refusal") or "")
+        refusal = message.get("refusal")
+        refusal = refusal if isinstance(refusal, str) and refusal else None
+        turn = ir.AssistantTurn(text=message.get("content") or refusal or "",
+                                refusal=refusal)
         # Reasoning models may return reasoning_content in the message body
         # (DeepSeek, OpenRouter, and other OpenAI-compatible providers).
         reasoning = message.get("reasoning_content") or message.get("reasoning")

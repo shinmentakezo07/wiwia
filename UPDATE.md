@@ -1110,9 +1110,9 @@ chunk-for-chunk, and text after a call has fully closed is inline again.
 
 **Translation-relevant changes in all four inbound codecs, the resume tape, the
 force-stream turn, and `wiwi/ir/translation.py`.** Full register: AUDIT
-#604–#614. Tests: `tests/test_fix_round213.py` (57).
+#607–#617. Tests: `tests/test_fix_round213.py` (57).
 
-**Thinking-block boundaries (AUDIT #605–#607).** A signature is the END of an
+**Thinking-block boundaries (AUDIT #608–#610).** A signature is the END of an
 Anthropic thinking block, everywhere a fold or encoder reconstructs one. The
 wire encoder (`anthropic_messages.py`) keys on a signed-open flag: further
 thinking text opens a new block, the deferred flush splits a run at each
@@ -1124,7 +1124,7 @@ themselves: both call `wiwi/streaming/resume.py:fold_thinking_parts`
 (signature ends the run, redacted is opaque, other content deltas are
 boundaries). Two rules for the same wire shape can no longer drift apart.
 
-**Replay fidelity (AUDIT #604, #608, #609, #612).** An Anthropic `document`
+**Replay fidelity (AUDIT #607, #611, #612, #615).** An Anthropic `document`
 with a Files-API `file_id` now decodes to `DocumentPart` (the base64/url arms
 already did; an id-less source is dropped rather than re-rendered bogus).
 `message.refusal` and `{"type": "refusal"}` content items on an assistant turn
@@ -1136,7 +1136,7 @@ stored payload inherits the fix through `rebuild_stored_payload`. A
 reasoning-only sync turn no longer appends an empty `message` item — the
 message rides along only when there is text or the turn is empty.
 
-**Boundary typing (AUDIT #610, #611, #613, #614).** New normalizers in
+**Boundary typing (AUDIT #613, #614, #616, #617).** New normalizers in
 `wiwi/ir/translation.py`: `wire_bool` (stream / `include_usage`: only `true`
 and `1` stream, on all four surfaces), `wire_bool_opt` (`strict` on tools and
 response formats: `None` when absent or malformed, `0`/`1`/booleans pass),

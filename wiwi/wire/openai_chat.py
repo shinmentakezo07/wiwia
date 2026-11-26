@@ -519,6 +519,12 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
                     req_id: str) -> dict[str, Any]:
     message: dict[str, Any] = {"role": "assistant",
                                "content": turn.text if turn.text else None}
+    if turn.refusal:
+        # Own slot, not content (AUDIT #618). The adapter mirrored the refusal
+        # into text for refusal-less dialects; undo that mirror here only.
+        message["refusal"] = turn.refusal
+        if turn.text == turn.refusal:
+            message["content"] = None
     # A1: provider-hosted builtin calls (web_search) are suppressed — the
     # client would otherwise try to execute a phantom function. Keyed on the
     # ``builtin`` flag rather than the tool name: a caller may legitimately

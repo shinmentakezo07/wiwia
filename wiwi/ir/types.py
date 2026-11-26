@@ -137,6 +137,13 @@ class ToolResultPart:
     def __post_init__(self) -> None:
         if not isinstance(self.tool_use_id, str):
             self.tool_use_id = str(self.tool_use_id)
+        # The family is open (any ``*_tool_result``), but a value outside it
+        # has no legal wire spelling and would be replayed verbatim into a 400
+        # (AUDIT #619). Same degrade rule as ToolUsePart.block_type.
+        if not (isinstance(self.block_type, str)
+                and (self.block_type == "tool_result"
+                     or self.block_type.endswith("_tool_result"))):
+            self.block_type = "tool_result"
 
 
 @dataclass
@@ -574,3 +581,9 @@ class AssistantTurn:
     # different from "an empty list" — the encoders emit the key only when
     # this is not None, so a response never grows a phantom field.
     logprobs: dict[str, Any] | None = None
+    # The upstream's refusal explanation (OpenAI ``message.refusal``), kept
+    # apart from ``text`` so a Chat/Responses client can tell a refusal from an
+    # answer (AUDIT #618). Adapters still mirror it into ``text`` when the turn
+    # has no content, so dialects without a refusal spelling keep showing it;
+    # the encoders that have one emit it in its own slot instead.
+    refusal: str | None = None
